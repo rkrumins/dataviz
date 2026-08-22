@@ -2359,6 +2359,11 @@ export function LineageLens({
               wires={boardGraph.edges.length}
               bundles={boardGraph.edges.filter(e => e.bundle).length}
               zoom={boardZoom}
+              // The legend names the two sides the board draws; naming
+              // them and doing nothing was a key where a control belonged
+              // (2026-08-23). Same switch as the header's Direction.
+              direction={directionFilter}
+              onDirection={setDirectionFilter}
             />
           {/* LEAVING THE ROOM. A walk is work — hops fetched one click at
               a time, containers opened, a path followed — and it lives

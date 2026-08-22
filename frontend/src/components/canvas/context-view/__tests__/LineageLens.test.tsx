@@ -2990,6 +2990,17 @@ describe('the header explains itself (2026-08-22)', () => {
     }
   })
 
+  it('the status bar\'s two tints switch Direction — the legend is a control (2026-08-23)', () => {
+    renderLens(['b'], simple())
+    expect(viewValue('Direction')).toBe('Both')
+    fireEvent.click(screen.getByRole('button', { name: /show only what feeds this entity/i }))
+    expect(viewValue('Direction')).toBe('Root cause')
+    // The header and the legend are the same switch, seen twice.
+    expect(screen.getByRole('button', { name: /show only what feeds this entity/i })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /show only what feeds this entity/i }))
+    expect(viewValue('Direction')).toBe('Both')
+  })
+
   it('the Wires control writes the preference', () => {
     usePreferencesStore.setState({ lensWires: 'auto' })
     renderLens(['b'], simple())

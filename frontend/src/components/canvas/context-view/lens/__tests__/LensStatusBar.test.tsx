@@ -5,8 +5,8 @@
  * as keycaps on the left, a legend of what the wires mean in the middle,
  * and live facts about the board on the right.
  */
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { LensStatusBar } from '../LensStatusBar'
 
 describe('LensStatusBar', () => {
@@ -26,6 +26,38 @@ describe('LensStatusBar', () => {
     expect(legend).toHaveTextContent('downstream')
     expect(legend).toHaveTextContent('≈ coarse')
     expect(legend).toHaveTextContent('bundle')
+  })
+
+  it('the two sides are CONTROLS: clicking upstream shows only what feeds the focus', () => {
+    // "The legend is passive": it named the two tints and did nothing.
+    // They are the same two sides the Direction control switches, so the
+    // legend switches them too — and shows which side is on.
+    const onDirection = vi.fn()
+    render(<LensStatusBar cards={4} wires={2} bundles={0} zoom={null} direction="both" onDirection={onDirection} />)
+    const up = screen.getByRole('button', { name: /show only what feeds this entity/i })
+    const down = screen.getByRole('button', { name: /show only what this entity feeds/i })
+    expect(up).toHaveAttribute('aria-pressed', 'false')
+    expect(down).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(up)
+    expect(onDirection).toHaveBeenCalledWith('in')
+    fireEvent.click(down)
+    expect(onDirection).toHaveBeenCalledWith('out')
+  })
+
+  it('the side already on turns back off — the legend never traps you on one side', () => {
+    const onDirection = vi.fn()
+    render(<LensStatusBar cards={4} wires={2} bundles={0} zoom={null} direction="in" onDirection={onDirection} />)
+    const up = screen.getByRole('button', { name: /show only what feeds this entity/i })
+    expect(up).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(up)
+    expect(onDirection).toHaveBeenCalledWith('both')
+  })
+
+  it('with no handler it stays a key: the tints are named, nothing is clickable', () => {
+    render(<LensStatusBar cards={4} wires={2} bundles={0} zoom={null} />)
+    const legend = screen.getByRole('list', { name: /what the wires mean/i })
+    expect(legend).toHaveTextContent('upstream')
+    expect(within(legend).queryByRole('button')).toBeNull()
   })
 
   it('explains the two marks a card can carry: ⊕ more to fetch, ⊘ a dead end', () => {

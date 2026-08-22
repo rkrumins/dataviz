@@ -314,10 +314,13 @@ accent — and **click a card to fly to it**.
 - `excludeUrns` is capped at 2,000 on the wire, so deep in a 50k walk the server re-ships nodes the
   client already holds (deduped on merge). A server-side "walked set" exclusion would cut that.
 
-## Ops before this reaches the user's environment
+## Ops — DONE 2026-08-23
 
-- Rebuild the backend image so `hiredis` is durable (it is installed in the running dev container only).
-- `GRAPH_CACHE_MAX_PAYLOAD_BYTES=8388608` on dev so wide pages are cacheable (today's 1 MiB cap leaves
-  every 2.5 MB page uncached).
+- ~~Rebuild the backend image so `hiredis` is durable~~ — done. The image now carries `hiredis 3.4.1`
+  and the service reports `_HiredisParser`; `docs/SETUP.md` gained "After pulling: rebuild when Python
+  dependencies change", because the failure mode is silent (the container keeps running without it).
+- ~~`GRAPH_CACHE_MAX_PAYLOAD_BYTES=8388608` on dev~~ — done, and not only on dev: `docker-compose.yml`
+  now sets it for every service with a cache client, so the stack's default is 8 MiB. Verified end to end:
+  a 2,516,657-byte closure page is present in the cache Redis, where the 1 MiB cap used to drop it.
 - The user's real environment runs code without this branch; none of this reaches them until the PR to
   `main` merges and deploys.

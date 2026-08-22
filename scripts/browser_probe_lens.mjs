@@ -345,6 +345,31 @@ if (process.env.WIRES_SWEEP) {
     }
   } else console.log('== hovering a bundle: none on the board')
 }
+if (process.env.LEGEND) {
+  // The legend's two tints are a Direction control: click "upstream" and
+  // the board should show only what feeds the focus.
+  const read = async () => evalJs(`(() => {
+    const g = document.querySelector('[role="group"][aria-label="Which side of the story to show"]')
+    const on = [...(g?.querySelectorAll('button') ?? [])].find(b => b.getAttribute('aria-pressed') === 'true')
+    const up = [...document.querySelectorAll('button')].find(b => /show only what feeds this entity/i.test(b.getAttribute('aria-label') ?? ''))
+    return { direction: on?.textContent?.trim() ?? null, legendPressed: up?.getAttribute('aria-pressed') ?? null, cards: document.querySelectorAll('.react-flow__node').length }
+  })()`)
+  console.log('== legend before:', JSON.stringify(await read()))
+  const box = await evalJs(`(() => { const b = [...document.querySelectorAll('button')].find(b => /show only what feeds this entity/i.test(b.getAttribute('aria-label') ?? '')); if (!b) return null; const r = b.getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) } })()`)
+  if (box) {
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    await sleep(900)
+    console.log('== legend after click:', JSON.stringify(await read()))
+    if (process.env.SCREENSHOT_DIR) {
+      const { writeFileSync } = await import('node:fs')
+      const W = Number((process.env.WINDOW ?? '1600,1000').split(',')[0])
+      const H = Number((process.env.WINDOW ?? '1600,1000').split(',')[1])
+      const shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: H - 90, width: W, height: 90, scale: 1 } })
+      writeFileSync(`${process.env.SCREENSHOT_DIR}/legend-on.png`, Buffer.from(shot.result.data, 'base64'))
+    }
+  } else console.log('== legend: no control found')
+}
 if (process.env.TRAIL) {
   const trail = await evalJs(`document.querySelector('nav[aria-label="Path"]')?.textContent ?? null`)
   console.log('== path trail:', JSON.stringify(trail))

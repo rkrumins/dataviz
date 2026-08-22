@@ -83,16 +83,25 @@ const LEGEND: ReadonlyArray<{ kind: 'up' | 'down' | 'coarse' | 'bundle'; label: 
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
 
+export type LensStatusDirection = 'both' | 'in' | 'out'
+
 export interface LensStatusBarProps {
   cards: number
   wires: number
   bundles: number
   /** The board's zoom once a viewport has settled; null before. */
   zoom: number | null
+  /** Which side the board is showing — the legend marks it. */
+  direction?: LensStatusDirection
+  /** THE LEGEND IS A CONTROL (2026-08-23). The two tints it names are the
+   *  two sides the Direction control switches, so clicking one switches
+   *  it: upstream → only what feeds the focus, again → both. Without
+   *  this the legend stays a key and nothing in it is clickable. */
+  onDirection?: (direction: LensStatusDirection) => void
   className?: string
 }
 
-export function LensStatusBar({ cards, wires, bundles, zoom, className }: LensStatusBarProps) {
+export function LensStatusBar({ cards, wires, bundles, zoom, direction = 'both', onDirection, className }: LensStatusBarProps) {
   const facts = [
     plural(cards, 'card', 'cards'),
     plural(wires, 'wire', 'wires'),
@@ -117,13 +126,45 @@ export function LensStatusBar({ cards, wires, bundles, zoom, className }: LensSt
           </li>
         ))}
       </ul>
-      <ul aria-label="What the wires mean" className="hidden md:flex items-center gap-x-3 lg:ml-0 ml-auto flex-shrink-0 pl-4 border-l border-black/[0.08] dark:border-white/[0.08]">
-        {LEGEND.map(({ kind, label }) => (
-          <li key={kind} className="flex items-center gap-1.5 text-[10px] text-ink-muted whitespace-nowrap">
-            <Swatch kind={kind} />
-            {label}
-          </li>
-        ))}
+      <ul aria-label="What the wires mean" className="hidden md:flex items-center gap-x-1 lg:ml-0 ml-auto flex-shrink-0 pl-4 border-l border-black/[0.08] dark:border-white/[0.08]">
+        {LEGEND.map(({ kind, label }) => {
+          // The two SIDES can be acted on; grain and bundling are keys.
+          const side = kind === 'up' ? 'in' : kind === 'down' ? 'out' : null
+          const item = (
+            <>
+              <Swatch kind={kind} />
+              {label}
+            </>
+          )
+          if (!side || !onDirection) {
+            return (
+              <li key={kind} className="flex items-center gap-1.5 px-1.5 text-[10px] text-ink-muted whitespace-nowrap">
+                {item}
+              </li>
+            )
+          }
+          const on = direction === side
+          return (
+            <li key={kind} className="flex">
+              <button
+                type="button"
+                aria-pressed={on}
+                aria-label={side === 'in' ? 'Show only what feeds this entity' : 'Show only what this entity feeds'}
+                title={on ? 'Showing this side only — click to show both' : (side === 'in' ? 'Show only what feeds this entity' : 'Show only what this entity feeds')}
+                onClick={() => onDirection(on ? 'both' : side)}
+                className={cn(
+                  'flex items-center gap-1.5 px-1.5 py-0.5 rounded-md text-[10px] whitespace-nowrap transition-colors',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  on
+                    ? 'bg-accent-lineage/[0.1] text-ink font-medium'
+                    : 'text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
+                )}
+              >
+                {item}
+              </button>
+            </li>
+          )
+        })}
       </ul>
       <p
         role="note"
