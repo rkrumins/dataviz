@@ -28,7 +28,7 @@ import {
 import {
     FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
     BUNDLE_WINDOW, OPEN_PARTNERS_PER_BAND,
-    CARD_W, BAND_GAP, FRAME_CONTENT_W, FRAME_PAD,
+    CARD_W, BAND_GAP, FRAME_CONTENT_W, FRAME_PAD, WIRE_BUNDLE_THRESHOLD,
     type FocusCard, type FocusEdge,
 } from '../focus-cards'
 import { gutterWidth, MAX_LANES } from '../frame-flow'
@@ -3900,3 +3900,69 @@ describe('the room between bands (2026-08-22)', () => {
     })
 })
 
+describe('wire bundles — a wall of wires folds into one per pair of containers (2026-08-22)', () => {
+    // "500 incoming/outgoing edges simply turn into one thick mass": in
+    // Grouped, wires land on ROWS, so two frames with five and eight rows
+    // showing are forty wires, and a wide estate is a solid block of
+    // colour. A pair of containers with many wires between them now draws
+    // ONE bundle — the count on it — and the individual wires come back
+    // for a card the reader hovers or selects.
+    /** Focus table F with `fc` columns, upstream table U with `uc` columns,
+     *  every U column feeding every F column. */
+    const fan = (uc: number, fc: number) => {
+        const nodes = [wnode('F', 'dataset', 'F', { childCount: fc }), wnode('U', 'dataset', 'U', { childCount: uc })]
+        const contains: Array<[string, string]> = []
+        const hops: Array<[string, string]> = []
+        for (let i = 0; i < fc; i++) { nodes.push(wnode(`F.c${i}`, 'schemaField', `c${i}`)); contains.push(['F', `F.c${i}`]) }
+        for (let i = 0; i < uc; i++) { nodes.push(wnode(`U.u${i}`, 'schemaField', `u${i}`)); contains.push(['U', `U.u${i}`]) }
+        for (let i = 0; i < uc; i++) for (let j = 0; j < fc; j++) hops.push([`U.u${i}`, `F.c${j}`])
+        return subgraph({ focus: 'F', nodes, contains, hops })
+    }
+    const between = (g: { cards: FocusCard[]; edges: FocusEdge[] }, a: string, b: string) =>
+        g.edges.filter(e => e.source === cardFor(g, a)?.id && e.target === cardFor(g, b)?.id)
+
+    it("Auto: a pair with more wires than the threshold folds into one bundle carrying the sum; the wires keep their identity behind it", () => {
+        const sg = fan(6, 8)
+        const g = layout(sg, initialLensViewState(sg), { wires: 'auto' })
+        const bundles = g.edges.filter(e => e.bundle)
+        expect(bundles.length).toBe(1)
+        expect(between(g, 'U', 'F').length).toBe(1)
+        expect(bundles[0].count).toBe(48)
+        expect(bundles[0].bundle!.members).toBe(48)
+        expect(g.edges.length).toBe(1)                       // nothing else drawn by default
+        expect(g.bundledWires.length).toBe(48)
+        expect(g.bundledWires.every(w => w.inBundle === bundles[0].id)).toBe(true)
+        expect(cardFor(g, 'U')!.wired).toBe(true)            // the frame has a port for it
+        expect(cardFor(g, 'F')!.wired).toBe(true)
+    })
+
+    it('Auto: a small fan stays as it was — every wire, no bundle', () => {
+        const sg = fan(2, 2)
+        const g = layout(sg, initialLensViewState(sg), { wires: 'auto' })
+        expect(g.edges.filter(e => e.bundle).length).toBe(0)
+        expect(g.edges.length).toBe(4)
+        expect(g.bundledWires.length).toBe(0)
+    })
+
+    it('Bundled folds even a small fan; Every wire never folds', () => {
+        const sg = fan(2, 2)
+        const bundled = layout(sg, initialLensViewState(sg), { wires: 'bundled' })
+        expect(bundled.edges.filter(e => e.bundle).length).toBe(1)
+        expect(bundled.bundledWires.length).toBe(4)
+        const all = layout(fan(6, 8), initialLensViewState(fan(6, 8)), { wires: 'all' })
+        expect(all.edges.filter(e => e.bundle).length).toBe(0)
+        expect(all.edges.length).toBe(48)
+        expect(all.bundledWires.length).toBe(0)
+    })
+
+    it('the threshold is the contract, and it is more than a handful', () => {
+        expect(WIRE_BUNDLE_THRESHOLD).toBe(12)
+        // Six rows × two columns = exactly the threshold: no fold. (Rows
+        // beyond a frame's window roll up to the frame as ONE wire, so the
+        // fan is built from rows that are all on screen.)
+        const at = fan(6, 2)
+        expect(layout(at, initialLensViewState(at), { wires: 'auto' }).bundledWires.length).toBe(0)
+        const over = fan(7, 2)                                  // fourteen: fold
+        expect(layout(over, initialLensViewState(over), { wires: 'auto' }).bundledWires.length).toBe(14)
+    })
+})

@@ -562,3 +562,98 @@ describe('useFrameCamera — the walk settles on the focus (2026-08-22)', () => 
     expect(state!.grew).toBe(true)
   })
 })
+
+describe('useFrameCamera — is the focus in view? (2026-08-22)', () => {
+  // The way back to the focus has to be findable exactly when the focus
+  // has been lost: the board asks this on every viewport move and offers
+  // a pill when the answer is no.
+  let rf: CameraTarget
+  beforeEach(() => {
+    vi.useFakeTimers()
+    rf = { fitView: vi.fn(), getViewport: () => ({ x: 0, y: 0, zoom: 1 }), setViewport: vi.fn() }
+  })
+  afterEach(() => { vi.useRealTimers() })
+  const placed = (id: string, x: number, y: number, w: number, h: number, band: number): FocusCard =>
+    ({ ...card(id), x, y, w, h, band, frameId: null }) as unknown as FocusCard
+  const focal = () => placed('f', 0, -60, 300, 120, 0)
+
+  it('answers from the viewport it is handed: centred = in view, panned away = lost', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    render(<Harness rf={rf} focalId="a" cards={[focal()]} paneW={1500} paneH={900} onState={(s) => { state = s }} />)
+    act(() => { vi.advanceTimersByTime(60) })
+    expect(state!.focusInView({ x: 600, y: 450, zoom: 1 })).toBe(true)      // focal spans 600–900 × 390–510
+    expect(state!.focusInView({ x: -2000, y: 450, zoom: 1 })).toBe(false)   // panned two screens left
+    expect(state!.focusInView({ x: 600, y: -400, zoom: 1 })).toBe(false)    // scrolled above the top
+  })
+
+  it('a pane it cannot measure, or a focal with no geometry, never reports the focus lost', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    render(<Harness rf={rf} focalId="a" cards={[card('f')]} onState={(s) => { state = s }} />)
+    act(() => { vi.advanceTimersByTime(60) })
+    expect(state!.focusInView({ x: -2000, y: 0, zoom: 1 })).toBe(true)
+  })
+})
+
+describe('useFrameCamera — the first paint is framed, and the walk always settles (2026-08-22)', () => {
+  // "On the initial open, when the lineage is done loading, the focus node
+  // is tiny until I click Center on focus." Two causes, both here: the
+  // camera stamped the EMPTY board as framed, so the real first paint was
+  // treated as an arrival during the walk and held; and the end-of-walk
+  // settle ran only when top-level cards had arrived — a coarse-first walk
+  // that merely fills rows never qualified.
+  let fitView: ReturnType<typeof vi.fn<CameraTarget['fitView']>>
+  let setViewport: ReturnType<typeof vi.fn<CameraTarget['setViewport']>>
+  let rf: CameraTarget
+  beforeEach(() => {
+    vi.useFakeTimers()
+    fitView = vi.fn<CameraTarget['fitView']>()
+    setViewport = vi.fn<CameraTarget['setViewport']>()
+    rf = { fitView, getViewport: () => ({ x: 0, y: 0, zoom: 1 }), setViewport }
+  })
+  afterEach(() => { vi.useRealTimers() })
+  const flush = () => act(() => { vi.advanceTimersByTime(60) })
+  const placed = (id: string, x: number, y: number, w: number, h: number, band: number): FocusCard =>
+    ({ ...card(id), x, y, w, h, band, frameId: null }) as unknown as FocusCard
+  const big = (focalH = 120) => [placed('f', 0, -focalH / 2, 300, focalH, 0), ...Array.from({ length: 40 }, (_, i) => placed(`n:u${i}`, -480, -1800 + i * 90, 240, 80, -1))]
+
+  it('an empty board is not a framed picture: the first real paint gets the focus-first framing even mid-walk', () => {
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={[]} paneW={1500} paneH={900} walking />)
+    flush()
+    rerender(<Harness rf={rf} focalId="a" cards={big()} paneW={1500} paneH={900} walking />)
+    flush()
+    expect(setViewport).toHaveBeenCalledTimes(1)          // centred on the focus, readable
+    expect(setViewport.mock.calls[0][0].zoom).toBeGreaterThanOrEqual(FOCUS_MIN_ZOOM)
+  })
+
+  it('the settle survives the re-renders the end of a walk itself causes', () => {
+    // `done` re-lays the board out (vouched edges, counts) within the same
+    // tick as the walking → done edge. A settle timer cancelled by that
+    // re-render, whose re-run no longer sees the edge, never fired — the
+    // focus stayed where the first framing left it.
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={big(120)} paneW={1500} paneH={900} walking />)
+    flush()
+    rerender(<Harness rf={rf} focalId="a" cards={big(900)} paneW={1500} paneH={900} walking />)
+    flush()
+    setViewport.mockClear()
+    rerender(<Harness rf={rf} focalId="a" cards={big(900)} paneW={1500} paneH={900} walking={false} />)
+    act(() => { vi.advanceTimersByTime(10) })
+    rerender(<Harness rf={rf} focalId="a" cards={big(900)} paneW={1500} paneH={900} walking={false} />)   // a fresh cards array, 10 ms later
+    act(() => { vi.advanceTimersByTime(10) })
+    rerender(<Harness rf={rf} focalId="a" cards={big(900)} paneW={1500} paneH={900} walking={false} />)
+    flush()
+    expect(setViewport).toHaveBeenCalledTimes(1)
+  })
+
+  it('a walk that only filled rows — no new top-level card — still settles on the focus when it ends', () => {
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={big(120)} paneW={1500} paneH={900} walking />)
+    flush()
+    setViewport.mockClear()
+    // Rows landed inside the focal frame: same top-level cards, a taller focal.
+    rerender(<Harness rf={rf} focalId="a" cards={big(900)} paneW={1500} paneH={900} walking />)
+    flush()
+    expect(setViewport).not.toHaveBeenCalled()              // holds while walking
+    rerender(<Harness rf={rf} focalId="a" cards={big(900)} paneW={1500} paneH={900} walking={false} />)
+    flush()
+    expect(setViewport).toHaveBeenCalledTimes(1)            // the settle
+  })
+})

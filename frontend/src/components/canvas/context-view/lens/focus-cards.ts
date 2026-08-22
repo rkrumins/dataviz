@@ -82,6 +82,16 @@ export const FRAME_WINDOW = 8
  *  eighteen bundles of five read; eighteen of eight are a wall again. */
 export const BUNDLE_WINDOW = 5
 /**
+ * WIRE BUNDLES (2026-08-22). In Grouped, wires land on ROWS, so two frames
+ * with five and eight rows showing are forty wires — and a wide estate is
+ * "one thick mass". A pair of containers with more than this many wires
+ * between them draws ONE bundle (Auto); the reader's `lensWires`
+ * preference can fold every pair (Bundled) or none (Every wire). The
+ * individual wires come back for a card the reader hovers or selects.
+ */
+export const WIRE_BUNDLE_THRESHOLD = 12
+export type LensWires = 'auto' | 'bundled' | 'all'
+/**
  * PARTNER GRAIN (Part H, 2026-08-22). How many partner frames a hop band
  * opens to their rows by itself under the Grouped rung — the strongest
  * first; the rest land closed, counted, one click from their rows. Six
@@ -673,6 +683,14 @@ export interface FocusEdge {
    *  ×N one (T22, R3 fix round 1). The wire's own muted/dashed treatment
    *  is unaffected — only the badge is withheld. */
   seamSlotted: boolean
+  /** THIS WIRE IS A BUNDLE (2026-08-22): it stands for `members` wires
+   *  between the two containers it joins, whose own rows it hides;
+   *  `count` is their sum. The members live in `FocusGraph.bundledWires`
+   *  and are drawn only for a card the reader hovers or selects. */
+  bundle?: { members: number }
+  /** This wire is a MEMBER of that bundle — carried in
+   *  `FocusGraph.bundledWires`, never in `edges`. */
+  inBundle?: string
   /** T23 R2 — this edge stands for a condensed maximal degree-1
    *  pass-through run: draw the "— via N steps —▶" connector chip
    *  instead of a plain ×N badge. `count` above is still the honest sum
@@ -684,6 +702,10 @@ export interface FocusEdge {
 export interface FocusGraph {
   cards: FocusCard[]
   edges: FocusEdge[]
+  /** The wires each bundle in `edges` stands for (`inBundle` names it).
+   *  Not drawn by default: the view adds the ones touching a hovered or
+   *  selected card, or a hovered bundle. */
+  bundledWires: FocusEdge[]
   /** Entities removed by the type chips (reported next to the chips). */
   hiddenByChips: number
   /** Per-direction split of the above. An empty band is only a claim

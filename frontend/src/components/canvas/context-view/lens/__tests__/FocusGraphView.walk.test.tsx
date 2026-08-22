@@ -16,7 +16,7 @@ import type { FocusGraph } from '../focus-cards'
 
 const noop = () => {}
 
-function view(graph: FocusGraph, built: ReturnType<typeof buildWalk>, walking: boolean, recenterKey?: string) {
+function view(graph: FocusGraph, built: ReturnType<typeof buildWalk>, walking: boolean, recenterKey?: string, recenterSignal?: number) {
   return (
     <ReactFlowProvider>
       <FocusGraphView
@@ -30,6 +30,7 @@ function view(graph: FocusGraph, built: ReturnType<typeof buildWalk>, walking: b
         reducedMotion
         walking={walking}
         recenterKey={recenterKey}
+        recenterSignal={recenterSignal}
         onSelect={noop}
         onFocus={noop}
         onToggleFrame={noop}
@@ -65,10 +66,10 @@ describe('FocusGraphView — a board that grows under the walk', () => {
     await settle()
     const pill = screen.getByRole('button', { name: /board grew/i })
     // The walk capsule owns the top-centre while the walk runs
-    // (2026-08-22): the offer sits BELOW it, never under it.
-    expect(pill.className).toMatch(/top-\[4\.75rem\]/)
+    // (2026-08-22): the offers' row sits BELOW it, never under it.
+    expect(pill.parentElement!.className).toMatch(/top-\[4\.75rem\]/)
     rerender(view(all, built, false))
-    expect(screen.getByRole('button', { name: /board grew/i }).className).toMatch(/\btop-3\b/)
+    expect(screen.getByRole('button', { name: /board grew/i }).parentElement!.className).toMatch(/\btop-3\b/)
     fireEvent.click(screen.getByRole('button', { name: /board grew/i }))
     await settle()
     expect(screen.queryByRole('button', { name: /board grew/i })).toBeNull()
@@ -95,5 +96,44 @@ describe('FocusGraphView — back to the focus (2026-08-22)', () => {
     const button = screen.getByRole('button', { name: /center on the focus/i })
     expect(button).toBeInTheDocument()
     fireEvent.click(button)      // jsdom has no viewport to move; the click must simply not throw
+  })
+})
+
+describe('FocusGraphView — the way back to the focus is findable (2026-08-22)', () => {
+  // "Center on the focus" lived only in the corner stack of icons. Now the
+  // header can ask for it (recenterSignal), and the board offers it by
+  // itself the moment the focus has left the screen.
+  const viewportTransform = () => document.querySelector<HTMLElement>('.react-flow__viewport')?.style.transform ?? ''
+
+  it('a recenter signal from the header moves the camera onto the focus', async () => {
+    // jsdom measures nothing; give the pane a size so the focus framing
+    // has something to centre in.
+    const rect = HTMLElement.prototype.getBoundingClientRect
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      // The camera measures the board's own wrapper (the `h-full w-full`
+      // div around React Flow); everything else stays unmeasured.
+      const pane = this.classList.contains('h-full') && this.classList.contains('w-full') && this.querySelector('.react-flow')
+      const w = pane ? 1500 : 0
+      const h = pane ? 900 : 0
+      return { width: w, height: h, x: 0, y: 0, top: 0, left: 0, right: w, bottom: h, toJSON() { return this } } as DOMRect
+    }
+    try {
+      const built = buildWalk(WALK_FIXTURES.walkHub)
+      const { rerender } = render(view(built.graph, built, false, 'grouped', 0))
+      await settle()
+      const before = viewportTransform()
+      rerender(view(built.graph, built, false, 'grouped', 1))
+      await settle()
+      expect(viewportTransform()).not.toBe(before)
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = rect
+    }
+  })
+
+  it('offers "Center on the focus" on the board only once the focus has left the screen', async () => {
+    const built = buildWalk(WALK_FIXTURES.walkHub)
+    render(view(built.graph, built, false))
+    await settle()
+    expect(screen.queryByTestId('lens-focus-offscreen')).toBeNull()
   })
 })

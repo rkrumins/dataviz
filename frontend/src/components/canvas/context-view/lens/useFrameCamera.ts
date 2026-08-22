@@ -156,12 +156,25 @@ export function useFrameCamera(
     return fitZoom >= FOCUS_MIN_ZOOM
   }, [cards, containerRef])
 
+  // Did the camera hold anything back during the current walk — an
+  // arrival, or rows landing inside frames already on the board? The
+  // end-of-walk settle reads it: a coarse-first walk can bring every
+  // partner container in its first page and only ever FILL them after,
+  // which grows nothing at the top level yet leaves the first framing
+  // stale (the focal frame alone may be ten times taller).
+  const heldRef = useRef(false)
   useEffect(() => {
     if (!rf) return
+    // AN EMPTY BOARD IS NOT A PICTURE. The lens renders before the driver
+    // has a model; stamping that as "framed" made the real first paint an
+    // arrival-during-walk, held where the empty board left the camera —
+    // the focus at a corner, tiny, until the reader asked for it
+    // (2026-08-22). Nothing is framed until there is something to frame.
+    if (cards.length === 0) return
     const ids = new Set(cards.map(c => c.id))
     const prev = framedRef.current
     const newFocal = !prev || prev.focal !== focalId || prev.key !== frameKey
-    if (newFocal) setGrew(false)
+    if (newFocal) { setGrew(false); heldRef.current = false }
     // Rows INSIDE a frame do not count as arrivals. A resolving
     // container replaces its rows on every step of the server walk
     // (pass-through levels come and go), and easing to each batch
@@ -170,7 +183,9 @@ export function useFrameCamera(
     // what happens inside it is its own business.
     const arrived = newFocal ? [] : cards.filter(c => !prev!.ids.has(c.id) && !c.frameId)
     if (!newFocal && arrived.length === 0) {
-      // Nothing to move to, so nothing to cancel: safe to stamp now.
+      // Nothing to move to, so nothing to cancel: safe to stamp now. The
+      // board did change under a walk, though (rows, frames, sizes).
+      if (walking) heldRef.current = true
       framedRef.current = { focal: focalId, key: frameKey, ids }
       return
     }
@@ -178,6 +193,7 @@ export function useFrameCamera(
       // The walk is drawing; the reader keeps their place. No move is
       // scheduled, so stamping now is safe — and the board grew.
       framedRef.current = { focal: focalId, key: frameKey, ids }
+      heldRef.current = true
       setGrew(true)
       return
     }
@@ -240,14 +256,27 @@ export function useFrameCamera(
   // (walking: true → false) brings the focus back, readable — a small
   // board fitted whole, a large one centred on the focus — and only if
   // the reader has not taken the camera themselves.
+  // The edge is detected by an effect that depends on `walking` ALONE, and
+  // remembered in a ref until the settle has actually run: `done` re-lays
+  // the board out (vouched edges, counts) within the same tick, and a
+  // settle timer cancelled by that re-render — whose re-run no longer saw
+  // the edge — never fired. The settle effect below may be cancelled and
+  // re-run as often as the board re-renders; it reschedules until it runs.
   const prevWalkingRef = useRef(walking)
+  const settleDueRef = useRef(false)
   useEffect(() => {
     const was = prevWalkingRef.current
     prevWalkingRef.current = walking
-    if (!was || walking) return
-    if (!rf || !grew || readerMoved) return
+    if (walking) settleDueRef.current = false
+    else if (was) settleDueRef.current = true
+  }, [walking])
+  useEffect(() => {
+    if (walking || !settleDueRef.current || !rf) return
+    if (!(grew || heldRef.current) || readerMoved) { settleDueRef.current = false; return }
     const t = window.setTimeout(() => {
+      settleDueRef.current = false
       setGrew(false)
+      heldRef.current = false
       if (fitsReadably() || !frameFocus(reducedMotion ? 0 : 320)) {
         void rf.fitView({ padding: FIT_PADDING, duration: reducedMotion ? 0 : 320, maxZoom: FIT_MAX_ZOOM })
       }
@@ -261,6 +290,24 @@ export function useFrameCamera(
     if (!rf) return
     void rf.fitView({ padding: FIT_PADDING, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
   }, [rf, reducedMotion])
+
+  /** Is the focal card (at least partly, with the usual margin) inside
+   *  the pane at this viewport? The board asks on every move and offers
+   *  the way back when the answer is no. A pane it cannot measure, or a
+   *  focal without geometry, answers "yes": never a pill about nothing. */
+  const focusInView = useCallback((viewport?: { x: number; y: number; zoom: number }): boolean => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    const focal = cards.find(c => c.kind === 'focal') ?? cards.find(c => c.id === 'f')
+    if (!rect || rect.width <= 0 || rect.height <= 0 || !focal) return true
+    if (![focal.x, focal.y, focal.w, focal.h].every(Number.isFinite)) return true
+    const vp = viewport ?? rf?.getViewport()
+    if (!vp) return true
+    const { left, top, right, bottom } = toScreen({ x: focal.x, y: focal.y, w: focal.w, h: focal.h }, vp)
+    // "In view" means some of it is on screen — a focal half off the
+    // right edge is still findable; one entirely past an edge is lost.
+    return right > VISIBLE_MARGIN_PX && left < rect.width - VISIBLE_MARGIN_PX
+      && bottom > VISIBLE_MARGIN_PX && top < rect.height - VISIBLE_MARGIN_PX
+  }, [rf, cards, containerRef])
 
   /** The reader's own "take me back to the focus": centre it at the
    *  readable zoom, whatever the board's size. Falls back to a plain fit
@@ -360,7 +407,7 @@ export function useFrameCamera(
     applyNudge()
   }, [rf, focalId, cards, reducedMotion, containerRef])
 
-  return useMemo(() => ({ grew, fitAll, recenter }), [grew, fitAll, recenter])
+  return useMemo(() => ({ grew, fitAll, recenter, focusInView }), [grew, fitAll, recenter, focusInView])
 }
 
 interface Rect { x: number; y: number; w: number; h: number }

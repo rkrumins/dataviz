@@ -59,6 +59,7 @@
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
+import { chooseView } from '@/test/lensView'
 import { usePreferencesStore } from '@/store/preferences'
 import { decodeLensShare } from '../lens/shareCodec'
 import type { WalkEntry } from '@/hooks/useLensWalk'
@@ -488,13 +489,13 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
     // (The connector chip itself is EdgeLabelRenderer geometry, which
     // jsdom has no layout for; what the fold MEANS is the drawn set,
     // and that is what this asserts.)
-    fireEvent.click(screen.getByRole('button', { name: 'Condensed' }))
+    chooseView('Steps', /^Condensed/)
     for (const stage of interior) expect(onBoard(stage)).toBe(false)
     assertBoardShows('ledger_snapshot')
     assertBoardShows('stage_up_05')
 
     // And back — the same control, the other way, nothing lost.
-    fireEvent.click(screen.getByRole('button', { name: 'Every step' }))
+    chooseView('Steps', /^Every step/)
     for (const stage of [...interior, 'stage_up_05']) assertBoardShows(stage)
     assertStrataCoherent(errorSpy)
   })

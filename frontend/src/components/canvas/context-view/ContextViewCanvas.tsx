@@ -3716,11 +3716,10 @@ export function ContextViewCanvas({
   // until its model lands the lens can only derive a label from the URN,
   // and the capsule that says "Mapping the lineage of …" is the first
   // thing the reader sees (2026-08-22). One scan per focus change.
-  const lensFocalLabelHint = useMemo(() => {
-    if (!lensFocal) return null
-    const data = nodes.find(n => n.id === lensFocal)?.data as { label?: string } | undefined
+  const lensLabelHintFor = useCallback((urn: string): string | null => {
+    const data = nodes.find(n => n.id === urn)?.data as { label?: string } | undefined
     return data?.label ?? null
-  }, [nodes, lensFocal])
+  }, [nodes])
   const userLensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
   // A share v2/v3 link's `depth` overrides the pref for exactly the
   // RESTORED focal's initial fetch: useLensWalk's own cache guard
@@ -4642,7 +4641,7 @@ export function ContextViewCanvas({
           }}
           fullWalkEnabled={lensFullWalk}
           walkProgress={lensFocal ? lensWalk.walkProgressFor(lensFocal) : null}
-          focalLabelHint={lensFocalLabelHint}
+          labelHintFor={lensLabelHintFor}
           onFullWalkToggle={setLensFullWalk}
           onWalkContinue={() => { if (lensFocal) lensWalk.continuePastCheckpoint(lensFocal) }}
           onWalkRetry={() => { if (lensFocal) lensWalk.retryWalk(lensFocal) }}

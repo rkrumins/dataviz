@@ -72,7 +72,9 @@ import {
     FRAME_WINDOW_ALL,
     BUNDLE_WINDOW,
     OPEN_PARTNERS_PER_BAND,
+    WIRE_BUNDLE_THRESHOLD,
     type LensDensity,
+    type LensWires,
     NO_FRAME_ROWS,
     UNRESOLVED_TYPE,
     type FocusCard,
@@ -217,6 +219,11 @@ export interface FocusLayoutInput {
      *  preference. Defaults to 'all' (nothing folded) so a caller that
      *  has not asked for a grain gets the whole picture. */
     density?: LensDensity
+    /** How the wires between two containers draw (2026-08-22): one bundle
+     *  when there are many ('auto', the reader's default), always
+     *  ('bundled'), or every wire ('all' — the layout's default, so a
+     *  caller that has not asked gets the whole picture). */
+    wires?: LensWires
 }
 
 /** Every focal-transition kind the lens recognizes (T26 R1). All five
@@ -429,6 +436,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         childrenAll, childrenAllStatus, walkStatus,
         directionFilter = 'both',
         density = 'all',
+        wires = 'all',
     } = input
     const model = sg.nodes
 
@@ -2187,6 +2195,73 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     }
 
     /**
+     * WIRE BUNDLES (2026-08-22) — one wire per pair of CONTAINERS when
+     * the pair has too many. Wires land on the finest visible card at
+     * both ends, so two frames showing five and eight rows are forty
+     * wires, and a wide estate in Grouped was "one thick mass". The
+     * top-level card each end sits in (its outermost frame) is the pair;
+     * a pair over the threshold — or every pair with a row at either end,
+     * under 'bundled' — draws ONE wire between the two containers, its
+     * count the sum, and the member wires move to `bundledWires` for the
+     * view to add back around a hovered or selected card. A wire between
+     * two top-level cards is already one wire; a same-frame wire is an
+     * internal lane; a condensed run is its own chip — none of those fold.
+     * Before the lane and badge passes, so they place only what is drawn.
+     */
+    const topOf = (cardId: string): string => {
+        const chain = frameChain(cardId)
+        return chain.length > 0 ? chain[chain.length - 1] : cardId
+    }
+    const bundledWires: FocusEdge[] = []
+    if (wires !== 'all') {
+        const groups = new Map<string, FocusEdge[]>()
+        for (const edge of edges) {
+            if (edge.condensed || edge.sameAncestorFrame) continue
+            const inRow = !!byId.get(edge.source)?.frameId || !!byId.get(edge.target)?.frameId
+            if (!inRow) continue
+            const key = `${topOf(edge.source)}>${topOf(edge.target)}`
+            const list = groups.get(key)
+            if (list) list.push(edge)
+            else groups.set(key, [edge])
+        }
+        const folded = new Set<FocusEdge>()
+        for (const [key, members] of groups) {
+            if (wires === 'auto' && members.length <= WIRE_BUNDLE_THRESHOLD) continue
+            const [source, target] = key.split('>')
+            const id = `b:${source}>${target}`
+            const first = members[0]
+            const bundle: FocusEdge = {
+                id,
+                source,
+                target,
+                count: members.reduce((acc, e) => acc + e.count, 0),
+                edgeTypeNorm: members.every(e => e.edgeTypeNorm === first.edgeTypeNorm) ? first.edgeTypeNorm : '',
+                dimmed: members.every(e => e.dimmed),
+                cycleBack: members.some(e => e.cycleBack),
+                cycleAnchor: false,
+                labelVisible: false,
+                labelT: 0.5,
+                grainCoarse: members.some(e => e.grainCoarse),
+                approx: members.some(e => e.approx ?? false),
+                sameAncestorFrame: null,
+                inFrameLane: null,
+                seamSlotted: false,
+                bundle: { members: members.length },
+            }
+            for (const m of members) { m.inBundle = id; folded.add(m); bundledWires.push(m) }
+            edges.push(bundle)
+            // The containers need ports for it.
+            const s = byId.get(source); if (s) s.wired = true
+            const t = byId.get(target); if (t) t.wired = true
+        }
+        if (folded.size > 0) {
+            const kept = edges.filter(e => !folded.has(e))
+            edges.length = 0
+            edges.push(...kept)
+        }
+    }
+
+    /**
      * IN-FRAME LANES — the routing half of "internal flow is vertical".
      *
      * A same-frame wire used to be a STRAIGHT LINE between two ports
@@ -2456,6 +2531,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     return {
         cards,
         edges,
+        bundledWires,
         hiddenByChips,
         hiddenByChipsIn,
         hiddenByChipsOut,

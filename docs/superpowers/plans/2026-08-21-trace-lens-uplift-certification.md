@@ -185,6 +185,82 @@ screenshot; no jsdom pin (layout only).
 Suites: frontend **3,110 tests / 322 files** green (the known d3-drag jsdom error), `tsc` 61, eslint on
 touched files at the HEAD counts (one pre-existing fast-refresh warning).
 
+**Three more (2026-08-22, late afternoon).** (1) *The List body is retired*: the Graph | List toggle is
+gone, `lensViewMode` migrates `'list' → 'graph'` (preferences v5), the list branch stays one release
+behind the store for rollback and is marked `@deprecated`; the guided tour's step on it became a Density
+step (`data-tour="lens-density"`). (2) *Docs*: the User Guide's Lens page (density/grouping, the capsule
+and stages, Walk modes, Center on the focus, no depth control, no footer actions, no List) and the canvas
+Trace section of Exploring the Graph; the Documentation section's Context Engine page gained the
+`/trace/closure` contract (request/result fields, the six invariants, coarse first paint, caching) and the
+Frontend reference lists the Lens/trace pipeline files. (3) *The Path names where you have been*: the trail
+read each chip off the current model, so a focus you had left fell back to its URN fragment
+(`gold_af963e43 › Snowflake › …`); the lens now remembers every name it has shown and asks the canvas
+(`labelHintFor`) for stops it never drew. Frontend 3,113 tests green (`ShareViewDialog` flaked once under
+the full run and passes alone — unrelated), `tsc` 61.
+
+**Center on focus, findable (2026-08-22, evening).** It was one icon in the corner stack. Now: a labelled
+**Center on focus** button in the header's navigation cluster (beside Back/Forward, right after the name),
+explained on hover like every control; and on the board a solid pill — "Center on the focus" — that appears
+exactly when the focal card has left the screen (`useFrameCamera.focusInView(viewport)` asked on every
+React Flow `onMove`) and leaves when it is back; the stack icon stays. Browser: drag the board two screens
+away → pill + header button present; click → focus centred at zoom 0.98, pill gone.
+
+**A cold open lands on the focus (2026-08-22, evening; `08dcd9d3`).** Three camera causes of "the focus is
+tiny until I click Center on focus": the empty board was stamped as framed (so the real first paint was held
+as an arrival during the walk), React Flow's own fit-on-init framed the coarse first paint whole a beat before
+the camera could, and the end-of-walk settle's timer was cancelled by the re-render `done` causes. Now: nothing
+is framed until there is something to frame, no `fitView` prop, the edge is detected on `walking` alone and
+remembered until the settle runs, and the settle fires after any held change (rows filling frames). Cold open
+at Grouped on the wide table: settled at zoom 0.91, "Board grew" cleared.
+
+**Wire bundles (2026-08-22, evening).** "500 incoming/outgoing edges simply turn into one thick mass" — seen
+in Grouped, where wires land on rows. A pair of containers with more than `WIRE_BUNDLE_THRESHOLD` (12) wires
+between them draws ONE bundle (Auto, the `lensWires` default; Bundled folds every pair; Every wire none): a
+heavier stroke (log of its members), a user-space arrowhead, the sum as its badge. The members move to
+`FocusGraph.bundledWires` and come back for the cone's anchor (hover), the selected or isolated card, a frame
+(every row's wires), or a hovered bundle — a click pins them. React Flow marks unselectable edges `inactive`
+(no pointer events), so a bundle carries its own hit path. Header: WIRES · Auto / Bundled / Every wire, each
+explained. Wide table at Grouped: Every wire 108 wires; Auto/Bundled 4 (two bundles, ×423 and ×598/×701);
+hovering a bundle fans out 53 members; the bundle fades to 0.28 beneath them.
+
+**Two defects from the user's testing of the bundles (2026-08-22, late).** (1) *The header overflowed*: a
+wrapped control cluster still ran past the dialog's edge and was clipped. It is now ONE row that never
+overflows — `useToolbarOverflow` measures the row and each group and folds the least-used groups into a
+**Display** menu (Radix Popover, z-[9999] above the Lens) in priority order `direction · density · wires ·
+walk · steps · next`, so the day-to-day controls stay in reach; the title and navigation never shrink (the
+groups fold instead). At 1,600 px: direction + Density + Wires inline, "Display 3"; at 2,000 px everything but
+Steps/Next. (2) *Bundles vanished on Bundled/Auto*: the layout was right (17 bundles from the Snowflake focal),
+but React Flow measures a node's handles once — a card that GAINS ports after mount (a focus that had no wires
+of its own becoming a bundle's endpoint) kept an empty handle measurement and its edges were silently dropped.
+`FocusNode` now calls `useUpdateNodeInternals` when `card.wired` flips (never on mount, never in a headless
+DOM — jsdom lacks DOMMatrixReadOnly). Snowflake at Every card: Bundled 7 bundles on screen (11 wires) vs 51.
+
+**The header, rebuilt as categories (2026-08-22, night).** Even folded, six captioned segmented groups
+crowded the search box off the row ("I cannot even search anymore"). The header is now two rows: identity,
+navigation and SEARCH (always) on the first; on the second, one **category chip** per axis — Direction ·
+Density · Wires · Walk · Steps · Next — each showing its current value and opening a menu (`ViewControl`,
+Radix Popover, `role=menu` of `menuitemradio`) where every option carries its name and a line of meaning,
+the current one checked; the chip's own meaning is the hover (quieted while its menu is open), arrow keys
+walk the options, Esc/outside closes. Six chips are ~900 px, so they fit on one row down to ~1,100 px; below
+that the chips row folds its least-used categories into **More** (same `useToolbarOverflow`). Tests choose
+options through `chooseView`/`viewValue` (`src/test/lensView.ts`); the tour anchors moved onto the chips.
+Browser: 1,600 and 1,100 px — all six chips inline, search intact; the Density menu lists its three options
+with meanings and the check on the current one.
+Then the blank space: the Path trail moved from its own row into the first row's middle (flex, scrolls
+sideways on a long walk) and the type chips onto the right of the chips row (flexible — they shrink and
+scroll, never fold a category into More) — two rows where there were four, no blank band. 2,000 px:
+name · Back · Center on focus · PATH GOLD › Tableau › Snowflake · search · help · share · close / six chips ·
+six type chips.
+
+**Direction first class + the status bar (2026-08-22, last).** Direction became an always-expanded segmented
+control at the head of the controls row — "which side of the story is the question itself, not a setting" —
+and never folds into More. The footer, one italic sentence of hints over a wide blank, is now a **status
+bar**: gestures as keycaps on the left (dropping the least-critical caps at narrow widths rather than
+clipping mid-word), a legend of what the four wire kinds mean in the middle, and live board facts on the
+right ("27 cards · 21 wires · 2 bundles · 79%", the zoom read on move-end). The header's middle, blank
+before a walk, now carries the Path's own empty state ("Double-click a card to focus it — your path appears
+here"). Verified at 2,000 and 1,280 px.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

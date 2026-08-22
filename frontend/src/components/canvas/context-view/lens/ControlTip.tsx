@@ -36,9 +36,12 @@ export interface ControlTipProps {
   /** Renders the control; it MUST put `peer` on the element and spread
    *  `aria-describedby`. */
   children: (tip: { 'aria-describedby': string; peer: 'peer' }) => ReactNode
+  /** Hold the popover back — while the control's own menu is open, say.
+   *  The description stays wired for assistive tech. */
+  quiet?: boolean
 }
 
-export function ControlTip({ name, meaning, side = 'bottom', children }: ControlTipProps) {
+export function ControlTip({ name, meaning, side = 'bottom', children, quiet = false }: ControlTipProps) {
   const id = useId()
   return (
     <span className="relative flex items-center">
@@ -51,7 +54,7 @@ export function ControlTip({ name, meaning, side = 'bottom', children }: Control
           'rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-lg',
           'px-2.5 py-1.5 text-left whitespace-normal',
           'opacity-0 transition-opacity duration-100 delay-0',
-          'peer-hover:opacity-100 peer-hover:delay-150 peer-focus-visible:opacity-100',
+          !quiet && 'peer-hover:opacity-100 peer-hover:delay-150 peer-focus-visible:opacity-100',
           side === 'bottom' ? 'top-full mt-1.5' : 'bottom-full mb-1.5',
         )}
       >
