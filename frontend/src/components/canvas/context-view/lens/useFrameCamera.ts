@@ -13,6 +13,27 @@ import { CARD_W, BAND_GAP, type FocusCard, type FocusEdge } from './focus-cards'
  */
 export const FIT_MAX_ZOOM = 1.5
 
+/**
+ * THE FOCUS FIRST (2026-08-22). A new picture used to be fitted whole,
+ * whatever its size: with dozens of partners a band the board is
+ * thousands of pixels tall, the fit zoom lands near 0.1 and "the focus
+ * node is tiny — I have to click Zoom In until I even find it". A board
+ * that cannot be read at its fit zoom now opens CENTRED ON THE FOCUS at
+ * a zoom never below this, with the two neighbouring bands in view; the
+ * rest is a pan or a Fit away. 0.75 keeps the 11–12px card type at
+ * ~8–9px — small, legible, and the focal frame's own rows readable.
+ */
+export const FOCUS_MIN_ZOOM = 0.75
+/** The flow-space width the focus framing tries to show: the focus and
+ *  one band either side, with a margin. */
+const FOCUS_FRAME_W = 3 * (CARD_W + BAND_GAP) + 120
+/** Screen pixels kept clear above a tall focal frame, so its header lands
+ *  under the walk capsule (top-centre, ~110px) rather than behind it. */
+export const FOCUS_HEADROOM_PX = 140
+/** `fitView`'s own padding, mirrored so "would the whole board read at
+ *  its fit zoom" is the same question React Flow would answer. */
+const FIT_PADDING = 0.15
+
 /** The only part of the React Flow instance the camera needs. */
 export type CameraTarget = {
   fitView: (opts: {
@@ -80,14 +101,66 @@ export function useFrameCamera(
    *  is set, arrivals hold the camera still and `grew` reports them so
    *  the view can OFFER a fit instead of taking one. */
   walking = false,
+  /** The layout mode — density · steps · direction — as one string. A
+   *  change is a new picture of the SAME focus (2026-08-22): the board
+   *  re-lays out wholesale, so the camera re-frames the focus exactly as
+   *  it does for a new focal, rather than leaving the reader wherever
+   *  the previous layout had them. */
+  frameKey = '',
+  /** The reader panned or zoomed since this picture was framed. While it
+   *  is set the camera is theirs: the end of a walk settles nothing, and
+   *  the "Board grew" offer stays a pill. */
+  readerMoved = false,
 ) {
-  const framedRef = useRef<{ focal: string; ids: Set<string> } | null>(null)
+  const framedRef = useRef<{ focal: string; key: string; ids: Set<string> } | null>(null)
   const [grew, setGrew] = useState(false)
+
+  /** Centre the focus at a readable zoom — the move behind the focus-first
+   *  opening and the reader's own Re-center. A plain viewport set: the
+   *  focal's geometry is the layout's own, so no node id is needed. */
+  const frameFocus = useCallback((duration: number) => {
+    if (!rf) return false
+    const rect = containerRef.current?.getBoundingClientRect()
+    const focal = cards.find(c => c.kind === 'focal') ?? cards.find(c => c.id === 'f')
+    if (!rect || rect.width <= 0 || rect.height <= 0 || !focal) return false
+    const geometry = [focal.x, focal.y, focal.w, focal.h]
+    if (!geometry.every(Number.isFinite)) return false
+    const zoom = Math.min(FIT_MAX_ZOOM, Math.max(FOCUS_MIN_ZOOM, rect.width / FOCUS_FRAME_W))
+    // A short focal is centred; a tall one is placed with its header
+    // FOCUS_HEADROOM_PX below the pane's top — the name and the counts
+    // are always in the picture, and never behind the capsule.
+    const cx = focal.x + focal.w / 2
+    const cy = focal.y + Math.min(focal.h / 2, (rect.height / 2 - FOCUS_HEADROOM_PX) / zoom)
+    void rf.setViewport({ x: rect.width / 2 - cx * zoom, y: rect.height / 2 - cy * zoom, zoom }, { duration })
+    return true
+  }, [rf, cards, containerRef])
+
+  /** Would the whole board read at its fit zoom? Unknown geometry or an
+   *  unmeasured pane answers "yes" — the plain fit is the safe default. */
+  const fitsReadably = useCallback((): boolean => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect || rect.width <= 0 || rect.height <= 0) return true
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const c of cards) {
+      if (c.frameId) continue
+      if (![c.x, c.y, c.w, c.h].every(Number.isFinite)) return true
+      minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x + c.w)
+      minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y + c.h)
+    }
+    if (!Number.isFinite(minX)) return true
+    const fitZoom = Math.min(
+      rect.width / ((maxX - minX) * (1 + 2 * FIT_PADDING)),
+      rect.height / ((maxY - minY) * (1 + 2 * FIT_PADDING)),
+      FIT_MAX_ZOOM,
+    )
+    return fitZoom >= FOCUS_MIN_ZOOM
+  }, [cards, containerRef])
+
   useEffect(() => {
     if (!rf) return
     const ids = new Set(cards.map(c => c.id))
     const prev = framedRef.current
-    const newFocal = !prev || prev.focal !== focalId
+    const newFocal = !prev || prev.focal !== focalId || prev.key !== frameKey
     if (newFocal) setGrew(false)
     // Rows INSIDE a frame do not count as arrivals. A resolving
     // container replaces its rows on every step of the server walk
@@ -98,20 +171,24 @@ export function useFrameCamera(
     const arrived = newFocal ? [] : cards.filter(c => !prev!.ids.has(c.id) && !c.frameId)
     if (!newFocal && arrived.length === 0) {
       // Nothing to move to, so nothing to cancel: safe to stamp now.
-      framedRef.current = { focal: focalId, ids }
+      framedRef.current = { focal: focalId, key: frameKey, ids }
       return
     }
     if (!newFocal && walking) {
       // The walk is drawing; the reader keeps their place. No move is
       // scheduled, so stamping now is safe — and the board grew.
-      framedRef.current = { focal: focalId, ids }
+      framedRef.current = { focal: focalId, key: frameKey, ids }
       setGrew(true)
       return
     }
     const t = window.setTimeout(() => {
-      framedRef.current = { focal: focalId, ids }
+      framedRef.current = { focal: focalId, key: frameKey, ids }
       if (newFocal) {
-        void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
+        // A small picture fills its frame; a picture too large to read
+        // at its fit zoom opens on the focus instead (FOCUS_MIN_ZOOM).
+        if (fitsReadably() || !frameFocus(reducedMotion ? 0 : 240)) {
+          void rf.fitView({ padding: FIT_PADDING, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
+        }
         return
       }
       // What each arrival wired itself to — the other end of every
@@ -153,14 +230,47 @@ export function useFrameCamera(
     // now that touching this file put it under lint. Safe: an `edges`
     // change alone (cards unchanged) re-runs the effect but hits the
     // "nothing arrived" early return, which only stamps the bookkeeping.
-  }, [rf, focalId, cards, edges, reducedMotion, containerRef, walking])
+  }, [rf, focalId, cards, edges, reducedMotion, containerRef, walking, frameKey, fitsReadably, frameFocus])
+
+  // THE WALK SETTLES ON THE FOCUS (2026-08-22). The camera holds still
+  // while the walk lands cards, and the focal frame grows around the
+  // midline meanwhile — so by the end its header had drifted up under
+  // the capsule, and the reader was left at the first wave's framing of
+  // a board now several times the size. One move on the walk's END
+  // (walking: true → false) brings the focus back, readable — a small
+  // board fitted whole, a large one centred on the focus — and only if
+  // the reader has not taken the camera themselves.
+  const prevWalkingRef = useRef(walking)
+  useEffect(() => {
+    const was = prevWalkingRef.current
+    prevWalkingRef.current = walking
+    if (!was || walking) return
+    if (!rf || !grew || readerMoved) return
+    const t = window.setTimeout(() => {
+      setGrew(false)
+      if (fitsReadably() || !frameFocus(reducedMotion ? 0 : 320)) {
+        void rf.fitView({ padding: FIT_PADDING, duration: reducedMotion ? 0 : 320, maxZoom: FIT_MAX_ZOOM })
+      }
+    }, 30)
+    return () => window.clearTimeout(t)
+  }, [walking, rf, grew, readerMoved, reducedMotion, fitsReadably, frameFocus])
 
   /** The reader's own "show me everything": one fit of the whole board. */
   const fitAll = useCallback(() => {
     setGrew(false)
     if (!rf) return
-    void rf.fitView({ padding: 0.15, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
+    void rf.fitView({ padding: FIT_PADDING, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
   }, [rf, reducedMotion])
+
+  /** The reader's own "take me back to the focus": centre it at the
+   *  readable zoom, whatever the board's size. Falls back to a plain fit
+   *  when the focal has no geometry yet. */
+  const recenter = useCallback(() => {
+    if (!rf) return
+    if (!frameFocus(reducedMotion ? 0 : 240)) {
+      void rf.fitView({ padding: FIT_PADDING, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
+    }
+  }, [rf, reducedMotion, frameFocus])
 
   // ── The extend-ghost nudge (fix round 1) ──────────────────────────
   //
@@ -250,7 +360,7 @@ export function useFrameCamera(
     applyNudge()
   }, [rf, focalId, cards, reducedMotion, containerRef])
 
-  return useMemo(() => ({ grew, fitAll }), [grew, fitAll])
+  return useMemo(() => ({ grew, fitAll, recenter }), [grew, fitAll, recenter])
 }
 
 interface Rect { x: number; y: number; w: number; h: number }

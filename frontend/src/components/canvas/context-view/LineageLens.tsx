@@ -72,6 +72,8 @@ import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeType
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
 import { TraceWalkIndicator } from './TraceWalkIndicator'
+import { ControlTip } from './lens/ControlTip'
+import { LensSkeleton } from './lens/LensSkeleton'
 
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
  *  thousands of participants; the request has to stay a request. */
@@ -1548,31 +1550,39 @@ export function LineageLens({
                   aria-label="What containers you open next will show"
                   className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
                 >
-                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
-                    Next
-                  </span>
+                  <ControlTip name="Next" meaning="What the next container you open will show — one already open keeps its own setting">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Next
+                      </span>
+                    )}
+                  </ControlTip>
                   {([
                     { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
                       title: 'Containers you open next show only what is on this lineage — this does not change one already open' },
                     { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
                       title: 'Containers you open next show everything inside, with lineage marked where it exists — this does not change one already open' },
                   ] as const).map(({ mode, Icon, label, title }) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => setLensFrameChildren(mode)}
-                      title={title}
-                      aria-pressed={lensFrameChildren === mode}
-                      className={cn(
-                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                        lensFrameChildren === mode
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
+                    <ControlTip key={mode} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setLensFrameChildren(mode)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={lensFrameChildren === mode}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            lensFrameChildren === mode
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
                       )}
-                    >
-                      <Icon className="w-3 h-3" />
-                      {label}
-                    </button>
+                    </ControlTip>
                   ))}
                 </div>
               )}
@@ -1587,31 +1597,39 @@ export function LineageLens({
                   aria-label="How far to walk the flow"
                   className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
                 >
-                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
-                    Walk
-                  </span>
+                  <ControlTip name="Walk" meaning="How far the lens walks on its own">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Walk
+                      </span>
+                    )}
+                  </ControlTip>
                   {([
                     { on: false, Icon: LucideIcons.Footprints, label: 'One hop',
                       title: 'Walk the flow yourself — ⊕ on a card fetches its next hop' },
                     { on: true, Icon: LucideIcons.Route, label: 'Full flow',
                       title: 'Trace mode: keep walking automatically until the whole end-to-end flow is drawn' },
                   ] as const).map(({ on, Icon, label, title }) => (
-                    <button
-                      key={label}
-                      type="button"
-                      onClick={() => onFullWalkToggle(on)}
-                      title={title}
-                      aria-pressed={fullWalkEnabled === on}
-                      className={cn(
-                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                        fullWalkEnabled === on
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
+                    <ControlTip key={label} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => onFullWalkToggle(on)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={fullWalkEnabled === on}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            fullWalkEnabled === on
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
                       )}
-                    >
-                      <Icon className="w-3 h-3" />
-                      {label}
-                    </button>
+                    </ControlTip>
                   ))}
                 </div>
               )}
@@ -1630,31 +1648,39 @@ export function LineageLens({
                   aria-label="How much of a long path to show"
                   className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
                 >
-                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
-                    Steps
-                  </span>
+                  <ControlTip name="Steps" meaning="How a long pass-through path is drawn">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Steps
+                      </span>
+                    )}
+                  </ControlTip>
                   {([
                     { on: false, Icon: LucideIcons.UnfoldHorizontal, label: 'Every step',
                       title: 'Show the full end-to-end flow — every hop on the path is its own card' },
                     { on: true, Icon: LucideIcons.FoldHorizontal, label: 'Condensed',
                       title: 'Fold long runs of single pass-through steps into one "via N steps" connector — click a connector to open that run' },
                   ] as const).map(({ on, Icon, label, title }) => (
-                    <button
-                      key={label}
-                      type="button"
-                      onClick={() => setCondenseSteps(on)}
-                      title={title}
-                      aria-pressed={condenseSteps === on}
-                      className={cn(
-                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                        condenseSteps === on
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
+                    <ControlTip key={label} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setCondenseSteps(on)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={condenseSteps === on}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            condenseSteps === on
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
                       )}
-                    >
-                      <Icon className="w-3 h-3" />
-                      {label}
-                    </button>
+                    </ControlTip>
                   ))}
                 </div>
               )}
@@ -1673,33 +1699,41 @@ export function LineageLens({
                   aria-label="How much of the picture to fold"
                   className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
                 >
-                  <span className="pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none">
-                    Density
-                  </span>
+                  <ControlTip name="Density" meaning="How much of the picture is folded — the numbers are the same at every rung">
+                    {(tip) => (
+                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
+                        Density
+                      </span>
+                    )}
+                  </ControlTip>
                   {([
                     { value: 'overview', Icon: LucideIcons.Layers, label: 'Overview',
-                      title: 'Start at the high level — a wide band shows the containers its cards sit in, closed, with counts' },
+                      title: 'Start at the high level — partners that share a container land as that container, closed, with counts; each click opens one level' },
                     { value: 'grouped', Icon: LucideIcons.Group, label: 'Grouped',
-                      title: 'A wide band folds its cards into the containers they sit in, each showing its strongest rows first' },
+                      title: 'Partners that share a container fold into it, its strongest rows first; the rest is one click away' },
                     { value: 'all', Icon: LucideIcons.LayoutGrid, label: 'Every card',
                       title: 'Draw every card on its own, however many there are' },
                   ] as const).map(({ value, Icon, label, title }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setDensity(value)}
-                      title={title}
-                      aria-pressed={density === value}
-                      className={cn(
-                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                        density === value
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
+                    <ControlTip key={value} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setDensity(value)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={density === value}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            density === value
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
                       )}
-                    >
-                      <Icon className="w-3 h-3" />
-                      {label}
-                    </button>
+                    </ControlTip>
                   ))}
                 </div>
               )}
@@ -1723,58 +1757,72 @@ export function LineageLens({
                     { dir: 'out', Icon: LucideIcons.ArrowUpRight, label: 'Impact',
                       title: 'Show only what this entity feeds — downstream' },
                   ] as const).map(({ dir, Icon, label, title }) => (
-                    <button
-                      key={dir}
-                      type="button"
-                      onClick={() => setDirectionFilter(dir)}
-                      title={title}
-                      aria-pressed={directionFilter === dir}
-                      className={cn(
-                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                        directionFilter === dir
-                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                          : 'text-ink-muted hover:text-ink',
+                    <ControlTip key={dir} name={label} meaning={title}>
+                      {(tip) => (
+                        <button
+                          type="button"
+                          onClick={() => setDirectionFilter(dir)}
+                          aria-describedby={tip['aria-describedby']}
+                          aria-pressed={directionFilter === dir}
+                          className={cn(
+                            tip.peer,
+                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            directionFilter === dir
+                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                              : 'text-ink-muted hover:text-ink',
+                          )}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {label}
+                        </button>
                       )}
-                    >
-                      <Icon className="w-3 h-3" />
-                      {label}
-                    </button>
+                    </ControlTip>
                   ))}
                 </div>
               )}
               {/* Graph | List body toggle — the graph is the premium
                   default; the columns stay one click away (persisted). */}
               <div data-tour="lens-toggle" className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]">
-                <button
-                  type="button"
-                  onClick={() => setLensViewMode('graph')}
-                  title="Graph — explore lineage interactively"
-                  aria-pressed={lensViewMode === 'graph'}
-                  className={cn(
-                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                    lensViewMode === 'graph'
-                      ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                      : 'text-ink-muted hover:text-ink',
+                <ControlTip name="Graph" meaning="Explore the lineage as cards and wires">
+                  {(tip) => (
+                    <button
+                      type="button"
+                      onClick={() => setLensViewMode('graph')}
+                      aria-describedby={tip['aria-describedby']}
+                      aria-pressed={lensViewMode === 'graph'}
+                      className={cn(
+                        tip.peer,
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        lensViewMode === 'graph'
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <LucideIcons.Network className="w-3 h-3" />
+                      Graph
+                    </button>
                   )}
-                >
-                  <LucideIcons.Network className="w-3 h-3" />
-                  Graph
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLensViewMode('list')}
-                  title="List — scan all connections as columns"
-                  aria-pressed={lensViewMode === 'list'}
-                  className={cn(
-                    'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                    lensViewMode === 'list'
-                      ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                      : 'text-ink-muted hover:text-ink',
+                </ControlTip>
+                <ControlTip name="List" meaning="Scan every connection as columns">
+                  {(tip) => (
+                    <button
+                      type="button"
+                      onClick={() => setLensViewMode('list')}
+                      aria-describedby={tip['aria-describedby']}
+                      aria-pressed={lensViewMode === 'list'}
+                      className={cn(
+                        tip.peer,
+                        'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                        lensViewMode === 'list'
+                          ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
+                          : 'text-ink-muted hover:text-ink',
+                      )}
+                    >
+                      <LucideIcons.List className="w-3 h-3" />
+                      List
+                    </button>
                   )}
-                >
-                  <LucideIcons.List className="w-3 h-3" />
-                  List
-                </button>
+                </ControlTip>
               </div>
               <div className="relative">
                 <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
@@ -2080,6 +2128,10 @@ export function LineageLens({
                 // C4: while the hands-free walk lands cards the camera
                 // holds its place and the board offers a fit instead.
                 walking={walkProgress?.phase === 'loading' || walkProgress?.phase === 'seeding' || walkProgress?.phase === 'walking'}
+                // A layout-mode switch is a new picture of the same focus:
+                // the camera re-frames the focus rather than leaving the
+                // reader wherever the previous layout had them (2026-08-22).
+                recenterKey={`${density}|${condenseSteps ? 'condensed' : 'every'}|${directionFilter}`}
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
                 onIsolate={setIsolated}
@@ -2119,10 +2171,15 @@ export function LineageLens({
                   entry for this focus `walkProgress` is null and the
                   fetch status alone says loading. Keyed on the focus so a
                   re-anchor starts a fresh capsule. */}
+              {/* THE PICTURE'S GHOST — sources → focus → consumers, drawn
+                  as shimmering shapes until the first cards exist, so an
+                  empty board never reads as nothing happening. */}
+              {walkStatus === 'loading' && boardGraph.cards.length === 0 && <LensSkeleton />}
               {capsulePhase && (
                 <TraceWalkIndicator
                   key={nodeId ?? ''}
                   phase={capsulePhase}
+                  surface="lens"
                   subject={focalLabel}
                   nodes={walkProgress?.nodes ?? 0}
                   flows={walkProgress?.flows ?? 0}

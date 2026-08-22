@@ -44,6 +44,22 @@
  * Lens's way out is its own close). A capsule mounted already `done`
  * says nothing — a focus walked earlier opens quiet — and a later wave
  * (a ⊕) brings it back, since that is a new computation.
+ *
+ * PROGRESS YOU CAN READ (2026-08-22, "more interactive, intuitive and
+ * modern … a clever way to mark the progress"). The total is still
+ * unknowable, so there is still no percentage. What there is instead:
+ *  • THE FOUR STAGES of every walk — Focus · Picture · Flows · Drawn —
+ *    as a stepper that says which one this is. They are real boundaries
+ *    (the focus found; the first picture on the board; the pages of
+ *    flows; complete), not a bar that pretends to know the end.
+ *  • THE STEPS STILL OWED — "14 requests · 11 more to go" — the driver's
+ *    own frontier count, a floor the reader can watch fall.
+ *  • TIME, once the wait is long enough to wonder about (3 s).
+ *  • A BEAT on the sounding line for every page that lands, and a tick
+ *    on every number that changes: the walk is visibly alive between
+ *    the big jumps.
+ *  • A LINE OF GUIDANCE on a long wait (4 s), rotating: what is
+ *    happening, and what the board offers meanwhile.
  */
 import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -68,6 +84,8 @@ export interface TraceWalkIndicatorProps {
     subject?: string
     /** Leave the trace. Absent = no Cancel (the Lens closes by itself). */
     onCancel?: () => void
+    /** Which board the capsule sits on — the guidance lines differ. */
+    surface?: 'canvas' | 'lens'
     /** Lift the memory checkpoint for this focus. */
     onContinue: () => void
     /** Give the failed steps one more attempt. */
@@ -109,6 +127,46 @@ function narrate(p: TraceWalkIndicatorProps): { headline: string; meta: string }
 const SOUNDS: ReadonlySet<WalkProgress['phase']> = new Set(['loading', 'seeding', 'walking', 'checkpoint'])
 const COMPUTING: ReadonlySet<WalkProgress['phase']> = new Set(['loading', 'seeding', 'walking'])
 
+/** The four stages of a walk, in order. */
+export const WALK_STAGES = ['Focus', 'Picture', 'Flows', 'Drawn'] as const
+/** Which stage a phase is ON: the focus is being found; the first
+ *  picture is on the board and the flows are being read (seeding,
+ *  walking, and the two holds — checkpoint, error — which happen there);
+ *  everything drawn. */
+function currentStage(phase: WalkProgress['phase']): number {
+    if (phase === 'loading') return 0
+    if (phase === 'done') return WALK_STAGES.length
+    return 2
+}
+type StageState = 'done' | 'current' | 'todo'
+function stageState(i: number, phase: WalkProgress['phase']): StageState {
+    const cur = currentStage(phase)
+    return i < cur ? 'done' : i === cur ? 'current' : 'todo'
+}
+
+/** Time before the capsule starts counting seconds, and before it offers
+ *  guidance; how long each line of guidance holds. */
+export const ELAPSED_AFTER_MS = 3_000
+export const GUIDANCE_AFTER_MS = 4_000
+export const GUIDANCE_EVERY_MS = 6_000
+const GUIDANCE: Record<'canvas' | 'lens', readonly string[]> = {
+    lens: [
+        'The board fills in as each page lands — it is yours to read meanwhile.',
+        '⊕ on a card walks one more hop; the chevron opens what is inside.',
+        'Density folds a wide band into its containers — Overview, Grouped, Every card.',
+    ],
+    canvas: [
+        'Cards land as each page arrives — the canvas stays yours meanwhile.',
+        'Every flow touching the focus is being read, page by page.',
+        'The dock below keeps the numbers once the trace is drawn.',
+    ],
+}
+
+/** A number that ticks: re-keyed on its value so the change animates. */
+function Tick({ value }: { value: number }) {
+    return <span key={value} className="nx-tick inline-block tabular-nums">{fmt(value)}</span>
+}
+
 const quietAction =
     'pointer-events-auto px-2.5 py-1 rounded-lg text-[11px] font-medium text-ink-muted '
     + 'hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-colors '
@@ -120,7 +178,7 @@ const primaryAction =
     + 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-1'
 
 export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
-    const { phase, upCount, downCount, onCancel, onContinue, onRetry } = props
+    const { phase, nodes, flows, requests, pending, upCount, downCount, onCancel, onContinue, onRetry, surface = 'canvas' } = props
 
     // THE ONLY STATE: the finished beat holds for `COMPLETE_DISMISS_MS` and
     // then the capsule removes itself, rather than fading to an invisible
@@ -133,20 +191,47 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
     const [armed, setArmed] = useState(phase !== 'done')
     const [beatOver, setBeatOver] = useState(false)
     const [prevPhase, setPrevPhase] = useState(phase)
+    // The clock: whole seconds since this computation started, counted by
+    // a once-a-second interval while it runs (the elapsed seconds and the
+    // guidance rotation read it). No wall-clock reads in render and no
+    // setState in an effect body — both are what the hooks lint forbids —
+    // so a computation STARTING (the first, or a re-arm after a finished
+    // beat) resets the count in the previous-render branch, and the
+    // interval does the counting.
+    const [ticks, setTicks] = useState(0)
     if (prevPhase !== phase) {
         setPrevPhase(phase)
-        if (COMPUTING.has(phase)) { setArmed(true); setBeatOver(false) }
+        if (COMPUTING.has(phase)) {
+            setArmed(true)
+            setBeatOver(false)
+            if (!COMPUTING.has(prevPhase)) setTicks(0)
+        }
     }
     useEffect(() => {
         if (phase !== 'done') return
         const timer = window.setTimeout(() => setBeatOver(true), COMPLETE_DISMISS_MS)
         return () => window.clearTimeout(timer)
     }, [phase])
+    useEffect(() => {
+        if (!COMPUTING.has(phase)) return
+        const timer = window.setInterval(() => setTicks(t => t + 1), 1_000)
+        return () => window.clearInterval(timer)
+    }, [phase])
     if (!armed || (phase === 'done' && beatOver)) return null
 
     const { headline, meta } = narrate(props)
     // Until the flow is exhausted the direction counts are floors.
     const floor = phase === 'done' ? '' : '+'
+    const computing = COMPUTING.has(phase)
+    const elapsedMs = ticks * 1_000
+    const elapsedS = ticks
+    const lines = GUIDANCE[surface]
+    const guidance = computing && elapsedMs >= GUIDANCE_AFTER_MS
+        ? lines[Math.floor((elapsedMs - GUIDANCE_AFTER_MS) / GUIDANCE_EVERY_MS) % lines.length]
+        : null
+    // The ticking line for the reading phases: every number re-keyed so
+    // it animates when it changes; the steps still owed; the time.
+    const ticking = phase === 'seeding' || phase === 'walking'
 
     return (
         <div
@@ -188,7 +273,13 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
                             a polite region that re-reads itself every wave is
                             noise; the phase sentence is the part worth hearing. */}
                         <span aria-hidden="true" className="block mt-0.5 text-[10.5px] text-ink-muted tabular-nums leading-tight">
-                            {meta}
+                            {ticking ? (
+                                <>
+                                    <Tick value={nodes} /> {nodes === 1 ? 'node' : 'nodes'} · <Tick value={flows} /> {flows === 1 ? 'flow' : 'flows'} · <Tick value={requests} /> {requests === 1 ? 'request' : 'requests'}
+                                    {pending > 0 && <> · <Tick value={pending} /> more to go</>}
+                                    {elapsedMs >= ELAPSED_AFTER_MS && <> · {elapsedS} s</>}
+                                </>
+                            ) : meta}
                         </span>
                     </span>
                     <span className="flex items-center gap-1.5 flex-none">
@@ -204,6 +295,42 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
                     </span>
                 </div>
 
+                {/* THE STAGES — where this walk is, of the four every walk has. */}
+                <ol aria-label="Progress" className="nx-trace-stages flex items-center gap-1.5" data-stage={currentStage(phase)}>
+                    {WALK_STAGES.map((label, i) => {
+                        const state = stageState(i, phase)
+                        return (
+                            <li
+                                key={label}
+                                data-state={state}
+                                className={cn(
+                                    'flex items-center gap-1.5 min-w-0 text-[9.5px] font-medium tracking-wide',
+                                    state === 'done' && 'text-indigo-600 dark:text-indigo-400',
+                                    state === 'current' && 'text-ink',
+                                    state === 'todo' && 'text-ink-muted/60',
+                                )}
+                            >
+                                {i > 0 && (
+                                    <span
+                                        aria-hidden="true"
+                                        className={cn('h-px w-4 flex-none rounded-full', state === 'todo' ? 'bg-black/10 dark:bg-white/10' : 'bg-indigo-500/60')}
+                                    />
+                                )}
+                                <span
+                                    aria-hidden="true"
+                                    className={cn(
+                                        'nx-trace-stage-dot flex-none w-2 h-2 rounded-full border',
+                                        state === 'done' && 'bg-indigo-500 border-indigo-500',
+                                        state === 'current' && 'border-indigo-500 bg-white dark:bg-neutral-900 nx-trace-stage-current',
+                                        state === 'todo' && 'border-black/20 dark:border-white/20 bg-transparent',
+                                    )}
+                                />
+                                <span className="truncate">{label}</span>
+                            </li>
+                        )
+                    })}
+                </ol>
+
                 {SOUNDS.has(phase) && (
                     <div className="flex items-center gap-2.5" aria-hidden="true">
                         <span className="flex-none w-[4.5rem] text-right text-[10px] font-medium text-cyan-600 dark:text-cyan-400 tabular-nums">
@@ -213,11 +340,25 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
                             <span className="nx-trace-sounding-up" />
                             <span className="nx-trace-sounding-origin" />
                             <span className="nx-trace-sounding-down" />
+                            {/* One beat per page landed: re-keyed on the request
+                                count so the animation restarts each time. */}
+                            {requests > 0 && computing && <span key={requests} data-beat={requests} className="nx-trace-sounding-beat" />}
                         </span>
                         <span className="flex-none w-[4.5rem] text-[10px] font-medium text-amber-600 dark:text-amber-400 tabular-nums">
                             {phase === 'loading' ? '' : `${fmt(downCount)}${floor} ↓`}
                         </span>
                     </div>
+                )}
+
+                {guidance && (
+                    <p
+                        key={guidance}
+                        data-testid="walk-guidance"
+                        aria-hidden="true"
+                        className="nx-trace-guidance text-[10px] italic text-ink-muted/80 leading-snug"
+                    >
+                        {guidance}
+                    </p>
                 )}
             </div>
         </div>

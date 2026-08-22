@@ -488,13 +488,13 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
     // (The connector chip itself is EdgeLabelRenderer geometry, which
     // jsdom has no layout for; what the fold MEANS is the drawn set,
     // and that is what this asserts.)
-    fireEvent.click(screen.getByTitle(/Fold long runs of single pass-through steps/))
+    fireEvent.click(screen.getByRole('button', { name: 'Condensed' }))
     for (const stage of interior) expect(onBoard(stage)).toBe(false)
     assertBoardShows('ledger_snapshot')
     assertBoardShows('stage_up_05')
 
     // And back — the same control, the other way, nothing lost.
-    fireEvent.click(screen.getByTitle(/Show the full end-to-end flow/))
+    fireEvent.click(screen.getByRole('button', { name: 'Every step' }))
     for (const stage of [...interior, 'stage_up_05']) assertBoardShows(stage)
     assertStrataCoherent(errorSpy)
   })

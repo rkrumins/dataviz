@@ -1,7 +1,7 @@
 import { StrictMode, useRef } from 'react'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, act } from '@testing-library/react'
-import { FIT_MAX_ZOOM, useFrameCamera, type CameraTarget } from '../useFrameCamera'
+import { FIT_MAX_ZOOM, FOCUS_MIN_ZOOM, FOCUS_HEADROOM_PX, useFrameCamera, type CameraTarget } from '../useFrameCamera'
 import type { FocusCard, FocusEdge } from '../focus-cards'
 
 const card = (id: string): FocusCard =>
@@ -10,13 +10,17 @@ const card = (id: string): FocusCard =>
 const wire = (source: string, target: string): FocusEdge =>
   ({ id: `e:${source}>${target}`, source, target }) as unknown as FocusEdge
 
-function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0, walking = false, onState }: {
+function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0, walking = false, frameKey, readerMoved = false, onState }: {
   rf: CameraTarget
   focalId: string
   cards: FocusCard[]
   edges?: FocusEdge[]
   /** A hands-free walk is landing cards (C4, 2026-08-21). */
   walking?: boolean
+  /** The layout mode (density · steps · direction): a change re-frames the focus. */
+  frameKey?: string
+  /** The reader panned or zoomed since this picture was framed. */
+  readerMoved?: boolean
   onState?: (state: ReturnType<typeof useFrameCamera>) => void
   /** Defaults to 0 — jsdom's own default `getBoundingClientRect` (no
    *  real layout), which every test in this file predates (P5) and does
@@ -27,7 +31,7 @@ function Harness({ rf, focalId, cards, edges = [], paneW = 0, paneH = 0, walking
   paneH?: number
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const state = useFrameCamera(rf, focalId, cards, edges, true, containerRef, walking)
+  const state = useFrameCamera(rf, focalId, cards, edges, true, containerRef, walking, frameKey, readerMoved)
   onState?.(state)
   return (
     <div
@@ -429,5 +433,132 @@ describe('useFrameCamera', () => {
     rerender(<Harness rf={rf} focalId="a" cards={[card('f')]} />)
     flush()
     expect(fitView).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('useFrameCamera — the focus first (2026-08-22)', () => {
+  // "When I open Focus with dozens of upstream/downstream edges the focus
+  // node is tiny, and switching density I have to click Zoom In until I
+  // even find it." A new picture used to be FITTED WHOLE, whatever its
+  // size; now a board that cannot be read at its fit zoom opens centred
+  // on the focus at a readable zoom instead, a layout-mode switch does
+  // the same, and `recenter()` does it on demand.
+  let fitView: ReturnType<typeof vi.fn<CameraTarget['fitView']>>
+  let setViewport: ReturnType<typeof vi.fn<CameraTarget['setViewport']>>
+  let rf: CameraTarget
+  beforeEach(() => {
+    vi.useFakeTimers()
+    fitView = vi.fn<CameraTarget['fitView']>()
+    setViewport = vi.fn<CameraTarget['setViewport']>()
+    rf = { fitView, getViewport: () => ({ x: 0, y: 0, zoom: 1 }), setViewport }
+  })
+  afterEach(() => { vi.useRealTimers() })
+  const flush = () => act(() => { vi.advanceTimersByTime(60) })
+  const placed = (id: string, x: number, y: number, w: number, h: number, band: number): FocusCard =>
+    ({ ...card(id), x, y, w, h, band, frameId: null }) as unknown as FocusCard
+  const focal = () => placed('f', 0, -60, 300, 120, 0)
+  /** Forty partners stacked in the upstream band: 3,600px tall, a fit
+   *  zoom of ~0.19 on a 900px pane — unreadable. */
+  const tall = () => Array.from({ length: 40 }, (_, i) => placed(`n:u${i}`, -480, -1800 + i * 90, 240, 80, -1))
+
+  it('a board that fits readably is still fitted whole', () => {
+    render(<Harness rf={rf} focalId="a" cards={[focal(), placed('n:x', -480, -40, 240, 80, -1)]} paneW={1500} paneH={900} />)
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(1)
+    expect(setViewport).not.toHaveBeenCalled()
+  })
+
+  it('a board too large to read at its fit zoom opens centred on the focus, at a readable zoom', () => {
+    render(<Harness rf={rf} focalId="a" cards={[focal(), ...tall()]} paneW={1500} paneH={900} />)
+    flush()
+    expect(fitView).not.toHaveBeenCalled()
+    expect(setViewport).toHaveBeenCalledTimes(1)
+    const vp = setViewport.mock.calls[0][0]
+    expect(vp.zoom).toBeGreaterThanOrEqual(FOCUS_MIN_ZOOM)
+    expect(vp.zoom).toBeLessThanOrEqual(FIT_MAX_ZOOM)
+    // The focal's centre (150, 0) lands on the pane's centre (750, 450).
+    expect(vp.x + 150 * vp.zoom).toBeCloseTo(750, 0)
+    expect(vp.y + 0 * vp.zoom).toBeCloseTo(450, 0)
+  })
+
+  it('a tall focal frame lands with its header under the capsule, not behind it', () => {
+    // The focus framing centres the VISIBLE part of a tall frame; with no
+    // headroom that put its header at the very top of the pane — exactly
+    // where the walk capsule sits.
+    const tallFocal = placed('f', 0, -450, 300, 900, 0)
+    render(<Harness rf={rf} focalId="a" cards={[tallFocal, ...tall()]} paneW={1500} paneH={900} />)
+    flush()
+    const vp = setViewport.mock.calls[0][0]
+    const screenTop = vp.y + tallFocal.y * vp.zoom
+    expect(screenTop).toBeGreaterThanOrEqual(FOCUS_HEADROOM_PX - 1)
+  })
+
+  it('a layout-mode switch (the frame key) re-frames the focus', () => {
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={[focal(), ...tall()]} paneW={1500} paneH={900} frameKey="grouped" />)
+    flush()
+    expect(setViewport).toHaveBeenCalledTimes(1)
+    rerender(<Harness rf={rf} focalId="a" cards={[focal(), ...tall()]} paneW={1500} paneH={900} frameKey="overview" />)
+    flush()
+    expect(setViewport).toHaveBeenCalledTimes(2)
+  })
+
+  it('recenter() brings the focus to the middle at the readable zoom, on demand — on any board', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    render(<Harness rf={rf} focalId="a" cards={[focal(), placed('n:x', -480, -40, 240, 80, -1)]} paneW={1500} paneH={900} onState={(s) => { state = s }} />)
+    flush()
+    setViewport.mockClear()
+    act(() => { state!.recenter() })
+    expect(setViewport).toHaveBeenCalledTimes(1)
+    const vp = setViewport.mock.calls[0][0]
+    expect(vp.zoom).toBeGreaterThanOrEqual(FOCUS_MIN_ZOOM)
+    expect(vp.x + 150 * vp.zoom).toBeCloseTo(750, 0)
+  })
+})
+
+describe('useFrameCamera — the walk settles on the focus (2026-08-22)', () => {
+  // The camera holds still while a hands-free walk lands cards (C4), and
+  // the focal frame grows around the midline meanwhile — so by the end
+  // its header had drifted up under the capsule. One move when the walk
+  // ENDS brings the focus back, readable; never if the reader has moved
+  // the camera themselves (then the offer stays a pill).
+  let fitView: ReturnType<typeof vi.fn<CameraTarget['fitView']>>
+  let setViewport: ReturnType<typeof vi.fn<CameraTarget['setViewport']>>
+  let rf: CameraTarget
+  beforeEach(() => {
+    vi.useFakeTimers()
+    fitView = vi.fn<CameraTarget['fitView']>()
+    setViewport = vi.fn<CameraTarget['setViewport']>()
+    rf = { fitView, getViewport: () => ({ x: 0, y: 0, zoom: 1 }), setViewport }
+  })
+  afterEach(() => { vi.useRealTimers() })
+  const flush = () => act(() => { vi.advanceTimersByTime(60) })
+  const placed = (id: string, x: number, y: number, w: number, h: number, band: number): FocusCard =>
+    ({ ...card(id), x, y, w, h, band, frameId: null }) as unknown as FocusCard
+  const small = () => [placed('f', 0, -60, 300, 120, 0), placed('n:x', -480, -40, 240, 80, -1)]
+  const grown = () => [placed('f', 0, -450, 300, 900, 0), ...Array.from({ length: 40 }, (_, i) => placed(`n:u${i}`, -480, -1800 + i * 90, 240, 80, -1))]
+
+  it('one move when the walk ends and the board grew: the focus, readable', () => {
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={small()} paneW={1500} paneH={900} walking />)
+    flush()
+    expect(fitView).toHaveBeenCalledTimes(1)             // the first paint, fitted whole
+    rerender(<Harness rf={rf} focalId="a" cards={grown()} paneW={1500} paneH={900} walking />)
+    flush()
+    expect(setViewport).not.toHaveBeenCalled()           // holds while walking
+    rerender(<Harness rf={rf} focalId="a" cards={grown()} paneW={1500} paneH={900} walking={false} />)
+    flush()
+    expect(setViewport).toHaveBeenCalledTimes(1)         // the settle
+    expect(setViewport.mock.calls[0][0].zoom).toBeGreaterThanOrEqual(FOCUS_MIN_ZOOM)
+  })
+
+  it('no settle when the reader moved the camera during the walk — the offer stays', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    const { rerender } = render(<Harness rf={rf} focalId="a" cards={small()} paneW={1500} paneH={900} walking onState={(s) => { state = s }} />)
+    flush()
+    rerender(<Harness rf={rf} focalId="a" cards={grown()} paneW={1500} paneH={900} walking readerMoved onState={(s) => { state = s }} />)
+    flush()
+    rerender(<Harness rf={rf} focalId="a" cards={grown()} paneW={1500} paneH={900} walking={false} readerMoved onState={(s) => { state = s }} />)
+    flush()
+    expect(setViewport).not.toHaveBeenCalled()
+    expect(state!.grew).toBe(true)
   })
 })

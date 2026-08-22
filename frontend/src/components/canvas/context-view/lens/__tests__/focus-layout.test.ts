@@ -28,8 +28,10 @@ import {
 import {
     FOCAL_H, FRAME_WINDOW, LABEL_MIN_RUN, frameWindow, labelFitsRun,
     BUNDLE_WINDOW, OPEN_PARTNERS_PER_BAND,
+    CARD_W, BAND_GAP, FRAME_CONTENT_W, FRAME_PAD,
     type FocusCard, type FocusEdge,
 } from '../focus-cards'
+import { gutterWidth, MAX_LANES } from '../frame-flow'
 
 // ── fixtures ─────────────────────────────────────────────────────────
 
@@ -818,7 +820,11 @@ describe('focus-layout — frames only where they clarify', () => {
         const g = layout(sg, { ...base, expandedContainment: new Set([...base.expandedContainment, 'UT']) })
         const wire = g.edges.find(e => e.source === cardFor(g, 'u1')!.id)!
         expect(wire.count).toBe(2)
-        expect(wire.labelVisible).toBe(false)
+        // 2026-08-22: with BAND_GAP at 240 this stub is ~170px and the
+        // badge fits — the rule is unchanged, the room is not. The rule
+        // itself is pinned by `labelFitsRun` above; here the wire's own
+        // geometry decides, never a stale assumption about the pitch.
+        expect(wire.labelVisible).toBe(labelFitsRun(0, 0, (CARD_W + BAND_GAP) - (FRAME_CONTENT_W + FRAME_PAD * 2), 0))
     })
 
     it('R6: a frontier the data source reported is not an empty side, even with nothing in hand', () => {
@@ -2680,15 +2686,16 @@ describe('focus-layout — badge legibility (R3)', () => {
         expect(wire1.labelT).not.toBe(wire2.labelT)
     })
 
-    it('fix round 1 — a convergent fan too dense for every candidate leaves the innermost wires UNSLOTTED, never overlapping', () => {
+    it('a ten-row fan onto one target finds a distinct, clear slot for every badge (2026-08-22: the room between bands)', () => {
         // Ten coarse rows of ONE frame (GOLD), all feeding the SAME
         // target — the exact shape `walkGrainSeam` carries, just wider.
-        // The outermost rows have room to find a clear candidate; the
-        // rows packed nearest the middle do not, however many candidates
-        // are tried. The review's own finding: `showSeam` had no
-        // fallback for this case, and drew the badge at a stale/default
-        // spot regardless — this pins the layout's OWN honest "no slot"
-        // signal (`seamSlotted`) the view now reads.
+        // Until 2026-08-22 this fan was "too dense for every candidate":
+        // the rows packed nearest the middle found no clear spot on a
+        // ~60px run and were left UNSLOTTED (`seamSlotted: false`, the
+        // layout's honest "no slot" signal the view reads to withhold a
+        // badge rather than draw it at a stale spot). With BAND_GAP at
+        // 240 the run holds them all — and the flag stays what it is:
+        // set only when a clear candidate was actually found.
         const nums = Array.from({ length: 10 }, (_, i) => String(i))
         const sg = subgraph({
             focus: 'F',
@@ -2702,17 +2709,8 @@ describe('focus-layout — badge legibility (R3)', () => {
         })
         const g = layout(sg)
         const coarse = g.edges.filter(e => e.grainCoarse)
-        // Not a vacuous pass: some genuinely fail (the finding this pin
-        // exists for) and some genuinely succeed (the mechanism still
-        // works where there IS room) — on the SAME board, at once.
-        const unslotted = coarse.filter(e => !e.seamSlotted)
-        const slotted = coarse.filter(e => e.seamSlotted)
-        expect(unslotted.length).toBeGreaterThan(0)
-        expect(slotted.length).toBeGreaterThan(0)
-        // An unslotted wire still carries `labelT: 0.5` (the harmless
-        // default) — it is the VIEW's job to withhold the badge for it,
-        // never this flag's job to fake a position.
-        for (const e of unslotted) expect(e.labelT).toBe(0.5)
+        expect(coarse.length).toBeGreaterThan(1)
+        expect(coarse.every(e => e.seamSlotted)).toBe(true)
     })
 
     it('a single bundle with no competitor keeps the plain midpoint (unchanged from before this task)', () => {
@@ -3877,6 +3875,28 @@ describe('partner grain — how the partners land, by density', () => {
         const sg = estate()
         const totals = (['all', 'grouped', 'overview'] as const).map(density => layout(sg, initialLensViewState(sg), { density }).edges.reduce((n, e) => n + e.count, 0))
         expect(totals).toEqual([33, 33, 33])
+    })
+})
+
+describe('the room between bands (2026-08-22)', () => {
+    // "When there are a lot of edges coming in, the space is too little
+    // and it gets too crowded." A band's pitch is one constant, but the
+    // card in it is not: a FRAME is wider than a card by its padding and
+    // its gutter, so the clear run between a frame and the next band was
+    // the gap minus all of that — on the GOLD screenshot some sixty
+    // pixels for five wires and their ×N badges. The pin is on the run
+    // itself, for the widest frame the layout can draw.
+    it('a frame routing a few internal lanes still leaves a badge-sized run, and more, to the next band', () => {
+        // Four lanes is a busy container; MAX_LANES (16) is the rare
+        // extreme and is allowed to eat into the run.
+        const busyFrame = FRAME_CONTENT_W + FRAME_PAD * 2 + gutterWidth(4)
+        const clearRun = (CARD_W + BAND_GAP) - busyFrame
+        expect(clearRun).toBeGreaterThanOrEqual(LABEL_MIN_RUN + 30)
+        expect(gutterWidth(MAX_LANES)).toBeLessThan(CARD_W + BAND_GAP)   // never past the next band
+    })
+
+    it('plain cards a band apart get at least two badge-widths of wire', () => {
+        expect(BAND_GAP).toBeGreaterThanOrEqual(LABEL_MIN_RUN * 2)
     })
 })
 

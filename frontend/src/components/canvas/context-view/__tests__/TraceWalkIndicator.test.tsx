@@ -134,3 +134,60 @@ describe('TraceWalkIndicator — on the Lens board too (2026-08-22)', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 })
+
+describe('TraceWalkIndicator — progress you can read (2026-08-22)', () => {
+  // "More interactive, intuitive and modern … a clever way to mark the
+  // progress." The total is still unknowable, so there is still no
+  // percentage; what there IS: the four stages of every walk, the steps
+  // still owed, the time it has taken, a beat on the line for every page
+  // that lands, and a line of guidance once the wait is long.
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  const stages = () => [...screen.getByRole('list', { name: /progress/i }).querySelectorAll('li')]
+    .map(li => `${li.textContent?.trim()}:${li.getAttribute('data-state')}`)
+
+  it('walks four stages — Focus · Picture · Flows · Drawn — and says which one it is on', () => {
+    const { rerender } = render(<TraceWalkIndicator {...base({ phase: 'loading' })} />)
+    expect(stages()).toEqual(['Focus:current', 'Picture:todo', 'Flows:todo', 'Drawn:todo'])
+    rerender(<TraceWalkIndicator {...base({ phase: 'seeding', nodes: 390, flows: 386, requests: 2 })} />)
+    expect(stages()).toEqual(['Focus:done', 'Picture:done', 'Flows:current', 'Drawn:todo'])
+    rerender(<TraceWalkIndicator {...base({ phase: 'walking', nodes: 12453, flows: 10055, requests: 3 })} />)
+    expect(stages()).toEqual(['Focus:done', 'Picture:done', 'Flows:current', 'Drawn:todo'])
+    rerender(<TraceWalkIndicator {...base({ phase: 'done', nodes: 20212, flows: 17953, requests: 4 })} />)
+    expect(stages()).toEqual(['Focus:done', 'Picture:done', 'Flows:done', 'Drawn:done'])
+  })
+
+  it('says how many steps are still owed — a floor, never a percent', () => {
+    render(<TraceWalkIndicator {...base({ phase: 'walking', nodes: 5000, flows: 4000, requests: 14, pending: 11 })} />)
+    expect(document.body.textContent).toMatch(/14 requests · 11 more to go/)
+    expect(document.body.textContent).not.toMatch(/%/)
+  })
+
+  it('keeps time once the wait is long enough to wonder about', () => {
+    render(<TraceWalkIndicator {...base({ phase: 'seeding', nodes: 1, flows: 0, requests: 1 })} />)
+    expect(document.body.textContent).not.toMatch(/· \d+ s(?!\w)/)
+    act(() => { vi.advanceTimersByTime(3_100) })
+    expect(document.body.textContent).toMatch(/· 3 s(?!\d)/)
+    act(() => { vi.advanceTimersByTime(4_000) })
+    expect(document.body.textContent).toMatch(/· 7 s(?!\d)/)
+  })
+
+  it('offers a line of guidance on a long wait, and changes it', () => {
+    render(<TraceWalkIndicator {...base({ phase: 'seeding', nodes: 1, flows: 0, requests: 1, surface: 'lens' })} />)
+    expect(screen.queryByTestId('walk-guidance')).toBeNull()
+    act(() => { vi.advanceTimersByTime(4_100) })
+    const first = screen.getByTestId('walk-guidance').textContent
+    expect(first).toBeTruthy()
+    act(() => { vi.advanceTimersByTime(6_100) })
+    expect(screen.getByTestId('walk-guidance').textContent).not.toBe(first)
+  })
+
+  it('beats on the sounding line every time a page lands', () => {
+    const { container, rerender } = render(<TraceWalkIndicator {...base({ phase: 'seeding', nodes: 10, flows: 5, requests: 1 })} />)
+    const beat = () => container.querySelector('.nx-trace-sounding-beat')?.getAttribute('data-beat')
+    expect(beat()).toBe('1')
+    rerender(<TraceWalkIndicator {...base({ phase: 'seeding', nodes: 400, flows: 380, requests: 2 })} />)
+    expect(beat()).toBe('2')
+  })
+})

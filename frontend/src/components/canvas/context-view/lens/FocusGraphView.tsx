@@ -642,6 +642,10 @@ interface FocusGraphViewProps {
   /** A hands-free walk is landing cards (C4, 2026-08-21): the camera
    *  holds still for arrivals and the board offers a fit instead. */
   walking?: boolean
+  /** The layout mode — density · steps · direction — as one string
+   *  (2026-08-22). A change re-frames the focus: the board re-lays out
+   *  wholesale and the reader should not have to go looking for it. */
+  recenterKey?: string
   edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   /** Stick the isolation on this card, or clear it with null. */
@@ -3961,7 +3965,7 @@ const twoFrames = () => new Promise<void>(resolve => {
 
 /** House-styled zoom cluster (React Flow's default chrome doesn't
  *  match the lens). Must render inside <ReactFlow> for useReactFlow. */
-function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayout, onPauseCulling }: {
+function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayout, onPauseCulling, onRecenter }: {
   reducedMotion: boolean
   exportName?: string
   /** The VISIBLE picture and who it's about — source for the data export. */
@@ -3971,6 +3975,9 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
   onResetLayout?: () => void
   /** Bring every card into the DOM for the capture, then let go. */
   onPauseCulling: (paused: boolean) => void
+  /** Centre the focus at a readable zoom (2026-08-22) — the way back
+   *  after a zoom-out, a pan, or a layout switch that left it tiny. */
+  onRecenter: () => void
 }) {
   const rf = useReactFlow()
   const [exporting, setExporting] = useState(false)
@@ -4060,8 +4067,13 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
           first and last buttons instead (`stackTop`/`stackEnd` below),
           which is the same picture without a clipping context. */}
       <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md divide-y divide-black/[0.06] dark:divide-white/[0.06]">
+        <IconTip label="Center on the focus" side="left">
+          <button type="button" aria-label="Center on the focus" onClick={onRecenter} className={cn(btn, 'peer', stackTop)}>
+            <LucideIcons.LocateFixed className="w-3.5 h-3.5" />
+          </button>
+        </IconTip>
         <IconTip label="Zoom in" side="left">
-          <button type="button" aria-label="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={cn(btn, 'peer', stackTop)}>
+          <button type="button" aria-label="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={cn(btn, 'peer')}>
             <LucideIcons.Plus className="w-3.5 h-3.5" />
           </button>
         </IconTip>
@@ -4156,6 +4168,7 @@ export function FocusGraphView({
   trailAdjacent = EMPTY_TRAIL,
   reducedMotion,
   walking = false,
+  recenterKey = '',
   edgeTypeInfo,
   onSelect,
   onIsolate: onIsolateProp,
@@ -4657,7 +4670,17 @@ export function FocusGraphView({
   // can read it because IT is one of those children; this can't be).
   // A ref costs nothing until the effect that uses it actually runs.
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const camera = useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef, walking)
+  // The reader took the camera (a pan or a zoom of their own) since this
+  // picture was framed — programmatic moves hand React Flow no event.
+  // Reset with the picture: a new focus or a layout switch is framed
+  // afresh, and the reader has not moved THAT yet.
+  const [readerMoved, setReaderMoved] = useState(false)
+  const [movedFor, setMovedFor] = useState(`${focalId}|${recenterKey}`)
+  if (movedFor !== `${focalId}|${recenterKey}`) {
+    setMovedFor(`${focalId}|${recenterKey}`)
+    setReaderMoved(false)
+  }
+  const camera = useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef, walking, recenterKey, readerMoved)
   // The PNG export needs every card in the DOM; culling is paused for
   // the capture (see `CULL_OFFSCREEN`).
   const [cullPaused, setCullPaused] = useState(false)
@@ -4738,6 +4761,8 @@ export function FocusGraphView({
           nodeTypes={NODE_TYPES}
           edgeTypes={EDGE_TYPES}
           onInit={setRf}
+          // A user-driven move carries its event; the camera's own moves do not.
+          onMoveStart={(event) => { if (event) setReaderMoved(true) }}
           fitView
           fitViewOptions={{ padding: 0.15, maxZoom: FIT_MAX_ZOOM }}
           minZoom={LENS_MIN_ZOOM}
@@ -4804,6 +4829,7 @@ export function FocusGraphView({
             focalUrn={focalId}
             onResetLayout={moved.size > 0 ? resetLayout : undefined}
             onPauseCulling={setCullPaused}
+            onRecenter={camera.recenter}
           />
           {peekCard && (
             <LensPeek

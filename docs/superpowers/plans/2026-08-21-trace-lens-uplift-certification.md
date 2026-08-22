@@ -152,6 +152,39 @@ focal chip into a three-line stack over NEXT. The header row wraps: title first,
 do not fit beside it, the close button anchored to the dialog's corner either way. Verified in the 1,600 px
 screenshot; no jsdom pin (layout only).
 
+**Four points from the user's own testing (2026-08-22 afternoon).**
+1. *The header explains itself.* Every segmented control (NEXT · WALK · STEPS · DENSITY · direction ·
+   Graph/List) and every group caption carries a styled popover — name in bold, one sentence of meaning —
+   shown on hover/focus and wired as the control's `aria-describedby` (`lens/ControlTip.tsx`, CSS-only like
+   the board's `IconTip`). The browser's `title` boxes are gone from those controls. Verified by hovering
+   Grouped in the headless browser.
+2. *Room between bands.* `BAND_GAP` 130 → 240: a frame is wider than a card by its padding and gutter, so
+   the clear run from a frame to the next band was ~60 px for five wires and their ×N badges. Now plain cards
+   get 240 px of wire and a busy frame (four gutter lanes) ≥ 120 px; pinned on the geometry. Two layout pins
+   changed with it: the "too short for a badge" stub now holds one, and the ten-row fan finds a slot for
+   every badge (the layout's honest `seamSlotted` signal is unchanged, the room is not).
+3. *The focus first.* A new picture used to be fitted whole whatever its size. Now: a board that reads at its
+   fit zoom (≥ `FOCUS_MIN_ZOOM` 0.75) is fitted whole as before; a larger one opens CENTRED ON THE FOCUS at a
+   readable zoom (`useFrameCamera.frameFocus`: focus + one band either side, headroom of 140 px above a tall
+   focal so its header lands under the capsule). A layout-mode switch (density · steps · direction) re-frames
+   the focus the same way (`recenterKey`); the control stack gained "Center on the focus" (`LocateFixed`,
+   top of the stack) = `camera.recenter()`; and when a hands-free walk ENDS the camera settles on the focus
+   once — unless the reader moved the camera themselves (`onMoveStart` with an event), in which case the
+   "Board grew · Fit" offer stays. Wide table: switching to Every card lands at zoom 0.98 centred on the focus
+   (was 0.05, a sliver); Grouped/Overview 0.89 fitted whole.
+4. *Progress you can read.* The capsule (both boards) gained the four stages every walk has — Focus · Picture
+   · Flows · Drawn — as a stepper saying which one it is on; "N requests · M more to go" from the driver's
+   own frontier count (a floor, never a percent); elapsed seconds after 3 s; a beat on the sounding line per
+   page landed and a tick on every number that changes; a rotating line of guidance after 4 s (6 s per line,
+   per board). Its clock is the interval itself (no wall-clock reads in render, no setState in effect bodies —
+   the hooks lint forbids both). The Lens board under the first fetch shows `LensSkeleton`: the picture's
+   ghost — sources → focus → consumers, shimmering — until the first cards exist. Wide table timeline: capsule
+   at 0.8 s (skeleton under it), seeding at 1.6 s with counts, guidance at 5.2 s, "Complete — 20,212 nodes ·
+   17,953 flows" at 7.9 s, gone at 8.6 s.
+
+Suites: frontend **3,110 tests / 322 files** green (the known d3-drag jsdom error), `tsc` 61, eslint on
+touched files at the HEAD counts (one pre-existing fast-refresh warning).
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).
