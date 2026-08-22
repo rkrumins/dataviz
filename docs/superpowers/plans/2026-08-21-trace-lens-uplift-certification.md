@@ -130,6 +130,28 @@ before these changes).
 Suites: frontend **3,084 tests / 322 files** green (the d3-drag jsdom error from the perf drag test is the
 known pre-existing one); `tsc` 61; eslint on the touched files unchanged.
 
+**The board says it is calculating (2026-08-22, user: "the loading state can be missed and the user might
+confuse that for nothing happening").** The Lens's loading surfaces were ten pixels of muted header text and
+a toast at the foot of a full-screen board. It now mounts the canvas trace's own capsule (`TraceWalkIndicator`)
+at the top-centre of the board from the moment Focus opens — "Mapping the lineage of *Executive Board
+Dashboard*" with the sounding line, then "Loading the immediate lineage · N nodes · M flows · K requests",
+then one 600 ms beat of "Complete — N nodes · M flows" before it leaves by itself. Computing phases only:
+the checkpoint and a failed step keep their strips (the capsule decides nothing on the Lens, and offers no
+Cancel — the Lens's way out is its own close). The capsule grew three things for this: a `subject`, an
+optional `onCancel`, and "mounted already `done` = quiet, a later wave re-arms" — which also stops the
+canvas flashing "Complete" when a cached focus is re-traced. The header's narration stays as the quiet
+record; the "Board grew · Fit" pill drops below the capsule while the walk runs. Before the first page
+lands the Lens can only derive the focus's label from the URN, so the canvas now hands it the name it knows
+(`focalLabelHint`) — the header and the capsule never open on `executive_board_dashboard_de06a1ba` when the
+lens is opened from a card (a cold share-link open still can, until the canvas has loaded the node).
+Browser (probe now records and screenshots the capsule): capsule in the DOM at 0.8 s from navigation, the
+board's first cards at 1.28 s, "Complete — 36 nodes · 29 flows" at 1.3 s, then gone.
+
+**Header wrap (same day).** At a 1,600 px window the Lens header's ~1,350 px control cluster crushed the
+focal chip into a three-line stack over NEXT. The header row wraps: title first, controls under it when they
+do not fit beside it, the close button anchored to the dialog's corner either way. Verified in the 1,600 px
+screenshot; no jsdom pin (layout only).
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

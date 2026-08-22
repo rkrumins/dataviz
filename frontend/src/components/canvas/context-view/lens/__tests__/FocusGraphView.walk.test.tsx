@@ -63,7 +63,12 @@ describe('FocusGraphView — a board that grows under the walk', () => {
     rerender(view(all, built, true))
     await settle()
     const pill = screen.getByRole('button', { name: /board grew/i })
-    fireEvent.click(pill)
+    // The walk capsule owns the top-centre while the walk runs
+    // (2026-08-22): the offer sits BELOW it, never under it.
+    expect(pill.className).toMatch(/top-\[4\.75rem\]/)
+    rerender(view(all, built, false))
+    expect(screen.getByRole('button', { name: /board grew/i }).className).toMatch(/\btop-3\b/)
+    fireEvent.click(screen.getByRole('button', { name: /board grew/i }))
     await settle()
     expect(screen.queryByRole('button', { name: /board grew/i })).toBeNull()
   })

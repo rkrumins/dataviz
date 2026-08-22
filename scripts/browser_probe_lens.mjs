@@ -84,9 +84,19 @@ for (let i = 0; i < Math.round(420 * 1000 / SAMPLE_MS); i++) {
     const oneHop = document.querySelector('button[aria-pressed="true"]')?.textContent?.trim() ?? null
     const scale = Number((/scale\(([\d.e-]+)\)/.exec(document.querySelector('.react-flow__viewport')?.style.transform ?? '') ?? [])[1] ?? NaN)
     const grew = !!document.querySelector('button')?.ownerDocument && [...document.querySelectorAll('button')].some(b => /board grew/i.test(b.textContent))
-    return { n, cards, strips, chip, oneHop, scale, grew }
+    const capsule = document.querySelector('[role="status"][data-trace-phase]')
+    const capsuleText = capsule ? (capsule.getAttribute('data-trace-phase') + ': ' + capsule.textContent.trim().replace(/\\s+/g, ' ').slice(0, 90)) : null
+    return { n, cards, strips, chip, oneHop, scale, grew, capsuleText }
   })()`)
   samples.push({ t: Date.now() - t0, ...s })
+  // The first time the capsule is seen, keep a picture of it (the loading
+  // state is what the reader sees on entry — it has to be unmissable).
+  if (process.env.SCREENSHOT_DIR && s.capsuleText && !samples.slice(0, -1).some(x => x.capsuleText)) {
+    const { writeFileSync } = await import('node:fs')
+    const shot = await send('Page.captureScreenshot', { format: 'png' })
+    writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-loading.png`, Buffer.from(shot.result.data, 'base64'))
+    console.log('== screenshot (loading)', `${process.env.SCREENSHOT_DIR}/lens-loading.png`, '@', Date.now() - t0, 'ms')
+  }
   const last = samples[samples.length - 1]
   if (process.env.PROBE_VERBOSE && (i % 5 === 0)) console.log(`  [${(last.t/1000).toFixed(0)}s] dom=${last.cards} scale=${last.scale.toFixed(3)} grew=${last.grew} n=${last.n}`)
   const settled = requests.length > 0 && !last.n && (Date.now() - t0) > 4000
@@ -129,7 +139,7 @@ for (const r of requests.slice(0, 25)) console.log('  ', JSON.stringify({ ...r, 
 if (requests.length > 25) console.log('   …', requests.length - 25, 'more')
 console.log('\n== narration timeline (changes only):')
 let prev = null
-for (const s of samples) { const k = `${s.n}|${s.cards}|${s.strips.join(',')}|${s.chip}`; if (k !== prev) { console.log(`  t=${(s.t / 1000).toFixed(1)}s dom=${s.cards} scale=${Number.isFinite(s.scale) ? s.scale.toFixed(3) : "?"} grew=${s.grew} narration=${JSON.stringify(s.n)} chip=${JSON.stringify(s.chip)} strips=${JSON.stringify(s.strips)} mode=${s.oneHop}`); prev = k } }
+for (const s of samples) { const k = `${s.n}|${s.cards}|${s.strips.join(',')}|${s.chip}|${s.capsuleText}`; if (k !== prev) { console.log(`  t=${(s.t / 1000).toFixed(1)}s dom=${s.cards} scale=${Number.isFinite(s.scale) ? s.scale.toFixed(3) : "?"} grew=${s.grew} narration=${JSON.stringify(s.n)} chip=${JSON.stringify(s.chip)} strips=${JSON.stringify(s.strips)} mode=${s.oneHop} capsule=${JSON.stringify(s.capsuleText)}`); prev = k } }
 const firstReq = requests[0]?.t ?? null
 const firstCards = samples.find(s => s.cards > 0)
 console.log(`\n== first paint: first request at ${firstReq} ms, first cards in the DOM at ${firstCards?.t ?? '?'} ms (${firstCards && firstReq != null ? firstCards.t - firstReq : '?'} ms after the request, ${firstCards?.cards ?? 0} cards)`)

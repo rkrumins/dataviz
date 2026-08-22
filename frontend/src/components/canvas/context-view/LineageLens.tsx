@@ -71,10 +71,14 @@ import { lensFocalOf, lensTransitionKind, type LensHistory } from './lens/lensHi
 import { labelOf, edgeLabelFor, orientationHalf, FRAME_WINDOW_ALL, type EdgeTypeInfoMap, type LensReach, type LensNeighbor } from './lens/focus-cards'
 import { encodeLensShare } from './lens/shareCodec'
 import { FocusGraphView } from './lens/FocusGraphView'
+import { TraceWalkIndicator } from './TraceWalkIndicator'
 
 /** Leaves one ⊕ extend ships to the server. A hub can stand for
  *  thousands of participants; the request has to stay a request. */
 const SEED_CAP = 500
+/** The capsule's decision buttons never render on the Lens (checkpoint and
+ *  error keep their strips), but the props are required. */
+const noop = () => {}
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set()
 const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
 const EMPTY_ROSTERS: ReadonlyMap<string, LensRoster> = new Map()
@@ -314,6 +318,10 @@ export interface LineageLensProps {
    *  the feature is not wired, nothing renders. */
   fullWalkEnabled?: boolean
   walkProgress?: WalkProgress | null
+  /** The focus's name as the canvas that opened the lens knows it — read
+   *  only until the model holds the focus, so the header and the capsule
+   *  never open on a URN fragment (`executive_board_dashboard_de06a1ba`). */
+  focalLabelHint?: string | null
   /** Switch between One hop (the focus's immediate lineage, then ⊕ walking)
    *  and Full flow. */
   onFullWalkToggle?: (on: boolean) => void
@@ -350,6 +358,7 @@ export function LineageLens({
   onTrace,
   fullWalkEnabled = false,
   walkProgress = null,
+  focalLabelHint = null,
   onFullWalkToggle,
   onWalkContinue,
   onWalkRetry,
@@ -391,6 +400,13 @@ export function LineageLens({
   const setQuery = (q: string) => setQueryState({ nodeId, q })
 
   const walkStatus: LensFetchStatus = walk?.status ?? 'loading'
+  // What the board's capsule narrates: the driver's phase while it is
+  // computing (plus `done`, for the capsule's own finished beat), or the
+  // bare fetch status before the driver has an entry for this focus.
+  // Checkpoint and error are strips, not a capsule.
+  const capsulePhase: WalkProgress['phase'] | null = walkProgress
+    ? (walkProgress.phase === 'checkpoint' || walkProgress.phase === 'error' ? null : walkProgress.phase)
+    : walkStatus === 'loading' ? 'loading' : null
   const model = walk?.model ?? null
 
   // ── The pipeline: model → subgraph → view state → layout ──────────
@@ -1313,7 +1329,7 @@ export function LineageLens({
   if (!nodeId) return null
 
   const focalNode = sg.nodes.get(nodeId)?.node
-  const focalLabel = labelOf(nodeId, focalNode)
+  const focalLabel = focalNode || !focalLabelHint ? labelOf(nodeId, focalNode) : focalLabelHint
   const focalType = (focalNode?.data?.type as string) ?? focalNode?.entityType ?? 'entity'
   const focalColor = generateColorFromType(focalType)
   const focalParentId = parentOf(nodeId)
@@ -1377,8 +1393,11 @@ export function LineageLens({
           role="dialog"
           aria-label={`Connections of ${focalLabel}`}
         >
-          {/* Header */}
-          <div className="flex items-center gap-2 px-4 py-3 border-b border-black/[0.08] dark:border-white/[0.08]">
+          {/* Header. The control cluster (`ml-auto`) is ~1,350px of segmented
+              controls; below ~1,700px it no longer fits beside the title
+              and WRAPS under it rather than crushing the focal chip into a
+              three-line stack over NEXT (seen at 1,600px, 2026-08-22). */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-2 pl-4 pr-12 py-3 border-b border-black/[0.08] dark:border-white/[0.08]">
             <div
               className="w-7 h-7 rounded-lg flex items-center justify-center"
               style={{ backgroundColor: `${focalColor}1f` }}
@@ -1776,15 +1795,17 @@ export function LineageLens({
                   </button>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={requestClose}
-                aria-label="Close"
-                className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-              >
-                <LucideIcons.X className="w-4 h-4" />
-              </button>
             </div>
+            {/* The way out stays in the corner whether the controls wrapped
+                or not — anchored to the dialog, not to the cluster. */}
+            <button
+              type="button"
+              onClick={requestClose}
+              aria-label="Close"
+              className="absolute top-3 right-4 w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.X className="w-4 h-4" />
+            </button>
           </div>
 
           {/* ── Path trail — the focus history as a visible, clickable
@@ -2086,15 +2107,33 @@ export function LineageLens({
                 onCondenseRun={toggleCondense}
                 onPin={pinEntities}
               />
-              {/* Status surfaces — a lone focal card floating in space
-                  explains nothing. */}
-              {walkStatus === 'loading' && (
-                <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">
-                  <div className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-canvas-elevated/95 border border-black/[0.07] dark:border-white/[0.08] shadow-sm text-[11px] text-ink-muted">
-                    <LucideIcons.Loader2 className="w-3.5 h-3.5 animate-spin text-accent-lineage/70" />
-                    Walking the lineage from the data source…
-                  </div>
-                </div>
+              {/* THE CAPSULE — the board says it is calculating, from the
+                  moment Focus opens (2026-08-22: the header's narration and
+                  a toast at the foot of the board were missed — "the user
+                  might confuse that for nothing happening"). The same
+                  capsule the canvas trace uses: headline, ticking counts,
+                  the sounding line; it leaves by itself a beat after the
+                  walk completes. It shows the COMPUTING phases only — the
+                  checkpoint and a failed step keep their strips below, so
+                  nothing here decides anything. Before the driver has an
+                  entry for this focus `walkProgress` is null and the
+                  fetch status alone says loading. Keyed on the focus so a
+                  re-anchor starts a fresh capsule. */}
+              {capsulePhase && (
+                <TraceWalkIndicator
+                  key={nodeId ?? ''}
+                  phase={capsulePhase}
+                  subject={focalLabel}
+                  nodes={walkProgress?.nodes ?? 0}
+                  flows={walkProgress?.flows ?? 0}
+                  requests={walkProgress?.requests ?? 0}
+                  pending={walkProgress?.pending ?? 0}
+                  error={null}
+                  upCount={reach?.up ?? 0}
+                  downCount={reach?.down ?? 0}
+                  onContinue={onWalkContinue ?? noop}
+                  onRetry={onWalkRetry ?? noop}
+                />
               )}
               {walkStatus === 'unsupported' && (
                 <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center pointer-events-none">

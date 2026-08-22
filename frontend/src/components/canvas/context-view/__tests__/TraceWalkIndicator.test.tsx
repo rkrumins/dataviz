@@ -74,7 +74,10 @@ describe('TraceWalkIndicator — the finished beat and the line', () => {
   afterEach(() => { vi.useRealTimers() })
 
   it('done: one beat of "Complete", no buttons, then it leaves by itself', () => {
-    render(<TraceWalkIndicator {...base({ phase: 'done', nodes: 50480, flows: 47768, requests: 27 })} />)
+    // The walk was seen running first — a capsule that only ever saw
+    // `done` has nothing to announce (see the Lens block below).
+    const { rerender } = render(<TraceWalkIndicator {...base({ phase: 'walking', nodes: 50000 })} />)
+    rerender(<TraceWalkIndicator {...base({ phase: 'done', nodes: 50480, flows: 47768, requests: 27 })} />)
     expect(document.body.textContent).toMatch(/complete — 50,480 nodes · 47,768 flows/i)
     expect(screen.queryByRole('button')).toBeNull()
     act(() => { vi.advanceTimersByTime(COMPLETE_DISMISS_MS + 10) })
@@ -94,5 +97,40 @@ describe('TraceWalkIndicator — the finished beat and the line', () => {
     const host = screen.getByRole('status')
     expect(host.className).toMatch(/pointer-events-none/)
     expect(screen.getByRole('button', { name: /cancel/i }).className).toMatch(/pointer-events-auto/)
+  })
+})
+
+describe('TraceWalkIndicator — on the Lens board too (2026-08-22)', () => {
+  // "The loading state can be missed and the user might confuse it for
+  // nothing happening": the Lens borrows this capsule, so both boards say
+  // "calculating" the same way. Three things the Lens needs of it.
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('names the subject while its lineage is being found', () => {
+    render(<TraceWalkIndicator {...base({ phase: 'loading', subject: 'Executive Board Dashboard' })} />)
+    expect(screen.getByText(/mapping the lineage of Executive Board Dashboard/i)).toBeInTheDocument()
+    expect(screen.queryByText(/finding the focus/i)).toBeNull()
+  })
+
+  it('offers no Cancel when there is nothing to cancel into', () => {
+    render(<TraceWalkIndicator {...base({ phase: 'seeding', onCancel: undefined })} />)
+    expect(screen.getByRole('status')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull()
+  })
+
+  it('mounted already complete it says nothing, and a later wave brings it back', () => {
+    // A focus the lens has already walked opens straight at `done`: no
+    // "Complete" flash for work the reader never saw start. A ⊕ wave
+    // afterwards is a new computation, so the capsule returns for it and
+    // leaves again on its own.
+    const { rerender } = render(<TraceWalkIndicator {...base({ phase: 'done' })} />)
+    expect(screen.queryByRole('status')).toBeNull()
+    rerender(<TraceWalkIndicator {...base({ phase: 'seeding', nodes: 12 })} />)
+    expect(screen.getByRole('status')).toBeInTheDocument()
+    rerender(<TraceWalkIndicator {...base({ phase: 'done', nodes: 30 })} />)
+    expect(document.body.textContent).toMatch(/complete — 30 nodes/i)
+    act(() => { vi.advanceTimersByTime(COMPLETE_DISMISS_MS + 10) })
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })

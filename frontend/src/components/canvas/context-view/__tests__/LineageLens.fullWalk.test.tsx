@@ -149,3 +149,49 @@ describe('LineageLens — the two valves', () => {
     expect(screen.queryByRole('button', { name: /one hop/i })).toBeNull()
   })
 })
+
+describe('LineageLens — the capsule says it is calculating (2026-08-22)', () => {
+  // The header narration is 10px of muted text and a bottom toast was
+  // easy to miss: "the user might confuse that for nothing happening".
+  // From the moment Focus opens, the board carries the same capsule the
+  // canvas trace uses — headline, ticking counts, the sounding line.
+  it('opening on a focus with nothing fetched yet: the capsule names the subject', () => {
+    renderLens({ walk: { model: walkModel('F', [wnode('F')]), status: 'loading', error: null, extendStatus: new Map(), depth: 1 }, walkProgress: null })
+    const capsule = screen.getByRole('status')
+    expect(capsule).toHaveTextContent(/Mapping the lineage of F/)
+    expect(screen.queryByText(/Walking the lineage from the data source/)).toBeNull()
+  })
+
+  it('before the first page lands the subject is the name the canvas knows, never a URN fragment', () => {
+    // Until the model holds the focus its label is derived from the URN
+    // (`executive_board_dashboard_de06a1ba`) — the canvas that opened the
+    // lens already knows the name, and the capsule is the first thing
+    // the reader looks at.
+    renderLens({
+      history: { entries: ['urn:li:dashboard:executive_board_dashboard_de06a1ba'], cursor: 0 },
+      walk: { model: walkModel('urn:li:dashboard:executive_board_dashboard_de06a1ba', []), status: 'loading', error: null, extendStatus: new Map(), depth: 1 },
+      walkProgress: null,
+      focalLabelHint: 'Executive Board Dashboard',
+    })
+    expect(screen.getByRole('status')).toHaveTextContent(/Mapping the lineage of Executive Board Dashboard/)
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Executive Board Dashboard')
+  })
+
+  it('while the immediate lineage loads: the capsule, with counts ticking, beside the header narration', () => {
+    renderLens({ fullWalkEnabled: false, walkProgress: progress({ phase: 'seeding', nodes: 1240, flows: 3100, requests: 3 }) })
+    expect(screen.getByRole('status')).toHaveTextContent(/Loading the immediate lineage/)
+    expect(document.body.textContent).toMatch(/1,240 nodes · 3,100 flows · 3 requests/)
+    expect(screen.getByTestId('lens-walk-narration')).toBeInTheDocument()
+  })
+
+  it('the capsule decides nothing: checkpoint and error stay with the strips', () => {
+    renderLens({ fullWalkEnabled: true, walkProgress: progress({ phase: 'checkpoint', nodes: 50000, pending: 12 }), onWalkContinue: vi.fn() })
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByRole('button', { name: /continue/i })).toBeInTheDocument()
+  })
+
+  it('a focus already walked opens quiet — no capsule, no flash', () => {
+    renderLens({ fullWalkEnabled: false, walkProgress: progress({ phase: 'done', requests: 1 }) })
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+})

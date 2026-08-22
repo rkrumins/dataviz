@@ -4891,12 +4891,17 @@ export function FocusGraphView({
         </ReactFlow>
       </ReactFlowProvider>
       {/* C4: cards landed while the walk was drawing and the camera held
-          its place — the fit is OFFERED, never taken. */}
+          its place — the fit is OFFERED, never taken. While the walk runs
+          the capsule owns the top-centre (2026-08-22), so the offer sits
+          below it rather than under it. */}
       {camera.grew && (
         <button
           type="button"
           onClick={camera.fitAll}
-          className="absolute top-3 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+          className={cn(
+            'absolute left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-[top]',
+            walking ? 'top-[4.75rem]' : 'top-3',
+          )}
         >
           <LucideIcons.Maximize2 className="w-3 h-3" />
           Board grew · Fit

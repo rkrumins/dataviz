@@ -33,6 +33,17 @@
  * completion beat, `pointer-events` only on its own buttons, and no exit
  * animation to strand (this codebase's portalled-AnimatePresence freeze
  * class) — it unmounts with the trace.
+ *
+ * ON THE LENS BOARD TOO (2026-08-22). "The loading state can be missed and
+ * the user might confuse that for nothing happening": the Lens's own
+ * surfaces were ten pixels of muted header text and a toast at the foot
+ * of a full-screen board. It now mounts this capsule from the moment
+ * Focus opens, so both boards say "calculating" in one voice. The Lens
+ * passes a `subject` (the focus is known before anything is fetched, so
+ * "Finding the focus…" would be wrong there) and no `onCancel` (the
+ * Lens's way out is its own close). A capsule mounted already `done`
+ * says nothing — a focus walked earlier opens quiet — and a later wave
+ * (a ⊕) brings it back, since that is a new computation.
  */
 import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
@@ -52,8 +63,11 @@ export interface TraceWalkIndicatorProps {
     /** What the VIEW counts on each side. */
     upCount: number
     downCount: number
-    /** Leave the trace. */
-    onCancel: () => void
+    /** What is being walked, when it is known before the first page lands
+     *  (the Lens): the `loading` headline names it instead of "the focus". */
+    subject?: string
+    /** Leave the trace. Absent = no Cancel (the Lens closes by itself). */
+    onCancel?: () => void
     /** Lift the memory checkpoint for this focus. */
     onContinue: () => void
     /** Give the failed steps one more attempt. */
@@ -69,7 +83,9 @@ const counts = (p: TraceWalkIndicatorProps): string =>
 function narrate(p: TraceWalkIndicatorProps): { headline: string; meta: string } {
     switch (p.phase) {
         case 'loading':
-            return { headline: 'Finding the focus…', meta: 'Reading the lineage around it' }
+            return p.subject
+                ? { headline: `Mapping the lineage of ${p.subject}`, meta: 'Asking the data source what feeds it and what it feeds' }
+                : { headline: 'Finding the focus…', meta: 'Reading the lineage around it' }
         case 'seeding':
             return { headline: 'Loading the immediate lineage', meta: counts(p) }
         case 'walking':
@@ -106,17 +122,27 @@ const primaryAction =
 export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
     const { phase, upCount, downCount, onCancel, onContinue, onRetry } = props
 
-    // THE ONLY STATE, one shot: the finished beat holds for
-    // `COMPLETE_DISMISS_MS` and then the capsule removes itself, rather than
-    // fading to an invisible node that keeps a stale sentence inside a live
-    // `aria-live` region. The host keys it on the focus, which re-arms it.
-    const [dismissed, setDismissed] = useState(false)
+    // THE ONLY STATE: the finished beat holds for `COMPLETE_DISMISS_MS` and
+    // then the capsule removes itself, rather than fading to an invisible
+    // node that keeps a stale sentence inside a live `aria-live` region.
+    // Mounted already `done` it is not armed (nothing was seen to start),
+    // and any computing phase re-arms it — a new wave is a new
+    // computation. The re-arm is the "previous render" pattern, not an
+    // effect: a setState in an effect body is a cascading render. The
+    // host may also key it on the focus.
+    const [armed, setArmed] = useState(phase !== 'done')
+    const [beatOver, setBeatOver] = useState(false)
+    const [prevPhase, setPrevPhase] = useState(phase)
+    if (prevPhase !== phase) {
+        setPrevPhase(phase)
+        if (COMPUTING.has(phase)) { setArmed(true); setBeatOver(false) }
+    }
     useEffect(() => {
         if (phase !== 'done') return
-        const timer = window.setTimeout(() => setDismissed(true), COMPLETE_DISMISS_MS)
+        const timer = window.setTimeout(() => setBeatOver(true), COMPLETE_DISMISS_MS)
         return () => window.clearTimeout(timer)
     }, [phase])
-    if (dismissed) return null
+    if (!armed || (phase === 'done' && beatOver)) return null
 
     const { headline, meta } = narrate(props)
     // Until the flow is exhausted the direction counts are floors.
@@ -172,7 +198,7 @@ export function TraceWalkIndicator(props: TraceWalkIndicatorProps) {
                         {phase === 'error' && (
                             <button type="button" onClick={onRetry} className={quietAction}>Try again</button>
                         )}
-                        {phase !== 'done' && (
+                        {phase !== 'done' && onCancel && (
                             <button type="button" onClick={onCancel} className={quietAction}>Cancel</button>
                         )}
                     </span>

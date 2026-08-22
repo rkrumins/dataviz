@@ -3712,6 +3712,15 @@ export function ContextViewCanvas({
   // stepping Back is instant. Lens-local: never written to the canvas
   // store.
   const lensFocal = lensFocalOf(lensHistory)
+  // The focus's name as THIS canvas knows it, for the lens's first paint:
+  // until its model lands the lens can only derive a label from the URN,
+  // and the capsule that says "Mapping the lineage of …" is the first
+  // thing the reader sees (2026-08-22). One scan per focus change.
+  const lensFocalLabelHint = useMemo(() => {
+    if (!lensFocal) return null
+    const data = nodes.find(n => n.id === lensFocal)?.data as { label?: string } | undefined
+    return data?.label ?? null
+  }, [nodes, lensFocal])
   const userLensInitialDepth = usePreferencesStore((s) => s.lensInitialDepth)
   // A share v2/v3 link's `depth` overrides the pref for exactly the
   // RESTORED focal's initial fetch: useLensWalk's own cache guard
@@ -4633,6 +4642,7 @@ export function ContextViewCanvas({
           }}
           fullWalkEnabled={lensFullWalk}
           walkProgress={lensFocal ? lensWalk.walkProgressFor(lensFocal) : null}
+          focalLabelHint={lensFocalLabelHint}
           onFullWalkToggle={setLensFullWalk}
           onWalkContinue={() => { if (lensFocal) lensWalk.continuePastCheckpoint(lensFocal) }}
           onWalkRetry={() => { if (lensFocal) lensWalk.retryWalk(lensFocal) }}
