@@ -235,6 +235,23 @@ of its own becoming a bundle's endpoint) kept an empty handle measurement and it
 `FocusNode` now calls `useUpdateNodeInternals` when `card.wired` flips (never on mount, never in a headless
 DOM — jsdom lacks DOMMatrixReadOnly). Snowflake at Every card: Bundled 7 bundles on screen (11 wires) vs 51.
 
+**The header, rebuilt as categories (2026-08-22, night).** Even folded, six captioned segmented groups
+crowded the search box off the row ("I cannot even search anymore"). The header is now two rows: identity,
+navigation and SEARCH (always) on the first; on the second, one **category chip** per axis — Direction ·
+Density · Wires · Walk · Steps · Next — each showing its current value and opening a menu (`ViewControl`,
+Radix Popover, `role=menu` of `menuitemradio`) where every option carries its name and a line of meaning,
+the current one checked; the chip's own meaning is the hover (quieted while its menu is open), arrow keys
+walk the options, Esc/outside closes. Six chips are ~900 px, so they fit on one row down to ~1,100 px; below
+that the chips row folds its least-used categories into **More** (same `useToolbarOverflow`). Tests choose
+options through `chooseView`/`viewValue` (`src/test/lensView.ts`); the tour anchors moved onto the chips.
+Browser: 1,600 and 1,100 px — all six chips inline, search intact; the Density menu lists its three options
+with meanings and the check on the current one.
+Then the blank space: the Path trail moved from its own row into the first row's middle (flex, scrolls
+sideways on a long walk) and the type chips onto the right of the chips row (flexible — they shrink and
+scroll, never fold a category into More) — two rows where there were four, no blank band. 2,000 px:
+name · Back · Center on focus · PATH GOLD › Tableau › Snowflake · search · help · share · close / six chips ·
+six type chips.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

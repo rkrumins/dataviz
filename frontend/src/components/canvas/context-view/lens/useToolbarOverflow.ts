@@ -59,7 +59,8 @@ export interface ToolbarOverflow {
 
 /**
  * @param rowRef   the toolbar row; every child that is NOT a registered
- *                 group (or the Display button) counts as fixed width.
+ *                 group, the menu, or marked `data-toolbar-flex` counts
+ *                 as fixed width.
  * @param order    group ids, most important first.
  * @param gap      the row's gap in px.
  */
@@ -92,6 +93,7 @@ export function useToolbarOverflow(
     let children = 0
     for (const child of Array.from(row.children) as HTMLElement[]) {
       if (child.dataset.toolbarGroup !== undefined || child.dataset.toolbarMenu !== undefined) continue
+      if (child.dataset.toolbarFlex !== undefined) continue     // flexible: shrinks and scrolls, never folds a group
       if (child.classList.contains('absolute')) continue       // anchored to the dialog, not in the row's flow
       fixed += child.getBoundingClientRect().width
       children += 1

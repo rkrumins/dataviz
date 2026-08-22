@@ -246,14 +246,26 @@ if (process.env.PAN_AWAY && process.env.SCREENSHOT_DIR) {
 }
 if (process.env.HOVER && process.env.SCREENSHOT_DIR) {
   // Rest the pointer on a header control and keep a picture of its popover.
-  const box = await evalJs(`(() => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(process.env.HOVER)}); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`)
+  // A header control by its text, or a view-control chip by its category ("Density").
+  const box = await evalJs(`(() => { const want = ${JSON.stringify(process.env.HOVER)}; const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === want || (b.getAttribute('aria-label') ?? '').startsWith(want + ': ')); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, chip: (b.getAttribute('aria-label') ?? '').startsWith(want + ': ') } })()`)
   if (box) {
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y })
     await sleep(600)
     const { writeFileSync } = await import('node:fs')
-    const shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: Number((process.env.WINDOW ?? '1600,1000').split(',')[0]), height: 260, scale: 1 } })
+    const W = Number((process.env.WINDOW ?? '1600,1000').split(',')[0])
+    let shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: W, height: 260, scale: 1 } })
     writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-hover.png`, Buffer.from(shot.result.data, 'base64'))
     console.log('== screenshot (hover)', `${process.env.SCREENSHOT_DIR}/lens-hover.png`)
+    if (box.chip) {
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+      await sleep(500)
+      const menu = await evalJs(`(() => { const m = document.querySelector('[role="menu"]'); return m ? [...m.querySelectorAll('[role="menuitemradio"]')].map(i => i.textContent.trim().slice(0, 40) + (i.getAttribute('aria-checked') === 'true' ? ' ✓' : '')) : null })()`)
+      console.log('== menu:', JSON.stringify(menu))
+      shot = await send('Page.captureScreenshot', { format: 'png', clip: { x: 0, y: 0, width: W, height: 420, scale: 1 } })
+      writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-menu.png`, Buffer.from(shot.result.data, 'base64'))
+      console.log('== screenshot (menu)', `${process.env.SCREENSHOT_DIR}/lens-menu.png`)
+    }
   } else console.log('== hover: no such control', process.env.HOVER)
 }
 ws.close(); chrome.kill(); process.exit(0)

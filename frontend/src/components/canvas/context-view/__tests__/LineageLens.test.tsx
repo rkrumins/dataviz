@@ -20,6 +20,7 @@ import { render, screen, fireEvent, cleanup, within, act } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
+import { chooseView, viewValue } from '@/test/lensView'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
 import { decodeLensShare } from '../lens/shareCodec'
@@ -1197,7 +1198,7 @@ describe('the shell around the picture', () => {
   it('the container default is a preference, persisted like the body mode', () => {
     usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' })
     renderLens(['b'], simple())
-    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    chooseView('Next', /^All/)
     expect(usePreferencesStore.getState().lensFrameChildren).toBe('all')
     usePreferencesStore.setState({ lensFrameChildren: 'connected' })
   })
@@ -1244,8 +1245,7 @@ describe('the shell around the picture', () => {
     // as a global toggle because nothing on its face said otherwise.
     usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
-    const group = screen.getByLabelText(/What containers you open next will show/)
-    expect(within(group).getAllByText('Next').some(e => e.hasAttribute('aria-describedby'))).toBe(true)
+    expect(screen.getByRole('button', { name: 'Next: Connected' })).toBeInTheDocument()
   })
 
   it('the direction preset filters the board view-side, with no fetch, and toggles back cleanly', () => {
@@ -1254,12 +1254,12 @@ describe('the shell around the picture', () => {
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(true)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Root cause' }))
+    chooseView('Direction', /^Root cause/)
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(false)
     expect(api.extend).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Both' }))
+    chooseView('Direction', /^Both/)
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(true)
   })
@@ -1269,7 +1269,7 @@ describe('the shell around the picture', () => {
     const writeText = vi.fn()
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     renderLens(['F'], doneWalk(collateralsEstate()))
-    fireEvent.click(screen.getByRole('button', { name: 'Root cause' }))
+    chooseView('Direction', /^Root cause/)
     fireEvent.click(screen.getByLabelText('Copy exploration link'))
 
     expect(writeText).toHaveBeenCalledTimes(1)
@@ -2928,10 +2928,11 @@ describe('Contents=All focal seed — the roster actually FETCHES', () => {
 })
 
 describe('the header explains itself (2026-08-22)', () => {
-  // "Add labels/popovers on each icon to make sure the user actually
-  // knows what it is and what it means." Every header control carries a
-  // styled popover — its name and one sentence of meaning — wired as its
-  // accessible description, never the browser's slow grey `title` box.
+  // "Break this down into different categories that the user clicks and
+  // can control." Every category of how the picture draws is ONE chip —
+  // its name and its current value — that opens a menu where every
+  // option carries a line of meaning. Nothing needs a hover to be
+  // understood before it is chosen.
   beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
   const simple = () => doneWalk(walkModel('b', {
@@ -2947,60 +2948,64 @@ describe('the header explains itself (2026-08-22)', () => {
     return document.getElementById(id!)!
   }
 
-  it('every segmented control names itself and says what it does', () => {
+  it('every category is a chip showing its current value, explained on hover and open to its options', () => {
     renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
-    const expectations: Array<[RegExp, RegExp]> = [
-      [/^Connected$/, /only what is on this lineage/i],
-      [/^All$/, /everything inside/i],
-      [/^One hop$/, /⊕ on a card fetches its next hop/i],
-      [/^Full flow$/, /until the whole end-to-end flow is drawn/i],
-      [/^Every step$/, /every hop on the path is its own card/i],
-      [/^Condensed$/, /fold long runs/i],
-      [/^Overview$/, /start at the high level/i],
-      [/^Grouped$/, /strongest rows first/i],
-      [/^Every card$/, /every card on its own/i],
-      [/^Both$/, /upstream and downstream/i],
-      [/^Root cause$/, /what feeds this entity/i],
-      [/^Impact$/, /what this entity feeds/i],
-      [/^Auto$/, /more than 12/i],
-      [/^Bundled$/, /one wire per pair of containers/i],
-      [/^Every wire$/, /however many/i],
+    const expectations: Array<[string, string, RegExp, Array<[RegExp, RegExp]>]> = [
+      ['Direction', 'Both', /which side of the story/i, [[/^Both/, /upstream and downstream/i], [/^Root cause/, /what feeds this entity/i], [/^Impact/, /what this entity feeds/i]]],
+      ['Density', 'Grouped', /how much of the picture is folded/i, [[/^Overview/, /start at the high level/i], [/^Grouped/, /strongest rows first/i], [/^Every card/, /every card on its own/i]]],
+      ['Wires', 'Auto', /how the wires between two containers draw/i, [[/^Auto/, /more than 12/i], [/^Bundled/, /one wire per pair of containers/i], [/^Every wire/, /however many/i]]],
+      ['Walk', 'One hop', /how far the lens walks on its own/i, [[/^One hop/, /⊕ on a card fetches its next hop/i], [/^Full flow/, /until the whole end-to-end flow is drawn/i]]],
+      ['Steps', 'Every step', /how a long pass-through path is drawn/i, [[/^Every step/, /every hop on the path is its own card/i], [/^Condensed/, /fold long runs/i]]],
+      ['Next', 'Connected', /what the next container you open will show/i, [[/^Connected/, /only what is on this lineage/i], [/^All/, /everything inside/i]]],
     ]
-    for (const [name, meaning] of expectations) {
-      const button = screen.getByRole('button', { name })
-      const tip = describedBy(button)
-      expect(tip.getAttribute('role')).toBe('tooltip')
-      expect(tip.textContent).toMatch(meaning)
-      expect(button.getAttribute('title')).toBeNull()          // one tooltip, not two
+    for (const [category, current, meaning, options] of expectations) {
+      const chip = screen.getByRole('button', { name: `${category}: ${current}` })
+      expect(describedBy(chip).textContent).toMatch(meaning)
+      expect(chip.getAttribute('title')).toBeNull()
+      fireEvent.click(chip)
+      const menu = screen.getByRole('menu', { name: category })
+      expect(menu).toHaveTextContent(meaning)
+      for (const [name, why] of options) expect(screen.getByRole('menuitemradio', { name })).toHaveTextContent(why)
+      fireEvent.click(chip)                                     // the chip toggles its menu closed
+      expect(screen.queryByRole('menu')).toBeNull()
     }
   })
 
-  it('a narrow row folds the least-used groups into a Display menu — the day-to-day ones stay in reach', () => {
-    // jsdom lays nothing out; give the row and its groups widths so the
-    // toolbar has evidence: a 1,000px row, six 200px groups, 40px for
-    // everything else in the row's flow. Three groups fit beside the
-    // menu; three fold — least important first.
+  it('choosing an option closes the menu and the chip reads the new value', () => {
+    renderLens(['b'], simple())
+    chooseView('Density', /^Overview/)
+    expect(viewValue('Density')).toBe('Overview')
+    expect(usePreferencesStore.getState().lensDensity).toBe('overview')
+    usePreferencesStore.setState({ lensDensity: 'grouped' })
+  })
+
+  it('search is always on the first row, beside the name — never behind a menu', () => {
+    renderLens(['b'], simple())
+    expect(screen.getByPlaceholderText('Filter connections…')).toBeInTheDocument()
+  })
+
+  it('a narrow row folds the least-used categories into a More menu — the day-to-day ones stay in reach', () => {
+    // jsdom lays nothing out; give the chips row and its chips widths so
+    // the toolbar has evidence: a 700px row, six 150px chips. Three fit
+    // beside the menu; three fold — least important first.
     const rect = HTMLElement.prototype.getBoundingClientRect
     HTMLElement.prototype.getBoundingClientRect = function () {
-      const w = this.classList.contains('pr-12') ? 1000 : this.dataset.toolbarGroup !== undefined ? 200 : 40
+      const w = this.dataset.toolbarGroup !== undefined ? 150 : this.querySelector?.('[data-toolbar-group]') ? 700 : 0
       return { width: w, height: 30, x: 0, y: 0, top: 0, left: 0, right: w, bottom: 30, toJSON() { return this } } as DOMRect
     }
     try {
       renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
-      const menu = screen.getByRole('button', { name: /^Display/ })
-      expect(menu).toHaveTextContent('3')
-      // Direction, Density and Wires — the day-to-day controls — stay on the row.
-      expect(screen.getByRole('button', { name: 'Root cause' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'Grouped' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'Every wire' })).toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: 'Condensed' })).toBeNull()
-      expect(screen.queryByRole('button', { name: 'Full flow' })).toBeNull()
-      fireEvent.click(menu)
-      // …and the folded ones are one click away, unchanged.
-      expect(screen.getByRole('button', { name: 'Condensed' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'Full flow' })).toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: 'Condensed' }))
+      const more = screen.getByRole('button', { name: /^More view controls/ })
+      expect(more).toHaveTextContent('3')
+      expect(screen.getByRole('button', { name: /^Direction: / })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Density: / })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Wires: / })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /^Steps: / })).toBeNull()
+      fireEvent.click(more)
+      expect(screen.getByRole('button', { name: /^Steps: / })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Walk: / })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Next: / })).toBeInTheDocument()
+      chooseView('Steps', /^Condensed/)
       expect(usePreferencesStore.getState().lensCondenseSteps).toBe(true)
       usePreferencesStore.setState({ lensCondenseSteps: false })
     } finally {
@@ -3011,38 +3016,18 @@ describe('the header explains itself (2026-08-22)', () => {
   it('the Wires control writes the preference', () => {
     usePreferencesStore.setState({ lensWires: 'auto' })
     renderLens(['b'], simple())
-    fireEvent.click(screen.getByRole('button', { name: 'Every wire' }))
+    chooseView('Wires', /^Every wire/)
     expect(usePreferencesStore.getState().lensWires).toBe('all')
-    fireEvent.click(screen.getByRole('button', { name: 'Bundled' }))
+    chooseView('Wires', /^Bundled/)
     expect(usePreferencesStore.getState().lensWires).toBe('bundled')
     usePreferencesStore.setState({ lensWires: 'auto' })
   })
 
   it('the header offers "Center on focus" beside Back and Forward, explained like every control', () => {
-    // "Currently it is in the bottom right corner — we should make it
-    // clearer for the user to find" (2026-08-22): a labelled button in
-    // the navigation cluster, where Back and Forward already live.
     renderLens(['a', 'b'], simple())
     const button = screen.getByRole('button', { name: /center on focus/i })
     expect(describedBy(button).textContent).toMatch(/middle/i)
     expect(button.compareDocumentPosition(screen.getByRole('button', { name: /^back$/i })) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
-    fireEvent.click(button)      // asks the board; the camera move itself is pinned in FocusGraphView.walk.test
-  })
-
-  it('the group captions say what the axis is', () => {
-    renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
-    for (const [caption, meaning] of [
-      ['Next', /what the next container you open will show/i],
-      ['Walk', /how far the lens walks on its own/i],
-      ['Steps', /how a long pass-through path is drawn/i],
-      ['Density', /how much of the picture is folded/i],
-      ['Wires', /how the wires between two containers draw/i],
-    ] as const) {
-      // The caption is the element that carries the description — the
-      // popover's own bold name is the other match for the same text.
-      const el = screen.getAllByText(caption).find(e => e.hasAttribute('aria-describedby'))!
-      expect(el, `${caption} caption`).toBeTruthy()
-      expect(describedBy(el).textContent).toMatch(meaning)
-    }
+    fireEvent.click(button)
   })
 })

@@ -12,6 +12,7 @@
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LineageLens } from '../LineageLens'
+import { chooseView, viewValue } from '@/test/lensView'
 import { usePreferencesStore } from '@/store/preferences'
 import type { WalkEntry } from '@/hooks/useLensWalk'
 import type { LensWalkModel, LensWalkNode } from '../lens/closure-adapter'
@@ -79,19 +80,19 @@ describe('LineageLens — density rungs', () => {
     renderLens()
     expect(databasesOnBoard()).toBe(3)
     expect(tablesOnBoard()).toBe(3 * BUNDLE_WINDOW)
-    expect(screen.getByRole('button', { name: /^grouped$/i })).toHaveAttribute('aria-pressed', 'true')
+    expect(viewValue('Density')).toBe('Grouped')
   })
 
   it('Every card: every table is its own card', () => {
     renderLens()
-    fireEvent.click(screen.getByRole('button', { name: /every card/i }))
+    chooseView('Density', /^Every card/)
     expect(usePreferencesStore.getState().lensDensity).toBe('all')     // the control writes the preference
     expect(tablesOnBoard()).toBe(24)
   })
 
   it('Overview: the databases land closed, with counts, and one click opens one', () => {
     renderLens()
-    fireEvent.click(screen.getByRole('button', { name: /overview/i }))
+    chooseView('Density', /^Overview/)
     expect(usePreferencesStore.getState().lensDensity).toBe('overview')
     expect(databasesOnBoard()).toBe(3)
     expect(tablesOnBoard()).toBe(0)
@@ -161,7 +162,7 @@ describe('LineageLens — how the partners land (the drill is the reader\'s)', (
 
   it('Overview: the database lands closed with its count; one click shows the tables grouped under it', () => {
     renderFive()
-    fireEvent.click(screen.getByRole('button', { name: /overview/i }))
+    chooseView('Density', /^Overview/)
     expect(tablesOnFive()).toBe(0)
     const db = node(/^db(?!\.)/)!
     expect(db.textContent).toMatch(/5 on this lineage/)
@@ -172,7 +173,7 @@ describe('LineageLens — how the partners land (the drill is the reader\'s)', (
 
   it('Every card: every table shows its columns', () => {
     renderFive()
-    fireEvent.click(screen.getByRole('button', { name: /every card/i }))
+    chooseView('Density', /^Every card/)
     expect(columnsOnBoard()).toBe(15)
     expect(OPEN_PARTNERS_PER_BAND).toBe(3)
   })
@@ -184,7 +185,7 @@ describe('LineageLens — how the partners land (the drill is the reader\'s)', (
     // like one — and Overview lands everything closed.
     const onRecenter = vi.fn()
     renderFive(onRecenter)
-    fireEvent.click(screen.getByRole('button', { name: /overview/i }))
+    chooseView('Density', /^Overview/)
     const db = node(/^db(?!\.)/)!
     fireEvent.click(within(db as HTMLElement).getByRole('button', { name: 'Focus on dept' }))
     expect(onRecenter).toHaveBeenCalledWith('dept')

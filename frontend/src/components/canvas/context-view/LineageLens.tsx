@@ -75,6 +75,7 @@ import { TraceWalkIndicator } from './TraceWalkIndicator'
 import type { ReactNode } from 'react'
 import { ControlTip } from './lens/ControlTip'
 import { useToolbarOverflow } from './lens/useToolbarOverflow'
+import { ViewControl } from './lens/ViewControl'
 import * as Popover from '@radix-ui/react-popover'
 import { LensSkeleton } from './lens/LensSkeleton'
 
@@ -1404,264 +1405,92 @@ export function LineageLens({
   const q = query.trim().toLowerCase()
   const filterFn = (r: WalkNeighbor) => q === '' || r.label.toLowerCase().includes(q)
 
-  const toolbarGroups: Partial<Record<ToolbarGroupId, ReactNode>> = lensViewMode !== 'graph' ? {} : {
-    next: (
-                <div
-                  data-tour="lens-children-mode"
-                  role="group"
-                  aria-label="What containers you open next will show"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Next" meaning="What the next container you open will show — one already open keeps its own setting">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Next
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { mode: 'connected', Icon: LucideIcons.Link2, label: 'Connected',
-                      title: 'Containers you open next show only what is on this lineage — this does not change one already open' },
-                    { mode: 'all', Icon: LucideIcons.Rows3, label: 'All',
-                      title: 'Containers you open next show everything inside, with lineage marked where it exists — this does not change one already open' },
-                  ] as const).map(({ mode, Icon, label, title }) => (
-                    <ControlTip key={mode} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setLensFrameChildren(mode)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={lensFrameChildren === mode}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            lensFrameChildren === mode
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-    ),
-    walk: onFullWalkToggle ? (
-                <div
-                  role="group"
-                  aria-label="How far to walk the flow"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Walk" meaning="How far the lens walks on its own">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Walk
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { on: false, Icon: LucideIcons.Footprints, label: 'One hop',
-                      title: 'Walk the flow yourself — ⊕ on a card fetches its next hop' },
-                    { on: true, Icon: LucideIcons.Route, label: 'Full flow',
-                      title: 'Trace mode: keep walking automatically until the whole end-to-end flow is drawn' },
-                  ] as const).map(({ on, Icon, label, title }) => (
-                    <ControlTip key={label} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => onFullWalkToggle(on)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={fullWalkEnabled === on}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            fullWalkEnabled === on
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
-    ) : null,
-    steps: (
-                <div
-                  role="group"
-                  aria-label="How much of a long path to show"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Steps" meaning="How a long pass-through path is drawn">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Steps
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { on: false, Icon: LucideIcons.UnfoldHorizontal, label: 'Every step',
-                      title: 'Show the full end-to-end flow — every hop on the path is its own card' },
-                    { on: true, Icon: LucideIcons.FoldHorizontal, label: 'Condensed',
-                      title: 'Fold long runs of single pass-through steps into one "via N steps" connector — click a connector to open that run' },
-                  ] as const).map(({ on, Icon, label, title }) => (
-                    <ControlTip key={label} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setCondenseSteps(on)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={condenseSteps === on}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            condenseSteps === on
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
+  // THE VIEW CONTROLS (2026-08-22): one chip per category, each opening a
+  // menu of its options with their meanings. Six captioned segmented
+  // groups in a row crowded the search box off the header; six chips
+  // showing their current value fit beside each other with room to spare.
+  const viewControls: Partial<Record<ToolbarGroupId, ReactNode>> = lensViewMode !== 'graph' ? {} : {
+    direction: (
+      <ViewControl
+        data-tour="lens-direction"
+        caption="Direction"
+        meaning="Which side of the story to show"
+        value={directionFilter}
+        onChange={setDirectionFilter}
+        options={[
+          { value: 'both', label: 'Both', Icon: LucideIcons.ArrowLeftRight, meaning: 'Upstream and downstream' },
+          { value: 'in', label: 'Root cause', Icon: LucideIcons.ArrowDownLeft, meaning: 'Only what feeds this entity — upstream' },
+          { value: 'out', label: 'Impact', Icon: LucideIcons.ArrowUpRight, meaning: 'Only what this entity feeds — downstream' },
+        ]}
+      />
     ),
     density: (
-                <div
-                  data-tour="lens-density"
-                  role="group"
-                  aria-label="How much of the picture to fold"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Density" meaning="How much of the picture is folded — the numbers are the same at every rung">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Density
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { value: 'overview', Icon: LucideIcons.Layers, label: 'Overview',
-                      title: 'Start at the high level — partners that share a container land as that container, closed, with counts; each click opens one level' },
-                    { value: 'grouped', Icon: LucideIcons.Group, label: 'Grouped',
-                      title: 'Partners that share a container fold into it, its strongest rows first; the rest is one click away' },
-                    { value: 'all', Icon: LucideIcons.LayoutGrid, label: 'Every card',
-                      title: 'Draw every card on its own, however many there are' },
-                  ] as const).map(({ value, Icon, label, title }) => (
-                    <ControlTip key={value} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setDensity(value)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={density === value}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            density === value
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
+      <ViewControl
+        data-tour="lens-density"
+        caption="Density"
+        meaning="How much of the picture is folded — the numbers are the same at every rung"
+        value={density}
+        onChange={setDensity}
+        options={[
+          { value: 'overview', label: 'Overview', Icon: LucideIcons.Layers, meaning: 'Start at the high level — partners that share a container land as that container, closed, with counts; each click opens one level' },
+          { value: 'grouped', label: 'Grouped', Icon: LucideIcons.Group, meaning: 'Partners that share a container fold into it, its strongest rows first; the rest is one click away' },
+          { value: 'all', label: 'Every card', Icon: LucideIcons.LayoutGrid, meaning: 'Draw every card on its own, however many there are' },
+        ]}
+      />
     ),
     wires: (
-                <div
-                  role="group"
-                  aria-label="How the wires between two containers draw"
-                  className="flex items-center gap-1 p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  <ControlTip name="Wires" meaning="How the wires between two containers draw — folded into one bundle, or every one">
-                    {(tip) => (
-                      <span aria-describedby={tip['aria-describedby']} className={cn(tip.peer, 'pl-1 text-[9px] font-semibold text-ink-muted/70 uppercase tracking-wide select-none')}>
-                        Wires
-                      </span>
-                    )}
-                  </ControlTip>
-                  {([
-                    { value: 'auto', Icon: LucideIcons.Spline, label: 'Auto',
-                      title: 'Two containers with more than 12 wires between them draw one bundle with the count; hover or select a card to see its own wires' },
-                    { value: 'bundled', Icon: LucideIcons.GitMerge, label: 'Bundled',
-                      title: 'One wire per pair of containers, with the count; hover or select a card to see its own wires' },
-                    { value: 'all', Icon: LucideIcons.Waypoints, label: 'Every wire',
-                      title: 'Draw every wire, however many there are' },
-                  ] as const).map(({ value, Icon, label, title }) => (
-                    <ControlTip key={value} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setWires(value)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={wires === value}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            wires === value
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
+      <ViewControl
+        caption="Wires"
+        meaning="How the wires between two containers draw"
+        value={wires}
+        onChange={setWires}
+        options={[
+          { value: 'auto', label: 'Auto', Icon: LucideIcons.Spline, meaning: 'Two containers with more than 12 wires between them draw one bundle with the count; hover or select a card to see its own wires' },
+          { value: 'bundled', label: 'Bundled', Icon: LucideIcons.GitMerge, meaning: 'One wire per pair of containers, with the count; hover or select a card to see its own wires' },
+          { value: 'all', label: 'Every wire', Icon: LucideIcons.Waypoints, meaning: 'Draw every wire, however many there are' },
+        ]}
+      />
     ),
-    direction: (
-                <div
-                  data-tour="lens-direction"
-                  role="group"
-                  aria-label="Which direction to show"
-                  className="flex items-center p-0.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04]"
-                >
-                  {([
-                    { dir: 'both', Icon: LucideIcons.ArrowLeftRight, label: 'Both',
-                      title: 'Show upstream and downstream' },
-                    { dir: 'in', Icon: LucideIcons.ArrowDownLeft, label: 'Root cause',
-                      title: 'Show only what feeds this entity — upstream' },
-                    { dir: 'out', Icon: LucideIcons.ArrowUpRight, label: 'Impact',
-                      title: 'Show only what this entity feeds — downstream' },
-                  ] as const).map(({ dir, Icon, label, title }) => (
-                    <ControlTip key={dir} name={label} meaning={title}>
-                      {(tip) => (
-                        <button
-                          type="button"
-                          onClick={() => setDirectionFilter(dir)}
-                          aria-describedby={tip['aria-describedby']}
-                          aria-pressed={directionFilter === dir}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1 px-2 py-1 rounded-md text-[10.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            directionFilter === dir
-                              ? 'bg-canvas-elevated text-accent-lineage shadow-sm border border-black/[0.06] dark:border-white/[0.08]'
-                              : 'text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <Icon className="w-3 h-3" />
-                          {label}
-                        </button>
-                      )}
-                    </ControlTip>
-                  ))}
-                </div>
+    walk: onFullWalkToggle ? (
+      <ViewControl
+        caption="Walk"
+        meaning="How far the lens walks on its own"
+        value={fullWalkEnabled ? 'full' : 'one'}
+        onChange={(v) => onFullWalkToggle(v === 'full')}
+        options={[
+          { value: 'one', label: 'One hop', Icon: LucideIcons.Footprints, meaning: 'Walk the flow yourself — ⊕ on a card fetches its next hop' },
+          { value: 'full', label: 'Full flow', Icon: LucideIcons.Route, meaning: 'Trace mode: keep walking automatically until the whole end-to-end flow is drawn' },
+        ]}
+      />
+    ) : null,
+    steps: (
+      <ViewControl
+        caption="Steps"
+        meaning="How a long pass-through path is drawn"
+        value={condenseSteps ? 'condensed' : 'every'}
+        onChange={(v) => setCondenseSteps(v === 'condensed')}
+        options={[
+          { value: 'every', label: 'Every step', Icon: LucideIcons.UnfoldHorizontal, meaning: 'Show the full end-to-end flow — every hop on the path is its own card' },
+          { value: 'condensed', label: 'Condensed', Icon: LucideIcons.FoldHorizontal, meaning: 'Fold long runs of single pass-through steps into one "via N steps" connector — click a connector to open that run' },
+        ]}
+      />
+    ),
+    next: (
+      <ViewControl
+        data-tour="lens-children-mode"
+        caption="Next"
+        meaning="What the next container you open will show — one already open keeps its own setting"
+        value={lensFrameChildren}
+        onChange={setLensFrameChildren}
+        options={[
+          { value: 'connected', label: 'Connected', Icon: LucideIcons.Link2, meaning: 'Containers you open next show only what is on this lineage — this does not change one already open' },
+          { value: 'all', label: 'All', Icon: LucideIcons.Rows3, meaning: 'Containers you open next show everything inside, with lineage marked where it exists — this does not change one already open' },
+        ]}
+      />
     ),
   }
-  const toolbarInline = TOOLBAR_ORDER.filter(id => toolbarGroups[id] && !collapsedGroups.has(id))
-  const toolbarInMenu = TOOLBAR_ORDER.filter(id => toolbarGroups[id] && collapsedGroups.has(id))
+  const toolbarInline = TOOLBAR_ORDER.filter(id => viewControls[id] && !collapsedGroups.has(id))
+  const toolbarInMenu = TOOLBAR_ORDER.filter(id => viewControls[id] && collapsedGroups.has(id))
 
   return createPortal(
     <AnimatePresence>
@@ -1702,15 +1531,14 @@ export function LineageLens({
           role="dialog"
           aria-label={`Connections of ${focalLabel}`}
         >
-          {/* Header. The control cluster (`ml-auto`) is ~1,350px of segmented
-              controls; below ~1,700px it no longer fits beside the title
-              and WRAPS under it rather than crushing the focal chip into a
-              three-line stack over NEXT (seen at 1,600px, 2026-08-22). */}
-          {/* THE TOOLBAR — one row that never overflows (2026-08-22). The
-              groups the reader reaches for least collapse, in priority
-              order, into the Display menu when there is no room, and
-              come back when there is (`useToolbarOverflow`). */}
-          <div ref={toolbarRowRef} className="flex items-center gap-2 pl-4 pr-12 py-2.5 border-b border-black/[0.08] dark:border-white/[0.08]">
+          {/* THE HEADER (2026-08-22): two rows. The first is identity and the
+              actions that never move — name, counts, Center on focus,
+              Back/Forward, SEARCH (always), help, share, close. The second
+              is how the picture draws: one chip per category, each opening
+              its options with their meanings, and a More menu only if a
+              narrow window leaves no room (`useToolbarOverflow`). */}
+          <div className="border-b border-black/[0.08] dark:border-white/[0.08]">
+            <div className="relative flex items-center gap-2 pl-4 pr-12 pt-2.5 pb-2">
             <div
               className="w-7 h-7 flex-shrink-0 rounded-lg flex items-center justify-center"
               style={{ backgroundColor: `${focalColor}1f` }}
@@ -1810,153 +1638,18 @@ export function LineageLens({
                 )}
               </ControlTip>
             )}
-            <div className="ml-auto flex items-center gap-2 flex-shrink-0">
-              {/* Gesture guide — the graph's interactions are rich, and
-                  a first-time business user shouldn't have to discover
-                  them by accident. */}
-              <InfoTooltip
-                side="bottom"
-                align="end"
-                content={
-                  <div className="space-y-1 text-left">
-                    <p className="font-semibold text-ink">Exploring lineage</p>
-                    {lensViewMode === 'graph' ? (
-                      <ul className="space-y-0.5 text-ink-muted">
-                        <li><span className="font-medium text-ink">Click</span> a card — inspect it; a row shows a preview</li>
-                        <li><span className="font-medium text-ink">Double-click</span> — focus there</li>
-                        <li><span className="font-medium text-ink">⊕</span> on a card&apos;s outer edge — reveal or fetch its next hop</li>
-                        <li><span className="font-medium text-ink">▸</span> beside a name — what is inside it</li>
-                        <li><span className="font-medium text-ink">Scroll</span> inside an open container — browse its rows</li>
-                        <li><span className="font-medium text-ink">Tab</span> into a container, then <span className="font-medium text-ink">↑ ↓</span> — walk its rows</li>
-                        <li><span className="font-medium text-ink">Enter</span> — preview · <span className="font-medium text-ink">Shift+Enter</span> — focus there</li>
-                        <li><span className="font-medium text-ink">→</span> open a row · <span className="font-medium text-ink">←</span> step back out · <span className="font-medium text-ink">type</span> to find</li>
-                        <li><span className="font-medium text-ink">← / →</span> outside a container — step back / forward</li>
-                        <li><span className="font-medium text-ink">Drag a card</span> — move it; connections follow</li>
-                        <li><span className="font-medium text-ink">Drag · scroll</span> the background — pan and zoom</li>
-                      </ul>
-                    ) : (
-                      <ul className="space-y-0.5 text-ink-muted">
-                        <li><span className="font-medium text-ink">Click</span> a connection — re-center on it</li>
-                        <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
-                        <li><span className="font-medium text-ink">Hover</span> a row — reveal &amp; details actions</li>
-                      </ul>
-                    )}
-                  </div>
-                }
-              >
-                <button
-                  type="button"
-                  aria-label="How to explore"
-                  className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                >
-                  <LucideIcons.HelpCircle className="w-4 h-4" />
-                </button>
-              </InfoTooltip>
-              {/* Share this exploration — the walked path as a link (the
-                  URL param restores it). */}
-              <InfoTooltip side="bottom" content={shareCopied ? 'Link copied' : 'Copy a link to this exploration'}>
-                <button
-                  type="button"
-                  data-tour="lens-share"
-                  onClick={copyShareLink}
-                  aria-label="Copy exploration link"
-                  className={cn(
-                    'w-7 h-7 rounded-md flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                    shareCopied
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]',
-                  )}
-                >
-                  {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
-                </button>
-              </InfoTooltip>
-            </div>
-            {toolbarInline.map(id => (
-              <div key={id} data-toolbar-group={id} ref={registerGroup(id)} className="flex-shrink-0">
-                {toolbarGroups[id]}
-              </div>
-            ))}
-            {toolbarInMenu.length > 0 && (
-              <div data-toolbar-menu className="flex-shrink-0">
-                <Popover.Root open={displayMenuOpen} onOpenChange={setDisplayMenuOpen}>
-                  <ControlTip name="Display" meaning={`${toolbarInMenu.length} more control${toolbarInMenu.length === 1 ? '' : 's'} — there is no room for them on this row`}>
-                    {(tip) => (
-                      <Popover.Trigger asChild>
-                        <button
-                          type="button"
-                          aria-describedby={tip['aria-describedby']}
-                          className={cn(
-                            tip.peer,
-                            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[10.5px] font-semibold border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
-                            displayMenuOpen
-                              ? 'border-accent-lineage/40 bg-accent-lineage/[0.08] text-accent-lineage'
-                              : 'border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted hover:text-ink',
-                          )}
-                        >
-                          <LucideIcons.SlidersHorizontal className="w-3.5 h-3.5" />
-                          Display
-                          <span className="ml-0.5 min-w-[1.1rem] px-1 rounded-full bg-accent-lineage/15 text-accent-lineage text-[9.5px] text-center tabular-nums">{toolbarInMenu.length}</span>
-                          <LucideIcons.ChevronDown className="w-3 h-3 opacity-70" />
-                        </button>
-                      </Popover.Trigger>
-                    )}
-                  </ControlTip>
-                  <Popover.Portal>
-                    <Popover.Content
-                      align="end"
-                      sideOffset={8}
-                      className="z-[9999] w-max max-w-[92vw] rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/10 p-2 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-2"
-                    >
-                      <p className="px-1.5 pt-0.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-muted/70">Display</p>
-                      <div className="flex flex-col gap-1.5">
-                        {toolbarInMenu.map(id => (
-                          <div key={id} className="flex">{toolbarGroups[id]}</div>
-                        ))}
-                      </div>
-                    </Popover.Content>
-                  </Popover.Portal>
-                </Popover.Root>
-              </div>
-            )}
-              <div className="relative flex-shrink-0">
-                <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Filter connections…"
-                  className="w-48 pl-6 pr-7 py-1.5 rounded-md bg-black/[0.04] dark:bg-white/[0.05] border border-black/10 dark:border-white/10 text-[11.5px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                />
-                {query && (
-                  <button
-                    type="button"
-                    onClick={() => setQuery('')}
-                    aria-label="Clear filter"
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 rounded flex items-center justify-center text-ink-muted/70 hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-                  >
-                    <LucideIcons.X className="w-3 h-3" />
-                  </button>
-                )}
-              </div>
-            {/* The way out stays in the corner whether the controls wrapped
-                or not — anchored to the dialog, not to the cluster. */}
-            <button
-              type="button"
-              onClick={requestClose}
-              aria-label="Close"
-              className="absolute top-3 right-4 w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-            >
-              <LucideIcons.X className="w-4 h-4" />
-            </button>
-          </div>
-
+              {/* THE PATH, in the row it belongs to — navigation. It takes
+                  the room between the controls and the search, scrolling
+                  sideways when a long walk needs more (2026-08-22: the
+                  header's blank middle, put to use). */}
           {/* ── Path trail — the focus history as a visible, clickable
               path. Every visited hop is a chip; the cursor's chip is
               highlighted and hops AHEAD of the cursor stay visible
               (dimmed) — clicking any chip moves the cursor there
               without dropping the trail (browser history, not a
               destructive stack). ── */}
-          {entries.length > 1 && onJumpTo && (
-            <nav aria-label="Path" className="flex items-center gap-1 px-4 py-2 border-b border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] overflow-x-auto custom-scrollbar whitespace-nowrap">
+              {entries.length > 1 && onJumpTo ? (
+            <nav aria-label="Path" className="flex-1 min-w-0 flex items-center gap-1 mx-2 px-2 py-1 rounded-lg bg-black/[0.025] dark:bg-white/[0.03] overflow-x-auto custom-scrollbar whitespace-nowrap">
               <span className="flex-shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/60 mr-1">
                 Path
               </span>
@@ -2121,7 +1814,159 @@ export function LineageLens({
                 </button>
               </div>
             </nav>
-          )}
+              ) : <div className="flex-1" aria-hidden="true" />}
+              <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
+              <div className="relative flex-shrink-0">
+                <LucideIcons.Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted/70" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Filter connections…"
+                  className="w-56 pl-6 pr-7 py-1.5 rounded-md bg-black/[0.04] dark:bg-white/[0.05] border border-black/10 dark:border-white/10 text-[11.5px] text-ink placeholder:text-ink-muted/60 outline-none focus:border-accent-lineage/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                />
+                {query && (
+                  <button
+                    type="button"
+                    onClick={() => setQuery('')}
+                    aria-label="Clear filter"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-4 h-4 rounded flex items-center justify-center text-ink-muted/70 hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  >
+                    <LucideIcons.X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              {/* Gesture guide — the graph's interactions are rich, and
+                  a first-time business user shouldn't have to discover
+                  them by accident. */}
+              <InfoTooltip
+                side="bottom"
+                align="end"
+                content={
+                  <div className="space-y-1 text-left">
+                    <p className="font-semibold text-ink">Exploring lineage</p>
+                    {lensViewMode === 'graph' ? (
+                      <ul className="space-y-0.5 text-ink-muted">
+                        <li><span className="font-medium text-ink">Click</span> a card — inspect it; a row shows a preview</li>
+                        <li><span className="font-medium text-ink">Double-click</span> — focus there</li>
+                        <li><span className="font-medium text-ink">⊕</span> on a card&apos;s outer edge — reveal or fetch its next hop</li>
+                        <li><span className="font-medium text-ink">▸</span> beside a name — what is inside it</li>
+                        <li><span className="font-medium text-ink">Scroll</span> inside an open container — browse its rows</li>
+                        <li><span className="font-medium text-ink">Tab</span> into a container, then <span className="font-medium text-ink">↑ ↓</span> — walk its rows</li>
+                        <li><span className="font-medium text-ink">Enter</span> — preview · <span className="font-medium text-ink">Shift+Enter</span> — focus there</li>
+                        <li><span className="font-medium text-ink">→</span> open a row · <span className="font-medium text-ink">←</span> step back out · <span className="font-medium text-ink">type</span> to find</li>
+                        <li><span className="font-medium text-ink">← / →</span> outside a container — step back / forward</li>
+                        <li><span className="font-medium text-ink">Drag a card</span> — move it; connections follow</li>
+                        <li><span className="font-medium text-ink">Drag · scroll</span> the background — pan and zoom</li>
+                      </ul>
+                    ) : (
+                      <ul className="space-y-0.5 text-ink-muted">
+                        <li><span className="font-medium text-ink">Click</span> a connection — re-center on it</li>
+                        <li><span className="font-medium text-ink">← / →</span> — step back / forward</li>
+                        <li><span className="font-medium text-ink">Hover</span> a row — reveal &amp; details actions</li>
+                      </ul>
+                    )}
+                  </div>
+                }
+              >
+                <button
+                  type="button"
+                  aria-label="How to explore"
+                  className="w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                >
+                  <LucideIcons.HelpCircle className="w-4 h-4" />
+                </button>
+              </InfoTooltip>
+              {/* Share this exploration — the walked path as a link (the
+                  URL param restores it). */}
+              <InfoTooltip side="bottom" content={shareCopied ? 'Link copied' : 'Copy a link to this exploration'}>
+                <button
+                  type="button"
+                  data-tour="lens-share"
+                  onClick={copyShareLink}
+                  aria-label="Copy exploration link"
+                  className={cn(
+                    'w-7 h-7 rounded-md flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                    shareCopied
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]',
+                  )}
+                >
+                  {shareCopied ? <LucideIcons.Check className="w-4 h-4" /> : <LucideIcons.Link2 className="w-4 h-4" />}
+                </button>
+              </InfoTooltip>
+              </div>
+            {/* The way out stays in the corner whether the controls wrapped
+                or not — anchored to the dialog, not to the cluster. */}
+            <button
+              type="button"
+              onClick={requestClose}
+              aria-label="Close"
+              className="absolute top-3 right-4 w-7 h-7 rounded-md flex items-center justify-center text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.X className="w-4 h-4" />
+            </button>
+            </div>
+            {lensViewMode === 'graph' && (
+              <div ref={toolbarRowRef} className="flex items-center gap-1.5 pl-4 pr-4 pb-2">
+                {toolbarInline.map(id => (
+                  <div key={id} data-toolbar-group={id} ref={registerGroup(id)} className="flex-shrink-0">
+                    {viewControls[id]}
+                  </div>
+                ))}
+                {toolbarInMenu.length > 0 && (
+                  <div data-toolbar-menu className="flex-shrink-0">
+                    <Popover.Root open={displayMenuOpen} onOpenChange={setDisplayMenuOpen}>
+                      <Popover.Trigger asChild>
+                        <button
+                          type="button"
+                          aria-label={`More view controls (${toolbarInMenu.length})`}
+                          className={cn(
+                            'flex items-center gap-1.5 h-7 px-2 rounded-lg border text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            displayMenuOpen
+                              ? 'border-accent-lineage/40 bg-accent-lineage/[0.08] text-accent-lineage'
+                              : 'border-black/10 dark:border-white/10 bg-canvas-elevated text-ink-muted hover:text-ink hover:border-black/20 dark:hover:border-white/20',
+                          )}
+                        >
+                          <LucideIcons.SlidersHorizontal className="w-3.5 h-3.5" />
+                          More
+                          <span className="min-w-[1.1rem] px-1 rounded-full bg-accent-lineage/15 text-accent-lineage text-[9.5px] text-center tabular-nums">{toolbarInMenu.length}</span>
+                          <LucideIcons.ChevronDown className="w-3 h-3 opacity-70" />
+                        </button>
+                      </Popover.Trigger>
+                      <Popover.Portal>
+                        <Popover.Content
+                          align="start"
+                          sideOffset={6}
+                          className="z-[9999] rounded-xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-xl shadow-black/10 p-2 animate-in fade-in zoom-in-95 data-[side=bottom]:slide-in-from-top-1"
+                        >
+                          <div className="flex flex-col items-start gap-1.5">
+                            {toolbarInMenu.map(id => <div key={id}>{viewControls[id]}</div>)}
+                          </div>
+                        </Popover.Content>
+                      </Popover.Portal>
+                    </Popover.Root>
+                  </div>
+                )}
+                {/* THE TYPE CHIPS share this row — a filter on the picture,
+                    beside the controls that shape it — and never push a
+                    control into More: the toolbar measures them as
+                    flexible (data-toolbar-flex). */}
+                {(typeChips.length > 1 || layout.hiddenByChips > 0) && (
+                  <div data-toolbar-flex className="ml-auto min-w-0 flex items-center justify-end gap-x-2 overflow-x-auto custom-scrollbar whitespace-nowrap">
+                    {typeChips.length > 1 && (
+                      <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} className="flex-nowrap" />
+                    )}
+                    {layout.hiddenByChips > 0 && (
+                      <span className="flex-shrink-0 px-1.5 py-0.5 rounded-md bg-black/[0.04] dark:bg-white/[0.06] text-[9.5px] text-ink-muted">
+                        {layout.hiddenByChips} hidden by the type chips
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
 
           {/* ── Walk narration — a failed or capped walk is SAID, never
               silently rendered as "no connections". ── */}
@@ -2192,20 +2037,6 @@ export function LineageLens({
               'list' })`) and then goes. ── */}
           {lensViewMode === 'graph' ? (
           <div className="flex-1 min-h-0 flex flex-col">
-            {/* Type chips — an explicit, reversible filter, and hidden
-                counts stay visible (never silent loss). */}
-            {(typeChips.length > 1 || layout.hiddenByChips > 0) && (
-              <div className="flex-shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 pb-1">
-                {typeChips.length > 1 && (
-                  <TypeChips chips={typeChips} hiddenTypes={hiddenTypes} onToggle={toggleHiddenType} />
-                )}
-                {layout.hiddenByChips > 0 && (
-                  <span className="px-1.5 py-0.5 rounded-md bg-black/[0.04] dark:bg-white/[0.06] text-[9.5px] text-ink-muted">
-                    {layout.hiddenByChips} hidden by the type chips
-                  </span>
-                )}
-              </div>
-            )}
             <div data-tour="lens-graph" className="relative flex-1 min-h-0">
               <FocusGraphView
                 graph={boardGraph}

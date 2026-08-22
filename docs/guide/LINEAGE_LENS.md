@@ -346,15 +346,24 @@ the same opening, expanding and filtering apply to that entity's own
 neighbours.
 
 First time here? The Lens offers a **one-minute guided tour** when the graph
-opens; replay it any time from the **Help** panel while you're on a view. And
-every control in the header explains itself: rest the pointer on any of them
-— **Next**, **Walk**, **Steps**, **Density**, **Wires**, the direction presets
-— and a small note names it and says what it does. The header is one row
-that never spills off the edge: when the window is too narrow for every
-group, the ones you reach for least fold into a **Display** menu (the
-settings first — Next, Steps — then Walk), and the day-to-day controls —
-direction, Density, Wires — stay on the row. Widen the window and they come
-back.
+opens; replay it any time from the **Help** panel while you're on a view.
+
+The header is two rows, and nothing in it is blank for long. The first is
+who and where: the entity's name and counts, **Back / Forward** and
+**Center on focus**, the **Path** you have walked (every stop a chip you can
+jump to, with *Show on canvas*, *Copy path* and *Copy link* at its end), and
+— always, never behind a menu — the **Filter connections** search, with
+help, share and close beside it. The second is how the picture draws: six
+**category chips** on the left, each showing its current value —
+**Direction · Both**, **Density · Grouped**, **Wires · Auto**, **Walk · One
+hop**, **Steps · Every step**, **Next · Connected** — and the **type chips**
+on the right (SCHEMAFIELD 506 · DATASET 43 …), which filter the board by
+entity type. Rest the pointer on a category chip and a note says what it is
+about; **click** it and a menu opens with every option, each with its name
+and a line of what it does, the current one checked — choose, and the menu
+closes. Only on a very narrow window do the chips you reach for least fold
+into a **More** menu; the day-to-day ones — Direction, Density, Wires — stay
+on the row.
 
 Press **Esc** to close — a row preview first if one is open, then the Lens
 itself. Clicking the backdrop closes it outright. To follow a chain across

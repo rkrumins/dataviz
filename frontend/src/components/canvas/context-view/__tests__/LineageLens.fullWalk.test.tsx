@@ -13,6 +13,7 @@ import type { ComponentProps } from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { LineageLens } from '../LineageLens'
+import { chooseView, viewValue } from '@/test/lensView'
 import type { WalkEntry, WalkProgress } from '@/hooks/useLensWalk'
 import type { LensWalkModel, LensWalkNode } from '../lens/closure-adapter'
 
@@ -134,11 +135,8 @@ describe('LineageLens — the two valves', () => {
   it('renders the Walk mode toggle and reports the switch', () => {
     const onFullWalkToggle = vi.fn()
     renderLens({ fullWalkEnabled: false, walkProgress: null, onFullWalkToggle })
-    const oneHop = screen.getByRole('button', { name: /one hop/i })
-    const fullFlow = screen.getByRole('button', { name: /full flow/i })
-    expect(oneHop).toHaveAttribute('aria-pressed', 'true')
-    expect(fullFlow).toHaveAttribute('aria-pressed', 'false')
-    fireEvent.click(fullFlow)
+    expect(viewValue('Walk')).toBe('One hop')
+    chooseView('Walk', /^Full flow/)
     expect(onFullWalkToggle).toHaveBeenCalledWith(true)
   })
 
@@ -146,7 +144,7 @@ describe('LineageLens — the two valves', () => {
     renderLens()
     expect(screen.queryByTestId('lens-walk-narration')).toBeNull()
     expect(screen.queryByText(/full flow drawn/i)).toBeNull()
-    expect(screen.queryByRole('button', { name: /one hop/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Walk: / })).toBeNull()
   })
 })
 

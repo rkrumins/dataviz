@@ -21,6 +21,7 @@ import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-libra
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
+import { viewValue } from '@/test/lensView'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import {
   lensBackward, lensFocalOf, lensForwardStep, lensJump, lensPush, type LensHistory,
@@ -544,6 +545,6 @@ describe('lens seam — trace (full walk)', () => {
       expect.objectContaining({ urn: 'F', upstreamDepth: 25, downstreamDepth: 25 }),
     )
     // The header mode toggle reflects the trace entry.
-    expect(screen.getByRole('button', { name: /full flow/i })).toHaveAttribute('aria-pressed', 'true')
+    expect(viewValue('Walk')).toBe('Full flow')
   })
 })
