@@ -185,6 +185,27 @@ if (process.env.TRAIL) {
   const trail = await evalJs(`document.querySelector('nav[aria-label="Path"]')?.textContent ?? null`)
   console.log('== path trail:', JSON.stringify(trail))
 }
+if (process.env.PAN_AWAY && process.env.SCREENSHOT_DIR) {
+  // Drag the board two screens to the right so the focus leaves the pane,
+  // read what the board offers, click it, and read again.
+  const pane = await evalJs(`(() => { const r = document.querySelector('.react-flow__pane')?.getBoundingClientRect(); return r ? { x: r.x + r.width / 2, y: r.y + r.height / 2 } : null })()`)
+  if (pane) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pane.x - 300, y: pane.y + 100 })
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pane.x - 300, y: pane.y + 100, button: 'left', clickCount: 1 })
+    for (let i = 1; i <= 20; i++) await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pane.x - 300 + i * 120, y: pane.y + 100, button: 'left' })
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pane.x - 300 + 2400, y: pane.y + 100, button: 'left', clickCount: 1 })
+    await sleep(600)
+    const offered = await evalJs(`(() => ({ pill: !!document.querySelector('[data-testid="lens-focus-offscreen"]'), header: !!([...document.querySelectorAll('button')].find(b => /center on focus/i.test(b.textContent))), transform: document.querySelector('.react-flow__viewport')?.style.transform }))()`)
+    console.log('== after pan-away:', JSON.stringify(offered))
+    const { writeFileSync } = await import('node:fs')
+    let shot = await send('Page.captureScreenshot', { format: 'png' })
+    writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-panned-away.png`, Buffer.from(shot.result.data, 'base64'))
+    const back = await evalJs(`(async () => { document.querySelector('[data-testid="lens-focus-offscreen"]')?.click(); await new Promise(r => setTimeout(r, 700)); return { pill: !!document.querySelector('[data-testid="lens-focus-offscreen"]'), transform: document.querySelector('.react-flow__viewport')?.style.transform } })()`)
+    console.log('== after Center on the focus:', JSON.stringify(back))
+    shot = await send('Page.captureScreenshot', { format: 'png' })
+    writeFileSync(`${process.env.SCREENSHOT_DIR}/lens-recentered.png`, Buffer.from(shot.result.data, 'base64'))
+  }
+}
 if (process.env.HOVER && process.env.SCREENSHOT_DIR) {
   // Rest the pointer on a header control and keep a picture of its popover.
   const box = await evalJs(`(() => { const b = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(process.env.HOVER)}); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`)

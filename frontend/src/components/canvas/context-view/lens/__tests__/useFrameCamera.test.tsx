@@ -562,3 +562,34 @@ describe('useFrameCamera — the walk settles on the focus (2026-08-22)', () => 
     expect(state!.grew).toBe(true)
   })
 })
+
+describe('useFrameCamera — is the focus in view? (2026-08-22)', () => {
+  // The way back to the focus has to be findable exactly when the focus
+  // has been lost: the board asks this on every viewport move and offers
+  // a pill when the answer is no.
+  let rf: CameraTarget
+  beforeEach(() => {
+    vi.useFakeTimers()
+    rf = { fitView: vi.fn(), getViewport: () => ({ x: 0, y: 0, zoom: 1 }), setViewport: vi.fn() }
+  })
+  afterEach(() => { vi.useRealTimers() })
+  const placed = (id: string, x: number, y: number, w: number, h: number, band: number): FocusCard =>
+    ({ ...card(id), x, y, w, h, band, frameId: null }) as unknown as FocusCard
+  const focal = () => placed('f', 0, -60, 300, 120, 0)
+
+  it('answers from the viewport it is handed: centred = in view, panned away = lost', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    render(<Harness rf={rf} focalId="a" cards={[focal()]} paneW={1500} paneH={900} onState={(s) => { state = s }} />)
+    act(() => { vi.advanceTimersByTime(60) })
+    expect(state!.focusInView({ x: 600, y: 450, zoom: 1 })).toBe(true)      // focal spans 600–900 × 390–510
+    expect(state!.focusInView({ x: -2000, y: 450, zoom: 1 })).toBe(false)   // panned two screens left
+    expect(state!.focusInView({ x: 600, y: -400, zoom: 1 })).toBe(false)    // scrolled above the top
+  })
+
+  it('a pane it cannot measure, or a focal with no geometry, never reports the focus lost', () => {
+    let state: ReturnType<typeof useFrameCamera> | null = null
+    render(<Harness rf={rf} focalId="a" cards={[card('f')]} onState={(s) => { state = s }} />)
+    act(() => { vi.advanceTimersByTime(60) })
+    expect(state!.focusInView({ x: -2000, y: 0, zoom: 1 })).toBe(true)
+  })
+})

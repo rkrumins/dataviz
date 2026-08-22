@@ -198,6 +198,13 @@ read each chip off the current model, so a focus you had left fell back to its U
 (`labelHintFor`) for stops it never drew. Frontend 3,113 tests green (`ShareViewDialog` flaked once under
 the full run and passes alone — unrelated), `tsc` 61.
 
+**Center on focus, findable (2026-08-22, evening).** It was one icon in the corner stack. Now: a labelled
+**Center on focus** button in the header's navigation cluster (beside Back/Forward, right after the name),
+explained on hover like every control; and on the board a solid pill — "Center on the focus" — that appears
+exactly when the focal card has left the screen (`useFrameCamera.focusInView(viewport)` asked on every
+React Flow `onMove`) and leaves when it is back; the stack icon stays. Browser: drag the board two screens
+away → pill + header button present; click → focus centred at zoom 0.98, pill gone.
+
 ## Not built, and why
 
 - ~~Coarse first paint~~ — built in the evening on the user's call (see above).

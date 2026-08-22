@@ -510,6 +510,8 @@ export function LineageLens({
   const setDirectionFilter = (dir: LensDirectionFilter) => setDirectionState({ nodeId, dir })
 
   const lensViewMode = usePreferencesStore((s) => s.lensViewMode)
+  // Bumped by the header's Center on focus; the board centres on it.
+  const [recenterSignal, setRecenterSignal] = useState(0)
   const setLensFrameChildren = usePreferencesStore((s) => s.setLensFrameChildren)
   const condenseSteps = usePreferencesStore((s) => s.lensCondenseSteps)
   const setCondenseSteps = usePreferencesStore((s) => s.setLensCondenseSteps)
@@ -1500,6 +1502,30 @@ export function LineageLens({
                 <LucideIcons.ArrowRight className="w-3 h-3" />
               </button>
             )}
+            {/* THE WAY BACK TO THE FOCUS, where the navigation lives. It was
+                only an icon in the corner stack — "we should make it clearer
+                for the user to find" (2026-08-22). A labelled button here,
+                and the board offers the same thing by itself the moment
+                the focus has left the screen. */}
+            {lensViewMode === 'graph' && (
+              <ControlTip name="Center on focus" meaning="Bring the focus back to the middle of the board at a readable size — after a zoom, a pan, or a layout switch">
+                {(tip) => (
+                  <button
+                    type="button"
+                    onClick={() => setRecenterSignal(n => n + 1)}
+                    aria-describedby={tip['aria-describedby']}
+                    className={cn(
+                      tip.peer,
+                      'flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage border border-accent-lineage/30 bg-accent-lineage/[0.06] hover:bg-accent-lineage/[0.12] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                      canBack || canForward ? 'ml-1' : 'ml-2',
+                    )}
+                  >
+                    <LucideIcons.LocateFixed className="w-3 h-3" />
+                    Center on focus
+                  </button>
+                )}
+              </ControlTip>
+            )}
             <div className="ml-auto flex items-center gap-2">
               {/* Gesture guide — the graph's interactions are rich, and
                   a first-time business user shouldn't have to discover
@@ -2125,6 +2151,7 @@ export function LineageLens({
                 // the camera re-frames the focus rather than leaving the
                 // reader wherever the previous layout had them (2026-08-22).
                 recenterKey={`${density}|${condenseSteps ? 'condensed' : 'every'}|${directionFilter}`}
+                recenterSignal={recenterSignal}
                 edgeTypeInfo={edgeTypeInfo}
                 onSelect={setSelection}
                 onIsolate={setIsolated}

@@ -377,7 +377,7 @@ TOURS.push({
       placement: 'top',
       padding: -8,
       title: 'Explore the lineage',
-      body: 'The whole immediate lineage loads by itself — the capsule at the top says where the walk stands. **Click** a card to inspect it. **Double-click** to focus there. **Hover** a card\'s edge for its follow control — "Load upstream" — and click to grow the board from exactly that entity. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it; **Center on the focus** in the corner brings you back.',
+      body: 'The whole immediate lineage loads by itself — the capsule at the top says where the walk stands. **Click** a card to inspect it. **Double-click** to focus there. **Hover** a card\'s edge for its follow control — "Load upstream" — and click to grow the board from exactly that entity. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it; **Center on focus** beside the name brings you back, and the board offers it by itself if the focus leaves the screen.',
     },
     {
       target: '[data-tour="lens-children-mode"]',

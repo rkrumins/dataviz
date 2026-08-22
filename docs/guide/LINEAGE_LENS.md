@@ -301,11 +301,13 @@ The Lens is built for exploring, not just reading:
   **centred on the focus** at a readable size, with its sources and consumers
   a band either side and the rest a scroll away — never a tiny sliver you
   have to zoom into. Switching Density, Steps or direction re-centres the
-  same way, and **Center on the focus** at the top of the corner controls
-  does it on demand. While a walk lands cards the camera holds still and a
-  **Board grew · Fit** pill offers the whole picture; when the walk ends the
-  camera settles on the focus once — unless you have already moved it
-  yourself.
+  same way, and **Center on focus** — the button beside the entity's name in
+  the header — does it on demand. Pan or zoom until the focus has left the
+  screen and the board offers the same thing as a pill at the top; the
+  corner controls carry it too. While a walk lands cards the camera holds
+  still and a **Board grew · Fit** pill offers the whole picture; when the
+  walk ends the camera settles on the focus once — unless you have already
+  moved it yourself.
 - **Filter connections** with the search box in the header — matching cards
   stay bright while the rest dim, so you can spot what matters in a crowded
   picture at a glance. The filter searches what's currently on the board; open

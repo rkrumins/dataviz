@@ -646,6 +646,9 @@ interface FocusGraphViewProps {
    *  (2026-08-22). A change re-frames the focus: the board re-lays out
    *  wholesale and the reader should not have to go looking for it. */
   recenterKey?: string
+  /** A counter the host bumps to ask for "Center on the focus" from
+   *  outside the board — the header's own button (2026-08-22). */
+  recenterSignal?: number
   edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   /** Stick the isolation on this card, or clear it with null. */
@@ -4169,6 +4172,7 @@ export function FocusGraphView({
   reducedMotion,
   walking = false,
   recenterKey = '',
+  recenterSignal = 0,
   edgeTypeInfo,
   onSelect,
   onIsolate: onIsolateProp,
@@ -4681,6 +4685,19 @@ export function FocusGraphView({
     setReaderMoved(false)
   }
   const camera = useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef, walking, recenterKey, readerMoved)
+  // THE WAY BACK IS FINDABLE (2026-08-22). "Center on the focus" lived only
+  // in the corner stack of icons. The header asks for it through
+  // `recenterSignal`; and the board offers it by itself the moment the
+  // focus has left the screen — asked of the camera on every move, so the
+  // pill is there exactly when the focus has been lost and gone when it
+  // is back.
+  const lastSignalRef = useRef(recenterSignal)
+  useEffect(() => {
+    if (lastSignalRef.current === recenterSignal) return
+    lastSignalRef.current = recenterSignal
+    camera.recenter()
+  }, [recenterSignal, camera])
+  const [focusOff, setFocusOff] = useState(false)
   // The PNG export needs every card in the DOM; culling is paused for
   // the capture (see `CULL_OFFSCREEN`).
   const [cullPaused, setCullPaused] = useState(false)
@@ -4763,6 +4780,7 @@ export function FocusGraphView({
           onInit={setRf}
           // A user-driven move carries its event; the camera's own moves do not.
           onMoveStart={(event) => { if (event) setReaderMoved(true) }}
+          onMove={(_, viewport) => setFocusOff(!camera.focusInView(viewport))}
           fitView
           fitViewOptions={{ padding: 0.15, maxZoom: FIT_MAX_ZOOM }}
           minZoom={LENS_MIN_ZOOM}
@@ -4920,18 +4938,35 @@ export function FocusGraphView({
           its place — the fit is OFFERED, never taken. While the walk runs
           the capsule owns the top-centre (2026-08-22), so the offer sits
           below it rather than under it. */}
-      {camera.grew && (
-        <button
-          type="button"
-          onClick={camera.fitAll}
+      {(camera.grew || focusOff) && (
+        <div
           className={cn(
-            'absolute left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-[top]',
+            'absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 transition-[top]',
             walking ? 'top-[4.75rem]' : 'top-3',
           )}
         >
-          <LucideIcons.Maximize2 className="w-3 h-3" />
-          Board grew · Fit
-        </button>
+          {focusOff && (
+            <button
+              type="button"
+              data-testid="lens-focus-offscreen"
+              onClick={camera.recenter}
+              className="inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/40 bg-accent-lineage px-3 py-1 text-[11px] font-semibold text-white shadow-md shadow-accent-lineage/20 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.LocateFixed className="w-3 h-3" />
+              Center on the focus
+            </button>
+          )}
+          {camera.grew && (
+            <button
+              type="button"
+              onClick={camera.fitAll}
+              className="inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.Maximize2 className="w-3 h-3" />
+              Board grew · Fit
+            </button>
+          )}
+        </div>
       )}
       </RowCursorStoreContext.Provider>
       </FollowContext.Provider>

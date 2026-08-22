@@ -2972,6 +2972,17 @@ describe('the header explains itself (2026-08-22)', () => {
     }
   })
 
+  it('the header offers "Center on focus" beside Back and Forward, explained like every control', () => {
+    // "Currently it is in the bottom right corner — we should make it
+    // clearer for the user to find" (2026-08-22): a labelled button in
+    // the navigation cluster, where Back and Forward already live.
+    renderLens(['a', 'b'], simple())
+    const button = screen.getByRole('button', { name: /center on focus/i })
+    expect(describedBy(button).textContent).toMatch(/middle/i)
+    expect(button.compareDocumentPosition(screen.getByRole('button', { name: /^back$/i })) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    fireEvent.click(button)      // asks the board; the camera move itself is pinned in FocusGraphView.walk.test
+  })
+
   it('the group captions say what the axis is', () => {
     renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
     for (const [caption, meaning] of [

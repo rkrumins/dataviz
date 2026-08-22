@@ -262,6 +262,24 @@ export function useFrameCamera(
     void rf.fitView({ padding: FIT_PADDING, duration: reducedMotion ? 0 : 240, maxZoom: FIT_MAX_ZOOM })
   }, [rf, reducedMotion])
 
+  /** Is the focal card (at least partly, with the usual margin) inside
+   *  the pane at this viewport? The board asks on every move and offers
+   *  the way back when the answer is no. A pane it cannot measure, or a
+   *  focal without geometry, answers "yes": never a pill about nothing. */
+  const focusInView = useCallback((viewport?: { x: number; y: number; zoom: number }): boolean => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    const focal = cards.find(c => c.kind === 'focal') ?? cards.find(c => c.id === 'f')
+    if (!rect || rect.width <= 0 || rect.height <= 0 || !focal) return true
+    if (![focal.x, focal.y, focal.w, focal.h].every(Number.isFinite)) return true
+    const vp = viewport ?? rf?.getViewport()
+    if (!vp) return true
+    const { left, top, right, bottom } = toScreen({ x: focal.x, y: focal.y, w: focal.w, h: focal.h }, vp)
+    // "In view" means some of it is on screen — a focal half off the
+    // right edge is still findable; one entirely past an edge is lost.
+    return right > VISIBLE_MARGIN_PX && left < rect.width - VISIBLE_MARGIN_PX
+      && bottom > VISIBLE_MARGIN_PX && top < rect.height - VISIBLE_MARGIN_PX
+  }, [rf, cards, containerRef])
+
   /** The reader's own "take me back to the focus": centre it at the
    *  readable zoom, whatever the board's size. Falls back to a plain fit
    *  when the focal has no geometry yet. */
@@ -360,7 +378,7 @@ export function useFrameCamera(
     applyNudge()
   }, [rf, focalId, cards, reducedMotion, containerRef])
 
-  return useMemo(() => ({ grew, fitAll, recenter }), [grew, fitAll, recenter])
+  return useMemo(() => ({ grew, fitAll, recenter, focusInView }), [grew, fitAll, recenter, focusInView])
 }
 
 interface Rect { x: number; y: number; w: number; h: number }
