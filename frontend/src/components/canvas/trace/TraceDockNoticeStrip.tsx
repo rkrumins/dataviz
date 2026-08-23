@@ -8,6 +8,13 @@ export interface TraceDockNoticeStripProps {
   displayMap: Map<string, HierarchyNode>
   onReduceDepth: () => void
   onJumpToUrn: (urn: string) => void
+  /** The native walk (D3, 2026-08-21): there is no budget and no depth to
+   *  reduce — a walk that stopped either parked at the one-time memory
+   *  checkpoint or lost a step at the data source. The strip then says
+   *  which, and offers the one thing that helps (`onContinue`: continue
+   *  past the checkpoint, or retry the failed step). */
+  nativeMode?: boolean
+  onContinue?: () => void
 }
 
 // Smallest node count we consider a "meaningfully truncated" trace. Below
@@ -45,8 +52,39 @@ export function TraceDockNoticeStrip({
   displayMap,
   onReduceDepth,
   onJumpToUrn,
+  nativeMode = false,
+  onContinue,
 }: TraceDockNoticeStripProps) {
   if (!result) return null
+
+  if (nativeMode) {
+    if (!result.truncated) return null
+    const total = result.traceNodes.size
+    if (result.truncationReason === 'checkpoint') {
+      return (
+        <Strip
+          tone="info"
+          icon={<Info className="w-4 h-4" strokeWidth={2.2} />}
+          title="Large flow"
+          message={<>This flow is larger than <span className="font-semibold text-ink tabular-nums">{total.toLocaleString()}</span> nodes. Loading the rest may slow this browser.</>}
+          actionLabel="Continue"
+          onAction={() => onContinue?.()}
+        />
+      )
+    }
+    // Never the reason token — "timeout" and "max_nodes" are the wire's
+    // words, not the reader's.
+    return (
+      <Strip
+        tone="warn"
+        icon={<AlertTriangle className="w-4 h-4" strokeWidth={2.2} />}
+        title="Part of the lineage could not be loaded"
+        message={<><span className="font-semibold text-ink tabular-nums">{total.toLocaleString()}</span> nodes are on the board — a step failed at the data source.</>}
+        actionLabel="Try again"
+        onAction={() => onContinue?.()}
+      />
+    )
+  }
 
   if (result.isInherited && result.inheritedFromUrn) {
     const ancestor = displayMap.get(result.inheritedFromUrn)

@@ -57,7 +57,7 @@ function renderWalk() {
   // (the header's "Steps" control, off by default) — and this suite's
   // whole subject is what the invariant stage does with that stage's
   // output, so it has to be on.
-  usePreferencesStore.setState({ lensViewMode: 'graph', lensCondenseSteps: true })
+  usePreferencesStore.setState({ lensCondenseSteps: true })
   const walk: WalkEntry = {
     model: walkModel('F', {
       nodes: [wnode('F', 'dataset', 'shipments'), wnode('U', 'dataset', 'sensor_feed')],

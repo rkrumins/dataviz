@@ -17,10 +17,11 @@
  * only the provider (the network).
  */
 import { useMemo, useState } from 'react'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
+import { viewValue } from '@/test/lensView'
 import { useLensWalk } from '@/hooks/useLensWalk'
 import {
   lensBackward, lensFocalOf, lensForwardStep, lensJump, lensPush, type LensHistory,
@@ -93,11 +94,30 @@ function bareEstate(urn: string): TraceV2Result & LensClosureExtras {
   }
 }
 
+/** A page request (`afterCursor`) is answered the way a server answers one:
+ *  the rest of that hub's adjacency — here, nothing more — and NO re-offer
+ *  of the cursor. The estate's `F` hub (`e:64`) is therefore drained by the
+ *  walk hook by itself the moment the lens opens (2026-08-21: hands-free). */
+function exhaustedPage(urn: string): TraceV2Result & LensClosureExtras {
+  return { ...bareEstate(urn), nodes: [] }
+}
+
+/** Every request that is not the coarse first-paint leg (Part G fires one
+ *  `grain: 'coarse'` request beside each focal's first fine page). The pins
+ *  count and index the walk's OWN requests, as they always did. */
+const fineCalls = (fn: { mock: { calls: unknown[][] } }) =>
+  fn.mock.calls.filter(c => (c[0] as Record<string, unknown>).grain !== 'coarse')
+
 function makeProvider() {
-  const traceClosure = vi.fn(async (req: Record<string, unknown>) =>
-    (req.urn === 'F' ? estate() : bareEstate(req.urn as string)))
+  const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
+    if (req.afterCursor) return exhaustedPage(req.urn as string)
+    return req.urn === 'F' ? estate() : bareEstate(req.urn as string)
+  })
   return { provider: { scopeKey: 'ws1', traceClosure } as unknown as GraphDataProvider, traceClosure }
 }
+/** Requests the lens makes on its own when it opens on `F`: the initial
+ *  closure, then the hub page for `F`'s downstream cursor. */
+const OPENED_CALLS = 2
 
 /**
  * ContextViewCanvas's lens block, and nothing else: the same focal
@@ -151,9 +171,10 @@ function LensSeam({ provider, share, history: opened, prefDepth = 1, fullWalk = 
       onJumpTo={(i) => setHistory(h => lensJump(h, i))}
       onClose={() => {}}
       fullWalkEnabled={fullWalkOn}
-      fullWalkStatus={focal ? walk.fullWalkFor(focal) : null}
+      walkProgress={focal ? walk.walkProgressFor(focal) : null}
       onFullWalkToggle={setFullWalkOn}
-      onFullWalkContinue={() => { if (focal) walk.continueFullWalk(focal) }}
+      onWalkContinue={() => { if (focal) walk.continuePastCheckpoint(focal) }}
+      onWalkRetry={() => { if (focal) walk.retryWalk(focal) }}
     />
   )
 }
@@ -168,17 +189,20 @@ async function openLens(props: Parameters<typeof LensSeam>[0]) {
   // does, so a walked trail names the focal on a chip as well as in the
   // header and on the board.
   await screen.findAllByText('collaterals')
+  // …and the walk hook drains what the estate OWES (F's hub page) before
+  // the tests look: the immediate lineage completes hands-free.
+  const mock = (props.provider as unknown as { traceClosure: ReturnType<typeof vi.fn> }).traceClosure
+  await waitFor(() => expect(fineCalls(mock)).toHaveLength(OPENED_CALLS))
   await act(async () => { await Promise.resolve() })
   return utils
 }
 
-/** Show the producer already in hand. Until it is on the board the ⊕
- *  offers THAT (free before costly), which is a different pill. */
+/** The producer already in hand (`u_prior`) is on the board from the
+ *  first render — everything fetched is drawn (2026-08-21) — so there is
+ *  no reveal to click. Kept as the seam's statement of that fact. */
 async function revealPrior() {
-  // The pill is on `b_amount`'s own row ("amount") — its frontier, not
-  // the table's: `T`'s rows are already drawn, so `T`'s own ⊕ defers to
-  // the finer grain that actually owns this offer (`drawnInsideOffers`).
-  fireEvent.click(await screen.findByTitle(/Shows the next hop upstream of amount \(customers\) only · 1 data flow recorded/))
+  await screen.findAllByText('prior_ledger')
+  expect(screen.queryByTitle(/Shows the next hop upstream of amount \(customers\)/)).toBeNull()
 }
 
 /** Collapse `customers`, so its ⊕ has to speak for the columns it hides.
@@ -187,7 +211,7 @@ async function collapseTable() {
   fireEvent.click(await screen.findByLabelText('Collapse customers'))
 }
 
-beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
+beforeEach(() => usePreferencesStore.setState({ lensFrameChildren: 'connected' }))
 afterEach(() => cleanup())
 
 describe('lens seam — what the canvas derives and hands down', () => {
@@ -196,8 +220,7 @@ describe('lens seam — what the canvas derives and hands down', () => {
     render(<LensSeam provider={provider} share={{ v: 2, entries: ['u_prior', 'F'], cursor: 1, depth: 1 }} />)
     await screen.findAllByText('collaterals')
 
-    expect(traceClosure).toHaveBeenCalledTimes(1)
-    expect(traceClosure.mock.calls[0]![0]).toMatchObject({ urn: 'F' })
+    expect(fineCalls(traceClosure)[0]![0]).toMatchObject({ urn: 'F' })
   })
 
   it('a shared link\'s depth reaches the fetch — and only for the focal it named', async () => {
@@ -207,7 +230,7 @@ describe('lens seam — what the canvas derives and hands down', () => {
       prefDepth: 1,
       share: { v: 2, entries: ['F'], cursor: 0, depth: 3 },
     })
-    expect(traceClosure.mock.calls[0]![0]).toMatchObject({ upstreamDepth: 3, downstreamDepth: 3 })
+    expect(fineCalls(traceClosure)[0]![0]).toMatchObject({ upstreamDepth: 3, downstreamDepth: 3 })
     cleanup()
 
     // And once the history has moved PAST the focal the link named — a
@@ -221,7 +244,7 @@ describe('lens seam — what the canvas derives and hands down', () => {
       share: { v: 2, entries: ['u_prior'], cursor: 0, depth: 3 },
       history: { entries: ['u_prior', 'F'], cursor: 1 },
     })
-    expect(second.traceClosure.mock.calls[0]![0]).toMatchObject({
+    expect(fineCalls(second.traceClosure)[0]![0]).toMatchObject({
       urn: 'F', upstreamDepth: 1, downstreamDepth: 1,
     })
   })
@@ -252,8 +275,8 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     // below will seed from (2 — the same `seedUrns` it asserts).
     fireEvent.click(await screen.findByTitle(/Load upstream for everything in customers \(2 entities\) · 12 data flows recorded/))
 
-    expect(traceClosure).toHaveBeenCalledTimes(2)
-    expect(traceClosure.mock.calls[1]![0]).toMatchObject({
+    expect(fineCalls(traceClosure)).toHaveLength(OPENED_CALLS + 1)
+    expect(fineCalls(traceClosure)[OPENED_CALLS]![0]).toMatchObject({
       urn: 'T',
       direction: 'upstream',
       upstreamDepth: 1,
@@ -278,31 +301,30 @@ describe('lens seam — one click, one action, one acknowledgement', () => {
     expect(screen.queryByTitle(/Load upstream for everything in customers/)).toBeNull()
 
     fireEvent.click(screen.getByLabelText('Fetching upstream lineage'))
-    expect(traceClosure).toHaveBeenCalledTimes(2)
+    expect(fineCalls(traceClosure)).toHaveLength(OPENED_CALLS + 1)
   })
 
-  it('page: one click carries the server\'s cursor back, verbatim', async () => {
+  it('page: a paged hub is drained by itself, the server\'s cursor carried back verbatim', async () => {
     const { provider, traceClosure } = makeProvider()
     await openLens({ provider })
 
-    fireEvent.click(await screen.findByTitle(/Loads the next hop downstream of collaterals only · 12 data flows recorded/))
-
-    expect(traceClosure).toHaveBeenCalledTimes(2)
-    expect(traceClosure.mock.calls[1]![0]).toMatchObject({
+    // The estate offered F's downstream as a paged hub (`e:64`) — a CUT
+    // entry, owed at hop 1. No click: the hook paged it the moment the
+    // lens opened, forwarding the cursor untouched…
+    expect(fineCalls(traceClosure)[1]![0]).toMatchObject({
       urn: 'F', direction: 'downstream', upstreamDepth: 0, downstreamDepth: 1, afterCursor: 'e:64',
     })
-    expect(screen.getByLabelText('Fetching downstream lineage')).toBeTruthy()
+    // …and once the page came back drained, there is nothing left to offer.
+    expect(screen.queryByTitle(/Loads the next hop downstream of collaterals only/)).toBeNull()
   })
 
-  it('reveal: one click shows what is already in hand, and never asks the server', async () => {
+  it('what is already in hand is on the board from the start — no click, no request', async () => {
     const { provider, traceClosure } = makeProvider()
     await openLens({ provider })
-    expect(screen.queryByText('prior_ledger')).toBeNull()
-
-    await revealPrior()
 
     expect(screen.getAllByText('prior_ledger').length).toBeGreaterThan(0)
-    expect(traceClosure).toHaveBeenCalledTimes(1)   // the initial fetch, and nothing since
+    expect(screen.queryByTitle(/Shows the next hop/)).toBeNull()
+    expect(fineCalls(traceClosure)).toHaveLength(OPENED_CALLS)   // nothing since the lens opened
   })
 })
 
@@ -383,24 +405,24 @@ describe('lens seam — history navigation lands on a rendered board', () => {
     expect(drawn('bravo')).toBe(true)
     await walkTo('charlie')
     expect(drawn('charlie')).toBe(true)
-    const fetches = traceClosure.mock.calls.length
+    const fetches = fineCalls(traceClosure).length
 
     // Back to bravo: a focal this session already walked, so it comes
     // out of the walk cache — no request, and a board with cards on it.
     fireEvent.click(screen.getByTitle('Step back one hop (←)'))
     await act(async () => { await Promise.resolve() })
     expect(drawn('bravo')).toBe(true)
-    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+    expect(fineCalls(traceClosure)).toHaveLength(fetches)
 
     fireEvent.click(screen.getByTitle('Step back one hop (←)'))
     await act(async () => { await Promise.resolve() })
     expect(drawn('alpha')).toBe(true)
-    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+    expect(fineCalls(traceClosure)).toHaveLength(fetches)
 
     fireEvent.click(screen.getByTitle('Step forward one hop (→)'))
     await act(async () => { await Promise.resolve() })
     expect(drawn('bravo')).toBe(true)
-    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+    expect(fineCalls(traceClosure)).toHaveLength(fetches)
   })
 
   it('the ← and → keys walk the history', async () => {
@@ -465,18 +487,18 @@ describe('lens seam — history navigation lands on a rendered board', () => {
     await openChain(provider)
     await walkTo('bravo')
     await walkTo('charlie')
-    const fetches = traceClosure.mock.calls.length
+    const fetches = fineCalls(traceClosure).length
 
     fireEvent.click(screen.getByTitle(/^Jump to alpha/))
     await act(async () => { await Promise.resolve() })
     expect(drawn('alpha')).toBe(true)
-    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+    expect(fineCalls(traceClosure)).toHaveLength(fetches)
 
     // …and the trail is intact, so the walk can be replayed forwards.
     fireEvent.click(screen.getByTitle(/^Jump to charlie/))
     await act(async () => { await Promise.resolve() })
     expect(drawn('charlie')).toBe(true)
-    expect(traceClosure).toHaveBeenCalledTimes(fetches)
+    expect(fineCalls(traceClosure)).toHaveLength(fetches)
   })
 })
 
@@ -488,13 +510,14 @@ describe('lens seam — history navigation lands on a rendered board', () => {
 describe('lens seam — trace (full walk)', () => {
   it('a trace entry draws the whole flow with zero ⊕ clicks, deep-fetched, and says so', async () => {
     const traceClosure = vi.fn(async (req: Record<string, unknown>) => {
-      // The page of F's downstream cursor and the a_status extend both
-      // drain (empty frontiers); only b_amount's extend has more flow.
+      // The page of F's downstream cursor drains (empty frontier); the
+      // two depth entries are re-seeded in ONE bulk request, and only
+      // b_amount's share of it has more flow.
       if (req.afterCursor) return bareEstate('F')
       if (req.urn === 'F') return estate()
-      if (req.urn === 'b_amount') {
+      if ((req.seedUrns as string[] | undefined)?.includes('b_amount')) {
         return {
-          ...bareEstate('b_amount'),
+          ...bareEstate(req.urn as string),
           nodes: [gn('u2', 'dataset', 'deep_source')],
           edges: [ge('u2', 'b_amount')],
         }
@@ -511,13 +534,17 @@ describe('lens seam — trace (full walk)', () => {
     // …and the walk announces it finished the flow.
     await screen.findByText(/full flow drawn/i)
 
-    // Deep initial fetch (trace mode), then exactly the three frontier
-    // ops the estate advertised: b_amount ⊕, a_status ⊕, F's page.
-    expect(traceClosure).toHaveBeenCalledTimes(4)
-    expect(traceClosure.mock.calls[0]![0]).toEqual(
+    // Deep initial fetch (trace mode), then F's hub page, then ONE bulk
+    // request re-seeding both depth entries the estate advertised.
+    expect(fineCalls(traceClosure)).toHaveLength(3)
+    expect(fineCalls(traceClosure).some(c => {
+      const r = c[0] as Record<string, unknown>
+      return Array.isArray(r.seedUrns) && (r.seedUrns as string[]).length === 2
+    })).toBe(true)
+    expect(fineCalls(traceClosure)[0]![0]).toEqual(
       expect.objectContaining({ urn: 'F', upstreamDepth: 25, downstreamDepth: 25 }),
     )
     // The header mode toggle reflects the trace entry.
-    expect(screen.getByRole('button', { name: /full flow/i })).toHaveAttribute('aria-pressed', 'true')
+    expect(viewValue('Walk')).toBe('Full flow')
   })
 })

@@ -213,6 +213,202 @@
     0%, 100% { opacity: 0.55; transform: scale(1); }
     50%      { opacity: 1;    transform: scale(1.05); }
   }
+  /* THE CAPSULE (TraceWalkIndicator) and its SOUNDING LINE. From an
+     indigo origin a cyan filament reaches upstream and an amber one
+     downstream — the colours the wires land in — and a glint travels
+     outward while the engine walks. No spinner, no percent: the walk's
+     total is unknowable until it ends.
+
+     THE LINE MEANS THE GRAIN. While the focus is still being found
+     (`loading`) the filaments are barely out of the origin; the moment
+     the walk starts they reach their full span. At the memory checkpoint
+     the span holds but nothing moves — the flow continues, and it is the
+     reader's call whether it carries on.
+
+     Reduced motion freezes every travel; the filaments, their colours and
+     their spans always remain, so the phase stays readable. */
+  .nx-trace-capsule {
+    animation: nx-trace-capsule-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes nx-trace-capsule-in {
+    from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+    to   { opacity: 1; transform: none; }
+  }
+  /* The finished beat glides out over exactly the window the component
+     holds it for, so the unmount lands on an already-faded capsule. */
+  [data-trace-phase="done"] .nx-trace-capsule {
+    animation: nx-trace-capsule-out 600ms ease-in both;
+  }
+  @keyframes nx-trace-capsule-out {
+    0%, 55% { opacity: 1; transform: none; }
+    100%    { opacity: 0; transform: translateY(-6px) scale(0.985); }
+  }
+  .nx-trace-origin-pulse {
+    box-shadow: 0 0 8px 1px rgba(99, 102, 241, 0.6);
+    animation: trace-pulse 2.4s ease-in-out infinite;
+  }
+  .nx-trace-sounding {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 1 1 0%;
+    min-width: 0;
+    height: 5px;
+  }
+  .nx-trace-sounding-origin {
+    width: 5px;
+    height: 5px;
+    border-radius: 9999px;
+    background: rgba(99, 102, 241, 0.95);
+    flex: none;
+  }
+  .nx-trace-sounding-up,
+  .nx-trace-sounding-down {
+    flex: 1 1 0%;
+    height: 2px;
+    border-radius: 9999px;
+    background-size: 200% 100%;
+    transition: transform 700ms cubic-bezier(0.22, 1, 0.36, 1), opacity 400ms ease;
+    animation: nx-trace-sounding-glint 1.6s linear infinite;
+  }
+  .nx-trace-sounding-up {
+    background-image: linear-gradient(to left, rgba(6, 182, 212, 0.9), rgba(6, 182, 212, 0.18), rgba(6, 182, 212, 0.9));
+    transform-origin: right center;
+    animation-direction: reverse;
+  }
+  .nx-trace-sounding-down {
+    background-image: linear-gradient(to right, rgba(245, 158, 11, 0.9), rgba(245, 158, 11, 0.18), rgba(245, 158, 11, 0.9));
+    transform-origin: left center;
+  }
+  /* Nothing has been found yet, so the line has not reached out. */
+  [data-trace-phase="loading"] .nx-trace-sounding-up,
+  [data-trace-phase="loading"] .nx-trace-sounding-down {
+    transform: scaleX(0.16);
+  }
+  /* Held at the checkpoint: the span is real, the movement is not. */
+  [data-trace-phase="checkpoint"] .nx-trace-sounding-up,
+  [data-trace-phase="checkpoint"] .nx-trace-sounding-down {
+    animation: none;
+    opacity: 0.5;
+  }
+  @keyframes nx-trace-sounding-glint {
+    0%   { background-position: 0% 0; }
+    100% { background-position: -200% 0; }
+  }
+  /* PROGRESS YOU CAN READ (2026-08-22). The current stage's dot breathes;
+     a page landing sends one beat out from the origin along both
+     filaments; a number that changes ticks; a line of guidance fades in. */
+  .nx-trace-stages { position: relative; }
+  .nx-trace-stage-current {
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18);
+    animation: nx-trace-stage-breathe 1.8s ease-in-out infinite;
+  }
+  @keyframes nx-trace-stage-breathe {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12); }
+    50%      { box-shadow: 0 0 0 5px rgba(99, 102, 241, 0.28); }
+  }
+  .nx-trace-sounding { position: relative; }
+  .nx-trace-sounding-beat {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    margin: -3.5px 0 0 -3.5px;
+    border-radius: 9999px;
+    background: rgba(99, 102, 241, 0.9);
+    pointer-events: none;
+    animation: nx-trace-beat 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes nx-trace-beat {
+    0%   { transform: scale(0.6); opacity: 0.95; box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.55); }
+    70%  { opacity: 0.6; }
+    100% { transform: scale(1); opacity: 0; box-shadow: 0 0 0 28px rgba(99, 102, 241, 0); }
+  }
+  .nx-tick {
+    animation: nx-tick 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes nx-tick {
+    0%   { transform: translateY(4px); opacity: 0.2; color: rgb(99, 102, 241); }
+    60%  { color: rgb(99, 102, 241); }
+    100% { transform: none; opacity: 1; }
+  }
+  .nx-trace-guidance {
+    animation: nx-trace-guidance-in 360ms ease-out both;
+  }
+  @keyframes nx-trace-guidance-in {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: none; }
+  }
+  /* THE MINI MAP (2026-08-22) — React Flow positions its own panel; here
+     it lives INSIDE the lens's glass panel chrome (a header that names it
+     and folds it away), so its own positioning is neutralised and only
+     its canvas remains. The panel around it carries the app's glass
+     tokens, exactly as the canvas behind the lens does. */
+  .nx-lens-minimap.react-flow__minimap {
+    position: static !important;
+    margin: 0 !important;
+    width: 208px;
+    height: 132px;
+    background: transparent;
+    border-radius: 0;
+    box-shadow: none;
+    display: block;
+  }
+  .react-flow__panel:has(> [aria-label='Map of the board']) {
+    margin: 0.75rem !important;
+  }
+  .dark .nx-lens-minimap .react-flow__minimap-mask {
+    fill: rgb(2 6 23 / 0.5);
+  }
+
+  /* THE PICTURE'S GHOST (LensSkeleton): a shimmer sweeping across every
+     ghost card, and the ghost wires' dashes travelling toward the focus. */
+  .nx-skeleton {
+    position: relative;
+    overflow: hidden;
+  }
+  .nx-skeleton::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.55) 50%, transparent 80%);
+    transform: translateX(-100%);
+    animation: nx-skeleton-sweep 1.8s ease-in-out infinite;
+  }
+  .dark .nx-skeleton::after {
+    background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.08) 50%, transparent 80%);
+  }
+  @keyframes nx-skeleton-sweep {
+    0%   { transform: translateX(-100%); }
+    60%, 100% { transform: translateX(100%); }
+  }
+  .nx-skeleton-wire {
+    animation: nx-skeleton-dash 1.2s linear infinite;
+  }
+  @keyframes nx-skeleton-dash {
+    to { stroke-dashoffset: -16; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .nx-skeleton::after,
+    .nx-skeleton-wire,
+    .nx-trace-capsule,
+    [data-trace-phase="done"] .nx-trace-capsule,
+    .nx-trace-origin-pulse,
+    .nx-trace-sounding-up,
+    .nx-trace-sounding-down,
+    .nx-trace-stage-current,
+    .nx-trace-sounding-beat,
+    .nx-tick,
+    .nx-trace-guidance {
+      animation: none;
+    }
+    .nx-trace-sounding-beat { display: none; }
+    .nx-trace-sounding-up,
+    .nx-trace-sounding-down {
+      transition: none;
+    }
+  }
   .nx-edge-trace {
     /* Tighter glow — original `0 0 6px ... 0.7` extended visibly past the
        stroke and read as overlapping the node bodies during trace. The

@@ -64,7 +64,22 @@ _CHECKPOINT_MAX_BATCHES: int = 5
 # window, or exceeds the (very generous) wall-clock safety net.
 # ``job.timeout_secs`` — when set on the job row — overrides the stall
 # window, preserving the column's "how long may this hang" intent.
-_STALL_TIMEOUT_SECS: int = int(os.getenv("AGGREGATION_STALL_TIMEOUT_SECS", "900"))
+#
+# 3h, matching what every UI trigger path sends explicitly. It used to be
+# 900s, and the gap was invisible because only the MACHINE paths leave
+# ``timeout_secs`` NULL: reconciliation drift and first builds, the cron
+# drift sweep, the stale-marker reconciler, Refresh rollups, the projector
+# heal hook and blank-model provisioning. Those are exactly the rebuilds
+# nobody is watching, on exactly the graphs big enough to go quiet for more
+# than fifteen minutes, and they were being killed for slowness the same
+# rebuild started from the Re-trigger dialog would have tolerated. Raising
+# the DEFAULT rather than passing 10800 at each call site is deliberate:
+# the per-call-site pattern is how the divergence happened, it leaves the
+# env var meaningful (freezing the value onto job rows would not), and it
+# covers already-queued NULL rows. Must stay below the control plane's
+# stale-job backstop at 2x AGGREGATION_JOB_TIMEOUT_SECS (4h by default) so
+# the worker still kills a wedged job first.
+_STALL_TIMEOUT_SECS: int = int(os.getenv("AGGREGATION_STALL_TIMEOUT_SECS", "10800"))
 _MAX_WALL_SECS: int = int(os.getenv("AGGREGATION_JOB_MAX_WALL_SECS", "86400"))
 
 

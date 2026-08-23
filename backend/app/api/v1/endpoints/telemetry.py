@@ -31,13 +31,43 @@ admin_router = APIRouter()
 
 # The only signals we accept — keeps the store meaningful and the endpoint from
 # becoming a general-purpose write sink.
+#
+# Two families, and the split matters:
+#
+#   * The ``docs.`` / ``tour.`` / ``onboarding.`` types are ABOUT the product —
+#     did the documentation help, did the tour land. They measure whether we
+#     explained ourselves.
+#   * The ``lineage.`` / ``graph.`` / ``version.`` / ``ontology.`` types are the
+#     product itself — someone traced lineage, searched the graph, published a
+#     revision. They measure whether anyone got VALUE.
+#
+# Only the first family existed. That meant Analytics could prove people opened
+# views and could not prove anyone ever traced lineage, which is the entire
+# point of the platform: we were counting attention, not value.
+#
+# The ``*_empty`` / ``*_miss`` variants are separate event TYPES rather than a
+# payload flag on purpose. The analytics repo aggregates with a GROUP BY on
+# ``event_type`` (served by ``idx_product_events_type_created``); a flag inside
+# the JSON payload would force a scan to answer "how often did a trace come back
+# with nothing?" — which is precisely the question worth asking, since a trace
+# that returns no lineage is a value moment that FAILED. ``docs.search_miss``
+# already set this precedent.
 ALLOWED_EVENT_TYPES = frozenset(
     {
+        # Did we explain ourselves?
         "docs.feedback",
         "docs.search_miss",
         "tour.completed",
         "tour.skipped",
         "onboarding.step",
+        # Did anyone get value?
+        "lineage.trace",
+        "lineage.trace_empty",
+        "graph.search",
+        "graph.search_miss",
+        "graph.export",
+        "version.published",
+        "ontology.published",
     }
 )
 

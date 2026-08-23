@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ontologyDefinitionService, type OntologyCreateRequest, type OntologyUpdateRequest } from '@/services/ontologyDefinitionService'
 import { useInvalidateGraphSchema, GRAPH_SCHEMA_QUERY_KEY } from '@/hooks/useGraphSchema'
 import { ONTOLOGY_KEYS } from './useOntologies'
+import { recordEvent } from '@/services/telemetryService'
 
 export function useOntologyMutations() {
   const queryClient = useQueryClient()
@@ -44,6 +45,9 @@ export function useOntologyMutations() {
     // what the publish surface itself shows — the rest (adoption, coverage,
     // graph schema, canvases) refetches lazily on next mount/focus.
     onSuccess: (data) => {
+      // Adoption of the semantic layer — the platform's differentiator — was
+      // measurable only as "rows exist", never as "someone published one".
+      recordEvent('ontology.published')
       queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.all, refetchType: 'none' })
       queryClient.invalidateQueries({ queryKey: GRAPH_SCHEMA_QUERY_KEY, refetchType: 'none' })
       queryClient.invalidateQueries({ queryKey: ONTOLOGY_KEYS.detail(data.id) })

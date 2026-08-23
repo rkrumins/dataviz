@@ -159,10 +159,10 @@ def test_both_groups_can_be_patched_together(monkeypatch):
 
 
 class _FakeSettingsRow:
-    def __init__(self, cadence_json=None):
+    def __init__(self, cadence_json=None, tuning_json=None):
         self.id = "global"
         self.cadence_json = cadence_json
-        self.tuning_json = None
+        self.tuning_json = tuning_json
         self.updated_at = None
         self.updated_by = None
 
@@ -256,6 +256,65 @@ def test_clearing_the_rebuild_interval_still_works():
     stored = json.loads(row.cadence_json)
     assert "rebuildMinIntervalSecs" not in stored
     assert stored["driftAutoRebuild"] is True
+
+
+def _put_tuning(row, tuning):
+    from backend.app.services.aggregation.service import AggregationService
+
+    session = _FakeSession(row)
+    svc = AggregationService.__new__(AggregationService)
+
+    async def _get_settings(_s):
+        return None
+    svc.get_settings = _get_settings
+
+    _run(svc.put_settings(session, tuning=tuning))
+    return json.loads(row.tuning_json)
+
+
+def test_saving_rollup_storage_preserves_the_workspace_tuning_defaults():
+    """``tuning_json`` gained a second editor: the Automation modal writes
+    rollup storage into the same column the workspace Defaults dialog writes
+    its caps and floors into. A REPLACE meant whichever saved last erased the
+    other — the exact bug already fixed for ``cadence_json`` above."""
+    from backend.app.services.aggregation.schemas import AggregationTuning
+
+    row = _FakeSettingsRow(tuning_json=json.dumps({
+        "scan_range_width": 500_000,
+        "max_materialized_edges": 40_000_000,
+    }))
+    stored = _put_tuning(row, AggregationTuning(materializeFinePairs="auto"))
+    assert stored["scan_range_width"] == 500_000
+    assert stored["max_materialized_edges"] == 40_000_000
+    assert stored["materialize_fine_pairs"] == "auto"
+
+
+def test_clearing_a_tuning_default_still_works():
+    """Merging must not break "leave blank to use the default": the numeric
+    fields clear by being sent an explicit null, since a merge cannot see a
+    key that was simply left out."""
+    from backend.app.services.aggregation.schemas import AggregationTuning
+
+    row = _FakeSettingsRow(tuning_json=json.dumps({
+        "scan_range_width": 500_000, "apply_chunk": 20_000,
+    }))
+    stored = _put_tuning(row, AggregationTuning(scanRangeWidth=None))
+    assert "scan_range_width" not in stored
+    assert stored["apply_chunk"] == 20_000
+
+
+def test_tuning_is_stored_under_field_names_not_aliases():
+    """``_effective_tuning`` hands this dict straight to the pipeline, which
+    reads ``materialize_fine_pairs``. Dumping by alias would store camelCase
+    keys nothing ever looks up — every stored default silently inert, with no
+    error anywhere to say so."""
+    from backend.app.services.aggregation.schemas import AggregationTuning
+
+    stored = _put_tuning(
+        _FakeSettingsRow(),
+        AggregationTuning(scanRangeWidth=100_000, materializeFinePairs=True),
+    )
+    assert set(stored) == {"scan_range_width", "materialize_fine_pairs"}
 
 
 def test_an_explicit_null_unsets_a_policy_field_back_to_the_env_default():

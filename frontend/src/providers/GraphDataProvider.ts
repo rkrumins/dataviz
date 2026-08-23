@@ -558,6 +558,12 @@ export interface TraceClosureRequest {
      *  the NEXT keyset page of the focus's lineage-bearing contents and
      *  walks from those. Mutually exclusive with afterCursor/seedUrns. */
     seedCursor?: string
+    /** The grain of the answer (Part G, 2026-08-21). 'coarse' asks for the
+     *  `:AGGREGATED` rollup cells incident to the focus — partner
+     *  containers and how many flows, one shot, milliseconds on the server
+     *  — the first paint the raw pages refine behind. Absent/'fine' is the
+     *  degree-exact walk. One shot: never with a cursor or seeds. */
+    grain?: 'fine' | 'coarse'
 }
 
 /** One frontier boundary node as the closure wire ships it — pre-normalization.
@@ -567,6 +573,12 @@ export interface TraceClosureFrontierNode {
     urn: URN
     totalCount?: number | null
     nextCursor?: string | null
+    /** WHY the node is on the frontier (additive, 2026-08-21): `cut` — the
+     *  node budget or the deadline stopped the walk before it (complete it
+     *  hands-free: re-root via `seedUrns`, or page a hub by `nextCursor`);
+     *  `depth` — the requested depth ended there (the next hop, a pill).
+     *  Absent on older servers. */
+    reason?: 'cut' | 'depth' | null
 }
 
 /** The three closure-only fields `TraceV2Result` doesn't carry — merged
@@ -579,6 +591,10 @@ export interface LensClosureExtras {
      *  null/absent when the focus's contents are fully seeded. Send back
      *  as the request's `seedCursor` for the next page of contents. */
     seedCursor?: string | null
+    /** Which grain actually served the page: 'coarse' from the rollup
+     *  lane, 'fine' when a coarse request fell back to the walk (a
+     *  provider without rollups), absent from servers that predate it. */
+    grain?: 'fine' | 'coarse' | null
 }
 
 /**
@@ -874,7 +890,12 @@ export interface GraphDataProvider {
      * not the table's. `edges` are the ONLY hops; `containmentEdges` are for
      * nesting and are never rendered as hops.
      */
-    traceClosure?(request: TraceClosureRequest): Promise<TraceV2Result & LensClosureExtras>
+    traceClosure?(
+        request: TraceClosureRequest,
+        /** `signal` aborts the request (and the server's work on it) when the
+         *  lens closes or re-anchors mid-walk. */
+        opts?: { signal?: AbortSignal },
+    ): Promise<TraceV2Result & LensClosureExtras>
 
     /**
      * Drill into an AGGREGATED edge: return finer-level nodes + edges

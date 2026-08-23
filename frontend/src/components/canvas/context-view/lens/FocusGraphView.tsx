@@ -61,7 +61,9 @@ import {
   BaseEdge,
   EdgeLabelRenderer,
   Handle,
+  useUpdateNodeInternals,
   MarkerType,
+  MiniMap,
   Panel,
   Position,
   getBezierPath,
@@ -83,10 +85,12 @@ import { getEntityVisual } from '@/hooks/useEntityVisual'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
 import { cn } from '@/lib/utils'
 import { CARD_W, BAND_GAP, FRAME_FOOTER_H, FRAME_PAD, headerHeight, holdsRows, labelFitsRun, frameWindow, edgeLabelFor, orientationHalf, type EdgeTypeInfoMap, type FocusCard, type FocusEdge, type FocusGraph, type FocusPill, type LensReach } from './focus-cards'
+import { revealedWires } from './wire-bundles'
 import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type LensDirectionFilter } from './focus-layout'
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 import { bumpRenderCount } from './renderProbe'
+import { recordEvent } from '@/services/telemetryService'
 
 /** The longest edge an exported image may have, BEFORE `pixelRatio`
  *  doubles it. A ceiling on the FILE, never on the content: a board
@@ -149,6 +153,12 @@ const TINT_DOWN = '#f59e0b'
  * active. Screenshot-verified against the `filter` version in the P2
  * report — the two are pixel-equivalent.
  */
+/** THE MINI MAP (2026-08-22) — offered once a board is big enough to get
+ *  lost on. Below this a reader can see the whole picture at a glance and
+ *  a map is furniture. */
+const MINIMAP_MIN_CARDS = 8
+/** The lineage accent, for the map's focus dot and viewport frame. */
+const ACCENT_LINEAGE = '#6366f1'
 const MUTED_TINT_UP = '#5e93ab'
 const MUTED_TINT_DOWN = '#c2a370'
 
@@ -639,6 +649,19 @@ interface FocusGraphViewProps {
    *  overrides it for as long as the pointer rests somewhere. */
   isolatedId?: string | null
   reducedMotion: boolean
+  /** A hands-free walk is landing cards (C4, 2026-08-21): the camera
+   *  holds still for arrivals and the board offers a fit instead. */
+  walking?: boolean
+  /** The layout mode — density · steps · direction — as one string
+   *  (2026-08-22). A change re-frames the focus: the board re-lays out
+   *  wholesale and the reader should not have to go looking for it. */
+  recenterKey?: string
+  /** A counter the host bumps to ask for "Center on the focus" from
+   *  outside the board — the header's own button (2026-08-22). */
+  recenterSignal?: number
+  /** The zoom once a move has settled — the status bar reads it. Once
+   *  per gesture (move end), never per frame. */
+  onViewportSettle?: (zoom: number) => void
   edgeTypeInfo?: EdgeTypeInfoMap
   onSelect: (nodeId: string | null) => void
   /** Stick the isolation on this card, or clear it with null. */
@@ -1086,13 +1109,20 @@ function FrameAncestry({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   )
 }
 
-/** Where a TOP-LEVEL card lives. Rows never carry one: inside a frame
- *  the header already names the owner, right above them, and repeating
- *  it on every row is the noise the frame was for. */
-function ProvenanceRibbon({ card }: { card: FocusCard }) {
+/** Where a TOP-LEVEL card lives — and a way UP to it. Rows never carry
+ *  one: inside a frame the header already names the owner, right above
+ *  them, and repeating it on every row is the noise the frame was for.
+ *
+ *  The owner is a button, like every other crumb on the board (frame
+ *  header, focal, peek): click `GOLD` on a closed `fact_orders` and GOLD
+ *  becomes the subject. It was the one crumb that only LOOKED like one,
+ *  and Overview lands every partner closed — "we seem to have lost the
+ *  ability to navigate up the containment" (2026-08-22). */
+function ProvenanceRibbon({ card, ctx }: { card: FocusCard; ctx: CardCtx }) {
   if (card.ancestry.length === 0 && !card.parentLabel) return null
   const chain = card.ancestry.length > 0 ? card.ancestry : [card.parentLabel!]
   const owner = chain[chain.length - 1]
+  const ownerId = card.ancestryIds[chain.length - 1] ?? card.parentId ?? ''
   return (
     <span className="flex items-center gap-1 min-w-0" title={`in ${chain.join(' › ')}`}>
       <LucideIcons.FolderTree className="w-2.5 h-2.5 flex-shrink-0 text-ink-muted/50" />
@@ -1105,7 +1135,15 @@ function ProvenanceRibbon({ card }: { card: FocusCard }) {
           Snowflake, which identifies nothing and reads as something
           broken. Below the floor the row's own counts give up their space
           instead; the tooltip carries the whole chain either way. */}
-      <TailName className="text-ink-muted min-w-[3.5rem]" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
+      <button
+        type="button"
+        aria-label={`Focus on ${owner}`}
+        disabled={ownerId === ''}
+        onClick={(e) => { e.stopPropagation(); ctx.onFocus(ownerId) }}
+        className="nodrag group/crumb flex min-w-0 disabled:pointer-events-none"
+      >
+        <TailName className="text-ink-muted min-w-[3.5rem] group-hover/crumb:text-accent-lineage transition-colors" title={`in ${chain.join(' › ')}`}>{owner}</TailName>
+      </button>
     </span>
   )
 }
@@ -1921,6 +1959,19 @@ const RowContent = memo(function RowContent({ card, ctx, onTrail }: {
               <ContentsCount card={card} />
             </>
           )}
+          {/* THE COARSE FIRST PAINT (Part G): a partner whose flows are
+              known only from a rollup cell — its own contents not yet
+              loaded — says how many, "≈", until the raw pages replace the
+              cell. The one count on a row that is a fact about the
+              entity rather than about the walk. */}
+          {!card.contents && card.approx && card.count > 0 && (
+            <>
+              {(card.showType || card.edgeTypeNorm) && <span className="text-ink-muted/40">·</span>}
+              <span className="tabular-nums" title={`About ${card.count.toLocaleString()} flows, from the data source's own summary — the detail is still loading`}>
+                {`≈${card.count.toLocaleString()} flow${card.count === 1 ? '' : 's'}`}
+              </span>
+            </>
+          )}
           {card.description && (
             <span className="truncate min-w-0 italic text-ink-muted/60">{card.description}</span>
           )}
@@ -1989,7 +2040,7 @@ const EntityContent = memo(function EntityContent({ card, ctx, onTrail }: {
         <p className="flex items-center gap-1 text-[9.5px] text-ink-muted/70 leading-snug min-w-0">
           {(card.ancestry.length > 0 || card.parentLabel) && (
             <>
-              <ProvenanceRibbon card={card} />
+              <ProvenanceRibbon card={card} ctx={ctx} />
               <span className="text-ink-muted/40">·</span>
             </>
           )}
@@ -2007,13 +2058,17 @@ const EntityContent = memo(function EntityContent({ card, ctx, onTrail }: {
               </span>
             </>
           )}
-          {/* No ×N on a frame either — same accumulator, same reason. */}
-          {card.contents && (
-            <>
-              <ContentsCount card={card} />
-            </>
-          )}
         </p>
+        {/* THE DRILL CUE. On a closed top-level card the count is what a
+            click will show ("10 on this lineage · of 12"), so it gets a
+            line of its own rather than the tail of the provenance line,
+            where it truncated to "10 on this lineag…" beside the ribbon.
+            (Rows keep the one-line form: see the row renderer.) */}
+        {card.contents && (
+          <p className="text-[9.5px] text-ink-muted leading-snug min-w-0 whitespace-nowrap">
+            <ContentsCount card={card} />
+          </p>
+        )}
       </div>
       <CardActions card={card} ctx={ctx} />
       <WalkPills card={card} ctx={ctx} />
@@ -2444,9 +2499,9 @@ const FrameContent = memo(function FrameContent({ card, ctx, focalStats, isFocal
                     follow controls sit OUTSIDE the truncating run, fixed
                     size, so they never fight the sentence for room. */}
                 <span className="truncate min-w-0 flex-1 tabular-nums">
-                  {orientationHalf('Fed by', 'source', 'upstream', focalReach.up, focalReach.moreUp, focalReach.upSystems, 'No upstream sources')}
+                  {orientationHalf('Fed by', 'source', 'upstream', focalReach.up, focalReach.moreUp, focalReach.upSystems, 'No upstream sources', focalReach.approxUp ?? 0)}
                   {' · '}
-                  {orientationHalf('feeds', 'consumer', 'downstream', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream')}
+                  {orientationHalf('feeds', 'consumer', 'downstream', focalReach.down, focalReach.moreDown, focalReach.downSystems, 'feeds nothing downstream', focalReach.approxDown ?? 0)}
                 </span>
                 {card.pillUp && <InlineFollow card={card} pill={card.pillUp} dir="in" ctx={ctx} />}
                 {card.pillDown && <InlineFollow card={card} pill={card.pillDown} dir="out" ctx={ctx} />}
@@ -2543,6 +2598,25 @@ function FocusNode({ data, selected }: NodeProps) {
   // could.
   const { anchor, onCone, offCone, hops } = useConeState(card.id)
   const onTrail = useOnTrail(card.nodeId)
+  // PORTS CAN ARRIVE AFTER THE CARD. React Flow measures a node's handles
+  // once, when the node mounts or resizes; a card that gains its ports
+  // LATER — a frame that becomes a bundle's endpoint when the reader
+  // switches Wires, a frame whose rows scroll past and roll up to it —
+  // renders the handles, but the edge layer still holds the old, empty
+  // measurement and silently draws nothing (2026-08-22: every bundle
+  // into a focus that had no wires of its own vanished). Re-measure
+  // whenever the card's wiring flips.
+  const updateNodeInternals = useUpdateNodeInternals()
+  const wiredRef = useRef(card.wired)
+  useEffect(() => {
+    if (wiredRef.current === card.wired) return          // the mount measures itself
+    wiredRef.current = card.wired
+    // React Flow reads the node's transform through DOMMatrixReadOnly,
+    // which a headless DOM does not have — there is nothing to re-measure
+    // there either.
+    if (typeof DOMMatrixReadOnly === 'undefined') return
+    updateNodeInternals(card.id)
+  }, [card.wired, card.id, updateNodeInternals])
 
   // A nested frame is one of its host's rows, so it answers to the
   // host's list the way any other row does — including saying whether
@@ -3200,6 +3274,9 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     /** The layout says this bundle's badge has something to say and room
      *  to say it (see `FocusEdge.labelVisible`). */
     labelVisible?: boolean
+    /** A rollup cell is in this bundle (Part G): the count is "≈" and the
+     *  wire draws coarse wherever it is. */
+    approx?: boolean
     /** Too many badges on this board for all of them to be read. */
     labelDense?: boolean
     /** THE TRAIL: this bundle connects two consecutive stops on the
@@ -3235,6 +3312,15 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     /** T23 R2 — this wire stands for a condensed pass-through run; draw
      *  the connector chip instead of a plain ×N. */
     condensed?: { connectorId: string; steps: number } | null
+    /** WIRE BUNDLES (2026-08-22): this wire stands for `bundle` member
+     *  wires between two containers — drawn heavier, its count the sum;
+     *  a member drawn back for a hover/selection carries `inBundle`. */
+    bundle?: number | null
+    inBundle?: string | null
+    onBundleHover?: ((id: string | null) => void) | null
+    onBundleClick?: ((id: string) => void) | null
+    /** The reader pinned this bundle open (its members are drawn). */
+    bundleOpen?: boolean
   }
   // Hover emphasis is derived here from context: the edges ARRAY stays
   // identity-stable, so sweeping the pointer never rebuilds it (nor
@@ -3298,7 +3384,10 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
   // while it is actually part of an isolated cone. The un-isolated
   // board's bundles are unchanged — `grainCoarse` sits on the data
   // whether or not anything is isolated, and `onCone` is what gates it.
-  const seam = onCone && (d.grainCoarse ?? false)
+  // A ROLLUP-BACKED wire (Part G) is coarse wherever it is: its count is a
+  // summary the raw pages have not yet confirmed, so it wears the seam's
+  // dash and an "≈" on its label until raw evidence replaces it.
+  const seam = (d.approx ?? false) || (onCone && (d.grainCoarse ?? false))
   // Whichever end sits FARTHER from the anchor is the coarse
   // CONTINUATION — the same "walk further from here" a card's own ⊕
   // already offers on that side, dispatched through the identical action.
@@ -3376,8 +3465,33 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
     reducedMotion: !!d.reducedMotion, motionDense: !!d.motionDense,
     tint: d.tint, mutedTint: d.mutedTint,
   })
+  // A BUNDLE draws as heavy as what it stands for — a stroke that grows
+  // with the log of its members (two at 13, five at 100, never a slab) —
+  // and its members, drawn back for a gesture, as ordinary wires.
+  if (d.bundle) visual.strokeWidth += Math.min(5, Math.log2(Math.max(2, d.bundle)) * 1.1)
+  // A bundle whose members are out (hovered here, or pinned) steps back
+  // so the detail reads on top of it rather than through it.
+  const [bundleHovered, setBundleHovered] = useState(false)
+  const bundleOut = !!d.bundle && (bundleHovered || !!d.bundleOpen)
   return (
     <>
+      {d.bundle && (
+        // THE BUNDLE'S OWN HIT PATH: hover fans the members out, a click
+        // keeps them out. Explicit pointer-events, because the flow marks
+        // an unselectable edge `inactive` and lets nothing through.
+        <path
+          d={path}
+          fill="none"
+          stroke="transparent"
+          strokeWidth={18}
+          style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+          className="nodrag nopan"
+          aria-label={`${d.bundle} wires — hover to see them, click to keep them`}
+          onMouseEnter={() => { setBundleHovered(true); d.onBundleHover?.(id) }}
+          onMouseLeave={() => { setBundleHovered(false); d.onBundleHover?.(null) }}
+          onClick={(e) => { e.stopPropagation(); d.onBundleClick?.(id) }}
+        />
+      )}
       <BaseEdge
         id={id}
         path={path}
@@ -3407,7 +3521,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
           // reduced motion can never strip it (review round 1's first
           // bug: the dash used to live only inside an animation class).
           strokeDasharray: visual.strokeDasharray,
-          opacity,
+          opacity: bundleOut ? Math.min(opacity, 0.28) : opacity,
           transition: d.reducedMotion ? undefined : 'opacity 140ms ease-out, stroke-width 140ms ease-out',
         }}
       />
@@ -3477,7 +3591,7 @@ function FocusGraphEdgeComp({ id, source, target, sourceX, sourceY, targetX, tar
                 aria-label="This connection loops back"
               />
             )}
-            {showCount && `×${d.count.toLocaleString()}`}
+            {showCount && `${d.approx ? '≈' : '×'}${d.count.toLocaleString()}`}
           </div>
         </EdgeLabelRenderer>
       )}
@@ -3736,14 +3850,14 @@ function LensPeek({ card, host, ctx, onDismiss }: {
             title={`${card.drawnIn.toLocaleString()} on this board${card.flowsIn > card.drawnIn ? `, ${(card.flowsIn - card.drawnIn).toLocaleString()} not fetched yet` : ''}`}
           >
             <LucideIcons.ArrowDownLeft className="w-3 h-3" />
-            {card.flowsIn.toLocaleString()}{card.flowsInExact ? '' : '+'} in
+            {card.approx ? '≈' : ''}{card.flowsIn.toLocaleString()}{card.flowsInExact ? '' : '+'} in
           </span>
           <span
             className="flex items-center gap-1 text-amber-600 dark:text-amber-400"
             title={`${card.drawnOut.toLocaleString()} on this board${card.flowsOut > card.drawnOut ? `, ${(card.flowsOut - card.drawnOut).toLocaleString()} not fetched yet` : ''}`}
           >
             <LucideIcons.ArrowUpRight className="w-3 h-3" />
-            {card.flowsOut.toLocaleString()}{card.flowsOutExact ? '' : '+'} out
+            {card.approx ? '≈' : ''}{card.flowsOut.toLocaleString()}{card.flowsOutExact ? '' : '+'} out
           </span>
           <span className="text-ink-muted/70">
             {flows === 0
@@ -3894,9 +4008,33 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+/**
+ * C4 (2026-08-21): how far OUT the reader may zoom. A one-hop board of a
+ * few hundred partner cards is many screens wide; the old 25% floor
+ * meant "Fit" could not fit it and the reader could not zoom out to see
+ * it either — the board ran off the pane in every direction.
+ */
+export const LENS_MIN_ZOOM = 0.02
+
+/**
+ * Mount only the cards in view. A 2,700-card board re-rendered every
+ * card on every wave of the hands-free walk; React Flow's culling keeps
+ * the DOM to what the pane shows. Off under vitest: jsdom has no
+ * layout, so every card would read as off-screen and every board test
+ * would see an empty pane. Paused during the PNG export, which
+ * rasterizes the DOM and needs every card in it.
+ */
+const CULL_OFFSCREEN = import.meta.env.MODE !== 'test'
+
+/** Two frames: enough for React Flow to mount and measure the cards the
+ *  culling had kept out of the DOM. */
+const twoFrames = () => new Promise<void>(resolve => {
+  requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+})
+
 /** House-styled zoom cluster (React Flow's default chrome doesn't
  *  match the lens). Must render inside <ReactFlow> for useReactFlow. */
-function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayout }: {
+function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayout, onPauseCulling, onRecenter }: {
   reducedMotion: boolean
   exportName?: string
   /** The VISIBLE picture and who it's about — source for the data export. */
@@ -3904,6 +4042,11 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
   focalUrn: string
   /** Present only once something has been dragged. */
   onResetLayout?: () => void
+  /** Bring every card into the DOM for the capture, then let go. */
+  onPauseCulling: (paused: boolean) => void
+  /** Centre the focus at a readable zoom (2026-08-22) — the way back
+   *  after a zoom-out, a pan, or a layout switch that left it tiny. */
+  onRecenter: () => void
 }) {
   const rf = useReactFlow()
   const [exporting, setExporting] = useState(false)
@@ -3936,7 +4079,9 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
       ?.querySelector<HTMLElement>('.react-flow__viewport')
     if (!viewport || exporting) return
     setExporting(true)
+    onPauseCulling(true)
     try {
+      await twoFrames()
       const { toPng } = await import('html-to-image')
       // THE HOOK'S BOUNDS, NOT THE BARE FUNCTION'S. The standalone
       // `getNodesBounds` cannot resolve sub-flow geometry without a node
@@ -3967,10 +4112,14 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
       a.href = dataUrl
       a.download = `lineage-${(exportName ?? 'focus').replace(/[^\p{L}\p{N}_-]+/gu, '-')}.png`
       a.click()
+      // Same feature family as the data export, different medium — someone took
+      // a lineage picture out of the product to show a human.
+      recordEvent('graph.export', { format: 'png', scope: 'lens' })
     } catch {
       // Rasterization can fail on exotic content (e.g. blocked images);
       // the graph itself is unaffected — just release the button.
     } finally {
+      onPauseCulling(false)
       setExporting(false)
     }
   }
@@ -3990,8 +4139,13 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
           first and last buttons instead (`stackTop`/`stackEnd` below),
           which is the same picture without a clipping context. */}
       <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-md divide-y divide-black/[0.06] dark:divide-white/[0.06]">
+        <IconTip label="Center on the focus" side="left">
+          <button type="button" aria-label="Center on the focus" onClick={onRecenter} className={cn(btn, 'peer', stackTop)}>
+            <LucideIcons.LocateFixed className="w-3.5 h-3.5" />
+          </button>
+        </IconTip>
         <IconTip label="Zoom in" side="left">
-          <button type="button" aria-label="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={cn(btn, 'peer', stackTop)}>
+          <button type="button" aria-label="Zoom in" onClick={() => void rf.zoomIn({ duration: dur })} className={cn(btn, 'peer')}>
             <LucideIcons.Plus className="w-3.5 h-3.5" />
           </button>
         </IconTip>
@@ -4085,6 +4239,10 @@ export function FocusGraphView({
   trailUrns = EMPTY_TRAIL,
   trailAdjacent = EMPTY_TRAIL,
   reducedMotion,
+  walking = false,
+  recenterKey = '',
+  recenterSignal = 0,
+  onViewportSettle,
   edgeTypeInfo,
   onSelect,
   onIsolate: onIsolateProp,
@@ -4297,7 +4455,9 @@ export function FocusGraphView({
       nodes.push({
         id: `bl:${band}`,
         type: 'bandLabel',
-        position: { x: band * (CARD_W + BAND_GAP), y: minY - 34 },
+        // The band's OWN column, measured (2026-08-22) — a widened frame
+        // moves the bands outside it, and their labels with them.
+        position: { x: graph.bandX.get(band) ?? band * (CARD_W + BAND_GAP), y: minY - 34 },
         ...(measuredById.get(`bl:${band}`) ? { measured: measuredById.get(`bl:${band}`) } : {}),
         draggable: false,
         selectable: false,
@@ -4335,7 +4495,7 @@ export function FocusGraphView({
     if (focalFetch === 'done') {
       if (!minYByBand.has(-1) && (!graph.modelHasUpstream || directionFilter === 'out' || graph.hiddenByChipsIn > 0)) {
         nodes.push({
-          id: 'blw:in', type: 'bandLabel', position: { x: -(CARD_W + BAND_GAP), y: -10 },
+          id: 'blw:in', type: 'bandLabel', position: { x: graph.bandX.get(-1) ?? -(CARD_W + BAND_GAP), y: -10 },
           draggable: false, selectable: false, focusable: false,
           data: {
             // Priority: the user's OWN direction filter, then the type
@@ -4351,7 +4511,7 @@ export function FocusGraphView({
       }
       if (!minYByBand.has(1) && (!graph.modelHasDownstream || directionFilter === 'in' || graph.hiddenByChipsOut > 0)) {
         nodes.push({
-          id: 'blw:out', type: 'bandLabel', position: { x: CARD_W + BAND_GAP, y: -10 },
+          id: 'blw:out', type: 'bandLabel', position: { x: graph.bandX.get(1) ?? CARD_W + BAND_GAP, y: -10 },
           draggable: false, selectable: false, focusable: false,
           data: {
             whisper: directionFilter === 'in'
@@ -4442,7 +4602,16 @@ export function FocusGraphView({
   // do, and they subscribe. Keeping it in `useState` re-rendered
   // `FocusGraphView` on every enter and every leave for nothing.
   const [hoverStore] = useState(() => new HoverStore())
-  const edges = useMemo((): Edge[] => {
+  // WIRE BUNDLES (2026-08-22): a hovered bundle fans out into its members;
+  // a clicked one keeps them out until it is clicked again (or Esc). The
+  // edge component reports both — React Flow marks unselectable edges
+  // `inactive` (no pointer events), so the bundle carries its own hit
+  // path rather than relying on the flow's edge events.
+  const [hoverBundle, setHoverBundle] = useState<string | null>(null)
+  const [pinnedBundle, setPinnedBundle] = useState<string | null>(null)
+  const onBundleHover = useCallback((id: string | null) => setHoverBundle(id), [])
+  const onBundleClick = useCallback((id: string) => setPinnedBundle(current => (current === id ? null : id)), [])
+  const { edges: baseEdges, toFlowEdge } = useMemo((): { edges: Edge[]; toFlowEdge: (e: FocusEdge) => Edge } => {
     const bandById = new Map(graph.cards.map(c => [c.id, c.band]))
     // For THE TRAIL: which urn each card id backs, so a bundle between
     // two consecutive walked hops can be found regardless of which end
@@ -4472,7 +4641,7 @@ export function FocusGraphView({
     // actually on a cone changes constantly, but how busy the board is
     // does not (`SEAM_MOTION_CAP`).
     const motionDense = graph.edges.filter(e => e.grainCoarse).length > SEAM_MOTION_CAP
-    return graph.edges.map((e) => {
+    const toFlowEdge = (e: FocusEdge): Edge => {
       // Containment is never drawn as a wire — it NESTS. Every edge on
       // the board is a lineage hop, tinted by the side it lands on.
       const up = Math.max(bandById.get(e.source) ?? 0, bandById.get(e.target) ?? 0) <= 0
@@ -4495,21 +4664,31 @@ export function FocusGraphView({
         sourceHandle: e.inFrameLane ? 'lane-out' : undefined,
         type: 'focusEdge',
         // Business users shouldn't infer direction from layout
-        // convention alone — every hop carries an explicit arrowhead.
-        markerEnd: { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
+        // convention alone — every hop carries an explicit arrowhead. A
+        // BUNDLE's stroke is heavy, and a marker sized in stroke units
+        // would be a sail: its arrow is sized in user space instead.
+        markerEnd: e.bundle
+          ? { type: MarkerType.ArrowClosed, color: tint, width: 22, height: 22, markerUnits: 'userSpaceOnUse' }
+          : { type: MarkerType.ArrowClosed, color: tint, width: 14, height: 14 },
         data: {
           count: e.count, dimmed: e.dimmed, tint, mutedTint, cycleBack: e.cycleBack, reducedMotion,
           cycleAnchor: e.cycleAnchor, labelVisible: e.labelVisible, labelDense, trail,
-          labelT: e.labelT, grainCoarse: e.grainCoarse, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
+          labelT: e.labelT, grainCoarse: e.grainCoarse, approx: e.approx ?? false, seamSlotted: e.seamSlotted, sameAncestorFrame: e.sameAncestorFrame,
           motionDense,
           inFrameLane: e.inFrameLane,
           sourcePillUp: cardById.get(e.source)?.pillUp ?? null,
           targetPillDown: cardById.get(e.target)?.pillDown ?? null,
           condensed: e.condensed ?? null,
+          bundle: e.bundle?.members ?? null,
+          inBundle: e.inBundle ?? null,
+          onBundleHover: e.bundle ? onBundleHover : null,
+          onBundleClick: e.bundle ? onBundleClick : null,
+          bundleOpen: !!e.bundle && pinnedBundle === e.id,
         },
       }
-    })
-  }, [graph.cards, graph.edges, reducedMotion, trailAdjacent])
+    }
+    return { edges: graph.edges.map(toFlowEdge), toFlowEdge }
+  }, [graph.cards, graph.edges, reducedMotion, trailAdjacent, onBundleHover, onBundleClick, pinnedBundle])
 
   const reachValue = useMemo(
     () => focalReach ?? null,
@@ -4528,6 +4707,25 @@ export function FocusGraphView({
   useEffect(() => () => { if (coneHoverTimer.current) clearTimeout(coneHoverTimer.current) }, [])
 
   const anchorId = hoverConeId ?? isolatedId ?? null
+  // WIRE BUNDLES — the detail a gesture away. The member wires a bundle
+  // hides come back for the cone's anchor (a hovered card, with its
+  // intent delay), the selected card, the isolated card, or a hovered
+  // bundle; a frame anchor brings every wire of every row inside it.
+  // Nothing here runs on a board without bundles.
+  const frameChainOf = useCallback((cardId: string): string[] => {
+    const chain: string[] = []
+    let host = graph.cards.find(c => c.id === cardId)?.frameId ?? null
+    let guard = 0
+    while (host && guard++ < 32) { chain.push(host); host = graph.cards.find(c => c.id === host)?.frameId ?? null }
+    return chain
+  }, [graph.cards])
+  const revealedEdges = useMemo((): Edge[] => {
+    if (graph.bundledWires.length === 0) return []
+    const cards = new Set([hoverConeId, selectedId, isolatedId].filter((id): id is string => !!id))
+    const bundles = new Set([hoverBundle, pinnedBundle].filter((id): id is string => !!id))
+    return revealedWires(graph.bundledWires, { cards, bundles }, frameChainOf).map(toFlowEdge)
+  }, [graph.bundledWires, hoverConeId, selectedId, isolatedId, hoverBundle, pinnedBundle, frameChainOf, toFlowEdge])
+  const edges = useMemo((): Edge[] => (revealedEdges.length === 0 ? baseEdges : [...baseEdges, ...revealedEdges]), [baseEdges, revealedEdges])
   const isolationValue = useMemo(() => {
     if (!anchorId) return null
     const cone = isolationCone(graph, anchorId)
@@ -4586,7 +4784,35 @@ export function FocusGraphView({
   // can read it because IT is one of those children; this can't be).
   // A ref costs nothing until the effect that uses it actually runs.
   const containerRef = useRef<HTMLDivElement | null>(null)
-  useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef)
+  // The reader took the camera (a pan or a zoom of their own) since this
+  // picture was framed — programmatic moves hand React Flow no event.
+  // Reset with the picture: a new focus or a layout switch is framed
+  // afresh, and the reader has not moved THAT yet.
+  const [readerMoved, setReaderMoved] = useState(false)
+  const [movedFor, setMovedFor] = useState(`${focalId}|${recenterKey}`)
+  if (movedFor !== `${focalId}|${recenterKey}`) {
+    setMovedFor(`${focalId}|${recenterKey}`)
+    setReaderMoved(false)
+  }
+  const camera = useFrameCamera(rf, focalId, graph.cards, graph.edges, reducedMotion, containerRef, walking, recenterKey, readerMoved, graph.bandX)
+  // THE WAY BACK IS FINDABLE (2026-08-22). "Center on the focus" lived only
+  // in the corner stack of icons. The header asks for it through
+  // `recenterSignal`; and the board offers it by itself the moment the
+  // focus has left the screen — asked of the camera on every move, so the
+  // pill is there exactly when the focus has been lost and gone when it
+  // is back.
+  const lastSignalRef = useRef(recenterSignal)
+  useEffect(() => {
+    if (lastSignalRef.current === recenterSignal) return
+    lastSignalRef.current = recenterSignal
+    camera.recenter()
+  }, [recenterSignal, camera])
+  const [focusOff, setFocusOff] = useState(false)
+  // The map folds away when it is in the way; the choice sticks for the session.
+  const [mapOpen, setMapOpen] = useState(true)
+  // The PNG export needs every card in the DOM; culling is paused for
+  // the capture (see `CULL_OFFSCREEN`).
+  const [cullPaused, setCullPaused] = useState(false)
 
   // The PEEK belongs to a ROW: a click on one asks "what is this", and
   // this is the answer, beside it. Top-level cards keep the lens's own
@@ -4664,10 +4890,16 @@ export function FocusGraphView({
           nodeTypes={NODE_TYPES}
           edgeTypes={EDGE_TYPES}
           onInit={setRf}
-          fitView
-          fitViewOptions={{ padding: 0.15, maxZoom: FIT_MAX_ZOOM }}
-          minZoom={0.25}
+          // A user-driven move carries its event; the camera's own moves do not.
+          onMoveStart={(event) => { if (event) setReaderMoved(true) }}
+          onMove={(_, viewport) => setFocusOff(!camera.focusInView(viewport))}
+          onMoveEnd={(_, viewport) => onViewportSettle?.(viewport.zoom)}
+          // No `fitView` prop: React Flow's own fit-on-init framed the coarse
+          // first paint WHOLE — the tiny focus — a beat before the camera's
+          // focus-first framing (2026-08-22). The camera owns every move.
+          minZoom={LENS_MIN_ZOOM}
           maxZoom={2}
+          onlyRenderVisibleElements={CULL_OFFSCREEN && !cullPaused}
           panOnDrag
           zoomOnScroll
           zoomOnDoubleClick={false}
@@ -4728,6 +4960,8 @@ export function FocusGraphView({
             graph={graph}
             focalUrn={focalId}
             onResetLayout={moved.size > 0 ? resetLayout : undefined}
+            onPauseCulling={setCullPaused}
+            onRecenter={camera.recenter}
           />
           {peekCard && (
             <LensPeek
@@ -4812,8 +5046,107 @@ export function FocusGraphView({
               </div>
             </Panel>
           )}
+          {/* THE MINI MAP (2026-08-22, richer second pass) — the room's own
+              glass panel, like the canvas behind it: a header that names
+              it and folds it away, the board's OWN card colours (the same
+              `visualFor` the cards paint with, the focus in the lineage
+              accent), the two sides marked on the stroke, and the
+              viewport framed. A way to travel, not a picture: drag to
+              pan, scroll to zoom, click a card to fly to it. Bottom-LEFT,
+              opposite the control stack. Only once there is enough board
+              to get lost on — a board of three cards is its own map. */}
+          {graph.cards.length >= MINIMAP_MIN_CARDS && (
+            <Panel position="bottom-left" className="!m-3 nopan nodrag">
+              <section
+                aria-label="Map of the board"
+                className="glass-panel-subtle rounded-xl overflow-hidden shadow-lg"
+              >
+                <div className="flex items-center gap-2 px-2.5 h-7 border-b border-black/[0.06] dark:border-white/[0.08]">
+                  <LucideIcons.Map className="w-3 h-3 flex-shrink-0 text-accent-lineage" aria-hidden="true" />
+                  <span className="text-[9.5px] font-semibold uppercase tracking-[0.1em] text-ink-muted/70">Map</span>
+                  <button
+                    type="button"
+                    onClick={() => setMapOpen(o => !o)}
+                    aria-label={mapOpen ? 'Hide the map' : 'Show the map'}
+                    className="-mr-1 ml-auto w-5 h-5 flex items-center justify-center rounded text-ink-muted/70 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                  >
+                    <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform', !mapOpen && 'rotate-180')} />
+                  </button>
+                </div>
+                {mapOpen && (
+                  <MiniMap
+                    ariaLabel="Map of the board"
+                    pannable
+                    zoomable
+                    offsetScale={2}
+                    nodeBorderRadius={3}
+                    nodeStrokeWidth={2}
+                    className="nx-lens-minimap"
+                    onNodeClick={(_, node) => {
+                      // Click a card on the map and travel to it — the map
+                      // is navigation, and this is the shortest way across
+                      // a board too big to scan.
+                      void rf?.fitView({ nodes: [{ id: node.id }], padding: 0.6, duration: reducedMotion ? 0 : 320, maxZoom: FIT_MAX_ZOOM })
+                    }}
+                    nodeColor={(n) => {
+                      const card = (n.data as { card?: FocusCard } | undefined)?.card
+                      if (!card) return 'rgba(148,163,184,0.35)'
+                      if (card.kind === 'focal') return ACCENT_LINEAGE
+                      // The board's own colour for this kind of thing, so
+                      // the map and the cards read as one picture.
+                      return card.type === 'not loaded' ? NEUTRAL_ACCENT : visualFor(card.type).color
+                    }}
+                    nodeStrokeColor={(n) => {
+                      const card = (n.data as { card?: FocusCard } | undefined)?.card
+                      if (!card) return 'transparent'
+                      if (card.kind === 'focal') return ACCENT_LINEAGE
+                      const band = card.band ?? 0
+                      return band < 0 ? TINT_UP : band > 0 ? TINT_DOWN : 'transparent'
+                    }}
+                    maskColor="rgba(15,23,42,0.08)"
+                    maskStrokeColor={ACCENT_LINEAGE}
+                    maskStrokeWidth={2}
+                  />
+                )}
+              </section>
+            </Panel>
+          )}
         </ReactFlow>
       </ReactFlowProvider>
+      {/* C4: cards landed while the walk was drawing and the camera held
+          its place — the fit is OFFERED, never taken. While the walk runs
+          the capsule owns the top-centre (2026-08-22), so the offer sits
+          below it rather than under it. */}
+      {(camera.grew || focusOff) && (
+        <div
+          className={cn(
+            'absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 transition-[top]',
+            walking ? 'top-[4.75rem]' : 'top-3',
+          )}
+        >
+          {focusOff && (
+            <button
+              type="button"
+              data-testid="lens-focus-offscreen"
+              onClick={camera.recenter}
+              className="inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/40 bg-accent-lineage px-3 py-1 text-[11px] font-semibold text-white shadow-md shadow-accent-lineage/20 hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.LocateFixed className="w-3 h-3" />
+              Center on the focus
+            </button>
+          )}
+          {camera.grew && (
+            <button
+              type="button"
+              onClick={camera.fitAll}
+              className="inline-flex items-center gap-1.5 rounded-full border border-accent-lineage/30 bg-canvas-elevated px-3 py-1 text-[11px] font-medium text-accent-lineage shadow-md hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+              <LucideIcons.Maximize2 className="w-3 h-3" />
+              Board grew · Fit
+            </button>
+          )}
+        </div>
+      )}
       </RowCursorStoreContext.Provider>
       </FollowContext.Provider>
       </TrailStoreContext.Provider>

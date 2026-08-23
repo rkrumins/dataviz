@@ -662,3 +662,5 @@ def requires(
     _dependency.workspace_any = workspace_any  # type: ignore[attr-defined]
 
     return _dependency
+
+

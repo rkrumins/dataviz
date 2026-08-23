@@ -29,6 +29,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Clock, Eye, History, Pencil, X } from 'lucide-react'
+import { ViewUsageBadge } from './ViewUsageBadge'
 import { cn } from '@/lib/utils'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -116,6 +117,11 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     <span className="text-[11px] text-ink-muted truncate hidden sm:inline">
                         {workspaceName ? `${workspaceName} · ` : ''}{viewTypeLabel(view.viewType)}
                     </span>
+                    {/* How much this view is actually used, on the view. The
+                        platform always knew; it only ever said so on a
+                        dashboard the person who built this has no reason to
+                        open. Renders nothing while loading or on failure. */}
+                    <ViewUsageBadge viewId={viewId} className="hidden md:inline-flex shrink-0" />
                     {readOnly && (
                         <span
                             className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-400 shrink-0"

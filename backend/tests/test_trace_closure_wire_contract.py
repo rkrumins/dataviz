@@ -117,6 +117,7 @@ def test_trace_closure_request_alias_round_trip():
         "excludeUrns": ["x1"],
         "afterCursor": "e:123",
         "seedCursor": None,
+        "grain": None,
     }
     from_alias = TraceClosureRequest.model_validate(alias_payload)
 
@@ -131,6 +132,7 @@ def test_trace_closure_request_alias_round_trip():
         "exclude_urns": ["x1"],
         "after_cursor": "e:123",
         "seed_cursor": None,
+        "grain": None,
     }
     from_snake = TraceClosureRequest.model_validate(snake_payload)
 
@@ -160,7 +162,19 @@ def test_trace_frontier_node_alias_round_trip():
     from_snake = TraceFrontierNode.model_validate(snake_payload)
 
     assert from_alias == from_snake
-    assert from_alias.model_dump(by_alias=True) == alias_payload
+    assert from_alias.model_dump(by_alias=True) == {**alias_payload, "reason": None}
+
+
+def test_trace_frontier_node_reason_is_additive_and_bounded():
+    """`reason` says WHY a node is on the frontier: `cut` = the budget or the
+    deadline stopped the walk there (a one-hop client completes it hands-free
+    by re-rooting), `depth` = the requested depth ended there (the next hop —
+    a pill). Old payloads without it still validate."""
+    assert TraceFrontierNode.model_validate({"urn": "u1"}).reason is None
+    assert TraceFrontierNode.model_validate({"urn": "u1", "reason": "cut"}).reason == "cut"
+    assert TraceFrontierNode(urn="u1", reason="depth").model_dump(by_alias=True)["reason"] == "depth"
+    with pytest.raises(ValidationError):
+        TraceFrontierNode.model_validate({"urn": "u1", "reason": "because"})
 
 
 # ── TraceClosureResult ───────────────────────────────────────────────────
@@ -199,8 +213,8 @@ def test_trace_closure_result_alias_round_trip():
         "effectiveLevel": 0,
         "truncated": True,
         "truncationReason": "max_nodes",
-        "frontierUp": [{"urn": "up1", "totalCount": 5, "nextCursor": None}],
-        "frontierDown": [{"urn": "down1", "totalCount": None, "nextCursor": "e:1"}],
+        "frontierUp": [{"urn": "up1", "totalCount": 5, "nextCursor": None, "reason": "depth"}],
+        "frontierDown": [{"urn": "down1", "totalCount": None, "nextCursor": "e:1", "reason": "cut"}],
         "seedTruncated": True,
     }
     from_alias = TraceClosureResult.model_validate(alias_payload)
@@ -213,8 +227,8 @@ def test_trace_closure_result_alias_round_trip():
         "effective_level": 0,
         "truncated": True,
         "truncation_reason": "max_nodes",
-        "frontier_up": [{"urn": "up1", "total_count": 5, "next_cursor": None}],
-        "frontier_down": [{"urn": "down1", "total_count": None, "next_cursor": "e:1"}],
+        "frontier_up": [{"urn": "up1", "total_count": 5, "next_cursor": None, "reason": "depth"}],
+        "frontier_down": [{"urn": "down1", "total_count": None, "next_cursor": "e:1", "reason": "cut"}],
         "seed_truncated": True,
     }
     from_snake = TraceClosureResult.model_validate(snake_payload)
@@ -222,8 +236,8 @@ def test_trace_closure_result_alias_round_trip():
     assert from_alias == from_snake
 
     dumped = from_alias.model_dump(by_alias=True)
-    assert dumped["frontierUp"] == [{"urn": "up1", "totalCount": 5, "nextCursor": None}]
-    assert dumped["frontierDown"] == [{"urn": "down1", "totalCount": None, "nextCursor": "e:1"}]
+    assert dumped["frontierUp"] == [{"urn": "up1", "totalCount": 5, "nextCursor": None, "reason": "depth"}]
+    assert dumped["frontierDown"] == [{"urn": "down1", "totalCount": None, "nextCursor": "e:1", "reason": "cut"}]
     assert dumped["seedTruncated"] is True
 
 
@@ -323,12 +337,23 @@ def test_max_nodes_none_uses_trace_max_nodes():
     assert provider.calls[0]["max_nodes"] == ContextEngine.TRACE_MAX_NODES
 
 
-def test_max_nodes_over_cap_clamps_to_trace_max_nodes():
+def test_max_nodes_over_cap_clamps_to_the_hard_ceiling():
+    # 2026-08-19: an explicit maxNodes may ESCALATE past the default page
+    # size (the full-walk driver's big-page lane — one 6000-node BFS beats
+    # thousands of frontier round trips), clamped by the hard ceiling.
     provider = _CapturingClosureProvider()
     eng = _make_engine(provider)
     req = TraceClosureRequest.model_validate({"urn": "u1", "maxNodes": 99999})
     _run(ContextEngine.trace_closure(eng, req))
-    assert provider.calls[0]["max_nodes"] == ContextEngine.TRACE_MAX_NODES
+    assert provider.calls[0]["max_nodes"] == ContextEngine.TRACE_MAX_NODES_HARD
+
+
+def test_max_nodes_escalation_between_default_and_hard_cap_passes_through():
+    provider = _CapturingClosureProvider()
+    eng = _make_engine(provider)
+    req = TraceClosureRequest.model_validate({"urn": "u1", "maxNodes": 6000})
+    _run(ContextEngine.trace_closure(eng, req))
+    assert provider.calls[0]["max_nodes"] == 6000
 
 
 def test_max_nodes_under_cap_passes_through():
@@ -537,3 +562,80 @@ def test_a_source_with_any_real_type_still_filters_the_synthetic_one():
     eng = _engine_with_ontology(provider, _OntologyWithSyntheticTypes())
     _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate({"urn": "u1"})))
     assert "AGGREGATED" not in provider.calls[0]["lineage_edge_types"]
+
+
+# ── grain: the coarse first paint's wire (Part G, 2026-08-21) ──────────────
+
+
+class _CoarseCapableProvider(_CapturingClosureProvider):
+    def __init__(self):
+        super().__init__()
+        self.coarse_calls = []
+
+    async def trace_closure_coarse(self, **kwargs):
+        self.coarse_calls.append(kwargs)
+        return TraceClosureResult(
+            nodes=[], edges=[], containmentEdges=[],
+            upstreamUrns=set(), downstreamUrns=set(),
+            focus=TraceFocus(urn=kwargs["urn"], level=0, entityType="x"),
+            effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+            truncated=False, truncationReason=None,
+        )
+
+
+def test_grain_is_optional_and_absent_from_the_dump_when_unset():
+    """An old client sends no `grain`; its cache key (built from the
+    exclude_none dump) must not change by a byte."""
+    req = TraceClosureRequest.model_validate({"urn": "u1"})
+    assert req.grain is None
+    assert "grain" not in req.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"}).grain == "coarse"
+
+
+def test_grain_coarse_dispatches_to_the_rollup_lane_and_the_result_says_so():
+    provider = _CoarseCapableProvider()
+    eng = _make_engine(provider)
+    req = TraceClosureRequest.model_validate({"urn": "u1", "direction": "upstream", "grain": "coarse"})
+    result = _run(ContextEngine.trace_closure(eng, req))
+    assert provider.calls == []                       # the fine walk never ran
+    assert len(provider.coarse_calls) == 1
+    call = provider.coarse_calls[0]
+    assert call["urn"] == "u1" and call["direction"] == "upstream"
+    assert call["aggregated_edge_type"] == "AGGREGATED"
+    assert call["containment_edge_types"] == ["HAS"]
+    assert result.grain == "coarse"
+
+
+def test_grain_coarse_falls_back_to_the_fine_walk_when_the_provider_has_no_rollup_lane():
+    """Drafts and versioned branches have no rollup lane: the request is
+    served by the fine walk, and the result says `fine` so the client can
+    tell it is the same page its fine leg brings."""
+    provider = _CapturingClosureProvider()
+    eng = _make_engine(provider)
+    req = TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"})
+    result = _run(ContextEngine.trace_closure(eng, req))
+    assert len(provider.calls) == 1
+    assert result.grain == "fine"
+
+
+def test_grain_fine_or_unset_never_touches_the_rollup_lane():
+    provider = _CoarseCapableProvider()
+    eng = _make_engine(provider)
+    for payload in ({"urn": "u1"}, {"urn": "u1", "grain": "fine"}):
+        _run(ContextEngine.trace_closure(eng, TraceClosureRequest.model_validate(payload)))
+    assert provider.coarse_calls == []
+    assert len(provider.calls) == 2
+
+
+def test_trace_closure_result_carries_grain_optionally():
+    base = {
+        "nodes": [], "edges": [], "containmentEdges": [],
+        "upstreamUrns": [], "downstreamUrns": [],
+        "focus": {"urn": "u1", "level": 0, "entityType": "x"},
+        "effectiveLevel": 0, "isInherited": False, "inheritedFromUrn": None,
+        "truncated": False, "truncationReason": None,
+        "frontierUp": [], "frontierDown": [], "seedTruncated": False, "seedCursor": None,
+    }
+    assert TraceClosureResult.model_validate(base).grain is None
+    assert TraceClosureResult.model_validate({**base, "grain": "coarse"}).model_dump(by_alias=True)["grain"] == "coarse"
+

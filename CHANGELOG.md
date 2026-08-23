@@ -9,7 +9,281 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Analytics, and measuring value rather than attention
+
+### Added
+
+**A top-level Analytics section at `/analytics`.** Six tabs — Overview, Growth,
+Engagement, Content, Health, Workspaces — under one range control (7d/14d/30d/90d/6m/1y
+or any custom range) that every chart, figure and table on the page re-renders against,
+so the numbers always agree with each other. Every number carries a definition saying
+what it counts, how it is computed, and what to do if it moves.
+
+**The product's own value moments are now instrumented.** Seven new product events —
+`lineage.trace`, `lineage.trace_empty`, `graph.search`, `graph.search_miss`,
+`graph.export`, `version.published`, `ontology.published`. The `_empty`/`_miss` variants
+are separate event *types*, not payload flags, so "how often did someone ask the core
+question and get nothing back?" stays a `GROUP BY` on an existing index rather than a
+payload scan. Activation is now scored on tracing lineage rather than on creating a
+view: authoring is a later, heavier commitment, and scoring activation on it measured
+investment rather than value.
+
+**Usage figures on the content itself.** The view page now shows opens, distinct viewers
+and a trend beside the view's name. `GET /insights/views` is deliberately not under
+`/admin` and not analytics-gated — it returns counts and dates with no identities, scoped
+by the same `readable_views_clause` the catalogue lists with, in three queries whatever
+the batch size. Ids the caller cannot read come back absent rather than refused, which is
+also what a non-existent id gets.
+
+**Server-computed narrative insights** above the Overview charts, ranked by significance.
+Every rule is a pure function of the finished summary document — so an insight can never
+contradict the chart beneath it — and every rule is guarded, so a young install gets
+silence rather than five findings manufactured from three users.
+
+**A first-run panel** on new deployments, in place of six empty charts and four zero
+tiles, linking the steps that fix it and gating each on whether this reader can take it.
+
+**A custom range calendar** — two months side by side, Monday-first, UTC, with named
+periods (this/last month, this/last quarter) and full keyboard navigation, replacing two
+`<input type="date">` boxes that could not show the shape of a range.
+
+**A visual harness** — `npm run harness:analytics` — rendering the real components against
+one fixture per privacy posture. The postures cannot be checked by hand: seeing the strict
+view needs a second account with no workspace bindings and two flags set a particular way.
+
+**`system:analytics:read`**, seeded on `super_admin`, `org_admin` and `org_auditor`.
+Analytics had been piggybacking on `system:audit:read` — "read the platform audit log" —
+so growth dashboards came bundled with every login and RBAC mutation.
+
+**Four feature flags in a new Analytics category:** `analyticsPrivacyMode` (strict /
+internal / full, default `internal`), `analyticsPublicEnabled` (off), `analyticsWorkspaceVisibility`
+(off), `analyticsShowEmailAddresses` (off). See **Upgrading**.
+
+**Retention for `product_events`.** A daily sweep on the scheduler-owner role keeps 400
+days (`PRODUCT_EVENT_RETENTION_DAYS`, clamped to ≥ 365 so a year-long chart cannot be made
+to lie). The table had no horizon because its contents used to be rare; it now takes a row
+per view open, lineage trace and graph search.
+
+### Changed
+
+**Analytics now follows the app's permission model instead of re-deciding it.** It was
+*stricter* than the product it reports on in four places — ignoring `system:org-viewer`,
+hiding `enterprise`-visibility view names, denying a creator reach to their own work, and
+withholding email addresses that `GET /views/{id}` has always returned. Being over-cautious
+is not the harmless direction to be wrong in: a dashboard that hides what the rest of the
+app shows teaches people its numbers are unreliable.
+
+**Analytics documents are cached once per window and redacted per reader.** The cache key
+was a fingerprint of the caller's visible workspaces, so readers with different access never
+shared an entry — a few hundred concurrent users meant a few hundred full recomputations per
+TTL, and the cache worked hardest exactly when it needed to help most. The audience was in the
+key because the *redacted* document was in the value; the unredacted one is now cached and
+`_serve` is the only way anything leaves it, deep-copying before applying a redactor.
+
+**The standard windows are precomputed off the read path.** A warmer on the scheduler-owner
+role recomputes the six presets every 300 s (`ANALYTICS_WARM_INTERVAL_SECONDS`) with a TTL
+three passes long. Purely an optimisation — a cold key, a custom range, a drill-in, or a
+deployment with no scheduler role still works through read-through. Documents are minutes old
+by design, so the header says so relatively with the exact instant on hover.
+
+**Event counts are grouped in SQL instead of decoded in Python.** `product_events.subject_id`
+denormalises what an event is *about* out of its JSON payload, indexed
+`(event_type, subject_id, created_at)`. Measured on 200k opens across 2,000 views over 90
+days: the full-window fold 1345 ms → 401 ms, and one view's usage 1345 ms → 2.4 ms. The
+second number is what makes usage-on-the-content affordable at all.
+
+**Comparison charts place both periods on one continuous time axis**, every bar on the date
+it happened, with a dashed divider, a wash over the earlier half and in-plot captions naming
+each. The previous period is a paired column that differs by texture (hatched), fill (outlined)
+and tint — not opacity alone, which reads as "disabled" rather than "earlier" — and the
+tooltip names the delta with an arrow, never a colour, since the chart does not know whether up
+is good. The cost is stated rather than hidden: a 30-day window draws a 60-day axis.
+`TimeSeriesChart` deliberately keeps index alignment; a ghost *line* is unambiguous as an
+overlay, and it is a *bar* sitting on a date that invites the reader to trust the axis about it.
+
+**Withheld content is locked and explained rather than removed.** A synthetic silhouette in
+the real geometry, the heading and description kept for everyone, and a locked workspace row
+that offers to request access — asking first, saying what is being requested and who will see
+it, and taking a note. Frosted glass over the real thing was rejected as a security bug: CSS
+blur is a paint effect and every value stays one view-source away.
+
+**`reference` renders as "Context View" everywhere.** The mapping had been hand-written in
+four places and Analytics was the fifth surface, rendering the raw enum; `lib/domainLabels.ts`
+is now the single source. **"Active users"** is one name for one measure across Overview, the
+drill-in, the KPI tile and the Engagement chart.
+
+**The Workspaces tab opens with what the estate is made of** — existing vs visible, quiet,
+unconnected, and two ordered distributions — rather than with a sortable table, which only
+answers a question nobody arrives with. Locked rows collapse behind a summary; they still
+exist, because the table has to keep agreeing with the totals above it.
+
+**The default Overview window is 14 days** rather than 30 — long enough that a quiet Tuesday
+does not swing the trend, short enough that "what changed" is still about now.
+
+### Fixed
+
+**The Growth tab crashed against any server that had not deployed yet** —
+`series.previous.buckets is not iterable`, an unguarded spread of a field the running backend
+did not send. Analytics documents are precomputed into Redis and outlive the code that wrote
+them, so *every* future field carries this hazard: the cache key now carries a schema version,
+`comparedSeries` returns null unless the previous period has a date for every value, and the
+shared chart primitive checks rather than throwing.
+
+**Metric definitions never appeared.** `MetricInfo` positioned its panel absolutely inside the
+tile, and every anchor sits in a `KpiCard` with `overflow-hidden` — so every definition was
+clipped to its tile and the affordance did nothing. Now portalled, viewport-clamped, flipped
+when there is no room, and following scroll and resize.
+
+**A previous-period tick was drawn at every bucket, including zeros**, landing on the axis
+where consecutive ones merged into a rule that read as a plotted series — a sparse window
+looked like a field of floating dashes with one real bar among them. A chart also no longer
+calls itself empty when only the *current* window is flat.
+
+**The `views-not-opened` insight was invisible to everyone it was for.** `redact_summary`
+fails closed, which is right, but silently — an unclassified rule is simply dropped, no error,
+no red test. A test now cross-checks every key any rule can emit against all three allow-lists
+in both directions, scanning the source rather than running the rules.
+
+Plus: an all-zero trend no longer draws a sparkline (a flat rule with an end dot reads as
+"steady at some level"); the sorted-column meter no longer shades a whole row; future days in
+the calendar no longer render louder than pickable ones (an alpha modifier on a bare `var()`
+token compiles to a colour the browser drops); a `useId` pattern id no longer begins with a
+colon, which an XML name may not and a browser may refuse to dereference.
+
+### Security
+
+**A redacted document was still shipping user ids.** `createdBy` was added to popular-view
+rows so the redactor could honour a creator's reach to their own work, and both branches of
+`_redact_view_row` then spread `**row` — so every redacted view carried its author's user id
+to a reader who could not see the view's name. Rows are now projected through an explicit
+allow-list: a column added to a ranking query is withheld until someone names it on purpose.
+
+**The workspace drill-in leaked its contributor roster.** `workspace_detail` returned its
+document unfiltered, guarded only by `can_see` — *may Analytics report on this workspace* —
+which is an access decision, not a decision about what a document may contain. It shipped
+`topContributors` with names and email addresses at every privacy level, including the strict
+one whose entire premise is that no individual is ever named, and
+`analyticsWorkspaceVisibility` made that reachable for non-members. Fixed with a single exit
+through `redact_workspace_detail`, contributors gated on `can_open` plus membership.
+
+**Guards that fail loudly.** A sweep over the serialised redacted document, a second over the
+HTTP response body (the repo's return value is not what reaches a browser), a router-walking
+sweep that enumerates the mounted routes rather than a list someone must remember to update,
+and a fourth that requires the identifiers to be *present* in a privileged document — a guard
+that cannot fail proves nothing.
+
+### Upgrading
+
+**Run the migration.** `20260821_1200_event_subject` adds `product_events.subject_id` and its
+index, then backfills in Python — SQLite and Postgres spell JSON extraction differently. It is
+inspector-guarded, because `0001_baseline` `create_all()`s the current ORM and a bare
+`add_column` would make a brand-new environment unbuildable while every migrated database kept
+working.
+
+**Nothing turns on by itself.** Analytics is visible to `super_admin`, `org_admin` and
+`org_auditor` on deploy and to nobody else.
+
+**Two settings widen disclosure — decide them deliberately.** `analyticsWorkspaceVisibility`
+lets Analytics *report on* workspaces RBAC hides from a reader (reporting only; it grants no
+access and renders no link they cannot follow). `analyticsShowEmailAddresses` adds addresses
+beside colleagues attached to something the reader can already open, never on the
+platform-wide activity ranking, and cannot read past `analyticsPrivacyMode`. Both default off
+and both changes are recorded in `feature_flag_changes`. `analyticsPublicEnabled` fails closed:
+an unreadable flag means privileged-only, because failing open would publish headcount and
+workspace existence over a database hiccup.
+
+**Run the scheduler role somewhere** if you want warmed documents and event retention. Neither
+is required for correctness, but without it readers pay the aggregation on the read path and
+`product_events` grows with no horizon.
+
+### Known limitations
+
+- A custom role granted **only** `system:analytics:read` gets no nav item: the catalogue spec
+  is `["system:admin", "system:org-admin", "system:audit:read"]`, so the client hides what the
+  server would serve. The three seeded roles each also hold one of those, so this does not bite
+  them.
+- Custom ranges are never warmed and pay the read-through cost on first request. Warming an
+  unbounded key space is how a warmer becomes a load generator.
+- Usage history starts from this release — opens are counted from `product_events`, and
+  `view_visits` is an upsert keyed `(view, user)` that only ever held each user's *last* visit.
+- Workspace distribution bands cover the workspaces this reader is shown, which for most people
+  is a subset; the header says how much of the estate is in view rather than calling two of ten
+  "the estate".
+
+---
+
 ## [Unreleased] — View sharing that means what it says
+
+### Changed
+
+**Rollups are stored in full detail by default.** Every ancestor-pair
+combination is now pre-created — leaf-involving and mixed-level included — so
+no canvas granularity can come back thin. This closes a real gap on
+self-nesting ontology types (`Node ⊃ Node ⊃ Node`), where the boundary mode's
+on-demand reader still reasons in ontology type levels and could return
+incomplete mixed-granularity drill answers. The previous default, `auto`,
+stored the full cube only while it fit the cube ceiling and fell back to the
+depth-diagonal above it.
+
+It applies everywhere without new plumbing, because every automatic rebuild
+already resolves its configuration server-side: reconciliation drift and first
+builds, the cron drift sweep, the stale-marker reconciler, Refresh rollups, the
+projector heal hook, and the Ingestion re-trigger dialog.
+
+**Rollup storage is now a fleet-wide setting an operator owns.** Ingestion →
+Freshness → Automation → ③ Act → Advanced switches the whole fleet between
+Auto and Always full detail, and every subsequent run picks it up. The
+workspace Defaults dialog gained the same control in place of its
+"Materialize fine pairs" checkbox.
+
+**Machine-queued rebuilds get the same stall window as a hand-started one.**
+`AGGREGATION_STALL_TIMEOUT_SECS` moves 900 → 10800 (3h), matching what every UI
+trigger path already sent explicitly. Only the machine paths leave a job's
+`timeout_secs` NULL, so they were the only rebuilds being killed for making no
+progress for fifteen minutes — on exactly the graphs large enough to do that,
+with nobody watching. A progressing job was never affected; this is a
+no-forward-progress window, not a runtime cap.
+
+### Fixed
+
+**"Auto" could not turn full detail back off.** Rollup storage had three
+meanings but only two wire values: "Auto" was expressed by omitting the field,
+and an omitted field means *inherit*. So once a global default of full detail
+was stored, the trigger dialog showed "Auto (recommended)" while the job it
+queued ran the full cube. `materializeFinePairs` now accepts `"auto"` as a
+value, and the dialog resolves an absent field against the default the server
+reports rather than assuming Auto.
+
+**Saving one aggregation default no longer erases the others.**
+`aggregation_settings.tuning_json` has two editors now, and it was written by
+replacement — so whichever saved last wiped the other's fields. It is merged,
+like `cadence_json` already was; clearing a value means sending it explicitly
+as `null`.
+
+**Picking a performance profile no longer discards the rollup-storage
+choice**, and a profile again reads as active once one is set.
+
+### Upgrading
+
+**Rollup storage changes behaviour on upgrade.** A graph whose full cube
+exceeds `AGGREGATION_MAX_MATERIALIZED_EDGES` (default 25M, ~12.5GB at ~0.5KB
+per edge, sized against ONE shard) now fails its rebuild terminally on
+`MaterializationBudgetExceeded` where `auto` would have degraded to the
+depth-diagonal and served finer granularities on demand. A forced cube skips
+the up-front estimate, so that failure lands part-way through and leaves a
+partial cube until the next successful rebuild reconciles it; reconciliation's
+breaker suspends a source after three such passes.
+
+Check your largest graph against the budget before upgrading. To keep the old
+behaviour fleet-wide, set Rollup storage to **Auto** in Ingestion → Freshness →
+Automation (③ Act → Advanced), or set
+`AGGREGATION_MATERIALIZE_FINE_PAIRS=auto`. Note that a value stored from the UI
+beats the environment variable.
+
+Deployments pinning `AGGREGATION_STALL_TIMEOUT_SECS` should raise it to 10800
+to pick up the watchdog change (`deploy/k8s/base/configmaps/worker-config.yaml`
+is updated); keep it below `2 × AGGREGATION_JOB_TIMEOUT_SECS` so the control
+plane's stale-job backstop stays the backstop.
 
 ### Security
 

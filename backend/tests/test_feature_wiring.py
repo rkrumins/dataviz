@@ -189,13 +189,36 @@ def test_an_ACTIVE_capability_flag_must_default_ON(key: str):
 
 
 def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
-    """The exemption is not a loophole: it has exactly one member, and adding another should
-    require someone to come here and say so out loud."""
-    off_by_default = [
+    """The exemption is not a loophole: adding a member should require someone to come here and
+    say so out loud. Said out loud, then:
+
+      * ``signupEnabled`` — ON means any stranger who reaches the login page can create an
+        account. The original reason this exemption exists.
+      * ``analyticsPublicEnabled`` — ON publishes platform-wide growth, headcount and the
+        existence of every workspace to everyone who can sign in. Redacted, but still a
+        disclosure, and one an operator should make deliberately rather than inherit from a
+        default nobody chose.
+      * ``analyticsShowEmailAddresses`` — ON puts several colleagues' addresses on one
+        ranked page. Each of them was already reachable from the thing they built, so this
+        is not what protects them; what it changes is how many arrive at once, and that is
+        a call about the deployment rather than a default anyone should inherit.
+      * ``analyticsWorkspaceVisibility`` — ON makes Analytics report on workspaces the rest
+        of the product hides from that reader. Reasonable in a single-company deployment
+        and wrong anywhere else, so it cannot be a default: the deployment shape is the
+        one thing the code cannot know.
+    """
+    # A single-select ladder has no "off" rung to ship on, so the boolean
+    # question this test asks does not apply to it.
+    off_by_default = sorted(
         k for k, w in FEATURE_WIRING.items()
         if w.posture == "security" and not _is_on(_default_of(k))
-    ]
-    assert off_by_default == ["signupEnabled"], (
+    )
+    # Sorted, so the assertion tracks membership rather than the order somebody
+    # happened to declare the flags in.
+    assert off_by_default == [
+        "analyticsPublicEnabled", "analyticsShowEmailAddresses",
+        "analyticsWorkspaceVisibility", "signupEnabled",
+    ], (
         f"a flag now ships OFF on a security exemption: {off_by_default}. That is allowed — but it "
         f"means a capability is invisible on every fresh deployment, so it should be a decision "
         f"somebody made, not one that crept in."

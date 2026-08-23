@@ -122,6 +122,21 @@ class FeatureFlagService:
         async with get_async_session() as session:
             return await self.is_enabled(key, session, default=default)
 
+    async def get_value_self_session(self, key: str, default: Any = None) -> Any:
+        """``get_value`` for call sites outside a request-scoped session.
+
+        The non-boolean sibling of :meth:`is_enabled_self_session`, for
+        single-select flags where "on/off" is not the question — the caller
+        needs the chosen option, not its truthiness. Same cache-first
+        behaviour: a fresh TTL cache never touches the DB.
+        """
+        now = time.monotonic()
+        if self._cache is not None and (now - self._cache_ts) < self._ttl:
+            return self._cache.get(key, default)
+        from backend.app.db.engine import get_async_session
+        async with get_async_session() as session:
+            return await self.get_value(key, session, default=default)
+
     @property
     def cached_version(self) -> int:
         return self._cache_version

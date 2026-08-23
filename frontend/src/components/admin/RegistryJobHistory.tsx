@@ -164,6 +164,10 @@ export function RegistryJobHistory() {
     // row itself carries no tuning. Best-effort: on failure the dialog simply
     // opens with blank tuning fields (worker defaults).
     const [defaultTuning, setDefaultTuning] = useState<AggregationTuning | undefined>(undefined)
+    // What the server resolves for Rollup storage when the request says
+    // nothing, so the dialog's radio can show the mode the job would actually
+    // run in rather than assuming Auto for an absent key.
+    const [envFinePairs, setEnvFinePairs] = useState<'auto' | 'true' | 'false' | undefined>(undefined)
 
     // Load reference data + summary
     useEffect(() => {
@@ -172,7 +176,10 @@ export function RegistryJobHistory() {
         catalogService.list().then(setCatalogItems).catch(() => {})
         aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         aggregationService.getAggregationSettings()
-            .then(s => setDefaultTuning(s.tuning ?? undefined))
+            .then(s => {
+                setDefaultTuning(s.tuning ?? undefined)
+                setEnvFinePairs(s.envMaterializeFinePairs ?? undefined)
+            })
             .catch(() => {})
     }, [])
 
@@ -770,6 +777,7 @@ export function RegistryJobHistory() {
                     lastCursor: retriggerCtx.job.lastCursor ?? null,
                     status: retriggerCtx.job.status,
                 } : undefined}
+                defaultFinePairs={envFinePairs}
                 onConfirmRetrigger={handleConfirmRetrigger}
                 onConfirmResume={retriggerCtx?.kind === 'job' ? handleConfirmResume : undefined}
             />

@@ -58,6 +58,18 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     # separately by the manage perm at the component level.
     "ingestion":  ("Ingestion",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:provider:read", "workspace:datasource:manage"])),
     "schema":     ("Semantic Layers", NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:ontology:read"])),
+    # The PRIVILEGED audiences, and the reason there are three: auditors
+    # (system:audit:read) and cross-workspace operators (system:org-admin) do
+    # not imply each other, and system:admin implies both.
+    #
+    # This spec is not the whole story any more. `analyticsPublicEnabled` opens
+    # a redacted version of the section to everyone else, and a feature flag is
+    # not a permission — the catalogue has no way to say "or the flag is on".
+    # So the flag is OR-ed in at the two places that consume this: the sidebar
+    # item and the route guard, both through `useAnalyticsAccess`. What stays
+    # true here is that holding any of these three ALWAYS grants access,
+    # whatever the flag says.
+    "analytics":  ("Analytics",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "system:audit:read"])),
     "admin":      ("Administration", NavSpecAnyPerm(perms=["system:admin", "system:groups:manage"])),
 }
 

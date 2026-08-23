@@ -23,9 +23,9 @@ const edge = (id: string, source: string, target: string, count = 1, edgeTypeNor
 })
 
 const graphOf = (cards: FocusCard[], edges: FocusEdge[]): FocusGraph => ({
-    cards, edges, hiddenByChips: 0, hiddenByChipsIn: 0, hiddenByChipsOut: 0,
+    cards, edges, bundledWires: [], bandX: new Map(), hiddenByChips: 0, hiddenByChipsIn: 0, hiddenByChipsOut: 0,
     modelHasUpstream: true, modelHasDownstream: true, hopsAtCoarserGrain: 0,
-    focusRecovered: false, walkedThrough: new Set(), drawnRank: new Map(), bandTotals: new Map(),
+    focusRecovered: false, walkedThrough: new Set(), bundled: new Set(), drawnRank: new Map(), bandTotals: new Map(),
 })
 
 /** A -> B -> C -> D -> E: B, C, D are degree-1 pass-through. */

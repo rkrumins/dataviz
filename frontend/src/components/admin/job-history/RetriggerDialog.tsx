@@ -40,6 +40,9 @@ export interface RetriggerDialogProps {
         lastCursor: string | null
         status: string  // "completed" | "failed" | "cancelled" | "running" | "pending"
     }
+    /** What the server resolves for Rollup storage when the request omits it,
+     *  so the form can show the mode the job would really run in. */
+    defaultFinePairs?: 'auto' | 'true' | 'false'
     /** Always shown. */
     onConfirmRetrigger: (overrides: AggregationOverridesValue) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
@@ -52,6 +55,7 @@ export function RetriggerDialog({
     initialValue,
     title,
     originatingJob,
+    defaultFinePairs,
     onConfirmRetrigger,
     onConfirmResume,
 }: RetriggerDialogProps) {
@@ -151,6 +155,7 @@ export function RetriggerDialog({
                             value={value}
                             onChange={setValue}
                             disabled={isLoading}
+                            defaultFinePairs={defaultFinePairs}
                         />
                     </div>
 

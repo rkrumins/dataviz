@@ -1037,11 +1037,22 @@ class AggregationService:
 
         # Always report the effective ENV defaults so the editor seeds from
         # ``persisted ?? envDefault`` (present whether or not a row exists).
+        # Called rather than mirrored as a module constant: the other env
+        # defaults above are read once at import, but rollup storage is the
+        # one an operator may flip on a live deploy to rescue a fleet, and a
+        # cached copy would report the stale value back to the editors.
+        # Local import — the providers package pulls in the graph client and
+        # this module is imported long before it.
+        from backend.app.providers.falkordb_materialize import (
+            _materialize_fine_pairs_mode,
+        )
+
         env_kwargs = dict(
             env_rebuild_min_interval_secs=AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
             env_drift_auto_rebuild=AGGREGATION_DRIFT_AUTO_REBUILD,
             env_probe_enabled=AGGREGATION_PROBE_ENABLED,
             env_probe_interval_secs=AGGREGATION_PROBE_INTERVAL_SECS,
+            env_materialize_fine_pairs=_materialize_fine_pairs_mode(),
         )
         row = await session.get(AggregationSettingsORM, "global")
         if row is None:
@@ -1081,12 +1092,23 @@ class AggregationService:
         editor never clobber each other. Busts the in-process cadence cache
         so a same-process consumer sees the change immediately.
 
-        ``cadence`` is MERGED, not replaced. It carries two unrelated groups
-        of settings — the rebuild cooldown and the reconciliation policy —
-        edited by different callers, and a replace meant whichever saved last
-        silently erased the other's fields. Only keys the caller actually sent
-        are touched; sending one explicitly as ``null`` still clears it, which
-        is how "leave blank to use the default" works.
+        BOTH columns are MERGED, not replaced, for the same reason: each
+        carries unrelated groups of settings edited by different callers, and
+        a replace meant whichever saved last silently erased the other's
+        fields. ``cadence`` holds the rebuild cooldown beside the
+        reconciliation policy; ``tuning`` holds the pipeline caps/floors
+        (workspace Defaults dialog) beside rollup storage (the Automation
+        modal's ③ Act). Only keys the caller actually sent are touched;
+        sending one explicitly as ``null`` still clears it, which is how
+        "leave blank to use the default" works.
+
+        The two columns use DIFFERENT key casings and must keep doing so:
+        ``cadence_json`` is camelCase (its reader parses aliases) while
+        ``tuning_json`` is snake_case, because ``_effective_tuning`` feeds
+        that dict straight to the pipeline, which reads
+        ``tuning.get("materialize_fine_pairs")``. Dumping tuning
+        ``by_alias=True`` would store camelCase keys the pipeline never looks
+        up — every stored default silently inert.
         """
         from .models import AggregationSettingsORM
 
@@ -1095,7 +1117,20 @@ class AggregationService:
             row = AggregationSettingsORM(id="global")
             session.add(row)
         if tuning is not None:
-            row.tuning_json = json.dumps(tuning.model_dump(exclude_none=True))
+            merged_tuning = {}
+            if row.tuning_json:
+                try:
+                    merged_tuning = json.loads(row.tuning_json)
+                except (TypeError, ValueError):
+                    merged_tuning = {}
+            # Field names, NOT aliases — see the docstring.
+            sent_tuning = tuning.model_dump(exclude_unset=True)
+            for key, value in sent_tuning.items():
+                if value is None:
+                    merged_tuning.pop(key, None)
+                else:
+                    merged_tuning[key] = value
+            row.tuning_json = json.dumps(merged_tuning)
         if cadence is not None:
             merged = {}
             if row.cadence_json:

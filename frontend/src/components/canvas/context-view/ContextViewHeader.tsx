@@ -75,6 +75,7 @@ export interface ContextViewHeaderProps {
   traceHistory?: TraceHistoryPanelEntry[]
   onResumeTraceHistory?: (index: number) => void
   onClearTraceHistory?: () => void
+  onCopyTraceHistoryLink?: (index: number) => string | null
   /** Open the Lineage Lens on the current selection. Optional. */
   onOpenLens?: () => void
 
@@ -177,6 +178,7 @@ export function ContextViewHeader({
   traceHistory,
   onResumeTraceHistory,
   onClearTraceHistory,
+  onCopyTraceHistoryLink,
   onOpenLens,
   isDraft,
   canManage,
@@ -246,6 +248,7 @@ export function ContextViewHeader({
     traceHistory,
     onResumeTraceHistory,
     onClearTraceHistory,
+    onCopyTraceHistoryLink,
     onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,

@@ -958,12 +958,24 @@ class ProductEventORM(Base):
     id = Column(Text, primary_key=True, default=lambda: f"pev_{uuid.uuid4().hex[:12]}")
     event_type = Column(Text, nullable=False)   # e.g. 'docs.feedback', 'docs.search_miss'
     actor_id = Column(Text, nullable=True)       # principal id who acted (if authenticated)
+    # What the event is ABOUT, denormalised out of the JSON payload so it can
+    # be grouped and filtered in SQL. Analytics counted opens per view by
+    # SELECTing every event in the window and decoding its payload in Python:
+    # correct, and linear in usage on a table that exists to grow with usage.
+    # NULL for the event types that have no single subject worth indexing (a
+    # docs vote, a finished tour), which is why it is nullable rather than a
+    # second required field on every signal.
+    subject_id = Column(Text, nullable=True)
     payload = Column(Text, nullable=True)        # JSON string
     created_at = Column(Text, nullable=False, default=_now)
 
     __table_args__ = (
         Index("idx_product_events_type_created", "event_type", "created_at"),
         Index("idx_product_events_created", "created_at"),
+        # Serves both shapes the dashboard asks for: "opens per view over this
+        # window" (equality on type, group on subject) and "this one view's
+        # opens" (equality on both, range on created_at).
+        Index("idx_product_events_subject", "event_type", "subject_id", "created_at"),
     )
 
     def __repr__(self) -> str:

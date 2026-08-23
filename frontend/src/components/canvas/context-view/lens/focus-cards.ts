@@ -47,7 +47,14 @@ export const edgeLabelFor = (norm: string, info?: EdgeTypeInfoMap): string =>
  */
 export function orientationHalf(
   verb: string, noun: string, dirWord: string, count: number, floor: boolean, systems: number, zero: string,
+  /** Partners known only from the coarse page's cells (Part G) — read
+   *  as "≈N" while the raw sets are still empty, never as "nothing". */
+  approx = 0,
 ): string {
+  if (count === 0 && approx > 0) {
+    const sys = systems > 1 ? ` across ${systems} systems` : ''
+    return `${verb} ≈${approx.toLocaleString()} ${noun}${approx === 1 ? '' : 's'}${sys}`
+  }
   if (count === 0) {
     return floor ? `nothing loaded ${dirWord} yet — the data source may have more` : zero
   }
@@ -66,6 +73,37 @@ export const ANCESTRY_CAP = 6
  *  fixed window is what keeps a 500-column table the same size as a
  *  5-column one; what MOVES it is a scroll rather than a page click. */
 export const FRAME_WINDOW = 8
+/** FAN-IN BUNDLES (Part H, 2026-08-21; the budget gate dropped 2026-08-22):
+ *  cards sharing a parent fold into a frame under it whenever there are
+ *  two or more of them — a database holding its tables as rows. The rule
+ *  reads parent pointers only, never ontology. These are its rows: the
+ *  strongest first, "N more" behind.
+ *  Narrower than a frame the reader opened on purpose (`FRAME_WINDOW`):
+ *  eighteen bundles of five read; eighteen of eight are a wall again. */
+export const BUNDLE_WINDOW = 5
+/**
+ * WIRE BUNDLES (2026-08-22). In Grouped, wires land on ROWS, so two frames
+ * with five and eight rows showing are forty wires — and a wide estate is
+ * "one thick mass". A pair of containers with more than this many wires
+ * between them draws ONE bundle (Auto); the reader's `lensWires`
+ * preference can fold every pair (Bundled) or none (Every wire). The
+ * individual wires come back for a card the reader hovers or selects.
+ */
+export const WIRE_BUNDLE_THRESHOLD = 12
+export type LensWires = 'auto' | 'bundled' | 'all'
+/**
+ * PARTNER GRAIN (Part H, 2026-08-22). How many partner frames a hop band
+ * opens to their rows by itself under the Grouped rung — the strongest
+ * first; the rest land closed, counted, one click from their rows. Six
+ * tables each opened to eight column rows were a wall at half zoom even
+ * with six well under the card budget: the cost was rows, not cards.
+ */
+export const OPEN_PARTNERS_PER_BAND = 3
+/** How much of the picture is folded — the reader's preference (see
+ *  `usePreferencesStore.lensDensity`): 'overview' lands bundle hosts as
+ *  CLOSED cards with counts, 'grouped' as open frames showing their
+ *  strongest rows, 'all' draws every card and folds nothing. */
+export type LensDensity = 'overview' | 'grouped' | 'all'
 /** Same, but in "everything inside" mode — rows are shorter there, so a
  *  couple more fit in the same height. */
 export const FRAME_WINDOW_ALL = 10
@@ -180,7 +218,13 @@ export function labelFitsRun(
   return Math.hypot(targetX - sourceX, targetY - sourceY) >= LABEL_MIN_RUN
 }
 
-export const BAND_GAP = 130
+/** Horizontal room between bands. 130 until 2026-08-22: a frame is wider
+ *  than a card by its padding and its gutter, so the clear run from a
+ *  frame to the next band was ~60px for five wires and their ×N badges
+ *  ("too crowded"). 240 gives plain cards two badge-widths of wire and a
+ *  busy frame a badge-width and a half; the focus-first camera keeps the
+ *  wider board readable. */
+export const BAND_GAP = 240
 export const CARD_GAP = 10
 /** Indent for cards hanging below the focal in its own band. */
 export const NEST_INDENT = 16
@@ -374,6 +418,11 @@ export interface LensReach {
    *  spread across a dozen platforms are a different picture entirely. */
   upSystems: number
   downSystems: number
+  /** Partner CARDS known only from the coarse page's cells (Part G) —
+   *  the endpoints whose residual is above zero — per side. Read as a
+   *  "≈N" floor while the raw-grain sets are still empty. */
+  approxUp?: number
+  approxDown?: number
 }
 
 export interface FocusCard {
@@ -403,6 +452,9 @@ export interface FocusCard {
   parentLabel: string | null
   /** Raw hops this card's subtree carries to the rest of the picture. */
   count: number
+  /** The count includes a rollup cell's summary (Part G): it reads "≈N"
+   *  until raw evidence replaces the cell. */
+  approx?: boolean
   /** WHAT THIS CARD IS CONNECTED TO, per side — the sentence a row
    *  states in words when you point at it ("17 flows · 12 in / 5 out").
    *
@@ -564,6 +616,9 @@ export interface FocusEdge {
   source: string
   target: string
   count: number
+  /** A rollup cell is in this bundle: the count is a summary ("≈N flows")
+   *  and the wire draws coarse (Part G). */
+  approx?: boolean
   edgeTypeNorm: string
   dimmed: boolean
   /** This hop runs BACKWARDS in the picture's own hop numbering, so it
@@ -628,6 +683,14 @@ export interface FocusEdge {
    *  ×N one (T22, R3 fix round 1). The wire's own muted/dashed treatment
    *  is unaffected — only the badge is withheld. */
   seamSlotted: boolean
+  /** THIS WIRE IS A BUNDLE (2026-08-22): it stands for `members` wires
+   *  between the two containers it joins, whose own rows it hides;
+   *  `count` is their sum. The members live in `FocusGraph.bundledWires`
+   *  and are drawn only for a card the reader hovers or selects. */
+  bundle?: { members: number }
+  /** This wire is a MEMBER of that bundle — carried in
+   *  `FocusGraph.bundledWires`, never in `edges`. */
+  inBundle?: string
   /** T23 R2 — this edge stands for a condensed maximal degree-1
    *  pass-through run: draw the "— via N steps —▶" connector chip
    *  instead of a plain ×N badge. `count` above is still the honest sum
@@ -639,6 +702,15 @@ export interface FocusEdge {
 export interface FocusGraph {
   cards: FocusCard[]
   edges: FocusEdge[]
+  /** Where each hop band's column starts, in flow space — measured from
+   *  what the board actually holds, so a widened frame pushes the bands
+   *  outside it along (2026-08-22). Band labels and the extend ghost read
+   *  it so they agree with the cards. */
+  bandX: ReadonlyMap<number, number>
+  /** The wires each bundle in `edges` stands for (`inBundle` names it).
+   *  Not drawn by default: the view adds the ones touching a hovered or
+   *  selected card, or a hovered bundle. */
+  bundledWires: FocusEdge[]
   /** Entities removed by the type chips (reported next to the chips). */
   hiddenByChips: number
   /** Per-direction split of the above. An empty band is only a claim
@@ -674,6 +746,9 @@ export interface FocusGraph {
    *  `LensViewState.walkedThrough`; see the note there for why the grain
    *  has to be sticky. */
   walkedThrough: ReadonlySet<string>
+  /** The containers this build folded a band's cards into (Part H):
+   *  their rows are the cards the band would otherwise have shown. */
+  bundled: ReadonlySet<string>
   /** Where every entity drawn so far SITS, by first-draw order. The
    *  consumer folds it back into `LensViewState.drawnRank`; a card on the
    *  board never moves because the walk grew under it. */
@@ -717,7 +792,7 @@ export function labelOf(id: string, node: LineageNode | undefined): string {
  * and positioned inside the frame afterwards. That keeps the band maths
  * (and its determinism) exactly as it was.
  */
-export function layoutBands(cards: FocusCard[]) {
+export function layoutBands(cards: FocusCard[]): Map<number, number> {
   // Size every frame to its children first, so the band can stack it as
   // a single unit.
   const childrenByFrame = new Map<string, FocusCard[]>()
@@ -777,8 +852,42 @@ export function layoutBands(cards: FocusCard[]) {
     if (list) list.push(c)
     else byBand.set(c.band, [c])
   }
+
+  /**
+   * THE COLUMNS MAKE ROOM (2026-08-22). Band x used to be a fixed pitch,
+   * `band * (CARD_W + BAND_GAP)` — but a frame is as wide as what it
+   * holds, and every level the reader opens inside it widens it again.
+   * Open a container, then one inside that, and the focus column outgrew
+   * the pitch: the next band was drawn ON TOP of it (reported with three
+   * screenshots, each expansion worse than the last).
+   *
+   * Bands are placed from the widths actually on the board instead:
+   * walking out from the focus, each band starts a full BAND_GAP past
+   * the right edge of the one inside it. A board of ordinary cards is
+   * unchanged — every width is CARD_W, so the sum IS the old pitch — and
+   * an empty band still holds a column's worth of room, so the hop
+   * numbering keeps its rhythm.
+   */
+  const widthOfBand = (band: number): number => {
+    const list = byBand.get(band)
+    if (!list || list.length === 0) return CARD_W
+    let widest = CARD_W
+    for (const c of list) {
+      // Band 0's non-focal cards hang below the focus, indented.
+      const offset = band === 0 && c.kind !== 'focal' ? NEST_INDENT * (c.depth + 1) : 0
+      widest = Math.max(widest, offset + c.w)
+    }
+    return widest
+  }
+  const present = [...byBand.keys()]
+  const maxBand = Math.max(0, ...present)
+  const minBand = Math.min(0, ...present)
+  const bandX = new Map<number, number>([[0, 0]])
+  for (let b = 1; b <= maxBand; b++) bandX.set(b, bandX.get(b - 1)! + widthOfBand(b - 1) + BAND_GAP)
+  for (let b = -1; b >= minBand; b--) bandX.set(b, bandX.get(b + 1)! - (widthOfBand(b) + BAND_GAP))
+
   for (const [band, list] of byBand) {
-    const x = band * (CARD_W + BAND_GAP)
+    const x = bandX.get(band) ?? band * (CARD_W + BAND_GAP)
     if (band === 0) {
       // The FOCAL node centers on the midline and owns the column's own
       // x; anything else that lands in this band hangs below it,
@@ -818,4 +927,7 @@ export function layoutBands(cards: FocusCard[]) {
       y += k.h + CARD_GAP
     }
   }
+
+  return bandX
+
 }

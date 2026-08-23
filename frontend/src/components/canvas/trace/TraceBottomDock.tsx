@@ -13,6 +13,7 @@ import { TraceDockSettings } from './TraceDockSettings'
 import { shouldShowTruncationNotice } from './TraceDockNoticeStrip'
 import type { GranularityOption } from './TraceDockControls'
 import { useTraceEscStack } from './useTraceEscStack'
+import type { TraceShareSummary } from './TraceSharePopover'
 
 export interface TraceBottomDockProps {
   trace: UseUnifiedTraceResult
@@ -30,6 +31,18 @@ export interface TraceBottomDockProps {
   onHistoryForward?: () => void
   canHistoryBack?: boolean
   canHistoryForward?: boolean
+  /** Driven by the NATIVE trace engine (the canvas overlay) rather than
+   *  `useUnifiedTrace`. The engine walks the whole flow once, so direction
+   *  and depth are VIEW scope on what it already holds — and the controls
+   *  that only ever parameterised the next request are withdrawn. */
+  nativeMode?: boolean
+  /** Chains the view cannot place anywhere (see `TraceView.outsideView`).
+   *  Surfaced in the Overview strip; hidden at 0. */
+  outsideView?: number
+  /** Everything the title bar's Share control needs. Absent = no control. */
+  share?: TraceShareSummary
+  /** The traced entity's name, resolved by the host (see the title bar). */
+  focusLabel?: string
 }
 
 const COMPACT_HEIGHT = 64
@@ -77,6 +90,10 @@ export function TraceBottomDock({
   onHistoryForward,
   canHistoryBack = false,
   canHistoryForward = false,
+  nativeMode = false,
+  outsideView = 0,
+  share,
+  focusLabel,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -183,7 +200,13 @@ export function TraceBottomDock({
       aria-label="Trace dock"
       initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0, height: dockHeight }}
-      exit={{ opacity: 0, y: 24 }}
+      // NO `exit`. With one, AnimatePresence keeps this mounted after the
+      // trace ends and — because the exit animation never completes here —
+      // strands a 1520x64 invisible bar across the bottom of the canvas:
+      // opacity 0, pointer-events on, role="region" still announcing the
+      // trace to screen readers. Same class as the stranded popovers this
+      // codebase has hit before; the cure is the same, drop the exit and let
+      // it unmount with `traceActive`. The entrance still animates.
       transition={MOTION.modalSpring}
       style={{ height: dockHeight }}
       className={cn(
@@ -244,6 +267,9 @@ export function TraceBottomDock({
           onHistoryForward={onHistoryForward}
           canHistoryBack={canHistoryBack}
           canHistoryForward={canHistoryForward}
+          share={share}
+          focusLabel={focusLabel}
+          nativeMode={nativeMode}
         />
 
         {/* Drill-back breadcrumb — visible whenever one or more drills are
@@ -287,6 +313,11 @@ export function TraceBottomDock({
                     resolveEdgeColor={resolveEdgeColor}
                     onReduceDepth={handleReduceDepth}
                     onJumpToUrn={onJumpToUrn}
+                    outsideView={outsideView}
+                    nativeMode={nativeMode}
+                    // The native `retrace` MEANS "this walk did not finish":
+                    // continue past the checkpoint, or retry the failed step.
+                    onContinue={() => void trace.retrace()}
                   />
                 )}
                 {tab === 'drilldowns' && (
@@ -315,6 +346,7 @@ export function TraceBottomDock({
                     granularityOptions={granularityOptions}
                     availableEdgeTypes={availableEdgeTypes}
                     resolveEdgeColor={resolveEdgeColor}
+                    nativeMode={nativeMode}
                   />
                 )}
               </AnimatePresence>

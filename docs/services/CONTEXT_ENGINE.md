@@ -100,7 +100,8 @@ its ontology on construction.
 The engine has no dedicated router of its own — it powers the workspace-scoped
 graph endpoints. Representative routes (under `/api/v1/{ws_id}/graph`, requiring
 `workspace:datasource:read`) include node/edge queries, `/nodes/top-level`,
-`/nodes/{urn}/children-with-edges`, lineage/trace, and aggregated edges.
+`/nodes/{urn}/children-with-edges`, the lineage walk `/trace/closure` (below),
+and aggregated edges.
 
 Context-model templates (the reusable layer configs behind lenses):
 
@@ -109,6 +110,67 @@ Context-model templates (the reusable layer configs behind lenses):
 | GET | `/api/v1/{ws_id}/context-models/templates` | List Quick Start Templates available to a workspace (read-only). |
 | GET | `/api/v1/{ws_id}/context-models/templates/{template_id}` | Get a single template. |
 | GET/POST/PUT/DELETE | `/api/v1/admin/context-model-templates[/{id}]` | Full template CRUD (requires `system:admin`). |
+
+## Lineage walks: `POST /api/v1/{ws_id}/graph/trace/closure`
+
+The endpoint behind both the canvas **Trace** and the **Lineage Lens** (the
+`require_trace` permission). One request is one *page* of a walk; the client
+drives the walk hands-free until nothing is owed. The contract (2026-08-21/22):
+
+**Request** (camelCase on the wire)
+
+| Field | Meaning |
+|-------|---------|
+| `urn`, `direction` (`upstream` · `downstream` · `both`), `upstreamDepth` / `downstreamDepth` (0–25) | What to walk from, which way, how far. |
+| `maxNodes` | Page size; clamped to `TRACE_MAX_NODES` (default 2,000) and never above `TRACE_MAX_NODES_HARD` (10,000). Ancestors never count toward it. |
+| `seedUrns` (≤ 500) | Re-root a page on explicit anchors (a card's ⊕, or a batch of frontier entries). |
+| `seedCursor` (`s:<urn>`) | Continue enumerating a container focus's lineage-bearing descendants from this anchor (inclusive). Legal together with `seedUrns`. |
+| `afterCursor` (`e:<n>`) | Continue paging one hub anchor's own adjacency. |
+| `excludeUrns` (≤ 2,000) | Nodes the client already holds; never decides where a walk *starts*. |
+| `grain` | `fine` (default): raw lineage edges. `coarse`: one shot, focus-anchored — every `:AGGREGATED` cell incident to the focus, with `properties.weight/sourceDepth/targetDepth/latestUpdate/sourceEdgeTypes`; 422 when combined with any cursor or `seedUrns`. Providers without a rollup lane fall through to `fine` (the result says which). |
+
+**Result** — `nodes`, `edges`, `containmentEdges` (every shipped node comes with
+its ancestor chain), `upstreamUrns` / `downstreamUrns`, `frontierUp` /
+`frontierDown` (each `{ urn, totalCount, nextCursor?, reason: 'cut' | 'depth' }`),
+`seedCursor`, `truncated` + `truncationReason`, `grain`, `focus`,
+`effectiveLevel`, `meta`.
+
+**Invariants the tests pin**
+
+1. Every anchor walked in a page has its *entire* adjacency in each requested
+   direction — the walk is degree-exact (anchors are measured first, then
+   expanded under the budget), so no page ever re-does another page's work.
+   The only exception is a hub carrying a real `e:<n>` cursor.
+2. `len(nodes) ≤ maxNodes`, always.
+3. Every un-walked anchor has exactly one resume: descendants of a container
+   focus by `seedCursor`; explicit seeds and deeper-ring members by a
+   cursor-less frontier entry with `reason: 'cut'` (re-rooted via `seedUrns`,
+   batchable); hubs by `e:<n>`. A `depth` entry is the next hop, not owed
+   work. `e:0` is never minted.
+4. Anchor lists are urn-sorted, so a page is a pure function of (graph,
+   request) and caches cleanly.
+5. No silent loss: a failed query sets `truncationReason` to `timeout`,
+   `seed_failed`, `nodes_failed` or `ancestors_failed` (in that precedence,
+   ahead of `max_nodes`); a page that made no progress ships no `seedCursor`.
+6. Every edge endpoint is shipped, excluded, or the request `urn`.
+
+**Coarse first paint.** The client fires the `coarse` page beside the first
+`fine` page. The cells name partner *containers* (materialised per
+containment-level pair), so which endpoints become cards is decided
+client-side by **inner-first accounting**: an endpoint is a card iff its
+residual `W − Σ W(inner cells)` > 0; residual-0 ancestors are hosts; cells
+whose far endpoint is the focus or one of its ancestors are internal flows.
+Raw evidence replaces a cell per pair as it lands (complete → dropped;
+partial → residual `W − R`), so a board never shows both. Coarse is an
+accelerator only: absent or stale rollups cost nothing, and counts render as
+"≈N" until raw lands.
+
+**Caching.** A closure page `truncated` for `max_nodes` is complete by
+contract and deterministic, so it is cached for the full TTL; any failure
+reason stays on the short negative TTL; `grain` is part of the key. A wide
+page is ~2.5 MB, larger than the library's 1 MiB per-payload cap, so the
+compose stack raises `GRAPH_CACHE_MAX_PAYLOAD_BYTES` to 8 MiB for every
+service that holds a cache client (see `docs/SETUP.md`).
 
 ## Configuration
 

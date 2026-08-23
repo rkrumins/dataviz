@@ -29,6 +29,7 @@ import { ReactFlowProvider } from '@xyflow/react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { FocusGraphView } from '../FocusGraphView'
 import { buildFocusLayout, initialLensViewState } from '../focus-layout'
+import { applyQueryDimming } from '../query-dimming'
 import type { LensWalkNode } from '../closure-adapter'
 import { buildLensSubgraph } from '../lens-subgraph'
 import { applyCondensation } from '../condensation'
@@ -371,6 +372,54 @@ describe('P0 — perf harness (Task 20)', () => {
   })
 
   /**
+   * (e) TYPING IN THE FILTER IS NOT A REBUILD (2026-08-22).
+   *
+   * MEASURED in the browser on the wide table (505 cards): 325 ms of
+   * blocked main thread per keystroke, because `query` was an input to
+   * the layout. It only ever set `dimmed`, so it now runs over the
+   * FINISHED board. The pin: dimming a laid-out board is a fraction of
+   * laying it out — a ratio, not a wall-clock number, so it holds on any
+   * machine.
+   */
+  describe('(e) the filter dims a finished board rather than rebuilding it', () => {
+    for (const fixtureName of ['walkWideHub']) {
+      it(`${fixtureName}: a keystroke costs a fraction of a rebuild`, () => {
+        const fixture = WALK_FIXTURES[fixtureName]
+        const sg = buildLensSubgraph(fixture.model)
+        const base = initialLensViewState(sg)
+        const view = fixture.script ? fixture.script(base) : base
+        const input = {
+          sg, view, query: '', hiddenTypes: new Set<string>(),
+          extendStatus: fixture.extendStatus ?? new Map(),
+          childrenAll: fixture.childrenAll ?? new Map(),
+          childrenAllStatus: new Map(),
+          walkStatus: 'done' as const,
+          directionFilter: fixture.directionFilter,
+        }
+        const graph = buildFocusLayout(input)
+        applyQueryDimming(graph, 'warm')                       // JIT warm-up, untimed
+        buildFocusLayout(input)
+
+        const N = 20
+        let rebuild = 0
+        let dim = 0
+        for (let i = 0; i < N; i++) {
+          let t = performance.now()
+          buildFocusLayout(input)
+          rebuild += performance.now() - t
+          t = performance.now()
+          applyQueryDimming(graph, `letter${i}`)               // a different needle each time
+          dim += performance.now() - t
+        }
+        console.log(`[P0-e] ${fixtureName} rebuildAvg=${(rebuild / N).toFixed(3)}ms dimAvg=${(dim / N).toFixed(3)}ms`)
+        expect(dim).toBeLessThan(rebuild / 4)
+        // And an unfiltered board pays nothing at all.
+        expect(applyQueryDimming(graph, '')).toBe(graph)
+      })
+    }
+  })
+
+  /**
    * T28 R3 — THE WINDOW NEVER FOLDS; THE BOARD JUST GROWS. `applyHopWindow`
    * (T23 R1) is gone — nothing narrows what React Flow has to draw
    * anymore, so an UNBOUNDED-WIDTH `walkLongChain` — every hop drawn as
@@ -463,6 +512,83 @@ describe('P0 — perf harness (Task 20)', () => {
    * row spans), so the point of the number is that they stay that way —
    * held to T20 P3's own budget verbatim, not to a new one.
    */
+  /**
+   * THE WIDE TABLE (2026-08-21). A hands-free one-hop walk of a 2,935-column
+   * table brings back ~20k nodes — every partner column under its table
+   * under its layer — and pins all of them. Live, each of the ten page
+   * merges then cost 0.8 → 3.1 s of PURE layout: `weightOf`/`crossingOf`
+   * scanned every lineage edge once PER CARD and `internalHopsOf` every
+   * projected bundle per frame (O(cards × edges)). Indexed once per layout
+   * by ancestor chain they are O(edges × depth). This estate is the same
+   * shape at a size a test can hold; the number is a regression tripwire,
+   * not a tight budget (jsdom, parallel runs).
+   */
+  describe('(wide table) a 20k-node one-hop model, every node pinned', () => {
+    const REGRESSION_CEILING_MS = 1500   // measured 158 ms; 61,500 ms before the indexes
+    it('500 partner tables × 40 columns lay out well under a second per rebuild', () => {
+      const wnode = (urn: string, type: string): LensWalkNode => ({
+        id: urn, type: 'generic', position: { x: 0, y: 0 },
+        data: { urn, label: urn, type }, urn, displayName: urn, entityType: type,
+      }) as unknown as LensWalkNode
+      const nodes: LensWalkNode[] = [wnode('L0', 'layer'), wnode('T', 'object')]
+      const lineageEdges: Array<{ id: string; sourceUrn: string; targetUrn: string; edgeType: string }> = []
+      const containmentEdges: Array<{ sourceUrn: string; targetUrn: string }> = [{ sourceUrn: 'L0', targetUrn: 'T' }]
+      const COLS = 400, TABLES = 500, PER = 40
+      for (let c = 0; c < COLS; c++) {
+        nodes.push(wnode(`c${c}`, 'attribute'))
+        containmentEdges.push({ sourceUrn: 'T', targetUrn: `c${c}` })
+      }
+      for (let t = 0; t < TABLES; t++) {
+        const layer = `L${1 + (t % 3)}`
+        if (t < 3) nodes.push(wnode(layer, 'layer'))
+        nodes.push(wnode(`p${t}`, 'object'))
+        containmentEdges.push({ sourceUrn: layer, targetUrn: `p${t}` })
+        for (let k = 0; k < PER; k++) {
+          const urn = `p${t}_${k}`
+          nodes.push(wnode(urn, 'attribute'))
+          containmentEdges.push({ sourceUrn: `p${t}`, targetUrn: urn })
+          const col = `c${(t * PER + k) % COLS}`
+          if (t % 2 === 0) lineageEdges.push({ id: `h${t}_${k}`, sourceUrn: urn, targetUrn: col, edgeType: 'FLOWS_TO' })
+          else lineageEdges.push({ id: `h${t}_${k}`, sourceUrn: col, targetUrn: urn, edgeType: 'FLOWS_TO' })
+        }
+      }
+      expect(nodes.length).toBeGreaterThan(20_000)
+      const sg = buildLensSubgraph({ focusUrn: 'T', nodes, lineageEdges, containmentEdges })
+      const base = initialLensViewState(sg)
+      const view = { ...base, pinned: new Set(nodes.map(n => n.urn)) }
+      const input = {
+        sg, view, query: '', hiddenTypes: new Set<string>(),
+        extendStatus: new Map(), childrenAll: new Map(), childrenAllStatus: new Map(),
+        walkStatus: 'done' as const,
+      }
+      const warm = buildFocusLayout(input)
+      // The premise: every partner table is a frame on the board.
+      expect(warm.cards.filter(c => c.nodeId?.startsWith('p') && c.kind === 'frame').length).toBe(TABLES)
+
+      const samples: number[] = []
+      for (let i = 0; i < 3; i++) {
+        const t0 = performance.now()
+        buildFocusLayout(input)
+        samples.push(performance.now() - t0)
+      }
+      const best = Math.min(...samples)
+      console.log(`[wide-table] nodes=${nodes.length} cards=${warm.cards.length} edges=${warm.edges.length} best=${best.toFixed(0)}ms samples=${samples.map(x => x.toFixed(0)).join(',')}`)
+      expect(best).toBeLessThan(REGRESSION_CEILING_MS)
+
+      // GROUPED (Part H): the 500 tables sit in three layers, so the band
+      // folds them into three frames — the board is a handful of top-level
+      // items instead of five hundred, in no more time.
+      const grouped = buildFocusLayout({ ...input, density: 'grouped' })
+      const topLevel = grouped.cards.filter(c => !c.frameId && c.kind !== 'divider')
+      expect(grouped.bundled.size).toBe(3)
+      expect(topLevel.length).toBeLessThanOrEqual(6)
+      expect(grouped.edges.reduce((n, e) => n + e.count, 0)).toBe(warm.edges.reduce((n, e) => n + e.count, 0))
+      const t0 = performance.now()
+      buildFocusLayout({ ...input, density: 'grouped' })
+      expect(performance.now() - t0).toBeLessThan(REGRESSION_CEILING_MS)
+    }, 120_000)
+  })
+
   describe('(in-frame routing) a dense container rebuild stays inside T20\'s budget', () => {
     const REGRESSION_CEILING_MS = 50 * 4
     it('50 tables in one warehouse, repeated rebuild', () => {
