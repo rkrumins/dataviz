@@ -5,8 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const useCountHistory = vi.fn()
 const useAnyPermission = vi.fn()
 
-vi.mock('@/store/auth', () => ({
-    useAnyPermission: (perms: string[]) => useAnyPermission(perms),
+vi.mock('@/hooks/useHistoryAccess', () => ({
+    useCanReadHistory: () => useAnyPermission(),
 }))
 vi.mock('@/hooks/useCountHistory', async () => {
     const actual = await vi.importActual<typeof import('@/hooks/useCountHistory')>(

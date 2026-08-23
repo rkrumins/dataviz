@@ -22,7 +22,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
-import { useAnyPermission } from '@/store/auth'
+import { useCanReadHistory } from '@/hooks/useHistoryAccess'
 import { insightsHistoryService } from '@/services/insightsHistoryService'
 import type { CountAlert } from '@/types/insights'
 import { compactNum, severityMeta, signedNum } from './shared'
@@ -57,7 +57,7 @@ export function AlertBand({ scopeId, onSelect, className }: {
     onSelect?: (at: string) => void
     className?: string
 }) {
-    const canRead = useAnyPermission(['system:admin'])
+    const canRead = useCanReadHistory()
     const queryClient = useQueryClient()
 
     const { data } = useQuery({

@@ -21,7 +21,7 @@ import { AlertTriangle, ArrowUpRight, ServerCog, ShieldCheck } from 'lucide-reac
 
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { useAnyPermission } from '@/store/auth'
+import { useCanReadHistory } from '@/hooks/useHistoryAccess'
 import { insightsHistoryService } from '@/services/insightsHistoryService'
 import type { CountAlert } from '@/types/insights'
 import { ALERTS_QUERY_KEY } from './AlertBand'
@@ -73,7 +73,7 @@ export function AlertInbox({ providerId, className }: {
     providerId?: string
     className?: string
 }) {
-    const canRead = useAnyPermission(['system:admin'])
+    const canRead = useCanReadHistory()
 
     const { data, isLoading } = useQuery({
         // Deliberately NOT keyed on providerId: the request does not vary

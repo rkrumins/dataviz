@@ -18,8 +18,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getDataSourceHistory = vi.fn()
 
-vi.mock('@/store/auth', () => ({
-    useAnyPermission: () => true,
+vi.mock('@/hooks/useHistoryAccess', () => ({
+    useCanReadHistory: () => true,
 }))
 vi.mock('@/services/insightsHistoryService', () => ({
     insightsHistoryService: {

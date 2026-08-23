@@ -23,8 +23,8 @@ vi.mock('@/services/insightsHistoryService', async () => {
         },
     }
 })
-vi.mock('@/store/auth', () => ({
-    useAnyPermission: (perms: string[]) => useAnyPermission(perms),
+vi.mock('@/hooks/useHistoryAccess', () => ({
+    useCanEditHistoryPolicy: () => useAnyPermission(),
 }))
 
 import { HistorySettingsDialog } from './HistorySettingsDialog'

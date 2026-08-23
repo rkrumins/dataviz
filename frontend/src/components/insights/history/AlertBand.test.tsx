@@ -13,8 +13,8 @@ vi.mock('@/services/insightsHistoryService', () => ({
         acknowledgeAlert: (id: string) => acknowledgeAlert(id),
     },
 }))
-vi.mock('@/store/auth', () => ({
-    useAnyPermission: (perms: string[]) => useAnyPermission(perms),
+vi.mock('@/hooks/useHistoryAccess', () => ({
+    useCanReadHistory: () => useAnyPermission(),
 }))
 
 import { AlertBand } from './AlertBand'

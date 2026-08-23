@@ -855,3 +855,60 @@ async def test_an_unknown_severity_is_refused_rather_than_stored(
             session=db_session,
         )
     assert exc.value.status_code == 422
+
+
+# --------------------------------------------------------------------------
+# Who may read this
+# --------------------------------------------------------------------------
+
+
+def test_history_reads_sit_behind_the_ingestion_gate_not_platform_admin():
+    """The whole ``/admin/insights`` router is ``system:admin``, which is right
+    for the discovery, DLQ and worker-config endpoints on it and wrong for
+    history: a workspace data source manager can already see a source's
+    freshness and its current counts, and could not see how those counts
+    MOVED. That made the history card invisible to the people who onboard the
+    data.
+
+    FastAPI router dependencies are additive and cannot be removed per route,
+    so the widening is a second router on the same prefix. This pins which
+    routes live on which, because moving one back is a silent permission
+    change that no other test would notice."""
+    from backend.app.api.v1.endpoints import insights
+
+    on_ingestion = {r.path for r in insights.ingestion_router.routes}
+    on_admin = {r.path for r in insights.router.routes}
+
+    assert on_ingestion == {
+        "/data-sources/{ds_id}/history",
+        "/data-sources/{ds_id}/history.csv",
+        "/providers/{provider_id}/history",
+        "/history/fleet",
+        "/alerts",
+        "/alerts/{alert_id}/acknowledge",
+        "/alerts/policy",
+    }
+    # Reading the policy is Ingestion-read (the dialog renders it read-only for
+    # non-admins, mirroring aggregation settings); CHANGING it is not.
+    assert "/alerts/policy" in on_admin, "the policy PUT must stay platform-admin"
+    for path in on_ingestion - {"/alerts/policy"}:
+        assert path not in on_admin, f"{path} is still gated at system:admin"
+
+
+def test_both_routers_are_mounted_on_the_same_prefix_with_their_own_gates():
+    """Same URLs as before the split — a client should never learn that the
+    gate moved."""
+    import inspect
+    import re
+
+    from backend.app.api.v1 import api
+
+    mounts = dict(re.findall(
+        r"include_router\(\s*insights\.(\w+).*?dependencies=\[Depends\((\w+)",
+        inspect.getsource(api), re.S,
+    ))
+    assert mounts == {
+        "router": "requires",
+        "ingestion_router": "_require_ingestion_read",
+    }
+    assert inspect.getsource(api).count('insights.ingestion_router, prefix="/admin/insights"') == 1

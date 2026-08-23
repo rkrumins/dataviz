@@ -288,6 +288,17 @@ api_router.include_router(
     insights.router, prefix="/admin/insights", tags=["admin:insights"],
     dependencies=[Depends(requires("system:admin"))],
 )
+# Counts history, same prefix, Ingestion-surface gate. A workspace data
+# source manager can already see a source's freshness and its current
+# counts; this is what those counts DID, and gating it at system:admin
+# hid it from the people who onboard the data. Same gate freshness.py
+# uses, so the two halves of the Ingestion story agree on who may read
+# them. Policy WRITES stay on the admin router above.
+from backend.app.api.v1.endpoints.aggregation import _require_ingestion_read
+api_router.include_router(
+    insights.ingestion_router, prefix="/admin/insights", tags=["admin:insights"],
+    dependencies=[Depends(_require_ingestion_read)],
+)
 # Infrastructure status: /api/v1/admin/system/status — super-admin
 # single-pane snapshot of every backing service + data-plane lag.
 api_router.include_router(

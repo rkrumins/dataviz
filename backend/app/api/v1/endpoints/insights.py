@@ -48,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel, Field
 
-from backend.app.auth.dependencies import requires
+from backend.app.auth.dependencies import get_current_user, requires
 from backend.app.config import resilience
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
@@ -64,6 +64,27 @@ from backend.insights_service.redis_streams import DISCOVERY_STREAM, claim_exist
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+#: Counts-history reads, mounted at the SAME path prefix but behind the
+#: Ingestion-surface read gate instead of ``system:admin``.
+#:
+#: The whole ``/admin/insights`` router is platform-admin, which is right for
+#: the discovery, DLQ and worker-config endpoints on it — and wrong for
+#: history. A workspace data-source manager who can already see a source's
+#: freshness and its current counts cannot see how those counts MOVED, which
+#: made the history card invisible to exactly the people who onboard the data.
+#:
+#: FastAPI router dependencies are additive and cannot be removed per route,
+#: so widening means a second router rather than a per-route override. It is
+#: mounted on the same prefix, so no URL changes and no client churn.
+#:
+#: The gate matches ``freshness.py`` exactly (``_require_ingestion_read``),
+#: and so does the visibility model: ``assemble_fleet_freshness`` already
+#: treats ``workspace_id`` as an optional FILTER rather than a mandatory
+#: tenant scope, so the Ingestion surface is fleet-wide for anyone holding an
+#: Ingestion permission. History follows that precedent rather than inventing
+#: a stricter one that would disagree with the page it sits next to.
+ingestion_router = APIRouter()
 
 
 # ── Envelope helpers ────────────────────────────────────────────────
@@ -1148,7 +1169,7 @@ async def _resolve_history_scope(session: AsyncSession, ds_id: str) -> str:
     return resolved or ds_id
 
 
-@router.get(
+@ingestion_router.get(
     "/data-sources/{ds_id}/history",
     summary="Historical entity counts for one data source",
 )
@@ -1423,7 +1444,7 @@ def _align_rollup(rows: list, *, group: str) -> tuple:
     return totals, series
 
 
-@router.get(
+@ingestion_router.get(
     "/providers/{provider_id}/history",
     summary="Historical entity counts across a provider's data sources",
 )
@@ -1487,7 +1508,7 @@ async def get_provider_history(
     )
 
 
-@router.get(
+@ingestion_router.get(
     "/history/fleet",
     summary="Historical entity counts across the whole platform",
 )
@@ -1557,7 +1578,7 @@ async def get_fleet_history(
     )
 
 
-@router.get(
+@ingestion_router.get(
     "/data-sources/{ds_id}/history.csv",
     summary="Export one data source's counts history as CSV",
 )
@@ -1734,7 +1755,7 @@ def _alert_model(row) -> dict:
     ).model_dump()
 
 
-@router.get(
+@ingestion_router.get(
     "/alerts",
     response_model=CountAlertsResponse,
     summary="Recorded counts anomalies",
@@ -1770,14 +1791,18 @@ async def list_count_alerts(
     )
 
 
-@router.post(
+@ingestion_router.post(
     "/alerts/{alert_id}/acknowledge",
     response_model=CountAlert,
     summary="Acknowledge one counts anomaly",
 )
 async def acknowledge_count_alert(
     alert_id: str = Path(...),
-    user=Depends(requires("system:admin")),
+    # Identity, not authorisation — the router gate already decided that.
+    # Whoever can see an anomaly can clear it: making acknowledgement
+    # admin-only leaves the person who actually fixed the loader unable to
+    # say so, and the alert then nags everyone who cannot act on it.
+    user=Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Idempotent, and the first acknowledgement wins — re-acknowledging must
@@ -1793,7 +1818,7 @@ async def acknowledge_count_alert(
     return _alert_model(row)
 
 
-@router.get(
+@ingestion_router.get(
     "/alerts/policy",
     response_model=AlertPolicyResponse,
     summary="Read the counts-anomaly alert policy",

@@ -30,7 +30,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { useAnyPermission } from '@/store/auth'
+import { useCanEditHistoryPolicy } from '@/hooks/useHistoryAccess'
 import {
     INHERIT_ENV_DEFAULT, insightsHistoryService,
 } from '@/services/insightsHistoryService'
@@ -77,7 +77,7 @@ function toDraft(policy: HistoryRetentionPolicy): Draft {
 }
 
 export function HistorySettingsDialog({ onClose }: { onClose: () => void }) {
-    const isAdmin = useAnyPermission(['system:admin'])
+    const isAdmin = useCanEditHistoryPolicy()
     const queryClient = useQueryClient()
     // `edits` holds ONLY what the user typed; the rendered draft is the
     // persisted policy with those laid over it. Deriving rather than syncing

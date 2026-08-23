@@ -18,7 +18,7 @@ import { ArrowUpRight, History, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Sparkline } from '@/components/ui/Sparkline'
 import { timeAgo } from '@/lib/timeAgo'
-import { useAnyPermission } from '@/store/auth'
+import { useCanReadHistory } from '@/hooks/useHistoryAccess'
 import { useCountHistory, resolveWindow } from '@/hooks/useCountHistory'
 import { compactNum, formatPct } from './shared'
 import { DeltaChip } from './DeltaChip'
@@ -33,7 +33,7 @@ export function HistoryCard({ dataSourceId, catalogId, className }: {
     // The history API is system:admin. Checking here means a non-admin never
     // makes the request at all, rather than making it, being refused, and
     // being shown an empty card explaining nothing.
-    const canRead = useAnyPermission(['system:admin'])
+    const canRead = useCanReadHistory()
 
     // Fixed 30-day window here. The card is a glance, not a control surface:
     // a second window selector inside a 440px drawer would compete with the

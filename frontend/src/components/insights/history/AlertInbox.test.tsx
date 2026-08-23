@@ -9,8 +9,8 @@ const useAnyPermission = vi.fn()
 vi.mock('@/services/insightsHistoryService', () => ({
     insightsHistoryService: { listAlerts: (...a: unknown[]) => listAlerts(...a) },
 }))
-vi.mock('@/store/auth', () => ({
-    useAnyPermission: (perms: string[]) => useAnyPermission(perms),
+vi.mock('@/hooks/useHistoryAccess', () => ({
+    useCanReadHistory: () => useAnyPermission(),
 }))
 
 import { AlertInbox } from './AlertInbox'
