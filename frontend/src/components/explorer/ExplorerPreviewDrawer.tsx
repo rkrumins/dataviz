@@ -5,12 +5,14 @@
  * data source, semantic layer, layout, created/updated dates,
  * last synced, favourite count, and a mini preview for hierarchy/reference.
  */
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { History, Settings2 } from 'lucide-react'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 // Extracted so the full-canvas ViewPage can host the same form. One component,
 // two hosts — not two forms that drift.
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
+import { ViewUsageDetails } from './ViewUsage'
+import { useViewUsage } from '@/hooks/useContentInsights'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
@@ -334,6 +336,13 @@ export function ExplorerPreviewDrawer({
   useEffect(() => {
     setEditMode(isOpen ? !!initialEditMode : false)
   }, [view?.id, isOpen, initialEditMode])
+
+  // Only while the drawer is actually open, and only for the one view it is
+  // showing. The shelf behind it already batched its own; this is a single id
+  // and would otherwise fire for every card the mouse passed over.
+  const usageIds = useMemo(() => (view?.id ? [view.id] : []), [view?.id])
+  const { data: usageMap } = useViewUsage(usageIds, isOpen)
+  const usage = view?.id ? usageMap?.[view.id] : undefined
   const content = (
     <>
       <ViewActivityDrawer
@@ -663,6 +672,20 @@ export function ExplorerPreviewDrawer({
                   />
                 </div>
               </div>
+
+              {/* Usage — the question somebody opening a details panel is
+                  actually asking about a view they do not recognise. Sits
+                  beside the favourite count because "liked" and "used" are
+                  different popularity signals and a reader wants both: a view
+                  can be bookmarked by many and opened by nobody. */}
+              {usage && (
+                <div className="pt-3 border-t border-glass-border/50">
+                  <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted block mb-1.5">
+                    Usage
+                  </span>
+                  <ViewUsageDetails usage={usage} />
+                </div>
+              )}
 
               {/* Favourite section */}
               <div className="flex items-center gap-3 pt-3 border-t border-glass-border/50">

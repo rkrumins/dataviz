@@ -244,9 +244,19 @@ export function ExplorerListRow({
         )}
 
         {/* ── Favourite count ── */}
-        <span className="inline-flex items-center gap-1 text-xs text-ink-muted">
+        <span
+          className="inline-flex items-center gap-1 text-xs text-ink-muted"
+          title={
+            view.favouriteCount === 0
+              ? 'Nobody has favourited this'
+              : `${view.favouriteCount} ${view.favouriteCount === 1 ? 'person has' : 'people have'} favourited this`
+          }
+        >
           <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
           {view.favouriteCount}
+          <span className="sr-only">
+            {view.favouriteCount === 1 ? 'favourite' : 'favourites'}
+          </span>
         </span>
 
         {/* ── Updated — freshest of settings-edit vs data-publish; tooltip tells both.

@@ -29,6 +29,39 @@ import { compact, exact } from '@/lib/formatMetric'
 import { timeAgo } from '@/lib/timeAgo'
 import type { ViewUsage } from '@/services/contentInsightsService'
 
+/** How many people, said as a sentence. */
+export function peoplePhrase(usage: ViewUsage): string {
+    if (usage.onlyAuthor) return 'Only its author has opened this'
+    if (usage.uniqueViewers === 0) {
+        return `Nobody has opened this in the last ${usage.windowDays} days`
+    }
+    return `${exact(usage.uniqueViewers)} `
+        + `${usage.uniqueViewers === 1 ? 'person has' : 'different people have'} `
+        + `opened this in the last ${usage.windowDays} days`
+}
+
+/** What is true BEYOND the window — lifetime, and when it was last touched.
+ *  Split out because the details panel prints the window figure in its first
+ *  line and must not say it twice. */
+export function opensTail(usage: ViewUsage): string {
+    return [
+        usage.lifetimeOpens > usage.opens
+            ? `${exact(usage.lifetimeOpens)} opens all time`
+            : null,
+        usage.lastOpenedAt ? `last opened ${timeAgo(usage.lastOpenedAt)}` : null,
+    ].filter(Boolean).join(' · ')
+}
+
+/** How many times, said as a sentence that can stand alone — which the eye
+ *  icon's tooltip needs, since nothing else is on screen to complete it. */
+export function opensPhrase(usage: ViewUsage): string {
+    const window = usage.opens === 0
+        ? `Not opened in the last ${usage.windowDays} days`
+        : `Opened ${exact(usage.opens)} ${usage.opens === 1 ? 'time' : 'times'} `
+          + `in the last ${usage.windowDays} days`
+    return [window, opensTail(usage)].filter(Boolean).join(' · ')
+}
+
 /** The personal note, or null when there is nothing worth adding. */
 function personalNote(usage: ViewUsage): string | null {
     // Others use it and you never have. The most useful thing this component
@@ -68,40 +101,27 @@ export function ViewUsageCounters({ usage, className }: {
 }) {
     if (!usage) return null
 
-    const lifetime = usage.lifetimeOpens > usage.opens
-        ? `${exact(usage.lifetimeOpens)} opens all time`
-        : null
     const note = personalNote(usage)
-    const title = [
-        usage.onlyAuthor
-            ? 'Only its author has opened this'
-            : usage.opens
-                ? `${exact(usage.opens)} opens by ${exact(usage.uniqueViewers)} `
-                  + `${usage.uniqueViewers === 1 ? 'person' : 'people'} in the last ${usage.windowDays} days`
-                : `Not opened in the last ${usage.windowDays} days`,
-        lifetime,
-        usage.lastOpenedAt ? `Last opened ${timeAgo(usage.lastOpenedAt)}` : null,
-        note,
-    ].filter(Boolean).join(' · ')
-
     return (
-        <span
-            className={cn('inline-flex items-center gap-2 text-[11px] font-medium text-ink-muted', className)}
-            title={title}
-        >
-            {/* People first even here: it is the number that says whether a
-                view is load-bearing, and it costs the same three characters. */}
-            <span className="inline-flex items-center gap-1">
+        <span className={cn('inline-flex items-center gap-2 text-[11px] font-medium text-ink-muted', className)}>
+            {/* A tooltip PER ICON, not one for the pair. A row of small glyphs
+                with a single shared title leaves somebody hovering the wrong
+                half of it and learning nothing — and `👥 0 👁 0` explains
+                itself to nobody. */}
+            <span
+                className="inline-flex items-center gap-1"
+                title={[peoplePhrase(usage), note].filter(Boolean).join(' · ')}
+            >
+                {/* People first even here: it is the number that says whether
+                    a view is load-bearing, and it costs the same characters. */}
                 <Users className="h-3 w-3" aria-hidden />
                 {compact(usage.uniqueViewers)}
-                <span className="sr-only">
-                    {usage.uniqueViewers === 1 ? 'person' : 'people'} in the last {usage.windowDays} days
-                </span>
+                <span className="sr-only">{peoplePhrase(usage)}</span>
             </span>
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1" title={opensPhrase(usage)}>
                 <Eye className="h-3 w-3" aria-hidden />
                 {compact(usage.opens)}
-                <span className="sr-only">opens in the last {usage.windowDays} days</span>
+                <span className="sr-only">{opensPhrase(usage)}</span>
             </span>
         </span>
     )
@@ -133,5 +153,34 @@ export function ViewUsageNote({ usage, className }: {
             <Sparkles className="h-2.5 w-2.5" aria-hidden />
             New to you
         </span>
+    )
+}
+
+/**
+ * The details form: the whole picture, where there is room for it.
+ *
+ * The counters answer "is this used" in three characters. Somebody who opened
+ * the details panel is asking the longer version — how many people, how often,
+ * when last, and whether they themselves have ever been here — so this says
+ * all of it in words rather than making them hover four separate glyphs.
+ */
+export function ViewUsageDetails({ usage }: { usage: ViewUsage | undefined }) {
+    if (!usage) return null
+
+    const note = personalNote(usage)
+    // The first line already says nobody has opened it, so the second must not
+    // repeat it — a panel that tells you the same fact twice reads as filler
+    // and teaches people to skim past the part that is not.
+    const secondary = usage.opens === 0 ? opensTail(usage) : opensPhrase(usage)
+    return (
+        <div className="space-y-1">
+            <p className="text-sm font-medium text-ink">{peoplePhrase(usage)}</p>
+            {secondary && <p className="text-xs text-ink-muted">{secondary}</p>}
+            {note && (
+                <p className="text-xs font-medium text-indigo-600 dark:text-indigo-400">
+                    {note}
+                </p>
+            )}
+        </div>
     )
 }

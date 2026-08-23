@@ -529,12 +529,22 @@ export function ExplorerViewCard({
         {/* ── 8. Footer ── */}
         <div className="flex items-center gap-2 border-t border-glass-border/50 pt-3 mt-1">
           {/* Favourite — left */}
-          <span className={cn(
-            'inline-flex items-center gap-1 text-[11px] font-medium',
-            view.isFavourited ? 'text-red-500' : 'text-ink-muted',
-          )}>
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 text-[11px] font-medium',
+              view.isFavourited ? 'text-red-500' : 'text-ink-muted',
+            )}
+            title={
+              view.favouriteCount === 0
+                ? 'Nobody has favourited this'
+                : `${view.favouriteCount} ${view.favouriteCount === 1 ? 'person has' : 'people have'} favourited this`
+            }
+          >
             <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
             {view.favouriteCount}
+            <span className="sr-only">
+              {view.favouriteCount === 1 ? 'favourite' : 'favourites'}
+            </span>
           </span>
 
           {/* Beside the favourite count, in the same register: how many people

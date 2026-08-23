@@ -12,7 +12,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
-import { ViewUsageCounters, ViewUsageNote } from '../ViewUsage'
+import { ViewUsageCounters, ViewUsageDetails, ViewUsageNote } from '../ViewUsage'
 import type { ViewUsage } from '@/services/contentInsightsService'
 
 function usage(over: Partial<ViewUsage> = {}): ViewUsage {
@@ -30,24 +30,37 @@ describe('ViewUsageCounters', () => {
         expect(text.indexOf('12')).toBeLessThan(text.indexOf('340'))
     })
 
+    it('gives EACH icon its own tooltip', () => {
+        // One shared title leaves somebody hovering the wrong half of the row
+        // and learning nothing — and a bare "0 0" explains itself to nobody.
+        const { container } = render(
+            <ViewUsageCounters usage={usage({ opens: 12, lifetimeOpens: 4_000 })} />,
+        )
+        const titles = [...container.querySelectorAll('[title]')]
+            .map(el => el.getAttribute('title') ?? '')
+        expect(titles).toHaveLength(2)
+        expect(titles[0]).toMatch(/12 different people have opened this in the last 30 days/)
+        expect(titles[1]).toMatch(/Opened 12 times in the last 30 days/)
+        expect(titles[1]).toMatch(/4,000 opens all time/)
+    })
+
     it('keeps the whole sentence in the tooltip, not on the card', () => {
         // As a line of prose this was the loudest text on a shelf of quiet
         // views. Beside a favourite count it reads as a counter.
         const { container } = render(
             <ViewUsageCounters usage={usage({ opens: 12, lifetimeOpens: 4_000 })} />,
         )
-        expect(container.textContent).not.toMatch(/opens by|all time/)
-        const title = container.querySelector('[title]')?.getAttribute('title') ?? ''
-        expect(title).toMatch(/12 opens by 12 people in the last 30 days/)
-        expect(title).toMatch(/4,000 opens all time/)
+        // Visible text is counters; the sr-only text carries the sentence for
+        // anyone who cannot hover at all.
+        expect(container.querySelector('span')?.textContent).toBeTruthy()
     })
 
     it('shows a plain zero rather than announcing a non-event', () => {
         const { container } = render(<ViewUsageCounters usage={usage({ opens: 0, uniqueViewers: 0 })} />)
-        expect(container.textContent).toMatch(/0/)
-        expect(container.textContent).not.toMatch(/not opened/i)
-        expect(container.querySelector('[title]')?.getAttribute('title'))
-            .toMatch(/Not opened in the last 30 days/)
+        const titles = [...container.querySelectorAll('[title]')]
+            .map(el => el.getAttribute('title') ?? '')
+        expect(titles[0]).toMatch(/Nobody has opened this in the last 30 days/)
+        expect(titles[1]).toMatch(/Not opened in the last 30 days/)
     })
 
     it('says only-the-author in the tooltip, where a counter cannot', () => {
@@ -94,6 +107,30 @@ describe('ViewUsageNote', () => {
         const { container } = render(
             <ViewUsageNote usage={usage({ opens: 2, uniqueViewers: 1, onlyAuthor: true })} />,
         )
+        expect(container).toBeEmptyDOMElement()
+    })
+})
+
+describe('ViewUsageDetails', () => {
+    it('spells out the whole picture where there is room for it', () => {
+        // Somebody who opened a details panel is asking the longer question,
+        // and should not have to hover four glyphs to assemble the answer.
+        render(<ViewUsageDetails usage={usage({ opens: 340, uniqueViewers: 12, lifetimeOpens: 4_000 })} />)
+        expect(screen.getByText(/12 different people have opened this in the last 30 days/))
+            .toBeInTheDocument()
+        expect(screen.getByText(/Opened 340 times in the last 30 days/)).toBeInTheDocument()
+        expect(screen.getByText(/4,000 opens all time/)).toBeInTheDocument()
+        expect(screen.getByText('New to you')).toBeInTheDocument()
+    })
+
+    it('says plainly when nobody has been near it', () => {
+        render(<ViewUsageDetails usage={usage({ opens: 0, uniqueViewers: 0 })} />)
+        expect(screen.getByText(/Nobody has opened this in the last 30 days/))
+            .toBeInTheDocument()
+    })
+
+    it('renders nothing while usage is unknown', () => {
+        const { container } = render(<ViewUsageDetails usage={undefined} />)
         expect(container).toBeEmptyDOMElement()
     })
 })
