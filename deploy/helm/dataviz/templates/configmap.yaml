@@ -39,3 +39,11 @@ data:
   STATS_POLL_TIMEOUT_SECS: {{ .Values.config.stats.pollTimeoutSecs | quote }}
   STATS_POLL_TIMEOUT_LARGE_SECS: {{ .Values.config.stats.pollTimeoutLargeSecs | quote }}
   STATS_POLL_LARGE_THRESHOLD: {{ .Values.config.stats.pollLargeThreshold | quote }}
+  # Read by two roles on purpose: the controlplane warms on this cadence and
+  # every web process snaps its analytics windows to the same grid. One
+  # ConfigMap serves both, so they cannot drift apart.
+  ANALYTICS_WARM_INTERVAL_SECONDS: {{ .Values.config.analytics.warmIntervalSeconds | quote }}
+  # Only the scheduler role acts on this — the sweep is gated on
+  # runs_scheduler() — but it is harmless and clearer to ship it fleet-wide
+  # from the same place as everything else.
+  PRODUCT_EVENT_RETENTION_DAYS: {{ .Values.config.analytics.productEventRetentionDays | quote }}

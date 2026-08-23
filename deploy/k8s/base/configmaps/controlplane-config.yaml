@@ -8,3 +8,11 @@ data:
   AGGREGATION_DISPATCH_MODE: "redis"
   AGGREGATION_API_PORT: "8091"
   FALKORDB_SOCKET_TIMEOUT: "5"
+  # Analytics warmer + product-event retention sweep — both gated on
+  # runs_scheduler(), so both belong to this role. The warm interval is also
+  # the epoch grid the WEB tier snaps every analytics window to, so this value
+  # and viz-config's copy must stay identical: a warmer phase-locked to a grid
+  # its readers do not share writes documents nobody looks up, and the only
+  # symptom is a dashboard that quietly stops being fast.
+  ANALYTICS_WARM_INTERVAL_SECONDS: "300"
+  PRODUCT_EVENT_RETENTION_DAYS: "400"

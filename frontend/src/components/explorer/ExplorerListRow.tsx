@@ -16,6 +16,9 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
+import type { ViewUsage } from '@/services/contentInsightsService'
+import { FavouriteTip, favouriteSentence, ViewUsageCounters, ViewUsageNote } from './ViewUsage'
 import { VISIBILITY_ICON } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -53,6 +56,9 @@ export interface ExplorerListRowProps {
   onRestore?: () => void
   onPermanentDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+  /** Opens, distinct people and the reader's own history. Undefined while it
+   *  loads or when the call failed — decoration must never gate a catalogue. */
+  usage?: ViewUsage
   isSelected?: boolean
   onToggleSelect?: () => void
   /** Visual density — controls vertical padding. */
@@ -77,6 +83,7 @@ export function ExplorerListRow({
   onDelete,
   onRestore,
   onPermanentDelete,
+  usage,
   isSelected,
   onToggleSelect,
   density = 'comfortable',
@@ -84,6 +91,9 @@ export function ExplorerListRow({
   hideWorkspaceInScope,
 }: ExplorerListRowProps) {
   const typeMeta = viewTypeMeta(view.viewType)
+  // One source for the sentence, so the tip and the screen-reader text cannot
+  // drift into saying different things about the same number.
+  const favouriteLabel = favouriteSentence(view.favouriteCount)
   // Glyph = user-chosen icon when set; tile colors stay type identity.
   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
   const VisIcon = ROW_VISIBILITY_ICON[view.visibility] ?? Lock
@@ -200,7 +210,15 @@ export function ExplorerListRow({
               </span>
             )}
           </div>
+
         </div>
+
+        {/* Terse, beside the other row meta. A list is where somebody scans
+            many unfamiliar views at once, which is exactly when "how many
+            people use this" earns its three characters — and exactly when a
+            sentence per row would drown the names. */}
+        <ViewUsageCounters usage={usage} className="hidden sm:inline-flex shrink-0" />
+        <ViewUsageNote usage={usage} className="hidden lg:inline-flex shrink-0" />
 
         {/* ── Type label ── */}
         <span className="text-xs text-ink-muted">
@@ -230,10 +248,13 @@ export function ExplorerListRow({
         )}
 
         {/* ── Favourite count ── */}
-        <span className="inline-flex items-center gap-1 text-xs text-ink-muted">
-          <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
-          {view.favouriteCount}
-        </span>
+        <HoverTip label={<FavouriteTip count={view.favouriteCount} />}>
+          <span className="inline-flex items-center gap-1 text-xs text-ink-muted">
+            <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
+            {view.favouriteCount}
+            <span className="sr-only">{favouriteLabel}</span>
+          </span>
+        </HoverTip>
 
         {/* ── Updated — freshest of settings-edit vs data-publish; tooltip tells both.
                This row printed FLAT GREY while the card beside it carried the

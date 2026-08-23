@@ -120,6 +120,101 @@ class FeatureWiring:
 
 
 FEATURE_WIRING: dict[str, FeatureWiring] = {
+    # ── Analytics ──────────────────────────────────────────────────────────────
+    "analyticsWorkspaceVisibility": FeatureWiring(
+        key="analyticsWorkspaceVisibility",
+        # SECURITY: it widens what Analytics reports past what workspace
+        # permissions allow, so an unreadable value must mean the narrower
+        # world — follow RBAC.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — when on, workspace names and figures are "
+            "reported for every workspace rather than only the reader's own. "
+            "Does NOT grant access to the workspace itself.",
+        ),
+        ui_surfaces=(
+            "Locked rows in the Workspaces table",
+            "Redacted names in the workspace and view leaderboards",
+        ),
+        still_allowed=(
+            "Platform-wide totals always count every workspace",
+            "Opening a workspace still requires the usual permissions",
+        ),
+    ),
+    "analyticsPrivacyMode": FeatureWiring(
+        key="analyticsPrivacyMode",
+        # SECURITY, and it is a LADDER rather than a switch — "strict" is the
+        # narrow end, so an unreadable value resolves there. Failing to the
+        # permissive end would publish per-person activity because a database
+        # hiccup, and a disclosure cannot be taken back.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — decides whether a non-privileged reader "
+            "is shown individual activity (internal, full) and operational "
+            "health (full). Never affects workspace or view access, which "
+            "follow the app's own permissions.",
+        ),
+        ui_surfaces=(
+            "Leaderboards and per-person panels on Overview, Engagement and Content",
+            "The freshness and access-friction sections of the Health tab",
+        ),
+        still_allowed=(
+            "Platform-wide counts and trends at every level",
+            "Full detail for workspaces the reader can already open",
+            "Their own activity, at every level",
+        ),
+    ),
+    "analyticsShowEmailAddresses": FeatureWiring(
+        key="analyticsShowEmailAddresses",
+        # SECURITY, though the honest framing is narrower than the others here.
+        # It does not decide whether addresses are knowable — a view's creator
+        # has always been a `mailto:` link in the Explorer drawer, ungated, to
+        # anyone who can read the view. What it decides is whether a page that
+        # RANKS things also carries several addresses at once, which is a
+        # different artefact from a detail panel showing one. Unreadable
+        # resolves to off for the usual reason: a disclosure cannot be undone.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — adds a contact address to a view's "
+            "creator and to a workspace's contributors, only where the reader "
+            "could already see that person's name. Never reaches the "
+            "platform-wide activity ranking, whatever this is set to.",
+        ),
+        # No UI half, and deliberately. The client reads no flag: the address is
+        # simply present in the payload or it is not, and the row renders what
+        # arrived. The hostility this field usually guards against — a button
+        # the UI keeps offering that now 403s — cannot occur here, because
+        # nothing is offered. Contact off means no address and no link to
+        # click, not a link that fails.
+        ui_surfaces=(),
+        still_allowed=(
+            "Reaching a view's author from the view itself, which never needed this",
+            "Everything the privacy level already governs — this can only narrow it",
+        ),
+    ),
+    "analyticsPublicEnabled": FeatureWiring(
+        key="analyticsPublicEnabled",
+        # SECURITY, and for the same reason `semanticLayerNonAdminEditing` is:
+        # this WIDENS who may read. If the value cannot be resolved we must
+        # assume the operator wanted the narrower world — privileged only.
+        # Failing open here would publish platform headcount and workspace
+        # existence to everyone because a database hiccup, which is not a
+        # mistake you can take back.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — a caller without system:audit:read, "
+            "system:org-admin or system:admin is refused outright when this is off, "
+            "and served a redacted document when it is on",
+        ),
+        ui_surfaces=(
+            "The Analytics item in the sidebar, for non-privileged people",
+            "The /analytics route guard",
+        ),
+        still_allowed=(
+            "Administrators, auditors and organisation admins keep the full "
+            "Analytics section regardless of this switch",
+        ),
+    ),
     # ── Lineage ────────────────────────────────────────────────────────────────
     "versioningEnabled": FeatureWiring(
         key="versioningEnabled",

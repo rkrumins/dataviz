@@ -2,16 +2,22 @@
 
 Writes are one-liners; reads aggregate in Python after a windowed fetch (the
 same portable approach ``audit.py`` uses for payload predicates), which keeps
-the SQL trivial and works identically on SQLite and Postgres. Volumes are small
-(one row per deliberate product signal), so a windowed scan is fine.
+the SQL trivial and works identically on SQLite and Postgres.
+
+The window scan below is filtered by ``event_type``. It did not need to be
+while every row was a deliberate product signal, but ``view.opened`` is
+appended on every view open, so an unfiltered window would now be dominated by
+rows this summary discards. High-volume aggregates over this table belong in
+``analytics_repo``, which groups in SQL rather than folding in Python.
 """
 from __future__ import annotations
 
 import json
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ProductEventORM
@@ -45,11 +51,26 @@ def _decode(row: ProductEventORM) -> dict[str, Any]:
         return {}
 
 
+#: The event types this summary actually reads. Filtering on them is not an
+#: optimisation detail — ``view.opened`` is appended once per view open, so an
+#: unfiltered window scan would load hundreds of rows for every one it uses.
+#: The ``(event_type, created_at)`` index serves this predicate directly.
+_SUMMARISED_TYPES = (
+    "docs.feedback",
+    "docs.search_miss",
+    "tour.completed",
+    "tour.skipped",
+)
+
+
 async def summary(session: AsyncSession, *, since_iso: str, top: int = 15) -> dict[str, Any]:
     """Aggregate the telemetry window into the shape the Admin panel renders."""
     rows = (
         await session.execute(
-            select(ProductEventORM).where(ProductEventORM.created_at >= since_iso)
+            select(ProductEventORM).where(
+                ProductEventORM.created_at >= since_iso,
+                ProductEventORM.event_type.in_(_SUMMARISED_TYPES),
+            )
         )
     ).scalars().all()
 
@@ -126,3 +147,37 @@ async def summary(session: AsyncSession, *, since_iso: str, top: int = 15) -> di
         "tours": {"completed": tour_completed, "skipped": tour_skipped, "funnel": tour_funnel},
         "totalEvents": len(rows),
     }
+
+
+async def purge_older_than(
+    session: AsyncSession, *, days: int, batch: int = 5_000,
+    now: datetime | None = None,
+) -> int:
+    """Delete product events older than ``days``. Returns how many went.
+
+    This table was append-only with no retention because its original
+    contents were rare, deliberate signals — a docs vote, a finished tour.
+    Instrumenting the product changed the arithmetic: a row per view open,
+    per lineage trace, and per graph search means the table now grows with
+    USAGE, which is exactly the thing we hope goes up.
+
+    Nothing reads beyond the analytics windows (365 days at most), so older
+    rows are storage and vacuum pressure buying nothing. Bounded per call so
+    one sweep never holds a long transaction on the jobs pool.
+    """
+    cutoff = (
+        (now or datetime.now(timezone.utc)) - timedelta(days=days)
+    ).isoformat()
+    doomed = (
+        await session.execute(
+            select(ProductEventORM.id)
+            .where(ProductEventORM.created_at < cutoff)
+            .limit(batch)
+        )
+    ).scalars().all()
+    if not doomed:
+        return 0
+    await session.execute(
+        delete(ProductEventORM).where(ProductEventORM.id.in_(doomed))
+    )
+    return len(doomed)

@@ -641,9 +641,25 @@ export function useAnyWorkspacePermission(perm: string): boolean {
  * branch on the spec kind themselves.
  */
 export function useNavPermission(spec: NavPermissionSpec): boolean {
-    const can = useAuthStore((s) => s.can)
-    const canAny = useAuthStore((s) => s.canAny)
     const claims = useAuthStore((s) => s.permissions)
+    return checkNavPermission(claims, spec)
+}
+
+/**
+ * The same question, outside a hook.
+ *
+ * Extracted because callers exist that must ask it for a LIST of specs — the
+ * Analytics insight strip decides per finding whether the screen that fixes it
+ * is reachable — and a hook cannot be called in a loop. Duplicating the switch
+ * would let the sidebar and those callers drift apart, which is the one thing
+ * this file exists to prevent.
+ */
+export function checkNavPermission(
+    claims: PermissionClaims, spec: NavPermissionSpec,
+): boolean {
+    const can = (perm: string, workspaceId?: string | null) =>
+        checkPermission(claims, perm, workspaceId)
+    const canAny = (perms: string[]) => perms.some((p) => can(p))
 
     switch (spec.kind) {
         case 'always':

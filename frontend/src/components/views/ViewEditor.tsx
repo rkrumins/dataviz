@@ -21,6 +21,7 @@ import { EntityAssignmentPanel } from './EntityAssignmentPanel'
 import { LayerDropZoneRow } from './LayerDropZone'
 import { ReferenceModelBuilder } from './ReferenceModelBuilder'
 import { useInstanceAssignments } from '@/store/referenceModelStore'
+import { viewTypeLabel } from '@/lib/domainLabels'
 
 // Dynamic icon component
 function DynamicIcon({ name, className, style }: { name: string; className?: string; style?: React.CSSProperties }) {
@@ -44,9 +45,9 @@ const GRANULARITY_LEVELS = [
 ]
 
 const LAYOUT_TYPES = [
-  { value: 'graph', label: 'Graph', icon: 'Network', description: 'Force-directed or DAG layout' },
-  { value: 'hierarchy', label: 'Hierarchy', icon: 'ListTree', description: 'Nested tree view' },
-  { value: 'reference', label: 'Context View', icon: 'LayoutTemplate', description: 'Horizontal layer columns' },
+  { value: 'graph', label: viewTypeLabel('graph'), icon: 'Network', description: 'Force-directed or DAG layout' },
+  { value: 'hierarchy', label: viewTypeLabel('hierarchy'), icon: 'ListTree', description: 'Nested tree view' },
+  { value: 'reference', label: viewTypeLabel('reference'), icon: 'LayoutTemplate', description: 'Horizontal layer columns' },
 ]
 
 export function ViewEditor({ viewId, onClose, onSave }: ViewEditorProps) {

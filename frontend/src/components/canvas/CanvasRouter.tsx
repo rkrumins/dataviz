@@ -34,6 +34,7 @@ import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
 import { ReferenceModelCanvas } from './ReferenceModelCanvas'
 import { cn } from '@/lib/utils'
+import { viewTypeLabel } from '@/lib/domainLabels'
 
 interface CanvasRouterProps {
   className?: string
@@ -248,23 +249,12 @@ interface ViewBadgeProps {
 }
 
 function ViewBadge({ name, layoutType, entityCount }: ViewBadgeProps) {
-  const layoutLabels: Record<string, string> = {
-    graph: 'Graph',
-    hierarchy: 'Hierarchy',
-    tree: 'Tree',
-    list: 'List',
-    grid: 'Grid',
-    timeline: 'Timeline',
-    'layered-lineage': 'Layered Lineage',
-    reference: 'Context View',
-  }
-
   return (
     <div className="flex items-center gap-2">
       <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
         <span className="text-sm font-medium text-ink">{name}</span>
         <span className="px-1.5 py-0.5 rounded text-2xs font-medium bg-accent-lineage/10 text-accent-lineage">
-          {layoutLabels[layoutType] ?? layoutType}
+          {viewTypeLabel(layoutType)}
         </span>
         <span className="text-2xs text-ink-muted">
           {entityCount} types

@@ -22,6 +22,7 @@ import type {
 import type { TraceMeta } from '@/services/traceApi'
 import { mapWithConcurrency } from '@/lib/concurrency'
 import { useCanvasStore } from '@/store/canvas'
+import { recordEvent } from '@/services/telemetryService'
 
 // ============================================
 // Types
@@ -838,6 +839,31 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         if (!provider) return
 
         const traceResult = await fetchTrace(nodeId, provider, urnResolver)
+
+        // The product's value moment, and until now the only unmeasured one.
+        // Every preset (upstream / downstream / full / retrace / toggle /
+        // history-jump) funnels through here, so one call site covers them all.
+        //
+        // A trace that comes back with no lineage is recorded as a DIFFERENT
+        // event type, not a flag: "how often does someone ask for lineage and
+        // get nothing back?" is the question worth answering, and a separate
+        // type keeps it a GROUP BY rather than a payload scan.
+        if (traceResult) {
+            // "Empty" means the trace found no lineage in either direction —
+            // the focus node itself is always in traceNodes, so counting that
+            // would call every failed trace a success.
+            const reach =
+                traceResult.upstreamNodes.size + traceResult.downstreamNodes.size
+            recordEvent(reach > 0 ? 'lineage.trace' : 'lineage.trace_empty', {
+                nodes: traceResult.traceNodes.size,
+                edges: traceResult.traceEdges.size,
+                upstream: traceResult.upstreamNodes.size,
+                downstream: traceResult.downstreamNodes.size,
+                level: traceResult.effectiveLevel ?? null,
+                truncated: traceResult.truncated ?? false,
+                inherited: traceResult.isInherited ?? false,
+            })
+        }
 
         if (traceResult && onTraceComplete) {
             onTraceComplete(traceResult)
