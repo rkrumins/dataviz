@@ -23,7 +23,7 @@ import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWor
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { ViewUsage } from '@/services/contentInsightsService'
-import { ViewUsageCounters, ViewUsageNote } from './ViewUsage'
+import { FavouriteTip, favouriteSentence, ViewUsageCounters, ViewUsageNote } from './ViewUsage'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -222,11 +222,9 @@ export function ExplorerViewCard({
   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
   const VisIcon = vis.icon
   const tags = view.tags ?? []
-  // One sentence, used by the tip and by the screen-reader text, so the two
-  // cannot drift into saying different things about the same number.
-  const favouriteLabel = view.favouriteCount === 0
-    ? 'Nobody has favourited this'
-    : `${view.favouriteCount} ${view.favouriteCount === 1 ? 'person has' : 'people have'} favourited this`
+  // One source for the sentence, so the tip and the screen-reader text cannot
+  // drift into saying different things about the same number.
+  const favouriteLabel = favouriteSentence(view.favouriteCount)
   const visibleTags = tags.slice(0, 3)
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
@@ -535,7 +533,7 @@ export function ExplorerViewCard({
         {/* ── 8. Footer ── */}
         <div className="flex items-center gap-2 border-t border-glass-border/50 pt-3 mt-1">
           {/* Favourite — left */}
-          <HoverTip label={favouriteLabel}>
+          <HoverTip label={<FavouriteTip count={view.favouriteCount} />}>
             <span className={cn(
               'inline-flex items-center gap-1 text-[11px] font-medium',
               view.isFavourited ? 'text-red-500' : 'text-ink-muted',

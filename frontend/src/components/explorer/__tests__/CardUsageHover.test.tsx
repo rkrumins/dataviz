@@ -59,16 +59,18 @@ describe('usage tooltips on a real Explorer card', () => {
         // when the card swaps in its hover controls.
         await user.hover(container.firstElementChild as HTMLElement)
 
-        for (const handle of [
-            /Nobody has favourited this/,
-            /Nobody has opened this in the last 30 days/,
-            /Not opened in the last 30 days/,
-        ]) {
-            // Captured BEFORE hovering: once the tip is up it carries the same
-            // sentence, so a second lookup would match two elements.
+        // Handle = the trigger's own screen-reader sentence; expected = what
+        // the panel leads with, which is the figure rather than the sentence.
+        for (const [handle, expected] of [
+            [/Nobody has favourited this/, 'No favourites'],
+            [/Nobody has opened this in the last 30 days/, 'Nobody yet'],
+            [/Not opened in the last 30 days/, 'Not opened'],
+        ] as const) {
+            // Captured BEFORE hovering: the sr-only text and the panel can
+            // both match, so a second lookup would find two elements.
             const trigger = screen.getByText(handle)
             await user.hover(trigger)
-            expect(await screen.findByRole('tooltip')).toHaveTextContent(handle)
+            expect(await screen.findByRole('tooltip')).toHaveTextContent(expected)
             await user.unhover(trigger)
         }
     })
@@ -80,7 +82,8 @@ describe('usage tooltips on a real Explorer card', () => {
         })
 
         await user.hover(screen.getByText(/12 different people have opened/))
-        expect(await screen.findByRole('tooltip'))
-            .toHaveTextContent(/12 different people have opened this in the last 30 days/)
+        const tip = await screen.findByRole('tooltip')
+        expect(tip).toHaveTextContent('12 people')
+        expect(tip).toHaveTextContent(/have opened this in the last 30 days/)
     })
 })

@@ -22,7 +22,7 @@
  * something about YOU worth interrupting a scan for — which, on most cards,
  * there is not.
  */
-import { Eye, Sparkles, Users } from 'lucide-react'
+import { Eye, Heart, Sparkles, Users } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -96,6 +96,62 @@ function personalNote(usage: ViewUsage): string | null {
  * The full sentence survives in the tooltip, where somebody who wants it can
  * find it and nobody else has to read it.
  */
+/**
+ * The body of a usage tooltip.
+ *
+ * A tooltip on a bare glyph is often the only place a number ever gets
+ * explained, and one line of grey prose wastes that. This is the shape the
+ * app's other popovers use — a tinted icon box, the FIGURE first at a size you
+ * can read, the qualifier under it, and a ruled footnote for what is true
+ * beyond the window.
+ *
+ * Reading order is the point, not the decoration: "12 people" is the answer
+ * and "in the last 30 days" is the caveat, so they are not the same size.
+ */
+function UsageTip({ icon: Icon, accent, figure, caption, footnote, note }: {
+    icon: React.ComponentType<{ className?: string }>
+    accent: string
+    figure: string
+    caption: string
+    footnote?: string | null
+    note?: string | null
+}) {
+    return (
+        <span className="flex items-start gap-2.5">
+            <span className={cn(
+                'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border',
+                accent,
+            )}>
+                <Icon className="h-3.5 w-3.5" />
+            </span>
+            <span className="block min-w-0">
+                <span className="block text-[13px] font-bold leading-tight text-ink">
+                    {figure}
+                </span>
+                <span className="mt-0.5 block text-[11px] leading-snug text-ink-secondary">
+                    {caption}
+                </span>
+                {footnote && (
+                    <span className="mt-1.5 block border-t border-glass-border pt-1.5 text-[10px] leading-snug text-ink-muted">
+                        {footnote}
+                    </span>
+                )}
+                {note && (
+                    <span className="mt-1.5 flex items-center gap-1 text-[10px] font-semibold text-indigo-600 dark:text-indigo-400">
+                        <Sparkles className="h-2.5 w-2.5 shrink-0" aria-hidden />
+                        {note}
+                    </span>
+                )}
+            </span>
+        </span>
+    )
+}
+
+const TIP_ACCENT = {
+    people: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+    opens: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
+} as const
+
 export function ViewUsageCounters({ usage, className }: {
     usage: ViewUsage | undefined
     className?: string
@@ -111,7 +167,29 @@ export function ViewUsageCounters({ usage, className }: {
                 nobody. `HoverTip` rather than `title`: the native one waits a
                 second, renders in OS chrome, and on a card that swaps in hover
                 controls it frequently never appears at all. */}
-            <HoverTip label={[peoplePhrase(usage), note].filter(Boolean).join(' · ')}>
+            <HoverTip
+                label={
+                    <UsageTip
+                        icon={Users}
+                        accent={TIP_ACCENT.people}
+                        figure={
+                            usage.onlyAuthor
+                                ? 'Only its author'
+                                : usage.uniqueViewers === 0
+                                    ? 'Nobody yet'
+                                    : `${exact(usage.uniqueViewers)} ${usage.uniqueViewers === 1 ? 'person' : 'people'}`
+                        }
+                        caption={
+                            usage.onlyAuthor
+                                ? `has opened this in the last ${usage.windowDays} days`
+                                : usage.uniqueViewers === 0
+                                    ? `nobody has opened this in the last ${usage.windowDays} days`
+                                    : `${usage.uniqueViewers === 1 ? 'has' : 'have'} opened this in the last ${usage.windowDays} days`
+                        }
+                        note={note}
+                    />
+                }
+            >
                 <span className="inline-flex items-center gap-1">
                     {/* People first even here: it is the number that says
                         whether a view is load-bearing. */}
@@ -120,7 +198,21 @@ export function ViewUsageCounters({ usage, className }: {
                     <span className="sr-only">{peoplePhrase(usage)}</span>
                 </span>
             </HoverTip>
-            <HoverTip label={opensPhrase(usage)}>
+            <HoverTip
+                label={
+                    <UsageTip
+                        icon={Eye}
+                        accent={TIP_ACCENT.opens}
+                        figure={
+                            usage.opens === 0
+                                ? 'Not opened'
+                                : `${exact(usage.opens)} ${usage.opens === 1 ? 'open' : 'opens'}`
+                        }
+                        caption={`in the last ${usage.windowDays} days`}
+                        footnote={opensTail(usage) || null}
+                    />
+                }
+            >
                 <span className="inline-flex items-center gap-1">
                     <Eye className="h-3 w-3" aria-hidden />
                     {compact(usage.opens)}
@@ -187,4 +279,32 @@ export function ViewUsageDetails({ usage }: { usage: ViewUsage | undefined }) {
             )}
         </div>
     )
+}
+
+/**
+ * The favourite count's tip, exported so the card and the row build it the
+ * same way — and so it matches the two usage tips it sits beside. One plain
+ * string among three structured panels reads as an oversight.
+ */
+export function FavouriteTip({ count }: { count: number }) {
+    return (
+        <UsageTip
+            icon={Heart}
+            accent="bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20"
+            figure={count === 0
+                ? 'No favourites'
+                : `${exact(count)} ${count === 1 ? 'favourite' : 'favourites'}`}
+            caption={count === 0
+                ? 'nobody has bookmarked this yet'
+                : `${count === 1 ? 'person has' : 'people have'} bookmarked this`}
+            footnote="Bookmarking is not the same as using — the eye beside this counts opens."
+        />
+    )
+}
+
+/** The plain sentence, for screen readers and anywhere a node will not do. */
+export function favouriteSentence(count: number): string {
+    return count === 0
+        ? 'Nobody has favourited this'
+        : `${count} ${count === 1 ? 'person has' : 'people have'} favourited this`
 }

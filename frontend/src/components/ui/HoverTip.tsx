@@ -20,6 +20,13 @@
  * The bubble is `pointer-events-none` so it can never sit between the cursor
  * and the thing it describes — a tooltip that swallows the click on its own
  * trigger is worse than no tooltip.
+ *
+ * `label` is a NODE, not a string. A tooltip on a bare glyph is often the only
+ * place a number gets explained, and one line of grey prose wastes that: the
+ * chrome here is the app's popover language — layered panel, real shadow, a
+ * caret that points at what it describes — so a caller can put a figure, a
+ * caption and a footnote in it and have it read as part of the product rather
+ * than as a browser artefact.
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -29,16 +36,23 @@ import { cn } from '@/lib/utils'
 const SHOW_DELAY_MS = 120
 const GAP = 8
 const EDGE = 8
-const MAX_WIDTH = 260
+const MAX_WIDTH = 280
+/** Keeps the caret inside the panel's rounded corners. */
+const CARET_INSET = 16
 
 export function HoverTip({ label, children, className }: {
-    /** The sentence. Written to stand alone: nothing else is on screen to
-     *  complete it. */
-    label: string
+    /** What to show. Written to stand alone: nothing else is on screen to
+     *  complete it. A plain string is fine; richer callers pass a node. */
+    label: React.ReactNode
     children: React.ReactNode
     className?: string
 }) {
-    const [at, setAt] = useState<{ x: number; y: number; above: boolean } | null>(null)
+    // `x` is where the panel is centred AFTER clamping to the viewport;
+    // `anchorX` is where the trigger actually is. They differ near a screen
+    // edge, and the caret has to follow the second or it points at nothing.
+    const [at, setAt] = useState<
+        { x: number; anchorX: number; y: number; above: boolean } | null
+    >(null)
     const anchorRef = useRef<HTMLSpanElement>(null)
     const timer = useRef<number | undefined>(undefined)
     const tipId = useId()
@@ -48,12 +62,14 @@ export function HoverTip({ label, children, className }: {
         if (!el) return
         const r = el.getBoundingClientRect()
         // Above by default; below when the top of the window is in the way.
-        const above = r.top > 56
+        const above = r.top > 120
+        const anchorX = r.left + r.width / 2
         setAt({
             x: Math.min(
-                Math.max(r.left + r.width / 2, EDGE + MAX_WIDTH / 2),
+                Math.max(anchorX, EDGE + MAX_WIDTH / 2),
                 window.innerWidth - EDGE - MAX_WIDTH / 2,
             ),
+            anchorX,
             y: above ? r.top - GAP : r.bottom + GAP,
             above,
         })
@@ -111,12 +127,35 @@ export function HoverTip({ label, children, className }: {
                             : 'translate(-50%, 0)',
                     }}
                     className={cn(
-                        'z-[60] pointer-events-none rounded-lg border border-glass-border',
-                        'bg-canvas-elevated px-2.5 py-1.5 text-[11px] font-medium leading-snug',
-                        'text-ink shadow-lg animate-in fade-in duration-100',
+                        'z-[60] block pointer-events-none rounded-xl',
+                        // Two borders and a real shadow, matching the app's
+                        // other popovers. A single hairline on a flat fill is
+                        // what made this read as browser chrome.
+                        'border border-glass-border ring-1 ring-black/[0.03] dark:ring-white/[0.04]',
+                        'bg-canvas-elevated px-3 py-2.5 shadow-xl',
+                        'animate-in fade-in duration-100',
+                        at.above ? 'slide-in-from-bottom-1' : 'slide-in-from-top-1',
                     )}
                 >
                     {label}
+                    {/* The caret tracks the TRIGGER, not the panel, so a tip
+                        pushed sideways by a screen edge still points at the
+                        thing it belongs to. */}
+                    <span
+                        aria-hidden
+                        style={{
+                            left: `calc(50% + ${Math.max(
+                                -(MAX_WIDTH / 2 - CARET_INSET),
+                                Math.min(MAX_WIDTH / 2 - CARET_INSET, at.anchorX - at.x),
+                            )}px)`,
+                            [at.above ? 'bottom' : 'top']: -4,
+                        }}
+                        className={cn(
+                            'absolute h-2 w-2 -translate-x-1/2 rotate-45',
+                            'border-glass-border bg-canvas-elevated',
+                            at.above ? 'border-b border-r' : 'border-l border-t',
+                        )}
+                    />
                 </span>,
                 document.body,
             )}
