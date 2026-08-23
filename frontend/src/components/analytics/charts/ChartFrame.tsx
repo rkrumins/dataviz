@@ -18,9 +18,7 @@ import { useId, useState } from 'react'
 import { BarChart3, Table2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-
-/** Matches `strokeOpacity` on the ghost polyline in `TimeSeriesChart`. */
-const GHOST_OPACITY = 0.28
+import { MARK } from './chartTheme'
 
 export interface ChartSeriesMeta {
     key: string
@@ -62,7 +60,13 @@ export function ChartFrame({
     const [showTable, setShowTable] = useState(false)
     const headingId = useId()
     const legend: (ChartSeriesMeta & { faded?: boolean })[] = ghostLabel && series[0]
-        ? [...series, { key: '__ghost', label: ghostLabel, color: series[0].color, shape: 'line', faded: true }]
+        ? [...series, {
+            key: '__ghost', label: ghostLabel, color: series[0].color,
+            // The ghost mirrors whatever it is a comparison FOR: a hatched
+            // chip beside bars, a faint rule beside anything drawn as a line —
+            // which is what an AREA chart's ghost is too.
+            shape: series[0].shape === 'bar' ? 'bar' : 'line', faded: true,
+        }]
         : series
 
     return (
@@ -118,7 +122,19 @@ export function ChartFrame({
                                         ? 'w-3.5 h-[2px] rounded-full'
                                         : 'w-2.5 h-2.5 rounded-[3px]',
                                 )}
-                                style={{ backgroundColor: s.color, opacity: s.faded ? GHOST_OPACITY : 1 }}
+                                style={
+                                    // A faded BAR is drawn hatched and outlined
+                                    // on the plot, so its key is too. A solid
+                                    // chip at low opacity would be a key for a
+                                    // mark that is not on the chart.
+                                    s.faded && s.shape === 'bar'
+                                        ? {
+                                            border: `1px solid ${s.color}`,
+                                            backgroundImage: `repeating-linear-gradient(45deg, ${s.color} 0 1.5px, transparent 1.5px 4px)`,
+                                            opacity: 0.55,
+                                        }
+                                        : { backgroundColor: s.color, opacity: s.faded ? MARK.ghostOpacity : 1 }
+                                }
                             />
                             <span className={cn(
                                 'text-[11px] font-medium',

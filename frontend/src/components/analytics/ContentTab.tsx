@@ -138,7 +138,13 @@ export function ContentTab({
                     title="Views created"
                     subtitle="New views per period"
                     isStale={isStale}
-                    isEmpty={series.viewsCreated.every((v) => v === 0)}
+                    isEmpty={
+                        // Both periods, not just this one: a chart that hid
+                        // itself when the current window is flat would hide
+                        // the very comparison explaining WHY it is flat.
+                        series.viewsCreated.every((v) => v === 0)
+                        && series.previous.viewsCreated.every((v) => v === 0)
+                    }
                     emptyLabel="No views created in this range."
                     series={[{ key: 'created', label: 'Views created', color: theme.series[0], shape: 'bar' }]}
                     ghostLabel={previousLabel(range)}

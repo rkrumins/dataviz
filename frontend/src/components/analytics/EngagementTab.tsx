@@ -149,7 +149,13 @@ export function EngagementTab({
                     title="Active users over time"
                     subtitle="Distinct people who did something, per period"
                     isStale={isStale}
-                    isEmpty={series.activeUsers.every((v) => v === 0)}
+                    isEmpty={
+                        // Both periods, not just this one: a chart that hid
+                        // itself when the current window is flat would hide
+                        // the very comparison explaining WHY it is flat.
+                        series.activeUsers.every((v) => v === 0)
+                        && series.previous.activeUsers.every((v) => v === 0)
+                    }
                     emptyLabel="No recorded activity in this range."
                     series={[{ key: 'active', label: 'Active users', color: theme.series[0], shape: 'area' }]}
                     ghostLabel={previousLabel(range)}

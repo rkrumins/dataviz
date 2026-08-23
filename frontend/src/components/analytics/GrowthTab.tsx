@@ -89,7 +89,13 @@ export function GrowthTab({
                     title="New accounts"
                     subtitle={`Signups per period over ${rangePhrase(range)}`}
                     isStale={isStale}
-                    isEmpty={series.signups.every((v) => v === 0)}
+                    isEmpty={
+                        // Both periods, not just this one: a chart that hid
+                        // itself when the current window is flat would hide
+                        // the very comparison explaining WHY it is flat.
+                        series.signups.every((v) => v === 0)
+                        && series.previous.signups.every((v) => v === 0)
+                    }
                     emptyLabel="No signups in this range."
                     series={[{ key: 'signups', label: 'Signups', color: theme.series[0], shape: 'bar' }]}
                     ghostLabel={previousLabel(range)}

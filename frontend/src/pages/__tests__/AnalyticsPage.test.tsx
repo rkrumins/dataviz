@@ -375,9 +375,44 @@ describe('AnalyticsPage', () => {
 
     it('states the comparison and the timezone once, above every chart', async () => {
         renderAt('/analytics')
-        expect(await screen.findByText(/faded lines show the previous period/i))
+        expect(await screen.findByText(/are the previous\s+period/i))
             .toBeInTheDocument()
         expect(screen.getByText(/bucketed in UTC/i)).toBeInTheDocument()
+    })
+
+    // ── Comparison marks ────────────────────────────────────────────
+
+    it('keeps plotting a window in which nothing happened', async () => {
+        // The reported case: no views created this month, plenty last month.
+        // Hiding the chart would hide the comparison that explains the zero —
+        // and "No views created in this range" is the least useful thing the
+        // panel could say when the answer is sitting in the previous period.
+        vi.mocked(analyticsService.getSummary).mockResolvedValue({
+            ...SUMMARY,
+            series: { ...SUMMARY.series, viewsCreated: [0, 0, 0] },
+        } as never)
+        renderAt('/analytics?tab=content')
+
+        // By heading: the legend names the series too, so a bare text query
+        // matches twice.
+        expect(await screen.findByRole('heading', { name: 'Views created' }))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/No views created in this range/i)).toBeNull()
+    })
+
+    it('says a chart is empty only when BOTH periods are', async () => {
+        vi.mocked(analyticsService.getSummary).mockResolvedValue({
+            ...SUMMARY,
+            series: {
+                ...SUMMARY.series,
+                viewsCreated: [0, 0, 0],
+                previous: { ...SUMMARY.series.previous, viewsCreated: [0, 0, 0] },
+            },
+        } as never)
+        renderAt('/analytics?tab=content')
+
+        expect(await screen.findByText(/No views created in this range/i))
+            .toBeInTheDocument()
     })
 
     // ── Terminology ─────────────────────────────────────────────────

@@ -139,8 +139,8 @@ export function AnalyticsPage() {
                                     in UTC, which matters to anyone reading a
                                     daily chart from another timezone. */}
                                 <p className="text-[11px] text-ink-muted/80">
-                                    Faded lines show the previous period · days
-                                    bucketed in UTC
+                                    Hatched bars and faded lines are the previous
+                                    period · days bucketed in UTC
                                 </p>
                             </div>
                         </div>

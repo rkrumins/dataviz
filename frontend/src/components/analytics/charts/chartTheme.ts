@@ -164,6 +164,10 @@ export const MARK = {
     surfaceGap: 2,
     /** A pointer target is bigger than the mark it selects. */
     minHitTarget: 24,
+    /** How faint the previous period is drawn — as a line, as a bar, and as
+     *  its own legend swatch. One number so the three cannot drift: a legend
+     *  swatch that does not match its mark is a legend that lies. */
+    ghostOpacity: 0.28,
 } as const
 
 

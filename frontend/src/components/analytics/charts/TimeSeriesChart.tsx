@@ -231,7 +231,7 @@ export function TimeSeriesChart({
                         fill="none"
                         stroke={theme.series[s.slot % theme.series.length]}
                         strokeWidth={1.5}
-                        strokeOpacity={0.28}
+                        strokeOpacity={MARK.ghostOpacity}
                         strokeLinejoin="round"
                         strokeLinecap="round"
                     />
