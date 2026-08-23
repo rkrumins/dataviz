@@ -11,7 +11,7 @@ redis>=8.1.0
 # Python: a 2,000-node trace-closure page spent ~1.2 s parsing ~300k reply
 # lines on the event loop (the event_loop_lag warnings). redis-py picks it up
 # automatically when importable.
-hiredis>=3.0
+hiredis>=3.4.1
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
 sqlalchemy>=2.0.52
