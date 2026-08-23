@@ -15,6 +15,7 @@ import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/se
 import { Link } from 'react-router-dom'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { WorkspaceCard, type WsDataSourceProviderInfo, type WorkspaceSchemaSummary } from '@/components/admin/WorkspaceCard'
+import { useWorkspaceUsage } from '@/hooks/useContentInsights'
 import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from '@/components/admin/workspace/WorkspaceFilterToolbar'
 import { WorkspaceListRow, WORKSPACE_LIST_GRID } from '@/components/admin/workspace/WorkspaceListRow'
 import { WorkspaceCardSkeleton, WorkspaceListRowSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
@@ -376,6 +377,11 @@ export function WorkspacesPage() {
     }
 
     /* ── Client-side filtering + sorting ── */
+    // One request for every workspace on screen. Same reasoning as the
+    // Explorer: a card fetching its own rollup would be one request per card.
+    const { data: wsUsage } = useWorkspaceUsage(
+        useMemo(() => workspaces.map(w => w.id), [workspaces]))
+
     const filtered = useMemo(() => {
         let result = workspaces
 
@@ -710,6 +716,7 @@ export function WorkspacesPage() {
                                 healthStatus={deriveWorkspaceHealth(ws.dataSources || [], { nodeCount: dsStats[ws.id]?.nodes })}
                                 dsProviders={wsProviderInfoMap[ws.id] || []}
                                 schemaSummary={wsSchemaSummaryMap[ws.id] || { uniqueEntityTypes: 0, uniqueRelationshipTypes: 0, ontologyNames: [], providerGroups: [], viewCount: 0 }}
+                                usage={wsUsage?.[ws.id]}
                                 onOpen={() => navigate(`/workspaces/${ws.id}`)}
                                 onPrefetch={() => prefetchWorkspaceDetail(queryClient, ws.id)}
                                 onDelete={() => handleDelete(ws.id)}

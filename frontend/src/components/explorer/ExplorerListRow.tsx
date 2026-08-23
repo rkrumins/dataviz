@@ -16,6 +16,8 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import type { ViewUsage } from '@/services/contentInsightsService'
+import { ViewUsageLine } from './ViewUsageLine'
 import { VISIBILITY_ICON } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -53,6 +55,9 @@ export interface ExplorerListRowProps {
   onRestore?: () => void
   onPermanentDelete?: () => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+  /** Opens, distinct people and the reader's own history. Undefined while it
+   *  loads or when the call failed — decoration must never gate a catalogue. */
+  usage?: ViewUsage
   isSelected?: boolean
   onToggleSelect?: () => void
   /** Visual density — controls vertical padding. */
@@ -77,6 +82,7 @@ export function ExplorerListRow({
   onDelete,
   onRestore,
   onPermanentDelete,
+  usage,
   isSelected,
   onToggleSelect,
   density = 'comfortable',
@@ -200,6 +206,11 @@ export function ExplorerListRow({
               </span>
             )}
           </div>
+
+          {/* Same answer as the grid card, on the row's own meta line. A list
+              is where somebody scans a lot of unfamiliar views at once, which
+              is exactly when "is anyone using this" earns its space. */}
+          <ViewUsageLine usage={usage} className="mt-0.5" />
         </div>
 
         {/* ── Type label ── */}

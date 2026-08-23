@@ -21,6 +21,8 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import type { ViewUsage } from '@/services/contentInsightsService'
+import { ViewUsageLine } from './ViewUsageLine'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -156,6 +158,9 @@ export interface ExplorerViewCardProps {
   /** When provided, tag chips become clickable → toggle the tag filter. */
   onTagClick?: (tag: string) => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+  /** Opens, distinct people and the reader's own history. Undefined while it
+   *  loads or when the call failed — decoration must never gate a catalogue. */
+  usage?: ViewUsage
   isSelected?: boolean
   onToggleSelect?: () => void
   /** Visual density — collapses padding, preview, and ancillary sections. */
@@ -187,6 +192,7 @@ export function ExplorerViewCard({
   onPermanentDelete,
   onTagClick,
   healthStatus,
+  usage,
   isSelected,
   onToggleSelect,
   density = 'comfortable',
@@ -473,6 +479,10 @@ export function ExplorerViewCard({
         {/* ── 6. Tags (fixed height) — hidden in compact density ── */}
         {showTags && (
         <div className={cn('min-h-[20px]', sectionGap)}>
+          {/* Above the tags, because "is anyone using this" outranks "what is
+              it about" for somebody deciding whether to open it at all. */}
+          <ViewUsageLine usage={usage} />
+
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {visibleTags.map(tag => {

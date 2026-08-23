@@ -19,6 +19,7 @@ import { useAuthStore } from '@/store/auth'
 import { useExplorerViews, resolveCategoryParams, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
 import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
+import { useViewUsage } from '@/hooks/useContentInsights'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
@@ -266,6 +267,16 @@ export function ExplorerPage() {
   // no longer post-filters the loaded page.
   const healthMap = useViewHealth(views)
 
+
+  // Usage for everything on screen, in ONE request. A card fetching its own
+  // would be one request per tile — the exact shape the batched endpoint
+  // exists to avoid — and the cache key is the sorted id list, so scrolling
+  // in another page re-uses nothing it already has rather than refetching.
+  const usageIds = useMemo(
+    () => Array.from(new Set([...views, ...popularViews].map(v => v.id))),
+    [views, popularViews],
+  )
+  const { data: usageMap } = useViewUsage(usageIds)
   // Resolves the provider (e.g. falkordb/neo4j) behind each view's data source
   // so cards can surface what the view is built from.
   const { resolve: resolveProvider } = useDataSourceProviderMap()
@@ -740,6 +751,7 @@ export function ExplorerPage() {
                     onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                     onTagClick={handleTagClick}
                     healthStatus={healthMap.get(v.id)?.status}
+                    usage={usageMap?.[v.id]}
                     density={density}
                     providerInfo={resolveProvider(v.dataSourceId)}
                   />
@@ -830,6 +842,7 @@ export function ExplorerPage() {
                       onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                       onTagClick={handleTagClick}
                       healthStatus={healthMap.get(v.id)?.status}
+                    usage={usageMap?.[v.id]}
                       isSelected={selectedIds.has(v.id)}
                       density={density}
                       providerInfo={resolveProvider(v.dataSourceId)}
@@ -871,6 +884,7 @@ export function ExplorerPage() {
                   onRestore={() => handleRestore(v)}
                   onPermanentDelete={() => handlePermanentDeleteRequest(v)}
                   healthStatus={healthMap.get(v.id)?.status}
+                    usage={usageMap?.[v.id]}
                   isSelected={selectedIds.has(v.id)}
                   density={density}
                   providerInfo={resolveProvider(v.dataSourceId)}
