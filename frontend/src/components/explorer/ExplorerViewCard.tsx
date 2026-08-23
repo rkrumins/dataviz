@@ -22,7 +22,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import type { ViewUsage } from '@/services/contentInsightsService'
-import { ViewUsageLine } from './ViewUsageLine'
+import { ViewUsageCounters, ViewUsageNote } from './ViewUsage'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -479,9 +479,9 @@ export function ExplorerViewCard({
         {/* ── 6. Tags (fixed height) — hidden in compact density ── */}
         {showTags && (
         <div className={cn('min-h-[20px]', sectionGap)}>
-          {/* Above the tags, because "is anyone using this" outranks "what is
-              it about" for somebody deciding whether to open it at all. */}
-          <ViewUsageLine usage={usage} />
+          {/* Only when there is something to say. The counters live in the
+              footer; this is the one usage fact worth a line of its own. */}
+          <ViewUsageNote usage={usage} />
 
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
@@ -536,6 +536,11 @@ export function ExplorerViewCard({
             <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
             {view.favouriteCount}
           </span>
+
+          {/* Beside the favourite count, in the same register: how many people
+              opened it, and how many times. As a sentence on its own line this
+              was the loudest text on a shelf of quiet views. */}
+          <ViewUsageCounters usage={usage} />
 
           {/* Creator — middle.
               Compact initials-only avatar; hover reveals the

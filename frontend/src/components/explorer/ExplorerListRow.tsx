@@ -17,7 +17,7 @@ import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
 import type { ViewUsage } from '@/services/contentInsightsService'
-import { ViewUsageLine } from './ViewUsageLine'
+import { ViewUsageCounters, ViewUsageNote } from './ViewUsage'
 import { VISIBILITY_ICON } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -207,11 +207,14 @@ export function ExplorerListRow({
             )}
           </div>
 
-          {/* Same answer as the grid card, on the row's own meta line. A list
-              is where somebody scans a lot of unfamiliar views at once, which
-              is exactly when "is anyone using this" earns its space. */}
-          <ViewUsageLine usage={usage} className="mt-0.5" />
         </div>
+
+        {/* Terse, beside the other row meta. A list is where somebody scans
+            many unfamiliar views at once, which is exactly when "how many
+            people use this" earns its three characters — and exactly when a
+            sentence per row would drown the names. */}
+        <ViewUsageCounters usage={usage} className="hidden sm:inline-flex shrink-0" />
+        <ViewUsageNote usage={usage} className="hidden lg:inline-flex shrink-0" />
 
         {/* ── Type label ── */}
         <span className="text-xs text-ink-muted">

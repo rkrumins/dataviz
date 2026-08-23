@@ -379,8 +379,8 @@ export function WorkspacesPage() {
     /* ── Client-side filtering + sorting ── */
     // One request for every workspace on screen. Same reasoning as the
     // Explorer: a card fetching its own rollup would be one request per card.
-    const { data: wsUsage } = useWorkspaceUsage(
-        useMemo(() => workspaces.map(w => w.id), [workspaces]))
+    const wsUsageIds = useMemo(() => workspaces.map(w => w.id), [workspaces])
+    const { data: wsUsage } = useWorkspaceUsage(wsUsageIds)
 
     const filtered = useMemo(() => {
         let result = workspaces

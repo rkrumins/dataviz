@@ -20,6 +20,7 @@ import { useExplorerViews, resolveCategoryParams, type SortOption, type Explorer
 import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { useViewUsage } from '@/hooks/useContentInsights'
+import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
@@ -251,7 +252,7 @@ export function ExplorerPage() {
   }
 
   const {
-    views,
+    views: loadedViews,
     totalCount,
     popularViews,
     isLoading,
@@ -265,7 +266,7 @@ export function ExplorerPage() {
   // Health map still drives the per-card health badge, but the
   // needs-attention filter itself runs server-side now, so the Explorer
   // no longer post-filters the loaded page.
-  const healthMap = useViewHealth(views)
+  const healthMap = useViewHealth(loadedViews)
 
 
   // Usage for everything on screen, in ONE request. A card fetching its own
@@ -273,10 +274,12 @@ export function ExplorerPage() {
   // exists to avoid — and the cache key is the sorted id list, so scrolling
   // in another page re-uses nothing it already has rather than refetching.
   const usageIds = useMemo(
-    () => Array.from(new Set([...views, ...popularViews].map(v => v.id))),
-    [views, popularViews],
+    () => Array.from(new Set([...loadedViews, ...popularViews].map(v => v.id))),
+    [loadedViews, popularViews],
   )
   const { data: usageMap } = useViewUsage(usageIds)
+  // "Most opened" is finished here rather than on the server — see the hook.
+  const views = useOpensOrdering(loadedViews, usageMap, filters.sort)
   // Resolves the provider (e.g. falkordb/neo4j) behind each view's data source
   // so cards can surface what the view is built from.
   const { resolve: resolveProvider } = useDataSourceProviderMap()
