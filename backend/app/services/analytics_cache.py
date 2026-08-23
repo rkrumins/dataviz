@@ -143,6 +143,15 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
     return await _flight.run(("analytics", key), _compute)
 
 
+#: Bump when the SHAPE of a cached document changes — a field added, removed
+#: or renamed. These documents outlive the code that wrote them: they sit in
+#: Redis for a TTL measured in minutes, so a deploy that adds a field will keep
+#: serving the old shape to freshly-deployed clients until every entry expires.
+#: Versioning the key makes a shape change a cache miss instead of a puzzle.
+#: (v2 added ``series.previous.buckets``.)
+SCHEMA_VERSION = 2
+
+
 def document_key(surface: str, args: dict[str, Any]) -> str:
     """The cache key for one surface over one window.
 
@@ -159,7 +168,7 @@ def document_key(surface: str, args: dict[str, Any]) -> str:
         f"d{args['days']}" if "days" in args
         else f"{args.get('start')}:{args.get('end')}"
     )
-    return f"raw:{surface}:{window}"
+    return f"raw:v{SCHEMA_VERSION}:{surface}:{window}"
 
 
 async def put(key: str, value: Any, *, ttl: float) -> bool:

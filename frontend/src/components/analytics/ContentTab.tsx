@@ -18,6 +18,7 @@ import { Leaderboard } from './Leaderboard'
 import { ContactLink } from './ContactLink'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
+import { comparedSeries } from './comparedSeries'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
 import { comparisonLabel, previousLabel, rangePhrase } from './RangePicker'
@@ -32,6 +33,12 @@ export function ContentTab({
 }) {
     const theme = useChartTheme()
     const { totals, series, breakdowns, leaderboards } = data
+
+    // `null` when the previous period has no dates to sit on — an
+    // older cached document, mostly. The chart then draws this period
+    // alone rather than guessing where the earlier bars belong.
+    const beforeCreated = comparedSeries(
+        series.previous.buckets, series.previous.viewsCreated)
     // Restricted rows stay by DEFAULT so the ranking agrees with the opens
     // total above it — "the most-opened thing here is something you cannot
     // see" is itself worth knowing. But a reader who can act on none of them
@@ -146,20 +153,20 @@ export function ContentTab({
                         // itself when the current window is flat would hide
                         // the very comparison explaining WHY it is flat.
                         series.viewsCreated.every((v) => v === 0)
-                        && series.previous.viewsCreated.every((v) => v === 0)
+                        && (beforeCreated?.values ?? []).every((v) => v === 0)
                     }
                     emptyLabel="No views created in this range."
                     series={[{ key: 'created', label: 'Views created', color: theme.series[0], shape: 'bar' }]}
-                    ghostLabel={previousLabel(range)}
+                    ghostLabel={beforeCreated ? previousLabel(range) : undefined}
                     table={
                         <ChartTable
                             rowLabel="Date"
-                            rows={[...series.previous.buckets, ...series.buckets]
+                            rows={[...(beforeCreated?.buckets ?? []), ...series.buckets]
                                 .map((b) => shortDate(b, true))}
                             columns={[
                                 {
                                     key: 'created', label: 'Views created',
-                                    values: [...series.previous.viewsCreated, ...series.viewsCreated],
+                                    values: [...(beforeCreated?.values ?? []), ...series.viewsCreated],
                                 },
                                 // The chart puts both periods on one axis, so the
                                 // table does too — a twin that disagreed with the
@@ -167,7 +174,7 @@ export function ContentTab({
                                 {
                                     key: 'period', label: 'Period',
                                     values: [
-                                        ...series.previous.buckets.map(() => previousLabel(range)),
+                                        ...(beforeCreated?.buckets ?? []).map(() => previousLabel(range)),
                                         ...series.buckets.map(() => 'This period'),
                                     ],
                                 },
@@ -177,10 +184,7 @@ export function ContentTab({
                 >
                     <BarSeriesChart
                         buckets={series.buckets} values={series.viewsCreated}
-                        previous={{
-                            buckets: series.previous.buckets,
-                            values: series.previous.viewsCreated,
-                        }}
+                        previous={beforeCreated ?? undefined}
                         previousLabel={previousLabel(range)}
                         label="views" slot={0}
                     />

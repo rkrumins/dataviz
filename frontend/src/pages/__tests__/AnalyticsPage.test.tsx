@@ -419,6 +419,26 @@ describe('AnalyticsPage', () => {
             .toBeInTheDocument()
     })
 
+    it('survives a cached document written before the dates existed', async () => {
+        // Analytics documents are precomputed into Redis and outlive the code
+        // that wrote them, so for one TTL after a deploy a freshly-loaded
+        // client is handed the OLD shape. Spreading the missing array took the
+        // whole tab down with a TypeError — this is that crash, locked out.
+        const { buckets: _dropped, ...old } = SUMMARY.series.previous
+        vi.mocked(analyticsService.getSummary).mockResolvedValue({
+            ...SUMMARY,
+            series: { ...SUMMARY.series, previous: old },
+        } as never)
+        renderAt('/analytics?tab=growth')
+
+        // The chart draws this period alone rather than guessing where the
+        // earlier bars belong — and says nothing about a comparison it cannot
+        // place, because a legend for an absent mark is its own lie.
+        expect(await screen.findByRole('heading', { name: 'New accounts' }))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/^Previous \d+ days$/)).toBeNull()
+    })
+
     // ── Terminology ─────────────────────────────────────────────────
 
     it('calls a reference view a Context View', async () => {

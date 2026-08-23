@@ -12,6 +12,7 @@ import { signupSourceLabel } from '@/lib/domainLabels'
 import { KpiCard } from './KpiCard'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
+import { comparedSeries } from './comparedSeries'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
 import { BarSeriesChart } from './charts/BarSeriesChart'
 import { StackedShareBar } from './charts/StackedShareBar'
@@ -28,6 +29,12 @@ export function GrowthTab({
 }) {
     const theme = useChartTheme()
     const { totals, series, engagement, breakdowns } = data
+
+    // `null` when the previous period has no dates to sit on — an
+    // older cached document, mostly. The chart then draws this period
+    // alone rather than guessing where the earlier bars belong.
+    const beforeSignups = comparedSeries(
+        series.previous.buckets, series.previous.signups)
 
     // Three cumulative totals whose magnitudes differ by more than an order of
     // magnitude — users in the thousands, workspaces in the tens. On a shared
@@ -94,20 +101,20 @@ export function GrowthTab({
                         // itself when the current window is flat would hide
                         // the very comparison explaining WHY it is flat.
                         series.signups.every((v) => v === 0)
-                        && series.previous.signups.every((v) => v === 0)
+                        && (beforeSignups?.values ?? []).every((v) => v === 0)
                     }
                     emptyLabel="No signups in this range."
                     series={[{ key: 'signups', label: 'Signups', color: theme.series[0], shape: 'bar' }]}
-                    ghostLabel={previousLabel(range)}
+                    ghostLabel={beforeSignups ? previousLabel(range) : undefined}
                     table={
                         <ChartTable
                             rowLabel="Date"
-                            rows={[...series.previous.buckets, ...series.buckets]
+                            rows={[...(beforeSignups?.buckets ?? []), ...series.buckets]
                                 .map((b) => shortDate(b, true))}
                             columns={[
                                 {
                                     key: 'signups', label: 'Signups',
-                                    values: [...series.previous.signups, ...series.signups],
+                                    values: [...(beforeSignups?.values ?? []), ...series.signups],
                                 },
                                 // The chart puts both periods on one axis, so the
                                 // table does too — a twin that disagreed with the
@@ -115,7 +122,7 @@ export function GrowthTab({
                                 {
                                     key: 'period', label: 'Period',
                                     values: [
-                                        ...series.previous.buckets.map(() => previousLabel(range)),
+                                        ...(beforeSignups?.buckets ?? []).map(() => previousLabel(range)),
                                         ...series.buckets.map(() => 'This period'),
                                     ],
                                 },
@@ -125,10 +132,7 @@ export function GrowthTab({
                 >
                     <BarSeriesChart
                         buckets={series.buckets} values={series.signups}
-                        previous={{
-                            buckets: series.previous.buckets,
-                            values: series.previous.signups,
-                        }}
+                        previous={beforeSignups ?? undefined}
                         previousLabel={previousLabel(range)} label="signups"
                     />
                 </ChartFrame>

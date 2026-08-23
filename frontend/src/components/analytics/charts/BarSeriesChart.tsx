@@ -81,9 +81,14 @@ export function BarSeriesChart({
     const plotH = height - PAD.top - PAD.bottom
     const color = theme.series[slot % theme.series.length]
 
-    // Only trust a comparison that carries a date for every value.
-    const ghost = previous && previous.buckets.length === previous.values.length
+    // Only trust a comparison that carries a date for every value. Checked
+    // here as well as at the call site because this is the primitive: a cached
+    // document written by an older deploy can be missing the dates entirely,
+    // and a chart is not the right place to learn that by throwing.
+    const ghost = previous
+        && Array.isArray(previous.buckets) && Array.isArray(previous.values)
         && previous.buckets.length > 0
+        && previous.buckets.length === previous.values.length
         ? previous
         : undefined
 
