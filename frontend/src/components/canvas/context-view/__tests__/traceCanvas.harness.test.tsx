@@ -23,7 +23,7 @@ import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(24))
+afterAll(() => expectTestsRan(25))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -641,6 +641,33 @@ describe('the trace overlay on the real canvas', () => {
     await h.toggleSharePicture()
     const plain = decodeTraceShare(new URL(await h.copyShareLink()).searchParams.get('trace') ?? '')
     expect(plain).toMatchObject({ urn: 'cfo', up: true, down: false, open: [] })
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // The launcher is a list of findings, so each row can be handed over
+  // without being opened first — the trace you want to send is often not the
+  // one you are looking at.
+  it('a history row hands over its own trace, without opening it', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    // Open a partner, so this entry has a picture worth carrying.
+    await h.toggle('orders')
+    await h.flushExpansionRecord()
+    h.pressEscape()
+    await h.settle()
+
+    await h.openTraceHistory()
+    const link = await h.shareTraceHistory('cfo')
+
+    // Sharing a row is not opening it: the panel stays put and no trace runs.
+    expect(h.isTracing()).toBe(false)
+    // And the confirmation reaches a screen reader, not just the eye.
+    expect(document.querySelector('[role="menu"][aria-label="Trace history"] [role="status"]')?.textContent?.trim())
+      .toBe('Link copied')
+    const shared = decodeTraceShare(new URL(link).searchParams.get('trace') ?? '')
+    expect(shared).toMatchObject({ urn: 'cfo', up: true, down: true })
+    // The picture it carries is the one that entry recorded.
+    expect(shared!.open).toContain('orders')
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 

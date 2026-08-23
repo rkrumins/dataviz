@@ -17,7 +17,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { ArrowUpLeft, ArrowDownRight, GitBranch, History, Trash2 } from 'lucide-react'
+import { ArrowUpLeft, ArrowDownRight, Check, GitBranch, History, Link2, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export interface TraceHistoryPanelEntry {
@@ -36,6 +36,10 @@ export interface TraceHistoryPanelProps {
   onClose: () => void
   /** The launcher control — the panel anchors below it. */
   triggerRef: React.RefObject<HTMLElement | null>
+  /** A link that reopens the entry at this stack index, or null when there
+   *  is nothing to link to. Absent = no share action on the rows, which is
+   *  what a host that cannot build links gets. */
+  onCopyLink?: (index: number) => string | null
 }
 
 const MODE_GLYPH = {
@@ -60,8 +64,24 @@ export function TraceHistoryPanel({
   onClear,
   onClose,
   triggerRef,
+  onCopyLink,
 }: TraceHistoryPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
+  /** Which row just yielded a link, and whether the clipboard took it. The
+   *  confirmation lives on the row itself: a toast for a two-word answer is
+   *  more interruption than the gesture is worth. */
+  const [copied, setCopied] = useState<{ index: number; ok: boolean } | null>(null)
+  const copy = async (index: number) => {
+    const link = onCopyLink?.(index)
+    if (!link) return
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied({ index, ok: true })
+    } catch {
+      setCopied({ index, ok: false })
+    }
+    window.setTimeout(() => setCopied(null), 1800)
+  }
 
   // Escape closes (window-level so it works before focus lands inside).
   useEffect(() => {
@@ -126,29 +146,66 @@ export function TraceHistoryPanel({
           <div className="max-h-[300px] overflow-y-auto py-1">
             {entries.map((e) => {
               const glyph = MODE_GLYPH[e.mode]
+              const justCopied = copied?.index === e.index
               return (
-                <button
+                <div
                   key={`${e.index}-${e.timestamp}`}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => onResume(e.index)}
-                  title={`Resume — ${glyph.title}`}
-                  className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:bg-black/[0.04] dark:focus-visible:bg-white/[0.06]"
+                  className="group/row flex items-stretch hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
                 >
-                  <span
-                    data-mode={e.mode}
-                    className={cn('flex items-center justify-center w-6 h-6 rounded-md flex-shrink-0', glyph.tone)}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    data-history-resume
+                    onClick={() => onResume(e.index)}
+                    title={`Resume — ${glyph.title}`}
+                    className="flex-1 min-w-0 flex items-center gap-2.5 pl-3.5 pr-2 py-2 text-left focus-visible:outline-none focus-visible:bg-black/[0.04] dark:focus-visible:bg-white/[0.06]"
                   >
-                    <glyph.Icon className="w-3.5 h-3.5" strokeWidth={2.2} />
-                  </span>
-                  <span className="flex-1 min-w-0 truncate text-xs font-medium text-ink">{e.label}</span>
-                  <span className="flex-shrink-0 text-[10px] tabular-nums text-ink-muted/70">
-                    {relativeTime(e.timestamp)}
-                  </span>
-                </button>
+                    <span
+                      data-mode={e.mode}
+                      className={cn('flex items-center justify-center w-6 h-6 rounded-md flex-shrink-0', glyph.tone)}
+                    >
+                      <glyph.Icon className="w-3.5 h-3.5" strokeWidth={2.2} />
+                    </span>
+                    <span className="flex-1 min-w-0 truncate text-xs font-medium text-ink">{e.label}</span>
+                    <span className="flex-shrink-0 text-[10px] tabular-nums text-ink-muted/70">
+                      {relativeTime(e.timestamp)}
+                    </span>
+                  </button>
+                  {/* HAND IT OVER WITHOUT OPENING IT. The trace worth sending
+                      is often not the one on screen, and opening it first
+                      just to copy a link is a walk nobody needed. */}
+                  {onCopyLink && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      data-history-share
+                      aria-label={justCopied
+                        ? (copied?.ok ? 'Link copied' : 'Copy failed')
+                        : `Copy a link to the ${e.label} trace`}
+                      title={justCopied
+                        ? (copied?.ok ? 'Link copied' : 'Your browser blocked the clipboard')
+                        : 'Copy a link to this trace'}
+                      onClick={(ev) => { ev.stopPropagation(); void copy(e.index) }}
+                      className={cn(
+                        'flex items-center justify-center w-9 pr-1.5 flex-shrink-0 transition-all',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
+                        justCopied
+                          ? (copied?.ok ? 'text-emerald-500' : 'text-rose-500')
+                          : 'text-ink-muted/50 hover:text-accent-lineage group-hover/row:text-ink-muted',
+                      )}
+                    >
+                      {justCopied && copied?.ok
+                        ? <Check className="w-3.5 h-3.5" strokeWidth={2.6} />
+                        : <Link2 className="w-3.5 h-3.5" strokeWidth={2.2} />}
+                    </button>
+                  )}
+                </div>
               )
             })}
           </div>
+          <span aria-live="polite" role="status" className="sr-only">
+            {copied ? (copied.ok ? 'Link copied' : 'Copy failed') : ''}
+          </span>
           <div className="flex items-center justify-between px-3.5 py-1.5 border-t border-glass-border/40">
             <span className="text-[10px] text-ink-muted/70">Select an entity to start a new trace</span>
             <button
