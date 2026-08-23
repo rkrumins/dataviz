@@ -338,7 +338,12 @@ describe('AnalyticsPage', () => {
     it('leads Overview with the narrative strip, linked to its tab', async () => {
         const user = userEvent.setup()
         renderAt('/analytics')
-        const insight = await screen.findByText(/33% of lineage traces come back empty/i)
+        // By role: the headline is a button, and the card's dismiss control
+        // repeats the same sentence in its own accessible name so five "Clear"
+        // buttons are distinguishable.
+        const insight = await screen.findByRole('button', {
+            name: /^33% of lineage traces come back empty$/i,
+        })
         expect(insight).toBeInTheDocument()
 
         // Clicking an insight goes where it can be investigated.

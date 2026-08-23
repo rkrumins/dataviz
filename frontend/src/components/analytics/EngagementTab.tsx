@@ -63,8 +63,9 @@ export function EngagementTab({
                 No other number here can see that — view opens, activity and
                 stickiness all count it as engagement. */}
             <section
+                id="chart-value-moments"
                 aria-labelledby="value-moments"
-                className="rounded-2xl border border-glass-border bg-canvas-elevated p-5 shadow-sm"
+                className="rounded-2xl border border-glass-border bg-canvas-elevated p-5 shadow-sm transition-shadow data-[revealed]:ring-2 data-[revealed]:ring-indigo-500/60"
             >
                 <div className="flex items-baseline justify-between gap-3 mb-1">
                     <h2 id="value-moments" className="text-sm font-bold text-ink">
@@ -146,6 +147,7 @@ export function EngagementTab({
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame
+                    id="chart-active-users"
                     title="Active users over time"
                     subtitle="Distinct people who did something, per period"
                     isStale={isStale}
@@ -182,6 +184,7 @@ export function EngagementTab({
                 </ChartFrame>
 
                 <ChartFrame
+                    id="chart-activation-funnel"
                     title="Activation funnel"
                     subtitle={`Everyone who signed up in ${rangePhrase(range)}`}
                     isStale={isStale}

@@ -142,6 +142,7 @@ export function ContentTab({
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame
+                    id="chart-views-created"
                     title="Views created"
                     // The axis carries BOTH periods, so it says so: someone
                     // picking "30 days" and seeing 60 on the axis deserves to
@@ -191,6 +192,7 @@ export function ContentTab({
                 </ChartFrame>
 
                 <ChartFrame
+                    id="chart-popular-views"
                     title="Most popular views"
                     subtitle="Opens, and how many distinct people did the opening"
                     isStale={isStale}

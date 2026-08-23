@@ -274,6 +274,15 @@ export interface Insight {
     detail: string
     /** Which tab answers this in more depth, if any. */
     tab: string | null
+    /**
+     * The series the headline is a claim ABOUT, drawn beside it.
+     *
+     * "Up 35%" is a summary of a shape, and steady growth, one spike and a
+     * late collapse all produce the same percentage. `null` for rules that
+     * quote a rate or a share: they have no series of their own, and a
+     * sparkline invented for them would be a picture of a different number.
+     */
+    spark: number[] | null
 }
 
 export interface AnalyticsSummary {

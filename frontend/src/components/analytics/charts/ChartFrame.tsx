@@ -48,6 +48,13 @@ interface Props {
     ghostLabel?: string
     /** Held at reduced opacity while a new range loads — never a skeleton. */
     isStale?: boolean
+    /**
+     * Anchor for a deep link. An insight that says "top views take 64% of all
+     * opens" should land the reader ON that chart, not merely on the tab that
+     * contains it — arriving somewhere and being left to hunt is barely better
+     * than not linking at all.
+     */
+    id?: string
     action?: React.ReactNode
     className?: string
     children: React.ReactNode
@@ -55,7 +62,7 @@ interface Props {
 
 export function ChartFrame({
     title, subtitle, series = [], isEmpty, emptyLabel, table, ghostLabel,
-    isStale, action, className, children,
+    isStale, id, action, className, children,
 }: Props) {
     const [showTable, setShowTable] = useState(false)
     const headingId = useId()
@@ -71,9 +78,14 @@ export function ChartFrame({
 
     return (
         <section
+            id={id}
             aria-labelledby={headingId}
             className={cn(
                 'rounded-2xl border border-glass-border bg-canvas-elevated p-5 shadow-sm',
+                // A deep link lands here and says so for a moment. Scrolling
+                // something into view without marking it leaves the reader to
+                // work out which of six cards they were sent to.
+                'transition-shadow data-[revealed]:ring-2 data-[revealed]:ring-indigo-500/60',
                 className,
             )}
         >

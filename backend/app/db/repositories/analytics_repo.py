@@ -1155,13 +1155,26 @@ _MAX_INSIGHTS = 5
 
 def _insight(
     key: str, tone: str, headline: str, detail: str, *, score: float,
-    tab: Optional[str] = None,
+    tab: Optional[str] = None, spark: Optional[list[int]] = None,
 ) -> dict:
     """``tone`` drives colour: good | watch | bad | neutral. ``score`` is only
-    used to rank; it never reaches the client."""
+    used to rank; it never reaches the client.
+
+    ``spark`` is the series the headline is a claim ABOUT, so the shape behind
+    "up 35%" can be seen rather than taken on trust — steady growth and one
+    spike produce the same percentage. Rules that quote a rate or a share have
+    no such series and pass none; a sparkline invented for them would be a
+    picture of a different number.
+
+    Where a finding can be ACTED on is deliberately not here. The destination
+    is a route and the door to it is a nav permission spec, and both of those
+    live on the client, keyed off the stable insight key. A server hardcoding
+    ``/ingestion?tab=freshness`` would be a server with an opinion about a
+    router it cannot see.
+    """
     return {
         "key": key, "tone": tone, "headline": headline,
-        "detail": detail, "tab": tab, "_score": score,
+        "detail": detail, "tab": tab, "spark": spark, "_score": score,
     }
 
 
@@ -1187,7 +1200,9 @@ def _narrative(doc: dict, *, window_label: str) -> list[dict]:
     health = doc["health"]
     value = doc["valueMoments"]
 
-    def _swing(metric: dict, key: str, noun: str, tab: str) -> None:
+    series = doc.get("series") or {}
+
+    def _swing(metric: dict, key: str, noun: str, tab: str, field: str) -> None:
         change, current = metric.get("changePct"), metric.get("current") or 0
         if change is None or current < _MIN_BASIS or abs(change) < _MATERIAL_CHANGE_PCT:
             return
@@ -1198,11 +1213,14 @@ def _narrative(doc: dict, *, window_label: str) -> list[dict]:
             f"{current:,} {noun} {window_label}, against "
             f"{metric.get('previous', 0):,} in the previous period.",
             score=min(abs(change), 100), tab=tab,
+            # The same array the chart on `tab` is drawn from, so the shape in
+            # the card and the shape in the chart cannot disagree.
+            spark=series.get(field),
         ))
 
-    _swing(totals["users"], "signups", "new sign-ups", "growth")
-    _swing(totals["activeUsers"], "active", "active users", "engagement")
-    _swing(totals["views"], "views", "new views", "content")
+    _swing(totals["users"], "signups", "new sign-ups", "growth", "signups")
+    _swing(totals["activeUsers"], "active", "active users", "engagement", "activeUsers")
+    _swing(totals["views"], "views", "new views", "content", "viewsCreated")
 
     # Where growth is actually coming from — a shift in mix is a strategy fact.
     sources = breakdowns.get("usersBySignupSource") or []
@@ -1383,7 +1401,11 @@ def _narrative(doc: dict, *, window_label: str) -> list[dict]:
             f"{dormant:,} active {_plural(dormant, 'user')} went quiet",
             f"More people stopped using the platform this period ({dormant:,}) "
             f"than kept using it ({returning:,}).",
-            score=88, tab="engagement",
+            # Growth accounting — new / returning / resurrected / dormant — is
+            # rendered on GROWTH. This said "engagement", which is where the
+            # word "active" appears but not the chart that shows the split, so
+            # following the finding landed on a tab that could not explain it.
+            score=88, tab="growth",
         ))
 
     out.sort(key=lambda i: i["_score"], reverse=True)

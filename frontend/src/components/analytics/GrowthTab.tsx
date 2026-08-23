@@ -93,6 +93,7 @@ export function GrowthTab({
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame
+                    id="chart-new-accounts"
                     title="New accounts"
                     subtitle={`Signups over ${rangePhrase(range)}, against ${previousLabel(range).toLowerCase()}`}
                     isStale={isStale}
@@ -176,6 +177,7 @@ export function GrowthTab({
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                 <ChartFrame
+                    id="chart-signup-source"
                     title="How people arrive"
                     subtitle="Signup source across all accounts"
                     isStale={isStale}
@@ -194,6 +196,7 @@ export function GrowthTab({
                 </ChartFrame>
 
                 <ChartFrame
+                    id="chart-growth-accounting"
                     title="Growth accounting"
                     subtitle={`Where this period's active users came from`}
                     isStale={isStale}

@@ -199,11 +199,11 @@ export const PRIVILEGED: AnalyticsSummary = {
         { bucket: BUCKETS[6], date: BUCKETS[6], title: 'v2.4 shipped — trace presets', kind: 'success' },
     ],
     insights: [
-        { key: 'trace-empty', tone: 'bad', headline: '24% of lineage traces come back empty', detail: '1,980 of 8,420 traces in the last 14 days found no lineage. People are asking the core question and not getting an answer.', tab: 'engagement' },
-        { key: 'signups', tone: 'good', headline: 'New sign-ups up 35%', detail: '96 new sign-ups in the last 14 days, against 71 in the previous period.', tab: 'growth' },
-        { key: 'access-backlog', tone: 'bad', headline: '7 access requests pending', detail: 'The oldest has been waiting 6 days. Every one is someone who wanted to use the platform and cannot.', tab: 'growth' },
-        { key: 'signup-mix', tone: 'neutral', headline: 'SSO is 61% of new accounts', detail: '781 of 1,284 accounts created in the last 14 days came in this way.', tab: 'growth' },
-        { key: 'concentration', tone: 'watch', headline: 'Top views take 64% of all opens', detail: 'Attention is concentrated in a few views. The rest of the catalogue is not being discovered.', tab: 'content' },
+        { key: 'trace-empty', tone: 'bad', headline: '24% of lineage traces come back empty', detail: '1,980 of 8,420 traces in the last 14 days found no lineage. People are asking the core question and not getting an answer.', tab: 'engagement', spark: null },
+        { key: 'signups', tone: 'good', headline: 'New sign-ups up 35%', detail: '96 new sign-ups in the last 14 days, against 71 in the previous period.', tab: 'growth', spark: signups },
+        { key: 'access-backlog', tone: 'bad', headline: '7 access requests pending', detail: 'The oldest has been waiting 6 days. Every one is someone who wanted to use the platform and cannot.', tab: 'growth', spark: null },
+        { key: 'signup-mix', tone: 'neutral', headline: 'SSO is 61% of new accounts', detail: '781 of 1,284 accounts created in the last 14 days came in this way.', tab: 'growth', spark: null },
+        { key: 'concentration', tone: 'watch', headline: 'Top views take 64% of all opens', detail: 'Attention is concentrated in a few views. The rest of the catalogue is not being discovered.', tab: 'content', spark: null },
     ],
     coverage: {
         viewOpenTrackingSince: '2026-03-11T00:00:00+00:00',

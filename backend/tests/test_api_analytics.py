@@ -810,6 +810,29 @@ async def test_the_ghost_carries_the_dates_it_actually_happened_on(db_session):
         assert gap == timedelta(days=1)
 
 
+async def test_a_trend_insight_carries_the_series_it_is_a_claim_about(db_session):
+    """"Up 35%" is a summary of a shape, and steady growth, one spike and a
+    late collapse all produce the same percentage. The card draws the shape."""
+    await _seed(db_session)
+    data = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+
+    by_key = {i["key"]: i for i in data["insights"]}
+    for key, field in (("signups", "signups"), ("active", "activeUsers"),
+                       ("views", "viewsCreated")):
+        insight = by_key.get(key)
+        if insight is None:
+            continue        # The rule stayed silent; nothing to check.
+        # The SAME array the chart is drawn from, so the card and the chart
+        # cannot disagree about the shape.
+        assert insight["spark"] == data["series"][field]
+
+    # A rule quoting a rate has no series of its own, and inventing one would
+    # be a picture of a different number.
+    for key in ("stickiness", "trace-empty", "concentration"):
+        if key in by_key:
+            assert by_key[key]["spark"] is None
+
+
 async def test_previous_window_is_equal_length_and_adjacent():
     w = analytics_repo.build_window(days=30)
     prev = analytics_repo.previous_window(w)
