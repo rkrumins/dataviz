@@ -17,7 +17,7 @@
  * Schemas are cached by React Query per (wsId, dsId, providerVersion).
  */
 
-import { createContext, useContext, useState, useEffect, useRef, useMemo, type ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useLayoutEffect, useRef, useMemo, type ReactNode } from 'react'
 import type { ViewAccess } from '@/services/viewApiService'
 import type { GraphSchema } from './GraphDataProvider'
 import type { GraphProviderContextValueExtended } from './GraphProviderContext'
@@ -234,7 +234,13 @@ export function ViewExecutionProvider({
         }
       })
     return () => { cancelled = true }
-  }, [scopedProvider, scopeMatchesGlobal, globalCtx.providerReady, providerStatus])
+  // Depends on the STATUS, not the object. `providerStatus` comes out of a polled
+  // store that replaces its whole `statuses` map on each meaningful write, so any
+  // provider in the fleet changing re-fired this effect for every open view —
+  // setProviderReady(false) -> getStats() -> true, plus a live round-trip. The
+  // store's own dedupe comment already names this as flickering the canvas.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopedProvider, scopeMatchesGlobal, globalCtx.providerReady, providerStatus?.status])
 
   // ── Build the overridden provider context value ──
   const providerContextValue = useMemo<GraphProviderContextValueExtended>(() => ({
@@ -263,13 +269,71 @@ export function ViewExecutionProvider({
     <ProviderOverride value={providerContextValue}>
       <ViewSchemaGate workspaceId={workspaceId} dataSourceId={dataSourceId} viewId={viewId ?? undefined}>
         {(schema) => (
-          <ViewExecCtx.Provider value={{ schema, workspaceId, dataSourceId, access, readOnly }}>
+          <ViewExecValue
+            schema={schema}
+            workspaceId={workspaceId}
+            dataSourceId={dataSourceId}
+            access={access}
+            readOnly={readOnly}
+          >
             {children}
-          </ViewExecCtx.Provider>
+          </ViewExecValue>
         )}
       </ViewSchemaGate>
     </ProviderOverride>
   )
+}
+
+/**
+ * The context value, memoized — a component rather than a `useMemo` in the body
+ * above because `schema` only exists inside `ViewSchemaGate`'s render prop, which
+ * re-runs on every render of either component.
+ *
+ * An inline `value={{ ... }}` here was the head of the flicker cascade. A Provider
+ * value change re-renders EVERY `useContext` consumer unconditionally — memo
+ * comparators downstream cannot stop it — so a fresh object each render meant:
+ * new schema arrays -> new containment predicate identity -> `useContainmentHierarchy`
+ * reads it as "ontology changed" and does a FULL rebuild -> new flat tree ->
+ * `LineageFlowOverlay`'s observer effect (keyed on `nodes`) disconnects every
+ * observer and clears `globalVisibleNodes`, leaving the edge layer blank for a
+ * frame. That is the "edges blink" the overlay's own comment describes, and its
+ * cost is O(nodes + edges) — which is why the flicker got worse the bigger the
+ * graph. `StaticViewSchemaProvider` above already did this correctly.
+ */
+function ViewExecValue({
+  schema,
+  workspaceId,
+  dataSourceId,
+  access,
+  readOnly,
+  children,
+}: ViewExecutionContextValue & { children: ReactNode }) {
+  const value = useMemo<ViewExecutionContextValue>(
+    () => ({ schema, workspaceId, dataSourceId, access, readOnly }),
+    [schema, workspaceId, dataSourceId, access, readOnly],
+  )
+  return <ViewExecCtx.Provider value={value}>{children}</ViewExecCtx.Provider>
+}
+
+/**
+ * The gate's last-good schema, per scope.
+ *
+ * A stable instance from `useState`'s lazy initializer rather than a `useRef`
+ * read in the render body: this project's hooks lint (`react-hooks/refs`) forbids
+ * that, and `FocusGraphView`'s `ConeStore`/`TrailStore` already establish this as
+ * the way to hold mutable-across-renders state here.
+ */
+class LastGoodSchema {
+  private entry: { scopeKey: string; schema: ResolvedViewSchema } | null = null
+
+  remember(scopeKey: string, schema: ResolvedViewSchema): void {
+    this.entry = { scopeKey, schema }
+  }
+
+  /** The remembered schema, but only if it belongs to this exact scope. */
+  forScope(scopeKey: string): ResolvedViewSchema | null {
+    return this.entry?.scopeKey === scopeKey ? this.entry.schema : null
+  }
 }
 
 // ─── Schema Gate ───────────────────────────────────────────────────────────
@@ -300,13 +364,51 @@ function ViewSchemaGate({ workspaceId, dataSourceId, viewId, children }: ViewSch
     }
   }, [data, loadFromBackend, workspaceId, dataSourceId])
 
-  // Resolve the raw GraphSchema into frontend types
+  // Resolve the raw GraphSchema into frontend types.
+  //
+  // This memo's cache hit is load-bearing, and it depends on `data` holding its
+  // identity across a no-op refetch. Two things guarantee that, both verified:
+  // React Query's structural sharing preserves the nested `schema` object when
+  // the payload is deep-equal (so the 2s `computing` poll does not churn it, even
+  // though `meta` changes), and `placeholderData` in `useGraphSchema` carries the
+  // same object across a `providerVersion` re-key.
+  //
+  // If it ever DID miss, the cost is not a cheap re-render: `resolveSchema`
+  // returns fresh entityTypes / containmentEdgeTypes / lineageEdgeTypes arrays ->
+  // `useViewIsContainmentEdge` re-mints its predicate ->
+  // `useContainmentHierarchy` reads that as "the ontology changed" and does a
+  // FULL rebuild -> new flat tree -> `LineageFlowOverlay`'s observer effect
+  // disconnects every observer, blanking the edge layer for a frame.
   const resolved = useMemo<ResolvedViewSchema | null>(() => {
     if (!data || !data.entityTypes || data.entityTypes.length === 0) return null
     return resolveSchema(data)
   }, [data])
 
+  // Hold the last resolved schema FOR THIS SCOPE so a re-key never unmounts a
+  // canvas that is already up.
+  //
+  // This gate renders `children` through a render prop, so returning the spinner
+  // early does not overlay the canvas — it destroys it: the React Flow instance,
+  // the open lens (its history is local state in ContextViewCanvas), the trace,
+  // the camera. Rebuilding all of that is the hard flicker, and it costs more the
+  // bigger the graph. With `placeholderData` on the query this is now belt and
+  // braces, but it is the layer that holds even if a trigger slips through.
+  //
+  // Stamped with the scope key, so a genuine workspace switch still gates and can
+  // never show the previous workspace's ontology.
+  const scopeKey = `${workspaceId}/${dataSourceId ?? ''}/${viewId ?? ''}`
+  const [lastGoodSchema] = useState(() => new LastGoodSchema())
+  useLayoutEffect(() => {
+    if (resolved) lastGoodSchema.remember(scopeKey, resolved)
+  }, [lastGoodSchema, scopeKey, resolved])
+  // An entry stamped with a DIFFERENT scope is never handed back, so there is
+  // nothing to clear — it is replaced as soon as the new scope resolves.
+  const lastGood = resolved ?? lastGoodSchema.forScope(scopeKey)
+
   if (isLoading || (!resolved && !isError)) {
+    // Already showing this scope — keep the canvas mounted and let the refetch
+    // land underneath it.
+    if (lastGood) return <>{children(lastGood)}</>
     return (
       <div className="absolute inset-0 flex items-center justify-center bg-canvas/60 backdrop-blur-sm z-10">
         <div className="flex flex-col items-center gap-3">

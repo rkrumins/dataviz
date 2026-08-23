@@ -3,7 +3,7 @@
  *
  * Shows: view type, name, description, tags, workspace, visibility,
  * data source, semantic layer, layout, created/updated dates,
- * last synced, favourite count, and a mini preview for hierarchy/reference.
+ * last synced, and a mini preview for hierarchy/reference.
  */
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { History, Settings2 } from 'lucide-react'
@@ -19,7 +19,6 @@ import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import {
   X,
-  Heart,
   Share2,
   Trash2,
   Tag,
@@ -51,7 +50,6 @@ interface ExplorerPreviewDrawerProps {
   view: View | null
   isOpen: boolean
   onClose: () => void
-  onToggleFavourite: () => void
   onShare: () => void
   /** Opens the full builder (ViewWizard) — labelled "Edit layout & scope". */
   onEdit?: () => void
@@ -319,7 +317,6 @@ export function ExplorerPreviewDrawer({
   view,
   isOpen,
   onClose,
-  onToggleFavourite,
   onShare,
   onEdit,
   editDisabled,
@@ -677,10 +674,7 @@ export function ExplorerPreviewDrawer({
               </div>
 
               {/* Usage — the question somebody opening a details panel is
-                  actually asking about a view they do not recognise. Sits
-                  beside the favourite count because "liked" and "used" are
-                  different popularity signals and a reader wants both: a view
-                  can be bookmarked by many and opened by nobody. */}
+                  actually asking about a view they do not recognise. */}
               {usage && (
                 <div className="pt-3 border-t border-glass-border/50">
                   <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted block mb-1.5">
@@ -690,28 +684,6 @@ export function ExplorerPreviewDrawer({
                 </div>
               )}
 
-              {/* Favourite section */}
-              <div className="flex items-center gap-3 pt-3 border-t border-glass-border/50">
-                <button
-                  onClick={onToggleFavourite}
-                  className={cn(
-                    'inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-colors duration-200',
-                    view.isFavourited
-                      ? 'bg-red-500/10 text-red-500 border border-red-500/20 hover:bg-red-500/15'
-                      : 'border border-glass-border text-ink-muted hover:text-red-500 hover:border-red-500/30 bg-black/[0.02] dark:bg-white/[0.02]',
-                  )}
-                >
-                  <Heart
-                    className="h-4 w-4"
-                    fill={view.isFavourited ? 'currentColor' : 'none'}
-                  />
-                  {view.isFavourited ? 'Favourited' : 'Favourite'}
-                </button>
-                <span className="text-ink-muted text-xs font-medium">
-                  {view.favouriteCount}{' '}
-                  {view.favouriteCount === 1 ? 'favourite' : 'favourites'}
-                </span>
-              </div>
               </>
             )}
             </div>

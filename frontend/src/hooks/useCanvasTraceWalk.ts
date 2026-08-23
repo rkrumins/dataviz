@@ -18,7 +18,7 @@
  * lands wherever the graph says instead of where THE VIEW places it. The
  * store now holds browse, and only browse.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import { recordEvent } from '@/services/telemetryService'
 import {
@@ -117,7 +117,9 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         else walk.retryWalk(tracedUrn)
     }, [walk, tracedUrn, walkEntry?.status])
 
-    return {
+    // Memoized: see `useUnifiedTrace`'s return. A fresh literal here re-triggered
+    // every consumer memo that depends on the walk.
+    return useMemo(() => ({
         isTracing: tracedUrn !== null,
         tracedUrn,
         start,
@@ -126,5 +128,5 @@ export function useCanvasTraceWalk(provider: GraphDataProvider | null): CanvasTr
         progress,
         continuePastCheckpoint,
         retryWalk,
-    }
+    }), [tracedUrn, start, exit, walkEntry, progress, continuePastCheckpoint, retryWalk])
 }

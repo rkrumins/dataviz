@@ -752,7 +752,6 @@ export default function WorkspaceViewsSection({
                 view={previewView}
                 isOpen={!!previewView}
                 onClose={() => setPreviewView(null)}
-                onToggleFavourite={() => previewView && toggleFavourite(previewView.id)}
                 onShare={() => previewView && setShareView({ id: previewView.id, name: previewView.name, visibility: previewView.visibility })}
                 onEdit={previewView ? () => { const id = previewView.id; setPreviewView(null); openViewEditor(id) } : undefined}
                 onDelete={previewView && canDeleteView(previewView)
