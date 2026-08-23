@@ -122,7 +122,7 @@ async def workspaces_usage(
     days: int = _DAYS,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_readonly_db_session),
 ) -> dict[str, Any]:
     """Is each workspace alive, and what do people come to it for?
 

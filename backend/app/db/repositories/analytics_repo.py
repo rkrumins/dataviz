@@ -753,37 +753,41 @@ async def workspace_usage(
         name_of[view_id] = name
         out[workspace_id]["views"] += 1
 
-    per_view = {
-        r[0]: (r[1], r[2])
-        for r in (await session.execute(
-            select(
-                ProductEventORM.subject_id,
-                func.count().label("opens"),
-                func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
-            ).where(
-                ProductEventORM.event_type == VIEW_OPENED,
-                ProductEventORM.subject_id.in_(list(name_of)),
-                ProductEventORM.created_at >= w.start,
-                ProductEventORM.created_at < w.end,
-            ).group_by(ProductEventORM.subject_id)
-        )).all()
-    }
+    # Chunked, like every other IN-list in this module: `name_of` holds every
+    # live view across up to MAX_USAGE_IDS workspaces, which is thousands of
+    # ids on a real platform rather than the handful the batch size suggests.
+    window = [
+        ProductEventORM.event_type == VIEW_OPENED,
+        ProductEventORM.created_at >= w.start,
+        ProductEventORM.created_at < w.end,
+    ]
+    view_ids = list(name_of)
+
+    per_view: dict[str, tuple[int, int]] = {}
+    for restriction in _subject_chunks(view_ids):
+        per_view.update({
+            r[0]: (r[1], r[2])
+            for r in (await session.execute(
+                select(
+                    ProductEventORM.subject_id,
+                    func.count().label("opens"),
+                    func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
+                ).where(*window, *restriction)
+                .group_by(ProductEventORM.subject_id)
+            )).all()
+        })
 
     # Distinct PEOPLE cannot be summed from per-view counts — the same person
     # opening three views is one person, not three — so the actors come back
     # once and are folded per workspace here.
     actors: dict[str, set[str]] = defaultdict(set)
-    for view_id, actor in (await session.execute(
-        select(ProductEventORM.subject_id, ProductEventORM.actor_id)
-        .where(
-            ProductEventORM.event_type == VIEW_OPENED,
-            ProductEventORM.subject_id.in_(list(name_of)),
-            ProductEventORM.created_at >= w.start,
-            ProductEventORM.created_at < w.end,
-        ).distinct()
-    )).all():
-        if actor:
-            actors[view_id].add(actor)
+    for restriction in _subject_chunks(view_ids):
+        for view_id, actor in (await session.execute(
+            select(ProductEventORM.subject_id, ProductEventORM.actor_id)
+            .where(*window, *restriction).distinct()
+        )).all():
+            if actor:
+                actors[view_id].add(actor)
 
     for workspace_id, view_ids in of_workspace.items():
         entry = out[workspace_id]
