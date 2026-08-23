@@ -36,7 +36,7 @@ python3-saml>=1.16.0
 # Local-dev .env auto-load. ``auth_service.core.config`` imports it
 # behind a try/except + ENV/file-existence gate, so a missing dep
 # silently falls back to the explicit-export path (no boot crash).
-python-dotenv>=1.2.2     # >=1.2.2: GHSA-mf9w-mj56-hr94 (set_key follows symlinks)
+python-dotenv>=1.2.3     # >=1.2.2: GHSA-mf9w-mj56-hr94 (set_key follows symlinks)
 
 # Graph adapter dependencies
 neo4j>=5.14.0            # Neo4j async driver (Phase 4)
