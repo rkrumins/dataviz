@@ -178,6 +178,8 @@ def _assert_session_config_coherent() -> None:
         JWT_EXPIRY_MINUTES,
         JWT_REFRESH_EXPIRY_DAYS,
         REFRESH_ROTATION_GRACE_SECONDS,
+        SESSION_ABSOLUTE_MAX_SECONDS,
+        SESSION_IDLE_MAX_SECONDS,
         SSO_SESSION_MAX_AGE_HOURS,
     )
 
@@ -197,6 +199,29 @@ def _assert_session_config_coherent() -> None:
             "token stops being honoured. Raise the revocation TTL or "
             "lower the access TTL."
         )
+    # A session ceiling shorter than the tokens it bounds is a
+    # configuration that cannot do what it says. Caught at boot for the
+    # same reason the revocation TTL is: the symptom otherwise is a
+    # sign-out nobody can attribute to a setting.
+    if 0 < SESSION_IDLE_MAX_SECONDS < access_ttl:
+        raise RuntimeError(
+            f"SESSION_IDLE_MAX_HOURS gives {SESSION_IDLE_MAX_SECONDS}s, "
+            f"shorter than one access-token lifetime "
+            f"(JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} = {access_ttl}s). "
+            "Every session would be refused at its first rotation. "
+            "Raise the idle ceiling or lower the access TTL."
+        )
+    if (
+        0 < SESSION_ABSOLUTE_MAX_SECONDS
+        and SESSION_IDLE_MAX_SECONDS > SESSION_ABSOLUTE_MAX_SECONDS
+    ):
+        logger.warning(
+            "SESSION_IDLE_MAX_HOURS (%ss) exceeds SESSION_ABSOLUTE_MAX_HOURS "
+            "(%ss), so the idle ceiling can never be reached — the absolute "
+            "one always fires first.",
+            SESSION_IDLE_MAX_SECONDS, SESSION_ABSOLUTE_MAX_SECONDS,
+        )
+
     if JWT_EXPIRY_MINUTES > 15:
         logger.warning(
             "JWT_EXPIRY_MINUTES=%s is long for claims-in-token auth: a "
@@ -207,10 +232,12 @@ def _assert_session_config_coherent() -> None:
         )
     logger.info(
         "Session config: access_ttl=%ds refresh_ttl=%dd revocation_ttl=%ds "
-        "rotation_grace=%ds clock_skew_leeway=%ds sso_ceiling=%dh",
+        "rotation_grace=%ds clock_skew_leeway=%ds sso_ceiling=%dh "
+        "idle_ceiling=%ds absolute_ceiling=%ds",
         access_ttl, JWT_REFRESH_EXPIRY_DAYS, REVOCATION_TTL_SECONDS,
         REFRESH_ROTATION_GRACE_SECONDS, CLOCK_SKEW_LEEWAY_SECONDS,
         SSO_SESSION_MAX_AGE_HOURS,
+        SESSION_IDLE_MAX_SECONDS, SESSION_ABSOLUTE_MAX_SECONDS,
     )
 def _log_auth_fingerprint() -> None:
     """Log how this instance identifies and verifies sessions.

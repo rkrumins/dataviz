@@ -42,7 +42,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -508,7 +508,7 @@ async def get_job_status(job_id: str = Path(...)) -> dict:
 @router.get("/dlq")
 async def list_dlq(
     cursor: str = "-",
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
 ) -> dict:
     """Paginated list of DLQ entries.
 

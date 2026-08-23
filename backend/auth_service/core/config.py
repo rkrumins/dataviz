@@ -258,6 +258,19 @@ def _build_key_ring() -> dict[str, object]:
     return _KEY_RING
 
 
+#: The only algorithms this key ring can actually support. Every entry
+#: in the ring is a secret STRING, so an asymmetric family would need a
+#: PEM there and no code path loads one — and ``none`` would mean no
+#: signature at all. ``JWT_ALGORITHM`` is read straight from the
+#: environment, so without this a typo or a hostile env var is a silent
+#: downgrade rather than a failed boot.
+_SUPPORTED_ALGORITHMS = frozenset({"HS256", "HS384", "HS512"})
+
+
+class UnsupportedAlgorithm(RuntimeError):
+    """Raised at startup when ``JWT_ALGORITHM`` is not a symmetric HMAC."""
+
+
 def assert_signing_secret() -> None:
     """Fail now if this process cannot sign tokens.
 
@@ -267,7 +280,17 @@ def assert_signing_secret() -> None:
     as a side effect of importing this module is this function; making it
     explicit is what lets processes that have no business holding the key
     import the module at all.
+
+    Also validates the algorithm. Building the ring proves a key exists;
+    it never proved the key could be used with the configured algorithm,
+    so ``JWT_ALGORITHM=none`` cleared startup untouched.
     """
+    if JWT_ALGORITHM not in _SUPPORTED_ALGORITHMS:
+        raise UnsupportedAlgorithm(
+            f"JWT_ALGORITHM={JWT_ALGORITHM!r} is not supported. This key "
+            f"ring holds symmetric secrets, so the algorithm must be one "
+            f"of {sorted(_SUPPORTED_ALGORITHMS)}."
+        )
     _build_key_ring()
 
 
@@ -368,6 +391,42 @@ SSO_SESSION_MAX_AGE_HOURS: float = float(
 SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
 
 
+# Absolute and idle ceilings for EVERY session, SSO or local.
+#
+# Rotation mints a brand-new 7-day refresh token every time, and nothing
+# looked at when the family started. So a local password session that
+# rotated at least once a week lived forever: a refresh cookie
+# exfiltrated once was a permanent credential, and the only thing that
+# could end it was an explicit revocation nobody knew to perform. SSO
+# sessions had the 24h ``auth_time`` ceiling above; local sessions had
+# no ceiling at all, which is the wrong way round given local login is
+# the path without an IdP's conditional access in front of it.
+#
+# Two different questions, so two settings:
+#   * ABSOLUTE — how long a single sign-in may last, measured from the
+#     family's first mint. Caps the value of a stolen cookie.
+#   * IDLE — how long a session may go unused, measured from the
+#     previous rotation. Caps the value of an abandoned one, which is
+#     the shared-workstation case.
+#
+# Both default to values a normal working pattern never reaches: the
+# SPA renews about a minute ahead of a 15-minute access token, so an
+# open tab rotates roughly four times an hour and only a genuinely
+# untouched session approaches the idle bound.
+#
+# ``0`` disables either check, which is how a deployment that has
+# deliberately accepted the old behaviour keeps it.
+SESSION_ABSOLUTE_MAX_HOURS: float = float(
+    os.getenv("SESSION_ABSOLUTE_MAX_HOURS", "168")   # 7 days
+)
+SESSION_ABSOLUTE_MAX_SECONDS: int = int(SESSION_ABSOLUTE_MAX_HOURS * 3600)
+
+SESSION_IDLE_MAX_HOURS: float = float(
+    os.getenv("SESSION_IDLE_MAX_HOURS", "12")
+)
+SESSION_IDLE_MAX_SECONDS: int = int(SESSION_IDLE_MAX_HOURS * 3600)
+
+
 # Rotation grace window. Refresh-token rotation treats a re-presented
 # jti as a stolen-chain replay and kills the whole family. That is right
 # for an attacker and wrong for the far more common causes: two tabs
@@ -407,8 +466,21 @@ REFRESH_ROTATION_GRACE_SECONDS: int = int(
 #
 # Every adoption logs at INFO naming the user and family, so the drain to
 # zero is something an operator can watch rather than assume.
+#
+# The default is now OFF. The drain window closed long ago — no session
+# minted before allow-by-record can still be inside its refresh lifetime
+# — and leaving the ramp in place meant allow-by-record was not actually
+# in force: a signed, unexpired refresh JWT with no row was still
+# accepted and given one. That is the exact failure the inversion exists
+# to remove, and it re-opens on any path that produces a token without
+# its record: a restore from a snapshot taken before the row was
+# written, or a row removed by hand.
+#
+# Set ``REFRESH_ADOPT_RECORDLESS=true`` for one deploy if an environment
+# is somehow still draining; the family-revoked check runs before
+# adoption either way, so a killed family stays killed.
 REFRESH_ADOPT_RECORDLESS: bool = os.getenv(
-    "REFRESH_ADOPT_RECORDLESS", "true",
+    "REFRESH_ADOPT_RECORDLESS", "false",
 ).strip().lower() not in ("false", "0", "no", "off")
 
 

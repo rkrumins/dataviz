@@ -1318,7 +1318,7 @@ async def get_node_children(
     edge_types: Optional[List[str]] = Query(None, alias="edgeTypes"),
     search_query: Optional[str] = Query(None, alias="searchQuery"),
     sort_property: Optional[str] = Query("displayName", alias="sortProperty", description="Node property to sort by. Pass null to skip sorting."),
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     cursor: Optional[str] = Query(None, description="Cursor for keyset pagination (displayName of last item). Takes precedence over offset."),
     sort_direction: str = Query(
@@ -1343,7 +1343,7 @@ async def get_children_with_edges(
     lineage_edge_types: Optional[List[str]] = Query(None, alias="lineageEdgeTypes"),
     search_query: Optional[str] = Query(None, alias="searchQuery"),
     sort_property: Optional[str] = Query("displayName", alias="sortProperty", description="Node property to sort by. Pass null to skip sorting."),
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     cursor: Optional[str] = Query(None, description="Cursor for keyset pagination (displayName of last item). Takes precedence over offset."),
     include_lineage_edges: bool = Query(True, alias="includeLineageEdges"),
@@ -1629,7 +1629,7 @@ async def get_edges(
     source_urn: Optional[str] = Query(None, alias="sourceUrn"),
     target_urn: Optional[str] = Query(None, alias="targetUrn"),
     offset: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Generic edge query.
@@ -1699,7 +1699,7 @@ async def get_graph_stats(
 async def get_nodes(
     entity_type: Optional[str] = Query(None, alias="entityType"),
     tag: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -1720,7 +1720,7 @@ async def get_nodes(
 @router.get("/nodes/{urn}/ancestors", response_model=List[GraphNode], response_model_by_alias=True)
 async def get_node_ancestors(
     urn: str,
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -1732,7 +1732,7 @@ async def get_node_descendants(
     urn: str,
     depth: int = Query(5, ge=1),
     entity_type: Optional[str] = Query(None, alias="entityType"),
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -1744,7 +1744,7 @@ async def get_node_descendants(
              deprecated=True)
 async def get_nodes_by_tag_endpoint(
     tag: str,
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     engine: ContextEngine = Depends(get_context_engine),
 ):
@@ -1756,7 +1756,7 @@ async def get_nodes_by_tag_endpoint(
 @router.get("/nodes/by-layer/{layer_id}", response_model=List[GraphNode], response_model_by_alias=True)
 async def get_nodes_by_layer_endpoint(
     layer_id: str,
-    limit: int = Query(100, ge=1),
+    limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     sort_direction: str = Query(
         "asc", alias="sortDirection", pattern="^(asc|desc)$",

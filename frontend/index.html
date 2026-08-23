@@ -10,47 +10,13 @@
     <meta name="theme-color" content="#fafbfc" media="(prefers-color-scheme: light)" />
     <title>Context Visualization Platform</title>
 
-    <!-- Pre-hydration brand paint: apply the cached title/favicon/accent
-         from a previous visit synchronously, before React boots, so a
-         rebranded deployment doesn't flash the default identity. The cache
-         is written by applyBranding() (see src/store/branding.ts); the key
-         must stay in sync with BRAND_CACHE_KEY there. -->
-    <script>
-      (function () {
-        try {
-          var c = JSON.parse(localStorage.getItem('nx-brand-cache') || 'null')
-          if (!c) return
-          if (c.title) document.title = c.title
-          if (c.favicon) {
-            var icon = document.querySelector("link[rel~='icon']")
-            if (icon) icon.href = c.favicon
-            var apple = document.querySelector("link[rel='apple-touch-icon']")
-            if (apple) apple.href = c.favicon
-          }
-          if (c.accent) {
-            document.documentElement.style.setProperty('--nx-accent-lineage', c.accent)
-          }
-        } catch (e) { /* no-op: first visit or storage unavailable */ }
-      })()
-    </script>
-
-    <!-- Pre-hydration theme paint: apply the persisted theme class to <html>
-         synchronously, before React boots, so a cold load of a route outside
-         AppLayout (e.g. /docs, /guide — reached via full page navigation,
-         not SPA routing) doesn't flash light mode. Key/shape must stay in
-         sync with the 'nexus-preferences' zustand persist store. -->
-    <script>
-      (function () {
-        try {
-          var raw = localStorage.getItem('nexus-preferences')
-          if (!raw) return
-          var theme = (JSON.parse(raw).state || {}).theme
-          var isDark = theme === 'dark' ||
-            (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
-          if (isDark) document.documentElement.classList.add('dark')
-        } catch (e) { /* no-op: first visit or storage unavailable */ }
-      })()
-    </script>
+    <!-- Pre-hydration paint (branding + theme), before React boots.
+         An external classic script rather than inline: an inline one
+         would force 'unsafe-inline' onto the document's script-src,
+         which is the directive whose whole value is not having it.
+         Must stay non-deferred — both blocks have to run before first
+         paint. See public/boot.js. -->
+    <script src="/boot.js"></script>
 
     <!-- Preload fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />

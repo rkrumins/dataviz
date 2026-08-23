@@ -9,6 +9,7 @@ linking policy variants, link-intent flow) live in
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -261,6 +262,30 @@ class _StubUserIdentityRepo:
 _NoopRefreshStore = InMemoryRefreshStore
 
 
+async def _mint_recorded_refresh(store, **kwargs):
+    """Mint a refresh token AND write its record, as login does.
+
+    Minting alone used to be enough here because
+    ``REFRESH_ADOPT_RECORDLESS`` defaulted on, so a token with no row was
+    adopted on first use. That default is off now — the migration window
+    it existed for closed long ago — and a token with no record is
+    correctly refused. Recording it is what production has always done;
+    these tests were relying on the ramp.
+    """
+    token, claims = token_module.create_refresh_token(**kwargs)
+    await store.record_mint(
+        jti=claims.jti,
+        family_id=claims.family_id,
+        user_id=claims.sub,
+        auth_time=claims.auth_time,
+        mint_ms=claims.mint_ms,
+        expires_at_iso=datetime.fromtimestamp(
+            claims.exp, tz=timezone.utc,
+        ).isoformat(),
+    )
+    return token
+
+
 class _NoopSession:
     async def __aenter__(self):
         return self
@@ -279,15 +304,15 @@ async def test_refresh_raises_sso_reauth_after_ceiling():
     from backend.auth_service.service import LocalIdentityService
 
     stale_auth_time = int(time.time()) - (SSO_SESSION_MAX_AGE_SECONDS + 10)
-    rt, _ = token_module.create_refresh_token(
-        user_id="usr_1", family_id="fam1", auth_time=stale_auth_time,
-    )
     killed: list[str] = []
 
     async def _killer(uid):
         killed.append(uid)
 
     store = _NoopRefreshStore()
+    rt = await _mint_recorded_refresh(
+        store, user_id="usr_1", family_id="fam1", auth_time=stale_auth_time,
+    )
     svc = LocalIdentityService(
         session_factory=_session_factory,
         user_repo=_StubUserRepo(),
@@ -312,14 +337,15 @@ async def test_refresh_succeeds_for_local_session():
     (no IdP) regardless of how many SSO identities the user has."""
     from backend.auth_service.service import LocalIdentityService
 
-    rt, _ = token_module.create_refresh_token(
-        user_id="usr_1", family_id="fam1",
+    store = _NoopRefreshStore()
+    rt = await _mint_recorded_refresh(
+        store, user_id="usr_1", family_id="fam1",
     )
     svc = LocalIdentityService(
         session_factory=_session_factory,
         user_repo=_StubUserRepo(),
         user_identity_repo=_StubUserIdentityRepo(has_identity=False),
-        refresh_store_factory=lambda s: _NoopRefreshStore(),
+        refresh_store_factory=lambda s: store,
     )
     user, _tokens = await svc.refresh(rt)
     assert user.id == "usr_1"

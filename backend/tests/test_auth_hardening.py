@@ -16,6 +16,7 @@ default fixtures — the default fixtures are what missed the bugs.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 import pytest
@@ -184,19 +185,32 @@ async def test_sso_reauth_resolves_the_provider_slug_from_the_real_orm(
     # The rotation bookkeeping is not what's under test here, the
     # provider-slug lookup is — but allow-by-record means a store that
     # answers "no row" refuses the rotation before the lookup happens, so
-    # this has to be a store that stores.
-    _Store = InMemoryRefreshStore
+    # this has to be a store that stores AND the token has to be recorded
+    # in it. It used to be enough to mint one: adoption was on by default
+    # and accepted a record-less token once. That default is off now.
+    store = InMemoryRefreshStore()
 
     svc = LocalIdentityService(
         session_factory=_factory,
         user_repo=user_repo,
         user_identity_repo=user_identity_repo,
-        refresh_store_factory=lambda s: _Store(),
+        refresh_store_factory=lambda s: store,
     )
 
     # A refresh token whose IdP-attested auth_time is already past the ceiling.
-    token, _claims = create_refresh_token(
-        user_id=user.id, family_id="fam-1", auth_time=int(time.time()) - 3600,
+    stale_auth_time = int(time.time()) - 3600
+    token, claims = create_refresh_token(
+        user_id=user.id, family_id="fam-1", auth_time=stale_auth_time,
+    )
+    await store.record_mint(
+        jti=claims.jti,
+        family_id=claims.family_id,
+        user_id=claims.sub,
+        auth_time=claims.auth_time,
+        mint_ms=claims.mint_ms,
+        expires_at_iso=datetime.fromtimestamp(
+            claims.exp, tz=timezone.utc,
+        ).isoformat(),
     )
 
     with pytest.raises(SsoReauthRequired) as exc:

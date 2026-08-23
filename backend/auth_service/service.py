@@ -26,6 +26,8 @@ import jwt as pyjwt
 
 from .core.config import (
     JWT_EXPIRY_MINUTES,
+    SESSION_ABSOLUTE_MAX_SECONDS,
+    SESSION_IDLE_MAX_SECONDS,
     JWT_REFRESH_EXPIRY_DAYS,
     REFRESH_ADOPT_RECORDLESS,
     REFRESH_ROTATION_GRACE_SECONDS,
@@ -539,6 +541,54 @@ class LocalIdentityService:
                     claims.sub, claims.family_id,
                 )
                 raise _RefreshRejected(InvalidRefreshToken("sessions_revoked"))
+
+            # ── Absolute + idle session ceilings ─────────────────────
+            # Every session, SSO or local. Rotation mints a fresh 7-day
+            # refresh token each time and nothing looked at when the
+            # family started, so a local session that rotated once a
+            # week lived indefinitely — a refresh cookie stolen once was
+            # a permanent credential. The SSO ceiling below does not
+            # help there: it only fires when ``auth_time`` is set, which
+            # local logins deliberately leave NULL.
+            #
+            # Refused rather than merely not-renewed, and the family is
+            # killed with it: a session past its ceiling is over, and
+            # leaving the rest of the chain live would let the next tab
+            # walk straight back in.
+            if SESSION_IDLE_MAX_SECONDS > 0:
+                # From the server's record, not the token's own claim —
+                # the same rule ``auth_time`` follows two blocks down,
+                # and for the same reason: a value the token asserts
+                # about itself is a value whoever holds the token could
+                # have been handed with anything in it.
+                last_mint_ms = (
+                    outcome.record.mint_ms if outcome.record is not None
+                    else claims.mint_ms
+                )
+                idle_seconds = int(time.time()) - int(last_mint_ms / 1000)
+                if idle_seconds > SESSION_IDLE_MAX_SECONDS:
+                    logger.info(
+                        "Refresh rejected (session_idle) for user=%s "
+                        "family=%s idle=%ds",
+                        claims.sub, claims.family_id, idle_seconds,
+                    )
+                    raise _RefreshRejected(
+                        InvalidRefreshToken("session_idle"),
+                    )
+
+            if SESSION_ABSOLUTE_MAX_SECONDS > 0:
+                started_ms = await store.family_started_ms(claims.family_id)
+                if started_ms is not None:
+                    age_seconds = int(time.time()) - int(started_ms / 1000)
+                    if age_seconds > SESSION_ABSOLUTE_MAX_SECONDS:
+                        logger.info(
+                            "Refresh rejected (session_expired) for user=%s "
+                            "family=%s age=%ds",
+                            claims.sub, claims.family_id, age_seconds,
+                        )
+                        raise _RefreshRejected(
+                            InvalidRefreshToken("session_expired"),
+                        )
 
             # ── SSO daily re-auth ceiling ────────────────────────────
             # ``auth_time`` present means "this session was minted by an
@@ -1375,7 +1425,9 @@ class LocalIdentityService:
             access_max_age_seconds=JWT_EXPIRY_MINUTES * 60,
             refresh_token=refresh,
             refresh_max_age_seconds=JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60,
-            csrf_token=mint_csrf_token(),
+            # Bound to this session's sid so a cookie planted by a
+            # sibling subdomain cannot satisfy the double-submit check.
+            csrf_token=mint_csrf_token(extra.get("sid")),
         )
 
 
