@@ -21,6 +21,9 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
+import type { ViewUsage } from '@/services/contentInsightsService'
+import { FavouriteTip, favouriteSentence, ViewUsageCounters, ViewUsageNote } from './ViewUsage'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -156,6 +159,9 @@ export interface ExplorerViewCardProps {
   /** When provided, tag chips become clickable → toggle the tag filter. */
   onTagClick?: (tag: string) => void
   healthStatus?: 'healthy' | 'warning' | 'broken' | 'stale'
+  /** Opens, distinct people and the reader's own history. Undefined while it
+   *  loads or when the call failed — decoration must never gate a catalogue. */
+  usage?: ViewUsage
   isSelected?: boolean
   onToggleSelect?: () => void
   /** Visual density — collapses padding, preview, and ancillary sections. */
@@ -187,6 +193,7 @@ export function ExplorerViewCard({
   onPermanentDelete,
   onTagClick,
   healthStatus,
+  usage,
   isSelected,
   onToggleSelect,
   density = 'comfortable',
@@ -215,6 +222,9 @@ export function ExplorerViewCard({
   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
   const VisIcon = vis.icon
   const tags = view.tags ?? []
+  // One source for the sentence, so the tip and the screen-reader text cannot
+  // drift into saying different things about the same number.
+  const favouriteLabel = favouriteSentence(view.favouriteCount)
   const visibleTags = tags.slice(0, 3)
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
@@ -473,6 +483,10 @@ export function ExplorerViewCard({
         {/* ── 6. Tags (fixed height) — hidden in compact density ── */}
         {showTags && (
         <div className={cn('min-h-[20px]', sectionGap)}>
+          {/* Only when there is something to say. The counters live in the
+              footer; this is the one usage fact worth a line of its own. */}
+          <ViewUsageNote usage={usage} />
+
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {visibleTags.map(tag => {
@@ -519,13 +533,21 @@ export function ExplorerViewCard({
         {/* ── 8. Footer ── */}
         <div className="flex items-center gap-2 border-t border-glass-border/50 pt-3 mt-1">
           {/* Favourite — left */}
-          <span className={cn(
-            'inline-flex items-center gap-1 text-[11px] font-medium',
-            view.isFavourited ? 'text-red-500' : 'text-ink-muted',
-          )}>
-            <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
-            {view.favouriteCount}
-          </span>
+          <HoverTip label={<FavouriteTip count={view.favouriteCount} />}>
+            <span className={cn(
+              'inline-flex items-center gap-1 text-[11px] font-medium',
+              view.isFavourited ? 'text-red-500' : 'text-ink-muted',
+            )}>
+              <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
+              {view.favouriteCount}
+              <span className="sr-only">{favouriteLabel}</span>
+            </span>
+          </HoverTip>
+
+          {/* Beside the favourite count, in the same register: how many people
+              opened it, and how many times. As a sentence on its own line this
+              was the loudest text on a shelf of quiet views. */}
+          <ViewUsageCounters usage={usage} />
 
           {/* Creator — middle.
               Compact initials-only avatar; hover reveals the

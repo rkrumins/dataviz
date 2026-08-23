@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.app.db.models import (
-    ProductEventORM, UserORM, ViewORM, WorkspaceORM,
+    ProductEventORM, UserORM, ViewORM, ViewVisitORM, WorkspaceORM,
 )
 from backend.app.db.repositories import analytics_repo
 
@@ -145,10 +145,21 @@ async def test_a_batch_costs_the_same_as_a_single(db_session):
         await analytics_repo.view_usage(
             db_session, ["view_open", "view_other", "view_gone"], days=30, now=NOW)
         many = counted["n"]
+        counted["n"] = 0
+        await analytics_repo.view_usage(
+            db_session, ["view_open", "view_other", "view_gone"], days=30, now=NOW,
+            viewer_id="usr_1")
+        personal = counted["n"]
     finally:
         db_session.execute = real_execute  # type: ignore[method-assign]
 
-    assert one == many == 3, f"expected 3 queries either way, got {one} and {many}"
+    # CONSTANT is the property, not the constant. Five buys: what the reader
+    # may see, the windowed totals, the daily trend, lifetime opens, and the
+    # distinct openers behind "only its author". Asking for the reader's own
+    # usage adds two more — their opens and their last visit — and neither
+    # number grows with the batch, which is the whole point of taking a list.
+    assert one == many == 5, f"expected 5 queries either way, got {one} and {many}"
+    assert personal == 7, f"expected 7 with a viewer, got {personal}"
 
 
 async def test_a_huge_batch_is_capped(db_session):
@@ -171,3 +182,170 @@ async def test_duplicate_ids_are_asked_for_once(db_session):
         db_session, ["view_open"] * 10, days=30, now=NOW)
     assert set(usage) == {"view_open"}
     assert usage["view_open"]["opens"] == 5
+
+
+# ── "Is this used, and by how many people?" ──────────────────────────
+#
+# The question somebody asks about a view they have never seen. A count alone
+# cannot answer it: 340 opens by one person is a scratchpad, 340 by twelve is
+# something a team relies on, and only the DISTINCT figure separates them.
+
+
+async def test_distinct_people_separates_a_shared_view_from_a_scratchpad(db_session):
+    await _seed(db_session)
+    # `view_open` was opened five times, alternating between two people.
+    usage = await analytics_repo.view_usage(
+        db_session, ["view_open"], days=30, now=NOW)
+    assert usage["view_open"]["opens"] == 5
+    assert usage["view_open"]["uniqueViewers"] == 2
+    assert usage["view_open"]["onlyAuthor"] is False
+
+
+async def test_a_view_only_its_author_has_opened_says_so(db_session):
+    """The one qualitative signal worth stating, because a number cannot: two
+    opens by two people and two opens by the author are both "2"."""
+    await _seed(db_session)
+    db_session.add_all([
+        ViewORM(id="view_solo", workspace_id="ws_a", name="Solo",
+                view_type="reference", visibility="workspace",
+                created_by="usr_1", created_at=_iso(40)),
+        ProductEventORM(
+            id="pev_solo1", event_type="view.opened", actor_id="usr_1",
+            subject_id="view_solo", payload=json.dumps({"viewId": "view_solo"}),
+            created_at=_iso(2)),
+        ProductEventORM(
+            id="pev_solo2", event_type="view.opened", actor_id="usr_1",
+            subject_id="view_solo", payload=json.dumps({"viewId": "view_solo"}),
+            created_at=_iso(1)),
+    ])
+    await db_session.commit()
+
+    usage = await analytics_repo.view_usage(
+        db_session, ["view_solo", "view_open"], days=30, now=NOW)
+    assert usage["view_solo"]["onlyAuthor"] is True
+    assert usage["view_open"]["onlyAuthor"] is False
+
+
+async def test_a_view_nobody_has_opened_is_not_the_author_case(db_session):
+    """Never opened and only-the-author are different states, and `opens == 0`
+    already says the first one."""
+    await _seed(db_session)
+    db_session.add(ViewORM(
+        id="view_untouched", workspace_id="ws_a", name="Untouched",
+        view_type="reference", visibility="workspace", created_by="usr_1",
+        created_at=_iso(40)))
+    await db_session.commit()
+
+    usage = await analytics_repo.view_usage(
+        db_session, ["view_untouched"], days=30, now=NOW)
+    assert usage["view_untouched"]["opens"] == 0
+    assert usage["view_untouched"]["onlyAuthor"] is False
+
+
+async def test_lifetime_reaches_past_the_window(db_session):
+    """`pev_old` is 200 days back — outside a 30-day window and inside the
+    lifetime figure, which is the whole difference between the two."""
+    await _seed(db_session)
+    usage = await analytics_repo.view_usage(
+        db_session, ["view_open"], days=30, now=NOW)
+    assert usage["view_open"]["opens"] == 5
+    assert usage["view_open"]["lifetimeOpens"] == 6
+
+
+async def test_your_own_usage_is_yours_alone(db_session):
+    """"New to you" is only sayable if we know what you have already seen."""
+    await _seed(db_session)
+    db_session.add(ViewVisitORM(
+        id="vis_1", view_id="view_open", user_id="usr_1", visited_at=_iso(1)))
+    await db_session.commit()
+
+    mine = await analytics_repo.view_usage(
+        db_session, ["view_open"], days=30, now=NOW, viewer_id="usr_1")
+    theirs = await analytics_repo.view_usage(
+        db_session, ["view_open"], days=30, now=NOW, viewer_id="usr_2")
+
+    # Three of the five alternating opens were usr_1's, two were usr_2's.
+    assert mine["view_open"]["yourOpens"] == 3
+    assert theirs["view_open"]["yourOpens"] == 2
+    # The platform-wide figures are the same for both, which is what makes the
+    # personal line an ADDITION rather than a different set of numbers.
+    assert mine["view_open"]["opens"] == theirs["view_open"]["opens"] == 5
+    assert mine["view_open"]["yourLastOpenedAt"] == _iso(1)
+    assert theirs["view_open"]["yourLastOpenedAt"] is None
+
+
+async def test_asking_for_nobody_leaves_the_personal_fields_empty(db_session):
+    await _seed(db_session)
+    usage = await analytics_repo.view_usage(
+        db_session, ["view_open"], days=30, now=NOW)
+    assert usage["view_open"]["yourOpens"] == 0
+    assert usage["view_open"]["yourLastOpenedAt"] is None
+
+
+# ── Workspace rollups ────────────────────────────────────────────────
+
+
+async def test_a_workspace_rollup_says_whether_anyone_is_there(db_session):
+    await _seed(db_session)
+    rollup = await analytics_repo.workspace_usage(
+        db_session, ["ws_a", "ws_b"], days=30, now=NOW)
+
+    # ws_a holds `view_open` (5 opens, 2 people) and the soft-deleted one,
+    # which is never counted.
+    assert rollup["ws_a"]["views"] == 1
+    assert rollup["ws_a"]["opens"] == 5
+    assert rollup["ws_a"]["uniqueViewers"] == 2
+    assert rollup["ws_a"]["topView"]["viewId"] == "view_open"
+    assert rollup["ws_a"]["topView"]["name"] == "Open"
+
+
+async def test_a_rollup_counts_only_what_the_reader_may_read(db_session):
+    """Two readers seeing different totals for one workspace is the access rule
+    showing through, not a bug — and the alternative leaks. A top view named
+    back to somebody who cannot open it turns a usage endpoint into the way to
+    learn that a view exists."""
+    await _seed(db_session)
+    everything = await analytics_repo.workspace_usage(
+        db_session, ["ws_b"], days=30, now=NOW)
+    assert everything["ws_b"]["opens"] == 1
+    assert everything["ws_b"]["topView"]["viewId"] == "view_other"
+
+    blind = await analytics_repo.workspace_usage(
+        db_session, ["ws_b"], days=30, now=NOW,
+        readable=ViewORM.workspace_id == "ws_a",
+    )
+    assert blind["ws_b"]["views"] == 0
+    assert blind["ws_b"]["opens"] == 0
+    assert blind["ws_b"]["topView"] is None
+
+
+async def test_a_workspace_with_nothing_in_it_still_answers(db_session):
+    """A missing key would make the caller guess; zeros say "nobody, yet"."""
+    await _seed(db_session)
+    rollup = await analytics_repo.workspace_usage(
+        db_session, ["ws_nonexistent"], days=30, now=NOW)
+    assert rollup["ws_nonexistent"]["opens"] == 0
+    assert rollup["ws_nonexistent"]["topView"] is None
+
+
+async def test_people_are_not_summed_across_views(db_session):
+    """One person opening three views is one person. Summing per-view distinct
+    counts would report three, which is the classic way a rollup lies."""
+    await _seed(db_session)
+    db_session.add_all([
+        ViewORM(id="view_two", workspace_id="ws_a", name="Two",
+                view_type="reference", visibility="workspace",
+                created_by="usr_1", created_at=_iso(40)),
+        ProductEventORM(
+            id="pev_two", event_type="view.opened", actor_id="usr_1",
+            subject_id="view_two", payload=json.dumps({"viewId": "view_two"}),
+            created_at=_iso(1)),
+    ])
+    await db_session.commit()
+
+    rollup = await analytics_repo.workspace_usage(
+        db_session, ["ws_a"], days=30, now=NOW)
+    assert rollup["ws_a"]["views"] == 2
+    assert rollup["ws_a"]["opens"] == 6
+    # usr_1 and usr_2 across both views — still two people, not three.
+    assert rollup["ws_a"]["uniqueViewers"] == 2

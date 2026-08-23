@@ -55,6 +55,8 @@ import { ExplorerViewCard } from '@/components/explorer/ExplorerViewCard'
 import { ExplorerListRow } from '@/components/explorer/ExplorerListRow'
 import { ExplorerListHeader } from '@/components/explorer/ExplorerListHeader'
 import { ExplorerSortControl } from '@/components/explorer/ExplorerSortControl'
+import { useViewUsage } from '@/hooks/useContentInsights'
+import { useOpensOrdering } from '@/components/explorer/useOpensOrdering'
 import { ExplorerCardSkeleton } from '@/components/explorer/ExplorerCardSkeleton'
 import { ExplorerBulkActions } from '@/components/explorer/ExplorerBulkActions'
 import { DeleteViewDialog } from '@/components/explorer/DeleteViewDialog'
@@ -125,10 +127,18 @@ export default function WorkspaceViewsSection({
     }), [search, visFilter, wsId, dsFilter, ownerFilter, sort, attentionOnly, currentUser?.id])
 
     const {
-        views, totalCount, isLoading,
+        views: loadedViews, totalCount, isLoading,
         toggleFavourite, removeView, refetch, loadMore, hasMore,
     } = useExplorerViews(filters)
-    const healthMap = useViewHealth(views)
+    const healthMap = useViewHealth(loadedViews)
+
+    // Same batched call as the Explorer, and the same reason: a card fetching
+    // its own usage would be one request per tile.
+    const usageIds = useMemo(() => loadedViews.map(v => v.id), [loadedViews])
+    const { data: usageMap } = useViewUsage(usageIds)
+    // "Most opened" is finished on the client — opens live in the event log
+    // and views in the catalogue, and this repo bans cross-domain JOINs.
+    const views = useOpensOrdering(loadedViews, usageMap, sort)
 
     // Server-authoritative attention count for the whole workspace.
     const { stats } = useViewStats(useMemo(() => ({ workspaceIds: [wsId] }), [wsId]))
@@ -676,7 +686,7 @@ export default function WorkspaceViewsSection({
                     {layout === 'grid' ? (
                         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                             {views.map(v => (
-                                <ExplorerViewCard key={v.id} view={v} {...actionProps(v)} />
+                                <ExplorerViewCard key={v.id} view={v} usage={usageMap?.[v.id]} {...actionProps(v)} />
                             ))}
                         </div>
                     ) : (
@@ -684,7 +694,7 @@ export default function WorkspaceViewsSection({
                             <ExplorerListHeader sort={sort} onSortChange={setSort} withCheckbox />
                             <div className="divide-y divide-glass-border/50">
                                 {views.map(v => (
-                                    <ExplorerListRow key={v.id} view={v} {...actionProps(v)} />
+                                    <ExplorerListRow key={v.id} view={v} usage={usageMap?.[v.id]} {...actionProps(v)} />
                                 ))}
                             </div>
                         </div>
