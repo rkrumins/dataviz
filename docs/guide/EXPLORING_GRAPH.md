@@ -79,6 +79,9 @@ decides how much travels:
 | **Include the open cards** (default) | Your exact picture — the containers you opened, the rows you drilled into |
 | Off | The same question, drawn the way a fresh trace opens |
 
+Every row of **Recent traces** carries the same action as a link icon, so a
+trace you ran yesterday can be handed over without opening it first.
+
 Opening a link starts the trace on the reader's own canvas, so **it re-runs
 against today's lineage** — it is a question, not a frozen snapshot, and it
 takes as long as that trace takes. Anyone who can open the view can open the
