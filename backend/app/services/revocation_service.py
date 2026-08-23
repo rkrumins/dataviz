@@ -754,10 +754,11 @@ def revocation_is_shared() -> bool:
     what ``/health/deps`` reports so a deployment does not sit in that
     state unnoticed.
     """
-    svc = _INSTANCE
-    if svc is None:
-        return False
-    return not isinstance(getattr(svc, "_backend", None), InMemoryBackend)
+    # Builds the singleton if it does not exist yet, so the answer is
+    # about the configuration rather than about whether anything has
+    # authenticated since boot. ``get_revocation_service`` never raises.
+    backend = getattr(get_revocation_service(), "_backend", None)
+    return backend is not None and not isinstance(backend, InMemoryBackend)
 
 
 def get_revocation_service() -> RevocationService:

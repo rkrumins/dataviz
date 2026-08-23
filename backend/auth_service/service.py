@@ -381,8 +381,14 @@ class LocalIdentityService:
             return
         try:
             sid = decode_token(access_token).get("sid")
-        except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
-            return  # already refused on every request; nothing to tombstone
+        except Exception:  # noqa: BLE001 — see below
+            # Expired, foreign, or structurally broken: all already
+            # refused on every request, so there is nothing to tombstone.
+            # Broad rather than the two JWT errors, because this runs
+            # BEFORE the family revocation and before the cookies are
+            # cleared — anything escaping here would turn a sign-out into
+            # a 500 that also failed to sign the user out.
+            return
         if not sid:
             return
         try:

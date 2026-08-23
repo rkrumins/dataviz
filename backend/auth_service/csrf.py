@@ -42,14 +42,6 @@ from .core import config
 
 logger = logging.getLogger(__name__)
 
-
-def _origin_of(url: str) -> str:
-    """``scheme://host[:port]`` of *url*, or "" if it has no origin."""
-    parts = urlsplit(url)
-    if not parts.scheme or not parts.netloc:
-        return ""
-    return f"{parts.scheme}://{parts.netloc}"
-
 CSRF_HEADER_NAME = "X-CSRF-Token"
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -98,6 +90,14 @@ _DEFAULT_EXEMPT_PATHS = (
 _EXEMPT_PATTERNS: tuple[Pattern[str], ...] = (
     re.compile(r"^/api/v1/auth/[^/]+/(acs|sls|browser-profile|mock)$"),
 )
+
+
+def _origin_of(url: str) -> str:
+    """``scheme://host[:port]`` of *url*, or "" if it has no origin."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 #: Separates the nonce from its tag. Not in the token_urlsafe alphabet,
@@ -315,22 +315,29 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         Read per request rather than cached: ``CORS_ALLOWED_ORIGINS`` is
         the same list the CORS middleware uses, and the two disagreeing
         would produce a request the browser permits and we refuse.
+
+        Both schemes are accepted for our OWN host, and that is
+        deliberate. TLS terminates upstream, so the app sees ``http``
+        and has to infer the client's scheme from ``X-Forwarded-Proto``
+        — a header some deployments do not set. Pinning the comparison
+        to the inferred scheme would mean that on any such deployment
+        the browser sends ``Origin: https://host`` while this computes
+        ``http://host``, and EVERY write 403s. That is a large
+        availability risk for a small security one: an ``http`` origin
+        on our own host is either us behind a proxy we mis-read, or a
+        downgrade that HSTS and ``Secure`` cookies already answer.
+        Entries from ``CORS_ALLOWED_ORIGINS`` stay exact — those are
+        third-party origins and the scheme is part of naming them.
         """
         allowed = {
             o.strip()
             for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
             if o.strip()
         }
-        # Behind a TLS-terminating proxy the app sees http; trust the
-        # forwarded scheme for this comparison exactly as the security
-        # headers and diagnostics already do.
         host = request.headers.get("host")
         if host:
-            proto = (
-                request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
-                or request.url.scheme
-            )
-            allowed.add(f"{proto}://{host}")
+            allowed.add(f"https://{host}")
+            allowed.add(f"http://{host}")
         return allowed
 
     @staticmethod

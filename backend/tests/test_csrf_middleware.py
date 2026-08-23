@@ -237,3 +237,39 @@ async def test_the_idp_callback_surface_still_accepts_a_foreign_origin(
     assert resp.status_code != 403 or (
         resp.json().get("detail", {}).get("error") != "csrf_failed"
     )
+
+
+async def test_our_own_host_is_allowed_under_either_scheme(
+    test_client: AsyncClient,
+):
+    """TLS terminates upstream, so the app sees http and has to infer
+    the client's scheme from a header some deployments do not set.
+    Pinning the comparison to the inferred scheme would 403 every write
+    on any such deployment — a large availability risk for a small
+    security one, since an http origin on our own host is either us
+    behind a proxy we mis-read or a downgrade that HSTS already answers.
+    """
+    for origin in ("http://testserver", "https://testserver"):
+        resp = await test_client.post(
+            _ANY_PROTECTED_POST, json={}, headers={"Origin": origin},
+        )
+        assert resp.status_code != 403, f"{origin} was refused"
+
+
+async def test_a_different_host_is_still_refused_under_either_scheme(
+    test_client: AsyncClient,
+):
+    """Tolerating the scheme must not tolerate the host."""
+    for origin in ("http://evil.example", "https://evil.example"):
+        resp = await test_client.post(
+            _ANY_PROTECTED_POST, json={}, headers={"Origin": origin},
+        )
+        assert resp.status_code == 403, f"{origin} was allowed"
+
+
+async def test_origin_null_is_refused(test_client: AsyncClient):
+    """Sandboxed iframes and data: URLs send this. It is not our origin."""
+    resp = await test_client.post(
+        _ANY_PROTECTED_POST, json={}, headers={"Origin": "null"},
+    )
+    assert resp.status_code == 403

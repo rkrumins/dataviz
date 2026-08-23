@@ -137,3 +137,63 @@ def test_get_saml_replay_cache_reports_none_on_an_in_process_backend():
     if not isinstance(backend, InMemoryBackend):
         pytest.skip("suite is running against a real revocation store")
     assert get_saml_replay_cache() is None
+
+
+# ── The prod refusal is scoped to actual SAML providers ──────────────
+
+def test_a_prod_deployment_without_a_shared_store_refuses_that_provider():
+    """Refused at BUILD time, not at boot.
+
+    Without a shared store every worker forgets every assertion
+    independently, so a captured SAMLResponse is replayable for its
+    whole validity window — an absent control, not a degraded one.
+    """
+    from backend.app.main import saml_builder_with_replay_cache
+
+    def _base(snap, replay_cache=None):  # pragma: no cover - must not run
+        raise AssertionError("the guard should have refused first")
+
+    build = saml_builder_with_replay_cache(_base, None, is_prod=True)
+    with pytest.raises(RuntimeError) as err:
+        build(_snapshot())
+    assert "corp-saml" in str(err.value)
+
+
+def test_a_deployment_with_no_saml_provider_is_unaffected():
+    """The guard raises per provider, so a prod stack that merely has
+    python3-saml installed and configures no SAML provider still boots.
+
+    Building the wrapper is the whole of what startup does; nothing is
+    refused until a provider is actually built.
+    """
+    from backend.app.main import saml_builder_with_replay_cache
+
+    build = saml_builder_with_replay_cache(lambda s, replay_cache=None: None, None, True)
+    assert callable(build)  # no raise at wire time
+
+
+def test_a_shared_store_is_handed_to_the_provider():
+    """The happy path still passes the cache through, in prod and out."""
+    from backend.app.main import saml_builder_with_replay_cache
+
+    seen = {}
+
+    def _base(snap, replay_cache=None):
+        seen["cache"] = replay_cache
+        return "provider"
+
+    cache = object()
+    for is_prod in (True, False):
+        seen.clear()
+        assert saml_builder_with_replay_cache(_base, cache, is_prod)(_snapshot()) == "provider"
+        assert seen["cache"] is cache
+
+
+def test_a_dev_deployment_without_a_shared_store_still_builds():
+    """Dev warns loudly at startup but does not refuse — the in-process
+    cache is useless across workers, and a single-process dev stack has
+    exactly one."""
+    from backend.app.main import saml_builder_with_replay_cache
+
+    build = saml_builder_with_replay_cache(lambda s, replay_cache=None: "provider", None, False)
+    assert build(_snapshot()) == "provider"

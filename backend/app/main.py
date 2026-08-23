@@ -283,6 +283,35 @@ def _log_auth_fingerprint() -> None:
         )
 
 
+
+def saml_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
+    """Wrap the SAML provider builder so it binds the shared replay cache.
+
+    Refuses at BUILD time rather than at startup, and that placement is
+    the point. Without a shared store every worker forgets every
+    assertion independently, so a captured ``SAMLResponse`` is replayable
+    for its whole validity window — an absent control, not a degraded
+    one, and the same fail-closed stance
+    ``require_encryption_or_plaintext_ok`` takes for credential
+    encryption. But refusing at boot would stop a deployment that merely
+    HAS python3-saml installed and configures no SAML provider at all.
+    Raising in the builder means only an actual SAML provider fails —
+    its routes 503 — while everything else keeps serving.
+    """
+
+    def _build(snap):
+        if replay_cache is None and is_prod:
+            raise RuntimeError(
+                f"SAML provider {snap.slug!r} cannot be served: the "
+                "revocation store is unavailable, so assertion-replay "
+                "protection cannot be enforced across workers. Fix "
+                "Redis/Memorystore connectivity."
+            )
+        return base_builder(snap, replay_cache=replay_cache)
+
+    return _build
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup / shutdown lifecycle.
@@ -554,33 +583,18 @@ async def lifespan(_app: FastAPI):
             get_saml_replay_cache,
         )
         _saml_replay = get_saml_replay_cache()
-        if _saml_replay is None:
-            # No shared store. In prod that is not a degraded mode, it is
-            # an absent control: every worker would forget every
-            # assertion independently, so a captured SAMLResponse is
-            # replayable for its whole validity window. Refuse to serve
-            # SAML rather than appear to protect it — the same
-            # fail-closed stance ``require_encryption_or_plaintext_ok``
-            # takes for credential encryption.
-            if os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
-                raise RuntimeError(
-                    "SAML is configured but the revocation store is "
-                    "unavailable, so assertion-replay protection cannot "
-                    "be enforced across workers. Fix REDIS/Memorystore "
-                    "connectivity, or remove the SAML providers."
-                )
+        _prod = os.getenv("ENV", "dev").strip().lower() in ("prod", "production")
+
+        if _saml_replay is None and not _prod:
             logger.warning(
                 "SAML replay cache is process-local (no shared revocation "
                 "store). A replayed assertion will be accepted by any "
                 "worker that has not seen it. Never deploy this.",
             )
-        else:
-            _saml_builder = _builders["saml2"]
 
-            def _build_saml_with_replay_cache(snap, _b=_saml_builder, _c=_saml_replay):
-                return _b(snap, replay_cache=_c)
-
-            _builders["saml2"] = _build_saml_with_replay_cache
+        _builders["saml2"] = saml_builder_with_replay_cache(
+            _builders["saml2"], _saml_replay, _prod,
+        )
 
     _registry = ProviderRegistry(
         loader=_DbProviderConfigLoader(),
