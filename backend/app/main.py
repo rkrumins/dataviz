@@ -696,6 +696,13 @@ async def lifespan(_app: FastAPI):
     async def _kill_user_sessions(user_id: str) -> None:
         await get_revocation_service().revoke_all_user_sessions(user_id)
 
+    # Sign-out's narrow counterpart: tombstone ONE session. Logout must
+    # end the access token the caller is holding — ``get_current_user``
+    # gates on the ``sid``, not on the refresh family — without touching
+    # the same user's sessions in other browsers.
+    async def _revoke_one_session(sid: str) -> None:
+        await get_revocation_service().revoke_session(sid)
+
     # Phase 4: inject the platform SSO posture provider. The
     # ``auth_service`` stays free of ``backend.app.*`` imports —
     # the loader closure does the DB hit; the service only sees a
@@ -734,6 +741,7 @@ async def lifespan(_app: FastAPI):
         sso_role_reconciler=_reconcile_sso_targets,
         sso_role_preview=_preview_sso_targets,
         session_killer=_kill_user_sessions,
+        session_revoker=_revoke_one_session,
         auth_config_provider=_auth_config_provider,
     )
     # Refuse to serve without a signing secret. This used to happen as a

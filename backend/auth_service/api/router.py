@@ -38,6 +38,7 @@ import os
 import secrets
 import time
 from typing import Callable, Optional
+from urllib.parse import unquote
 
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -326,12 +327,46 @@ def _public_config(snap) -> dict:
     return out
 
 
+#: Characters a browser folds into a path separator, or that let one
+#: hide inside a value that still looks relative to a prefix test.
+#: Backslash is the one that mattered: the WHATWG URL spec's
+#: relative-slash state treats it as "/", so "/\evil.com" — which
+#: starts with "/" and not "//" — is resolved by every major browser
+#: as https://evil.com/. Tab, newline and carriage return are stripped
+#: from URLs before parsing, so "/<TAB>/evil.com" arrives as
+#: "//evil.com".
+_UNSAFE_NEXT_CHARS = ("\\", "\t", "\n", "\r")
+
+
 def _safe_next(raw: str | None) -> str:
     """Only allow a same-site relative path. Anything that could escape
-    the origin (scheme, host, protocol-relative ``//``) falls back to
-    the app root — an open-redirect guard on the post-login bounce."""
-    if not raw or not raw.startswith("/") or raw.startswith("//"):
+    the origin — a scheme, a host, protocol-relative ``//``, or a
+    backslash the browser will read as ``/`` — falls back to the app
+    root. This is the open-redirect guard on the post-login bounce, and
+    it serves OIDC, the SAML ACS and both custom kinds.
+
+    The value is sealed into the signed flow cookie and consumed by
+    ``_session_redirect`` *after* the session is minted, so a bypass
+    here bounces an **authenticated** user to the attacker's origin.
+    That makes it phishing infrastructure rather than a cosmetic bug,
+    and it is why this rejects rather than sanitises: a value we cannot
+    read as unambiguously relative is not one to guess at.
+
+    One decode pass first, because ``%5c`` and ``%2f%2f`` survive the
+    naive prefix test and are decoded by the browser. Anything still
+    encoded after that pass is left alone — it is a legal path segment.
+    """
+    if not raw or not raw.startswith("/"):
         return "/"
+    try:
+        decoded = unquote(raw)
+    except (UnicodeDecodeError, ValueError):
+        return "/"
+    for candidate in (raw, decoded):
+        if not candidate.startswith("/") or candidate.startswith("//"):
+            return "/"
+        if any(ch in candidate for ch in _UNSAFE_NEXT_CHARS):
+            return "/"
     return raw
 
 
@@ -852,7 +887,12 @@ async def login(
 async def logout(request: Request, response: Response):
     svc = _identity_service(request)
     refresh = read_refresh_cookie(request)
-    await svc.logout(refresh)
+    # The access cookie carries the ``sid``, and the ``sid`` is what
+    # ``get_current_user`` checks on every request. Without it the
+    # sign-out revokes renewal but not the credential the caller is
+    # holding right now.
+    access = read_access_cookie(request)
+    await svc.logout(refresh, access)
     clear_session_cookies(response, request)
     return _Ack()
 
@@ -1447,10 +1487,11 @@ async def saml_sls(slug: str, request: Request):
         return resp
 
     refresh_token = read_refresh_cookie(request)
-    if refresh_token:
+    access_token = read_access_cookie(request)
+    if refresh_token or access_token:
         try:
             svc = _identity_service(request)
-            await svc.logout(refresh_token)
+            await svc.logout(refresh_token, access_token)
         except Exception:  # noqa: BLE001
             pass
 

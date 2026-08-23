@@ -530,6 +530,40 @@ async def revoke_subject_sessions(
     return 0
 
 
+async def revoke_every_session_for_user(
+    user_id: str,
+    *,
+    session,
+    reason: str,
+) -> None:
+    """End every session a user holds, durably. Both halves, always.
+
+    ``revoke_subject_sessions`` tombstones the ``sid``s that are live
+    right now, and those tombstones expire with the access token they
+    guard. ``revoke_sessions_from_now`` stamps the cutoff that stops the
+    next rotation minting a fresh, untombstoned session, and it only
+    bites at that rotation. Either alone leaves a window: the first lets
+    a refresh walk straight back in, the second leaves the current
+    access token working until it expires.
+
+    They were being called as a pair in one place and not at all in
+    three others — the password-reset paths among them, which is the
+    worst of the set. A user resetting a password after a compromise is
+    performing the remediation; leaving the attacker's session alive
+    through it defeats the point. This exists so the pair cannot be
+    half-remembered again.
+
+    Cookie clearing is deliberately NOT here. It only makes sense when
+    the subject is the caller, and reaching for it on an admin action
+    would sign the *admin* out. The caller-facing wrapper in
+    ``users.py`` adds it.
+    """
+    from backend.app.db.repositories import user_repo
+
+    await user_repo.revoke_sessions_from_now(session, user_id)
+    await revoke_subject_sessions("user", user_id, session=session, reason=reason)
+
+
 async def revoke_role_sessions(
     role_name: str, *, session, reason: str = "role_changed",
 ) -> int:

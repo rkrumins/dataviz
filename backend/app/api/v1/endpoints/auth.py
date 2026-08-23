@@ -39,6 +39,9 @@ from backend.common.models.auth import (
 from backend.app.auth.dependencies import get_current_user
 from backend.app.api.v1.feature_gate import feature_disabled
 from backend.app.services.feature_flags import feature_flags
+from backend.app.services.revocation_service import (
+    revoke_every_session_for_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -741,6 +744,18 @@ async def reset_password(
     # 3. Update password (also clears the reset token)
     hashed = hash_password(body.new_password)
     await user_repo.update_password(session, user.id, hashed)
+
+    # 4. End every session the account already had.
+    #
+    # This is the whole point of the flow. A password reset is what
+    # somebody performs *because* they believe their account is
+    # compromised, and until this call the attacker's session survived
+    # it untouched — the new password locked nobody out. The
+    # self-service change-password path always did this; the two reset
+    # paths did not.
+    await revoke_every_session_for_user(
+        user.id, session=session, reason="password_reset",
+    )
 
     await user_repo.create_outbox_event(
         session,
