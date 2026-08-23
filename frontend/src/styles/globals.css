@@ -90,16 +90,53 @@
     font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;
   }
 
-  /* Smooth theme transitions */
-  * {
-    transition-property: background-color, border-color, color;
-    transition-timing-function: ease-out;
-    transition-duration: 100ms;
-  }
+  /* NO blanket transition here, deliberately.
+   *
+   * This used to be `* { transition-property: background-color, border-color,
+   * color; transition-duration: 100ms }` — every element in the document, at all
+   * times. The comment called it "smooth theme transitions", but the rule below
+   * switched it OFF for the theme swap, so what it actually bought was a global
+   * 100ms colour fade on ordinary UI state changes.
+   *
+   * What it cost: on a canvas holding thousands of nodes, EVERY re-render that
+   * touched a className anywhere animated that element's colours over 100ms.
+   * That is what turned ordinary render churn into a visible, screen-wide
+   * shimmer — the reported flickering, amplified by exactly how much was on
+   * screen. Components wanting a hover/state fade carry Tailwind's
+   * `transition-colors` themselves; most already did.
+   *
+   * The suppressor below stays: it kills those per-component transitions during
+   * the theme class swap, which is the whole-page cross-fade it was written to
+   * prevent. `useAppliedTheme` adds the class around the swap and removes it two
+   * frames later. */
 
   /* Disable transitions on theme change to prevent flash */
   .theme-transitioning * {
     transition: none !important;
+  }
+
+  /* Lineage edge hover preview.
+   *
+   * `LineageFlowOverlay` marks its container `data-flow-hover` while a node is
+   * hovered and tags the edges touching that node `data-edge-hot`. Expressing
+   * the dim in CSS means a hover costs two attribute writes plus one write per
+   * TOUCHING edge, instead of an inline `opacity` on every edge on the board —
+   * and, because the rule keys off attributes React itself cannot clobber
+   * mid-hover, the highlight survives a re-render. */
+  [data-flow-hover] g[data-edge-id] {
+    opacity: 0.06;
+  }
+  [data-flow-hover] g[data-edge-id][data-edge-hot] {
+    opacity: 1;
+  }
+
+  /* Toast auto-dismiss bar. Driven by the compositor rather than a 30ms
+   * setInterval + setState, which re-rendered a `<motion.div layout>` ~33 times
+   * a second for the life of every toast. `width` is set inline to where the bar
+   * should START (a remount mid-life resumes correctly); this runs it to zero
+   * over whatever time is left. */
+  @keyframes nx-toast-progress {
+    to { width: 0%; }
   }
 }
 

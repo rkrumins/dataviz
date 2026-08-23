@@ -184,13 +184,26 @@ function ToastItem({ toast }: { toast: Toast }) {
   const id = toast.id
   const createdAt = toast.createdAt
 
-  // Initial progress is computed from createdAt so a remount (e.g. caused by
-  // React StrictMode double-invocation, or by the parent re-rendering for
-  // any unrelated reason) doesn't snap the bar back to 100%.
-  const [progress, setProgress] = useState(() => {
-    if (isLoading) return 100
+  // The bar is a CSS animation, not React state.
+  //
+  // It used to be a `setInterval(..., 30)` calling `setProgress` — ~33 re-renders
+  // a second, on a `<motion.div layout>`, which makes framer-motion re-measure
+  // layout on every one of them. `ToastContainer` is always mounted and
+  // `CanvasRouter` raises a hydration toast during EVERY canvas load, so that ran
+  // at exactly the moment the canvas was busiest. Handing the interpolation to
+  // the compositor costs zero renders.
+  //
+  // Both values are computed from the immutable `createdAt`, so a remount (React
+  // StrictMode, or the parent re-rendering for an unrelated reason) resumes the
+  // bar where it should be rather than snapping back to 100%.
+  // Computed once at mount, in a state initializer — `createdAt` is immutable for
+  // a given toast and `ToastItem` is keyed by id, so there is nothing to recompute.
+  const [{ fromPercent, remainingMs }] = useState(() => {
     const elapsed = Date.now() - createdAt
-    return Math.max(0, 100 - (elapsed / DURATION) * 100)
+    return {
+      fromPercent: Math.max(0, 100 - (elapsed / DURATION) * 100),
+      remainingMs: Math.max(0, DURATION - elapsed),
+    }
   })
 
   useEffect(() => {
@@ -202,18 +215,10 @@ function ToastItem({ toast }: { toast: Toast }) {
     // whenever this effect re-ran (e.g. because a sibling toast dismissed
     // and the parent's onDismiss closure changed), which gave the user the
     // misleading impression that the remaining toasts had reset.
-    const remainingMs = Math.max(0, DURATION - (Date.now() - createdAt))
-    const timer = setTimeout(() => removeToast(id), remainingMs)
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - createdAt
-      const remaining = Math.max(0, 100 - (elapsed / DURATION) * 100)
-      setProgress(remaining)
-      if (remaining <= 0) clearInterval(interval)
-    }, 30)
+    const timer = setTimeout(() => removeToast(id), Math.max(0, DURATION - (Date.now() - createdAt)))
 
     return () => {
       clearTimeout(timer)
-      clearInterval(interval)
     }
   }, [createdAt, id, isLoading, removeToast])
 
@@ -264,7 +269,11 @@ function ToastItem({ toast }: { toast: Toast }) {
         <div className="h-0.5 w-full bg-black/5 dark:bg-white/5">
           <div
             className={cn('h-full transition-none rounded-r-full', accentColors[toast.type])}
-            style={{ width: `${progress}%`, opacity: 0.6 }}
+            style={{
+              width: `${fromPercent}%`,
+              opacity: 0.6,
+              animation: `nx-toast-progress ${remainingMs}ms linear forwards`,
+            }}
           />
         </div>
       )}

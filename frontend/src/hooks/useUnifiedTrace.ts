@@ -1028,7 +1028,18 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         }
     }, [result, upstreamCount, downstreamCount, drilldowns])
 
-    return {
+    // MEMOIZED, and it matters far more than it looks.
+    //
+    // This returned a fresh 39-field object literal on every render. Consumers put
+    // it straight into dependency arrays — `ContextViewCanvas`'s `dockTrace` memo
+    // among them — so those memos NEVER hit their cache: four `Set`s over the full
+    // trace model were rebuilt on every render of a 5,000-line component, and the
+    // whole trace dock re-rendered with them. That is the render volume the rest of
+    // the flicker chain was being multiplied by.
+    //
+    // Every field below is a zustand selection, a primitive, a `useCallback` or a
+    // `useMemo`, so this genuinely holds its identity when nothing has changed.
+    return useMemo(() => ({
         status,
         error,
         focusId,
@@ -1068,7 +1079,47 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         recordAddedEdgeIds,
         resetAddedEdgeIds,
         expandingPairs,
-    }
+    }), [
+        status,
+        error,
+        focusId,
+        result,
+        isTracing,
+        isLoading,
+        config,
+        setConfig,
+        showUpstream,
+        showDownstream,
+        setShowUpstream,
+        setShowDownstream,
+        startTrace,
+        toggleTrace,
+        clearTrace,
+        retrace,
+        traceUpstream,
+        traceDownstream,
+        traceFullLineage,
+        isInTrace,
+        isUpstream,
+        isDownstream,
+        isFocus,
+        visibleTraceNodes,
+        traceContextSet,
+        upstreamCount,
+        downstreamCount,
+        statistics,
+        drilldowns,
+        expandAggregatedEdge,
+        expandAggregatedEdgesBatch,
+        collapseDrilldown,
+        traceHistory,
+        jumpToHistoryEntry,
+        clearTraceHistory,
+        addedEdgeIds,
+        recordAddedEdgeIds,
+        resetAddedEdgeIds,
+        expandingPairs,
+    ])
 }
 
 // ============================================
