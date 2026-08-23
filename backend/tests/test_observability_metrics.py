@@ -434,3 +434,62 @@ def test_the_gunicorn_config_exposes_the_hooks():
 
     assert callable(getattr(module, "on_starting", None))
     assert callable(getattr(module, "child_exit", None))
+
+
+# ── Nested routers ────────────────────────────────────────────────────
+
+
+async def test_label_is_the_full_path_under_nested_routers():
+    """The shape production actually uses, and the one that was broken.
+
+    FastAPI 0.141 / Starlette 1.6 stopped flattening ``include_router``
+    and nest a ``_IncludedRouter`` per prefix instead. The innermost
+    router writes ``scope["route"]``, so what lands there is the route's
+    path *relative to its own router* — and ``root_path`` stays empty,
+    so there is nothing else in the scope that obviously carries the
+    prefix.
+
+    The original test for this used a route declared straight on the app
+    with its full path inline. That is the one arrangement where the
+    relative template and the full path are the same string, so it
+    passed against the bug — while every real endpoint, all of which
+    arrive through ``app.include_router(api_router, prefix="/api/v1")``,
+    was labelled by its last segment alone.
+
+    The failure that causes is not extra series, it is **merged** ones:
+    two different routers' ``/config`` endpoints summing into one line
+    that reads like a single endpoint.
+    """
+    from fastapi import APIRouter
+
+    inner = APIRouter()
+
+    @inner.get("/config")
+    async def config():
+        return {"ok": True}
+
+    @inner.get("/items/{item_id}")
+    async def item(item_id: str):
+        return {"ok": True}
+
+    api = APIRouter()
+    api.include_router(inner, prefix="/announcements")
+
+    app = _app()
+    app.include_router(api, prefix="/api/v1")
+
+    before_cfg = _count("GET", "/api/v1/announcements/config", "200")
+    before_item = _count("GET", "/api/v1/announcements/items/{item_id}", "200")
+
+    await _get(app, "/api/v1/announcements/config")
+    await _get(app, "/api/v1/announcements/items/abc")
+    await _get(app, "/api/v1/announcements/items/xyz")
+
+    assert _count("GET", "/api/v1/announcements/config", "200") == before_cfg + 1
+    assert _count("GET", "/api/v1/announcements/items/{item_id}", "200") == before_item + 2
+
+    # The bug's signature: the bare last segment must never be a series,
+    # because that is what two unrelated routers would collide on.
+    assert _count("GET", "/config", "200") == 0.0
+    # And the concrete ids must not have minted series of their own.
+    assert _count("GET", "/api/v1/announcements/items/abc", "200") == 0.0

@@ -34,10 +34,42 @@ def _route_label(scope: Scope) -> str:
     before routing) has no template, and its raw path is attacker- or
     crawler-controlled — so it collapses to a single ``<unmatched>``
     bucket rather than minting a series per URL probed.
+
+    **The template has to be reassembled, and skipping that step is a
+    quieter bug than the cardinality one it looks like.** FastAPI 0.141 /
+    Starlette 1.6 no longer flatten ``include_router``: they nest a
+    ``_IncludedRouter`` per prefix, and the innermost router is the one
+    that writes ``scope["route"]``. What lands there is therefore the
+    route's path *relative to its own router* — ``/config``, not
+    ``/api/v1/announcements/config`` — while ``root_path`` stays empty.
+    Using it raw does not inflate cardinality, it **collides**: every
+    router with a ``/config`` endpoint sums into one series, and the
+    reader has no way to tell. Wrong numbers that look right.
+
+    So the prefix comes from ``scope["path"]`` (the full concrete path)
+    and only the tail comes from the template. Taking the prefix from
+    the concrete path is safe precisely because a prefix is all literal
+    segments — no parameter values can hide in it.
     """
     route = scope.get("route")
-    path_format = getattr(route, "path_format", None) or getattr(route, "path", None)
-    return path_format or "<unmatched>"
+    template = getattr(route, "path_format", None) or getattr(route, "path", None)
+    if not template:
+        return "<unmatched>"
+
+    concrete = [seg for seg in (scope.get("path") or "").split("/") if seg]
+    tail = [seg for seg in template.split("/") if seg]
+
+    # A ``{param:path}`` converter eats several segments, so the segment
+    # arithmetic below would mistake real parameter values for prefix and
+    # put them in the label. Rather than risk that, keep the relative
+    # template: less specific, still bounded.
+    if any("/" in str(v) for v in (scope.get("path_params") or {}).values()):
+        return template
+
+    if len(concrete) > len(tail):
+        prefix = "/" + "/".join(concrete[: len(concrete) - len(tail)])
+        return prefix + template
+    return template
 
 
 class RequestMetricsMiddleware:
