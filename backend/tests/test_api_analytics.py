@@ -833,6 +833,151 @@ async def test_a_trend_insight_carries_the_series_it_is_a_claim_about(db_session
             assert by_key[key]["spark"] is None
 
 
+async def test_a_longer_window_can_never_report_less(db_session):
+    """A 14-day window CONTAINS the 7-day one, so nothing it counts can be
+    smaller. Reported from the running app: "Saved views" showed 4 over 7 days
+    and 3 over 14, and one popular view vanished entirely as the window grew.
+
+    Computed here from one database at one instant, which is the only way to
+    tell a counting bug from two documents that were simply built at different
+    times.
+    """
+    await _seed(db_session)
+    await _seed_product_signals(db_session)
+
+    short = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+    longer = await analytics_repo.platform_summary(db_session, days=30, now=NOW)
+
+    for name, metric in short["totals"].items():
+        assert (longer["totals"][name].get("current") or 0) >= (metric.get("current") or 0), (
+            f"{name} counted less over 30 days than over 7")
+
+    for name in ("traces", "searches", "views", "exports", "publishes"):
+        if name in short["valueMoments"]:
+            assert (longer["valueMoments"].get(name) or 0) >= (short["valueMoments"][name] or 0), name
+
+    short_features = {f["key"]: f["events"] for f in short["adoption"]}
+    for row in longer["adoption"]:
+        assert row["events"] >= short_features.get(row["key"], 0), row["key"]
+
+    # Every view the shorter window found must still be there, with at least
+    # as many opens. A ranking that loses a row as the window widens is not a
+    # ranking, it is a coin toss.
+    long_views = {v["viewId"]: v for v in longer["leaderboards"]["topViews"]}
+    for view in short["leaderboards"]["topViews"]:
+        assert view["viewId"] in long_views, view["viewId"]
+        assert long_views[view["viewId"]]["opens"] >= view["opens"], view["viewId"]
+
+    long_ws = {w["workspaceId"]: w for w in longer["leaderboards"]["topWorkspaces"]}
+    for ws in short["leaderboards"]["topWorkspaces"]:
+        assert ws["workspaceId"] in long_ws, ws["workspaceId"]
+        assert long_ws[ws["workspaceId"]]["opens"] >= ws["opens"], ws["workspaceId"]
+        assert long_ws[ws["workspaceId"]]["activity"] >= ws["activity"], ws["workspaceId"]
+
+
+async def test_the_reported_contradiction_cannot_happen_again(db_session, monkeypatch):
+    """The exact shape of the bug: a SHORTER window reporting MORE.
+
+    A 14-day document is built, somebody opens a view, and a 7-day document is
+    built a moment later. Before the shared epoch the second document ended
+    later than the first, so it counted an event the first could not see — and
+    the dashboard showed 4 saved views over 7 days beside 3 over 14, which is
+    arithmetically impossible and destroys trust in every other number on the
+    page.
+    """
+    from backend.app.services import analytics_cache
+    from backend.app.api.v1.endpoints import analytics as endpoint
+
+    await _seed(db_session)
+    await _seed_product_signals(db_session)
+
+    pinned = analytics_cache.epoch_start(NOW)
+    monkeypatch.setattr(analytics_cache, "epoch_start", lambda at=None: pinned)
+
+    _, wide_args = endpoint._at_epoch({"days": 30})
+    wide = await analytics_repo.platform_summary(db_session, scope=None, **wide_args)
+
+    # Somebody opens a view between the two documents being built.
+    db_session.add(ProductEventORM(
+        id="pev_between", event_type="view.opened", actor_id="usr_old",
+        subject_id="view_a", payload='{"viewId": "view_a"}',
+        created_at=(NOW - timedelta(minutes=1)).isoformat(),
+    ))
+    await db_session.flush()
+
+    _, narrow_args = endpoint._at_epoch({"days": 7})
+    narrow = await analytics_repo.platform_summary(db_session, scope=None, **narrow_args)
+
+    # Both ended at the same instant, so the wider window still contains the
+    # narrower one — whatever happened in between.
+    assert wide["generatedAt"] == narrow["generatedAt"] == pinned.isoformat()
+    assert (wide["totals"]["viewOpens"]["current"]
+            >= narrow["totals"]["viewOpens"]["current"])
+
+
+async def test_two_windows_asked_seconds_apart_end_at_the_same_instant():
+    """The reported bug, at its source.
+
+    Every document is a trailing window ending at ``now``, and ``now`` used to
+    be whatever the wall clock said when that document happened to be built.
+    Six warmed windows in one pass had six different ends and a read-through
+    miss had a seventh, so a 14-day figure could come out SMALLER than the
+    7-day figure inside it — not because the counting was wrong, but because
+    the two documents were counting up to different moments.
+    """
+    from backend.app.services import analytics_cache
+
+    grid = analytics_cache.epoch_seconds()
+    early = datetime(2026, 6, 15, 12, 0, 1, tzinfo=timezone.utc)
+    later = early + timedelta(seconds=grid / 2)
+    assert analytics_cache.epoch_start(early) == analytics_cache.epoch_start(later)
+
+    # ...and the key carries it, so a document from one slot can never be
+    # served beside a document from the next. Mixing two epochs is the same
+    # bug wearing a smaller number.
+    next_slot = early + timedelta(seconds=grid)
+    assert analytics_cache.epoch_start(next_slot) != analytics_cache.epoch_start(early)
+    assert (
+        analytics_cache.document_key("summary", {"days": 7},
+                                     epoch=analytics_cache.epoch_start(early))
+        != analytics_cache.document_key("summary", {"days": 7},
+                                        epoch=analytics_cache.epoch_start(next_slot))
+    )
+    # Same slot, different windows: different keys, same epoch stamp — which is
+    # what makes the two documents comparable.
+    stamp = f"e{int(analytics_cache.epoch_start(early).timestamp())}"
+    for days in (7, 14):
+        key = analytics_cache.document_key(
+            "summary", {"days": days}, epoch=analytics_cache.epoch_start(later))
+        assert stamp in key
+
+
+async def test_the_endpoint_and_the_warmer_write_the_same_key(db_session, monkeypatch):
+    """A warmer that writes a key the reader does not look up warms nothing.
+
+    The epoch made this sharper than it was: both sides now have to agree about
+    WHEN as well as about which window.
+    """
+    from backend.app.services import analytics_cache, analytics_warmer
+    from backend.app.api.v1.endpoints import analytics as endpoint
+
+    pinned = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(analytics_cache, "epoch_start", lambda at=None: pinned)
+
+    written: list[str] = []
+
+    async def _capture(key, value, *, ttl):
+        written.append(key)
+        return True
+
+    monkeypatch.setattr(analytics_cache, "put", _capture)
+    await analytics_warmer.warm_once(db_session, ttl=60)
+
+    _, build_args = endpoint._at_epoch({"days": 30})
+    assert build_args["now"] == pinned
+    assert endpoint._cache_key("summary", {"days": 30}, epoch=pinned) in written
+
+
 async def test_previous_window_is_equal_length_and_adjacent():
     w = analytics_repo.build_window(days=30)
     prev = analytics_repo.previous_window(w)

@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.app.common.single_flight import SingleFlight
@@ -143,6 +145,54 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
     return await _flight.run(("analytics", key), _compute)
 
 
+# ── One clock for every window ───────────────────────────────────────
+
+#: How wide a slot of wall clock counts as "the same instant".
+#:
+#: Every document is a trailing window ending at ``now``, and ``now`` used to
+#: be whatever the wall clock said when that particular document happened to be
+#: built. Six warmed windows in one pass therefore had six different ends, and
+#: a read-through miss had a seventh — so a 14-day figure could be SMALLER than
+#: the 7-day figure it contains, because the 14-day document was built a minute
+#: earlier and had not seen the newest events. Reported from the running app:
+#: "Saved views" showed 4 over 7 days and 3 over 14, and a popular view
+#: vanished entirely as the window widened.
+#:
+#: Snapping ``now`` down to a fixed grid makes every document built in the same
+#: slot share an end instant exactly, which is what makes them comparable. The
+#: epoch is part of the CACHE KEY as well, so all windows roll over together
+#: rather than a fresh 7-day document being served beside a stale 14-day one —
+#: mixing two epochs is the same bug wearing a smaller number.
+#:
+#: Aligned with the warm interval by construction: they read the same variable,
+#: so a deployment that speeds one up speeds up the other.
+_DEFAULT_EPOCH_SECONDS = 300.0
+
+
+def epoch_seconds() -> float:
+    raw = os.getenv("ANALYTICS_WARM_INTERVAL_SECONDS")
+    if not raw:
+        return _DEFAULT_EPOCH_SECONDS
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return _DEFAULT_EPOCH_SECONDS
+    # A grid finer than a second buys nothing and risks a zero divisor.
+    return max(1.0, parsed)
+
+
+def epoch_start(at: Optional[datetime] = None) -> datetime:
+    """The start of the slot ``at`` falls in — the shared "now" for a document.
+
+    Callers pass this to the repository AND fold it into the cache key, so a
+    document and the key it is stored under always agree about when it ends.
+    """
+    at = at or datetime.now(timezone.utc)
+    grid = epoch_seconds()
+    stamp = at.timestamp()
+    return datetime.fromtimestamp(stamp - (stamp % grid), tz=timezone.utc)
+
+
 #: Bump when the SHAPE of a cached document changes — a field added, removed
 #: or renamed. These documents outlive the code that wrote them: they sit in
 #: Redis for a TTL measured in minutes, so a deploy that adds a field will keep
@@ -152,7 +202,9 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
 SCHEMA_VERSION = 2
 
 
-def document_key(surface: str, args: dict[str, Any]) -> str:
+def document_key(
+    surface: str, args: dict[str, Any], *, epoch: Optional[datetime] = None,
+) -> str:
     """The cache key for one surface over one window.
 
     Lives HERE rather than in the endpoint because two callers now build it —
@@ -163,12 +215,18 @@ def document_key(surface: str, args: dict[str, Any]) -> str:
 
     ``raw:`` names what the value is: an UNREDACTED document, shared by every
     reader, filtered per-reader on the way out. Nothing may serve it directly.
+
+    ``epoch`` is the instant the window ENDS at, and it belongs in the key for
+    the same reason the window does: it is an input to the document. Without it
+    a 7-day entry written this minute sits in the cache beside a 14-day entry
+    written five minutes ago, and the two contradict each other.
     """
     window = (
         f"d{args['days']}" if "days" in args
         else f"{args.get('start')}:{args.get('end')}"
     )
-    return f"raw:v{SCHEMA_VERSION}:{surface}:{window}"
+    stamp = int((epoch or epoch_start()).timestamp())
+    return f"raw:v{SCHEMA_VERSION}:e{stamp}:{surface}:{window}"
 
 
 async def put(key: str, value: Any, *, ttl: float) -> bool:

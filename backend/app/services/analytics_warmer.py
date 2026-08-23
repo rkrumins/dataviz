@@ -103,16 +103,23 @@ async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
     """
     ttl = ttl if ttl is not None else interval_seconds() * _TTL_MULTIPLE
     stored = 0
+    # ONE instant for the whole pass. Each window used to end wherever the wall
+    # clock happened to be when its own aggregation finished, so the six
+    # documents this writes did not agree with each other — and a 14-day figure
+    # could come out smaller than the 7-day figure inside it. The epoch is in
+    # the key too, so readers cannot mix a window from this pass with one from
+    # the last.
+    epoch = analytics_cache.epoch_start()
     for days in WARM_WINDOWS:
         args = {"days": days}
         for surface in _SURFACES:
             try:
                 if surface == "summary":
                     doc = await analytics_repo.platform_summary(
-                        session, scope=None, **args)
+                        session, scope=None, now=epoch, **args)
                 else:
                     doc = await analytics_repo.workspace_rows(
-                        session, scope=None, **args)
+                        session, scope=None, now=epoch, **args)
             except Exception as exc:  # noqa: BLE001 — one window, not the pass
                 logger.warning(
                     "Analytics warm failed for %s/%dd: %s", surface, days, exc,
@@ -120,7 +127,8 @@ async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
                 )
                 continue
             if await analytics_cache.put(
-                analytics_cache.document_key(surface, args), doc, ttl=ttl,
+                analytics_cache.document_key(surface, args, epoch=epoch),
+                doc, ttl=ttl,
             ):
                 stored += 1
     return stored

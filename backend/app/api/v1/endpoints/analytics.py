@@ -21,6 +21,7 @@ safety — the frontend's ``analyticsService`` types are the consumed contract.
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -66,6 +67,20 @@ def _window_args(days: int, start: str | None, end: str | None) -> dict[str, Any
 #: Deliberately NOT per-reader — see `_serve`. Shared with the warmer, which
 #: must write the exact key the reader looks up.
 _cache_key = analytics_cache.document_key
+
+
+def _at_epoch(args: dict[str, Any]) -> tuple[datetime, dict[str, Any]]:
+    """The instant this request's documents end at, and the builder args.
+
+    Every window a reader can see must end at the SAME instant, or a 14-day
+    figure can come out smaller than the 7-day figure inside it — which is what
+    happened, because each document used whatever the wall clock said when it
+    happened to be built. Snapping to the shared epoch fixes both halves at
+    once: the documents agree because they end together, and they stay agreed
+    because the epoch is in the key, so all windows roll over as one.
+    """
+    epoch = analytics_cache.epoch_start()
+    return epoch, {**args, "now": epoch}
 
 
 async def _serve(
@@ -117,12 +132,13 @@ async def analytics_summary(
 ) -> dict[str, Any]:
     """Platform-wide KPIs, time series, breakdowns, leaderboards, and funnel."""
     args = _window_args(days, date_from, date_to)
+    epoch, build_args = _at_epoch(args)
     try:
         return await _serve(
-            _cache_key("summary", args),
+            _cache_key("summary", args, epoch=epoch),
             # `scope=None` is what makes the repo return the document
             # unredacted; `_serve` is what puts the scope back.
-            lambda: analytics_repo.platform_summary(session, scope=None, **args),
+            lambda: analytics_repo.platform_summary(session, scope=None, **build_args),
             analytics_repo.redact_summary,
             scope,
         )
@@ -140,10 +156,11 @@ async def analytics_workspaces(
 ) -> list[dict[str, Any]]:
     """One aggregate row per live workspace — the Workspaces tab's table."""
     args = _window_args(days, date_from, date_to)
+    epoch, build_args = _at_epoch(args)
     try:
         return await _serve(
-            _cache_key("workspaces", args),
-            lambda: analytics_repo.workspace_rows(session, scope=None, **args),
+            _cache_key("workspaces", args, epoch=epoch),
+            lambda: analytics_repo.workspace_rows(session, scope=None, **build_args),
             analytics_repo.redact_workspace_rows,
             scope,
         )
@@ -162,11 +179,12 @@ async def analytics_workspace_detail(
 ) -> dict[str, Any]:
     """Full insights for one workspace, in the same shape as the summary."""
     args = _window_args(days, date_from, date_to)
+    epoch, build_args = _at_epoch(args)
     try:
         detail = await _serve(
-            _cache_key(f"ws:{workspace_id}", args),
+            _cache_key(f"ws:{workspace_id}", args, epoch=epoch),
             lambda: analytics_repo.workspace_detail(
-                session, workspace_id, scope=None, **args),
+                session, workspace_id, scope=None, **build_args),
             analytics_repo.redact_workspace_detail,
             scope,
         )
