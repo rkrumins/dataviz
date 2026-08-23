@@ -90,25 +90,52 @@
     font-family: 'Inter Variable', 'Inter', system-ui, sans-serif;
   }
 
-  /* NO blanket transition here, deliberately.
+  /* Colour fade on CONTROLS, not on everything.
    *
-   * This used to be `* { transition-property: background-color, border-color,
-   * color; transition-duration: 100ms }` — every element in the document, at all
-   * times. The comment called it "smooth theme transitions", but the rule below
-   * switched it OFF for the theme swap, so what it actually bought was a global
-   * 100ms colour fade on ordinary UI state changes.
+   * This was `* { transition-property: background-color, border-color, color;
+   * transition-duration: 100ms }` — every element in the document, at all times
+   * — and that selector was a flicker amplifier. On a canvas holding thousands
+   * of nodes, every re-render that touched a className anywhere animated that
+   * element's colours for 100ms, which is what turned ordinary render churn
+   * into a visible, screen-wide shimmer.
    *
-   * What it cost: on a canvas holding thousands of nodes, EVERY re-render that
-   * touched a className anywhere animated that element's colours over 100ms.
-   * That is what turned ordinary render churn into a visible, screen-wide
-   * shimmer — the reported flickering, amplified by exactly how much was on
-   * screen. Components wanting a hover/state fade carry Tailwind's
-   * `transition-colors` themselves; most already did.
+   * The transition was never the problem; `*` was. Scoped to controls it keeps
+   * the feel exactly where people hover — measured, 463 of the 644 elements
+   * that had been relying on the global rule are `<button>` alone — while
+   * leaving out the elements that made it expensive.
    *
-   * The suppressor below stays: it kills those per-component transitions during
-   * the theme class swap, which is the whole-page cross-fade it was written to
-   * prevent. `useAppliedTheme` adds the class around the swap and removes it two
-   * frames later. */
+   * WHAT IS DELIBERATELY EXCLUDED, and why this is safe: the canvas's rows and
+   * cards are `div`s (see `FlatTreeItem`'s root, and the Lens cards), and those
+   * are precisely the elements whose colours change on trace, isolation,
+   * selection and search — the sweeps the old rule was animating. They get no
+   * transition from here and must not: a trace lighting up a large board should
+   * paint, not animate. The per-row `<button>` affordances inside a virtualized
+   * row are harmless by contrast — a declared transition costs nothing until
+   * the property actually changes, and theirs changes on hover, not during a
+   * render sweep.
+   *
+   * A component wanting something different still says so itself with
+   * Tailwind's `transition-colors` / `duration-*`, which wins on specificity.
+   *
+   * The suppressor below stays, and still covers this rule: it is `*`-scoped,
+   * so the theme swap kills these transitions too — the whole-page cross-fade
+   * it was written to prevent stays prevented. `useAppliedTheme` adds the class
+   * around the swap and removes it two frames later. */
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  label,
+  summary,
+  [role="button"],
+  [role="menuitem"],
+  [role="tab"],
+  [role="option"] {
+    transition-property: background-color, border-color, color;
+    transition-timing-function: ease-out;
+    transition-duration: 100ms;
+  }
 
   /* Disable transitions on theme change to prevent flash */
   .theme-transitioning * {
