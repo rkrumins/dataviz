@@ -988,6 +988,114 @@ async def test_the_catalogue_insight_reaches_a_public_reader(db_session):
     )
 
 
+
+
+# ── Contact details ─────────────────────────────────────────────────
+# `analyticsShowEmailAddresses`. The capability is real — a view's creator has
+# always been a mailto: link in the Explorer drawer, ungated — but it is
+# scoped: a person attached to a thing the reader can open, never the
+# platform-wide activity ranking.
+
+def _contact(**kw) -> ViewerScope:
+    """A non-privileged reader with contact turned on."""
+    kw.setdefault("privacy", PrivacyMode.INTERNAL)
+    kw.setdefault("contact_enabled", True)
+    return _scope(**kw)
+
+
+async def test_contact_is_off_until_an_operator_turns_it_on(db_session):
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_scope(privacy=PrivacyMode.INTERNAL, visible_workspaces=frozenset({"ws_live"})),
+    )
+    assert "@x.io" not in json.dumps(doc)
+
+
+async def test_a_view_creator_becomes_reachable(db_session):
+    """The anchored case: the person is attached to a view in front of the
+    reader, which is the shape Explorer has always shown for the same view."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_contact(visible_workspaces=frozenset({"ws_live"})),
+    )
+    alpha = next(v for v in doc["leaderboards"]["topViews"] if v["viewId"] == "view_a")
+    assert alpha["createdByEmail"] == "old@x.io"
+    assert alpha["createdByName"]
+    # The id is still never returned — that is individual activity.
+    assert "createdBy" not in alpha
+
+
+async def test_a_view_you_cannot_see_names_nobody(db_session):
+    """Contact rides on seeing the view, not on the flag. A redacted row must
+    not become a way to learn who built something you may not look at."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_contact(visible_workspaces=frozenset()),   # member of nothing
+    )
+    for row in doc["leaderboards"]["topViews"]:
+        if row.get("redacted"):
+            assert "createdByEmail" not in row and "createdByName" not in row
+
+
+async def test_the_platform_ranking_never_carries_addresses(db_session):
+    """The line the setting deliberately does not cross.
+
+    "Most active people" is a ranked list of accounts across the whole tenancy
+    with no anchoring object. Addresses there would make it a harvestable,
+    activity-ordered directory — which is not the contact use case, because
+    anyone wanting to reach a colleague found them through something they
+    built.
+    """
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_contact(visible_workspaces=frozenset({"ws_live"})),
+    )
+    boards = doc["leaderboards"]
+    assert boards["topUsers"], "the ranking should still be populated"
+    assert all(u["email"] is None for u in boards["topUsers"])
+    assert all("email" not in c for c in boards["topCreators"])
+
+
+async def test_contact_cannot_read_past_the_privacy_level(db_session):
+    """An address beside a name that is itself withheld would be incoherent —
+    and a way to use this flag to defeat `strict`."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW,
+        scope=_contact(privacy=PrivacyMode.STRICT,
+                       visible_workspaces=frozenset({"ws_live"})),
+    )
+    assert "@x.io" not in json.dumps(doc)
+
+
+async def test_a_workspace_roster_is_reachable_to_its_own_members(db_session):
+    await _seed(db_session)
+    detail = await analytics_repo.workspace_detail(
+        db_session, "ws_live", days=7, now=NOW,
+        scope=_contact(visible_workspaces=frozenset({"ws_live"})),
+    )
+    assert detail is not None
+    assert any(c.get("email") for c in detail["topContributors"])
+
+
+async def test_reporting_on_a_workspace_still_hands_over_no_roster(db_session):
+    """`analyticsWorkspaceVisibility` opens the figures; it never opens the
+    people. Turning contact on as well must not change that."""
+    await _seed(db_session)
+    detail = await analytics_repo.workspace_detail(
+        db_session, "ws_live", days=7, now=NOW,
+        scope=_contact(visible_workspaces=frozenset(),
+                       reports_all_workspaces=True, user_id="usr_new2"),
+    )
+    assert detail is not None, "reporting is on, so the page opens"
+    assert detail["topContributors"] == []
+    assert "@x.io" not in json.dumps(detail)
+
+
 def test_the_cache_key_is_the_window_alone():
     """One entry per window, shared by every reader.
 

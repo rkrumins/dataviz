@@ -19,6 +19,7 @@ import { ViewLink } from './EntityLink'
 import { WithheldPanel } from './Redacted'
 import { KpiCard } from './KpiCard'
 import { Leaderboard } from './Leaderboard'
+import { ContactLink } from './ContactLink'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
@@ -230,7 +231,13 @@ export function WorkspaceInsightsPanel({
                                         rows={data.topContributors.map((c) => ({
                                             id: c.userId,
                                             label: c.name,
-                                            meta: c.email ?? undefined,
+                                            // Reaching the people active in
+                                            // your own workspace is the case
+                                            // contact details are for. The
+                                            // address arrives only when the
+                                            // reader is a member and the
+                                            // operator turned it on.
+                                            meta: <ContactLink email={c.email} name={c.name} />,
                                             value: c.events,
                                         }))}
                                     />

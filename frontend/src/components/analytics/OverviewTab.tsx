@@ -21,6 +21,7 @@ import { WithheldPanel } from './Redacted'
 import { ViewLink, WorkspaceLink } from './EntityLink'
 import { AdoptionMatrix } from './AdoptionMatrix'
 import { Leaderboard } from './Leaderboard'
+import { ContactLink } from './ContactLink'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { TimeSeriesChart } from './charts/TimeSeriesChart'
@@ -260,7 +261,18 @@ export function OverviewTab({
                         rows={leaderboards.topViews.map((v) => ({
                             id: v.viewId,
                             label: <ViewLink viewId={v.viewId} name={v.name} canOpen={v.canOpen} />,
-                            meta: `${v.viewType} · ${v.visibility}`,
+                            // What it is, and — where the server sent one —
+                            // the person behind it. Finding a useful view and
+                            // wanting to ask its author about it is the whole
+                            // reason contact details exist on this page. The
+                            // type and visibility stay either way: they say
+                            // what the row IS, which no address replaces.
+                            meta: (
+                                <span className="flex items-center gap-1.5 truncate">
+                                    <span className="shrink-0">{v.viewType} · {v.visibility}</span>
+                                    <ContactLink email={v.createdByEmail} name={v.createdByName} />
+                                </span>
+                            ),
                             value: v.opens,
                             detail: `${compact(v.uniqueViewers)} ${v.uniqueViewers === 1 ? 'person' : 'people'}`,
                         }))}

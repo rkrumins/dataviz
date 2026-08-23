@@ -157,6 +157,11 @@ export interface TopView {
     opens: number
     uniqueViewers: number
     favourites: number
+    /** Who built it, and a way to reach them — present only where the reader
+     *  may see the view AND the operator turned contact on. Absent, not null,
+     *  when either is false. */
+    createdByName?: string | null
+    createdByEmail?: string | null
 }
 
 export interface Leaderboards {

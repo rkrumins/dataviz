@@ -164,6 +164,34 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Their own activity, at every level",
         ),
     ),
+    "analyticsShowEmailAddresses": FeatureWiring(
+        key="analyticsShowEmailAddresses",
+        # SECURITY, though the honest framing is narrower than the others here.
+        # It does not decide whether addresses are knowable — a view's creator
+        # has always been a `mailto:` link in the Explorer drawer, ungated, to
+        # anyone who can read the view. What it decides is whether a page that
+        # RANKS things also carries several addresses at once, which is a
+        # different artefact from a detail panel showing one. Unreadable
+        # resolves to off for the usual reason: a disclosure cannot be undone.
+        posture="security",
+        server_gates=(
+            "GET /admin/analytics/* — adds a contact address to a view's "
+            "creator and to a workspace's contributors, only where the reader "
+            "could already see that person's name. Never reaches the "
+            "platform-wide activity ranking, whatever this is set to.",
+        ),
+        # No UI half, and deliberately. The client reads no flag: the address is
+        # simply present in the payload or it is not, and the row renders what
+        # arrived. The hostility this field usually guards against — a button
+        # the UI keeps offering that now 403s — cannot occur here, because
+        # nothing is offered. Contact off means no address and no link to
+        # click, not a link that fails.
+        ui_surfaces=(),
+        still_allowed=(
+            "Reaching a view's author from the view itself, which never needed this",
+            "Everything the privacy level already governs — this can only narrow it",
+        ),
+    ),
     "analyticsPublicEnabled": FeatureWiring(
         key="analyticsPublicEnabled",
         # SECURITY, and for the same reason `semanticLayerNonAdminEditing` is:

@@ -198,6 +198,10 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
         existence of every workspace to everyone who can sign in. Redacted, but still a
         disclosure, and one an operator should make deliberately rather than inherit from a
         default nobody chose.
+      * ``analyticsShowEmailAddresses`` — ON puts several colleagues' addresses on one
+        ranked page. Each of them was already reachable from the thing they built, so this
+        is not what protects them; what it changes is how many arrive at once, and that is
+        a call about the deployment rather than a default anyone should inherit.
       * ``analyticsWorkspaceVisibility`` — ON makes Analytics report on workspaces the rest
         of the product hides from that reader. Reasonable in a single-company deployment
         and wrong anywhere else, so it cannot be a default: the deployment shape is the
@@ -212,7 +216,8 @@ def test_a_SECURITY_flag_that_ships_off_is_a_deliberate_exception():
     # Sorted, so the assertion tracks membership rather than the order somebody
     # happened to declare the flags in.
     assert off_by_default == [
-        "analyticsPublicEnabled", "analyticsWorkspaceVisibility", "signupEnabled",
+        "analyticsPublicEnabled", "analyticsShowEmailAddresses",
+        "analyticsWorkspaceVisibility", "signupEnabled",
     ], (
         f"a flag now ships OFF on a security exemption: {off_by_default}. That is allowed — but it "
         f"means a capability is invisible on every fresh deployment, so it should be a decision "

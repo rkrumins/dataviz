@@ -910,6 +910,13 @@ def _redact_view_row(row: dict, scope) -> dict:
     row so the creator-reach rule can be applied; a user id is exactly the
     "individual activity" the strict level withholds, so it must not survive
     into the response even on a view the reader CAN see.
+
+    The creator's NAME and address are a different matter, and they ride on
+    three conditions at once: the reader can see the view, people are nameable
+    at this privacy level, and the operator has turned contact on. This is the
+    anchored case the setting exists for — the person is attached to a specific
+    thing in front of the reader, which is the shape the Explorer drawer has
+    always shown ungated for the same view.
     """
     public = {k: row.get(k) for k in _PUBLIC_VIEW_FIELDS}
     if scope.can_see_view(
@@ -920,11 +927,15 @@ def _redact_view_row(row: dict, scope) -> dict:
         # Named. Whether it also LINKS is the stricter question: an
         # enterprise-published view opens for anyone, a workspace-scoped one
         # only for a member.
-        return {
+        seen = {
             **public,
             "canOpen": (row.get("visibility") == "enterprise")
             or scope.can_open(row.get("workspaceId")),
         }
+        if scope.shows_contact:
+            seen["createdByName"] = row.get("createdByName")
+            seen["createdByEmail"] = row.get("createdByEmail")
+        return seen
     return {
         **public,
         "name": REDACTED_VIEW,
@@ -936,8 +947,9 @@ def _redact_view_row(row: dict, scope) -> dict:
     }
 
 
-#: A contributor row, minus the address. Same allow-list discipline as the
-#: view rows: name what may leave.
+#: A contributor row. Same allow-list discipline as the view rows: name what
+#: may leave. ``email`` is deliberately absent — it is added back, explicitly
+#: and conditionally, by :func:`redact_workspace_detail`.
 _PUBLIC_CONTRIBUTOR_FIELDS = ("userId", "name", "events")
 
 
@@ -962,9 +974,17 @@ def redact_workspace_detail(doc: dict, scope) -> dict:
     member = scope.can_open(doc.get("workspaceId"))
     show_people = scope.shows_people and member
 
+    # Contact rides on membership as well as the flag: this roster is the other
+    # anchored case, and being able to reach the people in YOUR workspace is
+    # the point of it. Someone reading a workspace they are not in gets no
+    # roster at all, so the question never arises for them.
+    show_contact = scope.shows_contact and member
     contributors = doc.get("topContributors") or []
     doc["topContributors"] = [
-        {k: c.get(k) for k in _PUBLIC_CONTRIBUTOR_FIELDS}
+        {
+            **{k: c.get(k) for k in _PUBLIC_CONTRIBUTOR_FIELDS},
+            **({"email": c.get("email")} if show_contact else {}),
+        }
         for c in contributors
         # Their own row survives at every level — it is their data.
         if show_people or scope.is_self(c.get("userId"))
@@ -2024,7 +2044,9 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
             "visibility": view_rows[vid].visibility,
             "viewType": view_rows[vid].view_type,
             # Carried so the redactor can honour the creator's own reach — see
-            # `ViewerScope.can_see_view`. Never rendered.
+            # `ViewerScope.can_see_view`. The id itself is never rendered; the
+            # NAME and address beside it are, and only when the reader may both
+            # see the view and be given a way to reach people.
             "createdBy": view_rows[vid].created_by,
             "opens": int(opens.by_view.get(vid, 0)),
             "uniqueViewers": opens.viewers_by_view.get(vid, 0),
@@ -2062,6 +2084,17 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
         }
         for wid in ranked_ws if wid in ws_rows
     ]
+
+    # Who built each popular view. Folded into the same round trip as the
+    # creators ranking below rather than fetched per row — a leaderboard that
+    # resolved ten names one at a time is ten queries for one panel.
+    view_creator_ids = {v["createdBy"] for v in top_views if v.get("createdBy")}
+    if view_creator_ids:
+        creators = await resolve_user_ids(session, view_creator_ids)
+        for v in top_views:
+            resolved = creators.get(v.get("createdBy") or "")
+            if resolved:
+                v["createdByName"], v["createdByEmail"] = resolved
 
     top_creators = [
         {

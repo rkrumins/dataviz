@@ -215,6 +215,29 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
     },
     {
+        "key": "analyticsShowEmailAddresses",
+        "name": "Let people contact each other from Analytics",
+        "description": (
+            "Show a colleague's email address beside their name in Analytics, so someone "
+            "who finds the person behind a view or a busy workspace can reach out without "
+            "hunting for them. Only where the person is attached to something the reader "
+            "can already open \u2014 never on the platform-wide activity ranking."
+        ),
+        "impact_when_off": (
+            "Names still appear (subject to the privacy level); addresses do not. The "
+            "reader can still reach a view's author the way they always could \u2014 by "
+            "opening the view, where the address has always been shown."
+        ),
+        "category_id": "analytics",
+        "type": "boolean",
+        # OFF by default. Addresses are already reachable one page over, so this
+        # is not the thing protecting them \u2014 but a ranked page that lists several
+        # at once is a different artefact from a detail panel showing one, and an
+        # operator should turn that on knowing their deployment, not inherit it.
+        "default_value": json.dumps(False),
+        "options": None,
+    },
+    {
         "key": "analyticsPublicEnabled",
         "name": "Analytics for everyone",
         "description": (

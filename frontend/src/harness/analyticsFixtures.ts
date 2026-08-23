@@ -141,7 +141,7 @@ export const PRIVILEGED: AnalyticsSummary = {
             { userId: 'u5', name: 'Barbara Liskov', email: 'bl@example.com', events: 186, viewsOpened: 140, viewsCreated: 9 },
         ],
         topViews: [
-            { viewId: 'v1', name: 'Revenue lineage', workspaceId: 'ws1', visibility: 'enterprise', viewType: 'reference', opens: 1840, uniqueViewers: 214, favourites: 61, canOpen: true },
+            { viewId: 'v1', createdByName: 'Ada Lovelace', createdByEmail: 'ada@example.com', name: 'Revenue lineage', workspaceId: 'ws1', visibility: 'enterprise', viewType: 'reference', opens: 1840, uniqueViewers: 214, favourites: 61, canOpen: true },
             { viewId: 'v2', name: 'Customer 360 pipeline', workspaceId: 'ws1', visibility: 'workspace', viewType: 'graph', opens: 1120, uniqueViewers: 142, favourites: 38, canOpen: true },
             { viewId: 'v3', name: 'Finance close', workspaceId: 'ws2', visibility: 'workspace', viewType: 'reference', opens: 890, uniqueViewers: 96, favourites: 24, canOpen: true },
             { viewId: 'v4', name: 'Marketing attribution', workspaceId: 'ws3', visibility: 'private', viewType: 'hierarchy', opens: 610, uniqueViewers: 51, favourites: 12, canOpen: true },

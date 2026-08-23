@@ -12,6 +12,7 @@ import { ViewLink } from './EntityLink'
 import { KpiCard } from './KpiCard'
 import { WithheldPanel } from './Redacted'
 import { Leaderboard } from './Leaderboard'
+import { ContactLink } from './ContactLink'
 import { ChartFrame } from './charts/ChartFrame'
 import { ChartTable } from './charts/ChartTable'
 import { BarSeriesChart } from './charts/BarSeriesChart'
@@ -171,7 +172,14 @@ export function ContentTab({
                         rows={leaderboards.topViews.map((v) => ({
                             id: v.viewId,
                             label: <ViewLink viewId={v.viewId} name={v.name} canOpen={v.canOpen} />,
-                            meta: `${viewTypeLabel(v.viewType)} · ${visibilityLabel(v.visibility)}`,
+                            meta: (
+                                <span className="flex items-center gap-1.5 truncate">
+                                    <span className="shrink-0">
+                                        {viewTypeLabel(v.viewType)} · {visibilityLabel(v.visibility)}
+                                    </span>
+                                    <ContactLink email={v.createdByEmail} name={v.createdByName} />
+                                </span>
+                            ),
                             value: v.opens,
                             detail: `${exact(v.uniqueViewers)} ${v.uniqueViewers === 1 ? 'person' : 'people'}`,
                         }))}

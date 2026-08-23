@@ -59,6 +59,9 @@ PRIVACY_FLAG = "analyticsPrivacyMode"
 #: only — see the ``can_see`` / ``can_open`` split on :class:`ViewerScope`.
 WORKSPACE_FLAG = "analyticsWorkspaceVisibility"
 
+#: Whether a named colleague also carries a way to reach them.
+CONTACT_FLAG = "analyticsShowEmailAddresses"
+
 #: Holding any one of these is what "privileged" means for Analytics.
 #:
 #: ``system:analytics:read`` is the real one — a dedicated platform privilege,
@@ -142,6 +145,10 @@ class ViewerScope:
     #: How much non-privileged readers are shown. Ignored when ``privileged``.
     privacy: PrivacyMode = DEFAULT_PRIVACY_MODE
 
+    #: ``analyticsShowEmailAddresses`` is on. Read through ``shows_contact``,
+    #: which also requires that the person is nameable in the first place.
+    contact_enabled: bool = False
+
     #: Who is asking. Used for the two ownership rules the app already has:
     #: a person may always see their own activity, and a view's creator keeps
     #: reach to it (``view_access.can_read_view`` says the same).
@@ -218,6 +225,23 @@ class ViewerScope:
         )
 
     @property
+    def shows_contact(self) -> bool:
+        """Whether a named person also carries a way to reach them.
+
+        Composed with ``shows_people`` rather than checked alone: an address
+        beside a name that is itself withheld is incoherent, and a flag that
+        could produce it would be a way to read past the privacy level.
+
+        Note what this is NOT protecting. A view's creator has always been a
+        ``mailto:`` link in the Explorer drawer, ungated, for anyone who can
+        read the view — so an address was never secret from these readers.
+        What the flag decides is whether a page that RANKS things also carries
+        several addresses at once, which is a different artefact from a detail
+        panel showing one, and worth an operator's deliberate yes.
+        """
+        return self.privileged or (self.contact_enabled and self.shows_people)
+
+    @property
     def shows_operations(self) -> bool:
         """Access requests, invite acceptance and refresh failures — an
         operator's view of the platform, and a map of where the gaps are."""
@@ -292,5 +316,8 @@ async def resolve_scope(
             WORKSPACE_FLAG, default=fail_safe_default(WORKSPACE_FLAG),
         ),
         privacy=await resolve_privacy_mode(),
+        contact_enabled=await feature_flags.is_enabled_self_session(
+            CONTACT_FLAG, default=fail_safe_default(CONTACT_FLAG),
+        ),
         user_id=getattr(user, "id", None),
     )

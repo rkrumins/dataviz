@@ -21,8 +21,9 @@ export interface LeaderboardRow {
      * server computed, so a link can never point somewhere the app refuses.
      */
     label: React.ReactNode
-    /** Secondary line — email, workspace, view type. */
-    meta?: string
+    /** Secondary line — workspace, view type, or a way to reach the person.
+     *  A node rather than a string so it can be a `mailto:` link. */
+    meta?: React.ReactNode
     value: number
     /** Extra columns, e.g. "12 opens · 3 created". */
     detail?: string
