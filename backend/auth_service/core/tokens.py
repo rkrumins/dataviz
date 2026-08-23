@@ -163,7 +163,7 @@ def _decode(token: str, *, audience: str, verify_exp: bool = True) -> dict:
 _RESERVED_CLAIMS = frozenset({"sub", "aud", "iss", "exp", "iat", "nbf", "jti"})
 
 
-def _safe_extra(extra: Optional[dict]) -> dict:
+def _safe_extra(extra: dict | None) -> dict:
     """``extra`` with reserved claims dropped and the drop logged."""
     if not extra:
         return {}
@@ -458,9 +458,20 @@ def create_oidc_state_token(
     nonce: str,
     code_verifier: str,
     next_path: str,
+    provider_id: str | None = None,
     expires_in_minutes: int = 10,
 ) -> str:
-    """Sign the in-flight OIDC handshake parameters into a JWT."""
+    """Sign the in-flight OIDC handshake parameters into a JWT.
+
+    ``provider_id`` binds the flow to the provider that started it.
+    There is one ``nx_oidc`` cookie name for every slug, so without it a
+    handshake begun at provider B satisfied provider A's state check —
+    the class RFC 9207 exists to close. Token validation still pins
+    ``iss``/``aud`` to A's configuration, so this is defence in depth
+    rather than a live bypass, but the cheap half of that pair was
+    missing. Optional so a flow cookie minted before this deploy still
+    decodes; the callback treats an absent id as "cannot check".
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "purpose": "oidc_state",
@@ -473,6 +484,8 @@ def create_oidc_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
+    if provider_id is not None:
+        payload["pid"] = provider_id
     return _encode(payload)
 
 
@@ -498,8 +511,24 @@ def create_saml_state_token(
     *,
     relay_state: str,
     next_path: str,
+    provider_id: str | None = None,
+    request_id: str | None = None,
     expires_in_minutes: int = 10,
 ) -> str:
+    """Sign the in-flight SAML handshake state into a JWT.
+
+    ``request_id`` is the ``ID`` of the AuthnRequest we just sent.
+    python3-saml only compares an assertion's ``InResponseTo`` when it
+    is handed that id, and it was never captured — so nothing bound a
+    response to the request that asked for it, and unsolicited
+    IdP-initiated responses were accepted as ordinary logins.
+
+    ``provider_id`` does for SAML what it does for OIDC: one ``nx_saml``
+    cookie name serves every slug, so a flow begun at provider B
+    satisfied provider A's RelayState check.
+
+    Both optional so a cookie minted before this deploy still decodes.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "purpose": "saml_state",
@@ -510,6 +539,10 @@ def create_saml_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
+    if provider_id is not None:
+        payload["pid"] = provider_id
+    if request_id is not None:
+        payload["rid"] = request_id
     return _encode(payload)
 
 

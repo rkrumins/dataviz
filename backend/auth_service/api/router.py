@@ -1369,6 +1369,7 @@ async def sso_login(
             state=flow["state"], nonce=flow["nonce"],
             code_verifier=flow["code_verifier"],
             next_path=flow["next"],
+            provider_id=provider.provider_id,
         )
         resp = RedirectResponse(auth_url, status_code=status.HTTP_302_FOUND)
         set_oidc_cookie(resp, state_token)
@@ -1377,7 +1378,7 @@ async def sso_login(
     if SamlProvider is not None and isinstance(provider, SamlProvider):
         host, https, path = _request_https_host(request)
         try:
-            redirect_url, relay_state = provider.build_authorization(
+            redirect_url, relay_state, request_id = provider.build_authorization(
                 host=host, https=https, path=path,
                 next_path=next_path, force_authn=force_flag,
             )
@@ -1389,6 +1390,7 @@ async def sso_login(
             )
         state_token = create_saml_state_token(
             relay_state=relay_state, next_path=next_path,
+            provider_id=provider.provider_id, request_id=request_id,
         )
         resp = RedirectResponse(redirect_url, status_code=status.HTTP_302_FOUND)
         set_saml_cookie(resp, state_token)
@@ -1405,6 +1407,27 @@ async def sso_login(
         )
 
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider kind")
+
+
+def _flow_belongs_to(flow: dict, provider) -> bool:
+    """Whether this flow cookie was minted for THIS provider.
+
+    There is one ``nx_oidc`` and one ``nx_saml`` cookie name for every
+    slug, so without this a handshake begun at provider B satisfied
+    provider A's state or RelayState check. Token validation still pins
+    ``iss``/``aud`` to A's configuration, which is why this was a
+    hardening gap rather than a live mixup — but it is the cheap half of
+    the pair RFC 9207 exists to complete.
+
+    A cookie with no ``pid`` predates this and is accepted: it
+    self-drains within the cookie's 10-minute life, and refusing it
+    would sign out every handshake in flight across the deploy for no
+    security gain.
+    """
+    claimed = flow.get("pid")
+    if not claimed:
+        return True
+    return hmac.compare_digest(str(claimed), str(provider.provider_id))
 
 
 # ── OIDC callback ─────────────────────────────────────────────────────
@@ -1442,6 +1465,8 @@ async def oidc_callback(
 
     if not hmac.compare_digest(str(flow.get("state", "")), state):
         return await _fail("state_mismatch")
+    if not _flow_belongs_to(flow, provider):
+        return await _fail("flow_provider_mismatch")
 
     try:
         identity = await provider.fetch_identity(
@@ -1514,12 +1539,19 @@ async def saml_acs(slug: str, request: Request):
         return await _fail(f"bad_flow_cookie:{exc}")
     if not hmac.compare_digest(str(flow.get("rs", "")), str(relay_state or "")):
         return await _fail("relay_state_mismatch")
+    if not _flow_belongs_to(flow, provider):
+        return await _fail("flow_provider_mismatch")
 
     host, https, path = _request_https_host(request)
     try:
         identity = await provider.fetch_identity(
             host=host, https=https, path=path,
             post_data={k: v for k, v in form.multi_items()},
+            # Binds the assertion to the AuthnRequest we sent. Absent on
+            # a cookie minted before this shipped, which reads as
+            # "cannot check" rather than "refuse" — the alternative
+            # breaks every handshake in flight across the deploy.
+            expected_request_id=flow.get("rid"),
         )
     except Exception as exc:  # noqa: BLE001
         return await _fail(f"saml_validate:{exc}")

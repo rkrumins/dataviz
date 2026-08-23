@@ -96,7 +96,8 @@ def _drive_oidc(client, slug, monkeypatch, cookies):
 def _drive_saml(client, slug, monkeypatch, cookies):
     from backend.auth_service.providers.saml2 import SamlProvider
 
-    async def _fetch(self, *, host, https, path, post_data):
+    async def _fetch(self, *, host, https, path, post_data,
+                     expected_request_id=None):
         return _identity("saml2")
 
     monkeypatch.setattr(SamlProvider, "fetch_identity", _fetch)

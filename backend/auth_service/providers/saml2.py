@@ -230,8 +230,12 @@ class SamlProvider:
 
     # ── Library glue ─────────────────────────────────────────────────
 
-    def _settings_dict(self) -> dict:
-        """Build the OneLogin settings dict from our static config."""
+    def _settings_dict(self, *, want_messages_signed: bool = False) -> dict:
+        """Build the OneLogin settings dict from our static config.
+
+        ``want_messages_signed`` is set only on the SLO path — see
+        ``process_slo`` for why it cannot be on globally.
+        """
         s = self._s
         d: dict = {
             "strict": True,
@@ -265,7 +269,11 @@ class SamlProvider:
             "security": {
                 # Strict signature + replay defences.
                 "wantAssertionsSigned": True,
-                "wantMessagesSigned": False,  # ID-style IdPs sign assertions only
+                # ID-style IdPs sign assertions only, so requiring a signed
+            # Response would break login against them. SLO passes True
+            # because a LogoutRequest has no assertion to carry the
+            # signature instead.
+            "wantMessagesSigned": want_messages_signed,
                 "wantAssertionsEncrypted": False,
                 "wantNameIdEncrypted": False,
                 "requestedAuthnContext": False,
@@ -276,14 +284,17 @@ class SamlProvider:
         }
         return d
 
-    def _build_auth(self, request_data: dict):
+    def _build_auth(self, request_data: dict, *, want_messages_signed: bool = False):
         # Imported lazily so a non-viz Dockerfile (missing libxmlsec1
         # system deps) doesn't crash on import of auth_service.
         try:
             from onelogin.saml2.auth import OneLogin_Saml2_Auth  # type: ignore
         except ImportError as exc:  # pragma: no cover - missing dep at import time
             raise SamlError(f"python3-saml is not available: {exc}") from exc
-        return OneLogin_Saml2_Auth(request_data, self._settings_dict())
+        return OneLogin_Saml2_Auth(
+            request_data,
+            self._settings_dict(want_messages_signed=want_messages_signed),
+        )
 
     @staticmethod
     def _safe_request_data(*, host: str, https: bool, post_data: dict,
@@ -307,12 +318,20 @@ class SamlProvider:
         path: str,
         next_path: str,
         force_authn: bool = False,
-    ) -> tuple[str, str]:
-        """Return (redirect_url, relay_state).
+    ) -> tuple[str, str, str]:
+        """Return (redirect_url, relay_state, request_id).
 
         ``relay_state`` is a random opaque value the IdP echoes back via
         the SAMLResponse POST; the route signs it (with next_path) into
         the short-lived ``nx_saml`` cookie via ``core.tokens``.
+
+        ``request_id`` is the ``ID`` of the AuthnRequest just built.
+        python3-saml only validates an assertion's ``InResponseTo`` when
+        ``process_response`` is handed this value, and it was never
+        captured — so nothing tied a response to the request that asked
+        for it, and an unsolicited IdP-initiated response was accepted
+        as an ordinary login. The route stores it in the flow cookie and
+        hands it back at the ACS.
 
         Setting ``force_authn=True`` (used by the 24h re-auth path)
         forces the IdP to re-authenticate the user even if their IdP
@@ -334,7 +353,7 @@ class SamlProvider:
             )
         except Exception as exc:  # noqa: BLE001 — library exceptions vary
             raise SamlError(f"AuthnRequest build failed: {exc}") from exc
-        return url, relay_state
+        return url, relay_state, auth.get_last_request_id() or ""
 
     # ── Leg 2: process the ACS POST and verify the assertion ─────────
 
@@ -345,6 +364,7 @@ class SamlProvider:
         https: bool,
         path: str,
         post_data: dict,
+        expected_request_id: str | None = None,
     ) -> ProviderIdentity:
         """Validate the SAML response and return a verified identity.
 
@@ -358,7 +378,15 @@ class SamlProvider:
         )
         auth = self._build_auth(request_data)
         try:
-            auth.process_response()
+            # Passing ``request_id`` is what makes python3-saml compare
+            # ``InResponseTo``. Without it the library skips the check
+            # entirely — it does not warn — so a response that answered
+            # nobody's request validated like any other.
+            #
+            # ``None`` when the flow cookie predates this (self-draining
+            # within the cookie's 10-minute life) or when the deployment
+            # deliberately accepts IdP-initiated login.
+            auth.process_response(request_id=expected_request_id or None)
         except Exception as exc:  # noqa: BLE001
             raise SamlError(f"SAML response parse failed: {exc}") from exc
 
@@ -441,9 +469,22 @@ class SamlProvider:
         request_data = self._safe_request_data(
             host=host, https=https, post_data=post_data, get_data=get_data, path=path,
         )
-        auth = self._build_auth(request_data)
+        # A settings variant that requires the message itself to be
+        # signed. ``wantMessagesSigned`` cannot be turned on globally —
+        # ID-style IdPs sign the assertion and not the Response, and the
+        # login path has to keep working with them — but a
+        # ``LogoutRequest`` has no assertion to carry the signature, so
+        # for SLO it is the only thing that can authenticate the
+        # message. Unsigned, this route ended the presenting browser's
+        # session on anyone's say-so, over GET, CSRF-exempt: an
+        # ``<img src=".../sls">`` on any page was a logout. Annoyance
+        # rather than compromise, but a logout nobody authenticated is
+        # not a logout.
+        auth = self._build_auth(request_data, want_messages_signed=True)
         try:
-            url = auth.process_slo(delete_session_cb=None, keep_local_session=True)
+            url = auth.process_slo(
+                delete_session_cb=None, keep_local_session=True,
+            )
         except Exception as exc:  # noqa: BLE001
             raise SamlError(f"SAML SLO processing failed: {exc}") from exc
         errors = auth.get_errors()

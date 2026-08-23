@@ -1410,6 +1410,9 @@ attacks at the bottom of the section.
 | OIDC ID-token forgery | JWKS verify + `iss`, `aud`, `exp`, `nonce`, `at_hash` (Authlib) | `providers/oidc.py:_verify_id_token` |
 | OIDC JWKS rotation desync | refetch on `kid` miss once before failing | same |
 | SAML signature forgery | python3-saml strict mode + `wantAssertionsSigned` | `providers/saml2.py:_settings_dict` |
+| Unsolicited / unmatched SAML response | AuthnRequest `ID` captured at leg 1, carried in the signed flow cookie, and passed to `process_response` so `InResponseTo` is actually compared. **The library skips that check silently when no id is supplied**, which is what it had been doing. | `providers/saml2.py:build_authorization` |
+| Unsigned IdP-initiated logout | the SLO path builds its settings with `wantMessagesSigned` — it cannot be on globally, since ID-style IdPs sign the assertion and not the Response, but a `LogoutRequest` has no assertion to carry a signature instead | `providers/saml2.py:process_slo` |
+| Flow begun at one provider completing at another | state tokens carry `pid`, compared at the callback. One `nx_oidc`/`nx_saml` cookie name serves every slug, so nothing else distinguished them | `api/router.py:_flow_belongs_to` |
 | SAML assertion replay | shared store keyed by assertion id (`SET NX EX`, TTL = NotOnOrAfter), injected by `app/main.py`; prod refuses to serve SAML without one. **Was claimed here and not wired** — every provider fell back to a per-worker dict that the 60s registry rebuild discarded. | `revocation_service.SharedSamlReplayCache` |
 | Signature wrapping (XSW) on SAML | strict-mode XML parsing in python3-saml | library |
 | Account takeover via email collision | `linking_policy` matrix, default `strict` | `service.py:complete_sso_login` |
@@ -1478,13 +1481,8 @@ attacks at the bottom of the section.
 * **IdP-initiated SLO propagation** — `/{slug}/sls` ends the presenting
   browser's session and nothing else. The `NameID`/`SessionIndex` are
   never resolved to a user, so a logout at the IdP does not reach that
-  user's other devices. The `LogoutRequest` signature is also not
-  required (`wantMessagesSigned: false`).
-
-* **`InResponseTo` binding on SAML responses** — `process_response()` is
-  called without a `request_id`, so python3-saml does not compare it and
-  unsolicited IdP-initiated responses are accepted. The signed
-  `nx_saml` RelayState is the only request↔response binding.
+  user's other devices. The message signature IS now required; what is
+  missing is the fan-out.
 
 * **Per-provider email-domain binding** — `idp_providers.email_domains`
   drives home-realm-discovery routing only. Nothing checks that an
