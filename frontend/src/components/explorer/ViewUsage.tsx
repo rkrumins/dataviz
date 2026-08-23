@@ -25,6 +25,7 @@
 import { Eye, Sparkles, Users } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { compact, exact } from '@/lib/formatMetric'
 import { timeAgo } from '@/lib/timeAgo'
 import type { ViewUsage } from '@/services/contentInsightsService'
@@ -104,25 +105,28 @@ export function ViewUsageCounters({ usage, className }: {
     const note = personalNote(usage)
     return (
         <span className={cn('inline-flex items-center gap-2 text-[11px] font-medium text-ink-muted', className)}>
-            {/* A tooltip PER ICON, not one for the pair. A row of small glyphs
-                with a single shared title leaves somebody hovering the wrong
-                half of it and learning nothing — and `👥 0 👁 0` explains
-                itself to nobody. */}
-            <span
-                className="inline-flex items-center gap-1"
-                title={[peoplePhrase(usage), note].filter(Boolean).join(' · ')}
-            >
-                {/* People first even here: it is the number that says whether
-                    a view is load-bearing, and it costs the same characters. */}
-                <Users className="h-3 w-3" aria-hidden />
-                {compact(usage.uniqueViewers)}
-                <span className="sr-only">{peoplePhrase(usage)}</span>
-            </span>
-            <span className="inline-flex items-center gap-1" title={opensPhrase(usage)}>
-                <Eye className="h-3 w-3" aria-hidden />
-                {compact(usage.opens)}
-                <span className="sr-only">{opensPhrase(usage)}</span>
-            </span>
+            {/* A tip PER ICON, not one for the pair. A row of small glyphs with
+                a single shared description leaves somebody hovering the wrong
+                half of it and learning nothing — and `0 0` explains itself to
+                nobody. `HoverTip` rather than `title`: the native one waits a
+                second, renders in OS chrome, and on a card that swaps in hover
+                controls it frequently never appears at all. */}
+            <HoverTip label={[peoplePhrase(usage), note].filter(Boolean).join(' · ')}>
+                <span className="inline-flex items-center gap-1">
+                    {/* People first even here: it is the number that says
+                        whether a view is load-bearing. */}
+                    <Users className="h-3 w-3" aria-hidden />
+                    {compact(usage.uniqueViewers)}
+                    <span className="sr-only">{peoplePhrase(usage)}</span>
+                </span>
+            </HoverTip>
+            <HoverTip label={opensPhrase(usage)}>
+                <span className="inline-flex items-center gap-1">
+                    <Eye className="h-3 w-3" aria-hidden />
+                    {compact(usage.opens)}
+                    <span className="sr-only">{opensPhrase(usage)}</span>
+                </span>
+            </HoverTip>
         </span>
     )
 }

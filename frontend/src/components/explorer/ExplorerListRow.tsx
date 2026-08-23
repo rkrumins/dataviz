@@ -16,6 +16,7 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { ViewUsage } from '@/services/contentInsightsService'
 import { ViewUsageCounters, ViewUsageNote } from './ViewUsage'
 import { VISIBILITY_ICON } from '@/lib/viewVisibility'
@@ -90,6 +91,11 @@ export function ExplorerListRow({
   hideWorkspaceInScope,
 }: ExplorerListRowProps) {
   const typeMeta = viewTypeMeta(view.viewType)
+  // One sentence, used by the tip and by the screen-reader text, so the two
+  // cannot drift into saying different things about the same number.
+  const favouriteLabel = view.favouriteCount === 0
+    ? 'Nobody has favourited this'
+    : `${view.favouriteCount} ${view.favouriteCount === 1 ? 'person has' : 'people have'} favourited this`
   // Glyph = user-chosen icon when set; tile colors stay type identity.
   const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
   const VisIcon = ROW_VISIBILITY_ICON[view.visibility] ?? Lock
@@ -244,20 +250,13 @@ export function ExplorerListRow({
         )}
 
         {/* ── Favourite count ── */}
-        <span
-          className="inline-flex items-center gap-1 text-xs text-ink-muted"
-          title={
-            view.favouriteCount === 0
-              ? 'Nobody has favourited this'
-              : `${view.favouriteCount} ${view.favouriteCount === 1 ? 'person has' : 'people have'} favourited this`
-          }
-        >
-          <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
-          {view.favouriteCount}
-          <span className="sr-only">
-            {view.favouriteCount === 1 ? 'favourite' : 'favourites'}
+        <HoverTip label={favouriteLabel}>
+          <span className="inline-flex items-center gap-1 text-xs text-ink-muted">
+            <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
+            {view.favouriteCount}
+            <span className="sr-only">{favouriteLabel}</span>
           </span>
-        </span>
+        </HoverTip>
 
         {/* ── Updated — freshest of settings-edit vs data-publish; tooltip tells both.
                This row printed FLAT GREY while the card beside it carried the

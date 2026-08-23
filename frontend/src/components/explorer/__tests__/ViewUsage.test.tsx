@@ -10,6 +10,7 @@
  * worth interrupting a scan for.
  */
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
 import { ViewUsageCounters, ViewUsageDetails, ViewUsageNote } from '../ViewUsage'
@@ -30,18 +31,29 @@ describe('ViewUsageCounters', () => {
         expect(text.indexOf('12')).toBeLessThan(text.indexOf('340'))
     })
 
-    it('gives EACH icon its own tooltip', () => {
-        // One shared title leaves somebody hovering the wrong half of the row
-        // and learning nothing — and a bare "0 0" explains itself to nobody.
-        const { container } = render(
-            <ViewUsageCounters usage={usage({ opens: 12, lifetimeOpens: 4_000 })} />,
-        )
-        const titles = [...container.querySelectorAll('[title]')]
-            .map(el => el.getAttribute('title') ?? '')
-        expect(titles).toHaveLength(2)
-        expect(titles[0]).toMatch(/12 different people have opened this in the last 30 days/)
-        expect(titles[1]).toMatch(/Opened 12 times in the last 30 days/)
-        expect(titles[1]).toMatch(/4,000 opens all time/)
+    it('gives EACH icon its own tooltip', async () => {
+        // One shared description leaves somebody hovering the wrong half of
+        // the row and learning nothing — and a bare "0 0" explains itself to
+        // nobody. Hovered for real, because the reported failure was a tooltip
+        // that existed in the markup and never appeared on screen.
+        const user = userEvent.setup()
+        render(<ViewUsageCounters usage={usage({ opens: 12, lifetimeOpens: 4_000 })} />)
+
+        // Hovered by the icon's own screen-reader text, which is the only
+        // thing that distinguishes one counter from the other.
+        await user.hover(screen.getByText(/12 different people have opened/))
+        expect(await screen.findByRole('tooltip'))
+            .toHaveTextContent(/12 different people have opened this in the last 30 days/)
+    })
+
+    it('describes the opens icon separately from the people icon', async () => {
+        const user = userEvent.setup()
+        render(<ViewUsageCounters usage={usage({ opens: 12, uniqueViewers: 3, lifetimeOpens: 4_000 })} />)
+        await user.hover(screen.getByText(/Opened 12 times/))
+        const tip = await screen.findByRole('tooltip')
+        expect(tip).toHaveTextContent(/Opened 12 times in the last 30 days/)
+        expect(tip).toHaveTextContent(/4,000 opens all time/)
+        expect(tip).not.toHaveTextContent(/different people/)
     })
 
     it('keeps the whole sentence in the tooltip, not on the card', () => {
@@ -55,20 +67,19 @@ describe('ViewUsageCounters', () => {
         expect(container.querySelector('span')?.textContent).toBeTruthy()
     })
 
-    it('shows a plain zero rather than announcing a non-event', () => {
-        const { container } = render(<ViewUsageCounters usage={usage({ opens: 0, uniqueViewers: 0 })} />)
-        const titles = [...container.querySelectorAll('[title]')]
-            .map(el => el.getAttribute('title') ?? '')
-        expect(titles[0]).toMatch(/Nobody has opened this in the last 30 days/)
-        expect(titles[1]).toMatch(/Not opened in the last 30 days/)
+    it('shows a plain zero rather than announcing a non-event', async () => {
+        const user = userEvent.setup()
+        render(<ViewUsageCounters usage={usage({ opens: 0, uniqueViewers: 0 })} />)
+        await user.hover(screen.getByText(/Nobody has opened this/))
+        expect(await screen.findByRole('tooltip'))
+            .toHaveTextContent(/Nobody has opened this in the last 30 days/)
     })
 
-    it('says only-the-author in the tooltip, where a counter cannot', () => {
-        const { container } = render(
-            <ViewUsageCounters usage={usage({ opens: 2, uniqueViewers: 1, onlyAuthor: true })} />,
-        )
-        expect(container.querySelector('[title]')?.getAttribute('title'))
-            .toMatch(/only its author/i)
+    it('says only-the-author in the tooltip, where a counter cannot', async () => {
+        const user = userEvent.setup()
+        render(<ViewUsageCounters usage={usage({ opens: 2, uniqueViewers: 1, onlyAuthor: true })} />)
+        await user.hover(screen.getByText(/Only its author has opened this/))
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(/only its author/i)
     })
 
     it('renders nothing at all while usage is unknown', () => {

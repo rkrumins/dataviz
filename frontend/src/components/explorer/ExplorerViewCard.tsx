@@ -21,6 +21,7 @@ import {
 import type { View } from '@/services/viewApiService'
 import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { ViewUsage } from '@/services/contentInsightsService'
 import { ViewUsageCounters, ViewUsageNote } from './ViewUsage'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
@@ -221,6 +222,11 @@ export function ExplorerViewCard({
   const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
   const VisIcon = vis.icon
   const tags = view.tags ?? []
+  // One sentence, used by the tip and by the screen-reader text, so the two
+  // cannot drift into saying different things about the same number.
+  const favouriteLabel = view.favouriteCount === 0
+    ? 'Nobody has favourited this'
+    : `${view.favouriteCount} ${view.favouriteCount === 1 ? 'person has' : 'people have'} favourited this`
   const visibleTags = tags.slice(0, 3)
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
@@ -529,23 +535,16 @@ export function ExplorerViewCard({
         {/* ── 8. Footer ── */}
         <div className="flex items-center gap-2 border-t border-glass-border/50 pt-3 mt-1">
           {/* Favourite — left */}
-          <span
-            className={cn(
+          <HoverTip label={favouriteLabel}>
+            <span className={cn(
               'inline-flex items-center gap-1 text-[11px] font-medium',
               view.isFavourited ? 'text-red-500' : 'text-ink-muted',
-            )}
-            title={
-              view.favouriteCount === 0
-                ? 'Nobody has favourited this'
-                : `${view.favouriteCount} ${view.favouriteCount === 1 ? 'person has' : 'people have'} favourited this`
-            }
-          >
-            <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
-            {view.favouriteCount}
-            <span className="sr-only">
-              {view.favouriteCount === 1 ? 'favourite' : 'favourites'}
+            )}>
+              <Heart className="h-3 w-3" fill={view.isFavourited ? 'currentColor' : 'none'} />
+              {view.favouriteCount}
+              <span className="sr-only">{favouriteLabel}</span>
             </span>
-          </span>
+          </HoverTip>
 
           {/* Beside the favourite count, in the same register: how many people
               opened it, and how many times. As a sentence on its own line this
