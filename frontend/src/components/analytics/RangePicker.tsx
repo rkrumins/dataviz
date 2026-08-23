@@ -14,6 +14,7 @@ import { CalendarRange, Check, X } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import type { AnalyticsRangeSelection } from '@/services/analyticsService'
+import { RangeCalendar, addMonths, monthBounds, monthOf } from './RangeCalendar'
 
 export const RANGE_PRESETS = [
     { days: 7, label: '7d', title: 'Last 7 days' },
@@ -181,6 +182,34 @@ export function RangePicker({
     )
 }
 
+function fmtDay(iso: string): string {
+    return new Date(`${iso}T00:00:00Z`).toLocaleDateString(undefined, {
+        day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+    })
+}
+
+function quarterBounds(anchor: { y: number; m: number }): { from: string; to: string } {
+    const start = { y: anchor.y, m: Math.floor(anchor.m / 3) * 3 }
+    return { from: monthBounds(start).from, to: monthBounds(addMonths(start, 2)).to }
+}
+
+/** Named periods the trailing-N-day presets structurally cannot express. The
+ *  presets all end today; "how did March compare to April" ends in the past,
+ *  and typing both boundaries by hand was the only way to ask it. Longest of
+ *  these is a quarter, so none can breach `MAX_RANGE_DAYS`. */
+function shortcutsFor(today: string): { label: string; from: string; to: string }[] {
+    const here = monthOf(today)
+    const clamp = (r: { from: string; to: string }) => ({
+        from: r.from, to: r.to > today ? today : r.to,
+    })
+    return [
+        { label: 'This month', ...clamp(monthBounds(here)) },
+        { label: 'Last month', ...clamp(monthBounds(addMonths(here, -1))) },
+        { label: 'This quarter', ...clamp(quarterBounds(here)) },
+        { label: 'Last quarter', ...clamp(quarterBounds(addMonths(here, -3))) },
+    ]
+}
+
 function CustomRangePopover({
     ref, initial, onApply, onClose,
 }: {
@@ -191,8 +220,12 @@ function CustomRangePopover({
 }) {
     const today = todayIso()
     const [from, setFrom] = useState(initial?.from ?? '')
-    const [to, setTo] = useState(initial?.to ?? today)
-    const error = from || to ? customRangeError(from, to) : null
+    const [to, setTo] = useState(initial?.to ?? '')
+    // A half-made range cannot be invalid — it is unfinished, and the footer
+    // says so. Only a complete pair is worth an error, and the cap is the only
+    // one the grid does not already prevent.
+    const error = from && to ? customRangeError(from, to) : null
+    const complete = Boolean(from && to && !error)
 
     // Escape closes, and a click anywhere outside does too — the same two exits
     // every other popover in the app offers.
@@ -209,12 +242,17 @@ function CustomRangePopover({
         }
     }, [onClose, ref])
 
+    const select = (nextFrom: string, nextTo: string) => {
+        setFrom(nextFrom)
+        setTo(nextTo)
+    }
+
     return (
         <div
             ref={ref}
             role="dialog"
             aria-label="Custom date range"
-            className="absolute right-0 top-full z-50 mt-2 w-[19rem] rounded-2xl border border-glass-border bg-canvas-elevated p-4 shadow-xl animate-in fade-in slide-in-from-top-1 duration-150"
+            className="absolute right-0 top-full z-50 mt-2 w-[20.5rem] sm:w-[34rem] rounded-2xl border border-glass-border bg-canvas-elevated p-4 shadow-xl animate-in fade-in slide-in-from-top-1 duration-150"
         >
             <div className="flex items-center justify-between mb-3">
                 <h3 className="text-xs font-bold text-ink">Custom range</h3>
@@ -226,30 +264,51 @@ function CustomRangePopover({
                 </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-                <label className="block">
-                    <span className="block text-[11px] font-medium text-ink-muted mb-1">From</span>
-                    <input
-                        type="date" value={from} max={to || today}
-                        onChange={(e) => setFrom(e.target.value)}
-                        className="w-full rounded-lg border border-glass-border bg-canvas px-2 py-1.5 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-                    />
-                </label>
-                <label className="block">
-                    <span className="block text-[11px] font-medium text-ink-muted mb-1">To</span>
-                    <input
-                        type="date" value={to} min={from || undefined} max={today}
-                        onChange={(e) => setTo(e.target.value)}
-                        className="w-full rounded-lg border border-glass-border bg-canvas px-2 py-1.5 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
-                    />
-                </label>
+            <div className="flex flex-wrap gap-1.5 mb-3">
+                {shortcutsFor(today).map((s) => {
+                    const active = s.from === from && s.to === to
+                    return (
+                        <button
+                            key={s.label}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => select(s.from, s.to)}
+                            className={cn(
+                                'rounded-lg border px-2 py-1 text-[11px] font-semibold transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                active
+                                    ? 'border-indigo-500/40 bg-indigo-500/10 text-indigo-600 dark:text-indigo-300'
+                                    : 'border-glass-border bg-black/[0.03] dark:bg-white/[0.04] text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/10',
+                            )}
+                        >
+                            {s.label}
+                        </button>
+                    )
+                })}
             </div>
 
-            {/* Both bounds are inclusive, and saying so beats making someone
-                run the experiment to find out. */}
-            <p className="mt-2 text-[11px] text-ink-muted">
-                Both dates included. Compared against the equal-length period before.
-            </p>
+            <RangeCalendar
+                from={from} to={to} today={today}
+                maxSpanDays={MAX_RANGE_DAYS}
+                onSelect={select}
+            />
+
+            <div className="mt-3 pt-3 border-t border-glass-border">
+                {/* The readout is the picker's own state in words. A grid can
+                    show a band without ever saying how long it is, and "how
+                    long" is usually the reason someone opened this. */}
+                <p className="text-[11px] font-semibold text-ink" aria-live="polite">
+                    {complete
+                        ? `${fmtDay(from)} → ${fmtDay(to)}`
+                        : from
+                            ? `${fmtDay(from)} → pick the end date`
+                            : 'Pick a start date'}
+                </p>
+                <p className="mt-0.5 text-[11px] text-ink-muted">
+                    {complete
+                        ? `${daysBetween(from, to)} days, both included · compared against the ${daysBetween(from, to)} days before`
+                        : 'Both dates are included in the range.'}
+                </p>
+            </div>
 
             {error && (
                 <p role="alert" className="mt-2 text-[11px] font-medium text-rose-600 dark:text-rose-400">
@@ -259,7 +318,7 @@ function CustomRangePopover({
 
             <button
                 type="button"
-                disabled={!!error || !from || !to}
+                disabled={!complete}
                 onClick={() => onApply(from, to)}
                 className="mt-3 w-full flex items-center justify-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-500 to-violet-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition-opacity disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
             >

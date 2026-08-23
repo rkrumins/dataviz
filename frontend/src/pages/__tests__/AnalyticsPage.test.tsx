@@ -21,9 +21,14 @@ import { useAuthStore } from '@/store/auth'
 
 // jsdom has no matchMedia, and the charts ask it which palette to draw with.
 // A browser always answers; the test environment has to be told to.
+//
+// Width queries answer TRUE — jsdom reports a 1024px viewport, so a desktop
+// answer is the honest one, and the date grid renders one month or two
+// depending on it. Everything else asked here is a `prefers-*` query, where
+// false is the right default.
 beforeAll(() => {
     window.matchMedia = window.matchMedia ?? (((query: string) => ({
-        matches: false,
+        matches: query.includes('min-width'),
         media: query,
         onchange: null,
         addEventListener: vi.fn(),
@@ -182,6 +187,27 @@ function renderAt(path: string) {
     )
 }
 
+/** Days in the previous calendar month, as the ISO strings the grid keys on.
+ *  A `to` of 0 means "the last day of that month". */
+function lastMonthDays(fromDay: number, toDay: number): { from: string; to: string } {
+    const now = new Date()
+    const y = now.getUTCFullYear()
+    const m = now.getUTCMonth() - 1
+    const iso = (t: number) => new Date(t).toISOString().slice(0, 10)
+    return {
+        from: iso(Date.UTC(y, m, fromDay)),
+        to: iso(toDay === 0 ? Date.UTC(y, m + 1, 0) : Date.UTC(y, m, toDay)),
+    }
+}
+
+/** The grid's day buttons carry the ISO date, so the query needs neither a
+ *  locale nor a weekday name to find one. */
+function dayCell(root: HTMLElement, day: string): HTMLElement {
+    const cell = root.querySelector<HTMLElement>(`[data-day="${day}"]`)
+    if (!cell) throw new Error(`no day cell for ${day}`)
+    return cell
+}
+
 describe('AnalyticsPage', () => {
     beforeEach(() => {
         // Zustand state survives between tests, so a test that seeds admin
@@ -271,12 +297,35 @@ describe('AnalyticsPage', () => {
 
         await user.click(screen.getByRole('button', { name: /custom/i }))
         const dialog = await screen.findByRole('dialog', { name: /custom date range/i })
-        await user.type(within(dialog).getByLabelText('From'), '2026-03-01')
-        await user.type(within(dialog).getByLabelText('To'), '2026-03-31')
+
+        // The grid opens on [last month, this month], so last month's 1st and
+        // 28th are always on screen and always in the past — no pinned clock,
+        // and no month where the 28th does not exist.
+        const { from, to } = lastMonthDays(1, 28)
+        await user.click(dayCell(dialog, from))
+        await user.click(dayCell(dialog, to))
         await user.click(within(dialog).getByRole('button', { name: /apply range/i }))
 
         await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalledWith({
-            kind: 'custom', from: '2026-03-01', to: '2026-03-31',
+            kind: 'custom', from, to,
+        }))
+    })
+
+    it('a named period fills the calendar, and Apply commits it', async () => {
+        const user = userEvent.setup()
+        renderAt('/analytics')
+
+        await user.click(screen.getByRole('button', { name: /custom/i }))
+        const dialog = await screen.findByRole('dialog', { name: /custom date range/i })
+
+        // Presets all END today. A named month is the question they cannot
+        // ask, which is the only reason this popover exists.
+        await user.click(within(dialog).getByRole('button', { name: 'Last month' }))
+        const { from, to } = lastMonthDays(1, 0)
+        await user.click(within(dialog).getByRole('button', { name: /apply range/i }))
+
+        await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalledWith({
+            kind: 'custom', from, to,
         }))
     })
 
