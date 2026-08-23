@@ -136,6 +136,9 @@ export interface TraceCanvasHarness {
   traceHistoryLabels(): string[]
   /** Resume the launcher entry with this label. */
   resumeTraceHistory(label: string): Promise<void>
+  /** Copy a link to the launcher entry with this label, without opening it;
+   *  resolves with what reached the clipboard. */
+  shareTraceHistory(label: string): Promise<string>
   /** How many name lookups the provider has served. */
   nameLookups(): number
   /** Which side the dock's direction control is on. */
@@ -735,16 +738,28 @@ export async function renderCanvasWithTrace(
     },
     traceHistoryLabels: () => {
       const panel = document.querySelector<HTMLElement>('[role="menu"][aria-label="Trace history"]')
-      return [...(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+      return [...(panel?.querySelectorAll<HTMLElement>('[data-history-resume]') ?? [])]
         .map(row => row.querySelector('span:nth-of-type(2)')?.textContent?.trim() ?? '')
     },
     async resumeTraceHistory(label: string) {
       const panel = document.querySelector<HTMLElement>('[role="menu"][aria-label="Trace history"]')
-      const row = [...(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])]
+      const row = [...(panel?.querySelectorAll<HTMLElement>('[data-history-resume]') ?? [])]
         .find(r => r.textContent?.includes(label))
       if (!row) throw new Error(`no trace history entry for ${label}`)
       await act(async () => { fireEvent.click(row) })
       await settle()
+    },
+    async shareTraceHistory(label: string) {
+      const panel = document.querySelector<HTMLElement>('[role="menu"][aria-label="Trace history"]')
+      const rows = [...(panel?.querySelectorAll<HTMLElement>('[data-history-resume]') ?? [])]
+      const row = rows.find(r => r.textContent?.includes(label))
+      if (!row) throw new Error(`no trace history entry for ${label}`)
+      const share = row.parentElement?.querySelector<HTMLButtonElement>('[data-history-share]')
+      if (!share) throw new Error(`no share action on the ${label} entry`)
+      clipboard.text = ''
+      await act(async () => { fireEvent.click(share) })
+      await settle()
+      return clipboard.text
     },
     nameLookups: () => providerCalls.getNodes,
     async waitForCard(id: string) {

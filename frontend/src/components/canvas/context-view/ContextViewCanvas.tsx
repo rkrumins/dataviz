@@ -2074,6 +2074,29 @@ export function ContextViewCanvas({
     setTraceHistory(h => traceHistoryJump(h, index))
     restoreTraceEntry(entry)
   }, [traceHistory, flushExpansionRecord, restoreTraceEntry])
+  // A ROW OF THE LAUNCHER IS A FINDING TOO, so it can be handed over without
+  // being opened first. Built on the click that asks for one — encoding all
+  // fifty tokens on every render would be work nobody asked for. The depth
+  // clamp is `restoreTraceEntry`'s own ONE DEPTH RULE: an entry written under
+  // the old 100-hop control would otherwise encode a depth the decoder is
+  // right to refuse, and the link would quietly do nothing.
+  const traceHistoryLink = useCallback((index: number): string | null => {
+    const entry = traceHistory.entries[index]
+    if (!entry) return null
+    const token = encodeTraceShare({
+      urn: entry.urn,
+      label: historyLabels.get(entry.urn),
+      up: entry.view.showUpstream,
+      down: entry.view.showDownstream,
+      depthUp: Math.min(entry.view.depthUp, FULL_WALK_INITIAL_DEPTH),
+      depthDown: Math.min(entry.view.depthDown, FULL_WALK_INITIAL_DEPTH),
+      open: entry.view.traceExpansion,
+    })
+    const url = new URL(window.location.href)
+    url.searchParams.set('trace', token)
+    url.searchParams.delete('lens')
+    return url.toString()
+  }, [traceHistory, historyLabels])
   const clearTraceHistory = useCallback(() => setTraceHistory(emptyTraceHistory()), [])
 
   // Legacy-shaped history entries for the dock's Recent popover.
@@ -4355,6 +4378,7 @@ export function ContextViewCanvas({
         traceHistory={headerTraceHistory}
         onResumeTraceHistory={resumeTraceHistory}
         onClearTraceHistory={clearTraceHistory}
+        onCopyTraceHistoryLink={traceHistoryLink}
         onOpenLens={() => { if (selectedNodeIds[0]) openLens(selectedNodeIds[0]) }}
         onSetTraceDepth={(dir, value) => {
           // A VIEW limit on the already-walked flow — applies instantly,

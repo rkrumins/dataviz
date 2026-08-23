@@ -71,6 +71,9 @@ export interface ComprehensionToolsProps {
   traceHistory?: TraceHistoryPanelEntry[]
   onResumeTraceHistory?: (index: number) => void
   onClearTraceHistory?: () => void
+  /** A link that reopens the history entry at this stack index — the rows'
+   *  own share action. Absent = no share action. */
+  onCopyTraceHistoryLink?: (index: number) => string | null
   /** Open the Lineage Lens on the current selection (same gating as
    *  Trace: a single non-logical entity). Optional — hosts that don't
    *  wire the lens show no button. */
@@ -121,6 +124,7 @@ export function ComprehensionTools({
   traceHistory = [],
   onResumeTraceHistory,
   onClearTraceHistory,
+  onCopyTraceHistoryLink,
   onOpenLens,
 }: ComprehensionToolsProps) {
   const { showToast } = useToast()
@@ -314,6 +318,7 @@ export function ComprehensionTools({
               onResume={(index) => { setTraceHistoryOpen(false); onResumeTraceHistory?.(index) }}
               onClear={() => { setTraceHistoryOpen(false); onClearTraceHistory?.() }}
               onClose={() => setTraceHistoryOpen(false)}
+              onCopyLink={onCopyTraceHistoryLink}
               triggerRef={traceLauncherRef}
             />
           )}
