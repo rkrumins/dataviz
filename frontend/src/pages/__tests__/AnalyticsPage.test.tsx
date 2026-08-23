@@ -457,11 +457,22 @@ describe('AnalyticsPage', () => {
         ] as never)
         renderAt('/analytics?tab=workspaces')
 
-        // Both rows present: the table must agree with the totals above it.
         expect(await screen.findByText('Finance')).toBeInTheDocument()
+
+        // Locked rows are COLLAPSED, not dropped — every one renders
+        // identically, so a tenancy that is mostly closed to the reader would
+        // otherwise bury the rows they can act on. The summary still accounts
+        // for them, because the table has to agree with the totals above it.
+        expect(screen.queryByText('Restricted workspace')).toBeNull()
+        const summary = screen.getByRole('button', { name: /more workspace/i })
+        expect(summary).toHaveTextContent('1')
+        expect(summary).toHaveTextContent(/counted in the figures above/i)
+
+        // Opening it brings the row back, with its way forward: a locked row
+        // is a dead end unless it offers one, and the product already has an
+        // access-request queue to put them in.
+        await userEvent.click(summary)
         expect(screen.getByText('Restricted workspace')).toBeInTheDocument()
-        // A locked row is a dead end unless it offers a way forward, and the
-        // product already has an access-request queue to put them in.
         expect(screen.getByRole('button', { name: /request access/i }))
             .toBeInTheDocument()
     })
