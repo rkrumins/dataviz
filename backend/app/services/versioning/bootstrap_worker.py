@@ -131,7 +131,7 @@ _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
 # worker's own output, not source data — importing them would make the graph    #
 # own its own cache.                                                            #
 # --------------------------------------------------------------------------- #
-_DERIVED_LABELS = ("_GVRollupMeta", "_AggMeta", "_Projection")
+_DERIVED_LABELS = config.DERIVED_LABELS
 
 
 def _not_derived(var: str) -> str:

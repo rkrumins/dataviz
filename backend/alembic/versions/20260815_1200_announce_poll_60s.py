@@ -1,7 +1,7 @@
 """Announcement banner polls every 60s, not every 15s.
 
 Revision ID: 20260815_1200_announce_poll_60s
-Revises: 20260802_1000_open_publish
+Revises: 20260817_1400_recon_pause
 Create Date: 2026-08-15 12:00
 
 ``announcement_config.poll_interval_seconds`` shipped with a default of
@@ -18,6 +18,17 @@ deliberately choosing 15 — keeps it; this is a default correction, not a
 policy override. The admin config endpoint still accepts anything >= 5,
 so dialling it down for a live incident is unaffected.
 
+Re-parented when main was merged in (2026-08-23). This originally hung
+off ``20260802_1000_open_publish``, which by then was also the parent of
+main's own ``20260817_1200_node_ident_scopes`` — so the merge left the
+tree with TWO heads and ``alembic upgrade head`` refusing to run. Git
+cannot flag that: both files merge cleanly and nothing is red until
+somebody migrates. Main hit the identical collision in ``35781fe`` and
+resolved it the same way, for the reason given there: re-parenting moves
+FORWARD onto a revision already stamped on shared databases, so an
+existing environment simply upgrades through this one, with nothing to
+stamp back.
+
 Plain forward DDL per docs/MIGRATIONS.md.
 """
 from __future__ import annotations
@@ -28,7 +39,7 @@ from alembic import op
 
 
 revision: str = "20260815_1200_announce_poll_60s"
-down_revision: Union[str, None] = "20260802_1000_open_publish"
+down_revision: Union[str, None] = "20260817_1400_recon_pause"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

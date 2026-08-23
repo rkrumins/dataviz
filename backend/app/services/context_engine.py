@@ -3,7 +3,7 @@ import hashlib
 import json as _json
 import logging
 import time
-from typing import List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
+from typing import Iterable, List, Dict, Any, Set, Optional, Tuple, TYPE_CHECKING
 from ..models.graph import (
     GraphNode, GraphEdge, LineageResult, NodeQuery, EdgeQuery, GraphSchemaStats, OntologyMetadata,
     GraphSchema, EntityTypeDefinition, RelationshipTypeDefinition, EntityVisualSchema, EntityHierarchySchema, EntityBehaviorSchema,
@@ -13,6 +13,7 @@ from ..models.graph import (
 )
 from backend.common.models.graph import (
     TraceResultV2, TraceExpandRequest, TraceDelta, TraceMeta, MegaNodeInfo,
+    TraceClosureRequest, TraceClosureResult,
 )
 
 from ..providers.base import GraphDataProvider
@@ -34,6 +35,36 @@ logger = logging.getLogger(__name__)
 # Coarseness is derived from hierarchy.level in the resolved ontology — level 0 = coarsest.
 # No hardcoded mapping needed.
 
+#: Relationship types this system MATERIALISES itself. They are stored in
+#: the graph like any other edge, and a source's resolved ontology
+#: routinely lists them among its lineage types — but nothing in the data
+#: source ever said them: ``:AGGREGATED`` is the aggregation worker's own
+#: rollup of a real flow, projected onto every coarser grain above its
+#: endpoints. A walk that treats them as lineage counts one real flow once
+#: per level of containment above it.
+#:
+#: Uppercase, and compared uppercase — the graph's own spelling varies per
+#: source (see ``_alias_rel_types``).
+#:
+#: This is the ONE place that names them for the closure. The aggregated
+#: read paths (``trace_at_level``, ``expand_aggregated_edge`` and the
+#: materialiser) read ``:AGGREGATED`` deliberately and carry their own
+#: literals; they are a different question and are left alone.
+SYNTHETIC_LINEAGE_EDGE_TYPES = frozenset({"AGGREGATED"})
+
+
+def _real_lineage_types(edge_types: Iterable[str]) -> List[str]:
+    """`edge_types` minus anything this system materialised itself.
+
+    Order-preserving and duplicate-tolerant, because the provider turns
+    the list straight into a Cypher relationship alternation.
+    """
+    return [
+        t for t in edge_types
+        if t and str(t).upper() not in SYNTHETIC_LINEAGE_EDGE_TYPES
+    ]
+
+
 class ContextEngine:
     _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
 
@@ -53,6 +84,9 @@ class ContextEngine:
         # Single ontology cache slot (resolved form, includes flat projection fields).
         self._resolved_ontology_cache: Optional[Any] = None
         self._resolved_ontology_cache_ts: float = 0.0
+        # The data source's resolved node-identity mapping (None until the
+        # first resolution, or when it could not be read).
+        self._node_identity: Optional[Any] = None
         # Lock to prevent concurrent ontology resolution (race condition on first request)
         self._ontology_resolve_lock = asyncio.Lock()
 
@@ -360,6 +394,40 @@ class ContextEngine:
             else:
                 self.provider.set_source_type_aliases({}, {})
 
+    def _inject_identity(self, identity) -> None:
+        """Inject the resolved node-identity mapping (same "always reset"
+        contract as the aliases — provider instances are shared and cached).
+
+        Until this existed, the mapping only ever reached a provider inside the
+        AGGREGATION worker, so a source keyed by ``id`` read as an empty graph
+        until someone re-ran aggregation. Injecting it here is what makes a
+        newly-declared mapping take effect on the very next read.
+        """
+        if hasattr(self.provider, "set_node_identity"):
+            if identity is not None:
+                self.provider.set_node_identity(
+                    identity.identity_property, identity.name_property)
+            else:
+                self.provider.set_node_identity(None, None)
+
+    async def _resolve_node_identity(self):
+        """The data source's effective mapping across all four scopes.
+
+        Best-effort: a failure here must never fail a read — falling back to
+        the platform defaults is exactly the behaviour that predates the
+        feature."""
+        if self._db_session is None or not self._data_source_id:
+            return None
+        try:
+            from .node_identity import load_node_identity
+            return await load_node_identity(self._db_session, self._data_source_id)
+        except Exception as exc:
+            logger.warning(
+                "node-identity resolution failed for ds=%s (reads fall back to "
+                "the platform defaults): %s", self._data_source_id, exc,
+            )
+            return None
+
     async def _resolve_ontology(self):
         """
         Single ontology resolution entry point with TTL caching.
@@ -399,10 +467,12 @@ class ContextEngine:
                 from . import resolved_ontology_cache as ont_cache
                 shared = await ont_cache.lookup(self._workspace_id, self._data_source_id)
                 if shared is not None:
-                    resolved, alignment = shared
+                    resolved, alignment, identity = shared
                     self._inject_resolved(resolved)
                     self._source_alignment = alignment
                     self._inject_alignment(alignment)
+                    self._node_identity = identity
+                    self._inject_identity(identity)
                     self._resolved_ontology_cache = resolved
                     self._resolved_ontology_cache_ts = time.monotonic()
                     return resolved
@@ -470,11 +540,20 @@ class ContextEngine:
                             resolved, introspected_entity_ids, introspected_rel_ids)
                     except Exception as exc:
                         logger.warning("source vocabulary alignment failed (non-fatal): %s", exc)
+                    # Per-source node identity: which physical property plays
+                    # the role of `urn`, and where the human name lives.
+                    # Resolved from the data source's whole scope chain and
+                    # injected before the first read, so a mapping declared on
+                    # the provider or workspace applies immediately rather than
+                    # waiting for an aggregation run to stamp the graph.
+                    self._node_identity = await self._resolve_node_identity()
+                    self._inject_identity(self._node_identity)
                     if gen_before is not None:
                         from . import resolved_ontology_cache as ont_cache
                         ont_cache.store(
                             self._workspace_id, self._data_source_id, gen_before,
-                            resolved, getattr(self, "_source_alignment", None))
+                            resolved, getattr(self, "_source_alignment", None),
+                            self._node_identity)
                     self._resolved_ontology_cache = resolved
                     self._resolved_ontology_cache_ts = time.monotonic()
                     return resolved
@@ -500,6 +579,12 @@ class ContextEngine:
             # layer, so even an empty introspection result must configure the
             # provider (empty = flat graph, not "unconfigured").
             self._inject_resolved(fallback, force_authoritative=True)
+            # Identity is a per-SOURCE property, independent of whether the
+            # ontology resolved — the degraded path must configure it too, or a
+            # transient ontology-service outage would silently un-map an
+            # id-keyed graph.
+            self._node_identity = await self._resolve_node_identity()
+            self._inject_identity(self._node_identity)
             self._resolved_ontology_cache = fallback
             self._resolved_ontology_cache_ts = time.monotonic()
             return fallback
@@ -1255,6 +1340,90 @@ class ContextEngine:
                 include_inherited_lineage=req.include_inherited_lineage,
             )
 
+    async def trace_closure(self, req: TraceClosureRequest) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        The provider walks RAW lineage outward from the focus (or from
+        ``req.seed_urns`` when continuing a walk) — correct at the finest
+        grain regardless of aggregation regime, showing only lineage hops
+        (containment only seeds/nests). Deliberately NO level resolution:
+        the closure is level-free by design, unlike ``trace``. Behind the
+        same per-(provider, graph) trace semaphore + engine deadline.
+        """
+        resolved = await self._resolve_ontology()
+        # SYNTHETIC EDGES ARE NOT LINEAGE. See SYNTHETIC_LINEAGE_EDGE_TYPES:
+        # a source's resolved ontology routinely LISTS ``AGGREGATED`` among
+        # its lineage types, but those relationships are the aggregation
+        # worker's own materialised rollups, not anything a data source
+        # said. Walking them counts one real flow once per coarser grain
+        # above it, which is what put "5 in / 4 out" on a column with two
+        # real neighbours — and it contradicts this closure's whole design,
+        # which is regime-independent precisely because it depends on NO
+        # ``:AGGREGATED`` cells.
+        #
+        # Filtered from BOTH the resolved default and anything a caller
+        # asked for, at this one seam: the provider hands the same list to
+        # its BFS, its cursor page AND its degree probe, so the counts the
+        # frontier reports stay consistent with the edges that shipped.
+        declared_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
+        edge_types = _real_lineage_types(declared_types)
+        if not edge_types and declared_types:
+            # The nothing-left case (REPORTED LIVE 2026-08-19): a source
+            # whose ONLY lineage vocabulary IS the synthetic type — the
+            # canvas editor's non-drawable guard was case-broken, so
+            # manual/blank models carry authored flow written as
+            # :AGGREGATED and nothing else. Filtering here handed the
+            # provider an EMPTY list and the walk was guaranteed to find
+            # nothing (canvas showed the flow, lens showed a bare focus).
+            # The double-count the filter prevents needs a REAL flow under
+            # the rollup; this source has none — walk the only lineage
+            # truth it has.
+            edge_types = [t for t in declared_types if t]
+        containment_types = list(resolved.containment_edge_types or [])
+        max_nodes = min(req.max_nodes or ContextEngine.TRACE_MAX_NODES, ContextEngine.TRACE_MAX_NODES_HARD)
+
+        # THE COARSE FIRST PAINT (Part G, 2026-08-21): the rollup cells incident
+        # to the focus, served by the provider's rollup lane when it has one.
+        # The synthetic type the fine walk strips is exactly what this lane
+        # reads. A provider without the lane (drafts, versioned branches)
+        # serves the request with the fine walk below, and the result says so.
+        if getattr(req, "grain", None) == "coarse":
+            coarse_fn = getattr(self.provider, "trace_closure_coarse", None)
+            if coarse_fn is not None:
+                async with self._trace_semaphore():
+                    result = await coarse_fn(
+                        urn=req.urn,
+                        direction=req.direction,
+                        aggregated_edge_type=next(iter(SYNTHETIC_LINEAGE_EDGE_TYPES)),
+                        containment_edge_types=containment_types,
+                        max_cells=max_nodes,
+                        timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                    )
+                result.grain = "coarse"
+                return result
+
+        fn = getattr(self.provider, "trace_closure", None)
+        if fn is None:
+            raise NotImplementedError("provider does not support trace_closure")
+
+        async with self._trace_semaphore():
+            result = await fn(
+                urn=req.urn,
+                upstream_depth=req.upstream_depth if req.direction in ("upstream", "both") else 0,
+                downstream_depth=req.downstream_depth if req.direction in ("downstream", "both") else 0,
+                lineage_edge_types=edge_types,
+                containment_edge_types=containment_types,
+                max_nodes=max_nodes,
+                timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
+                seed_urns=req.seed_urns,
+                exclude_urns=req.exclude_urns,
+                after_cursor=req.after_cursor,
+                seed_cursor=req.seed_cursor,
+            )
+        if getattr(req, "grain", None) is not None:
+            result.grain = "fine"
+        return result
+
     # ------------------------------------------------------------------ #
     # Trace v2 wrappers — skeleton-first contract                          #
     #                                                                     #
@@ -1383,16 +1552,27 @@ class ContextEngine:
 
     async def expand_aggregated_edge(self, req: ExpandRequest) -> TraceResult:
         resolved = await self._resolve_ontology()
-        # next_level can be int or entity-type-id; resolve to int
-        level = await self._resolve_level(req.next_level, req.source_urn, resolved)
+        # next_level can be int, entity-type-id, or ABSENT. Absent must
+        # survive to the provider as None — it means "drill structurally,
+        # one containment step", the only honest ask when the ontology
+        # repeats a type at two depths. _resolve_level would coerce None
+        # through its "auto" branch into the source's own level, which
+        # silently turned a structural request back into the level-pair
+        # query the caller was trying to avoid.
+        level = (
+            None if req.next_level is None
+            else await self._resolve_level(req.next_level, req.source_urn, resolved)
+        )
         edge_types = req.lineage_edge_types or list(resolved.lineage_edge_types or [])
         containment_types = list(resolved.containment_edge_types or [])
 
         # Use raw edges when next_level is the finest level in the ontology
         # — at that level AGGREGATED is 1:1 with raw lineage anyway, but
-        # raw is safer (no dependency on materialization having run).
+        # raw is safer (no dependency on materialization having run). A
+        # structural drill (level None) lets the provider's own
+        # agg-first / empty→raw fallback decide instead.
         finest_level = self._finest_level(resolved)
-        use_raw = (finest_level is not None and level >= finest_level)
+        use_raw = (level is not None and finest_level is not None and level >= finest_level)
 
         async with self._trace_semaphore():
             return await self.provider.expand_aggregated(
@@ -1405,6 +1585,7 @@ class ContextEngine:
                 timeout_ms=ContextEngine.TRACE_TIMEOUT_MS,
                 use_raw_edges=use_raw,
                 include_containment_edges=req.include_containment_edges,
+                drill_anchor=getattr(req, "drill_anchor", None),
             )
 
     async def _resolve_level(self, level_input: Any, source_urn: str, ontology: Any) -> int:
@@ -1488,6 +1669,13 @@ class ContextEngine:
     # tunes both backend layers and stays in sync with the frontend.
     import os as _os
     TRACE_MAX_NODES: int = int(_os.getenv("TRACE_MAX_NODES", "2000"))
+    # The closure walk's ESCALATION ceiling (2026-08-19): a caller may ask
+    # for pages larger than the default — MEASURED on solidatus_perf_large:
+    # one 6000-node BFS takes 1.9s while draining the same flow through
+    # per-anchor frontier waves needs ~2,300 round trips (minutes). The
+    # full-walk driver escalates its page budget up to this hard cap;
+    # requests without maxNodes keep the default above.
+    TRACE_MAX_NODES_HARD: int = int(_os.getenv("TRACE_MAX_NODES_HARD", "10000"))
     # Engine budget sits BELOW the HTTP middleware tier by the headroom,
     # so the engine's truncated-200 (timeout/max_nodes/ancestors_failed)
     # always beats the middleware 504.
@@ -1671,7 +1859,10 @@ class ContextEngine:
                 rel_def.is_containment = is_containment
 
             result.append(RelationshipTypeDefinition(
-                id=rel_id.lower(),
+                # VERBATIM casing (parity with build_synthetic_schema): the
+                # schema id must equal the declared/physical relationship
+                # type — the canvas stamps it onto writes (2026-08-19).
+                id=rel_id,
                 name=rel_def.name or rel_id.title(),
                 description=rel_def.description or f"Relationship type: {rel_id}",
                 sourceTypes=(stat.source_types if stat else None) or rel_def.source_types,

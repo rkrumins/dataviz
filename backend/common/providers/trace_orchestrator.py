@@ -363,6 +363,7 @@ class TraceOrchestrator:
         timeout_ms: int,
         use_raw_edges: bool = False,
         include_containment_edges: bool = False,  # ignored; hierarchy always included
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         # See ``trace_at_level`` for the case-folding rationale: pass
@@ -371,9 +372,20 @@ class TraceOrchestrator:
         ltypes = list(lineage_edge_types) if lineage_edge_types else None
 
         # 1. Collect descendants of source/target at next_level (parallel).
+        #
+        # ``drill_anchor`` names the side being OPENED. Only it descends
+        # to ``next_level``; the partner contributes its whole subtree,
+        # so anchors many containment levels apart can still meet. This
+        # callback surface has no unfiltered-descendant primitive, so
+        # the partner falls back to ITSELF — narrower than the FalkorDB
+        # path but never empty, which is what mattered.
         src_task = self._cb.descendants_at_level(source_urn, next_level, ctypes)
         dst_task = self._cb.descendants_at_level(target_urn, next_level, ctypes)
         src_set, dst_set = await asyncio.gather(src_task, dst_task)
+        if drill_anchor == source_urn:
+            dst_set = dst_set or {target_urn}
+        elif drill_anchor == target_urn:
+            src_set = src_set or {source_urn}
 
         truncation_reason: Optional[str] = None
         if len(src_set) + len(dst_set) > max_nodes:

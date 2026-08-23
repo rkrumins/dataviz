@@ -10,6 +10,7 @@ import logging
 import os
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, NamedTuple, Optional, Dict, Any, Set, Tuple
 
 
@@ -39,6 +40,8 @@ from ..models.graph import (
     ChildrenWithEdgesResult, TopLevelNodesResult,
     TraceResult, TraceFocus,
 )
+# The closure-walk models are not carried by the app-level re-export above.
+from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from backend.common.interfaces.provider import ProviderConfigurationError
 
@@ -153,6 +156,27 @@ def _sanitize_label(s: str) -> str:
 # continuing would silently skip or repeat rows — so providers reject the
 # mismatch (ValueError → 400 at the endpoint).
 _CURSOR_PREFIX = "k1:"
+
+# How many closure-frontier candidates get a real degree probe. Every boundary
+# node the walk did not finish is a candidate, and they all share ONE
+# `get_node_degrees` wave — so a hub-heavy closure could otherwise turn its
+# "what did I miss?" epilogue into the most expensive part of the request.
+# Past the cap the entries still ship, with totalCount None ("there is more,
+# we don't know how much"), which is what an unprobed frontier honestly is.
+CLOSURE_FRONTIER_PROBE_CAP = int(os.getenv("CLOSURE_FRONTIER_PROBE_CAP", "1000"))
+
+# The degree-exact closure walk (``trace_closure`` / ``_walk_anchors``):
+#   CLOSURE_WALK_SLICE — anchors whose degrees are read in one wave before the
+#       budget decides how many of them fit; bounded so a huge ring never
+#       turns the probe into the expensive part of the request.
+#   CLOSURE_QUERY_CAP_SECS — the per-query ceiling. Every walk query is bounded
+#       by the REQUEST deadline (minus a reserve for hydration), capped here;
+#       the old flat 1.5 s clamp silently dropped rows on wide estates.
+#   CLOSURE_WALK_RESERVE_FRACTION — the share of the request budget kept back
+#       for hydration/containment after the walk stops.
+CLOSURE_WALK_SLICE = int(os.getenv("CLOSURE_WALK_SLICE", "500"))
+CLOSURE_QUERY_CAP_SECS = float(os.getenv("CLOSURE_QUERY_CAP_SECS", "10.0"))
+CLOSURE_WALK_RESERVE_FRACTION = 0.2
 
 
 class CursorMismatchError(ValueError):
@@ -508,6 +532,11 @@ _RESERVED_NODE_KEYS: frozenset = frozenset({
     "entityId", "searchableText",
     "properties",      # legacy blob — read path no longer hydrates from it
     "propertiesRaw",   # native escape hatch for non-scalar property values
+    # Provenance written by the conformance stamp: which SOURCE property each
+    # canonical value was filled from. They are what lets a re-pointed mapping
+    # rewrite its own previous work without ever touching a node that carried a
+    # native urn / displayName. Provider-owned bookkeeping, not user data.
+    "urnSource", "nameSource",
 })
 
 
@@ -586,8 +615,20 @@ def _sanitize_node_properties(payload: Optional[Dict[str, Any]]) -> Optional[Dic
     return {**payload, "properties": clean}
 
 
-def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = None) -> Optional[GraphNode]:
+def _node_from_props(
+    props: Dict[str, Any],
+    entity_type_str: Optional[str] = None,
+    identity_property: Optional[str] = None,
+    name_property: Optional[str] = None,
+) -> Optional[GraphNode]:
     """Build GraphNode from FalkorDB node properties.
+
+    ``identity_property`` / ``name_property`` are the source's resolved
+    node-identity mapping (see ``backend.app.services.node_identity``). They
+    make this function the READ-TIME half of the mapping: an id-keyed graph
+    hydrates correctly on the very next request, without waiting for an
+    aggregation run to stamp ``urn`` onto its nodes — which is what a
+    read-only source or a dedicated projection can never get.
 
     Reconstructs the user `properties` dict from two layers, in
     increasing priority (later wins):
@@ -607,7 +648,16 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
     A one-time WARNING surfaces if such a node is observed so the
     operator knows to run the migration.
     """
-    if not props or "urn" not in props:
+    if not props:
+        return None
+    # Identity: the canonical `urn` when the node has one, else the source's
+    # URN-equivalent. Before this fallback existed, EVERY node on an id-keyed
+    # graph was dropped here — silently, one `return None` at a time — so the
+    # canvas showed an empty graph and the mapping looked like it did nothing.
+    urn = props.get("urn")
+    if not urn and identity_property and identity_property != "urn":
+        urn = props.get(identity_property)
+    if not urn:
         return None
     entity_type = entity_type_str or props.get("entityType", "unknown")
 
@@ -645,16 +695,18 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
 
     try:
         return GraphNode(
-            urn=props["urn"],
+            urn=str(urn),
             entityType=str(entity_type),
             # Onboarded third-party graphs often store the human name under
             # `name`/`title`/`label` rather than the platform's `displayName`,
-            # which would otherwise render a BLANK node label. Fall back through
-            # the common keys. A source with a truly custom name property sets
-            # its `name_property`, which the aggregation stamp copies onto
-            # `displayName` server-side (see stamp_identity_urns).
+            # which would otherwise render a BLANK node label. The source's
+            # CONFIGURED name property goes first — that is the operator
+            # telling us where the name lives, and it is the only thing that
+            # can find a name under a key this list could never guess. The
+            # common keys stay as the fallback for unmapped sources.
             displayName=(
                 props.get("displayName")
+                or (props.get(name_property) if name_property else None)
                 or props.get("name")
                 or props.get("title")
                 or props.get("label")
@@ -665,7 +717,13 @@ def _node_from_props(props: Dict[str, Any], entity_type_str: Optional[str] = Non
             properties=user_props,
             tags=json.loads(props["tags"]) if isinstance(props.get("tags"), str) else (props.get("tags") or []),
             layerAssignment=props.get("layerAssignment"),
-            childCount=props.get("childCount"),
+            # DETERMINISTIC childCount (2026-08-20 ruling): the stored
+            # property is an ingest-time snapshot that drifts as the graph
+            # changes — it is NEVER a truth source. childCount is set ONLY
+            # by the read paths that count real containment edges live
+            # (get_nodes, get_nodes_batch, get_node, children fetches);
+            # a path that cannot compute reports unknown, not stale.
+            childCount=None,
             sourceSystem=props.get("sourceSystem"),
             lastSyncedAt=props.get("lastSyncedAt"),
         )
@@ -685,6 +743,47 @@ def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[
         confidence=props.get("confidence"),
         properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
     )
+
+
+@dataclass
+class _ClosureWalk:
+    """Mutable state of one ``trace_closure`` request's degree-exact walk —
+    what the old loop kept as a dozen locals, shared with the helpers that
+    now do the walking. ``reasons`` collects every truncation cause in the
+    order it happened; the response reports the most severe."""
+    ltypes: List[str]
+    max_nodes: int
+    deadline: float
+    walk_deadline: float
+    excluded: Set[str]
+    visited: Set[str]
+    discovered: Set[str]
+    edges_by_id: Dict[str, GraphEdge] = field(default_factory=dict)
+    upstream_urns: Set[str] = field(default_factory=set)
+    downstream_urns: Set[str] = field(default_factory=set)
+    cut_up: Dict[str, None] = field(default_factory=dict)
+    cut_down: Dict[str, None] = field(default_factory=dict)
+    degrees: Dict[str, Tuple[int, int]] = field(default_factory=dict)     # urn -> (in, out)
+    paged: Dict[Tuple[str, str], str] = field(default_factory=dict)       # (urn, "up"|"down") -> "e:<n>"
+    reasons: List[str] = field(default_factory=list)
+    labels: Dict[str, str] = field(default_factory=dict)
+    ring_up: List[Tuple[str, str]] = field(default_factory=list)          # partners found this hop
+    ring_down: List[Tuple[str, str]] = field(default_factory=list)
+    progress: int = 0                                                     # anchors walked this request
+
+    def query_timeout(self) -> float:
+        return max(0.6, min(CLOSURE_QUERY_CAP_SECS, self.walk_deadline - time.monotonic()))
+
+    def record_edge(self, rec: Dict[str, Any]) -> None:
+        eid = rec["edgeId"]
+        if eid not in self.edges_by_id:
+            self.edges_by_id[eid] = GraphEdge(
+                id=eid,
+                sourceUrn=rec["sourceUrn"],
+                targetUrn=rec["targetUrn"],
+                edgeType=rec["edgeType"],
+                properties={},
+            )
 
 
 class FalkorDBProvider(GraphDataProvider):
@@ -2000,10 +2099,19 @@ class FalkorDBProvider(GraphDataProvider):
         * ``displayName`` ← ``name_property``  (piggybacks on the urn pass, or runs standalone only
           for a CUSTOM name property — a fully conforming source stays a complete no-op)
 
+        Each stamped value records WHICH property it came from, in ``urnSource`` / ``nameSource``.
+        That provenance is what makes the mapping editable rather than write-once: a fill-only pass
+        can never rewrite a node it already stamped, so re-pointing a source from ``id`` to ``uuid``
+        used to leave every existing node on the OLD identity forever, with no error and no way to
+        tell from the graph which nodes were wrong. A node whose marker disagrees with the current
+        mapping is now re-stamped from the new property.
+
         Safe: in-source projection only (never mutates a possibly read-only source behind a
-        dedicated projection); ``coalesce`` SETs only fill a MISSING value, never overwrite; batched
-        by internal ID range (no property index needed); best-effort per batch. Idempotent — a
-        re-run only touches nodes added since the last run. Returns nodes stamped.
+        dedicated projection); a node with NO marker carried its own native ``urn`` /
+        ``displayName`` and is never touched, so this can only ever overwrite values it wrote
+        itself; batched by internal ID range (no property index needed); best-effort per batch.
+        Idempotent — a re-run with an unchanged mapping only touches nodes added since the last
+        one. Returns properties stamped.
         """
         ident = str(getattr(self, "_node_identity_property", None) or "urn").replace("`", "")
         name_prop = str(getattr(self, "_name_property", None) or "name").replace("`", "")
@@ -2029,13 +2137,39 @@ class FalkorDBProvider(GraphDataProvider):
         if max_id < 0:
             return 0
 
+        # Two cases per property:
+        #   FILL     — the canonical value is missing, so take it from the source property;
+        #   RE-POINT — we filled it before from a DIFFERENT property (the marker says so),
+        #              so the mapping changed under us and the old value is stale.
+        # A node with no marker and a value present is native data: excluded by both.
+        #
+        # The two properties are stamped in ONE pass (these are full scans; two passes would
+        # double the cost on a multi-million-node graph), which means the WHERE matches a node
+        # that qualifies for EITHER. Each SET is therefore guarded by its OWN condition — an
+        # unguarded pair would let a node that only needed a displayName fill also have its
+        # native urn overwritten.
         sets, wheres = [], []
         if stamp_urn:
-            sets.append(f"n.`urn` = coalesce(n.`urn`, n.`{ident}`)")
-            wheres.append(f"(n.`urn` IS NULL AND n.`{ident}` IS NOT NULL)")
+            urn_cond = (
+                f"((n.`urn` IS NULL OR (n.`urnSource` IS NOT NULL AND n.`urnSource` <> $ident)) "
+                f"AND n.`{ident}` IS NOT NULL)"
+            )
+            sets.append(
+                f"n.`urn` = CASE WHEN {urn_cond} THEN n.`{ident}` ELSE n.`urn` END, "
+                f"n.`urnSource` = CASE WHEN {urn_cond} THEN $ident ELSE n.`urnSource` END"
+            )
+            wheres.append(urn_cond)
         if stamp_name:
-            sets.append(f"n.`displayName` = coalesce(n.`displayName`, n.`{name_prop}`)")
-            wheres.append(f"(n.`displayName` IS NULL AND n.`{name_prop}` IS NOT NULL)")
+            name_cond = (
+                f"((n.`displayName` IS NULL OR (n.`nameSource` IS NOT NULL "
+                f"AND n.`nameSource` <> $nameProp)) AND n.`{name_prop}` IS NOT NULL)"
+            )
+            sets.append(
+                f"n.`displayName` = CASE WHEN {name_cond} THEN n.`{name_prop}` "
+                f"ELSE n.`displayName` END, "
+                f"n.`nameSource` = CASE WHEN {name_cond} THEN $nameProp ELSE n.`nameSource` END"
+            )
+            wheres.append(name_cond)
         set_clause = ", ".join(sets)
         where_clause = " OR ".join(wheres)
 
@@ -2048,7 +2182,10 @@ class FalkorDBProvider(GraphDataProvider):
                 r = await self._query(
                     f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND ({where_clause}) "
                     f"SET {set_clause}",
-                    params={"lo": lo, "hi": hi}, op="identity.stamp",
+                    params={
+                        "lo": lo, "hi": hi, "ident": ident, "nameProp": name_prop,
+                    },
+                    op="identity.stamp",
                 )
                 stamped += int(getattr(r, "properties_set", 0) or 0)
             except Exception as exc:
@@ -2441,6 +2578,34 @@ class FalkorDBProvider(GraphDataProvider):
         self._source_entity_aliases: Dict[str, List[str]] = {
             str(k).upper(): [str(s) for s in v] for k, v in (entity_aliases or {}).items()}
 
+    def set_node_identity(
+        self,
+        identity_property: Optional[str] = None,
+        name_property: Optional[str] = None,
+    ) -> None:
+        """Per-source node-identity mapping: which physical property plays the
+        role of ``urn``, and which holds the human name.
+
+        Resolved across all four scopes by
+        ``backend.app.services.node_identity`` and injected here by the
+        aggregation worker (before materialization) and by ``ContextEngine``
+        (before any read). Same "ALWAYS RESET" contract as
+        :meth:`set_source_type_aliases`, and for the same reason: provider
+        instances are cached and shared per ``(provider_id, graph_name)``, so
+        omitting the call would leak the previous source's mapping into the
+        next query. Passing ``None`` restores the platform defaults — that is a
+        meaningful instruction, not a no-op.
+        """
+        from backend.app.services.node_identity import (
+            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY,
+        )
+        self._node_identity_property = (
+            str(identity_property).strip() if identity_property else ""
+        ) or DEFAULT_IDENTITY_PROPERTY
+        self._name_property = (
+            str(name_property).strip() if name_property else ""
+        ) or DEFAULT_NAME_PROPERTY
+
     def _alias_types(self, types, alias_attr: str):
         """Translate each declared/canonical type to the source's observed spelling(s)
         via the injected alias map; identity when there's no alias (governed graphs,
@@ -2575,13 +2740,15 @@ class FalkorDBProvider(GraphDataProvider):
         if not row:
             return None
         cell = row[0] if isinstance(row, (list, tuple)) else row
+        ident = getattr(self, "_node_identity_property", None)
+        name_prop = getattr(self, "_name_property", None)
         if hasattr(cell, "properties"):
             props = cell.properties or {}
             labels = getattr(cell, "labels", None) or []
             entity_type = labels[0] if labels else props.get("entityType", "unknown")
-            return _node_from_props(props, entity_type)
+            return _node_from_props(props, entity_type, ident, name_prop)
         if isinstance(cell, dict):
-            return _node_from_props(cell)
+            return _node_from_props(cell, None, ident, name_prop)
         return None
 
     # ---- URN → label cache (Redis Hash) ----
@@ -2682,6 +2849,15 @@ class FalkorDBProvider(GraphDataProvider):
             # Operator escape hatch forces the cube CONTRACT (mixed-level
             # derivation off) without discarding the resolved timestamp
             # or stamp version.
+            #
+            # The default here stays "false" even though the pipeline's
+            # ``_materialize_fine_pairs_mode`` now defaults to "true", and
+            # the asymmetry is deliberate: this is a READ, and every run
+            # stamps the regime it actually used onto ``_AggMeta``. An unset
+            # env var means "believe the stamp", which is right whichever way
+            # the write default points — a graph last built under "auto" that
+            # fell back to the diagonal must keep deriving mixed levels. Only
+            # an EXPLICIT setting overrides the stamp.
             meta = meta._replace(regime="cube")
         self._agg_meta_cached = (meta, now)
         return meta
@@ -2803,25 +2979,49 @@ class FalkorDBProvider(GraphDataProvider):
     async def get_node(self, urn: str) -> Optional[GraphNode]:
         await self._ensure_connected()
 
+        # DETERMINISTIC childCount: counted live from real containment
+        # edges when types are configured — never the stored property.
+        try:
+            _ct_types = self._get_containment_edge_types() or []
+        except Exception:
+            # Unconfigured provider (probes, pre-ontology warmup): degrade
+            # to the bare form — childCount reports unknown, never stale.
+            _ct_types = []
+        ct = "|".join(_sanitize_label(t) for t in _ct_types if t)
+        count_clause = (
+            f" OPTIONAL MATCH (n)-[:{ct}]->(child) RETURN n, count(child) as childCount"
+            if ct else " RETURN n"
+        )
+
+        def _from_row(row) -> Optional[GraphNode]:
+            if ct and isinstance(row, (list, tuple)) and len(row) >= 2:
+                node = self._extract_node_from_result([row[0]])
+                if node is not None:
+                    node.child_count = int(row[1])
+                    if node.properties is not None:
+                        node.properties['childCount'] = int(row[1])
+                return node
+            return self._extract_node_from_result(row)
+
         # Try label-aware lookup first (index-assisted, 10-50x faster)
         label = await self._get_cached_label(urn)
         if label:
             result = await self._ro_query(
-                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}) RETURN n",
+                f"MATCH (n:{_sanitize_label(label)} {{urn: $urn}}){count_clause}",
                 params={"urn": urn},
                 op="nodes.get",
             )
             if result.result_set and len(result.result_set) > 0:
-                return self._extract_node_from_result(result.result_set[0])
+                return _from_row(result.result_set[0])
 
         # Fallback: label-less scan (still works, just slower)
         result = await self._ro_query(
-            "MATCH (n) WHERE n.urn = $urn RETURN n",
+            f"MATCH (n) WHERE n.urn = $urn{count_clause}",
             params={"urn": urn},
             op="nodes.get_unlabeled",
         )
         if result.result_set and len(result.result_set) > 0:
-            node = self._extract_node_from_result(result.result_set[0])
+            node = _from_row(result.result_set[0])
             # Backfill the cache for next time
             if node:
                 await self._cache_urn_label(urn, str(node.entity_type))
@@ -4272,18 +4472,30 @@ class FalkorDBProvider(GraphDataProvider):
             for u in missing_urns:
                 result[u] = computed.get(u, [])
 
-            # Batch-store all computed chains in one pipeline
-            store_pipe = self._redis.pipeline(transaction=False)
-            for u in missing_urns:
-                store_pipe.execute_command(
-                    "HSET", cache_key, u, json.dumps(result.get(u, [])),
-                )
-            # TTL so the ancestors hash stays evictable (see _cache_urn_label).
-            store_pipe.expire(cache_key, self._ancestor_cache_ttl())
-            try:
-                await store_pipe.execute()
-            except Exception as e:
-                logger.debug(f"Failed to batch-store ancestor chains: {e}")
+            # Batch-store all computed chains in one pipeline.
+            #
+            # The cache is an OPTIMIZATION, never a hard dependency. There is no
+            # cache client when CACHE_REDIS_URL is unset OR when the dedicated
+            # cache Redis is simply DOWN (``build_cache_client`` returns None by
+            # construction — it never co-locates the cache on FalkorDB). Guard
+            # the write: this line used to raise AttributeError on a None client
+            # and, because the raise escaped the whole method, it THREW AWAY the
+            # chains that had just been computed successfully above. Callers saw
+            # `truncated: ancestors_failed` and a trace with NO containment tree
+            # — i.e. a cache outage silently broke the graph read path, the exact
+            # inverse of the decoupling's intent.
+            if self._redis is not None:
+                store_pipe = self._redis.pipeline(transaction=False)
+                for u in missing_urns:
+                    store_pipe.execute_command(
+                        "HSET", cache_key, u, json.dumps(result.get(u, [])),
+                    )
+                # TTL so the ancestors hash stays evictable (see _cache_urn_label).
+                store_pipe.expire(cache_key, self._ancestor_cache_ttl())
+                try:
+                    await store_pipe.execute()
+                except Exception as e:
+                    logger.debug(f"Failed to batch-store ancestor chains: {e}")
 
         return result
 
@@ -4624,19 +4836,30 @@ class FalkorDBProvider(GraphDataProvider):
                         "RETURN n.urn AS u, labels(n)[0] AS label",
                         params={"urns": missing},
                     )
-                store_pipe = self._redis.pipeline(transaction=False)
-                store_count = 0
+                # The cache is an OPTIMIZATION, never a hard dependency. Resolve
+                # the result FIRST, then write the cache only if a client exists.
+                # This pipeline used to be opened BEFORE the loop, so a None
+                # client (unset CACHE_REDIS_URL, or the dedicated cache Redis
+                # simply DOWN — build_cache_client returns None by construction)
+                # raised before ``out`` was ever populated. That threw away labels
+                # which had resolved perfectly well and pushed the caller into the
+                # unlabeled-MATCH fallback — i.e. a FULL NODE SCAN, the
+                # 4-9s-on-2M-nodes antipattern this very cache exists to avoid.
+                # A cache outage must not knock every label lookup off its index.
+                resolved_labels: List[Tuple[str, str]] = []
                 for row in res.result_set or []:
                     urn, label = row[0], row[1]
                     if label:
                         safe = _sanitize_label(label)
                         out[urn] = safe
-                        store_pipe.hset(label_key, urn, safe)
-                        store_count += 1
+                        resolved_labels.append((urn, safe))
                     else:
                         out[urn] = None
-                if store_count > 0:
+                if resolved_labels and self._redis is not None:
                     try:
+                        store_pipe = self._redis.pipeline(transaction=False)
+                        for urn, safe in resolved_labels:
+                            store_pipe.hset(label_key, urn, safe)
                         await store_pipe.execute()
                     except Exception:
                         pass
@@ -7055,17 +7278,686 @@ class FalkorDBProvider(GraphDataProvider):
             object.__setattr__(result, "_fallback_level", fallback_level)
         return result
 
+    async def trace_closure(
+        self,
+        urn: str,
+        upstream_depth: int,
+        downstream_depth: int,
+        lineage_edge_types: List[str],
+        containment_edge_types: List[str],
+        max_nodes: int,
+        timeout_ms: int,
+        seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None,
+        after_cursor: Optional[str] = None,
+        seed_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        """Focus-scoped, regime-independent lineage closure — ONE step of a walk.
+
+        Walks RAW lineage edges outward from the focus (upstream + downstream)
+        as a bounded per-hop frontier BFS (``_expand_raw_lineage_set``),
+        gathering exactly the leaves that participate in THIS focus's lineage —
+        not its container's. Depends on NO ``:AGGREGATED`` cells, so it is
+        correct at the finest grain even in boundary regime where leaf rollups
+        are never materialised (the "trace disappears at the attribute level"
+        bug). Always hydrates the containment ancestor chain so the canvas can
+        nest the participants — containment is used to PLACE nodes, never as a
+        lineage hop.
+
+        Bounded like ``trace_at_level``: the engine deadline (< the middleware
+        tier) makes it truncate to a 200 with a ``truncationReason`` rather than
+        race a 504; ``max_nodes`` caps the working set. Python is a frontier
+        cursor + a visited set (cycle-safe on any cyclic graph); every
+        set-shaped step is one label-qualified index-seeking Cypher.
+
+        The walk is SERVER-DRIVEN one step at a time — the client keeps the
+        graph it has accumulated and asks for the next step — so three
+        parameters describe where it already is:
+
+        ``seed_urns``    start the hops from these known lineage participants
+                         instead of deriving a seed from the focus. A walk
+                         CONTINUATION: the client is expanding a frontier node,
+                         not re-anchoring on the focus.
+        ``exclude_urns`` nodes the client already holds. They are never
+                         re-shipped in ``nodes``, but an EDGE into one still
+                         is — that seam edge is what stitches this step onto
+                         the graph the client already has. It says nothing
+                         about where the walk may START: a node named in
+                         ``seed_urns`` is walked from (and hydrated with the
+                         rest of the working set) whether or not it is also
+                         excluded, which is the only shape a real client
+                         ever sends.
+        ``after_cursor`` page ONE node's adjacency in ONE direction instead of
+                         walking: the fallback for a hub with more lineage than
+                         a hop can carry. ``e:<edge id>`` names the NEXT id to
+                         consider, so ``e:0`` is from the start.
+
+        THE WALK IS DEGREE-EXACT (see ``_walk_anchors``). Anchors — the focus
+        or its lineage-bearing descendants, in urn order — are walked in the
+        longest prefix whose ``node + degree`` estimate fits the remaining
+        budget, so every anchor a page ships is COMPLETE in each requested
+        direction, ``len(discovered)`` never exceeds ``max_nodes``, and a page
+        is a pure function of (graph, request). What did not fit:
+
+        * a descendant the page could not afford is the next page's first
+          anchor: ``seedCursor = "s:<urn>"`` (INCLUSIVE — the next anchor to
+          consider), legal with ``seed_urns`` too;
+        * an explicit seed or a hop>=2 ring member that did not fit is a
+          CURSOR-LESS frontier entry with ``reason == "cut"`` — re-root it via
+          ``seed_urns`` (batchable, hundreds per request);
+        * a hub no page can hold is paged by edge id and carries a REAL
+          ``e:<next id>`` cursor; ``e:0`` is never minted.
+
+        ``frontierUp``/``frontierDown`` name the boundary nodes the walk did NOT
+        finish, carrying the full-graph degree in that direction when it is
+        known, so the canvas can offer "+N more" instead of presenting a
+        bounded closure as the whole truth, and ``reason`` saying whether the
+        BUDGET stopped there (``cut`` — a one-hop client completes it hands-
+        free) or the requested DEPTH did (``depth`` — the next hop, a pill). A
+        boundary node whose adjacency is already fully on screen is NOT
+        frontier: it is an honest dead end. Nothing is lost silently: a failed
+        query files its anchors as cut under ``truncationReason == "timeout"``,
+        a failed enumeration is ``seed_failed``, missing hydration is
+        ``nodes_failed`` (its dangling edges dropped), and any failure outranks
+        ``max_nodes`` in the reported reason.
+        """
+        await self._ensure_connected()
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+
+        # Normalize + per-graph case-align the declared rel-type sets (the
+        # case-sensitive [:TYPE] / type(r) patterns need the graph's spelling).
+        ltypes = [t.upper() for t in (lineage_edge_types or [])]
+        ctypes = [t.upper() for t in (containment_edge_types or [])]
+        ltypes = self._alias_rel_types(ltypes) if ltypes else ltypes
+        ctypes = self._alias_rel_types(ctypes) if ctypes else ctypes
+
+        try:
+            focus_node = await self.get_node(urn)
+        except Exception:
+            focus_node = None
+        focus_level = self._get_node_level(focus_node.entity_type) if focus_node else None
+        focus_entity_type = str(focus_node.entity_type) if focus_node else "unknown"
+        focus_label = focus_entity_type if focus_node else ""
+
+        excluded: Set[str] = set(exclude_urns or [])
+        seed_truncated = False
+
+        # ---- the walk state --------------------------------------------
+        # Every walk query is bounded by the REQUEST deadline minus a reserve
+        # for hydration/containment, capped per query — not clamped to a flat
+        # 1.5 s, which on wide estates timed out silently and shipped pages
+        # that claimed to be complete.
+        walk_deadline = deadline - min(10.0, CLOSURE_WALK_RESERVE_FRACTION * (timeout_ms / 1000.0))
+        st = _ClosureWalk(
+            ltypes=ltypes, max_nodes=max_nodes, deadline=deadline, walk_deadline=walk_deadline,
+            excluded=excluded, visited=set(excluded), discovered=set(),
+        )
+        # Depth boundary: rings still growing when the requested depth ended.
+        depth_up: Dict[str, None] = {}
+        depth_down: Dict[str, None] = {}
+        next_seed_after: Optional[str] = None
+        seed_after = (
+            seed_cursor[2:]
+            if seed_cursor and seed_cursor.startswith("s:") and len(seed_cursor) > 2
+            else None
+        )
+
+        if after_cursor is not None:
+            # ---- paging shape: one node, one direction, one page ----------
+            # No seed walk and no BFS: the client is draining a single hub it
+            # already has, so re-walking would re-ship everything around it.
+            try:
+                after_id = int(after_cursor[2:])
+            except (TypeError, ValueError):
+                # The endpoint guarantees ^e:\d+$; if something else arrives,
+                # refuse rather than silently page from the start (which would
+                # re-ship a page the client already holds).
+                raise ValueError("invalid cursor")
+            up = int(upstream_depth) > 0
+            side = "up" if up else "down"
+            anchor_label = await self._get_cached_label(urn) or focus_label
+            st.discovered.add(urn)
+            st.visited.add(urn)
+            st.labels[urn] = anchor_label
+            rows, last_edge_id = await self._page_raw_lineage_single(
+                urn, anchor_label, "incoming" if up else "outgoing", ltypes,
+                after_id, max_nodes, st.query_timeout(),
+            )
+            if rows is None:
+                # The page could not be read: say so, and hand the SAME cursor
+                # back so the client resumes exactly where it was.
+                st.reasons.append("timeout")
+                (st.cut_up if up else st.cut_down)[urn] = None
+                st.paged[(urn, side)] = after_cursor
+            else:
+                # The anchor and the client's known set are "already visited":
+                # their edges still ship (the seam), the nodes are not
+                # re-shipped and not re-attributed to a direction the client
+                # already filed them under.
+                for rec in rows:
+                    st.record_edge(rec)
+                    other = rec.get("otherUrn")
+                    if not other or other in st.visited:
+                        continue
+                    st.visited.add(other)
+                    st.discovered.add(other)
+                    st.labels[other] = rec.get("otherLabel") or ""
+                    (st.upstream_urns if up else st.downstream_urns).add(other)
+                    # A partner arrives here UNWALKED — the page read the
+                    # ANCHOR's adjacency, never this node's — so it is filed
+                    # like a ring the last allowed hop discovered: a depth
+                    # candidate, probed below and kept only if it has more
+                    # than the client can see.
+                    (depth_up if up else depth_down)[other] = None
+                if len(rows) >= max_nodes:
+                    # A FULL page means there is more of this node's adjacency;
+                    # the cursor names the NEXT id to consider.
+                    (st.cut_up if up else st.cut_down)[urn] = None
+                    if last_edge_id is not None:
+                        st.paged[(urn, side)] = f"e:{last_edge_id + 1}"
+                    st.reasons.append("max_nodes")
+        else:
+            # ---- seed: enumerate the anchors, then walk hop 1 exactly ----
+            # A SEED IS AN INSTRUCTION, NOT A CANDIDATE. ``exclude_urns``
+            # says what must not be re-SHIPPED; it never says where the walk
+            # may START (a client's seeds are by construction nodes it already
+            # holds). And a seed that stands for finer things resolves to
+            # them: lineage lives at the leaves, a table carries none of its
+            # own, so ``seedUrns:[table]`` walks the table's columns — paged
+            # by keyset exactly like a focus-anchored seed.
+            up_active = int(upstream_depth) > 0
+            down_active = int(downstream_depth) > 0
+            roots: List[Tuple[str, str]] = []
+            desc: List[Tuple[str, str]] = []
+            enum_failed = False
+            if seed_urns:
+                wanted = sorted(dict.fromkeys(seed_urns))
+                labels = await self._resolve_urn_labels_bulk(wanted) if wanted else {}
+                roots = [(u, labels.get(u) or "") for u in wanted]
+                desc, enum_failed = await self._descendant_lineage_seed(
+                    wanted, labels, ltypes, ctypes, max_nodes + 1, st.query_timeout(),
+                    after_urn=seed_after,
+                )
+                if seed_after:
+                    # A continuation of a seed list's descendants: the named
+                    # seeds were walked on page one. They stay pre-visited
+                    # (a seam edge into one still ships) but are not
+                    # re-walked and not re-shipped.
+                    for u, lbl in roots:
+                        st.visited.add(u)
+                        st.labels.setdefault(u, lbl)
+                    roots = []
+            else:
+                anchors, enum_failed = await self._collect_lineage_seed(
+                    urn, focus_label, ltypes, ctypes, max_nodes + 1, st.query_timeout(),
+                    after_urn=seed_after,
+                )
+                roots = [a for a in anchors if a[0] == urn]
+                desc = [a for a in anchors if a[0] != urn]
+            if enum_failed:
+                st.reasons.append("seed_failed")
+
+            # The request urn and the named seeds are always shipped (the
+            # client holds them; a frontier entry on one must be stampable).
+            st.discovered.add(urn)
+            st.visited.add(urn)
+            st.labels.setdefault(urn, focus_label)
+            for u, lbl in roots:
+                st.discovered.add(u)
+                st.visited.add(u)
+                st.labels.setdefault(u, lbl)
+
+            def _room() -> int:
+                return max_nodes - len(st.discovered)
+
+            if roots and (up_active or down_active):
+                i_roots = await self._walk_anchors(
+                    roots, st, up=up_active, down=down_active, budget=_room(),
+                    keyset=False, first_of_page=True,
+                )
+                self._file_cut(st, roots[i_roots:], up=up_active, down=down_active)
+            j = len(desc)
+            if desc and (up_active or down_active):
+                j = await self._walk_anchors(
+                    desc, st, up=up_active, down=down_active, budget=_room(),
+                    keyset=True, first_of_page=(st.progress == 0),
+                )
+            if j < len(desc) and (st.progress > 0 or "timeout" not in st.reasons):
+                # Inclusive-next: the first anchor this page did not walk.
+                # A page that made NO progress because its first read failed
+                # ships no cursor — a cursor there would loop the client.
+                next_seed_after = desc[j][0]
+                if "max_nodes" not in st.reasons:
+                    st.reasons.append("max_nodes")
+            seed_truncated = next_seed_after is not None
+
+            # ---- deeper hops: rings, fair shares between directions -------
+            max_hops = max(int(upstream_depth), int(downstream_depth))
+            ring_up = sorted(st.ring_up)
+            ring_down = sorted(st.ring_down)
+            st.ring_up, st.ring_down = [], []
+            hop = 1
+            while (ring_up or ring_down) and hop < max_hops:
+                hop += 1
+                active_up = bool(ring_up) and hop <= int(upstream_depth)
+                active_down = bool(ring_down) and hop <= int(downstream_depth)
+                if ring_up and not active_up:
+                    # Ran out of DEPTH, not of graph (asymmetric depths): this
+                    # ring is the upstream boundary.
+                    depth_up.update(dict.fromkeys(u for u, _ in ring_up))
+                    ring_up = []
+                if ring_down and not active_down:
+                    depth_down.update(dict.fromkeys(u for u, _ in ring_down))
+                    ring_down = []
+                if not (active_up or active_down):
+                    break
+                room = _room()
+                if room <= 0 or time.monotonic() >= st.walk_deadline:
+                    if time.monotonic() >= st.walk_deadline:
+                        st.reasons.append("timeout")
+                    self._file_cut(st, ring_up, up=True, down=False)
+                    self._file_cut(st, ring_down, up=False, down=True)
+                    ring_up, ring_down = [], []
+                    break
+                if active_up and active_down:
+                    # Up takes the ceiling of half the room, down takes its
+                    # half plus whatever up left, then up gets the rest.
+                    share_up = room - room // 2
+                    i_up = await self._walk_anchors(
+                        ring_up, st, up=True, down=False, budget=share_up,
+                        keyset=False, first_of_page=False,
+                    )
+                    i_down = await self._walk_anchors(
+                        ring_down, st, up=False, down=True, budget=_room(),
+                        keyset=False, first_of_page=False,
+                    )
+                    if i_up < len(ring_up) and _room() > 0:
+                        i_up += await self._walk_anchors(
+                            ring_up[i_up:], st, up=True, down=False, budget=_room(),
+                            keyset=False, first_of_page=False,
+                        )
+                elif active_up:
+                    i_up = await self._walk_anchors(
+                        ring_up, st, up=True, down=False, budget=room,
+                        keyset=False, first_of_page=False,
+                    )
+                    i_down = 0
+                else:
+                    i_down = await self._walk_anchors(
+                        ring_down, st, up=False, down=True, budget=room,
+                        keyset=False, first_of_page=False,
+                    )
+                    i_up = 0
+                self._file_cut(st, ring_up[i_up:], up=True, down=False)
+                self._file_cut(st, ring_down[i_down:], up=False, down=True)
+                ring_up = sorted(st.ring_up)
+                ring_down = sorted(st.ring_down)
+                st.ring_up, st.ring_down = [], []
+            # Depth exhaustion: the rings still growing when the last allowed
+            # hop finished. A ring that simply DRAINED is empty here — a dead
+            # end, never a frontier.
+            depth_up.update(dict.fromkeys(u for u, _ in ring_up))
+            depth_down.update(dict.fromkeys(u for u, _ in ring_down))
+
+        edges_by_id = st.edges_by_id
+        upstream_urns = st.upstream_urns
+        downstream_urns = st.downstream_urns
+        discovered = st.discovered
+        cut_up, cut_down = st.cut_up, st.cut_down
+
+        # ---- frontier: what the walk did not finish, and how much is left --
+        # Sorted by urn (deterministic), paged anchors first in the probe.
+        candidates_up = sorted(dict.fromkeys([*depth_up, *cut_up]))
+        candidates_down = sorted(dict.fromkeys([*depth_down, *cut_down]))
+        frontier_up: List[TraceFrontierNode] = []
+        frontier_down: List[TraceFrontierNode] = []
+        if candidates_up or candidates_down:
+            def _probe_slice(candidates: List[str], side: str) -> List[str]:
+                # Anchors with a cursor the client is draining go first, so a
+                # budget's worth of partners cannot push them past the cap.
+                paged = [u for u in candidates if (u, side) in st.paged]
+                rest = [u for u in candidates if (u, side) not in st.paged]
+                # The walk already knows the degrees of what it probed; only
+                # the rest needs the end-of-walk wave.
+                return [*paged, *rest][:CLOSURE_FRONTIER_PROBE_CAP]
+
+            probe_up = [u for u in _probe_slice(candidates_up, "up") if u not in st.degrees]
+            probe_down = [u for u in _probe_slice(candidates_down, "down") if u not in st.degrees]
+            degrees: Dict[str, Dict[str, int]] = {}
+            if (probe_up or probe_down):
+                if (deadline - time.monotonic()) < 1.5:
+                    # Not enough budget for the probe wave. The frontier still
+                    # ships — unknown counts, not invented ones.
+                    probe_up, probe_down = [], []
+                else:
+                    try:
+                        degrees = await self.get_node_degrees(
+                            list(dict.fromkeys([*probe_up, *probe_down])), ltypes,
+                        )
+                    except Exception as exc:
+                        logger.warning("trace_closure: frontier probe failed: %s", exc)
+
+            shown_in: Dict[str, int] = defaultdict(int)
+            shown_out: Dict[str, int] = defaultdict(int)
+            for edge in edges_by_id.values():
+                shown_out[edge.source_urn] += 1
+                shown_in[edge.target_urn] += 1
+
+            def _frontier(
+                candidates: List[str], probed: Set[str], key: str, side: str,
+                shown: Dict[str, int], cut: Dict[str, None],
+            ) -> List[TraceFrontierNode]:
+                out: List[TraceFrontierNode] = []
+                for u in candidates:
+                    if u in st.degrees:
+                        total: Optional[int] = st.degrees[u][0 if key == "in" else 1]
+                    elif u in probed:
+                        total = (degrees.get(u) or {}).get(key)
+                    else:
+                        total = None
+                    reason = "cut" if u in cut else "depth"
+                    cursor = st.paged.get((u, side))
+                    if cursor is not None:
+                        # A paged hub always ships — the cursor, not the count,
+                        # is the affordance.
+                        out.append(TraceFrontierNode(
+                            urn=u, totalCount=total, nextCursor=cursor, reason=reason,
+                        ))
+                        continue
+                    if total is None:
+                        # Unprobed, probe failed, or the degree bucket failed —
+                        # absence is UNKNOWN, never zero.
+                        out.append(TraceFrontierNode(urn=u, reason=reason))
+                    elif total > shown.get(u, 0):
+                        out.append(TraceFrontierNode(urn=u, totalCount=total, reason=reason))
+                    # else: everything this node has is already on screen.
+                return out
+
+            frontier_up = _frontier(candidates_up, set(probe_up), "in", "up", shown_in, cut_up)
+            frontier_down = _frontier(candidates_down, set(probe_down), "out", "down", shown_out, cut_down)
+
+        # Hydrate participant nodes, then their containment ancestor chains, so
+        # the canvas can nest the closure. Guarded: on failure surface a
+        # truncated-200 with the reason rather than dropping the lineage.
+        nodes_by_urn: Dict[str, GraphNode] = {}
+        try:
+            hydrated = await self.get_nodes_batch(list(discovered))
+            nodes_by_urn = {n.urn: n for n in hydrated if n}
+        except Exception:
+            st.reasons.append("nodes_failed")
+        missing = [u for u in discovered if u not in nodes_by_urn]
+        if missing:
+            # HYDRATION HONESTY: a node the walk discovered but the provider
+            # did not return is a failed page, not a smaller one — and an
+            # edge into it would draw into nothing, so the edge goes too.
+            st.reasons.append("nodes_failed")
+            keep = set(nodes_by_urn) | excluded | {urn}
+            edges_by_id = {
+                eid: e for eid, e in edges_by_id.items()
+                if e.source_urn in keep and e.target_urn in keep
+            }
+
+        # CONTAINMENT ALWAYS SHIPS (2026-08-21): this step used to short-
+        # circuit into `ancestors_failed` whenever the walk had spent the
+        # request deadline down to its last 2s — a BUDGET verdict dressed up
+        # as a provider failure. At scale the walk ALWAYS spends that budget,
+        # so the closure shipped its participants with containmentEdges=[]:
+        # the canvas received thousands of rootless entities, nested nothing
+        # and drew no chevrons. The step now always runs — the pair-fetch is
+        # chunked with its own per-chunk timeout and synthesizes edges from
+        # the ancestor chains when a chunk fails, so the chain is never
+        # silently empty. `ancestors_failed` now means what it says: the
+        # provider actually failed.
+        containment_edges_list: List[GraphEdge] = []
+        if ctypes and nodes_by_urn:
+            try:
+                chains = await self._compute_and_store_ancestors_bulk(
+                    list(nodes_by_urn.keys()),
+                )
+                seen_anc: Set[str] = set()
+                ancestor_urns: List[str] = []
+                for chain in chains.values():
+                    for ancestor in chain or []:
+                        if ancestor and ancestor not in seen_anc:
+                            seen_anc.add(ancestor)
+                            ancestor_urns.append(ancestor)
+                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                if new_ancestors:
+                    ancestor_nodes = await self.get_nodes_batch(new_ancestors)
+                    for n in ancestor_nodes:
+                        if n:
+                            nodes_by_urn[n.urn] = n
+                if len(nodes_by_urn) > 1:
+                    containment_edges_list = await self._fetch_containment_edges(
+                        list(nodes_by_urn.keys()), ctypes, chains=chains,
+                        labels={u: str(n.entity_type) for u, n in nodes_by_urn.items() if n.entity_type},
+                    )
+            except Exception:
+                st.reasons.append("ancestors_failed")
+
+        # The most severe reason wins: a FAILURE outranks a budget cut, so a
+        # page that is both is never cached as a complete-by-contract page.
+        truncation_reason: Optional[str] = None
+        for candidate in ("timeout", "seed_failed", "nodes_failed", "ancestors_failed"):
+            if candidate in st.reasons:
+                truncation_reason = candidate
+                break
+        if truncation_reason is None and ("max_nodes" in st.reasons or seed_truncated):
+            truncation_reason = "max_nodes"
+
+        return TraceClosureResult(
+            nodes=list(nodes_by_urn.values()),
+            edges=list(edges_by_id.values()),
+            containmentEdges=containment_edges_list,
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(
+                urn=urn,
+                level=focus_level if focus_level is not None else 0,
+                entityType=focus_entity_type,
+            ),
+            effectiveLevel=focus_level if focus_level is not None else 0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=(truncation_reason is not None),
+            truncationReason=truncation_reason,
+            frontierUp=frontier_up,
+            frontierDown=frontier_down,
+            seedTruncated=seed_truncated,
+            seedCursor=(f"s:{next_seed_after}" if next_seed_after else None),
+        )
+
+    async def trace_closure_coarse(
+        self,
+        urn: str,
+        direction: str,
+        aggregated_edge_type: str,
+        containment_edge_types: List[str],
+        max_cells: int,
+        timeout_ms: int,
+    ) -> TraceClosureResult:
+        """The COARSE first paint (Part G, 2026-08-21): every ``:AGGREGATED``
+        rollup cell INCIDENT to the focus, both directions, one shot.
+
+        A cell is "which container feeds / consumes this one, and how many
+        flows" — the picture the browse canvas reads, answered from an
+        index seek in milliseconds. The fine walk (``trace_closure``) takes
+        seconds on a wide table because it enumerates and hydrates the
+        table's own columns; this ships the partner containers first so
+        the board has a picture while the raw pages land behind it.
+
+        What it deliberately does NOT do: filter by depth or label (every
+        incident cell ships — which endpoints are cards is the client's
+        inner-first accounting, so a ``Node ⊃ Node ⊃ Node`` estate with
+        partners at different depths needs no special case here), walk
+        past hop 1 (rollup transitivity is not leaf transitivity), or
+        claim to be the truth (cells are derived and can lag; raw evidence
+        replaces them pair by pair on the client).
+
+        Honesty is the fine walk's: a failed read is ``timeout`` (never an
+        unflagged empty page), a partner that does not hydrate drops its
+        cell and files ``nodes_failed``, the ancestor chain and containment
+        always ship (the ``TraceResult`` invariant), and a page cut at
+        ``max_cells`` says ``max_nodes`` with the heaviest cells kept.
+        """
+        await self._ensure_connected()
+        deadline = time.monotonic() + max(0.6, timeout_ms / 1000.0)
+        reasons: List[str] = []
+
+        focus_node = await self.get_node(urn)
+        focus_level = self._get_node_level(focus_node.entity_type) if focus_node else None
+        focus_entity_type = str(focus_node.entity_type) if focus_node else "unknown"
+        focus_label = (await self._get_cached_label(urn)) or (focus_entity_type if focus_node else "")
+        anchor = f"(f:{_sanitize_label(focus_label)} {{urn: $urn}})" if focus_label else "(f {urn: $urn})"
+
+        agg_types = self._alias_rel_types([aggregated_edge_type]) or [aggregated_edge_type]
+        agg = _sanitize_label(agg_types[0])
+        ctypes = self._alias_rel_types(list(containment_edge_types or []))
+        cap = max(1, int(max_cells))
+
+        # One query per direction, heaviest first, one row past the cap so a
+        # cut is known rather than inferred. The arrow is in the pattern
+        # text (``-[r:…]->`` / ``<-[r:…]-``) — the shape the tests fake.
+        def _query(incoming: bool) -> str:
+            pattern = f"{anchor}<-[r:{agg}]-(p)" if incoming else f"{anchor}-[r:{agg}]->(p)"
+            return (
+                f"MATCH {pattern} "
+                "RETURN p.urn AS partner, labels(p)[0] AS label, coalesce(r.weight, 0) AS weight, "
+                "r.sourceDepth AS sd, r.targetDepth AS td, r.latestUpdate AS lu, r.sourceEdgeTypes AS types "
+                "ORDER BY weight DESC, partner LIMIT $cap"
+            )
+
+        edges_by_id: Dict[str, GraphEdge] = {}
+        upstream_urns: Set[str] = set()
+        downstream_urns: Set[str] = set()
+        partners: Set[str] = set()
+        for incoming in (True, False):
+            if incoming and direction == "downstream":
+                continue
+            if not incoming and direction == "upstream":
+                continue
+            remaining = deadline - time.monotonic()
+            try:
+                res = await self._ro_query(
+                    _query(incoming),
+                    {"urn": urn, "cap": cap + 1},
+                    timeout=max(0.6, min(CLOSURE_QUERY_CAP_SECS, remaining)),
+                    op="trace.closure_coarse",
+                )
+                rows = list(res.result_set or [])
+            except Exception:
+                reasons.append("timeout")
+                continue
+            if len(rows) > cap:
+                rows = rows[:cap]
+                reasons.append("max_nodes")
+            for row in rows:
+                partner, _label, weight, sd, td, lu, types = (list(row) + [None] * 7)[:7]
+                if not partner or partner == urn:
+                    continue
+                src, tgt = (partner, urn) if incoming else (urn, partner)
+                eid = f"agg:{src}>{tgt}"
+                edges_by_id[eid] = GraphEdge(
+                    id=eid,
+                    sourceUrn=src,
+                    targetUrn=tgt,
+                    edgeType=agg_types[0],
+                    properties={
+                        "weight": weight if isinstance(weight, (int, float)) else 0,
+                        "sourceDepth": sd,
+                        "targetDepth": td,
+                        "latestUpdate": lu,
+                        "sourceEdgeTypes": list(types) if isinstance(types, (list, tuple)) else [],
+                    },
+                )
+                partners.add(partner)
+                (upstream_urns if incoming else downstream_urns).add(partner)
+
+        # ── the fine walk's own tail: hydrate, honesty, chains, containment ──
+        discovered = {urn, *partners}
+        nodes_by_urn: Dict[str, GraphNode] = {}
+        try:
+            hydrated = await self.get_nodes_batch(list(discovered))
+            nodes_by_urn = {n.urn: n for n in hydrated if n}
+        except Exception:
+            reasons.append("nodes_failed")
+        if focus_node and urn not in nodes_by_urn:
+            nodes_by_urn[urn] = focus_node
+        missing = [u for u in discovered if u not in nodes_by_urn]
+        if missing:
+            reasons.append("nodes_failed")
+            keep = set(nodes_by_urn)
+            edges_by_id = {
+                eid: e for eid, e in edges_by_id.items()
+                if e.source_urn in keep and e.target_urn in keep
+            }
+            upstream_urns &= keep
+            downstream_urns &= keep
+
+        containment_edges_list: List[GraphEdge] = []
+        if ctypes and nodes_by_urn:
+            try:
+                chains = await self._compute_and_store_ancestors_bulk(list(nodes_by_urn.keys()))
+                seen_anc: Set[str] = set()
+                ancestor_urns: List[str] = []
+                for chain in chains.values():
+                    for ancestor in chain or []:
+                        if ancestor and ancestor not in seen_anc:
+                            seen_anc.add(ancestor)
+                            ancestor_urns.append(ancestor)
+                new_ancestors = [u for u in ancestor_urns if u not in nodes_by_urn]
+                if new_ancestors:
+                    for n in await self.get_nodes_batch(new_ancestors):
+                        if n:
+                            nodes_by_urn[n.urn] = n
+                if len(nodes_by_urn) > 1:
+                    containment_edges_list = await self._fetch_containment_edges(
+                        list(nodes_by_urn.keys()), ctypes, chains=chains,
+                        labels={u: str(n.entity_type) for u, n in nodes_by_urn.items() if n.entity_type},
+                    )
+            except Exception:
+                reasons.append("ancestors_failed")
+
+        truncation_reason: Optional[str] = None
+        for candidate in ("timeout", "nodes_failed", "ancestors_failed", "max_nodes"):
+            if candidate in reasons:
+                truncation_reason = candidate
+                break
+
+        return TraceClosureResult(
+            nodes=list(nodes_by_urn.values()),
+            edges=list(edges_by_id.values()),
+            containmentEdges=containment_edges_list,
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(
+                urn=urn,
+                level=focus_level if focus_level is not None else 0,
+                entityType=focus_entity_type,
+            ),
+            effectiveLevel=focus_level if focus_level is not None else 0,
+            isInherited=False,
+            inheritedFromUrn=None,
+            truncated=(truncation_reason is not None),
+            truncationReason=truncation_reason,
+            frontierUp=[],
+            frontierDown=[],
+            seedTruncated=False,
+            seedCursor=None,
+        )
+
     async def expand_aggregated(
         self,
         source_urn: str,
         target_urn: str,
-        next_level: int,
+        next_level: Optional[int],
         lineage_edge_types: List[str],
         containment_edge_types: List[str],
         max_nodes: int,
         timeout_ms: int,
         use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
         await self._ensure_connected()
         deadline = time.monotonic() + (timeout_ms / 1000.0)
@@ -7091,6 +7983,27 @@ class FalkorDBProvider(GraphDataProvider):
             structural = (
                 await self._edge_depth_stamps(source_urn, target_urn)
             ) is not None
+        # No level to descend to is itself a request for the structural
+        # drill. A caller that cannot name a level is not confused — a
+        # type appearing at two containment depths (``Container`` inside
+        # ``Container``) has no single ``hierarchy.level``, so there is
+        # no number it could honestly send.
+        if next_level is None:
+            structural = True
+
+        # Which anchor is being OPENED. Only that side descends; the
+        # other contributes itself and everything beneath it.
+        #
+        # Stepping both sides in lockstep is why opening a Data Domain
+        # against a Table five levels below returned nothing: the level
+        # path filtered the Table side to types at the domain's next
+        # level (it has none), and the structural path walked the Table
+        # down to its columns. Either way the two sets could never meet,
+        # and the caller was told "nothing here connects" about lineage
+        # that plainly exists. The partner is the question, not another
+        # thing to descend.
+        if drill_anchor is not None and drill_anchor not in (source_urn, target_urn):
+            drill_anchor = None
 
         # Single-query pair fetch: source + target descendants in one
         # UNION'd Cypher round-trip. Saves one planner pass and frees a
@@ -7101,10 +8014,12 @@ class FalkorDBProvider(GraphDataProvider):
             if structural:
                 s_urns, t_urns = await self._collect_children_pair(
                     source_urn, target_urn, ctypes, max_nodes,
+                    drill_anchor=drill_anchor,
                 )
             else:
                 s_urns, t_urns = await self._collect_descendants_pair_at_level(
                     source_urn, target_urn, next_level, ctypes, max_nodes,
+                    drill_anchor=drill_anchor,
                 )
         except Exception:
             s_urns, t_urns = [], []
@@ -7167,6 +8082,14 @@ class FalkorDBProvider(GraphDataProvider):
         focus_level_actual = (
             self._get_node_level(anchor_node.entity_type) if anchor_node else next_level
         )
+        # The response model wants a concrete level. A structural drill
+        # has none to report — the caller could not name one, which is
+        # the whole reason it asked structurally — so fall back to the
+        # anchor's own resolved level and finally to 0 rather than
+        # failing validation on a `None` nobody asked to be meaningful.
+        reported_level = focus_level_actual if focus_level_actual is not None else next_level
+        if reported_level is None:
+            reported_level = 0
 
         return TraceResult(
             nodes=list(nodes_by_urn.values()),
@@ -7176,10 +8099,10 @@ class FalkorDBProvider(GraphDataProvider):
             downstreamUrns=set(),
             focus=TraceFocus(
                 urn=source_urn,
-                level=focus_level_actual if focus_level_actual is not None else next_level,
+                level=reported_level,
                 entityType=str(anchor_node.entity_type) if anchor_node else "unknown",
             ),
-            effectiveLevel=next_level,
+            effectiveLevel=next_level if next_level is not None else reported_level,
             isInherited=False,
             inheritedFromUrn=None,
             truncated=(truncation_reason is not None),
@@ -7680,6 +8603,757 @@ class FalkorDBProvider(GraphDataProvider):
                     continue
         return out
 
+    # ── Degree-exact closure walk ──────────────────────────────────────────
+    #
+    # ``trace_closure`` used to expand each BFS ring under ONE row LIMIT shared
+    # by both directions (``max_nodes - discovered`` per label bucket). On a
+    # wide container that LIMIT was the whole story: a 2,935-column table got
+    # 1,014 of its 17,567 hop-1 edges, one direction starved the other
+    # (984 upstream partners, 15 downstream), every seed in the ring was
+    # re-offered as an ``e:0`` cursor, and the client re-walked the same rows
+    # page after page. The walk below never asks for a row it cannot ship:
+    # it reads each anchor's degrees first, walks the longest prefix of
+    # anchors whose (node + degree) estimate fits the remaining budget, and
+    # asks the database for exactly those rows (``LIMIT sum(degree) + 1`` — the
+    # extra row is a concurrent-write tripwire). An anchor that is walked is
+    # COMPLETE in every requested direction; an anchor that does not fit is
+    # either the next page's first anchor (keyset mode) or a cursor-less
+    # frontier entry (ring mode), and a hub that cannot fit any page is paged
+    # by edge id with a REAL cursor. ``e:0`` is never minted.
+
+    async def _lineage_degrees(
+        self,
+        anchors: List[Tuple[str, str]],
+        ltypes: List[str],
+        *,
+        up: bool,
+        down: bool,
+        timeout: float,
+    ) -> Optional[Dict[str, Tuple[int, int]]]:
+        """``urn -> (in, out)`` raw-lineage degree for the given anchors, one
+        index-seeking query per label bucket per requested direction.
+        Labels come with the anchors (the seed/expansion rows carry
+        ``labels(x)[0]``), so no URN→label round trip is paid here. Returns
+        None when ANY bucket failed — the caller treats that as "cannot
+        estimate", never as zero. A direction that was not requested is
+        reported as 0 (it is never walked)."""
+        if not anchors:
+            return {}
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        by_label: Dict[str, List[str]] = {}
+        for urn, label in anchors:
+            by_label.setdefault(label or "", []).append(urn)
+
+        queries: List[Tuple[str, str, List[str]]] = []
+        for label, urns in by_label.items():
+            sl = _sanitize_label(label) if label else ""
+            lbl = f":{sl}" if sl else ""
+            if up:
+                queries.append((
+                    "in",
+                    f"MATCH (n{lbl})<-[r:{rel_alt}]-() WHERE n.urn IN $urns "
+                    "RETURN n.urn AS urn, count(r) AS degree",
+                    urns,
+                ))
+            if down:
+                queries.append((
+                    "out",
+                    f"MATCH (n{lbl})-[r:{rel_alt}]->() WHERE n.urn IN $urns "
+                    "RETURN n.urn AS urn, count(r) AS degree",
+                    urns,
+                ))
+
+        async def _run(cypher: str, urns: List[str]):
+            return await self._ro_query(
+                cypher, params={"urns": urns}, timeout=timeout, op="trace.closure_degrees",
+            )
+
+        try:
+            results = await asyncio.gather(*(_run(c, u) for _, c, u in queries))
+        except Exception as exc:
+            logger.warning("trace_closure: degree read failed for %d anchors: %s", len(anchors), exc)
+            return None
+
+        out: Dict[str, List[int]] = {urn: [0, 0] for urn, _ in anchors}
+        for (direction, _c, _u), result in zip(queries, results):
+            for row in (result.result_set or []):
+                urn = str(row[0])
+                if urn in out:
+                    out[urn][0 if direction == "in" else 1] = int(row[1] or 0)
+        return {urn: (io[0], io[1]) for urn, io in out.items()}
+
+    async def _walk_anchors(
+        self,
+        anchors: List[Tuple[str, str]],
+        st: "_ClosureWalk",
+        *,
+        up: bool,
+        down: bool,
+        budget: int,
+        keyset: bool,
+        first_of_page: bool,
+    ) -> int:
+        """Walk ``anchors`` (urn-sorted ``(urn, label)`` pairs) one hop in the
+        requested directions under ``budget`` new nodes. Returns the index of
+        the first anchor NOT walked (``len(anchors)`` when all were).
+
+        Every walked anchor is complete in each requested direction (I1).
+        An anchor that does not fit: in ``keyset`` mode it ends the page and
+        becomes the caller's cursor; otherwise it is filed as a cursor-less
+        cut entry and skipped, so a hub never starves the rest of its ring.
+        A non-fitting anchor at the very start of a page (``first_of_page``
+        and nothing walked yet) is a hub that no page could hold: it is paged
+        by edge id per direction and carries a REAL ``e:<n>`` cursor for any
+        direction that filled its page.
+        """
+        n = len(anchors)
+        idx = 0
+        while idx < n:
+            if budget <= 0:
+                if keyset:
+                    return idx
+                self._file_cut(st, anchors[idx:], up=up, down=down)
+                return n
+            if time.monotonic() >= st.walk_deadline:
+                st.reasons.append("timeout")
+                if keyset:
+                    return idx
+                self._file_cut(st, anchors[idx:], up=up, down=down)
+                return n
+
+            chunk = anchors[idx: idx + CLOSURE_WALK_SLICE]
+            need = [a for a in chunk if a[0] not in st.degrees]
+            if need:
+                deg = await self._lineage_degrees(
+                    need, st.ltypes, up=up, down=down, timeout=st.query_timeout(),
+                )
+                if deg is None:
+                    st.reasons.append("timeout")
+                    if keyset:
+                        return idx
+                    self._file_cut(st, chunk, up=up, down=down)
+                    idx += len(chunk)
+                    continue
+                st.degrees.update(deg)
+
+            pos = 0
+            while pos < len(chunk):
+                if budget <= 0 or time.monotonic() >= st.walk_deadline:
+                    break
+                # The longest prefix whose estimate fits.
+                prefix: List[Tuple[str, str]] = []
+                est_sum = 0
+                j = pos
+                while j < len(chunk):
+                    e = self._walk_estimate(chunk[j][0], st, up=up, down=down)
+                    if est_sum + e > budget:
+                        break
+                    prefix.append(chunk[j])
+                    est_sum += e
+                    j += 1
+                if not prefix:
+                    anchor = chunk[pos]
+                    if first_of_page and st.progress == 0:
+                        spent = await self._hub_page(anchor, st, up=up, down=down, budget=budget)
+                        budget -= spent
+                        pos += 1
+                        continue
+                    if keyset:
+                        return idx + pos
+                    self._file_cut(st, [anchor], up=up, down=down)
+                    pos += 1
+                    continue
+                spent = await self._expand_prefix(prefix, st, up=up, down=down)
+                budget -= spent
+                pos = j
+            if pos < len(chunk):
+                # Budget or deadline ended the chunk mid-way.
+                if keyset:
+                    return idx + pos
+                if time.monotonic() >= st.walk_deadline:
+                    st.reasons.append("timeout")
+                self._file_cut(st, chunk[pos:], up=up, down=down)
+            idx += len(chunk)
+        return n
+
+    def _walk_estimate(self, urn: str, st: "_ClosureWalk", *, up: bool, down: bool) -> int:
+        d_in, d_out = st.degrees.get(urn, (0, 0))
+        return (0 if urn in st.discovered else 1) + (d_in if up else 0) + (d_out if down else 0)
+
+    def _file_cut(
+        self, st: "_ClosureWalk", anchors: List[Tuple[str, str]], *, up: bool, down: bool,
+    ) -> None:
+        """An anchor the walk could not afford (or could not read): a
+        cursor-less frontier entry in each requested direction. It is still
+        shipped when it was already discovered; a never-discovered anchor
+        (an explicit seed) is added to ``discovered`` so the client can stamp
+        the entry — the client holds it anyway."""
+        for urn, label in anchors:
+            if urn not in st.discovered:
+                st.discovered.add(urn)
+                st.visited.add(urn)
+                st.labels.setdefault(urn, label)
+            if up:
+                st.cut_up[urn] = None
+            if down:
+                st.cut_down[urn] = None
+        if anchors and "max_nodes" not in st.reasons and "timeout" not in st.reasons:
+            st.reasons.append("max_nodes")
+
+    async def _expand_prefix(
+        self,
+        prefix: List[Tuple[str, str]],
+        st: "_ClosureWalk",
+        *,
+        up: bool,
+        down: bool,
+    ) -> int:
+        """Expand a prefix of anchors whose degree estimate fits. Asks each
+        direction for exactly ``sum(degree) + 1`` rows: more rows than the
+        degrees promised means the graph changed under us, and that direction
+        is re-offered as cut rather than committed half-read. A failed label
+        bucket files its anchors as cut under ``timeout``; the other buckets
+        commit. Returns the number of NEW nodes committed."""
+        labels = {urn: (label or st.labels.get(urn) or "") for urn, label in prefix}
+        spent = 0
+        for urn, _ in prefix:
+            if urn not in st.discovered:
+                st.discovered.add(urn)
+                st.visited.add(urn)
+                spent += 1
+            st.labels.setdefault(urn, labels[urn])
+        st.progress += len(prefix)
+
+        for direction, active, key in (("incoming", up, 0), ("outgoing", down, 1)):
+            if not active:
+                continue
+            wanted = [(urn, lbl) for urn, lbl in labels.items() if st.degrees.get(urn, (0, 0))[key] > 0]
+            if not wanted:
+                continue
+            expected = sum(st.degrees[urn][key] for urn, _ in wanted)
+            rows, failed_labels = await self._expand_raw_lineage_set(
+                [urn for urn, _ in wanted], dict(wanted), direction, st.ltypes,
+                expected + 1, st.query_timeout(),
+            )
+            cut_dir = st.cut_up if direction == "incoming" else st.cut_down
+            if failed_labels:
+                st.reasons.append("timeout")
+                for urn, lbl in wanted:
+                    if lbl in failed_labels:
+                        cut_dir[urn] = None
+            if len(rows) > expected:
+                # Drift: the graph has more than the degrees said. Nothing
+                # from this direction is committed; every anchor is re-offered.
+                for urn, _ in wanted:
+                    cut_dir[urn] = None
+                if "max_nodes" not in st.reasons:
+                    st.reasons.append("max_nodes")
+                continue
+            spent += self._commit_rows(rows, st, direction)
+        return spent
+
+    def _commit_rows(self, rows: List[Dict[str, Any]], st: "_ClosureWalk", direction: str) -> int:
+        """Record edges and newly discovered partners. Edge FIRST, visited
+        second: an edge into a node the client already holds is the seam that
+        stitches this step onto its graph. Returns the number of new nodes."""
+        spent = 0
+        for rec in rows:
+            other = rec.get("otherUrn")
+            is_new = bool(other) and other not in st.visited
+            if is_new and len(st.discovered) >= st.max_nodes:
+                # Defensive: the estimate is an upper bound, so this is only
+                # reachable under concurrent writes. Drop the edge WITH the
+                # node and re-offer the near end.
+                near = rec["targetUrn"] if direction == "incoming" else rec["sourceUrn"]
+                (st.cut_up if direction == "incoming" else st.cut_down)[near] = None
+                if "max_nodes" not in st.reasons:
+                    st.reasons.append("max_nodes")
+                continue
+            st.record_edge(rec)
+            if not is_new:
+                continue
+            st.visited.add(other)
+            st.discovered.add(other)
+            st.labels[other] = rec.get("otherLabel") or ""
+            spent += 1
+            if direction == "incoming":
+                st.upstream_urns.add(other)
+                st.ring_up.append((other, st.labels[other]))
+            else:
+                st.downstream_urns.add(other)
+                st.ring_down.append((other, st.labels[other]))
+        return spent
+
+    async def _hub_page(
+        self,
+        anchor: Tuple[str, str],
+        st: "_ClosureWalk",
+        *,
+        up: bool,
+        down: bool,
+        budget: int,
+    ) -> int:
+        """An anchor whose adjacency cannot fit the page: ship its first page
+        per direction by edge id. Upstream gets half the budget, downstream
+        the rest; a direction whose page came back FULL carries a real
+        ``e:<last id + 1>`` cursor and a cut entry, a direction with fewer
+        rows is complete. Returns the new nodes spent."""
+        urn, label = anchor
+        spent = 0
+        if urn not in st.discovered:
+            st.discovered.add(urn)
+            st.visited.add(urn)
+            spent += 1
+            budget -= 1
+        st.labels.setdefault(urn, label or "")
+        st.progress += 1
+        plan: List[Tuple[str, str, int]] = []
+        if up and down:
+            share_up = (budget + 1) // 2
+            plan.append(("incoming", "up", share_up))
+            plan.append(("outgoing", "down", -1))       # the rest, decided after up
+        elif up:
+            plan.append(("incoming", "up", budget))
+        elif down:
+            plan.append(("outgoing", "down", budget))
+        for direction, side, limit in plan:
+            if limit < 0:
+                limit = budget
+            if limit <= 0:
+                (st.cut_up if side == "up" else st.cut_down)[urn] = None
+                if "max_nodes" not in st.reasons:
+                    st.reasons.append("max_nodes")
+                continue
+            rows, last_edge_id = await self._page_raw_lineage_single(
+                urn, label or st.labels.get(urn) or "", direction, st.ltypes,
+                0, limit, st.query_timeout(),
+            )
+            if rows is None:
+                st.reasons.append("timeout")
+                (st.cut_up if side == "up" else st.cut_down)[urn] = None
+                continue
+            new = self._commit_rows(rows, st, direction)
+            spent += new
+            budget -= new
+            if len(rows) >= limit:
+                (st.cut_up if side == "up" else st.cut_down)[urn] = None
+                if last_edge_id is not None:
+                    st.paged[(urn, side)] = f"e:{last_edge_id + 1}"
+                if "max_nodes" not in st.reasons:
+                    st.reasons.append("max_nodes")
+        return spent
+
+    async def _expand_raw_lineage_set(
+        self,
+        frontier: List[str],
+        frontier_labels: Dict[str, str],
+        direction: str,
+        ltypes: List[str],
+        limit: int,
+        timeout_secs: float,
+    ) -> Tuple[List[Dict[str, Any]], Set[str]]:
+        """One BFS hop over RAW lineage edges — the regime-independent core of
+        ``trace_closure``. Returns ``(rows, failed_labels)``: the label
+        buckets whose query failed are named, never silently empty — the
+        caller re-offers their anchors as cut entries under ``timeout``.
+
+        Unlike ``_expand_aggregated_set`` this walks the DECLARED lineage
+        rel-types directly (``[r:LTYPE1|LTYPE2|...]``) with NO neighbour
+        label/level filter: focus scoping comes from starting at the focus and
+        following its ACTUAL lineage, not from constraining peers. Reads the
+        MAIN graph (raw edges live there, not the projection graph), so it is
+        correct at the finest grain even in boundary regime where leaf rollups
+        are never materialised.
+
+        ``direction``: ``'incoming'`` walks upstream (``(f)<-[r]-(o)``),
+        ``'outgoing'`` walks downstream (``(f)-[r]->(o)``). Each returned record
+        is oriented source->target and carries ``otherUrn``/``otherLabel`` — the
+        far (newly-discovered) endpoint and its entity-type label — so the
+        caller seeds the next frontier ALREADY label-bucketed without a
+        separate label round-trip.
+
+        The frontier is bucketed by label so each sub-query uses the per-label
+        ``(:Label).urn`` index (there is no label-less URN index; an unlabeled
+        bucket pays one scan, still correct).
+
+        There is deliberately NO exclude filter. The caller's already-known
+        set is applied in Python AFTER the row is recorded, so an edge into a
+        known node still ships while the node itself does not — see the note
+        at the call site in ``trace_closure`` for the diamond this protects.
+        """
+        if not frontier or limit <= 0 or not ltypes:
+            return [], set()
+
+        by_label: Dict[str, List[str]] = {}
+        for urn in frontier:
+            by_label.setdefault(frontier_labels.get(urn) or "", []).append(urn)
+
+        if direction == "incoming":
+            arrow = "<-[r:{rel}]-"
+            source_var, target_var = "o", "f"
+        else:
+            arrow = "-[r:{rel}]->"
+            source_var, target_var = "f", "o"
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        per_query_timeout = max(0.6, min(CLOSURE_QUERY_CAP_SECS, timeout_secs))
+
+        queries: List[Tuple[str, str, Dict[str, Any]]] = []
+        for f_label, urns in by_label.items():
+            sl = _sanitize_label(f_label) if f_label else ""
+            label_clause = f":{sl}" if sl else ""
+            where_clause = "WHERE f.urn IN $frontier "
+            params: Dict[str, Any] = {"frontier": urns, "limit": limit}
+            cypher = (
+                f"MATCH (f{label_clause}){arrow.format(rel=rel_alt)}(o) "
+                + where_clause
+                + f"RETURN {source_var}.urn AS sourceUrn, {target_var}.urn AS targetUrn, "
+                "id(r) AS edgeId, type(r) AS edgeType, "
+                "o.urn AS otherUrn, labels(o)[0] AS otherLabel "
+                "LIMIT $limit"
+            )
+            queries.append((f_label, cypher, params))
+
+        async def _run(c: str, p: Dict[str, Any]):
+            try:
+                return await self._ro_query(
+                    c, params=p, timeout=per_query_timeout, op="trace.closure_expand",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: raw lineage expand (%s) failed: %s",
+                    direction, exc,
+                )
+                return None
+
+        results = await asyncio.gather(*(_run(c, p) for _, c, p in queries))
+
+        out: List[Dict[str, Any]] = []
+        failed_labels: Set[str] = set()
+        seen_edge_ids: Set[str] = set()
+        for (f_label, _c, _p), result in zip(queries, results):
+            if result is None:
+                failed_labels.add(f_label)
+                continue
+            for row in (result.result_set or []):
+                try:
+                    eid = str(row[2]) if row[2] is not None else f"raw-{row[0]}-{row[1]}"
+                    if eid in seen_edge_ids:
+                        continue
+                    seen_edge_ids.add(eid)
+                    out.append({
+                        "sourceUrn": row[0],
+                        "targetUrn": row[1],
+                        "edgeId": eid,
+                        "edgeType": str(row[3]) if row[3] else ltypes[0],
+                        "otherUrn": row[4],
+                        "otherLabel": row[5],
+                    })
+                    if len(out) >= limit:
+                        return out, failed_labels
+                except Exception:
+                    continue
+        return out, failed_labels
+
+    async def _collect_lineage_seed(
+        self,
+        focus_urn: str,
+        focus_label: str,
+        ltypes: List[str],
+        ctypes: List[str],
+        cap: int,
+        timeout_secs: float,
+        after_urn: Optional[str] = None,
+    ) -> Tuple[List[Tuple[str, str]], bool]:
+        """The anchors the closure walk STARTS from, in walk order.
+
+        Lineage lives at the leaves, never on containers. A LEAF focus is its
+        own seed. A CONTAINER focus (a Domain/Layer/Table with no lineage of
+        its own) contributes nothing directly — so this is the ONE place
+        containment flows DOWNWARD: walk containment down to find which
+        descendants of the top-most node carry incident lineage, and seed from
+        those. The closure BFS then shows only their LINEAGE hops; containment
+        is never a hop. Bounded by ``cap`` (a container with more lineage
+        leaves than that spills to the lazy/coarse path — handled by the
+        caller's ``max_nodes`` truncation + cursor).
+
+        Returns ``(anchors, failed)``: ``anchors`` is the focus's own row
+        (page one only, when it carries lineage) followed by its
+        lineage-bearing descendants ORDERED BY urn, as ``(urn, label)``
+        pairs (label-bucketed for index-seeking sub-queries — no extra label
+        lookup), at most ``cap`` descendants. The caller passes
+        ``max_nodes + 1`` so a capped enumeration always leaves a KNOWN
+        pending anchor for the cursor — the walk, not this query, decides
+        where the page ends. ``after_urn`` is the INCLUSIVE keyset resume
+        point (``d.urn >= $after``): it names the next anchor to consider,
+        mirroring the ``e:<next id>`` convention. ``failed`` is True when a
+        query errored; the caller reports ``seed_failed`` rather than
+        shipping an empty page that claims to be complete.
+
+        The caller's ``exclude_urns`` deliberately plays NO part here: it
+        governs what is re-SHIPPED, never where the walk STARTS. Dropping a
+        held node from the seed only means never re-deriving the hops it
+        has not been asked about yet — see the ``wanted`` comment in
+        ``trace_closure``, which is the same rule on the explicit-seed path.
+        """
+        if not ltypes:
+            return [(focus_urn, focus_label)], False
+
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        per_query_timeout = max(0.6, min(CLOSURE_QUERY_CAP_SECS, timeout_secs))
+        sl = _sanitize_label(focus_label) if focus_label else ""
+        label_clause = f":{sl}" if sl else ""
+
+        # FalkorDB REJECTS the tempting single-round-trip form
+        #     WITH [f] + collect(DISTINCT d) AS cands
+        # (mixing a node alias with an aggregation) — it fails with
+        #     "_AR_EXP_UpdateEntityIdx: Unable to locate a value with alias f"
+        # VERIFIED against a live engine (a fake that string-matches Cypher
+        # cannot catch this). So: two separately-valid queries, GATHERED, and
+        # unioned in Python — a cursor role, not a filter:
+        #   (1) does the focus itself carry lineage?         → LEAF focus
+        #   (2) which containment descendants carry lineage? → CONTAINER focus
+        # A seed-page CONTINUATION (after_urn) re-collects only descendants
+        # past the keyset boundary; the focus-self seed belongs to page one.
+        queries: List[Tuple[str, Dict[str, Any]]] = [] if after_urn else [(
+            f"MATCH (f{label_clause} {{urn: $urn}}) WHERE (f)-[:{rel_alt}]-() "
+            "RETURN f.urn AS urn, labels(f)[0] AS label",
+            {"urn": focus_urn},
+        )]
+        descendants_idx = len(queries)
+        if ctypes:
+            ct_alt = "|".join(_sanitize_label(t) for t in ctypes)
+            hops = self._containment_hop_bound()
+            # ORDER BY urn makes the page deterministic and the keyset
+            # (`d.urn > $after`) a true resume point — SKIP-free, so a deep
+            # page costs the same as the first.
+            after_clause = "AND d.urn >= $after " if after_urn else ""
+            queries.append((
+                f"MATCH (f{label_clause} {{urn: $urn}})-[c:{ct_alt}*1..{hops}]->(d) "
+                f"WHERE (d)-[:{rel_alt}]-() {after_clause}"
+                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label "
+                "ORDER BY urn LIMIT $cap",
+                {"urn": focus_urn, "cap": cap, **({"after": after_urn} if after_urn else {})},
+            ))
+        elif after_urn:
+            # No containment types ⇒ no descendant pages exist to resume.
+            return [], False
+
+        async def _run_seed(c: str, prm: Dict[str, Any]):
+            try:
+                return await self._ro_query(
+                    c, params=prm, timeout=per_query_timeout, op="trace.closure_seed",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: seed query failed for %s: %s", focus_urn, exc,
+                )
+                return None
+
+        results = await asyncio.gather(*(_run_seed(c, prm) for c, prm in queries))
+        failed = any(r is None for r in results)
+
+        # The focus's own row first (page one), then descendants in urn
+        # order — the order the walk consumes them, and the order the keyset
+        # cursor resumes.
+        seed: List[Tuple[str, str]] = []
+        seen: Set[str] = set()
+        for result in results:
+            if result is None:
+                continue
+            for row in (result.result_set or []):
+                u = row[0]
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                seed.append((u, (row[1] if len(row) > 1 else None) or ""))
+        return seed, failed
+
+    async def _descendant_lineage_seed(
+        self,
+        urns: List[str],
+        labels: Dict[str, str],
+        ltypes: List[str],
+        ctypes: List[str],
+        cap: int,
+        timeout_secs: float,
+        after_urn: Optional[str] = None,
+    ) -> Tuple[List[Tuple[str, str]], bool]:
+        """Which lineage-bearing entities live BENEATH these seeds, in urn
+        order, resumable by the same inclusive keyset cursor as
+        ``_collect_lineage_seed`` (``d.urn >= $after``).
+
+        ``_collect_lineage_seed``'s containment-descent, asked of a SET
+        rather than of one anchor: a walk continuation names the cards the
+        reader clicked, and a card that holds finer things carries no
+        lineage of its own — its columns do. Seeds that ARE leaves simply
+        contribute nothing here (a leaf has no containment children), so
+        the caller can hand over its whole seed list without sorting them
+        first.
+
+        Bucketed by label for the per-label ``(:Label).urn`` index, the
+        same way ``_expand_raw_lineage_set`` buckets its frontier (there is
+        no label-less URN index; an unlabeled bucket pays one scan, still
+        correct). Each bucket is ``ORDER BY urn LIMIT $cap``; with several
+        buckets the union is trimmed to the SAFE BOUND ``B = min(last urn of
+        every bucket that filled its cap)`` so the merged list has no gap a
+        later page could fall into — every un-enumerated row of a capped
+        bucket is ``> B``. Returns ``(anchors, failed)``; ``failed`` names a
+        query error the caller must report (``seed_failed``) instead of
+        walking the literal seeds as if nothing lived beneath them.
+        """
+        if not urns or not ltypes or not ctypes or cap <= 0:
+            return [], False
+
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+        ct_alt = "|".join(_sanitize_label(t) for t in ctypes)
+        hops = self._containment_hop_bound()
+        per_query_timeout = max(0.6, min(CLOSURE_QUERY_CAP_SECS, timeout_secs))
+        after_clause = "AND d.urn >= $after " if after_urn else ""
+
+        by_label: Dict[str, List[str]] = {}
+        for u in urns:
+            by_label.setdefault(labels.get(u) or "", []).append(u)
+
+        async def _run(f_label: str, bucket: List[str]):
+            sl = _sanitize_label(f_label) if f_label else ""
+            label_clause = f":{sl}" if sl else ""
+            cypher = (
+                f"MATCH (f{label_clause})-[c:{ct_alt}*1..{hops}]->(d) "
+                f"WHERE f.urn IN $seeds AND (d)-[:{rel_alt}]-() {after_clause}"
+                "RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label "
+                "ORDER BY urn LIMIT $cap"
+            )
+            params: Dict[str, Any] = {"seeds": bucket, "cap": cap}
+            if after_urn:
+                params["after"] = after_urn
+            try:
+                return await self._ro_query(
+                    cypher, params=params,
+                    timeout=per_query_timeout, op="trace.closure_seed",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "trace_closure: descendant seed query failed: %s", exc,
+                )
+                return None
+
+        results = await asyncio.gather(
+            *(_run(lbl, bucket) for lbl, bucket in by_label.items())
+        )
+
+        failed = any(r is None for r in results)
+        merged: Dict[str, str] = {}
+        bound: Optional[str] = None
+        for result in results:
+            if result is None:
+                continue
+            rows = result.result_set or []
+            for row in rows:
+                u = row[0]
+                if not u or u in merged:
+                    continue
+                merged[u] = (row[1] if len(row) > 1 else None) or ""
+            if len(rows) >= cap and rows[-1][0]:
+                last = str(rows[-1][0])
+                bound = last if bound is None else min(bound, last)
+        anchors = sorted(merged.items())
+        if bound is not None:
+            anchors = [(u, lbl) for u, lbl in anchors if u <= bound]
+        return anchors, failed
+
+    async def _page_raw_lineage_single(
+        self,
+        urn: str,
+        label: str,
+        direction: str,
+        ltypes: List[str],
+        after_id: Optional[int],
+        limit: int,
+        timeout: float,
+    ) -> Tuple[Optional[List[Dict[str, Any]]], Optional[int]]:
+        """Cursor page over ONE node's raw-lineage adjacency in ONE
+        direction — the lazy/coarse fallback for a single frontier node
+        whose full hop would blow the BFS budget, paired with
+        ``_expand_raw_lineage_set``'s batched hop.
+
+        Stable-ordered by ``id(r)``. ``after_id`` is INCLUSIVE — "the next
+        edge id to consider", not "the last one you saw" — so ``0`` means
+        from the start and the caller's next cursor is ``last_edge_id + 1``.
+        The exclusive form could not express "from the start" at all: the
+        wire grammar is ``^e:\\d+$``, so the only available start was
+        ``e:0``, which silently skipped the edge with ``id(r) == 0``. Row
+        dicts use the SAME keys as ``_expand_raw_lineage_set`` rows so
+        callers can share processing code between the batched and
+        single-node paths.
+
+        ``label`` falsy falls back to an unlabeled anchor match — a
+        single-node scan, so the missing per-label index is an accepted
+        cost here (unlike the frontier-wide bucketing in the sibling
+        helpers, where an unlabeled bucket would pay that cost per URN).
+        """
+        if not ltypes or limit <= 0:
+            return [], None
+
+        after = 0 if after_id is None else after_id
+        sl = _sanitize_label(label) if label else ""
+        label_clause = f":{sl}" if sl else ""
+        rel_alt = "|".join(_sanitize_label(t) for t in ltypes)
+
+        if direction == "incoming":
+            arrow = f"<-[r:{rel_alt}]-"
+            source_expr, target_expr = "o.urn", "f.urn"
+        else:
+            arrow = f"-[r:{rel_alt}]->"
+            source_expr, target_expr = "f.urn", "o.urn"
+
+        cypher = (
+            f"MATCH (f{label_clause} {{urn: $urn}}){arrow}(o) "
+            "WHERE id(r) >= $after "
+            f"RETURN id(r) AS edgeId, {source_expr} AS sourceUrn, {target_expr} AS targetUrn, "
+            "type(r) AS edgeType, o.urn AS otherUrn, labels(o)[0] AS otherLabel "
+            "ORDER BY id(r) "
+            "LIMIT $limit"
+        )
+        # Per-query bound, same as the sibling walk helpers — deliberately
+        # NOT the caller's whole remaining budget. Keeping every individual
+        # page query small is what lets the closure's overall deadline
+        # degrade to a truncated (200) response instead of one runaway
+        # query eating the whole request; a single label-qualified anchor
+        # page at LIMIT <= 2000 fits comfortably inside this bound.
+        per_query_timeout = max(0.6, min(CLOSURE_QUERY_CAP_SECS, timeout))
+        try:
+            result = await self._ro_query(
+                cypher, params={"urn": urn, "after": after, "limit": limit},
+                timeout=per_query_timeout, op="trace.closure_page",
+            )
+        except Exception as exc:
+            logger.warning(
+                "trace_closure: page query failed for %s (%s): %s", urn, direction, exc,
+            )
+            # None, not []: the caller must tell "nothing there" from "could
+            # not read" — the latter is a flagged, resumable page.
+            return None, None
+
+        rows: List[Dict[str, Any]] = []
+        last_edge_id: Optional[int] = None
+        for row in (result.result_set or []):
+            try:
+                raw_eid = row[0]
+                eid_int = int(raw_eid) if raw_eid is not None else None
+                rows.append({
+                    "sourceUrn": row[1],
+                    "targetUrn": row[2],
+                    "edgeId": str(raw_eid) if raw_eid is not None else f"raw-{row[1]}-{row[2]}",
+                    "edgeType": str(row[3]) if row[3] else ltypes[0],
+                    "otherUrn": row[4],
+                    "otherLabel": row[5],
+                })
+                if eid_int is not None:
+                    last_edge_id = eid_int
+            except Exception:
+                continue
+        return rows, last_edge_id
+
     async def _collect_ancestor_urns(
         self, urns: List[str], ctypes: List[str],
     ) -> List[str]:
@@ -7797,13 +9471,64 @@ class FalkorDBProvider(GraphDataProvider):
         target_urn: str,
         ctypes: List[str],
         limit: int,
+        drill_anchor: Optional[str] = None,
     ) -> Tuple[List[str], List[str]]:
-        """STRUCTURAL drill: each anchor's DIRECT containment children —
-        one step below the expanded pair, each side advancing from its
-        own depth (ragged pairs included: a childless side stays at the
-        anchor itself). Label-agnostic, so self-nesting ontologies drill
-        correctly at every depth; on aligned type-structured trees the
-        children ARE the next type level, so behavior is unchanged."""
+        """STRUCTURAL drill: DIRECT containment children — one step below
+        the expanded pair. Label-agnostic, so self-nesting ontologies
+        drill correctly at every depth; on aligned type-structured trees
+        the children ARE the next type level, so behavior is unchanged.
+
+        ``drill_anchor`` names the side being OPENED. Only it descends;
+        the other contributes itself plus its whole subtree, so anchors
+        at very different depths can still meet. Without it both sides
+        advance from their own depth (ragged pairs included), which is
+        the historical behaviour and correct only for a pair that was
+        already aligned.
+
+        Either way a childless side falls back to the anchor itself."""
+        if drill_anchor is not None:
+            partner = target_urn if drill_anchor == source_urn else source_urn
+            depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+            cypher = (
+                # The opened side — one containment step down.
+                "MATCH (a {urn: $drill})-[c]->(child) "
+                "WHERE type(c) IN $ctypes "
+                "WITH DISTINCT child.urn AS urn "
+                "LIMIT $limit "
+                "RETURN 'd' AS side, collect(urn) AS urns "
+                "UNION "
+                # The partner — itself...
+                "MATCH (b {urn: $partner}) "
+                "RETURN 'p' AS side, [b.urn] AS urns "
+                "UNION "
+                # ...and everything beneath it, at any depth.
+                f"MATCH (b {{urn: $partner}})-[c*1..{depth}]->(sub) "
+                "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+                "WITH DISTINCT sub.urn AS urn "
+                "LIMIT $limit "
+                "RETURN 'p' AS side, collect(urn) AS urns"
+            )
+            result = await self._ro_query(
+                cypher,
+                params={"drill": drill_anchor, "partner": partner,
+                        "ctypes": ctypes, "limit": limit},
+                op="trace.children_drill",
+                timeout=2.0,
+            )
+            drilled: List[str] = []
+            partner_side: List[str] = []
+            for row in (result.result_set or []):
+                if not row or len(row) < 2:
+                    continue
+                urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+                if row[0] == 'd':
+                    drilled.extend(urns)
+                elif row[0] == 'p':
+                    partner_side.extend(urns)
+            drilled = list(dict.fromkeys(drilled)) or [drill_anchor]
+            partner_side = list(dict.fromkeys(partner_side)) or [partner]
+            return (drilled, partner_side) if drill_anchor == source_urn else (partner_side, drilled)
+
         cypher = (
             "MATCH (a {urn: $source})-[c]->(child) "
             "WHERE type(c) IN $ctypes "
@@ -7846,6 +9571,7 @@ class FalkorDBProvider(GraphDataProvider):
         target_level: int,
         ctypes: List[str],
         limit: int,
+        drill_anchor: Optional[str] = None,
     ) -> Tuple[List[str], List[str]]:
         """Collect descendants of both anchors in a SINGLE Cypher round-trip.
 
@@ -7860,9 +9586,28 @@ class FalkorDBProvider(GraphDataProvider):
         Returns ``(source_urns, target_urns)``. Either side may be empty if
         the anchor's label does not match ``target_level``'s type set.
         """
+        # ``drill_anchor`` names the side being OPENED. Only it is
+        # level-filtered; the partner contributes itself and its whole
+        # subtree. Level-filtering BOTH is what empties the partner side
+        # whenever it sits finer than the level asked for — a Table has
+        # no descendants at a Domain's next level, so ``t_urns`` came
+        # back empty and the expand reported "nothing connects" about
+        # lineage that exists.
+        if drill_anchor is not None:
+            return await self._collect_level_and_subtree(
+                drill_anchor,
+                target_urn if drill_anchor == source_urn else source_urn,
+                target_level, ctypes, limit,
+                drilled_is_source=drill_anchor == source_urn,
+            )
         types = self._types_at_level(target_level)
         if not types:
-            return [], []
+            # Nothing declared at that level. Returning empty here made
+            # the expand report "nothing connects" about a level the
+            # ONTOLOGY could not describe — a statement about our type
+            # map, dressed up as a statement about the data. Each anchor
+            # stands for itself instead, so the edge query still runs.
+            return [source_urn], [target_urn]
 
         if not ctypes:
             # Empty containment — descendants of each anchor reduce to
@@ -7950,7 +9695,72 @@ class FalkorDBProvider(GraphDataProvider):
                 s_set.update(urn_list)
             elif side == 't':
                 t_set.update(urn_list)
-        return list(s_set), list(t_set)
+        # An anchor that matched nothing falls back to ITSELF, mirroring
+        # ``_collect_children_pair``. Without this a side could come back
+        # empty and short-circuit the whole expand to zero edges — the
+        # asymmetry between these two helpers was itself a bug.
+        return (list(s_set) or [source_urn], list(t_set) or [target_urn])
+
+    async def _collect_level_and_subtree(
+        self,
+        drilled_urn: str,
+        partner_urn: str,
+        target_level: int,
+        ctypes: List[str],
+        limit: int,
+        *,
+        drilled_is_source: bool,
+    ) -> Tuple[List[str], List[str]]:
+        """One side descends to ``target_level``; the other contributes
+        itself plus its whole subtree, unfiltered. See the dispatch in
+        ``_collect_descendants_pair_at_level`` for why."""
+        types = self._types_at_level(target_level)
+        max_depth = max(len(getattr(self, "_entity_type_levels", {}) or {}), 10)
+        parts = [
+            # The opened side — anchor itself when it already sits at the level
+            "MATCH (a {urn: $drill}) WHERE labels(a)[0] IN $types "
+            "RETURN 'd' AS side, [a.urn] AS urns",
+            # ...and its descendants at that level
+            f"MATCH (a {{urn: $drill}})-[c*1..{max_depth}]->(child) "
+            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            "  AND labels(child)[0] IN $types "
+            "WITH DISTINCT child.urn AS urn LIMIT $limit "
+            "RETURN 'd' AS side, collect(urn) AS urns",
+            # The partner — itself
+            "MATCH (b {urn: $partner}) RETURN 'p' AS side, [b.urn] AS urns",
+            # ...and everything beneath it, at any depth, any label
+            f"MATCH (b {{urn: $partner}})-[c*1..{max_depth}]->(sub) "
+            "WHERE ALL(rel IN c WHERE type(rel) IN $ctypes) "
+            "WITH DISTINCT sub.urn AS urn LIMIT $limit "
+            "RETURN 'p' AS side, collect(urn) AS urns",
+        ]
+        if not types:
+            # Nothing declared at that level — the opened side still
+            # contributes itself, so the expand degrades to "does this
+            # container connect at all" rather than to silence.
+            parts = [
+                "MATCH (a {urn: $drill}) RETURN 'd' AS side, [a.urn] AS urns",
+                *parts[2:],
+            ]
+        if not ctypes:
+            parts = [p for p in parts if "*1.." not in p]
+        result = await self._ro_query(
+            " UNION ".join(parts),
+            params={"drill": drilled_urn, "partner": partner_urn,
+                    "ctypes": ctypes, "types": types, "limit": limit},
+            op="trace.level_and_subtree",
+            timeout=2.0,
+        )
+        d_set: Set[str] = set()
+        p_set: Set[str] = set()
+        for row in (result.result_set or []):
+            if not row or len(row) < 2:
+                continue
+            urns = [u for u in (row[1] if isinstance(row[1], list) else []) if u]
+            (d_set if row[0] == 'd' else p_set).update(urns)
+        drilled = list(d_set) or [drilled_urn]
+        partner = list(p_set) or [partner_urn]
+        return (drilled, partner) if drilled_is_source else (partner, drilled)
 
     async def _edges_between_sets(
         self, s_urns: List[str], t_urns: List[str], level: int,
@@ -8050,8 +9860,16 @@ class FalkorDBProvider(GraphDataProvider):
     async def _fetch_containment_edges(
         self, urns: List[str], ctypes: List[str],
         chains: Optional[Dict[str, List[str]]] = None,
+        labels: Optional[Dict[str, str]] = None,
     ) -> List[GraphEdge]:
         """Containment edges where both endpoints are in ``urns``.
+
+        ``labels`` (urn → entity label), when the caller has them in hand
+        (the closure hydrates every participant, so it always does), anchors
+        each pair chunk on the PARENT's label: ``MATCH (s:Label)-[r]->(t)``
+        is an index seek, while the unlabeled form scanned the whole graph
+        once per chunk — measured ~520 ms per 400 pairs on a 520k-node
+        estate, eight chunks per page.
 
         Pair-list driven: builds the parent→child pairs we expect to exist
         from the cached ancestor chains (already populated by aggregation
@@ -8097,27 +9915,68 @@ class FalkorDBProvider(GraphDataProvider):
         # scan/seek for the whole batch. The pair-bounded branch
         # post-filters Cartesian results down to the requested pairs.
         if pairs:
-            s_urns = sorted({s for s, _ in pairs})
-            t_urns = sorted({t for _, t in pairs})
-            allowed_pairs: Set[Tuple[str, str]] = set(pairs)
-            cypher = (
-                f"MATCH (s)-[r:{rel_alt}]->(t) "
-                "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
-                "RETURN s.urn AS sUrn, t.urn AS tUrn, "
-                "type(r) AS edgeType, id(r) AS edgeId"
-            )
-            try:
-                result = await self._ro_query(
-                    cypher,
-                    params={"sUrns": s_urns, "tUrns": t_urns},
-                    timeout=2.0,
+            # CHUNKED + NEVER-EMPTY (2026-08-20): one set×set query over a
+            # full-walk's ~2,000 pairs on a 1.2M-node graph blew the 2s
+            # timeout and the exception path silently returned [] — the
+            # trace shipped participants WITHOUT the containment that
+            # placement/nesting need ("completely disjointed" on the big
+            # estates, while the Lens's small per-click pair sets fit the
+            # budget). Pairs now resolve in bounded chunks, and any chunk
+            # that still fails SYNTHESIZES its edges straight from the
+            # ancestor chains — the chains are the truth; the query only
+            # decorates real ids/types onto them.
+            out: List[GraphEdge] = []
+            CHUNK_PAIRS = 400
+            # Bucket by the parent's label when known: one index-anchored
+            # query per (label, chunk) instead of one scan per chunk.
+            by_label: Dict[str, List[Tuple[str, str]]] = {}
+            for pair in sorted(pairs):
+                by_label.setdefault((labels or {}).get(pair[0]) or "", []).append(pair)
+            chunks: List[Tuple[str, List[Tuple[str, str]]]] = []
+            for lbl, lbl_pairs in by_label.items():
+                for i in range(0, len(lbl_pairs), CHUNK_PAIRS):
+                    chunks.append((lbl, lbl_pairs[i:i + CHUNK_PAIRS]))
+            for lbl, chunk in chunks:
+                chunk_set: Set[Tuple[str, str]] = set(chunk)
+                s_urns = sorted({s for s, _ in chunk})
+                t_urns = sorted({t for _, t in chunk})
+                sl = _sanitize_label(lbl) if lbl else ""
+                s_clause = f":{sl}" if sl else ""
+                cypher = (
+                    f"MATCH (s{s_clause})-[r:{rel_alt}]->(t) "
+                    "WHERE s.urn IN $sUrns AND t.urn IN $tUrns "
+                    "RETURN s.urn AS sUrn, t.urn AS tUrn, "
+                    "type(r) AS edgeType, id(r) AS edgeId"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "trace_at_level: containment edge pair-fetch failed "
-                    "(%d pairs): %s", len(pairs), exc,
-                )
-                return []
+                resolved: Set[Tuple[str, str]] = set()
+                try:
+                    result = await self._ro_query(
+                        cypher,
+                        params={"sUrns": s_urns, "tUrns": t_urns},
+                        timeout=2.0,
+                    )
+                    for row in (result.result_set or []):
+                        if (row[0], row[1]) not in chunk_set:
+                            continue
+                        resolved.add((row[0], row[1]))
+                        out.append(GraphEdge(
+                            id=str(row[3]), sourceUrn=row[0], targetUrn=row[1],
+                            edgeType=str(row[2]), properties={},
+                        ))
+                except Exception as exc:
+                    logger.warning(
+                        "trace: containment pair-fetch chunk failed "
+                        "(%d pairs) — synthesizing from chains: %s",
+                        len(chunk), exc,
+                    )
+                for (s, t) in chunk:
+                    if (s, t) in resolved:
+                        continue
+                    out.append(GraphEdge(
+                        id=f"containment:{s}>{t}", sourceUrn=s, targetUrn=t,
+                        edgeType=ctypes[0], properties={},
+                    ))
+            return out
         else:
             allowed_pairs = None  # type: ignore[assignment]  # no post-filter
             # Cold-cache fallback. Still rel-typed (avoids the OR-on-type
@@ -8179,11 +10038,34 @@ class FalkorDBProvider(GraphDataProvider):
         # unlabeled IN-list form survives only for the unresolved-label
         # residue bucket (this build has no label-less URN index — the
         # unlabeled anchor is a full node scan).
+        #
+        # childCount is COMPUTED here when containment types are configured
+        # (2026-08-20): trace-shipped nodes used to rely on the denormalised
+        # `childCount` property alone, which import paths don't always stamp
+        # — a self-nesting Node⊃Node⊃Node estate then rendered its trace-
+        # merged children CHEVRON-LESS (no expand affordance, deeper levels
+        # unreachable). Browse computes the count live; the batch hydration
+        # every trace path uses must agree with it.
+        try:
+            _ct_for_count = self._get_containment_edge_types() or []
+        except Exception:
+            _ct_for_count = []
+        ctypes_for_count = [_sanitize_label(t) for t in _ct_for_count if t]
+        ct_alt_count = "|".join(ctypes_for_count)
+
         async def _fetch(label: str, bucket: List[str]) -> list:
             anchor = f"(n:{label})" if label else "(n)"
+            if ct_alt_count:
+                cy = (
+                    f"MATCH {anchor} WHERE n.urn IN $urns "
+                    f"OPTIONAL MATCH (n)-[:{ct_alt_count}]->(child) "
+                    "RETURN n, count(child) as childCount"
+                )
+            else:
+                cy = f"MATCH {anchor} WHERE n.urn IN $urns RETURN n"
             try:
                 res = await self._ro_query(
-                    f"MATCH {anchor} WHERE n.urn IN $urns RETURN n",
+                    cy,
                     params={"urns": bucket},
                     timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS,
                     op="nodes.batch",
@@ -8204,9 +10086,19 @@ class FalkorDBProvider(GraphDataProvider):
         out: List[GraphNode] = []
         for rows in rows_per_bucket:
             for row in rows:
-                node = self._extract_node_from_result(row)
-                if node:
-                    out.append(node)
+                child_count = None
+                if ct_alt_count and isinstance(row, (list, tuple)) and len(row) >= 2:
+                    node = self._extract_node_from_result([row[0]])
+                    child_count = row[1]
+                else:
+                    node = self._extract_node_from_result(row)
+                if not node:
+                    continue
+                if child_count is not None:
+                    node.child_count = int(child_count)
+                    if node.properties is not None:
+                        node.properties['childCount'] = int(child_count)
+                out.append(node)
         return out
 
     # Schema-level caches are persisted in Postgres by the stats service;
@@ -8293,6 +10185,109 @@ class FalkorDBProvider(GraphDataProvider):
             except Exception:
                 pass
 
+        return result
+
+    async def get_counts_fast(self) -> Optional[Dict[str, Any]]:
+        """Same payload as :meth:`get_stats`, without scanning the graph.
+
+        FalkorDB's ``reduce_count`` optimization answers ``count()`` over an
+        unfiltered pattern from the label/relation matrix counters — the plan
+        is ``Results / Project`` with no scan operator at all. Projecting
+        ``labels(n)[0]`` or ``type(r)`` alongside the count is what loses it,
+        which is exactly what ``get_stats`` does and why its two queries cost
+        ~514ms on a 500k-node / 850k-edge graph where this costs ~1.3ms.
+
+        So the per-type breakdown comes from the schema catalogue
+        (``db.labels()`` / ``db.relationshipTypes()``, both O(#types)) plus one
+        constant-time count each. **Never add a projection to these queries.**
+
+        Cost is ``4 + labels + types`` round trips and is therefore constant in
+        the SIZE of the graph but linear in the size of its SCHEMA — the exact
+        inverse of ``get_stats``. On a small graph with a wide schema the two
+        converge; the win is on the large graphs that forced the 900s poll
+        interval in the first place.
+
+        Returns ``None`` — not an error — when the counts cannot be trusted,
+        so the caller falls back to :meth:`get_stats`. That happens when the
+        label counts sum ABOVE the node total, which means multi-label nodes:
+        per-label counting then double-counts relative to ``labels(n)[0]``
+        semantics. Our own writers are single-label by construction
+        (``MERGE (n:{label} {urn: …})``) but an external loader need not be.
+        """
+        await self._ensure_connected()
+
+        async def _count(cypher: str) -> int:
+            res = await self._ro_query_tolerant(cypher, op="probe.count")
+            rows = res.result_set or []
+            return int(rows[0][0] or 0) if rows and rows[0] else 0
+
+        async def _catalogue(cypher: str) -> List[str]:
+            res = await self._ro_query_tolerant(cypher, op="probe.catalogue")
+            return [row[0] for row in (res.result_set or []) if row and row[0]]
+
+        labels = await _catalogue(
+            "CALL db.labels() YIELD label RETURN label"
+        )
+        rel_types = await _catalogue(
+            "CALL db.relationshipTypes() YIELD relationshipType "
+            "RETURN relationshipType"
+        )
+        node_count = await _count("MATCH (n) RETURN count(n)")
+        edge_count = await _count("MATCH ()-[r]->() RETURN count(r)")
+
+        # Zero-count buckets are DROPPED, not reported. The catalogue keeps
+        # listing a label/type after its last row is deleted, where get_stats
+        # simply returns no row for it — and a {"Ghost": 0} key hashes
+        # differently from an absent one, so keeping it would read as drift on
+        # the first probe of every graph that ever deleted a type.
+        entity_type_counts: Dict[str, Any] = {}
+        for label in labels:
+            safe = str(label).replace("`", "")
+            count = await _count(f"MATCH (n:`{safe}`) RETURN count(n)")
+            if count:
+                entity_type_counts[label] = count
+
+        edge_type_counts: Dict[str, Any] = {}
+        for rel_type in rel_types:
+            safe = str(rel_type).replace("`", "")
+            count = await _count(f"MATCH ()-[r:`{safe}`]->() RETURN count(r)")
+            if count:
+                edge_type_counts[rel_type] = count
+
+        label_sum = sum(entity_type_counts.values())
+        if label_sum > node_count:
+            logger.info(
+                "get_counts_fast on %s: label counts sum to %d over %d nodes "
+                "(multi-label graph) — deferring to the full scan",
+                self._graph_name, label_sum, node_count,
+            )
+            return None
+        if label_sum < node_count:
+            # Unlabelled nodes: invisible to per-label counts, and get_stats
+            # buckets them under `labels(n)[0] or "unknown"`. Deriving the
+            # remainder reproduces that bucket exactly.
+            entity_type_counts["unknown"] = node_count - label_sum
+
+        # An edge carries exactly one type, so unlike nodes there is no honest
+        # remainder to attribute. A disagreement means the catalogue is not
+        # describing this graph; refuse rather than report a wrong shape.
+        if sum(edge_type_counts.values()) != edge_count:
+            logger.info(
+                "get_counts_fast on %s: edge-type counts sum to %d over %d "
+                "edges — deferring to the full scan",
+                self._graph_name, sum(edge_type_counts.values()), edge_count,
+            )
+            return None
+
+        result = {
+            "nodeCount": node_count,
+            "edgeCount": edge_count,
+            "entityTypeCounts": entity_type_counts,
+            "edgeTypeCounts": edge_type_counts,
+        }
+        # Same payload get_stats would have produced, so priming its cache
+        # keeps the two from disagreeing for the TTL.
+        await self.prime_stats_cache(result)
         return result
 
     async def prime_stats_cache(self, stats: Dict[str, Any]) -> None:

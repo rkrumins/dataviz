@@ -85,6 +85,9 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from backend.common.providers.identity import (
+    node_identity_expr as _shared_identity_expr,
+)
 from backend.common.providers.pair_rules import (
     ancestor_closure,
     boundary_pairs,
@@ -163,25 +166,16 @@ def _scan_timeout_s() -> float:
 
 
 def _node_identity_expr(identity_property: Optional[str]) -> str:
-    """Cypher expression for a node's canonical identity: the platform ``urn``, falling back to the
-    source's configured URN-equivalent property when a node has no ``urn``.
+    """Cypher expression for a node's canonical identity, bound to the ``n``
+    variable this module's directory scans use.
 
-    Every consumer keys on ``urn``, but an ONBOARDED third-party graph identifies nodes by ``id``
-    (or ``name``), not ``urn``. The DEFINITIVE fix is :meth:`FalkorDBProvider.stamp_identity_urns`,
-    which copies the identity property onto ``urn`` for every node at aggregation start — after it
-    runs, the whole urn-keyed write / index / read / trace stack works unchanged. This expression is
-    defense-in-depth for the directory scans: it still resolves identity if the stamp was skipped
-    (e.g. a read-only source) or hasn't reached a freshly-added node yet. It does NOT fix the
-    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a coalesce expression) —
-    the stamp is what makes writes attach.
-
-    Default is ``urn`` (OPT-IN — no behavior change for conforming graphs); a source sets it to its
-    URN-equivalent (e.g. ``id``)."""
-    prop = identity_property or "urn"
-    safe = str(prop).replace("`", "")
-    if not safe or safe == "urn":
-        return "n.`urn`"
-    return f"coalesce(n.`urn`, n.`{safe}`)"
+    Thin alias over :func:`backend.common.providers.identity.node_identity_expr`
+    — shared with the read path so the aggregation directory and a canvas read
+    can never resolve a node's identity differently. It does NOT fix the
+    AGGREGATED write (which MERGEs on the ``urn`` PROPERTY and cannot key on a
+    coalesce expression); ``stamp_identity_urns`` is what makes writes attach.
+    """
+    return _shared_identity_expr(identity_property, "n")
 
 
 def _extract_concurrency() -> int:
@@ -210,16 +204,31 @@ def _materialize_fine_pairs_mode() -> str:
     """FULL-CUBE materialization mode: EVERY ancestor-pair combination
     (leaf→table, table→table, column→domain, …) physically stored.
 
-    ``auto`` (default): the pipeline ESTIMATES the cube volume up front
-    (one counting pass over the raw edges using the ancestor walks it
-    already performs) and materializes the full cube whenever the
-    estimate fits ``AGGREGATION_MAX_MATERIALIZED_EDGES`` — the canvas
-    then answers at EVERY granularity from storage alone. Above budget
-    it falls back to the structural depth-diagonal + on-demand reads
-    (the scale mode; the cube scales as edges × depth² and OOM'd real
-    instances: 1.17M edges → 5.6M pairs). ``true``/``false`` force a
-    mode (a forced cube over budget fails terminally, loudly)."""
-    raw = os.getenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "auto").strip().lower()
+    ``true`` (default): always store the full cube, so the canvas answers
+    at EVERY granularity from storage alone and no drill can come back
+    thin — including on self-nesting types, where boundary mode's
+    on-demand reader still reasons in ontology type levels and can return
+    incomplete mixed-granularity answers.
+
+    ``auto``: ESTIMATE the cube volume up front (one counting pass over
+    the raw edges using the ancestor walks the run already performs) and
+    store the full cube only while the estimate fits
+    ``AGGREGATION_MAX_CUBE_EDGES``. Above the ceiling it falls back to
+    the structural depth-diagonal + on-demand reads (the scale mode; the
+    cube scales as edges × depth² and OOM'd real instances: 1.17M edges
+    → 5.6M pairs). ``false`` forces the diagonal.
+
+    THE COST OF THE DEFAULT, stated plainly: a FORCED cube skips the
+    estimate entirely (see ``_decide_materialization_mode``), so a graph
+    whose cube exceeds ``AGGREGATION_MAX_MATERIALIZED_EDGES`` is not
+    refused up front — it fails terminally mid-apply, leaving a partial
+    cube over the previous generation's cells because the reconcile
+    delete pass never runs. ``auto`` can never pick a cube that exceeds
+    the budget and is the mode that degrades instead of failing. Operators
+    move a fleet back to it from Ingestion → Freshness → Automation
+    (③ Act → Advanced) without a redeploy, or by setting this env var.
+    """
+    raw = os.getenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true").strip().lower()
     if raw in ("1", "true", "yes", "on"):
         return "true"
     if raw in ("0", "false", "no", "off"):

@@ -194,6 +194,43 @@ class ManagementDbConfigORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# platform_settings  (single-row: platform-wide defaults)              #
+# ------------------------------------------------------------------ #
+
+class PlatformSettingsORM(Base):
+    """Platform-wide defaults (single row, id=1).
+
+    The bottom of the node-identity resolution chain: what a data source
+    resolves to when neither it, its provider, nor its workspace says
+    otherwise. Deliberately a DB row rather than an env var — the previous
+    global ``AGGREGATION_NODE_IDENTITY_PROPERTY`` env var was removed as a
+    footgun precisely because it applied everywhere with no audit trail and
+    no way to see what it was doing. A row carries ``updated_by`` and can be
+    changed without a redeploy.
+
+    NULL means "unset" — the code default (``urn`` / ``name``) applies.
+    """
+
+    __tablename__ = "platform_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    identity_property = Column(Text, nullable=True)
+    name_property = Column(Text, nullable=True)
+    updated_at = Column(Text, nullable=True, onupdate=_now)
+    updated_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_platform_settings_single_row"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PlatformSettings identity={self.identity_property!r} "
+            f"name={self.name_property!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
 # feature_categories  (definitions: id, label, icon, color, order)     #
 # ------------------------------------------------------------------ #
 
@@ -334,6 +371,14 @@ class ProviderORM(Base):
     permitted_workspaces = Column(Text, nullable=False, default='["*"]')  # JSON list; "*" = all
     extra_config = Column(Text, nullable=True)        # JSON blob
     falkor_max_resident = Column(Integer, nullable=True)  # per-provider FalkorDB cache-eviction budget (max resident graphs); NULL ⇒ unset
+    # Node-identity defaults for every data source hosted on this provider —
+    # the level where they usually belong, because they describe the SHAPE of
+    # the graphs this connection serves (a DataHub export keys nodes by `id`
+    # whichever workspace mounts it). NULL = unset, fall through to the
+    # workspace default, then the platform default. See
+    # ``backend.app.services.node_identity``.
+    identity_property = Column(Text, nullable=True)
+    name_property = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
@@ -532,6 +577,14 @@ class WorkspaceORM(Base):
     # Risk that is concentrated in a few SOURCES belongs on the source
     # (see ``WorkspaceDataSourceORM.is_restricted``), not on everyone.
     publish_policy = Column(Text, nullable=False, default="open")
+    # Node-identity defaults for the sources in this workspace — a team-level
+    # policy for graphs a workspace onboards itself. Weaker than the provider's
+    # value on purpose: the provider describes what the data actually looks
+    # like, the workspace only expresses a preference. NULL = unset, fall
+    # through to the platform default. See
+    # ``backend.app.services.node_identity``.
+    identity_property = Column(Text, nullable=True)
+    name_property = Column(Text, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -969,6 +1022,23 @@ class DataSourceStatsORM(Base):
     schema_updated_at = Column(Text, nullable=True)
     top_level_nodes = Column(Text, nullable=True)        # JSON payload, NULL = never materialized
     top_level_updated_at = Column(Text, nullable=True)   # ISO timestamp, freshness marker
+
+    # Drift-probe facet. ``counts_digest`` hashes EVERY count above, AGGREGATED
+    # included; the reconcile sweep stamps the value it last evaluated into
+    # ``aggregation.data_source_state.last_seen_counts_digest``, so "did
+    # anything move since we last looked" is a SQL comparison rather than an
+    # evaluation pass over the fleet. Including AGGREGATED is deliberate — the
+    # drift BASELINE must exclude it (a rebuild would move it), but a tripwire
+    # that excluded it could not see a wiped overlay on unchanged raw data.
+    # ``last_probed_at`` is the probe lane's own cadence marker, separate from
+    # the stats poll's ``data_source_polling_configs.last_polled_at`` because
+    # the two lanes run at very different frequencies.
+    counts_digest = Column(Text, nullable=True)
+    last_probed_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_ds_stats_probe_due", "last_probed_at"),
+    )
 
     # Relationships
     data_source = relationship("WorkspaceDataSourceORM", back_populates="stats")
@@ -2533,18 +2603,42 @@ class RefreshEventORM(Base):
     workspace_id = Column(Text, nullable=True)
     data_source_id = Column(Text, nullable=False)
     provider_id = Column(Text, nullable=True)
-    origin = Column(Text, nullable=False)      # script|connector|api|drift|reconcile
+    origin = Column(Text, nullable=False)      # script|connector|api|drift|reconcile|reconcile-sweep
     actor = Column(Text, nullable=False, default="internal")
     scope = Column(Text, nullable=False)       # auto|read-caches|rollups|full|batch-item|clear
     gate = Column(Text, nullable=False)        # changed|unchanged|forced|n/a
     actions = Column(Text, nullable=True)      # JSON: what was acted on
     outcome = Column(Text, nullable=False)     # accepted|deferred|noop|conflict|error|completed|failed
     detail = Column(Text, nullable=True)
+    # WHY the reconciliation sweep acted — one of the typed detector codes in
+    # ``services/aggregation/reconcile.REASONS``. Deliberately unconstrained
+    # (like ``detail``) so adding a detector later needs no migration.
+    reason = Column(Text, nullable=True)
+    # JSON evidence behind ``reason``: observed vs expected AGGREGATED edges,
+    # raw node/edge counts before → after, both fingerprints, and how old the
+    # stats row was. Kept OUT of ``actions``, which is contractually "what the
+    # signal DID" and is a List[str] on the wire.
+    evidence = Column(Text, nullable=True)
+    # The aggregation job this event produced, when it produced one. Without
+    # it the two halves of the audit trail never meet: this table knows WHY a
+    # rebuild was decided on and Job History knows WHAT the rebuild did, and
+    # nothing joined them. Logical reference (no FK — different domain).
+    job_id = Column(Text, nullable=True)
+    # The reconcile_runs row that produced this event, when the origin is
+    # reconcile-sweep. Lets the overnight ledger join "this pass" to the
+    # sources it touched, instead of filtering Job History by trigger + day.
+    run_id = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_refresh_events_ds_ts", "data_source_id", "ts"),
+        Index("idx_refresh_events_origin_run", "origin", "run_id"),
         CheckConstraint(
-            "origin IN ('script', 'connector', 'api', 'drift', 'reconcile')",
+            # 'reconcile' is the stale-marker reconciler in scheduler.py;
+            # 'reconcile-sweep' is the drift / overlay-integrity sweep. They
+            # are different subsystems and the UI distinguishes them, so the
+            # new one gets its own value rather than reusing the old.
+            "origin IN ('script', 'connector', 'api', 'drift', 'reconcile', "
+            "'reconcile-sweep')",
             name="ck_refresh_events_origin",
         ),
         CheckConstraint(

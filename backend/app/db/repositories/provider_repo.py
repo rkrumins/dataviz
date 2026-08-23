@@ -74,6 +74,8 @@ def _to_response(row: ProviderORM) -> ProviderResponse:
         extraConfig=redact_extra_config(json.loads(row.extra_config) if row.extra_config else None),
         falkorMaxResident=row.falkor_max_resident,
         permittedWorkspaces=json.loads(row.permitted_workspaces) if row.permitted_workspaces else ["*"],
+        identityProperty=getattr(row, "identity_property", None),
+        nameProperty=getattr(row, "name_property", None),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -138,6 +140,8 @@ async def create_provider(
         extra_config=json.dumps(req.extra_config) if req.extra_config else None,
         falkor_max_resident=req.falkor_max_resident,
         permitted_workspaces=json.dumps(req.permitted_workspaces) if getattr(req, "permitted_workspaces", None) else '["*"]',
+        identity_property=(req.identity_property or "").strip() or None,
+        name_property=(req.name_property or "").strip() or None,
     )
     session.add(row)
     await session.flush()
@@ -185,6 +189,13 @@ async def update_provider(
         row.falkor_max_resident = req.falkor_max_resident
     if getattr(req, "permitted_workspaces", None) is not None:
         row.permitted_workspaces = json.dumps(req.permitted_workspaces)
+    # Node-identity defaults. Same partial-update contract as the data source's:
+    # absent = untouched, "" = clear back to unset so sources fall through to
+    # the workspace / platform default.
+    if req.identity_property is not None:
+        row.identity_property = req.identity_property.strip() or None
+    if req.name_property is not None:
+        row.name_property = req.name_property.strip() or None
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()

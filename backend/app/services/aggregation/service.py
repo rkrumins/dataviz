@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -68,6 +68,54 @@ AGGREGATION_DRIFT_AUTO_REBUILD = (
     .strip().lower() in ("1", "true", "yes", "on")
 )
 
+# ── Automatic reconciliation defaults ────────────────────────────────────
+# Env fallbacks for the reconciliation sweep, kept HERE beside the cadence
+# defaults so ``get_settings`` reports exactly the value the sweep resolves
+# against — the same discipline the drift-auto flag above documents.
+AGGREGATION_RECONCILE_ENABLED = (
+    __import__("os").getenv("AGGREGATION_RECONCILE_ENABLED", "true")
+    .strip().lower() in ("1", "true", "yes", "on")
+)
+AGGREGATION_RECONCILE_INTERVAL_SECS = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_INTERVAL_SECS", "3600")
+)
+AGGREGATION_RECONCILE_MAX_ACTIONS = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_MAX_ACTIONS", "10")
+)
+AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT", "10")
+)
+# How stale the stats row may be before a finding is untrustworthy. Default
+# 3x the stats service's own 900s idle poll interval: acting on stale counts
+# is how a false positive rebuilds a multi-million-node graph.
+AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS", "2700")
+)
+# Consecutive actions on one source before the breaker trips and it is
+# suspended for a human. Guards against a finding we can never clear.
+AGGREGATION_RECONCILE_BREAKER_CAP = int(
+    __import__("os").getenv("AGGREGATION_RECONCILE_BREAKER_CAP", "3")
+)
+# ── Drift probe ──────────────────────────────────────────────────────────
+# The probe reads FalkorDB's label/relation counters rather than scanning, so
+# it costs ~1ms where the stats poll costs hundreds. That is what lets this
+# interval be 60s while STATS_DEFAULT_INTERVAL_SECS stays 900 — and it is the
+# self-detection SLO: a source nobody signals is noticed within roughly this
+# window plus one sweep tick.
+AGGREGATION_PROBE_ENABLED = (
+    __import__("os").getenv("AGGREGATION_PROBE_ENABLED", "true")
+    .strip().lower() in ("1", "true", "yes", "on")
+)
+AGGREGATION_PROBE_INTERVAL_SECS = int(
+    __import__("os").getenv("AGGREGATION_PROBE_INTERVAL_SECS", "60")
+)
+# Fleet-wide ceiling on probes enqueued per tick. Probes are cheap
+# INDIVIDUALLY; this bounds the fan-out against one provider when a large
+# fleet comes due at once.
+AGGREGATION_PROBE_BATCH_CAP = int(
+    __import__("os").getenv("AGGREGATION_PROBE_BATCH_CAP", "200")
+)
+
 
 # ── F9: configurable rebuild cadence ─────────────────────────────────────
 # The env-only cooldown/drift knobs are now overridable by a persisted
@@ -96,6 +144,79 @@ def resolve_rebuild_interval(
     if global_secs is not None:
         return global_secs
     return AGGREGATION_REBUILD_MIN_INTERVAL_SECS
+
+
+def resolve_reconcile_enabled(
+    override: Optional[bool], global_value: Optional[bool],
+) -> bool:
+    """Per-source override → persisted global → env default.
+
+    Same shape as :func:`resolve_rebuild_interval`: ``None`` at a level means
+    "unset, fall through"; ``False`` is a real value (the per-source opt-out)
+    and is honored, not treated as unset.
+    """
+    if override is not None:
+        return override
+    if global_value is not None:
+        return global_value
+    return AGGREGATION_RECONCILE_ENABLED
+
+
+def resolve_reconcile_interval(
+    override_secs: Optional[int], global_secs: Optional[int],
+) -> int:
+    """Per-source override → persisted global → env default (3600)."""
+    if override_secs is not None:
+        return override_secs
+    if global_secs is not None:
+        return global_secs
+    return AGGREGATION_RECONCILE_INTERVAL_SECS
+
+
+def resolve_probe_enabled(
+    override: Optional[bool], global_value: Optional[bool],
+) -> bool:
+    """Per-source override → persisted global → env default. Same shape as
+    :func:`resolve_reconcile_enabled`; ``False`` is a real value."""
+    if override is not None:
+        return override
+    if global_value is not None:
+        return global_value
+    return AGGREGATION_PROBE_ENABLED
+
+
+def resolve_probe_interval(
+    override_secs: Optional[int], global_secs: Optional[int],
+) -> int:
+    """Per-source override → persisted global → env default (60)."""
+    if override_secs is not None:
+        return override_secs
+    if global_secs is not None:
+        return global_secs
+    return AGGREGATION_PROBE_INTERVAL_SECS
+
+
+def reconcile_policy_from_cadence(cadence) -> "ReconcilePolicy":
+    """Build the detectors' :class:`Policy` from the persisted global cadence.
+
+    ``reconcile_detectors`` is the one field that must be read with ``is not
+    None`` rather than truthiness: an EMPTY list is a real configuration
+    ("every detector off"), and a truthiness check would silently turn them
+    all back on.
+    """
+    from .reconcile import Policy as ReconcilePolicy
+
+    detectors = getattr(cadence, "reconcile_detectors", None)
+    shrink = getattr(cadence, "reconcile_shrink_tolerance_pct", None)
+    return ReconcilePolicy(
+        stats_max_age_secs=AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS,
+        shrink_tolerance_pct=(
+            shrink if shrink is not None
+            else AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT
+        ),
+        breaker_cap=AGGREGATION_RECONCILE_BREAKER_CAP,
+        detectors=None if detectors is None else tuple(detectors),
+    )
 
 
 def invalidate_global_cadence_cache() -> None:
@@ -648,6 +769,16 @@ class AggregationService:
             # A ready cube stamped below v2 predates depth stamps — rebuild to
             # restore depth-accurate (self-nesting) hierarchy reads.
             needs_rebuild=bool(is_ready and stamp_version is not None and stamp_version < 2),
+            # Reconciliation verdict — already on the state row this method
+            # loaded, so surfacing it here costs nothing and saves the profile
+            # page a second request.
+            drift_state=getattr(state, "drift_state", None),
+            last_reconciled_at=getattr(state, "last_reconciled_at", None),
+            last_reconcile_reason=getattr(state, "last_reconcile_reason", None),
+            auto_reconcile=resolve_reconcile_enabled(
+                getattr(state, "reconcile_enabled", None),
+                (await read_global_cadence(session)).reconcile_enabled,
+            ),
             message=messages.get(status, "Unknown status."),
         )
 
@@ -794,8 +925,12 @@ class AggregationService:
         result = await session.execute(rows_q)
         jobs = result.scalars().all()
 
+        why = await _reconcile_reason_map(session, jobs)
         items = [
-            self._to_global_response(job, job.workspace_id, None, job.data_source_label)
+            self._to_global_response(
+                job, job.workspace_id, None, job.data_source_label,
+                why=why.get(job.id),
+            )
             for job in jobs
         ]
 
@@ -807,6 +942,7 @@ class AggregationService:
         workspace_id: str,
         workspace_name: str,
         data_source_label: Optional[str],
+        why: Optional[dict] = None,
     ) -> AggregationJobResponse:
         """Convert ORM to enriched response for the global listing."""
         # Compute duration
@@ -855,6 +991,8 @@ class AggregationService:
             projection_mode=job.projection_mode,
             duration_seconds=duration,
             edge_coverage_pct=coverage,
+            reconcile_reason=(why or {}).get("reason"),
+            reconcile_evidence=(why or {}).get("evidence"),
             last_cursor=job.last_cursor,
             max_retries=job.max_retries,
             timeout_secs=job.timeout_secs,
@@ -899,9 +1037,22 @@ class AggregationService:
 
         # Always report the effective ENV defaults so the editor seeds from
         # ``persisted ?? envDefault`` (present whether or not a row exists).
+        # Called rather than mirrored as a module constant: the other env
+        # defaults above are read once at import, but rollup storage is the
+        # one an operator may flip on a live deploy to rescue a fleet, and a
+        # cached copy would report the stale value back to the editors.
+        # Local import — the providers package pulls in the graph client and
+        # this module is imported long before it.
+        from backend.app.providers.falkordb_materialize import (
+            _materialize_fine_pairs_mode,
+        )
+
         env_kwargs = dict(
             env_rebuild_min_interval_secs=AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
             env_drift_auto_rebuild=AGGREGATION_DRIFT_AUTO_REBUILD,
+            env_probe_enabled=AGGREGATION_PROBE_ENABLED,
+            env_probe_interval_secs=AGGREGATION_PROBE_INTERVAL_SECS,
+            env_materialize_fine_pairs=_materialize_fine_pairs_mode(),
         )
         row = await session.get(AggregationSettingsORM, "global")
         if row is None:
@@ -939,7 +1090,26 @@ class AggregationService:
         are independent columns on the single settings row: each is written
         only when supplied, so the pipeline-tuning editor and the cadence
         editor never clobber each other. Busts the in-process cadence cache
-        so a same-process consumer sees the change immediately."""
+        so a same-process consumer sees the change immediately.
+
+        BOTH columns are MERGED, not replaced, for the same reason: each
+        carries unrelated groups of settings edited by different callers, and
+        a replace meant whichever saved last silently erased the other's
+        fields. ``cadence`` holds the rebuild cooldown beside the
+        reconciliation policy; ``tuning`` holds the pipeline caps/floors
+        (workspace Defaults dialog) beside rollup storage (the Automation
+        modal's ③ Act). Only keys the caller actually sent are touched;
+        sending one explicitly as ``null`` still clears it, which is how
+        "leave blank to use the default" works.
+
+        The two columns use DIFFERENT key casings and must keep doing so:
+        ``cadence_json`` is camelCase (its reader parses aliases) while
+        ``tuning_json`` is snake_case, because ``_effective_tuning`` feeds
+        that dict straight to the pipeline, which reads
+        ``tuning.get("materialize_fine_pairs")``. Dumping tuning
+        ``by_alias=True`` would store camelCase keys the pipeline never looks
+        up — every stored default silently inert.
+        """
         from .models import AggregationSettingsORM
 
         row = await session.get(AggregationSettingsORM, "global")
@@ -947,9 +1117,34 @@ class AggregationService:
             row = AggregationSettingsORM(id="global")
             session.add(row)
         if tuning is not None:
-            row.tuning_json = json.dumps(tuning.model_dump(exclude_none=True))
+            merged_tuning = {}
+            if row.tuning_json:
+                try:
+                    merged_tuning = json.loads(row.tuning_json)
+                except (TypeError, ValueError):
+                    merged_tuning = {}
+            # Field names, NOT aliases — see the docstring.
+            sent_tuning = tuning.model_dump(exclude_unset=True)
+            for key, value in sent_tuning.items():
+                if value is None:
+                    merged_tuning.pop(key, None)
+                else:
+                    merged_tuning[key] = value
+            row.tuning_json = json.dumps(merged_tuning)
         if cadence is not None:
-            row.cadence_json = json.dumps(cadence.model_dump(exclude_none=True))
+            merged = {}
+            if row.cadence_json:
+                try:
+                    merged = json.loads(row.cadence_json)
+                except (TypeError, ValueError):
+                    merged = {}
+            sent = cadence.model_dump(by_alias=True, exclude_unset=True)
+            for alias, value in sent.items():
+                if value is None:
+                    merged.pop(alias, None)
+                else:
+                    merged[alias] = value
+            row.cadence_json = json.dumps(merged)
         row.updated_at = _now()
         row.updated_by = updated_by
         await session.commit()
@@ -1316,6 +1511,125 @@ class AggregationService:
         )
         return secs
 
+    # Sentinel for "this field was not sent", so a PATCH carrying only one
+    # field cannot silently clear the other. ``None`` is a real value here
+    # (it means "clear the override, inherit the global").
+    _UNSET = object()
+
+    async def _get_or_create_state(
+        self, ds_id: str, session: AsyncSession,
+    ) -> "AggregationDataSourceStateORM":
+        """Fetch this source's aggregation-state row, creating one if absent.
+
+        Shared by every per-source override setter (reconcile, probe,
+        pause, ...): a never-aggregated source has no state row — and that
+        is precisely the source an operator may want to exclude, from the
+        first build, from probing, from anything — so refusing to record
+        the choice would break the case the setting exists for.
+
+        Raises ``NotFoundError`` if the data source itself doesn't exist (or
+        is soft-deleted). Does not commit; the caller mutates the returned
+        row and commits once, alongside its own fields.
+        """
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is None:
+            from backend.app.db.models import WorkspaceDataSourceORM
+
+            ds = await session.get(WorkspaceDataSourceORM, ds_id)
+            if ds is None or ds.deleted_at is not None:
+                raise NotFoundError(f"Data source {ds_id} not found")
+            state = AggregationDataSourceStateORM(
+                data_source_id=ds_id,
+                workspace_id=ds.workspace_id,
+                aggregation_status="none",
+            )
+            session.add(state)
+        return state
+
+    async def set_source_reconcile_settings(
+        self, ds_id: str, session: AsyncSession, *,
+        enabled: Any = _UNSET, check_interval_secs: Any = _UNSET,
+    ) -> dict:
+        """Set or clear the per-source reconciliation overrides.
+
+        UPSERTS, deliberately unlike ``set_source_rebuild_interval``, which
+        requires the state row to exist. A never-aggregated source has no
+        state row — and that is precisely the source an operator may want to
+        exclude from the automatic first build, so refusing to record their
+        choice would break the case the setting exists for.
+
+        Only fields explicitly passed are written; the rest keep their stored
+        value.
+        """
+        state = await self._get_or_create_state(ds_id, session)
+
+        if enabled is not self._UNSET:
+            state.reconcile_enabled = enabled
+        if check_interval_secs is not self._UNSET:
+            state.reconcile_check_interval_secs = check_interval_secs
+        await session.commit()
+        logger.info(
+            "Reconcile settings for data source %s: enabled=%s interval=%s",
+            ds_id, state.reconcile_enabled, state.reconcile_check_interval_secs,
+        )
+        return {
+            "reconcile_enabled": state.reconcile_enabled,
+            "reconcile_check_interval_secs": state.reconcile_check_interval_secs,
+        }
+
+    async def set_source_probe_settings(
+        self, ds_id: str, session: AsyncSession, *,
+        enabled: Any = _UNSET, interval_secs: Any = _UNSET,
+    ) -> dict:
+        """Set or clear the per-source drift-probe overrides.
+
+        UPSERTS for the same reason ``set_source_reconcile_settings`` does: a
+        never-aggregated source has no state row, and that is exactly the
+        source an operator may want to exclude from probing.
+
+        Only fields explicitly passed are written. ``None`` clears an
+        override; ``False`` is a real value and is stored as one.
+        """
+        state = await self._get_or_create_state(ds_id, session)
+
+        if enabled is not self._UNSET:
+            state.probe_enabled = enabled
+        if interval_secs is not self._UNSET:
+            state.probe_interval_secs = interval_secs
+        await session.commit()
+        logger.info(
+            "Probe settings for data source %s: enabled=%s interval=%s",
+            ds_id, state.probe_enabled, state.probe_interval_secs,
+        )
+        return {
+            "probe_enabled": state.probe_enabled,
+            "probe_interval_secs": state.probe_interval_secs,
+        }
+
+    async def set_source_pause(
+        self, ds_id: str, session: AsyncSession, *, paused_until: Optional[str],
+    ) -> dict:
+        """Set or clear the operator snooze for one source.
+
+        A HOLD, not a guard: automation keeps evaluating and keeps recording
+        the finding while ``paused_until`` is in the future, it just refuses
+        to act (see ``reconcile._hold``). UPSERTS for the same reason
+        ``set_source_probe_settings`` does — a never-aggregated source has no
+        state row, and that is exactly the source an operator may want to
+        snooze.
+        """
+        state = await self._get_or_create_state(ds_id, session)
+
+        state.paused_until = paused_until
+        await session.commit()
+        logger.info(
+            "Pause for data source %s: paused_until=%s",
+            ds_id, state.paused_until,
+        )
+        return {"paused_until": state.paused_until}
+
     # ── Change Detection ──────────────────────────────────────────────
 
     async def check_drift(
@@ -1368,6 +1682,10 @@ class AggregationService:
         self, ds_id: str, session: AsyncSession, *,
         reason: str = "external_load", force: bool = False,
         origin: str = "api", actor: str = "internal",
+        audit_reason: Optional[str] = None,
+        evidence: Optional[dict] = None,
+        trigger_source: str = "api",
+        run_id: Optional[str] = None,
     ) -> SourceChangedResponse:
         """Convergence entry point after a DIRECT write to a source's graph.
 
@@ -1394,6 +1712,12 @@ class AggregationService:
         before the rebuild completes re-invalidates harmlessly and the
         idempotency key collapses the duplicate job; if the rebuild fails,
         the stored fingerprint stays old so the next signal retries.
+
+        ``audit_reason`` / ``evidence`` are carried straight through to the
+        one audit event this call emits — the reconciliation sweep uses them
+        to record WHY it acted and the counts behind it. They change no
+        behaviour here; the one-row-per-signal contract that
+        ``refresh_source(scope="auto")`` depends on is preserved.
         """
         from .models import AggregationDataSourceStateORM
 
@@ -1448,6 +1772,7 @@ class AggregationService:
             event_id = await self._emit_signal_event(
                 workspace_id=workspace_id, ds_id=ds_id, origin=origin,
                 actor=actor, gate="unchanged", actions={}, outcome="noop",
+                audit_reason=audit_reason, evidence=evidence, run_id=run_id,
             )
             return SourceChangedResponse(
                 changed=False,
@@ -1545,7 +1870,11 @@ class AggregationService:
                         AggregationTriggerRequest(
                             idempotency_key=f"source-changed:{current_fp or uuid4().hex}",
                         ),
-                        "api",
+                        # Defaults to "api" so every existing caller (connector
+                        # webhooks, seed scripts, the refresh endpoints) is
+                        # unchanged; the reconciliation sweep passes its own so
+                        # its rebuilds are identifiable in Job History.
+                        trigger_source,
                         session,
                     )
                     job_id = job.id
@@ -1601,6 +1930,8 @@ class AggregationService:
             workspace_id=workspace_id, ds_id=ds_id, origin=origin,
             actor=actor, gate=("forced" if force else "changed"),
             actions=actions, outcome=outcome, detail=trigger_detail,
+            audit_reason=audit_reason, evidence=evidence, job_id=job_id,
+            run_id=run_id,
         )
 
         return SourceChangedResponse(
@@ -1615,7 +1946,8 @@ class AggregationService:
 
     async def _emit_signal_event(
         self, *, workspace_id, ds_id, origin, actor, gate, actions, outcome,
-        detail=None,
+        detail=None, audit_reason=None, evidence=None, job_id=None,
+        run_id=None,
     ) -> Optional[str]:
         """Best-effort audit emit for one ``signal_source_changed`` outcome.
 
@@ -1637,6 +1969,10 @@ class AggregationService:
                 actions=actions,
                 outcome=outcome,
                 detail=detail,
+                reason=audit_reason,
+                evidence=evidence,
+                job_id=job_id,
+                run_id=run_id,
             )
         except Exception as exc:
             logger.warning(
@@ -1980,8 +2316,9 @@ class AggregationService:
         # Resolved rebuild window for this source (per-source override →
         # persisted global → env), so the badge matches the cooldown gate.
         cadence = await read_global_cadence(session)
-        overrides = await _rebuild_override_map(session, [ds.id])
-        override_secs = overrides.get(ds.id)
+        states = await _state_map(session, [ds.id])
+        state_row = states.get(ds.id, {})
+        override_secs = state_row.get("rebuild_min_interval_secs")
         cooldown_interval_secs = resolve_rebuild_interval(
             override_secs, cadence.rebuild_min_interval_secs,
         )
@@ -2046,19 +2383,51 @@ class AggregationService:
                     ds.graph_fingerprint, live_fingerprint,
                 )
 
+        # Reconciliation detail. The check-cadence trio mirrors the rebuild
+        # trio above; ``observed`` comes from the stats service's cached
+        # counts (refreshed above when Probe wrote the counts facet).
+        recon_override = state_row.get("reconcile_check_interval_secs")
+        recon_interval = resolve_reconcile_interval(
+            recon_override, cadence.reconcile_check_interval_secs,
+        )
+        recon_source = (
+            "custom" if recon_override is not None
+            else "global" if cadence.reconcile_check_interval_secs is not None
+            else "default"
+        )
+        # Detect (drift-probe) cadence trio — same shape AND the same
+        # vocabulary as its two siblings. The drawer renders all three through
+        # one label map, so a private vocabulary here printed the raw token
+        # ("override"/"env") to the operator beside "Custom" and "System
+        # default".
+        probe_override = state_row.get("probe_interval_secs")
+        probe_interval = resolve_probe_interval(
+            probe_override, cadence.probe_interval_secs,
+        )
+        probe_source = (
+            "custom" if probe_override is not None
+            else "global" if cadence.probe_interval_secs is not None
+            else "default"
+        )
+        observed_agg, stats_as_of = await _observed_overlay(session, ds.id)
+        versioned = await _platform_mastered_ids()
+
         return FreshnessDoc(
             **_freshness_row_kwargs(
                 ds, provider_name=provider_name, signals=signals,
                 running_job_id=running.get(ds.id), last_event=last_event,
                 drifted=drifted,
                 cooldown_interval_secs=cooldown_interval_secs,
+                state_row=state_row,
+                reconcile_enabled_global=cadence.reconcile_enabled,
+                last_failure_reason=last_failure_reason,
+                last_failure_category=last_failure_category,
+                platform_mastered=ds.id in versioned,
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
             cache_key_count=cache_key_count,
             cache_key_count_by_endpoint=cache_key_count_by_endpoint,
-            last_failure_reason=last_failure_reason,
-            last_failure_category=last_failure_category,
             retry_count=retry_count,
             live_fingerprint=live_fingerprint,
             live_node_count=live_node_count,
@@ -2067,6 +2436,29 @@ class AggregationService:
             rebuild_override_secs=override_secs,
             resolved_rebuild_interval_secs=cooldown_interval_secs,
             rebuild_interval_source=rebuild_interval_source,
+            observed_aggregated_edges=observed_agg,
+            expected_aggregated_edges=getattr(
+                ds, "aggregation_edge_count", None,
+            ),
+            stats_as_of=stats_as_of,
+            reconcile_interval_override_secs=recon_override,
+            resolved_reconcile_interval_secs=recon_interval,
+            reconcile_interval_source=recon_source,
+            probe_enabled=resolve_probe_enabled(
+                state_row.get("probe_enabled"), cadence.probe_enabled,
+            ),
+            probe_interval_secs=probe_override,
+            resolved_probe_interval_secs=probe_interval,
+            probe_interval_source=probe_source,
+            next_check_at=_next_check_at(
+                state_row.get("last_reconcile_checked_at"), recon_interval,
+            ),
+            blocked_reason=(
+                state_row.get("drift_state")
+                if state_row.get("drift_state") in (
+                    "blocked", "suspended", "unobservable",
+                ) else None
+            ),
         )
 
     async def _probe_live_stats(
@@ -2075,7 +2467,13 @@ class AggregationService:
         """ONE ``get_schema_stats`` probe → ``(live_fingerprint,
         node_count, edge_count)``. Bounded by ``SCHEDULER_DRIFT_CHECK_TIMEOUT``;
         any failure or timeout degrades to ``(None, None, None)`` — the
-        freshness read must never fail because a provider is slow or down."""
+        freshness read must never fail because a provider is slow or down.
+
+        On success, also writes the cheap counts facet into
+        ``data_source_stats`` so the idle poll, auto sweeper, and meter
+        share the observation Probe already paid for. Write failure never
+        fails the doc.
+        """
         from .fingerprint import fingerprint_from_stats
 
         timeout = float(
@@ -2097,11 +2495,53 @@ class AggregationService:
                 ds_id, exc,
             )
             return (None, None, None)
+
+        await self._persist_probe_counts(ds_id, stats, session)
         return (
             fingerprint_from_stats(stats),
             getattr(stats, "total_nodes", None),
             getattr(stats, "total_edges", None),
         )
+
+    async def _persist_probe_counts(
+        self, ds_id: str, stats: Any, request_session: AsyncSession,
+    ) -> None:
+        """Best-effort counts-facet write from a successful Probe."""
+        from backend.app.db.repositories.stats_repo import (
+            upsert_data_source_stats_counts,
+        )
+
+        try:
+            entity = {
+                str(s.id): int(s.count)
+                for s in (getattr(stats, "entity_type_stats", None) or [])
+            }
+            edges = {
+                str(s.id): int(s.count)
+                for s in (getattr(stats, "edge_type_stats", None) or [])
+            }
+            kwargs = dict(
+                ds_id=ds_id,
+                node_count=int(getattr(stats, "total_nodes", 0) or 0),
+                edge_count=int(getattr(stats, "total_edges", 0) or 0),
+                entity_type_counts=json.dumps(entity),
+                edge_type_counts=json.dumps(edges),
+            )
+            factory = self._session_factory
+            if factory is not None:
+                async with factory() as session:
+                    await upsert_data_source_stats_counts(session, **kwargs)
+                    await session.commit()
+            else:
+                await upsert_data_source_stats_counts(request_session, **kwargs)
+                flush = getattr(request_session, "flush", None)
+                if flush is not None:
+                    await flush()
+        except Exception as exc:
+            logger.warning(
+                "assemble_source_freshness: probe counts write failed for %s: %s",
+                ds_id, exc,
+            )
 
     # ── Startup Recovery (CRIT-4: lives here, NOT on Worker) ─────────
 
@@ -2297,6 +2737,9 @@ class AggregationService:
             SimpleNamespace(entity_type_definitions=entity_defs)
         )
 
+        from backend.app.services.node_identity import load_node_identity
+        identity = await load_node_identity(session, ds)
+
         return {
             "ontology_id": ds.ontology_id,
             "ontology_fingerprint": report.fingerprint,
@@ -2307,12 +2750,15 @@ class AggregationService:
             "containment_edge_types": containment_types,
             "lineage_edge_types": lineage_types,
             "entity_type_levels": entity_type_levels,
-            # URN-equivalent for this physical graph. Frozen onto the job so a
-            # mid-lifecycle change to the data source's identity_property is
-            # picked up by the NEXT run. Default "urn" for every existing source.
-            "identity_property": getattr(ds, "identity_property", None) or "urn",
-            # Node display-name property, frozen likewise. Default "name".
-            "name_property": getattr(ds, "name_property", None) or "name",
+            # URN-equivalent + display-name property for this physical graph,
+            # RESOLVED across all four scopes (data source → provider →
+            # workspace → platform default) rather than read off the data
+            # source alone, so a mapping declared once on the provider reaches
+            # every source it hosts. Frozen onto the job here so a
+            # mid-lifecycle change anywhere in that chain is picked up by the
+            # NEXT run and the worker stays stateless.
+            "identity_property": identity.identity_property,
+            "name_property": identity.name_property,
         }
 
     async def _replay_fingerprint_matches(
@@ -2446,10 +2892,33 @@ class AggregationService:
 
 
 def _event_summary(row) -> Optional[RefreshEventSummary]:
-    """RefreshEventORM → the trimmed summary the freshness views render."""
+    """RefreshEventORM → the trimmed summary the freshness views render.
+
+    ``mode`` is derived from ``origin`` rather than stored: machine-initiated
+    origins are automatic, the rest are a person acting. Bad evidence JSON
+    degrades to ``None`` — a malformed audit payload must never break the
+    read that renders it."""
     if row is None:
         return None
-    return RefreshEventSummary(origin=row.origin, outcome=row.outcome, ts=row.ts)
+    from .schemas import _AUTOMATIC_ORIGINS
+
+    evidence = None
+    raw = getattr(row, "evidence", None)
+    if raw:
+        try:
+            evidence = json.loads(raw)
+        except (TypeError, ValueError):
+            evidence = None
+    return RefreshEventSummary(
+        origin=row.origin,
+        outcome=row.outcome,
+        ts=row.ts,
+        actor=getattr(row, "actor", None),
+        reason=getattr(row, "reason", None),
+        evidence=evidence,
+        mode="automatic" if row.origin in _AUTOMATIC_ORIGINS else "manual",
+        job_id=getattr(row, "job_id", None),
+    )
 
 
 def classify_failure(error_message: Optional[str]) -> Optional[str]:
@@ -2506,17 +2975,39 @@ def _rebuild_cooldown_until(
     return until.isoformat()
 
 
+async def _platform_mastered_ids() -> frozenset:
+    """Live versioned-graph set. Empty on a cold lookup failure so a
+    freshness read never 500s because graphver is down."""
+    try:
+        from backend.app.services.versioned_sources import (
+            versioned_data_source_ids,
+        )
+        return await versioned_data_source_ids()
+    except Exception as exc:
+        logger.warning("versioned-source lookup failed for freshness: %s", exc)
+        return frozenset()
+
+
 def _freshness_row_kwargs(
     ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
     cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
+    state_row: Optional[dict] = None,
+    reconcile_enabled_global: Optional[bool] = None,
+    last_failure_reason: Optional[str] = None,
+    last_failure_category: Optional[str] = None,
+    platform_mastered: bool = False,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
     ``signals`` is ``(generation, cache_as_of, stale_reason)`` from
     :func:`graph_cache.read_freshness_signals`. ``cooldown_interval_secs`` is
     the resolved per-source rebuild window (default = env), so the
-    ``cooldownUntil`` the badge reads reflects any global/per-source override."""
+    ``cooldownUntil`` the badge reads reflects any global/per-source override.
+    ``state_row`` is this source's entry from :func:`_state_map` — the
+    reconciliation verdict the SWEEP stamped, read straight off the row so
+    this path never recomputes detection."""
     generation, cache_as_of, stale_reason = signals
+    st = state_row or {}
     return dict(
         data_source_id=ds.id,
         workspace_id=ds.workspace_id,
@@ -2540,7 +3031,66 @@ def _freshness_row_kwargs(
         drifted=drifted,
         running_job_id=running_job_id,
         last_event=_event_summary(last_event),
+        drift_state=st.get("drift_state"),
+        auto_reconcile=resolve_reconcile_enabled(
+            st.get("reconcile_enabled"), reconcile_enabled_global,
+        ),
+        paused_until=st.get("paused_until"),
+        last_checked_at=st.get("last_reconcile_checked_at"),
+        last_reconciled_at=st.get("last_reconciled_at"),
+        last_reconcile_reason=st.get("last_reconcile_reason"),
+        last_reconcile_mode=st.get("last_reconcile_mode"),
+        last_finding_at=st.get("last_finding_at"),
+        last_finding_reason=st.get("last_finding_reason"),
+        last_finding_evidence=st.get("last_finding_evidence"),
+        last_failure_reason=last_failure_reason,
+        last_failure_category=last_failure_category,
+        platform_mastered=platform_mastered or st.get("drift_state") == "managed",
     )
+
+
+def _next_check_at(
+    last_checked_at: Optional[str], interval_secs: int,
+) -> Optional[str]:
+    """When this source is next due for a drift check. ``None`` when it has
+    never been checked (⇒ due now) or the cadence is disabled."""
+    if not last_checked_at or interval_secs <= 0:
+        return None
+    try:
+        ref = datetime.fromisoformat(last_checked_at)
+    except (TypeError, ValueError):
+        return None
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return (ref + timedelta(seconds=interval_secs)).isoformat()
+
+
+async def _observed_overlay(
+    session: AsyncSession, ds_id: str,
+) -> tuple[Optional[int], Optional[str]]:
+    """``(observed AGGREGATED edge count, stats-as-of)`` from the stats
+    service's cached counts — the same evidence the sweep decides on, so the
+    drawer shows exactly what the detector saw. Never raises; a missing or
+    unparseable row degrades to ``(None, None)``."""
+    from backend.app.db.models import DataSourceStatsORM
+    from .fingerprint import raw_fingerprint_from_counts
+
+    try:
+        row = (await session.execute(
+            select(
+                DataSourceStatsORM.edge_type_counts,
+                DataSourceStatsORM.updated_at,
+            ).where(DataSourceStatsORM.data_source_id == ds_id)
+        )).first()
+        if row is None:
+            return None, None
+        _fp, observed, _raw = raw_fingerprint_from_counts(
+            {}, json.loads(row[0] or "{}"),
+        )
+        return observed, row[1]
+    except Exception as exc:  # pragma: no cover - never fail a read
+        logger.warning("Observed-overlay read failed for %s: %s", ds_id, exc)
+        return None, None
 
 
 async def _running_job_map(
@@ -2568,29 +3118,166 @@ async def _running_job_map(
     return out
 
 
-async def _rebuild_override_map(
+async def _latest_failure_map(
     session: AsyncSession, ds_ids: List[str],
-) -> dict[str, Optional[int]]:
-    """Per-source rebuild-interval override (``data_source_state``) for a set
-    of data sources, in ONE query (batched like ``_running_job_map`` — no
-    per-row reads). Sources without a state row or without an override are
-    simply absent from the map (⇒ resolve to global/env). Never raises: a
-    failure degrades to an empty map so the freshness read still assembles."""
+) -> dict[str, dict]:
+    """``{ds_id: {reason, category}}`` for sources whose *latest* job failed.
+
+    One bounded query over the page's failed-status sources — the fleet
+    table needs the cause without a per-row round-trip. Same classifier as
+    the drawer. Best-effort: a query error returns ``{}``, never raises.
+    """
     if not ds_ids:
         return {}
-    from .models import AggregationDataSourceStateORM
+    try:
+        rows = (await session.execute(
+            select(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.status,
+                AggregationJobORM.error_message,
+            )
+            .where(AggregationJobORM.data_source_id.in_(ds_ids))
+            .order_by(
+                AggregationJobORM.data_source_id,
+                AggregationJobORM.updated_at.desc().nullslast(),
+            )
+        )).all()
+    except Exception as exc:
+        logger.warning("latest-failure map failed: %s", exc)
+        return {}
+
+    out: dict[str, dict] = {}
+    for ds_id, status, error in rows:
+        if ds_id in out:
+            continue  # first per ds = newest
+        if status != "failed":
+            out[ds_id] = {}  # mark seen so an older failed job cannot win
+            continue
+        out[ds_id] = {
+            "reason": error,
+            "category": classify_failure(error),
+        }
+    # Drop the "seen but not failed" placeholders.
+    return {k: v for k, v in out.items() if v}
+
+
+async def _reconcile_reason_map(session, jobs) -> Dict[str, Dict]:
+    """``{job_id: {"reason", "evidence"}}`` for the reconciliation-driven jobs
+    in one page — the "why" behind an automatic rebuild.
+
+    Job History knows what a rebuild DID; ``refresh_events`` knows why it was
+    decided on. This is the join between them, and it is what lets the UI say
+    "Rollups were missing — 1,204,318 → 0" on a job row instead of just
+    "Automatic".
+
+    Batched and joined in memory rather than a JOIN: ``refresh_events`` is a
+    ``public`` table and ``aggregation.jobs`` is not, so they are different
+    domains (``DOMAIN_OWNERSHIP.md``) — the same shape ``_state_map`` uses.
+
+    Filtered to ``trigger_source == 'reconcile'`` first, so a page with no
+    automatic rebuilds issues no query at all.
+    """
+    job_ids = [j.id for j in jobs if j.trigger_source == "reconcile"]
+    if not job_ids:
+        return {}
+
+    from backend.app.db.models import RefreshEventORM
+
+    rows = (await session.execute(
+        select(
+            RefreshEventORM.job_id,
+            RefreshEventORM.reason,
+            RefreshEventORM.evidence,
+        ).where(RefreshEventORM.job_id.in_(job_ids))
+        # Newest first so the first row per job wins if a job were ever
+        # recorded twice (a retry emitting a second event).
+        .order_by(RefreshEventORM.ts.desc())
+    )).all()
+
+    out: Dict[str, Dict] = {}
+    for job_id, reason, evidence in rows:
+        if job_id in out:
+            continue
+        try:
+            parsed = json.loads(evidence) if evidence else None
+        except (TypeError, ValueError):
+            parsed = None
+        out[job_id] = {"reason": reason, "evidence": parsed}
+    return out
+
+
+async def _state_map(
+    session: AsyncSession, ds_ids: List[str],
+) -> dict[str, dict]:
+    """Per-source aggregation-state fields the freshness views need, in ONE
+    query (batched like ``_running_job_map`` — no per-row reads).
+
+    Carries both the rebuild-interval override and the reconciliation
+    columns. One query rather than two: the reconciliation fields live on the
+    same row, and the fleet path already reads it.
+
+    Sources without a state row are simply absent (⇒ resolve to global/env
+    and report no drift verdict). Never raises: a failure degrades to an
+    empty map so the freshness read still assembles."""
+    if not ds_ids:
+        return {}
+    from .models import AggregationDataSourceStateORM as S
 
     try:
         rows = (await session.execute(
             select(
-                AggregationDataSourceStateORM.data_source_id,
-                AggregationDataSourceStateORM.rebuild_min_interval_secs,
-            ).where(AggregationDataSourceStateORM.data_source_id.in_(ds_ids))
+                S.data_source_id,
+                S.rebuild_min_interval_secs,
+                S.reconcile_enabled,
+                S.reconcile_check_interval_secs,
+                S.drift_state,
+                S.last_reconcile_checked_at,
+                S.last_reconciled_at,
+                S.last_reconcile_reason,
+                S.last_reconcile_mode,
+                S.last_finding_at,
+                S.last_finding_reason,
+                S.last_finding_evidence,
+                S.probe_enabled,
+                S.probe_interval_secs,
+                S.paused_until,
+            ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
-        logger.warning("Rebuild-override map read failed (using defaults): %s", exc)
+        logger.warning("State map read failed (using defaults): %s", exc)
         return {}
-    return {ds_id: secs for ds_id, secs in rows if secs is not None}
+    return {
+        r[0]: {
+            "rebuild_min_interval_secs": r[1],
+            "reconcile_enabled": r[2],
+            "reconcile_check_interval_secs": r[3],
+            "drift_state": r[4],
+            "last_reconcile_checked_at": r[5],
+            "last_reconciled_at": r[6],
+            "last_reconcile_reason": r[7],
+            "last_reconcile_mode": r[8],
+            "last_finding_at": r[9],
+            "last_finding_reason": r[10],
+            # Stored as a JSON string. A malformed blob degrades to None
+            # rather than failing the whole freshness read.
+            "last_finding_evidence": _safe_json(r[11]),
+            "probe_enabled": r[12],
+            "probe_interval_secs": r[13],
+            "paused_until": r[14],
+        }
+        for r in rows
+    }
+
+
+def _safe_json(raw: Optional[str]) -> Optional[dict]:
+    """Parse a stored JSON column; None on absent or malformed content."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 # Fleet summary is skipped (returned as None) once the workspace/provider-
@@ -2677,7 +3364,12 @@ async def assemble_fleet_freshness(
     # global + ONE batched query for the per-source overrides, so the
     # ``cooldownUntil`` badge honors both without any per-row reads.
     cadence = await read_global_cadence(session)
-    overrides = await _rebuild_override_map(session, ds_ids)
+    states = await _state_map(session, ds_ids)
+    failed_ids = [
+        ds.id for ds in ds_list if ds.aggregation_status == "failed"
+    ]
+    failures = await _latest_failure_map(session, failed_ids)
+    versioned = await _platform_mastered_ids()
 
     rows = [
         FreshnessRow(**_freshness_row_kwargs(
@@ -2689,8 +3381,14 @@ async def assemble_fleet_freshness(
             running_job_id=running.get(ds.id),
             last_event=events.get(ds.id),
             cooldown_interval_secs=resolve_rebuild_interval(
-                overrides.get(ds.id), cadence.rebuild_min_interval_secs,
+                states.get(ds.id, {}).get("rebuild_min_interval_secs"),
+                cadence.rebuild_min_interval_secs,
             ),
+            state_row=states.get(ds.id),
+            reconcile_enabled_global=cadence.reconcile_enabled,
+            last_failure_reason=(failures.get(ds.id) or {}).get("reason"),
+            last_failure_category=(failures.get(ds.id) or {}).get("category"),
+            platform_mastered=ds.id in versioned,
         ))
         for ds in ds_list
     ]
@@ -2704,6 +3402,7 @@ async def assemble_fleet_freshness(
         signals=signals,
         running=running,
         provider_names=provider_names,
+        states=states,
     )
     return FreshnessFleetResponse(
         rows=rows, total=total, summary=summary,
@@ -2722,6 +3421,7 @@ async def _assemble_fleet_summary(
     signals: dict,
     running: dict,
     provider_names: dict,
+    states: Optional[dict] = None,
 ) -> tuple[Optional[FreshnessSummary], Optional[list[ProviderFreshnessSummary]]]:
     """Fleet stat-tile counts over the workspace/provider-filtered set,
     BEFORE the ``staleOnly`` facet and pagination — so the tiles describe
@@ -2804,26 +3504,56 @@ async def _assemble_fleet_summary(
         else:
             full_signals = await _gc.read_freshness_signals(full_pairs)
 
-    summary = _summarize_freshness(full_rows, full_signals, full_running)
-    provider_summaries = _summarize_by_provider(full_rows, full_signals, full_running)
+    # Drift verdicts for the summary basis. Reuses the page's state map when
+    # the page IS the full set (the common case), exactly as the signals and
+    # running-job maps above do — so the tiles cost no extra query there.
+    full_ids = [row[0] for row in full_rows]
+    if states is not None and set(full_ids) == {ds.id for ds in ds_list}:
+        full_states = states
+    else:
+        full_states = await _state_map(session, full_ids)
+    drifting_ids = {
+        ds_id for ds_id, st in full_states.items()
+        if st.get("drift_state") in _DRIFTING_STATES
+    }
+    suspended_ids = {
+        ds_id for ds_id, st in full_states.items()
+        if st.get("drift_state") == "suspended"
+    }
+
+    summary = _summarize_freshness(
+        full_rows, full_signals, full_running, drifting_ids, suspended_ids,
+    )
+    provider_summaries = _summarize_by_provider(
+        full_rows, full_signals, full_running, drifting_ids, suspended_ids,
+    )
     return summary, provider_summaries
+
+
+# Drift verdicts that count toward the "Drifting" tile. Both mean the rollup
+# no longer matches the data; the split is only about which detector saw it.
+_DRIFTING_STATES = frozenset({"drifting", "overlayMissing"})
 
 
 def _summarize_freshness(
     full_rows: list, signals: dict, running: dict,
+    drifting_ids: Optional[set] = None,
+    suspended_ids: Optional[set] = None,
 ) -> FreshnessSummary:
     """Reduce ``(ds_id, workspace_id, aggregation_status, ...)`` rows +
     their Redis signals + running-job map into the fleet summary counts
     (only the first 3 columns are read here; trailing provider columns,
     when present, are for ``_summarize_by_provider``).
-    ``needs_attention`` is a per-row OR (marker present or failed), not a
-    sum of the two buckets — a row that is both failed and marked stale
-    counts once. ``pending`` counts rows with a live job (see
-    ``_assemble_fleet_summary`` docstring), independent of
+    ``needs_attention`` is a per-row OR (marker, failed, drifting, or
+    suspended), not a sum of those buckets — a row that is both failed
+    and marked stale counts once. ``pending`` counts rows with a live job
+    (see ``_assemble_fleet_summary`` docstring), independent of
     ``aggregation_status`` — a row can be both ``ready`` (from its last
     completed run) and ``pending`` (a new rebuild already in flight)."""
+    drifting_ids = drifting_ids or set()
+    suspended_ids = suspended_ids or set()
     ready = pending = failed = not_built = 0
-    recomputing = needs_attention = cache_stamped = 0
+    recomputing = needs_attention = cache_stamped = drifting = suspended = 0
     for row in full_rows:
         ds_id, ws_id, status = row[0], row[1], row[2]
         if status == "ready":
@@ -2840,7 +3570,16 @@ def _summarize_freshness(
         marker = bool(stale_reason)
         if marker:
             recomputing += 1
-        if marker or status == "failed":
+        is_drifting = ds_id in drifting_ids
+        if is_drifting:
+            drifting += 1
+        is_suspended = ds_id in suspended_ids
+        if is_suspended:
+            suspended += 1
+        # A drifting or suspended source is serving data that no longer
+        # matches its graph, so it belongs in the same triage bucket as a
+        # failed or marked one. Suspended is the case that needs a person.
+        if marker or status == "failed" or is_drifting or is_suspended:
             needs_attention += 1
         if cache_as_of:
             cache_stamped += 1
@@ -2853,11 +3592,15 @@ def _summarize_freshness(
         recomputing=recomputing,
         needs_attention=needs_attention,
         cache_stamped=cache_stamped,
+        drifting=drifting,
+        suspended=suspended,
     )
 
 
 def _summarize_by_provider(
     full_rows: list, signals: dict, running: dict,
+    drifting_ids: Optional[set] = None,
+    suspended_ids: Optional[set] = None,
 ) -> list[ProviderFreshnessSummary]:
     """Per-provider breakdown of the SAME rows ``_summarize_freshness``
     reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
@@ -2870,16 +3613,260 @@ def _summarize_by_provider(
 
     result = []
     for (provider_id, provider_name), rows in groups.items():
-        s = _summarize_freshness(rows, signals, running)
+        s = _summarize_freshness(
+            rows, signals, running, drifting_ids, suspended_ids,
+        )
         result.append(ProviderFreshnessSummary(
             provider_id=provider_id,
             provider_name=provider_name,
             total=s.total, ready=s.ready, pending=s.pending, failed=s.failed,
             not_built=s.not_built, needs_attention=s.needs_attention,
-            cache_stamped=s.cache_stamped,
+            cache_stamped=s.cache_stamped, drifting=s.drifting,
+            suspended=s.suspended,
         ))
     result.sort(key=lambda ps: (ps.provider_name is None, ps.provider_name or ""))
     return result
+
+
+# ── Reconciliation: policy read/write + run history ─────────────────
+
+
+def _policy_response(cadence) -> "ReconcilePolicyResponse":
+    """Persisted policy plus the env defaults behind it, so the editor seeds
+    from ``persisted ?? envDefault`` and a no-op save round-trips the real
+    current default instead of pinning a wrong value."""
+    from .reconcile import REASONS
+    from .schemas import ReconcilePolicyResponse
+
+    return ReconcilePolicyResponse(
+        enabled=cadence.reconcile_enabled,
+        check_interval_secs=cadence.reconcile_check_interval_secs,
+        max_actions_per_run=cadence.reconcile_max_actions_per_run,
+        shrink_tolerance_pct=cadence.reconcile_shrink_tolerance_pct,
+        detectors=cadence.reconcile_detectors,
+        env_enabled=AGGREGATION_RECONCILE_ENABLED,
+        env_check_interval_secs=AGGREGATION_RECONCILE_INTERVAL_SECS,
+        env_max_actions_per_run=AGGREGATION_RECONCILE_MAX_ACTIONS,
+        env_shrink_tolerance_pct=AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT,
+        env_stats_max_age_secs=AGGREGATION_RECONCILE_STATS_MAX_AGE_SECS,
+        all_detectors=list(REASONS),
+    )
+
+
+def _run_model(row) -> "ReconcileRun":
+    from .schemas import ReconcileRun
+
+    detail = {}
+    if row.detail:
+        try:
+            detail = json.loads(row.detail)
+        except (TypeError, ValueError):
+            detail = {}
+    return ReconcileRun(
+        id=row.id,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+        mode=row.mode,
+        actor=row.actor,
+        scanned=row.scanned,
+        skipped=row.skipped,
+        seeded=row.seeded,
+        findings=row.findings,
+        actions=row.actions,
+        errors=row.errors,
+        by_reason=detail.get("byReason") or {},
+        by_skip=detail.get("bySkip") or {},
+    )
+
+
+async def assemble_reconcile_overview(
+    session: AsyncSession, *, limit: int = 20,
+) -> "ReconcileOverviewResponse":
+    """Resolved policy + the most recent sweep runs. Pure SQL; never raises —
+    a missing runs table (pre-migration) degrades to an empty history rather
+    than 500ing the cockpit."""
+    from .models import ReconcileRunORM
+    from .schemas import ReconcileOverviewResponse
+
+    cadence = await read_global_cadence(session)
+    runs = []
+    try:
+        rows = (await session.execute(
+            select(ReconcileRunORM)
+            .order_by(ReconcileRunORM.started_at.desc())
+            .limit(limit)
+        )).scalars().all()
+        runs = [_run_model(r) for r in rows]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Reconcile run history read failed: %s", exc)
+    return ReconcileOverviewResponse(policy=_policy_response(cadence), runs=runs)
+
+
+def parse_activity_since(raw: Optional[str]) -> datetime:
+    """``since`` query: ISO timestamp, or a duration like ``24h``. Default
+    is the last 24 hours. Clamped to the run-record retention window (30
+    days): rows older than that are trimmed anyway, so a wider window only
+    widens the scan, never the result."""
+    now = datetime.now(timezone.utc)
+    if not raw:
+        return now - timedelta(hours=24)
+    text = raw.strip()
+    if len(text) > 1 and text[-1] in ("h", "d") and text[:-1].isdigit():
+        n = int(text[:-1])
+        dt = now - (timedelta(hours=n) if text[-1] == "h" else timedelta(days=n))
+    else:
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                "since must be an ISO timestamp or a duration like 24h or 7d",
+            ) from exc
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    return max(dt, now - timedelta(days=30))
+
+
+def _activity_outcome(finding: dict, event) -> str:
+    if not finding.get("acted"):
+        return "held"
+    if event is not None and event.outcome in ("error", "failed"):
+        return "failed"
+    return "rebuilt"
+
+
+async def assemble_reconcile_activity(
+    session: AsyncSession, *, since: Optional[datetime] = None,
+    limit: int = 500,
+) -> "ReconcileActivityResponse":
+    """Overnight blotter: findings persisted on ``reconcile_runs`` joined
+    to ``refresh_events`` by ``run_id``. Preview passes are excluded —
+    they evaluate and record, they do not change anything overnight.
+
+    ``limit`` bounds the run rows read (newest first) — each row can carry
+    up to a scan-cap of findings, so an unbounded read over a wide window
+    deserializes an unbounded response.
+
+    Never raises: a missing table degrades to an empty ledger rather than
+    500ing the cockpit."""
+    from backend.app.db.models import RefreshEventORM
+    from .models import ReconcileRunORM
+    from .schemas import ReconcileActivityItem, ReconcileActivityResponse
+
+    cutoff = since or (datetime.now(timezone.utc) - timedelta(hours=24))
+    cutoff_iso = cutoff.isoformat()
+    items: list = []
+    try:
+        runs = (await session.execute(
+            select(ReconcileRunORM)
+            .where(ReconcileRunORM.mode != "preview")
+            .where(ReconcileRunORM.started_at >= cutoff_iso)
+            .order_by(ReconcileRunORM.started_at.desc())
+            .limit(limit)
+        )).scalars().all()
+        run_ids = [r.id for r in runs]
+        events_by_key: dict[tuple, object] = {}
+        if run_ids:
+            event_rows = (await session.execute(
+                select(RefreshEventORM)
+                .where(RefreshEventORM.origin == "reconcile-sweep")
+                .where(RefreshEventORM.run_id.in_(run_ids))
+                .order_by(RefreshEventORM.ts.desc())
+            )).scalars().all()
+            for ev in event_rows:
+                key = (ev.run_id, ev.data_source_id)
+                events_by_key.setdefault(key, ev)
+
+        for run in runs:
+            detail = {}
+            if run.detail:
+                try:
+                    detail = json.loads(run.detail)
+                except (TypeError, ValueError):
+                    detail = {}
+            findings = detail.get("findings") or []
+            mode = run.mode if run.mode in ("auto", "manual") else "auto"
+            for finding in findings:
+                ds_id = finding.get("dataSourceId")
+                if not ds_id:
+                    continue
+                event = events_by_key.get((run.id, ds_id))
+                evidence = finding.get("evidence") or {}
+                if event and event.evidence:
+                    try:
+                        evidence = json.loads(event.evidence) or evidence
+                    except (TypeError, ValueError):
+                        pass
+                items.append(ReconcileActivityItem(
+                    run_id=run.id,
+                    run_started_at=run.started_at,
+                    ts=(event.ts if event else run.started_at),
+                    data_source_id=ds_id,
+                    name=finding.get("name"),
+                    workspace_id=finding.get("workspaceId"),
+                    provider_id=finding.get("providerId"),
+                    provider_name=finding.get("providerName"),
+                    reason=finding.get("reason") or (
+                        event.reason if event else None
+                    ),
+                    mode=mode,
+                    outcome=_activity_outcome(finding, event),
+                    skip=finding.get("skip"),
+                    job_id=event.job_id if event else None,
+                    evidence=evidence if isinstance(evidence, dict) else {},
+                ))
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Reconcile activity read failed: %s", exc)
+
+    return ReconcileActivityResponse(since=cutoff_iso, items=items)
+
+
+async def save_reconcile_policy(
+    session: AsyncSession, body, *, sent: set,
+) -> "ReconcilePolicyResponse":
+    """Merge the sent fields into ``aggregation_settings.cadence_json``.
+
+    Read-modify-write on the SAME column the rebuild cadence lives in, so a
+    reconciliation save must not clobber ``rebuildMinIntervalSecs`` or
+    ``driftAutoRebuild`` — hence the merge, and the row lock: two concurrent
+    writers merging against the same snapshot would silently drop one
+    another's fields (no-op on SQLite, ``FOR UPDATE`` on Postgres).
+    """
+    from .models import AggregationSettingsORM
+    from .schemas import AggregationCadence
+
+    row = await session.get(
+        AggregationSettingsORM, "global", with_for_update=True,
+    )
+    if row is None:
+        row = AggregationSettingsORM(id="global")
+        session.add(row)
+    current = {}
+    if row.cadence_json:
+        try:
+            current = json.loads(row.cadence_json)
+        except (TypeError, ValueError):
+            current = {}
+
+    field_map = {
+        "enabled": "reconcileEnabled",
+        "check_interval_secs": "reconcileCheckIntervalSecs",
+        "max_actions_per_run": "reconcileMaxActionsPerRun",
+        "shrink_tolerance_pct": "reconcileShrinkTolerancePct",
+        "detectors": "reconcileDetectors",
+    }
+    for field, alias in field_map.items():
+        if field in sent:
+            value = getattr(body, field)
+            if value is None:
+                current.pop(alias, None)   # unset → inherit the env default
+            else:
+                current[alias] = value
+
+    row.cadence_json = json.dumps(current)
+    row.updated_at = _now()
+    await session.commit()
+    invalidate_global_cadence_cache()
+    return _policy_response(AggregationCadence(**current))
 
 
 # ── Custom Exception Classes ────────────────────────────────────────

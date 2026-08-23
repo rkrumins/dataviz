@@ -59,9 +59,13 @@ async def notify(
     actor_id: Optional[str] = None,
     resource_type: Optional[str] = None,
     resource_id: Optional[str] = None,
+    dedupe_unread: bool = False,
 ) -> int:
     """Queue one notification per recipient. Never notifies the actor
     about their own action — being told what you just did is noise.
+
+    ``dedupe_unread`` skips anyone who already has an unread row of this
+    ``kind`` + ``resource_id`` — a stuck source must not re-ring every hour.
 
     Best-effort: a notification failure must not roll back the action it
     describes.
@@ -70,6 +74,18 @@ async def notify(
     if not recipients:
         return 0
     try:
+        if dedupe_unread and resource_id:
+            already = (await session.execute(
+                select(NotificationORM.user_id).where(
+                    NotificationORM.user_id.in_(recipients),
+                    NotificationORM.kind == kind,
+                    NotificationORM.resource_id == resource_id,
+                    NotificationORM.read_at.is_(None),
+                )
+            )).all()
+            recipients -= {row[0] for row in already}
+            if not recipients:
+                return 0
         for uid in recipients:
             session.add(NotificationORM(
                 user_id=uid,
@@ -260,3 +276,78 @@ async def users_who_can(
         )).all()
         users.update(m[0] for m in members)
     return users
+
+
+async def users_with_global_permission(
+    session: AsyncSession, permission: str,
+) -> set[str]:
+    """Users bound globally to a role that carries ``permission``.
+
+    Sharing deliberately excludes platform owners from workspace bells;
+    ops alerts (a source the sweep will not retry) are the opposite —
+    globally bound ``system:admin`` is the audience. Group bindings
+    expand to their members.
+    """
+    role_rows = (await session.execute(
+        select(RolePermissionORM.role_name).where(
+            RolePermissionORM.permission_id == permission,
+        )
+    )).all()
+    roles = {r[0] for r in role_rows}
+    if not roles:
+        return set()
+
+    bindings = (await session.execute(
+        select(RoleBindingORM).where(
+            RoleBindingORM.scope_type == "global",
+            RoleBindingORM.role_name.in_(roles),
+        )
+    )).scalars().all()
+
+    users: set[str] = set()
+    group_ids: set[str] = set()
+    for b in bindings:
+        if b.subject_type == "user":
+            users.add(b.subject_id)
+        elif b.subject_type == "group":
+            group_ids.add(b.subject_id)
+
+    if group_ids:
+        members = (await session.execute(
+            select(GroupMemberORM.user_id).where(
+                GroupMemberORM.group_id.in_(group_ids)
+            )
+        )).all()
+        users.update(m[0] for m in members)
+    return users
+
+
+async def notify_reconcile_suspended(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    data_source_id: str,
+    source_name: str,
+) -> int:
+    """Bell for a source the breaker just tripped. Workspace managers
+    plus globally bound platform admins; unread-deduped per source."""
+    managers = await users_who_can(
+        session,
+        workspace_id=workspace_id,
+        permission="workspace:datasource:manage",
+    )
+    admins = await users_with_global_permission(session, "system:admin")
+    return await notify(
+        session,
+        user_ids=managers | admins,
+        kind="reconcile.suspended",
+        title=f"{source_name} needs a person",
+        body=(
+            "Automatic reconciliation stopped after repeated rebuilds "
+            "that did not clear the drift."
+        ),
+        link=f"/ingestion?tab=freshness&fds={data_source_id}",
+        resource_type="data_source",
+        resource_id=data_source_id,
+        dedupe_unread=True,
+    )

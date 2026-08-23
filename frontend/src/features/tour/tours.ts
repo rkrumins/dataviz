@@ -1,4 +1,4 @@
-import { Sparkles, DatabaseZap, Compass, Boxes, Workflow, Import, Layers, GitPullRequestArrow } from 'lucide-react'
+import { Sparkles, DatabaseZap, Compass, Boxes, Workflow, Import, Layers, GitPullRequestArrow, Focus } from 'lucide-react'
 import type { TourDefinition } from './types'
 
 /**
@@ -355,6 +355,71 @@ TOURS.push(
     ],
   },
 )
+
+TOURS.push({
+  id: 'lineage-lens',
+  title: 'Explore lineage in Focus mode',
+  description: 'Walk an entity\'s lineage interactively — inspect, focus, expand hop by hop, and share what you find.',
+  icon: Focus,
+  estimate: '2 min',
+  // Targets live inside the open Lens dialog on a view canvas. Offered
+  // automatically the first time the graph body opens, and from Help
+  // while you're on a view.
+  contextual: true,
+  contextPathPrefix: '/views/',
+  steps: [
+    {
+      title: 'Focus mode',
+      body: 'Everything that touches **one entity** — sources on the left, consumers on the right, rolled up so busy entities stay readable. Leave any time with **Esc**.',
+    },
+    {
+      target: '[data-tour="lens-graph"]',
+      placement: 'top',
+      padding: -8,
+      title: 'Explore the lineage',
+      body: 'The whole immediate lineage loads by itself — the capsule at the top says where the walk stands. **Click** a card to inspect it. **Double-click** to focus there. **Hover** a card\'s edge for its follow control — "Load upstream" — and click to grow the board from exactly that entity. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it; **Center on focus** beside the name brings you back, and the board offers it by itself if the focus leaves the screen.',
+    },
+    {
+      target: '[data-tour="lens-children-mode"]',
+      placement: 'bottom',
+      title: 'Open a container your way',
+      body: 'Opening a table or platform shows just the parts that **connect** to your focus. Switch to **All** to see everything it holds — every column stays listed, with the ones carrying lineage highlighted in place.',
+    },
+    {
+      target: '[data-tour="lens-graph"]',
+      placement: 'top',
+      padding: -8,
+      title: 'Browse what a container holds',
+      body: 'An open container is a **scrollable list**: spin the wheel over it and a 400-column table moves under a fixed frame, fetching more as you reach the end — the header keeps saying which rows you are on. **Click** any row for a preview beside it, with what it is, what flows through it, and where you can go next. Prefer the keyboard? **Tab** into the list, then **↑ ↓** to walk it, **Enter** to preview, **Shift+Enter** to focus there, **→** to open a row, **←** to step back out — and just **start typing** to jump to a name.',
+    },
+    {
+      target: '[data-tour="lens-direction"]',
+      placement: 'bottom',
+      title: 'Narrow the view',
+      body: '**Both / Root cause / Impact** narrows the picture to just what feeds this entity or just what it feeds — instantly, with nothing new to fetch.',
+    },
+    {
+      target: '[data-tour="lens-density"]',
+      placement: 'bottom',
+      title: 'Choose the grain',
+      body: 'Partners that share a container fold into it — five tables under one database are one frame. **Overview** lands those containers closed with their counts, **Grouped** opens them to their strongest rows, **Every card** folds nothing. The numbers are the same at every rung; it is your preference, and it follows you.',
+    },
+    {
+      title: 'See the path, take it with you',
+      body: 'Hover or click any card to spotlight its lineage on the board. Click it to stick, and a chip at the bottom states exactly what it knows — drawn versus known — with a button to follow further and one to focus there. When you\'re ready to hand it off, the corner controls save the picture as a **PNG**, or the data itself as **JSON** or **CSV**.',
+    },
+    {
+      target: '[data-tour="lens-share"]',
+      placement: 'bottom',
+      title: 'Share what you found',
+      body: 'Copy a link that reopens this exact exploration — the walked path, everything you expanded, and your direction setting — for a colleague.',
+    },
+    {
+      title: 'Retrace any time',
+      body: 'Every focus is recorded: **← / →** step back and forward, and the **Path** trail jumps anywhere you\'ve been. The **(?)** icon in the header has the full gesture list any time.',
+    },
+  ],
+})
 
 export function getTour(id: string): TourDefinition | undefined {
   return TOURS.find((t) => t.id === id)

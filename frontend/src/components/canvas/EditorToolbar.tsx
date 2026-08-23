@@ -107,7 +107,11 @@ export function EditorToolbar({
                 <div className="flex flex-col gap-1 mx-1">
                     <span className="text-[10px] font-medium text-ink-muted uppercase tracking-wider px-1">Connection</span>
 
-                    <DropdownMenu.Root>
+                    {/* modal={false}: canvas dropdowns must be non-modal — a
+                        modal one locks body pointer-events while open, and an
+                        unmount-while-open strands the lock app-wide (the
+                        b7bb5535 class; see LayerSortMenu.test.tsx). */}
+                    <DropdownMenu.Root modal={false}>
                         <DropdownMenu.Trigger asChild>
                             <button className="h-7 px-2 flex items-center gap-2 bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 rounded-md text-xs font-medium text-ink transition-colors outline-none focus:ring-2 focus:ring-accent-lineage/50">
                                 <span className="truncate max-w-[120px]">{activeLabel}</span>

@@ -24,6 +24,7 @@ const EMPTY_REL_TYPES: RelationshipTypeSchema[] = []
 const EMPTY_STRING_ARRAY: string[] = []
 const EMPTY_VIEWS: ViewConfiguration[] = []
 const EMPTY_ENTITY_HIERARCHY_MAP: Record<string, { canContain: string[]; canBeContainedBy: string[] }> = {}
+const EMPTY_ENTITY_LEVELS: Map<string, number> = new Map()
 const EMPTY_EDGE_TYPE_METADATA_MAP: Record<string, EdgeTypeMetadata> = {}
 // These are intentionally EMPTY — the backend's ontology (or its graph introspection)
 // defines what containment and lineage mean for each specific graph.
@@ -714,6 +715,26 @@ export function useEntityTypeHierarchyMap() {
         },
       ])
     )
+  }, [entityTypes])
+}
+
+/**
+ * Entity-type id → hierarchy level (0 = coarsest/root, higher = finer).
+ *
+ * Levels are what the backend's aggregated-edge drill speaks: expanding a
+ * rolled-up connection asks for the NEXT level down. Types the ontology
+ * hasn't leveled are simply absent — callers must treat that as UNKNOWN
+ * and decline to guess, never as level 0.
+ */
+export function useEntityTypeLevels(): Map<string, number> {
+  const entityTypes = useEntityTypes()
+  return useMemo(() => {
+    if (entityTypes.length === 0) return EMPTY_ENTITY_LEVELS
+    const m = new Map<string, number>()
+    for (const et of entityTypes) {
+      if (typeof et.hierarchy?.level === 'number') m.set(et.id, et.hierarchy.level)
+    }
+    return m
   }, [entityTypes])
 }
 

@@ -41,6 +41,14 @@ export interface AggregationOverridesFormProps {
     disabled?: boolean         // true while the parent's submit is in flight
     /** Optional: hide the projectionMode selector when the parent doesn't allow changing it */
     hideProjectionMode?: boolean
+    /**
+     * What the server would resolve for Rollup storage when this form sends
+     * nothing — `AggregationSettingsResponse.envMaterializeFinePairs`. Without
+     * it an absent key renders as "Auto" while the job runs full detail, which
+     * is the shipped default. Omitted only where the caller genuinely cannot
+     * know; `'true'` is then assumed, matching the backend.
+     */
+    defaultFinePairs?: 'auto' | 'true' | 'false'
 }
 
 // ============================================
@@ -155,6 +163,8 @@ export interface TuningFieldsProps {
     value: AggregationTuning
     onChange: (next: AggregationTuning) => void
     disabled?: boolean
+    /** See `AggregationOverridesFormProps.defaultFinePairs`. */
+    defaultFinePairs?: 'auto' | 'true' | 'false'
 }
 
 /**
@@ -162,7 +172,12 @@ export interface TuningFieldsProps {
  * shell, so the workspace dashboard's "Defaults" dialog can reuse them.
  * Empty inputs mean "no override" (the key is omitted from `tuning`).
  */
-export function TuningFields({ value, onChange, disabled = false }: TuningFieldsProps): JSX.Element {
+export function TuningFields({
+    value,
+    onChange,
+    disabled = false,
+    defaultFinePairs = 'true',
+}: TuningFieldsProps): JSX.Element {
     const setField = (spec: TuningFieldSpec, raw: string, clamp: boolean) => {
         const next: AggregationTuning = { ...value }
         const parsed = spec.float ? parseFloat(raw) : parseInt(raw)
@@ -179,15 +194,18 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
     }
 
     const materialize = value.materializeLeafPairs ?? false
-    // undefined = Auto (cube within budget, diagonal above it);
-    // true = force full detail (fails loudly if over budget).
-    const fullDetail = value.materializeFinePairs === true
+    // Three states, and the absent one is INHERIT — not Auto. Resolving it
+    // against the server's effective default is what stops this control
+    // showing "Auto (recommended)" over a job that runs full detail.
+    const resolvedFinePairs = value.materializeFinePairs ?? defaultFinePairs
+    const fullDetail = resolvedFinePairs === true || resolvedFinePairs === 'true'
 
+    // Auto is written as `'auto'`, never by deleting the key. Deleting means
+    // "inherit", and inheritance cannot walk back a stored global of `true`:
+    // `merged_over` drops undefined, so the stored value would win while this
+    // control claimed otherwise.
     const setStrategy = (force: boolean) => {
-        const next: AggregationTuning = { ...value }
-        if (force) next.materializeFinePairs = true
-        else delete next.materializeFinePairs
-        onChange(next)
+        onChange({ ...value, materializeFinePairs: force ? true : 'auto' })
     }
 
     return (
@@ -196,7 +214,7 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
             <div>
                 <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
                     Rollup storage
-                    <Tip label="Auto stores every ancestor combination when the estimate fits what the graph instance can hold, and falls back to the canonical depth-diagonal above it (finer granularities are derived on demand at read time — nothing is lost, it is just not pre-created). Full detail always pre-creates every combination and FAILS the job instead of exceeding the materialization budget; on multi-million-edge graphs that combination is what exhausts the instance, so Auto is the safe choice at scale.">
+                    <Tip label="Full detail always pre-creates every combination, so every granularity answers from storage and no drill comes back thin. It is the default. It also FAILS the job rather than exceed the materialization budget, and because a forced cube skips the up-front estimate that failure lands mid-run — on a multi-million-edge graph, plan for it. Auto pre-creates every combination too whenever the estimate fits what the instance can hold, and falls back to the canonical depth-diagonal above it, deriving finer granularities on demand at read time: slower drills on the largest graphs, but it degrades instead of failing.">
                         <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
                     </Tip>
                 </label>
@@ -213,7 +231,7 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
                             disabled && 'cursor-not-allowed opacity-60',
                         )}
                     >
-                        <span className="block text-[11px] font-medium text-ink-secondary">Auto (recommended)</span>
+                        <span className="block text-[11px] font-medium text-ink-secondary">Auto</span>
                         <span className="block text-[10px] text-ink-muted mt-0.5">Full detail within budget; diagonal + on-demand above it.</span>
                     </button>
                     <button
@@ -228,7 +246,7 @@ export function TuningFields({ value, onChange, disabled = false }: TuningFields
                             disabled && 'cursor-not-allowed opacity-60',
                         )}
                     >
-                        <span className="block text-[11px] font-medium text-ink-secondary">Always full detail</span>
+                        <span className="block text-[11px] font-medium text-ink-secondary">Always full detail (default)</span>
                         <span className="block text-[10px] text-ink-muted mt-0.5">Pre-create every combination; fails instead of exceeding the budget.</span>
                     </button>
                 </div>
@@ -321,10 +339,14 @@ interface ConfigPreset {
  * trade off is how hard they lean on the provider: pacing, extract
  * concurrency, scan width and retries.
  *
- * `materializeFinePairs` is deliberately ABSENT from every preset. It is
- * typed `boolean | undefined` and "Auto" is only expressible by OMITTING
- * the key, so setting it here would force full-detail — the mode that
- * OOMs a multi-million-edge graph.
+ * `materializeFinePairs` is deliberately ABSENT from every preset, and stays
+ * absent: a preset expresses how hard to lean on the provider, not where the
+ * rollups live. Setting it here would make picking a profile silently
+ * overwrite a fleet-wide storage decision. Absence now means INHERIT (the
+ * stored global, then the env default), so it is also excluded from
+ * `PRESET_MATCH_KEYS` — otherwise a form carrying an explicit `'auto'` could
+ * never match a preset that carries nothing, and no profile would ever
+ * highlight as active.
  */
 const CAPACITY_FLOOR = {
     // Worker RSS bound — unaffected by the graph store's topology.
@@ -375,10 +397,13 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
     },
 ]
 
-const TUNING_KEYS: (keyof AggregationTuning)[] = [
+/** The knobs a preset actually sets, and therefore the only ones that can
+ *  decide whether the current form IS that preset. `materializeFinePairs` is
+ *  excluded on purpose — see CAPACITY_FLOOR above. */
+const PRESET_MATCH_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk',
     'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
-    'maxMaterializedEdges', 'materializeFinePairs',
+    'maxMaterializedEdges',
 ]
 
 // ============================================
@@ -390,6 +415,7 @@ export function AggregationOverridesForm({
     onChange,
     disabled = false,
     hideProjectionMode = false,
+    defaultFinePairs,
 }: AggregationOverridesFormProps): JSX.Element {
     const [showAdvanced, setShowAdvanced] = useState(false)
 
@@ -398,7 +424,7 @@ export function AggregationOverridesForm({
         return CONFIG_PRESETS.find(p =>
             p.maxRetries === value.maxRetries &&
             p.timeoutMinutes === value.timeoutMinutes &&
-            TUNING_KEYS.every(k => tuning[k] === p.tuning[k])
+            PRESET_MATCH_KEYS.every(k => tuning[k] === p.tuning[k])
         )?.id ?? null
     }, [value.maxRetries, value.timeoutMinutes, value.tuning])
 
@@ -423,10 +449,17 @@ export function AggregationOverridesForm({
     }
 
     const applyPreset = (preset: ConfigPreset) => {
+        // Rollup storage survives the swap. A preset replaces `tuning`
+        // wholesale and carries no storage choice of its own, so without this
+        // picking "Balanced" would quietly discard an explicit Auto and hand
+        // the job back to the fleet default.
+        const finePairs = value.tuning?.materializeFinePairs
         update({
             maxRetries: preset.maxRetries,
             timeoutMinutes: preset.timeoutMinutes,
-            tuning: { ...preset.tuning },
+            tuning: finePairs === undefined
+                ? { ...preset.tuning }
+                : { ...preset.tuning, materializeFinePairs: finePairs },
         })
     }
 
@@ -657,6 +690,7 @@ export function AggregationOverridesForm({
                                         value={value.tuning ?? {}}
                                         onChange={tuning => update({ tuning })}
                                         disabled={disabled}
+                                        defaultFinePairs={defaultFinePairs}
                                     />
                                 </div>
                             </div>

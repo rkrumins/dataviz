@@ -496,6 +496,24 @@ export const LayerColumn = React.memo(function LayerColumn({
     return nodes.reduce((acc, n) => acc + count(n), 0)
   }, [nodes])
 
+  // TRACE HEADER: what this lane contributes to the LINEAGE — participants,
+  // not rows. Each root carries the view model's own count of the
+  // participants inside it (`onLineage`, self excluded), so the lane total is
+  // that plus the roots that are participants themselves. Counting rendered
+  // rows instead would fold in the HOSTS — the containers the flow merely
+  // passes through, which the view model is explicit are never on the lineage
+  // — and a column of chrome reporting "8 on this lineage" is exactly the
+  // inflated count this rebuild exists to remove.
+  const onLineageCount = useMemo(() => {
+    if (!isTracing) return 0
+    return nodes.reduce((acc, n) => {
+      const role = (n.data as Record<string, unknown> | undefined)?.traceRole
+      const inside = Number((n.data as Record<string, unknown> | undefined)?.onLineage ?? 0) || 0
+      return acc + inside + (role && role !== 'host' ? 1 : 0)
+    }, 0)
+  }, [isTracing, nodes])
+  const onLineageLabel = `${onLineageCount.toLocaleString()} on this lineage`
+
   // Fetch the next page of a parent's children. Stable identity — the row that
   // calls this used to be an IntersectionObserver sentinel whose one-shot latch
   // was reset every time this callback's identity churned.
@@ -703,6 +721,12 @@ export const LayerColumn = React.memo(function LayerColumn({
   // snapping the user back to the focus and preventing them from scrolling
   // up or down through the lineage. With the guard the focus is centered
   // when a trace starts; afterwards the user's scroll position is theirs.
+  //
+  // T24 F5 — "Trace from here" vertically centered the focus row inside
+  // its OWN column via the virtualizer, but never brought the COLUMN
+  // itself into the canvas's horizontal viewport — the same "3-click
+  // reveal" gap `revealTarget`'s own effect (below) already closed for a
+  // search hit. Chains the identical two-rAF horizontal scrollIntoView.
   const lastCenteredFocusRef = useRef<string | null>(null)
   useEffect(() => {
     if (!traceFocusId) {
@@ -712,9 +736,22 @@ export const LayerColumn = React.memo(function LayerColumn({
     if (lastCenteredFocusRef.current === traceFocusId) return
     const flatIndex = nodeToFlatIndexMap.get(traceFocusId)
     if (flatIndex === undefined) return
+    const targetId = traceFocusId
     const timer = setTimeout(() => {
       virtualizer.scrollToIndex(flatIndex, { align: 'center', behavior: 'smooth' })
-      lastCenteredFocusRef.current = traceFocusId
+      lastCenteredFocusRef.current = targetId
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const row = document.getElementById(`layer-node-${targetId}`)
+          if (row) {
+            row.scrollIntoView({
+              inline: 'center',
+              block: 'nearest',
+              behavior: 'smooth',
+            })
+          }
+        })
+      })
     }, 100)
     return () => clearTimeout(timer)
   }, [traceFocusId, nodeToFlatIndexMap, virtualizer])
@@ -1213,9 +1250,11 @@ export const LayerColumn = React.memo(function LayerColumn({
               <div
                 className="relative px-1.5 py-1 rounded-full text-[10px] font-semibold tabular-nums"
                 style={{ backgroundColor: `${layer.color}20`, color: layer.color }}
-                title={sortIsOverride ? `Sorted: ${SORT_MODE_LABELS[sortMode]}` : undefined}
+                title={isTracing
+                  ? onLineageLabel
+                  : sortIsOverride ? `Sorted: ${SORT_MODE_LABELS[sortMode]}` : undefined}
               >
-                {totalCount}
+                {isTracing ? onLineageCount : totalCount}
                 {/* Sort-override indicator survives collapse, so a curated
                     arrangement doesn't silently vanish from view. */}
                 {sortIsOverride && (
@@ -1293,13 +1332,23 @@ export const LayerColumn = React.memo(function LayerColumn({
                 ) : (
                   <div
                     className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]"
-                    title={`${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${totalCount.toLocaleString()} loaded in this layer (collapsed children included — expand rows to reveal them)`}
+                    title={isTracing
+                      ? onLineageLabel
+                      : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${totalCount.toLocaleString()} loaded in this layer (collapsed children included — expand rows to reveal them)`}
                   >
-                    <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
-                      {visibleCount}
-                    </span>
-                    <span className="text-[9px] text-ink-muted/60">/</span>
-                    <span className="text-[10px] text-ink-muted/60">{totalCount}</span>
+                    {isTracing ? (
+                      <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
+                        {onLineageCount}
+                      </span>
+                    ) : (
+                      <>
+                        <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
+                          {visibleCount}
+                        </span>
+                        <span className="text-[9px] text-ink-muted/60">/</span>
+                        <span className="text-[10px] text-ink-muted/60">{totalCount}</span>
+                      </>
+                    )}
                   </div>
                 )}
                 {/* Curated-order signal — always visible (never hover-gated) so

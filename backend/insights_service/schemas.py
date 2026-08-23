@@ -55,6 +55,18 @@ class StatsDeepJobEnvelope(StatsJobEnvelope):
     kind: Literal["stats_deep"] = "stats_deep"  # type: ignore[assignment]
 
 
+class ProbeJobEnvelope(StatsJobEnvelope):
+    """Drift probe: constant-time counts only, no scan.
+
+    Same scope and fields as a counts poll — deliberately, so the two share
+    the enqueue plumbing — but a different ``kind`` routes it to the probe
+    lane and a different handler. What it writes is narrower too: the counts
+    and their digest, never the schema/ontology columns.
+    """
+
+    kind: Literal["probe"] = "probe"  # type: ignore[assignment]
+
+
 class DiscoveryJobEnvelope(BaseModel):
     """Pre-registration provider asset discovery.
 
@@ -138,13 +150,15 @@ class PurgeJobEnvelope(BaseModel):
 
 
 JobEnvelope = Union[
-    StatsJobEnvelope, StatsDeepJobEnvelope, DiscoveryJobEnvelope, PurgeJobEnvelope,
+    StatsJobEnvelope, StatsDeepJobEnvelope, ProbeJobEnvelope,
+    DiscoveryJobEnvelope, PurgeJobEnvelope,
 ]
 
 
 _ENVELOPE_BY_KIND: dict[str, type[BaseModel]] = {
     "stats_poll": StatsJobEnvelope,
     "stats_deep": StatsDeepJobEnvelope,
+    "probe": ProbeJobEnvelope,
     "discovery": DiscoveryJobEnvelope,
     "purge": PurgeJobEnvelope,
 }

@@ -28,6 +28,9 @@ class StatsServiceConfig:
     sweep_concurrency: int
     heavy_concurrency: int
     purge_concurrency: int
+    # Drift probes are milliseconds each, so this budget exists to bound
+    # fan-out against one FalkorDB endpoint, not to bound our own CPU.
+    probe_concurrency: int
     max_per_graph: int
     max_delivery_attempts: int
     drain_timeout_secs: float
@@ -57,6 +60,7 @@ class StatsServiceConfig:
             sweep_concurrency=int(os.getenv("STATS_SWEEP_CONCURRENCY", "2")),
             heavy_concurrency=int(os.getenv("STATS_HEAVY_CONCURRENCY", "1")),
             purge_concurrency=int(os.getenv("STATS_PURGE_CONCURRENCY", "1")),
+            probe_concurrency=int(os.getenv("STATS_PROBE_CONCURRENCY", "4")),
             max_per_graph=int(os.getenv("STATS_MAX_CONCURRENT_PER_GRAPH", "1")),
             max_delivery_attempts=int(os.getenv("STATS_MAX_DELIVERY_ATTEMPTS", "3")),
             drain_timeout_secs=float(os.getenv("STATS_DRAIN_TIMEOUT_SECS", "60")),

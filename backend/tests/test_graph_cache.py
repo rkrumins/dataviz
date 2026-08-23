@@ -24,6 +24,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_LAYER_ASSIGNMENT,
     ENDPOINT_TOP_LEVEL,
     ENDPOINT_TRACE,
+    ENDPOINT_TRACE_CLOSURE,
     ENDPOINT_TRACE_EXPAND,
     GraphCache,
     _build_key,
@@ -96,6 +97,9 @@ def _enable_children_endpoint(monkeypatch):
     )
     monkeypatch.setitem(
         graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TRACE_EXPAND, True,
+    )
+    monkeypatch.setitem(
+        graph_cache._ENABLED_ENDPOINTS, ENDPOINT_TRACE_CLOSURE, True,
     )
 
 
@@ -494,6 +498,140 @@ async def test_stale_result_caches_with_negative_ttl_and_no_lkg() -> None:
     assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
     keys = [call.args[0] for call in redis.set.await_args_list]
     assert not any(graph_cache._LKG_PREFIX in k for k in keys)
+
+
+def _closure(frontier: list, **overrides: Any) -> Any:
+    """A real TraceClosureResult, because the heuristic reads its fields by
+    name — a stand-in model would pass while the real one is spelled
+    differently."""
+    from backend.common.models.graph import (
+        GraphNode, TraceClosureResult, TraceFocus,
+    )
+    return TraceClosureResult(**{
+        "nodes": [GraphNode(urn="u1", entityType="dataset", displayName="u1")],
+        "edges": [],
+        "focus": TraceFocus(urn="u1", level=0, entityType="dataset"),
+        "effectiveLevel": 0,
+        "frontierUp": frontier,
+        "frontierDown": [],
+        **overrides,
+    })
+
+
+async def _cache_closure(result: Any):
+    from backend.common.models.graph import TraceClosureResult
+
+    redis = _make_redis()
+    cache = GraphCache(redis)
+    await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"),
+        endpoint=ENDPOINT_TRACE_CLOSURE,
+        params={},
+        compute=AsyncMock(return_value=result),
+        model_cls=TraceClosureResult,
+    )
+    return redis
+
+
+@pytest.mark.asyncio
+async def test_a_closure_whose_probe_never_ran_is_not_pinned_for_the_full_ttl() -> None:
+    """The degree probe is dropped when the deadline is close and logged-
+    and-skipped when it fails; either way every frontier entry ships
+    countless. That is honest, and it is also the DEGRADED answer — the
+    lens can only draw a bare chevron where it would say "+8 more". One
+    slow moment used to become the workspace's answer for the full TTL,
+    and the outage fallback on top of that."""
+    from backend.common.models.graph import TraceFrontierNode
+
+    redis = await _cache_closure(_closure([
+        TraceFrontierNode(urn="a"), TraceFrontierNode(urn="b", nextCursor="e:0"),
+    ]))
+
+    assert redis.set.await_count == 1                       # no LKG mirror
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+    assert not any(graph_cache._LKG_PREFIX in c.args[0] for c in redis.set.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_a_max_nodes_page_is_complete_by_contract_and_cached_for_the_full_ttl() -> None:
+    """The degree-exact walk makes a budget-cut page a pure function of
+    (graph, request): every anchor it ships is whole, and the cursor names
+    exactly where the next page starts. Such a page is THE answer to that
+    request and deserves the full TTL — it used to be re-TTL'd to the
+    negative window like a degraded one, so page one of every wide focus
+    was never a cache hit."""
+    from backend.common.models.graph import TraceFrontierNode
+
+    redis = await _cache_closure(_closure(
+        [TraceFrontierNode(urn="a", totalCount=3, reason="cut")],
+        truncated=True, truncationReason="max_nodes", seedTruncated=True, seedCursor="s:b",
+    ))
+
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+
+
+@pytest.mark.asyncio
+async def test_a_coarse_page_is_complete_and_cached_for_the_full_ttl() -> None:
+    """A coarse page has no frontier and no cursor — it is the whole
+    answer to its request — and a cap cut is `max_nodes` like the fine
+    walk's. Both keep the full TTL."""
+    redis = await _cache_closure(_closure([], grain="coarse"))
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    redis = await _cache_closure(_closure([], grain="coarse", truncated=True, truncationReason="max_nodes"))
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+
+
+def test_grain_separates_the_cache_key() -> None:
+    from backend.common.models.graph import TraceClosureRequest
+    fine = TraceClosureRequest.model_validate({"urn": "u1"}).model_dump(mode="json", by_alias=True, exclude_none=True)
+    coarse = TraceClosureRequest.model_validate({"urn": "u1", "grain": "coarse"}).model_dump(mode="json", by_alias=True, exclude_none=True)
+    scope = CacheScope("ws1", "ds1")
+    assert graph_cache._build_key(scope, "g", ENDPOINT_TRACE_CLOSURE, fine) != graph_cache._build_key(scope, "g", ENDPOINT_TRACE_CLOSURE, coarse)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["timeout", "seed_failed", "nodes_failed", "ancestors_failed"])
+async def test_a_failed_page_is_not_pinned(reason: str) -> None:
+    """A FAILURE is still degraded: the same request may well succeed in a
+    moment, and pinning the failed page would serve the failure for the
+    full TTL. (The walk reports failures ahead of max_nodes for exactly
+    this reason.)"""
+    from backend.common.models.graph import TraceFrontierNode
+
+    redis = await _cache_closure(_closure(
+        [TraceFrontierNode(urn="a", totalCount=3, reason="cut")],
+        truncated=True, truncationReason=reason,
+    ))
+
+    assert redis.set.call_args.kwargs["ex"] == graph_cache._NEGATIVE_TTL
+
+
+@pytest.mark.asyncio
+async def test_a_probed_frontier_is_a_complete_answer() -> None:
+    """One real count is enough. A partial probe (the cap, or one failed
+    degree bucket) still answers the question the cache exists for, and
+    treating it as degraded would throw away most of the caching on any
+    wide board."""
+    from backend.common.models.graph import TraceFrontierNode
+
+    redis = await _cache_closure(_closure([
+        TraceFrontierNode(urn="a"), TraceFrontierNode(urn="b", totalCount=8),
+    ]))
+
+    assert redis.set.await_count == 2                       # primary + LKG
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
+    assert any(graph_cache._LKG_PREFIX in c.args[0] for c in redis.set.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_a_drained_walk_is_complete_not_degraded() -> None:
+    """No frontier at all is the walk's own answer — "there is nothing
+    more" — not a probe that failed. Reading an empty list as "all
+    countless" would give the most cacheable result the shortest TTL."""
+    redis = await _cache_closure(_closure([]))
+
+    assert redis.set.await_count == 2
+    assert redis.set.await_args_list[0].kwargs["ex"] != graph_cache._NEGATIVE_TTL
 
 
 @pytest.mark.asyncio

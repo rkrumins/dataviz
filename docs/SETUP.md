@@ -163,6 +163,38 @@ python backend/scripts/seed_falkordb.py --scenarios finance,ecommerce --scale 1 
 ./dev.sh frontend       # frontend on :5173
 ```
 
+## After pulling: rebuild when Python dependencies change
+
+`dev.sh` mounts `./backend` into the running container, so **code** changes
+take effect without a rebuild — but a new entry in `backend/requirements.txt`
+lives in the image, and the container will keep running without it. The
+symptom is silent: the feature that needed it simply behaves as it did
+before.
+
+The one to know about is **`hiredis`** (`backend/requirements.txt`). redis-py
+picks it up automatically and parses every FalkorDB/Redis reply in C; without
+it the same replies are parsed in pure Python — measured at ~1.2 s for a
+single wide trace-closure hydration, and it is what produces the
+`event_loop_lag` warnings. Nothing fails, so nothing tells you.
+
+After pulling a change to `requirements.txt`:
+
+```bash
+./dev.sh build          # or: docker compose ... build viz-service …
+./dev.sh up             # restart the services onto the new image
+```
+
+Check it took:
+
+```bash
+docker exec synodic-dev-viz-service-1 python -c \
+  "import hiredis; from redis.connection import DefaultParser; \
+   print(hiredis.__version__, DefaultParser.__name__)"
+# 3.4.1 _HiredisParser        ← the C parser is active
+```
+
+---
+
 ## Fresh start vs repair
 
 - **`./dev.sh repair`** — fixes a broken environment (stale role, orphan containers) by wiping *only* what's broken. Prompts before destructive action. Use this when things were working before.
@@ -224,6 +256,13 @@ All environment variables with their defaults. Set these in `.env.dev` (dev work
 |----------|---------|-------------|
 | `CREDENTIAL_ENCRYPTION_KEY` | *(none)* | Fernet key for encrypting provider credentials at rest. **Required in production.** |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Comma-separated allowed CORS origins |
+
+### Graph read cache
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CACHE_REDIS_URL` | *(unset — cache disabled)* | Redis for cached graph reads. The compose stack points every service at `redis://redis:6379/1`, a different DB index from the job streams on `/0`. |
+| `GRAPH_CACHE_MAX_PAYLOAD_BYTES` | **`8388608`** (8 MiB) in the compose stack; `1048576` (1 MiB) if the code is run without it | Largest single response that may be cached. Bigger ones are logged and dropped rather than crowding out a thousand small entries. The library default of 1 MiB is **smaller than the responses this stack most wants cached** — a wide trace-closure page (the Lens's own one-hop request on a 500-column table) is ~2.5 MB — so `docker-compose.yml` raises it for every service that holds a cache client. Set to `0` to disable the cap (not recommended); bounds are 0, or 4 KB–64 MB. |
 
 ---
 

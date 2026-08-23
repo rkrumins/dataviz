@@ -484,9 +484,16 @@ export interface TraceV2Request {
 export interface ExpandAggregatedRequest {
     sourceUrn: URN
     targetUrn: URN
-    nextLevel: number | string
+    /** Omit when the ontology repeats an entity type at two containment
+     *  depths — there is then no single honest level to send, and the
+     *  server drills structurally instead. */
+    nextLevel?: number | string | null
     lineageEdgeTypes?: string[] | null
     includeContainmentEdges?: boolean
+    /** Which anchor is being OPENED. Only that side descends; the
+     *  partner contributes itself and its whole subtree, so a Data
+     *  Domain and a Table five levels below it can still meet. */
+    drillAnchor?: URN
 }
 
 export interface ExpandAggregatedBatchRequest {
@@ -518,6 +525,76 @@ export interface TraceV2Result {
     truncationReason?: string | null
     /** Sidecar performance metadata (cache, regime, query latency) — present when emitted by the v2 envelope */
     meta?: TraceMeta
+}
+
+/**
+ * Focus-scoped lineage closure request — one step of a server-driven walk.
+ * No `level`: the closure is leaf-grain by construction, walking RAW
+ * lineage outward from `urn` (or from `seedUrns` when continuing a walk
+ * from leaves already on screen, e.g. under a rolled-up container card).
+ */
+export interface TraceClosureRequest {
+    urn: URN
+    direction?: 'upstream' | 'downstream' | 'both'
+    upstreamDepth?: number
+    downstreamDepth?: number
+    /** null = use all ontology lineage types */
+    lineageEdgeTypes?: string[] | null
+    maxNodes?: number
+    /** Walk continuation: extend from these known lineage-participating
+     *  leaves instead of re-deriving a seed from `urn`. Keeps the walk
+     *  scoped to the ORIGINAL focus's lineage, not `urn`'s. */
+    seedUrns?: string[]
+    /** URNs the client already holds: never re-shipped in the response's
+     *  `nodes`, but an edge into one still is — the seam that stitches
+     *  this step onto the graph the client already has. */
+    excludeUrns?: string[]
+    /** Page one node's adjacency in one direction instead of walking
+     *  further. "e:<edge id>" — the next id to consider; "e:0" starts
+     *  from the top. */
+    afterCursor?: string
+    /** Resume a capped container seed walk: the previous response's
+     *  `seedCursor` ("s:<last-descendant-urn>"). The continuation seeds
+     *  the NEXT keyset page of the focus's lineage-bearing contents and
+     *  walks from those. Mutually exclusive with afterCursor/seedUrns. */
+    seedCursor?: string
+    /** The grain of the answer (Part G, 2026-08-21). 'coarse' asks for the
+     *  `:AGGREGATED` rollup cells incident to the focus — partner
+     *  containers and how many flows, one shot, milliseconds on the server
+     *  — the first paint the raw pages refine behind. Absent/'fine' is the
+     *  degree-exact walk. One shot: never with a cursor or seeds. */
+    grain?: 'fine' | 'coarse'
+}
+
+/** One frontier boundary node as the closure wire ships it — pre-normalization.
+ *  (See `LensFrontierEntry` in lens/lens-subgraph.ts for the adapter's
+ *  normalized shape, where an absent `totalCount`/`nextCursor` becomes `null`.) */
+export interface TraceClosureFrontierNode {
+    urn: URN
+    totalCount?: number | null
+    nextCursor?: string | null
+    /** WHY the node is on the frontier (additive, 2026-08-21): `cut` — the
+     *  node budget or the deadline stopped the walk before it (complete it
+     *  hands-free: re-root via `seedUrns`, or page a hub by `nextCursor`);
+     *  `depth` — the requested depth ended there (the next hop, a pill).
+     *  Absent on older servers. */
+    reason?: 'cut' | 'depth' | null
+}
+
+/** The three closure-only fields `TraceV2Result` doesn't carry — merged
+ *  onto it by `traceClosure`'s return type. */
+export interface LensClosureExtras {
+    frontierUp: TraceClosureFrontierNode[]
+    frontierDown: TraceClosureFrontierNode[]
+    seedTruncated: boolean
+    /** Resume point for a capped container seed walk ("s:<urn>"), or
+     *  null/absent when the focus's contents are fully seeded. Send back
+     *  as the request's `seedCursor` for the next page of contents. */
+    seedCursor?: string | null
+    /** Which grain actually served the page: 'coarse' from the rollup
+     *  lane, 'fine' when a coarse request fell back to the walk (a
+     *  provider without rollups), absent from servers that predate it. */
+    grain?: 'fine' | 'coarse' | null
 }
 
 /**
@@ -802,6 +879,23 @@ export interface GraphDataProvider {
      * config — when tripped, response carries `truncated: true`.
      */
     traceAtLevel?(request: TraceV2Request): Promise<TraceV2Result>
+
+    /**
+     * Focus-scoped lineage closure — the trace focus view's data source.
+     *
+     * Returns exactly the subgraph that participates in THIS focus's lineage:
+     * the lineage-connected leaves (raw hops, regime-independent, correct at
+     * attribute level) plus the containment ancestors needed to nest them.
+     * Tracing one column of a 1000-column table returns that column's lineage,
+     * not the table's. `edges` are the ONLY hops; `containmentEdges` are for
+     * nesting and are never rendered as hops.
+     */
+    traceClosure?(
+        request: TraceClosureRequest,
+        /** `signal` aborts the request (and the server's work on it) when the
+         *  lens closes or re-anchors mid-walk. */
+        opts?: { signal?: AbortSignal },
+    ): Promise<TraceV2Result & LensClosureExtras>
 
     /**
      * Drill into an AGGREGATED edge: return finer-level nodes + edges

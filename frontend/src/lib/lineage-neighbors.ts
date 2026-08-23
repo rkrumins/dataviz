@@ -18,6 +18,103 @@ export interface NeighborRecord {
   neighborNode: LineageNode | undefined
   direction: NeighborDirection
   edgeTypeNorm: string
+  /** Underlying connections this record stands for — always ≥1. An
+   *  absorbed AGGREGATED rollup contributes its own edge count, so
+   *  folding one away can never understate. A floor, never a total. */
+  bundledCount: number
+  /** Relationship types folded into this record beyond `edgeTypeNorm`
+   *  (today: the synthetic rollup). Shown as secondary chips. */
+  alsoTypes: string[]
+  /** This connection is (or absorbed) a coarse rollup of finer flows.
+   *  Survives the fold, so the rollup styling and counts don't vanish
+   *  along with the edge that carried the flag. */
+  aggregated: boolean
+  /** The absorbed rollup edge itself, kept because it — not the concrete
+   *  edge — is what the server can drill into its underlying
+   *  connections. Undefined when nothing was absorbed. */
+  rollupEdge: LineageEdge | undefined
+}
+
+/**
+ * The platform's synthetic rollup relationship. It is declared
+ * `is_lineage` in the system ontology and injected into every ontology,
+ * so it arrives in `lineageEdgeTypes` and reads as an ordinary business
+ * relationship — but it is materialized by the aggregation job, never
+ * authored, and the backend happily returns it ALONGSIDE the raw edge
+ * for the same pair (it dedupes by relationship id, never by pair).
+ * Left alone, that renders one card per edge type for one connection.
+ */
+const ROLLUP_EDGE_TYPE = 'AGGREGATED'
+
+/** Shared empty array — records that absorbed nothing share one. */
+const EMPTY_TYPES: string[] = []
+
+/** How many underlying connections one edge stands for (floor, ≥1). */
+const edgeWeight = (e: LineageEdge): number => {
+  const d = e.data as { isAggregated?: boolean; sourceEdgeCount?: number; edgeCount?: number } | undefined
+  if (!d?.isAggregated) return 1
+  return Math.max(d.sourceEdgeCount ?? d.edgeCount ?? 1, 1)
+}
+
+/**
+ * One card per CONNECTION, not per edge.
+ *
+ * Two collapses, in order:
+ *   1. Exact repeats — the same (neighbour, relationship) arriving as
+ *      two edge ids (store + projection, or two hydration passes).
+ *   2. The synthetic rollup — an AGGREGATED edge folds into the concrete
+ *      relationship to the same neighbour, carrying its weight so the
+ *      count never drops. Genuinely different business relationships
+ *      keep their own record; and a rollup with no concrete sibling is
+ *      kept as-is, because between coarse entities it is often the ONLY
+ *      evidence that a connection exists.
+ */
+function collapseRecords(records: NeighborRecord[]): NeighborRecord[] {
+  if (records.length < 2) return records
+
+  // 1. Exact repeats, insertion order preserved. These are ONE
+  //    connection arriving twice (the store and the projection both
+  //    carry it), so the weight is the larger of the two — summing
+  //    would report a duplicate as extra lineage.
+  const byKey = new Map<string, NeighborRecord>()
+  for (const r of records) {
+    const key = `${r.neighborId}\u0000${r.edgeTypeNorm}`
+    const seen = byKey.get(key)
+    if (seen) {
+      seen.bundledCount = Math.max(seen.bundledCount, r.bundledCount)
+      if (r.aggregated) seen.aggregated = true
+      seen.rollupEdge ??= r.rollupEdge
+    } else byKey.set(key, r)
+  }
+
+  // 2. Rollups fold into a concrete sibling for the same neighbour.
+  const concreteByNeighbor = new Map<string, NeighborRecord>()
+  for (const r of byKey.values()) {
+    if (r.edgeTypeNorm === ROLLUP_EDGE_TYPE) continue
+    const best = concreteByNeighbor.get(r.neighborId)
+    if (!best
+      || r.bundledCount > best.bundledCount
+      || (r.bundledCount === best.bundledCount && r.edgeTypeNorm < best.edgeTypeNorm)
+    ) concreteByNeighbor.set(r.neighborId, r)
+  }
+  const out: NeighborRecord[] = []
+  for (const r of byKey.values()) {
+    if (r.edgeTypeNorm !== ROLLUP_EDGE_TYPE) { out.push(r); continue }
+    // Absorbed by exactly ONE concrete record — spreading it would
+    // count the same underlying flows more than once. The rollup
+    // summarises ALL flows to that neighbour, so it attaches to the
+    // record already standing for the most of them (ties by type name,
+    // so the output is stable across hydration orders).
+    const host = concreteByNeighbor.get(r.neighborId)
+    if (!host) { out.push(r); continue }
+    // max, not sum: the rollup is evidence ABOUT the same flows the
+    // concrete edge stands for, not additional flows.
+    host.bundledCount = Math.max(host.bundledCount, r.bundledCount)
+    host.aggregated = true
+    host.rollupEdge ??= r.edge
+    if (!host.alsoTypes.includes(r.edgeTypeNorm)) host.alsoTypes = [...host.alsoTypes, r.edgeTypeNorm]
+  }
+  return out
 }
 
 /**
@@ -116,9 +213,18 @@ export function deriveNeighborRecords(
       neighborNode: nodeMap.get(isIn ? e.source : e.target),
       direction: isIn ? 'incoming' : 'outgoing',
       edgeTypeNorm,
+      bundledCount: edgeWeight(e),
+      alsoTypes: EMPTY_TYPES,
+      aggregated: !!(e.data as { isAggregated?: boolean } | undefined)?.isAggregated,
+      rollupEdge: undefined,
     }
     if (isIn) incoming.push(record)
     else outgoing.push(record)
   }
-  return { incomingRecords: incoming, outgoingRecords: outgoing }
+  // Collapsed per direction: the same entity legitimately appears on
+  // both sides of a focal, and those are two different connections.
+  return {
+    incomingRecords: collapseRecords(incoming),
+    outgoingRecords: collapseRecords(outgoing),
+  }
 }

@@ -48,6 +48,7 @@ ENDPOINT_CHILDREN = "children-with-edges"
 ENDPOINT_AGGREGATED = "aggregated"
 ENDPOINT_CANVAS_BOOTSTRAP = "canvas-bootstrap"
 ENDPOINT_CANVAS_EXPAND = "canvas-expand"
+ENDPOINT_TRACE_CLOSURE = "trace-closure"
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,12 @@ _CONFIGS: dict[str, BucketConfig] = {
     # client. Covered here so enabling FAIR_SHARE_ENABLED protects them too.
     ENDPOINT_CANVAS_BOOTSTRAP: _load_config("CANVAS_BOOTSTRAP", 10.0, 20),
     ENDPOINT_CANVAS_EXPAND: _load_config("CANVAS_EXPAND", 20.0, 40),
+    # One lens click = one walk step, and each step is a bounded BFS with a
+    # degree probe behind it — heavier than a children page, lighter than a
+    # full aggregated trace. An endpoint absent from this table is not
+    # rate-limited at all (see `take`), so the closure endpoint's own
+    # enforcement call did nothing until it was listed here.
+    ENDPOINT_TRACE_CLOSURE: _load_config("TRACE_CLOSURE", 10.0, 20),
 }
 
 

@@ -25,10 +25,35 @@ export type FailureCategory =
     | 'conflict'
     | 'unknown'
 
+/** A reconciliation verdict, stamped by the sweep and read off the state row.
+ *  Mirrors ``reconcile.DRIFT_STATES``. */
+export type DriftStateValue =
+    | 'inSync' | 'drifting' | 'overlayMissing' | 'neverBuilt'
+    | 'blocked' | 'unobservable' | 'suspended'
+    // Versioned graph: version control owns its rollups, so the sweep observes
+    // and labels it but never acts. Mirrors ``reconcile.DRIFT_STATES``.
+    | 'managed'
+
+/** Why the sweep acted. Mirrors ``reconcile.REASONS``. */
+export type ReconcileReason =
+    | 'overlay_missing' | 'overlay_shrunk' | 'never_aggregated' | 'raw_drift'
+
 export interface RefreshEventSummary {
     origin: string
     outcome: string
     ts: string
+    actor?: string | null
+    /** Set only on reconciliation events: the detector that fired. */
+    reason?: ReconcileReason | string | null
+    /** The counts behind ``reason`` — observed vs expected rollups, raw
+     *  counts before → after, and how old the statistics were. */
+    evidence?: Record<string, unknown> | null
+    /** Derived server-side from origin, so the UI never decodes the origin
+     *  vocabulary itself. */
+    mode?: 'automatic' | 'manual' | null
+    /** The aggregation job this event produced, when it produced one — the
+     *  bridge from "why we rebuilt" to "what the rebuild did". */
+    jobId?: string | null
 }
 
 export interface FreshnessRow {
@@ -52,6 +77,24 @@ export interface FreshnessRow {
     drifted?: boolean | null
     runningJobId?: string | null
     lastEvent?: RefreshEventSummary | null
+    /** Reconciliation, all stamped by the sweep — never recomputed on read. */
+    driftState?: DriftStateValue | null
+    /** Resolved per-source → global → env. */
+    autoReconcile?: boolean | null
+    /** Operator snooze: an ISO instant until which the sweep's action is
+     *  held. The row's driftState/finding still updates while this is in
+     *  the future — only Act is suppressed, not Detect/Check. */
+    pausedUntil?: string | null
+    lastCheckedAt?: string | null
+    lastReconciledAt?: string | null
+    lastReconcileReason?: ReconcileReason | string | null
+    lastReconcileMode?: 'auto' | 'manual' | null
+    /** Populated on failed sources from the latest job — so the table can
+     *  name the cause without opening the drawer. */
+    lastFailureReason?: string | null
+    lastFailureCategory?: FailureCategory | null
+    /** True when a live versioned graph exists — mastered here, not external. */
+    platformMastered?: boolean | null
 }
 
 export interface FreshnessDoc extends FreshnessRow {
@@ -72,18 +115,141 @@ export interface FreshnessDoc extends FreshnessRow {
     resolvedRebuildIntervalSecs?: number | null
     /** Where the resolved interval came from. */
     rebuildIntervalSource?: 'custom' | 'global' | 'default' | null
-    /** Failure surfacing (doc-only, populated only when the latest job failed):
-     *  the raw error, a coarse category for resolution guidance, and how many
-     *  attempts have been made. All null on a healthy source. */
-    lastFailureReason?: string | null
-    lastFailureCategory?: FailureCategory | null
+    /** How many rebuild attempts have been made (doc-only). */
     retryCount?: number | null
+    /** The two numbers the integrity meter compares: what the statistics scan
+     *  last counted in the graph, and what the last successful build reported
+     *  writing. Measured at different instants, so small gaps are normal. */
+    observedAggregatedEdges?: number | null
+    expectedAggregatedEdges?: number | null
+    statsAsOf?: string | null
+    /** The check-cadence trio, mirroring the rebuild trio above. */
+    reconcileIntervalOverrideSecs?: number | null
+    resolvedReconcileIntervalSecs?: number | null
+    reconcileIntervalSource?: 'custom' | 'global' | 'default' | null
+    /** ① Detect — the per-source change-detection override (null = inherit),
+     *  its resolved value and where that value came from. Same trio shape as
+     *  the check and rebuild cadences above. */
+    probeEnabled?: boolean | null
+    probeIntervalSecs?: number | null
+    resolvedProbeIntervalSecs?: number | null
+    probeIntervalSource?: 'custom' | 'global' | 'default' | null
+    nextCheckAt?: string | null
+    /** Set when the sweep is deliberately not acting on this source. */
+    blockedReason?: string | null
+    /** The live detector finding, stamped on EVERY evaluation — including the
+     *  ones the sweep deliberately did not act on. Distinct from
+     *  ``lastReconcile*``, which records the last rebuild we actually queued:
+     *  a source can carry an open finding nobody is acting on, and the drawer
+     *  has to be able to explain that rather than show a bare verdict word. */
+    lastFindingAt?: string | null
+    lastFindingReason?: ReconcileReason | string | null
+    lastFindingEvidence?: Record<string, unknown> | null
 }
 
-/** Echo of the stored per-source override after a freshness-settings PATCH. */
+/** Echo of the stored per-source overrides after a freshness-settings PATCH.
+ *  Each field is null when no override is set (the source inherits). */
 export interface FreshnessSettings {
     dataSourceId: string
     rebuildMinIntervalSecs?: number | null
+    autoReconcileEnabled?: boolean | null
+    reconcileCheckIntervalSecs?: number | null
+    probeEnabled?: boolean | null
+    probeIntervalSecs?: number | null
+    pausedUntil?: string | null
+}
+
+/** PATCH body. Only the keys you send are written — every field treats an
+ *  explicit null as "clear this override", so omitting one leaves it alone. */
+export interface FreshnessSettingsPatch {
+    rebuildMinIntervalSecs?: number | null
+    autoReconcileEnabled?: boolean | null
+    reconcileCheckIntervalSecs?: number | null
+    probeEnabled?: boolean | null
+    probeIntervalSecs?: number | null
+    /** Operator snooze: an ISO instant to hold automation until. Explicit
+     *  null resumes immediately. */
+    pausedUntil?: string | null
+}
+
+// ── Reconciliation ──────────────────────────────────────────────────
+
+export interface ReconcileFinding {
+    dataSourceId: string
+    name?: string | null
+    workspaceId?: string | null
+    providerId?: string | null
+    providerName?: string | null
+    reason: ReconcileReason | string
+    evidence: Record<string, unknown>
+}
+
+export interface ReconcileRun {
+    id: string
+    startedAt?: string | null
+    finishedAt?: string | null
+    mode: 'auto' | 'manual' | 'preview'
+    actor?: string | null
+    scanned: number
+    skipped: number
+    seeded: number
+    findings: number
+    actions: number
+    errors: number
+    byReason: Record<string, number>
+    bySkip: Record<string, number>
+}
+
+/** Persisted policy plus the env defaults behind it, so an editor can seed
+ *  from ``persisted ?? envDefault`` and a no-op save round-trips the real
+ *  current default rather than pinning a wrong value. */
+export interface ReconcilePolicy {
+    enabled?: boolean | null
+    checkIntervalSecs?: number | null
+    maxActionsPerRun?: number | null
+    shrinkTolerancePct?: number | null
+    /** Unset = every detector on. An EMPTY array = every detector OFF. */
+    detectors?: string[] | null
+    envEnabled: boolean
+    envCheckIntervalSecs: number
+    envMaxActionsPerRun: number
+    envShrinkTolerancePct: number
+    envStatsMaxAgeSecs: number
+    allDetectors: string[]
+}
+
+export interface ReconcileOverview {
+    policy: ReconcilePolicy
+    runs: ReconcileRun[]
+}
+
+export interface ReconcileActivityItem {
+    runId: string
+    runStartedAt?: string | null
+    ts?: string | null
+    dataSourceId: string
+    name?: string | null
+    workspaceId?: string | null
+    providerId?: string | null
+    providerName?: string | null
+    reason?: ReconcileReason | string | null
+    mode: 'auto' | 'manual'
+    outcome: 'rebuilt' | 'held' | 'failed'
+    skip?: string | null
+    jobId?: string | null
+    evidence: Record<string, unknown>
+}
+
+export interface ReconcileActivity {
+    since: string
+    items: ReconcileActivityItem[]
+}
+
+export interface ReconcileRunResult {
+    run?: ReconcileRun | null
+    findings: ReconcileFinding[]
+    /** Another replica held the sweep lock, so nothing ran. Not an error. */
+    skipped: boolean
 }
 
 /** Fleet-wide stat-tile counts, computed server-side over the
@@ -104,6 +270,11 @@ export interface FreshnessSummary {
     needsAttention: number
     /** Rows with a non-null ``cacheAsOf``. */
     cacheStamped: number
+    /** Rows whose last reconciliation check found the rollups out of step
+     *  (``drifting`` or ``overlayMissing``). */
+    drifting: number
+    /** Circuit breaker tripped — automation stopped; a person has to look. */
+    suspended?: number
 }
 
 /** Per-provider breakdown of the fleet ``summary`` — identical bucket
@@ -120,6 +291,8 @@ export interface ProviderFreshnessSummary {
     notBuilt: number
     needsAttention: number
     cacheStamped: number
+    drifting: number
+    suspended?: number
 }
 
 export interface FreshnessFleetResponse {
@@ -229,14 +402,54 @@ export const freshnessService = {
         return authFetch<BatchStatus>(`${BASE}/refresh-batches/${batchId}`)
     },
 
-    /** Set or clear a source's rebuild-cadence override (null clears it →
-     *  the source resolves the global/env default). ds:manage only. */
+    /** Set or clear a source's rebuild-cadence and reconciliation overrides
+     *  (null on a field clears it → the source resolves the global/env
+     *  default). ds:manage only.
+     *
+     *  Send ONLY the fields you mean to change: the server applies exactly
+     *  the keys present, because an explicit null means "clear". */
     patchFreshnessSettings(
         dsId: string,
-        body: { rebuildMinIntervalSecs: number | null },
+        body: FreshnessSettingsPatch,
     ): Promise<FreshnessSettings> {
         return authFetch<FreshnessSettings>(`${BASE}/data-sources/${dsId}/freshness-settings`, {
             method: 'PATCH',
+            body: JSON.stringify(body),
+        })
+    },
+
+    // ── Reconciliation ───────────────────────────────────────────────
+
+    /** Policy + recent sweep runs. Ingestion-read. */
+    getReconciliation(limit = 20): Promise<ReconcileOverview> {
+        return authFetch<ReconcileOverview>(
+            `${BASE}/freshness/reconciliation?limit=${limit}`,
+        )
+    },
+
+    /** Overnight blotter: findings joined to jobs by run_id. Default 24h. */
+    getReconciliationActivity(since = '24h'): Promise<ReconcileActivity> {
+        return authFetch<ReconcileActivity>(
+            `${BASE}/freshness/reconciliation/activity?since=${encodeURIComponent(since)}`,
+        )
+    },
+
+    /** Update the global policy. Partial: only the keys sent are written.
+     *  Platform-admin only. */
+    putReconciliation(body: Partial<ReconcilePolicy>): Promise<ReconcilePolicy> {
+        return authFetch<ReconcilePolicy>(`${BASE}/freshness/reconciliation`, {
+            method: 'PUT',
+            body: JSON.stringify(body),
+        })
+    },
+
+    /** Run a sweep now. ``dryRun`` evaluates and reports without queueing
+     *  anything — the blast-radius preview. Platform-admin only. */
+    reconcileNow(
+        body: { dryRun?: boolean; dataSourceIds?: string[] } = {},
+    ): Promise<ReconcileRunResult> {
+        return authFetch<ReconcileRunResult>(`${BASE}/freshness/reconcile-now`, {
+            method: 'POST',
             body: JSON.stringify(body),
         })
     },

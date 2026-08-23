@@ -249,6 +249,40 @@ export function buildDiagnostics(snap: SystemStatusSnapshot): Insight[] {
         })
     }
 
+    // ── Overlay integrity ──
+    if (snap.reconciliation?.stopped) {
+        out.push({
+            id: 'recon:stopped',
+            severity: 'warning',
+            category: 'Aggregation',
+            title: 'Sweeps have stopped',
+            symptom: 'The last overlay-integrity check is older than three check intervals, so every drift verdict in Freshness is frozen at that point.',
+            why: [
+                'The aggregation control plane may be down, or the reconciliation sweeper failed to start.',
+                'A lock held by a crashed replica can also stall the next pass until it expires.',
+            ],
+            resolution: [
+                'Confirm the aggregation control plane is running, then open Ingestion → Freshness and use Check now.',
+            ],
+        })
+    }
+    if ((snap.reconciliation?.suspendedCount ?? 0) > 0) {
+        const n = snap.reconciliation!.suspendedCount
+        out.push({
+            id: 'recon:suspended',
+            severity: 'warning',
+            category: 'Aggregation',
+            title: `${n} source${n === 1 ? '' : 's'} suspended`,
+            symptom: 'Automatic reconciliation stopped after repeated rebuilds that did not clear the drift — a person has to look.',
+            why: [
+                'The circuit breaker trips after consecutive actions that never heal the overlay (often a wipe the rebuild cannot restore).',
+            ],
+            resolution: [
+                'Open Ingestion → Freshness and filter to sources that need a person (?fstatus=suspended).',
+            ],
+        })
+    }
+
     // ── Per-service degraded / down (fold in reasons) ──
     for (const svc of snap.services) {
         if (svc.status !== 'degraded' && svc.status !== 'down') continue

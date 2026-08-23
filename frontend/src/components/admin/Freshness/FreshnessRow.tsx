@@ -19,8 +19,8 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
-    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, Loader2,
-    Minus, MoreHorizontal, RefreshCw, RotateCcw, Sparkles, StopCircle,
+    Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, GitBranch, Loader2,
+    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -30,8 +30,14 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
-import { freshnessState } from './freshnessTriage'
-import type { FreshnessState } from './freshnessTriage'
+import { freshnessState, isDrifting, isPlatformMastered, isReconcileSuspended } from './freshnessTriage'
+import type { FreshnessState, StatusFacet } from './freshnessTriage'
+import {
+    DRIFT_SPEC, DriftStateBadge,
+} from './DriftStateBadge'
+import { failureBadgeLabel, failureBadgeWhy, relatedFailureCount } from './failureGuidance'
+import { SelectionCheckbox } from './SelectionCheckbox'
+import { resolveLastActivity, type LastActivityKind } from './lastActivity'
 
 /** A quiet placeholder for an empty cell — muted enough that a never-built
  *  row's blank cells don't read as three shouting dashes. */
@@ -61,6 +67,73 @@ export function timeUntil(iso?: string | null): string | null {
     return `${Math.round(hours / 24)}d`
 }
 
+/** The reconciliation fields `automationChip` reads off a fleet row — a
+ *  `Pick`, not the full row type, so the decision logic is testable with a
+ *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
+type AutomationRow = Pick<
+    FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil'
+>
+
+/**
+ * The automation-state chip for a fleet row. Absence is the signal: a
+ * healthy, automated source (in sync, not paused) returns null rather than
+ * repeating "everything is fine" on every row — a chip appears only for a
+ * state worth interrupting the scan for.
+ *
+ * Precedence, most consequential first: the breaker (suspended) always
+ * wins, even over an active snooze — a person is needed regardless of
+ * whether the source is also paused. Next, a deliberate opt-out — it is
+ * more permanent than a snooze (a snooze lapses on its own; automation
+ * being off does not), so it wins over "Paused" too: a drifting, paused,
+ * opted-out source resumes on nothing when the snooze lapses, and telling
+ * the operator "Paused" there would imply otherwise. Only once neither of
+ * those applies does a snooze get to surface, and only while it is
+ * actually holding back a real drift verdict — pausing a source that never
+ * drifts looks identical to automation working normally, so it stays as
+ * quiet as any healthy row.
+ */
+export function automationChip(row: AutomationRow): {
+    label: string
+    tone: string
+    facet: StatusFacet
+    Icon: typeof Clock
+    title: string
+} | null {
+    const neutralTone = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
+
+    if (row.driftState === 'suspended') {
+        return {
+            label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone,
+            facet: 'suspended', Icon: AlertTriangle,
+            title: DRIFT_SPEC.suspended.title,
+        }
+    }
+    if (row.autoReconcile === false) {
+        // No StatusFacet filters to "automation off" sources specifically,
+        // so this resolves to '' (the existing "all" facet) — the render
+        // site treats an empty facet as non-interactive rather than wiring
+        // up a click that would silently just clear the status filter.
+        return {
+            label: 'Automation off', tone: neutralTone, facet: '', Icon: Minus,
+            title: 'Automatic reconciliation is turned off for this source. '
+                + 'Drift is still detected and shown, but nothing is rebuilt '
+                + 'automatically.',
+        }
+    }
+    const drifting = row.driftState === 'drifting' || row.driftState === 'overlayMissing'
+    if (drifting && timeUntil(row.pausedUntil)) {
+        return {
+            label: 'Paused', tone: neutralTone, facet: 'drifting',
+            Icon: PauseCircle,
+            title: 'An operator paused automatic reconciliation for this source.',
+        }
+    }
+    // No cooldown chip here on purpose: FreshnessBadges already renders
+    // "Next rebuild in Xm" from the same `cooldownUntil` on this row, so a
+    // chip would be the same fact twice, one column apart.
+    return null
+}
+
 function humanizeReason(reason: string): string {
     switch (reason) {
         case 'unmaterialized': return 'Not materialized'
@@ -78,6 +151,96 @@ const STATUS_STYLE: Record<string, { label: string; tone: string; Icon: typeof C
     pending: { label: 'Pending', tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20', Icon: Clock },
     failed: { label: 'Failed', tone: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20', Icon: AlertTriangle },
     skipped: { label: 'Skipped', tone: 'bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20', Icon: Minus },
+}
+
+export function MasteryTag({ mastered }: { mastered: boolean }) {
+    return mastered
+        ? (
+            <span
+                title="This graph is mastered here and stored in Postgres. Version control maintains its rollups on every publish."
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold shrink-0 bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20"
+            >
+                <GitBranch className="w-3 h-3 shrink-0" />
+                Versioned
+            </span>
+        )
+        : (
+            <span
+                title="This graph is mastered by an external system. Reconciliation watches its overlay for drift."
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold shrink-0 bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20"
+            >
+                <Database className="w-3 h-3 shrink-0" />
+                External
+            </span>
+        )
+}
+
+export function CacheStatusPill({ cached }: { cached: boolean }) {
+    return cached
+        ? (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20">
+                <Database className="w-3 h-3" />
+                Cached
+            </span>
+        )
+        : (
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20">
+                <Minus className="w-3 h-3" />
+                Not cached
+            </span>
+        )
+}
+
+// `in_step` (a routine "checked, nothing to do" outcome) is deliberately
+// absent — it renders as quiet muted text instead of a pill (see the Last
+// activity cell below), so it never competes for attention with Failed or
+// Queued the way an identically-styled pill did.
+const ACTIVITY_PILL: Record<Exclude<LastActivityKind, 'in_step'>, { tone: string; Icon: typeof CheckCircle2 }> = {
+    verdict: {
+        tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+        Icon: AlertTriangle,
+    },
+    rebuild: {
+        tone: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+        Icon: Activity,
+    },
+    refresh: {
+        tone: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+        Icon: CheckCircle2,
+    },
+    queued: {
+        tone: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+        Icon: Clock,
+    },
+    failed: {
+        tone: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
+        Icon: AlertTriangle,
+    },
+}
+
+export function LastActivityPill({ kind, label, originLabel }: {
+    kind: Exclude<LastActivityKind, 'in_step'>
+    label: string
+    originLabel?: string | null
+}) {
+    const { tone, Icon } = ACTIVITY_PILL[kind]
+    return (
+        <span
+            title={originLabel ? `${label} · ${originLabel}` : label}
+            className={cn(
+                'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',
+                tone,
+            )}
+        >
+            <Icon className="w-3 h-3 shrink-0" />
+            <span className="uppercase tracking-wide">{label}</span>
+            {originLabel && !label.toLowerCase().includes(originLabel.toLowerCase()) && (
+                <span className="font-medium normal-case tracking-normal opacity-70">
+                    · {originLabel}
+                </span>
+            )}
+        </span>
+    )
 }
 
 export function AggStatusPill({ status }: { status?: string | null }) {
@@ -128,8 +291,9 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
         badges.push(
             <Badge key="failed"
                 tone="bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20"
-                Icon={AlertTriangle} label="Rebuild failed"
-                title="The last lineage rebuild failed. Open this source for what happened and how to resolve it."
+                Icon={AlertTriangle}
+                label={failureBadgeLabel(row)}
+                title={failureBadgeWhy(row)}
             />,
         )
     } else if (state === 'recomputing') {
@@ -161,6 +325,28 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 title="This source's lineage is out of date and needs a rebuild."
             />,
         )
+    } else if (state === 'neverBuilt') {
+        badges.push(
+            <Badge key="neverBuilt"
+                tone="bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-500/20"
+                Icon={Minus} label="Never built"
+                title="Lineage has never been built for this source."
+            />,
+        )
+    } else if (state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)) {
+        badges.push(
+            <Badge key="upToDate"
+                tone="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                Icon={CheckCircle2} label="Up to date"
+                title="Lineage is built and the last reconcile check found the rollups in sync."
+            />,
+        )
+    }
+
+    // Current overlay verdict — additive on failed/queued rows, and the
+    // primary freshness label when a ready source is drifting.
+    if (isDrifting(row) || isReconcileSuspended(row)) {
+        badges.push(<DriftStateBadge key="driftState" state={row.driftState} />)
     }
 
     if (row.drifted === true) {
@@ -192,11 +378,6 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
     }
 
     if (badges.length === 0) {
-        // "Up to date" is an assertion — only make it for a source that has
-        // actually been built. Never-built sources say so plainly.
-        if (state === 'neverBuilt') {
-            return <span className="text-[11px] text-ink-muted/70">Never built</span>
-        }
         return <span className="text-[11px] text-ink-muted">Up to date</span>
     }
     return <div className="flex flex-wrap items-center gap-1">{badges}</div>
@@ -215,6 +396,15 @@ interface Props {
     expanded?: boolean
     onToggleExpand?: (dsId: string) => void
     onCancelJob?: (dsId: string, jobId: string) => void
+    /** All visible rows — used for "N more like this" related-failure links. */
+    peerRows?: FreshnessRowData[]
+    onFilterFailure?: (category: string) => void
+    /** Lets the automation chip act as a filter, same as the stat band's
+     *  tiles — mirrors `onFilterFailure`'s pattern for the other facet axis. */
+    onFilterStatus?: (facet: StatusFacet) => void
+    selected?: boolean
+    onToggleSelect?: (dsId: string) => void
+    selectable?: boolean
 }
 
 type RowAction = { scope: RefreshScope; label: string; Icon: typeof RefreshCw; iconClass: string; firstBuild?: boolean; hint?: string }
@@ -281,7 +471,11 @@ export function overflowActions(state: FreshnessState): RowAction[] {
     }
 }
 
-export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded, onToggleExpand, onCancelJob }: Props) {
+export function FreshnessRow({
+    row, job, colSpan, workspaceName, onOpenDrawer, onRefresh, busy, expanded,
+    onToggleExpand, onCancelJob, peerRows, onFilterFailure, onFilterStatus, selected,
+    onToggleSelect, selectable,
+}: Props) {
     const state = freshnessState(row)
     const actions = overflowActions(state)
     // Refresh IS the ds:manage mutation. Hide the menu entirely for viewers
@@ -296,18 +490,46 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
         ? Math.min(100, Math.max(0, Math.round(job.progress)))
         : 0
 
+    const severe = state === 'failed' || isReconcileSuspended(row)
+    const related = state === 'failed' && peerRows && onFilterFailure
+        ? relatedFailureCount(peerRows, row.lastFailureCategory, row.dataSourceId)
+        : 0
+
     return (
         <>
-        {/* The existing row, unchanged — same className, same six cells. */}
-        <tr className="border-t border-glass-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors">
+        <tr className={cn(
+            'group/row border-t border-glass-border transition-colors duration-150',
+            'hover:bg-black/[0.015] dark:hover:bg-white/[0.015]',
+            selected
+                ? 'bg-indigo-500/[0.07] shadow-[inset_3px_0_0_0] shadow-indigo-500'
+                : severe && 'bg-red-500/[0.03] shadow-[inset_3px_0_0_0] shadow-red-500/60',
+        )}>
+            {/* Selection */}
+            <td className="pl-3 pr-1 py-2.5 align-middle w-10">
+                {selectable && canManage && state !== 'recomputing' && onToggleSelect ? (
+                    <SelectionCheckbox
+                        selected={!!selected}
+                        onToggle={() => onToggleSelect(row.dataSourceId)}
+                        ariaLabel={selected
+                            ? `Deselect ${row.name || row.dataSourceId}`
+                            : `Select ${row.name || row.dataSourceId}`}
+                    />
+                ) : (
+                    <span className="inline-block w-5" aria-hidden />
+                )}
+            </td>
+
             {/* Source */}
-            <td className="px-3 py-2 align-top">
+            <td className="px-3 py-2.5 align-top">
                 <button
                     onClick={() => onOpenDrawer(row.dataSourceId)}
-                    className="text-left group outline-none"
+                    className="text-left group outline-none min-w-0"
                 >
-                    <span className="text-sm font-semibold text-ink group-hover:text-indigo-600 dark:group-hover:text-indigo-400 group-focus-visible:underline">
-                        {row.name || row.dataSourceId}
+                    <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-sm font-semibold text-ink truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 group-focus-visible:underline">
+                            {row.name || row.dataSourceId}
+                        </span>
+                        <MasteryTag mastered={isPlatformMastered(row)} />
                     </span>
                     <span className="block text-[11px] text-ink-muted">
                         {row.providerName || 'Unknown provider'}
@@ -328,28 +550,94 @@ export function FreshnessRow({ row, job, colSpan, workspaceName, onOpenDrawer, o
 
             {/* Cache */}
             <td className="px-3 py-2 align-top">
-                {row.cacheAsOf
-                    ? <TimeStamp at={row.cacheAsOf} prefix="as of" icon={Database} />
-                    : <EmptyCell />}
+                <div className="flex flex-col gap-1">
+                    <CacheStatusPill cached={row.cacheAsOf != null} />
+                    {row.cacheAsOf
+                        ? <TimeStamp at={row.cacheAsOf} prefix="updated" icon={Database} />
+                        : <EmptyCell />}
+                </div>
             </td>
 
             {/* Freshness */}
             <td className="px-3 py-2 align-top">
-                <FreshnessBadges row={row} job={job} showProgressBar={!expanded} />
+                <div className="flex flex-col gap-1 items-start">
+                    <FreshnessBadges row={row} job={job} showProgressBar={!expanded} />
+                    {related > 0 && onFilterFailure && row.lastFailureCategory && (
+                        <button
+                            type="button"
+                            onClick={() => onFilterFailure(row.lastFailureCategory!)}
+                            className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                        >
+                            {related} more like this
+                        </button>
+                    )}
+                </div>
             </td>
 
             {/* Last activity */}
             <td className="px-3 py-2 align-top">
-                {row.lastEvent
-                    ? (
-                        <div className="flex flex-col gap-0.5">
-                            <span className="text-[11px] text-ink-secondary">
-                                {row.lastEvent.origin} · {row.lastEvent.outcome}
-                            </span>
-                            <TimeStamp at={row.lastEvent.ts} icon={Activity} colorByAge={false} />
-                        </div>
-                    )
-                    : <EmptyCell />}
+                <div className="flex flex-col gap-1 items-start">
+                    {(() => {
+                        const activity = resolveLastActivity(row)
+                        if (!activity) return <EmptyCell />
+                        // The routine "checked, nothing to do" outcome loses the
+                        // pill entirely — border/fill/uppercase are exactly what
+                        // made it compete with Failed/Queued for attention.
+                        if (activity.kind === 'in_step') {
+                            return (
+                                <TimeStamp
+                                    at={activity.at}
+                                    prefix="checked"
+                                    icon={CheckCircle2}
+                                    colorByAge={false}
+                                />
+                            )
+                        }
+                        return (
+                            <>
+                                <LastActivityPill
+                                    kind={activity.kind}
+                                    label={activity.label}
+                                    originLabel={activity.originLabel}
+                                />
+                                <TimeStamp
+                                    at={activity.at}
+                                    prefix={activity.source === 'check' ? 'checked' : 'updated'}
+                                    icon={Activity}
+                                />
+                            </>
+                        )
+                    })()}
+                    {(() => {
+                        const chip = automationChip(row)
+                        if (!chip) return null
+                        // Icon and title travel WITH the decision rather than
+                        // being re-derived from the facet here: the facet is a
+                        // filter target, and several states can share one.
+                        const { Icon, title } = chip
+                        const chipClass = cn(
+                            'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold',
+                            chip.tone,
+                        )
+                        const content = <><Icon className="w-3 h-3 shrink-0" />{chip.label}</>
+                        // Only 'suspended'/'drifting' have a real facet to filter
+                        // to — 'Automation off' resolves to '' (see automationChip)
+                        // and stays a plain label rather than a click that would
+                        // just clear the status filter.
+                        return chip.facet && onFilterStatus ? (
+                            <button
+                                type="button"
+                                title={title}
+                                onClick={() => onFilterStatus(chip.facet)}
+                                className={cn(chipClass, 'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50')}
+                            >
+                                {content}
+                            </button>
+                        ) : (
+                            <span title={title} className={chipClass}>{content}</span>
+                        )
+                    })()}
+                </div>
             </td>
 
             {/* Actions */}

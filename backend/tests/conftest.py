@@ -21,6 +21,14 @@ os.environ.setdefault(
     "JWT_SECRET_KEY", "test-only-jwt-secret-key-not-for-production-use"
 )
 
+# NOTE: deliberately do NOT set CACHE_REDIS_URL here. Providers build a real
+# cache client whenever it is set, so a placeholder URL makes dozens of unit
+# tests attempt (and wait on) a connection to a host that does not exist. Unit
+# tests run cache-off; `_assert_redis_roles_configured()` exempts the DEV role
+# from the endpoint checks for exactly this reason. Cache-off is not dangerous:
+# the ancestor path degrades to uncached computation instead of discarding
+# chains it already computed.
+
 # ---------------------------------------------------------------------------
 # Imports
 # ---------------------------------------------------------------------------

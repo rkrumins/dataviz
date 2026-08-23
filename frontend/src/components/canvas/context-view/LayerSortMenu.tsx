@@ -100,8 +100,13 @@ export function LayerSortMenu({
     )
   }
 
+  // NON-MODAL, invariant: a modal dropdown locks body pointer-events while
+  // open, and a column unmounting/re-keying with the menu open strands that
+  // lock — the whole app goes pointer-dead (the b7bb5535 class; reported
+  // live 2026-08-19 as "drawer buttons need 3-4 clicks"). Pinned by
+  // LayerSortMenu.test.tsx.
   return (
-    <DropdownMenu.Root>
+    <DropdownMenu.Root modal={false}>
       <DropdownMenu.Trigger asChild>
         <button
           onClick={(e) => e.stopPropagation()}

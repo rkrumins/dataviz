@@ -10,7 +10,7 @@ from .endpoints import (
     graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
-    insights, me, system_status, redis_config,
+    insights, me, system_status, redis_config, platform_settings,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     changes,
@@ -64,6 +64,10 @@ api_router.include_router(
 )
 api_router.include_router(
     catalog.router, prefix="/admin/catalog", tags=["admin:catalog"],
+)
+api_router.include_router(
+    platform_settings.router, prefix="/admin/platform",
+    tags=["admin:platform"],
 )
 api_router.include_router(
     ontologies.router, prefix="/admin/ontologies", tags=["admin:ontologies"],

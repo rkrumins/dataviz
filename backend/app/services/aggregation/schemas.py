@@ -4,7 +4,7 @@ Pydantic request/response schemas for the aggregation API.
 These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -32,6 +32,59 @@ def _validate_projection_mode(value: Optional[str]) -> Optional[str]:
         return value
     if value not in ("in_source", "dedicated"):
         raise ValueError("projection_mode must be 'in_source' or 'dedicated'")
+    return value
+
+
+def _validate_paused_until(value: Optional[str]) -> Optional[str]:
+    """Reject a snooze the reader cannot parse — or that cannot hold.
+
+    ``reconcile._pause_active`` treats an unparseable stamp as expired — the
+    right call there, since a corrupt value must not pause a source forever.
+    Accepting one here would therefore store a snooze that silently does
+    nothing, so the format is enforced at the boundary instead. The same
+    goes for a past instant (an already-expired snooze that does nothing)
+    and a far-future one (a permanent hold wearing a time-boxed name — the
+    per-source enable toggle is the honest way to switch a source off).
+    Naive stamps are coerced to UTC, matching how the reader compares them,
+    and the normalized aware form is what gets stored and echoed.
+    """
+    if value is None:
+        return value
+    from datetime import datetime, timedelta, timezone
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "paused_until must be an ISO-8601 instant (e.g. "
+            "2026-08-17T12:00:00+00:00)"
+        )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if dt <= now:
+        raise ValueError("paused_until must be in the future")
+    if dt > now + timedelta(days=90):
+        raise ValueError(
+            "paused_until must be within 90 days — to stop watching a "
+            "source indefinitely, disable its automation instead"
+        )
+    return dt.isoformat()
+
+
+def _validate_detector_names(value: List[str]) -> List[str]:
+    """A typo here is not a bad name, it is a detector that never fires —
+    ``["overlay_missng"]`` reads back as a valid policy while disabling
+    everything it was meant to enable. Empty stays valid ("act on
+    nothing"). Applied at the WRITE boundaries only: ``AggregationCadence``
+    itself also parses stored ``cadence_json``, and a validator there would
+    make previously-stored data unreadable."""
+    from .reconcile import REASONS
+    unknown = [d for d in value if d not in REASONS]
+    if unknown:
+        raise ValueError(
+            f"unknown detector(s) {unknown}; valid detectors are "
+            f"{list(REASONS)}"
+        )
     return value
 
 
@@ -82,13 +135,17 @@ class AggregationTuning(BaseModel):
         None, alias="materializeLeafPairs",
         description="Also materialize leaf-to-leaf mirror pairs (legacy behavior).",
     )
-    materialize_fine_pairs: Optional[bool] = Field(
+    materialize_fine_pairs: Optional[Union[Literal["auto"], bool]] = Field(
         None, alias="materializeFinePairs",
-        description="Legacy full-cube mode: materialize every ancestor-pair "
-                    "combination, including leaf-involving and mixed-level "
-                    "pairs (scales with raw-edge count; can exceed FalkorDB "
-                    "memory). Default false: only the same-level diagonal is "
-                    "stored; the rest is served on demand.",
+        description="Rollup storage. ``true`` (the shipped default) pre-creates "
+                    "every ancestor-pair combination, including leaf-involving "
+                    "and mixed-level pairs, so every canvas granularity answers "
+                    "from storage; a cube over ``maxMaterializedEdges`` fails the "
+                    "job terminally. ``\"auto\"`` stores the full cube only while "
+                    "the estimate fits the cube ceiling and falls back to the "
+                    "depth-diagonal above it, serving the rest on demand. "
+                    "``false`` forces the diagonal. Absent inherits the stored "
+                    "global default, then the env default.",
     )
     max_materialized_edges: Optional[int] = Field(
         None, alias="maxMaterializedEdges", ge=10_000, le=50_000_000,
@@ -322,6 +379,14 @@ class AggregationJobResponse(BaseModel):
     duration_seconds: Optional[float] = Field(None, alias="durationSeconds")
     edge_coverage_pct: Optional[float] = Field(None, alias="edgeCoveragePct")
 
+    # WHY an automatic reconciliation queued this job — the typed detector
+    # code plus the counts behind it, read from the ``refresh_events`` row
+    # that names this job. Only populated for ``triggerSource='reconcile'``,
+    # so a page with no reconciliation jobs costs no extra query. Without
+    # these, Job History can say a rebuild was automatic but never why.
+    reconcile_reason: Optional[str] = Field(None, alias="reconcileReason")
+    reconcile_evidence: Optional[Dict] = Field(None, alias="reconcileEvidence")
+
     # UI phase visibility. Short ID identifying which phase of the
     # materialization pipeline is currently running — 'extracting' /
     # 'computing' / 'reconciling' / 'applying' (see
@@ -369,6 +434,13 @@ class DataSourceReadinessResponse(BaseModel):
     # should be rebuilt. Drives the per-source "rebuild to fix nested
     # hierarchies" warning in the UI.
     needs_rebuild: bool = Field(False, alias="needsRebuild")
+    # Reconciliation, so the data-source profile can answer "is this still in
+    # step with its graph" without fetching the whole freshness doc. Read off
+    # the state row this endpoint already loads — no extra query.
+    drift_state: Optional[str] = Field(None, alias="driftState")
+    last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
+    last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
+    auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
     message: str
 
     class Config:
@@ -488,12 +560,29 @@ class RefreshResponse(BaseModel):
 # ── Freshness cockpit (operator-facing read models) ──────────────────
 
 
+# Origins that are machine-initiated. Everything else is a person acting
+# through the API or a connector on their behalf. Derived rather than stored:
+# ``origin`` + ``actor`` already carry it.
+_AUTOMATIC_ORIGINS = frozenset({"drift", "reconcile", "reconcile-sweep", "script"})
+
+
 class RefreshEventSummary(BaseModel):
     """One row of the refresh_events audit trail, trimmed to what the
     freshness views render. Populated from ``RefreshEventORM``."""
     origin: str
     outcome: str
     ts: str
+    actor: Optional[str] = None
+    # WHY, for a reconciliation event: the typed detector code plus the counts
+    # behind it. ``None`` on every other kind of refresh.
+    reason: Optional[str] = None
+    evidence: Optional[Dict] = None
+    # "automatic" | "manual", derived from origin — the UI shows this rather
+    # than making the reader decode an origin vocabulary.
+    mode: Optional[str] = None
+    # The aggregation job this event produced, so the activity trail can hand
+    # the reader straight to what the rebuild actually did.
+    job_id: Optional[str] = Field(None, alias="jobId")
 
     class Config:
         populate_by_name = True
@@ -528,6 +617,31 @@ class FreshnessRow(BaseModel):
     running_job_id: Optional[str] = Field(None, alias="runningJobId")
     last_event: Optional[RefreshEventSummary] = Field(None, alias="lastEvent")
 
+    # ── Reconciliation ────────────────────────────────────────────────
+    # Read straight off ``data_source_state`` — the sweep stamps them, the
+    # read path never recomputes them (it must stay pure SQL + Redis).
+    drift_state: Optional[str] = Field(None, alias="driftState")
+    auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
+    # Operator snooze. A HOLD, not a guard: the row above still carries its
+    # drift_state/finding while this is in the future — only the sweep's
+    # action is suppressed. On FreshnessRow (not just FreshnessDoc) because
+    # the fleet table renders a "Paused" chip straight off this field.
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
+    last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
+    last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
+    last_reconcile_mode: Optional[str] = Field(None, alias="lastReconcileMode")
+    # Failure surfacing for the fleet table: populated only when
+    # aggregation_status is failed and the latest job is failed. Same
+    # classifier as the drawer — so the row can name the cause without a
+    # second round-trip. Best-effort; never raises.
+    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
+    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    # True when a live graphver.graphs row exists — this source is mastered
+    # here. Distinct from drift_state == managed, which is only stamped after
+    # a reconcile check. Fail-open False when the versioned lookup is down.
+    platform_mastered: bool = Field(False, alias="platformMastered")
+
     class Config:
         populate_by_name = True
 
@@ -561,12 +675,57 @@ class FreshnessDoc(FreshnessRow):
     cache_key_count_by_endpoint: Optional[Dict[str, int]] = Field(
         None, alias="cacheKeyCountByEndpoint",
     )
-    # Failure surfacing (spec §9c): populated only when the latest job for
-    # this source is ``failed`` (one bounded query); None otherwise —
-    # doc-only, best-effort, never raises.
-    last_failure_reason: Optional[str] = Field(None, alias="lastFailureReason")
-    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+    # Retry count stays doc-only (not needed to scan the fleet table).
     retry_count: Optional[int] = Field(None, alias="retryCount")
+
+    # ── Reconciliation detail ─────────────────────────────────────────
+    # The two numbers the drawer's integrity meter compares. ``observed`` is
+    # what the stats service last counted in the graph; ``expected`` is what
+    # the last successful job reported writing.
+    observed_aggregated_edges: Optional[int] = Field(
+        None, alias="observedAggregatedEdges",
+    )
+    expected_aggregated_edges: Optional[int] = Field(
+        None, alias="expectedAggregatedEdges",
+    )
+    stats_as_of: Optional[str] = Field(None, alias="statsAsOf")
+    # The check-cadence trio, mirroring the rebuild-interval trio above so the
+    # drawer can say where the value came from without reading global settings.
+    reconcile_interval_override_secs: Optional[int] = Field(
+        None, alias="reconcileIntervalOverrideSecs",
+    )
+    resolved_reconcile_interval_secs: Optional[int] = Field(
+        None, alias="resolvedReconcileIntervalSecs",
+    )
+    reconcile_interval_source: Optional[str] = Field(
+        None, alias="reconcileIntervalSource",
+    )
+    # ① Detect — the per-source probe override, its resolved value, and where
+    # that value came from. Mirrors the reconcile_*/rebuild_* triples exactly
+    # so the drawer can render "Using default" vs "Overridden" uniformly.
+    probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
+    probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
+    resolved_probe_interval_secs: Optional[int] = Field(
+        None, alias="resolvedProbeIntervalSecs",
+    )
+    probe_interval_source: Optional[str] = Field(
+        None, alias="probeIntervalSource",
+    )
+    next_check_at: Optional[str] = Field(None, alias="nextCheckAt")
+    # Non-null when the sweep is deliberately not acting on this source
+    # (no ontology, suspended by the breaker, overlay not observable…).
+    blocked_reason: Optional[str] = Field(None, alias="blockedReason")
+
+    # The live detector finding, stamped on EVERY evaluation including holds
+    # (migration 20260815_1200_recon_ops). Distinct from last_reconcile_*,
+    # which records the last rebuild we queued: a source can have an open
+    # finding it is deliberately not acting on, and the drawer must be able
+    # to explain that rather than showing a bare verdict word.
+    last_finding_at: Optional[str] = Field(None, alias="lastFindingAt")
+    last_finding_reason: Optional[str] = Field(None, alias="lastFindingReason")
+    last_finding_evidence: Optional[dict] = Field(
+        None, alias="lastFindingEvidence",
+    )
 
     class Config:
         populate_by_name = True
@@ -584,8 +743,14 @@ class FreshnessSummary(BaseModel):
     failed: int = Field(0)  # aggregation_status == "failed"
     not_built: int = Field(0, alias="notBuilt")  # status in ("none","skipped") or no state row
     recomputing: int = Field(0)  # stale marker present
-    needs_attention: int = Field(0, alias="needsAttention")  # marker present OR failed
+    needs_attention: int = Field(0, alias="needsAttention")  # marker, failed, drifting, or suspended
     cache_stamped: int = Field(0, alias="cacheStamped")  # cacheAsOf non-null
+    # driftState is a drifting/overlayMissing verdict from the last sweep.
+    drifting: int = Field(0)
+    # Circuit breaker tripped — automation stopped; a person has to look.
+    # Counted in needsAttention too, but not in drifting (the overlay is
+    # still wrong; the distinction is that the sweep will not retry).
+    suspended: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -605,6 +770,8 @@ class ProviderFreshnessSummary(BaseModel):
     not_built: int = Field(0, alias="notBuilt")
     needs_attention: int = Field(0, alias="needsAttention")
     cache_stamped: int = Field(0, alias="cacheStamped")
+    drifting: int = Field(0)
+    suspended: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -644,6 +811,63 @@ class AggregationCadence(BaseModel):
                     "detects drift. Unset → env default.",
     )
 
+    # ── Automatic reconciliation (the drift / overlay-integrity sweep) ──
+    # Carried here rather than in a new column because ``cadence_json`` is
+    # already the persisted-global store, already read through the cached
+    # ``read_global_cadence``, already env-echoed by ``get_settings``, and
+    # already editable from the Freshness cadence dialog. A separate store
+    # would duplicate all four.
+    reconcile_enabled: Optional[bool] = Field(
+        None, alias="reconcileEnabled",
+        description="Whether the sweep may automatically reconcile sources "
+                    "whose rollups have drifted. Unset → env default.",
+    )
+    reconcile_check_interval_secs: Optional[int] = Field(
+        None, alias="reconcileCheckIntervalSecs", ge=30, le=86400,
+        description="How often each source is checked for drift. Evaluation "
+                    "is pure SQL over counts the probe already collected, and "
+                    "a source whose counts have not moved is not re-evaluated "
+                    "at all, so this can safely sit near the probe interval. "
+                    "Unset → env default.",
+    )
+    reconcile_max_actions_per_run: Optional[int] = Field(
+        None, alias="reconcileMaxActionsPerRun", ge=0, le=200,
+        description="Cap on rebuilds queued by a single sweep. The remainder "
+                    "is picked up next sweep. 0 = detect but never act.",
+    )
+    reconcile_shrink_tolerance_pct: Optional[int] = Field(
+        None, alias="reconcileShrinkTolerancePct", ge=0, le=100,
+        description="How far the observed rollup may fall below the expected "
+                    "count before it reads as shrunk. The two numbers are "
+                    "measured at different instants, so some slack is "
+                    "required, not merely kind.",
+    )
+    reconcile_detectors: Optional[List[str]] = Field(
+        None, alias="reconcileDetectors",
+        description="Which detectors may ACT, from overlay_missing, "
+                    "overlay_shrunk, never_aggregated, raw_drift. Unset = "
+                    "all enabled; an EMPTY list = all disabled (detection "
+                    "still runs and is still surfaced).",
+    )
+
+    # ── Drift probe ───────────────────────────────────────────────────
+    # What actually makes detection fast. The probe reads FalkorDB's
+    # counters instead of scanning, so its interval is a freshness dial
+    # rather than a load dial — the opposite of the stats poll's 900s.
+    probe_enabled: Optional[bool] = Field(
+        None, alias="probeEnabled",
+        description="Whether sources are actively probed for changed counts. "
+                    "Off means drift is only noticed when the (much slower) "
+                    "stats poll happens to refresh. Unset → env default.",
+    )
+    probe_interval_secs: Optional[int] = Field(
+        None, alias="probeIntervalSecs", ge=15, le=86400,
+        description="How often each source's counts are re-read. This is the "
+                    "self-detection SLO: a source nobody notifies us about is "
+                    "noticed within roughly this window plus one sweep tick. "
+                    "Unset → env default.",
+    )
+
     class Config:
         populate_by_name = True
 
@@ -654,6 +878,13 @@ class AggregationSettingsRequest(BaseModel):
     editor and the cadence editor can write without clobbering each other."""
     tuning: Optional[AggregationTuning] = None
     cadence: Optional[AggregationCadence] = None
+
+    @field_validator("cadence")
+    @classmethod
+    def _detectors_known(cls, v):
+        if v is not None and v.reconcile_detectors is not None:
+            _validate_detector_names(v.reconcile_detectors)
+        return v
 
     class Config:
         populate_by_name = True
@@ -671,6 +902,19 @@ class AggregationSettingsResponse(BaseModel):
     env_drift_auto_rebuild: Optional[bool] = Field(
         None, alias="envDriftAutoRebuild",
     )
+    env_probe_enabled: Optional[bool] = Field(
+        None, alias="envProbeEnabled",
+    )
+    env_probe_interval_secs: Optional[int] = Field(
+        None, alias="envProbeIntervalSecs",
+    )
+    # The tri-state the pipeline resolves when nothing overrides it, reported
+    # as the string ``_materialize_fine_pairs_mode`` returns rather than a
+    # bool — "auto" is a third state, not a missing one, and the editors seed
+    # from ``persisted ?? envDefault``.
+    env_materialize_fine_pairs: Optional[Literal["auto", "true", "false"]] = Field(
+        None, alias="envMaterializeFinePairs",
+    )
     updated_at: Optional[str] = Field(None, alias="updatedAt")
     updated_by: Optional[str] = Field(None, alias="updatedBy")
 
@@ -680,23 +924,233 @@ class AggregationSettingsResponse(BaseModel):
 
 class FreshnessSettingsRequest(BaseModel):
     """PATCH /data-sources/{id}/freshness-settings body — the per-source
-    rebuild-interval override. ``None`` clears the override (back to the
-    resolved global/env default)."""
+    overrides. ``None`` on any field clears that override (back to the
+    resolved global/env default).
+
+    Every field means "clear" when explicitly sent as null, so the handler
+    MUST apply only the keys actually present in the request body
+    (``model_fields_set``). Treating an absent field as null would make a
+    partial PATCH impossible: sending only ``autoReconcileEnabled`` would
+    silently wipe the rebuild-interval override.
+    """
     rebuild_min_interval_secs: Optional[int] = Field(
         None, alias="rebuildMinIntervalSecs", ge=0, le=86400,
     )
+    auto_reconcile_enabled: Optional[bool] = Field(
+        None, alias="autoReconcileEnabled",
+        description="Per-source automatic-reconciliation flag. Null inherits "
+                    "the global setting.",
+    )
+    reconcile_check_interval_secs: Optional[int] = Field(
+        None, alias="reconcileCheckIntervalSecs", ge=30, le=86400,
+        description="How often this source is checked for drift. Null "
+                    "inherits the global cadence.",
+    )
+    probe_enabled: Optional[bool] = Field(
+        None, alias="probeEnabled",
+        description="Per-source change-detection flag. Null inherits the "
+                    "global setting.",
+    )
+    probe_interval_secs: Optional[int] = Field(
+        None, alias="probeIntervalSecs", ge=15, le=86400,
+        description="How often this source's counts are re-read. Null "
+                    "inherits the global cadence.",
+    )
+    paused_until: Optional[str] = Field(
+        None, alias="pausedUntil", max_length=64,
+        description="ISO-8601 instant until which automation is held for this "
+                    "source. Null resumes immediately.",
+    )
+
+    @field_validator("paused_until")
+    @classmethod
+    def _check_paused_until(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_paused_until(v)
 
     class Config:
         populate_by_name = True
 
 
 class FreshnessSettingsResponse(BaseModel):
-    """The stored per-source override after a PATCH (echoes the effective
-    override; ``None`` = no override, source resolves global/env)."""
+    """The stored per-source overrides after a PATCH (each echoes the
+    effective override; ``None`` = no override, source resolves global/env)."""
     data_source_id: str = Field(alias="dataSourceId")
     rebuild_min_interval_secs: Optional[int] = Field(
         None, alias="rebuildMinIntervalSecs",
     )
+    auto_reconcile_enabled: Optional[bool] = Field(
+        None, alias="autoReconcileEnabled",
+    )
+    reconcile_check_interval_secs: Optional[int] = Field(
+        None, alias="reconcileCheckIntervalSecs",
+    )
+    probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
+    probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Reconciliation (the drift / overlay-integrity sweep) ─────────────
+
+
+class ReconcileFinding(BaseModel):
+    """One source the sweep would act on (or did). Powers the preview, so an
+    operator can see the blast radius before switching automation on."""
+    data_source_id: str = Field(alias="dataSourceId")
+    name: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    reason: str
+    evidence: Dict = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRun(BaseModel):
+    """One pass of the sweep — the "when did this last run and what did it
+    find" record, one row per pass rather than per source."""
+    id: str
+    started_at: Optional[str] = Field(None, alias="startedAt")
+    finished_at: Optional[str] = Field(None, alias="finishedAt")
+    mode: str = "auto"
+    actor: Optional[str] = None
+    scanned: int = 0
+    skipped: int = 0
+    seeded: int = 0
+    findings: int = 0
+    actions: int = 0
+    errors: int = 0
+    by_reason: Dict[str, int] = Field(default_factory=dict, alias="byReason")
+    by_skip: Dict[str, int] = Field(default_factory=dict, alias="bySkip")
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcilePolicyResponse(BaseModel):
+    """Resolved global policy plus the env defaults behind it, so the editor
+    can seed from ``persisted ?? envDefault`` and a no-op save round-trips the
+    real current default instead of pinning a wrong value — the same contract
+    ``AggregationSettingsResponse`` already honours for cadence."""
+    enabled: Optional[bool] = None
+    check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
+    max_actions_per_run: Optional[int] = Field(None, alias="maxActionsPerRun")
+    shrink_tolerance_pct: Optional[int] = Field(None, alias="shrinkTolerancePct")
+    detectors: Optional[List[str]] = None
+
+    env_enabled: bool = Field(True, alias="envEnabled")
+    env_check_interval_secs: int = Field(3600, alias="envCheckIntervalSecs")
+    env_max_actions_per_run: int = Field(10, alias="envMaxActionsPerRun")
+    env_shrink_tolerance_pct: int = Field(10, alias="envShrinkTolerancePct")
+    env_stats_max_age_secs: int = Field(2700, alias="envStatsMaxAgeSecs")
+    all_detectors: List[str] = Field(default_factory=list, alias="allDetectors")
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileOverviewResponse(BaseModel):
+    """GET /freshness/reconciliation — policy plus recent runs."""
+    policy: ReconcilePolicyResponse
+    runs: List[ReconcileRun] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileActivityItem(BaseModel):
+    """One overnight-ledger row: a finding from a sweep, joined to the
+    refresh_event (and job) it produced when it produced one."""
+    run_id: str = Field(alias="runId")
+    run_started_at: Optional[str] = Field(None, alias="runStartedAt")
+    ts: Optional[str] = None
+    data_source_id: str = Field(alias="dataSourceId")
+    name: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    reason: Optional[str] = None
+    mode: str = "auto"  # auto | manual
+    outcome: str  # rebuilt | held | failed
+    skip: Optional[str] = None
+    job_id: Optional[str] = Field(None, alias="jobId")
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileActivityResponse(BaseModel):
+    """GET /freshness/reconciliation/activity — overnight blotter."""
+    since: str
+    items: List[ReconcileActivityItem] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcilePolicyRequest(BaseModel):
+    """PUT /freshness/reconciliation. Partial-update semantics, same as the
+    per-source PATCH: only explicitly-sent keys are written."""
+    enabled: Optional[bool] = None
+    # ``ge=30`` matches the two other writers of this same stored value
+    # (``AggregationTuningRequest.reconcile_check_interval_secs`` and the
+    # per-source PATCH). It was 300 here alone, so a 60-299s interval passed
+    # the client's own floor and then 422'd against the only endpoint the
+    # Automation modal writes through.
+    check_interval_secs: Optional[int] = Field(
+        None, alias="checkIntervalSecs", ge=30, le=86400,
+    )
+    max_actions_per_run: Optional[int] = Field(
+        None, alias="maxActionsPerRun", ge=0, le=200,
+    )
+    shrink_tolerance_pct: Optional[int] = Field(
+        None, alias="shrinkTolerancePct", ge=0, le=100,
+    )
+    detectors: Optional[List[str]] = None
+
+    @field_validator("detectors")
+    @classmethod
+    def _detectors_known(cls, v):
+        if v is None:
+            return v
+        return _validate_detector_names(v)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRunRequest(BaseModel):
+    """POST /freshness/reconcile-now."""
+    dry_run: bool = Field(False, alias="dryRun")
+    data_source_ids: Optional[List[str]] = Field(None, alias="dataSourceIds")
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRunInternal(ReconcileRunRequest):
+    """Body for the Control Plane's sweep twin — adds ``actor``, the
+    initiator's user id forwarded by the viz proxy (which forces it, so a
+    caller cannot attribute a sweep to someone else). Mirrors
+    ``RefreshRequestInternal``."""
+    actor: Optional[str] = Field(None, max_length=128)
+
+    class Config:
+        populate_by_name = True
+
+
+class ReconcileRunResponse(BaseModel):
+    """The outcome of an on-demand sweep. ``findings`` is populated on a dry
+    run so the preview can render what WOULD be reconciled."""
+    run: Optional[ReconcileRun] = None
+    findings: List[ReconcileFinding] = Field(default_factory=list)
+    # True when another replica held the sweep lock, so nothing ran.
+    skipped: bool = False
 
     class Config:
         populate_by_name = True

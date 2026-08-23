@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
     normalizeIdentity, isIdentityOverridden, identityCoalesceExpr,
-    normalizeName, isNameOverridden, nameCoalesceExpr,
+    normalizeName, isNameOverridden, nameCoalesceExpr, isInherited,
 } from './NodeIdentity'
 
 describe('normalizeIdentity', () => {
@@ -73,5 +73,37 @@ describe('nameCoalesceExpr', () => {
     it('renders a displayName coalesce fallback for a mapped property', () => {
         expect(nameCoalesceExpr('title')).toBe('coalesce(n.displayName, n.title)')
         expect(nameCoalesceExpr('  fullName ')).toBe('coalesce(n.displayName, n.fullName)')
+    })
+})
+
+
+describe('isInherited', () => {
+    it('is true only for a scope ABOVE the data source', () => {
+        expect(isInherited('provider')).toBe(true)
+        expect(isInherited('workspace')).toBe(true)
+        expect(isInherited('global')).toBe(true)
+    })
+    it('is false when this source set it, or when nothing did', () => {
+        // Both mean "there is nothing to inherit FROM to name in the UI":
+        // data_source is the local override, default is the code floor.
+        expect(isInherited('data_source')).toBe(false)
+        expect(isInherited('default')).toBe(false)
+        expect(isInherited(undefined)).toBe(false)
+    })
+})
+
+describe('the inherited-value trap', () => {
+    it('a resolved value looks identical to a locally-set one', () => {
+        // The API returns the mapping in FORCE, so a source inheriting `id`
+        // from its provider is indistinguishable from one that chose `id`
+        // itself by value alone. Only the provenance separates them -- which is
+        // why any editor seeding from the resolved value must consult it, or it
+        // will save an inherited value back as a permanent local override.
+        const inherited = { identityProperty: 'id', identityPropertySource: 'provider' as const }
+        const local = { identityProperty: 'id', identityPropertySource: 'data_source' as const }
+        expect(inherited.identityProperty).toBe(local.identityProperty)
+        expect(isIdentityOverridden(inherited.identityProperty)).toBe(true)
+        expect(isInherited(inherited.identityPropertySource)).toBe(true)
+        expect(isInherited(local.identityPropertySource)).toBe(false)
     })
 })

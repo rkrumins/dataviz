@@ -30,6 +30,7 @@ from backend.app.config import resilience
 from backend.app.db.engine import get_jobs_session
 from backend.app.db.models import DataSourcePollingConfigORM, WorkspaceDataSourceORM
 from backend.app.db.repositories.stats_repo import (
+    touch_probe_stamp,
     touch_schema_freshness,
     upsert_data_source_stats,
     upsert_data_source_stats_counts,
@@ -156,6 +157,8 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
             stats = await provider.get_stats()
 
     node_count = int(stats.get("nodeCount", 0) or 0)
+    entity_counts = stats.get("entityTypeCounts", {}) or {}
+    edge_counts = stats.get("edgeTypeCounts", {}) or {}
 
     async with get_jobs_session() as session:
         await upsert_data_source_stats_counts(
@@ -163,8 +166,8 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
             ds_id=envelope.data_source_id,
             node_count=node_count,
             edge_count=int(stats.get("edgeCount", 0) or 0),
-            entity_type_counts=json.dumps(stats.get("entityTypeCounts", {})),
-            edge_type_counts=json.dumps(stats.get("edgeTypeCounts", {})),
+            entity_type_counts=json.dumps(entity_counts),
+            edge_type_counts=json.dumps(edge_counts),
         )
         await _stamp_poll_success(session, envelope.data_source_id)
 
@@ -476,7 +479,73 @@ async def record_failure(data_source_id: str, error: str) -> None:
         config.last_polled_at = datetime.now(timezone.utc).isoformat()
 
 
-# Self-register both facets. The worker dispatches by envelope kind;
+async def probe_counts(envelope: StatsJobEnvelope) -> None:
+    """Drift probe — the counts facet with no scan behind it.
+
+    ``get_counts_fast`` answers from FalkorDB's label/relation counters, so
+    this costs milliseconds where :func:`collect_counts` costs a full scan.
+    That difference is the entire reason drift detection can run on a 60s
+    cadence while the counts poll stays at 900s.
+
+    Deliberately narrower than the counts poll: no top-level
+    materialization, no cache warming, no polling-config lifecycle. Those
+    belong to the poll that owns them, and loading them here would give the
+    tripwire the cost profile it exists to avoid.
+
+    When the provider cannot answer cheaply this SKIPS rather than falling
+    back to a scan — a non-FalkorDB provider, or a graph whose multi-label
+    nodes make per-label counts non-equivalent. Running the scan here would
+    put minutes of work in a lane budgeted for milliseconds and blow the
+    probe's fixed timeout. Such a source simply keeps the behaviour it has
+    today: the stats poll refreshes it on the usual interval, and the sweep's
+    own check interval remains the correctness backstop. The probe is an
+    accelerator, never a dependency.
+    """
+    _engine, provider, provider_id, _, _ = await _open_context(
+        envelope, resolve_ontology=False,
+    )
+
+    fast = getattr(provider, "get_counts_fast", None)
+    if fast is None:
+        logger.debug(
+            "probe: %s has no constant-time counts — leaving it to the poll",
+            envelope.data_source_id,
+        )
+        # Stamp without counts, or the NULL last_probed_at sorts this source
+        # to the head of the due-set and it is re-enqueued every scheduler
+        # tick forever, spending the batch cap on sources that cannot answer.
+        async with get_jobs_session() as session:
+            await touch_probe_stamp(session, envelope.data_source_id)
+        return
+
+    async with admission.gate(provider_id, op_kind="probe"):
+        stats = await fast()
+
+    if stats is None:
+        logger.info(
+            "probe: %s cannot be counted from counters — leaving it to the poll",
+            envelope.data_source_id,
+        )
+        async with get_jobs_session() as session:
+            await touch_probe_stamp(session, envelope.data_source_id)
+        return
+
+    entity_counts = stats.get("entityTypeCounts", {}) or {}
+    edge_counts = stats.get("edgeTypeCounts", {}) or {}
+
+    async with get_jobs_session() as session:
+        await upsert_data_source_stats_counts(
+            session=session,
+            ds_id=envelope.data_source_id,
+            node_count=int(stats.get("nodeCount", 0) or 0),
+            edge_count=int(stats.get("edgeCount", 0) or 0),
+            entity_type_counts=json.dumps(entity_counts),
+            edge_type_counts=json.dumps(edge_counts),
+            probed=True,
+        )
+
+
+# Self-register every facet. The worker dispatches by envelope kind;
 # ``stats_poll`` keeps its wire format from before the split, so
 # in-flight messages from a previous release drain through the counts
 # handler harmlessly (idempotent refresh).
@@ -484,3 +553,4 @@ from . import dispatcher  # noqa: E402
 
 dispatcher.register_handler("stats_poll", collect_counts)
 dispatcher.register_handler("stats_deep", collect_deep)
+dispatcher.register_handler("probe", probe_counts)

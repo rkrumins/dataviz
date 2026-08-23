@@ -22,6 +22,11 @@ import {
     type FreshnessDoc,
     type FreshnessFleetResponse,
     type FreshnessSettings,
+    type FreshnessSettingsPatch,
+    type ReconcileActivity,
+    type ReconcileOverview,
+    type ReconcilePolicy,
+    type ReconcileRunResult,
     type RefreshResponse,
     type RefreshScope,
 } from '@/services/freshnessService'
@@ -32,10 +37,16 @@ import { ACTIVE_JOBS_KEY } from './useActiveJobs'
 const FLEET_PAGE_SIZE = 200
 const FLEET_POLL_MS = 30_000
 const BATCH_POLL_MS = 2_000
+/** The sweep ticks on the order of an hour, so polling it faster than the
+ *  fleet would only add noise. */
+const RECONCILE_POLL_MS = 60_000
 
 export const FRESHNESS_KEYS = {
     all: ['freshness'] as const,
     fleetPrefix: ['freshness', 'fleet'] as const,
+    reconciliation: ['freshness', 'reconciliation'] as const,
+    activityPrefix: ['freshness', 'reconciliation', 'activity'] as const,
+    activity: (since = '24h') => ['freshness', 'reconciliation', 'activity', since] as const,
     fleet: (params: FleetParams) =>
         [
             'freshness',
@@ -103,21 +114,84 @@ export function useRefreshSource(): UseMutationResult<RefreshResponse, Error, Re
     })
 }
 
-export interface SetFreshnessSettingsVars {
+export interface SetFreshnessSettingsVars extends FreshnessSettingsPatch {
     dsId: string
-    rebuildMinIntervalSecs: number | null
 }
 
-/** Set/clear a source's rebuild-cadence override; invalidates that source's
- *  doc and the fleet so the badge + drawer reflect the new window. */
+/** Set/clear a source's cadence and reconciliation overrides; invalidates
+ *  that source's doc and the fleet so the badge + drawer reflect the change.
+ *
+ *  Only the fields you pass are sent, and therefore only those are written —
+ *  the server treats an explicit null as "clear this override", so sending a
+ *  full object would clobber the settings you did not mean to touch. */
 export function useSetFreshnessSettings(): UseMutationResult<FreshnessSettings, Error, SetFreshnessSettingsVars> {
     const qc = useQueryClient()
     return useMutation<FreshnessSettings, Error, SetFreshnessSettingsVars>({
-        mutationFn: ({ dsId, rebuildMinIntervalSecs }) =>
-            freshnessService.patchFreshnessSettings(dsId, { rebuildMinIntervalSecs }),
+        mutationFn: ({ dsId, ...patch }) =>
+            freshnessService.patchFreshnessSettings(dsId, patch),
         onSuccess: (_res, { dsId }) => {
             void qc.invalidateQueries({ queryKey: ['freshness', 'doc', dsId] })
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+        },
+    })
+}
+
+// ── Reconciliation ──────────────────────────────────────────────────
+
+/** Policy + recent sweep runs. Polls slowly: the sweep itself ticks on the
+ *  order of an hour, so anything faster is just noise. */
+export function useReconciliation(enabled = true): UseQueryResult<ReconcileOverview, Error> {
+    return useQuery<ReconcileOverview, Error>({
+        queryKey: FRESHNESS_KEYS.reconciliation,
+        queryFn: () => freshnessService.getReconciliation(),
+        enabled,
+        staleTime: 30_000,
+        refetchInterval: RECONCILE_POLL_MS,
+        retry: 1,
+    })
+}
+
+export function useReconcileActivity(
+    since = '24h',
+    enabled = true,
+): UseQueryResult<ReconcileActivity, Error> {
+    return useQuery<ReconcileActivity, Error>({
+        queryKey: FRESHNESS_KEYS.activity(since),
+        queryFn: () => freshnessService.getReconciliationActivity(since),
+        enabled,
+        staleTime: 30_000,
+        refetchInterval: RECONCILE_POLL_MS,
+        retry: 1,
+    })
+}
+
+export function useSetReconciliationPolicy(): UseMutationResult<ReconcilePolicy, Error, Partial<ReconcilePolicy>> {
+    const qc = useQueryClient()
+    return useMutation<ReconcilePolicy, Error, Partial<ReconcilePolicy>>({
+        mutationFn: (patch) => freshnessService.putReconciliation(patch),
+        onSuccess: () => {
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
+            // The resolved per-source ``autoReconcile`` inherits the global,
+            // so every row's badge can change from one policy save.
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+        },
+    })
+}
+
+/** Run a sweep on demand. ``dryRun`` reports what WOULD be reconciled and
+ *  queues nothing, so it is safe to call before enabling automation. */
+export function useReconcileNow(): UseMutationResult<
+    ReconcileRunResult, Error, { dryRun?: boolean; dataSourceIds?: string[] }
+> {
+    const qc = useQueryClient()
+    return useMutation<ReconcileRunResult, Error, { dryRun?: boolean; dataSourceIds?: string[] }>({
+        mutationFn: (body) => freshnessService.reconcileNow(body),
+        onSuccess: (_res, vars) => {
+            if (vars.dryRun) return   // a preview changed nothing
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activityPrefix })
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+            void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
         },
     })
 }

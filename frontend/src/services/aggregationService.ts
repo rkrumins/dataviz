@@ -6,17 +6,28 @@ import { authFetch } from './apiClient';
  * self-tuning defaults. These are caps/floors, not fixed values.
  */
 export interface AggregationTuning {
-  scanRangeWidth?: number;      // 10,000 .. 5,000,000
-  maxPendingPairs?: number;     // 50,000 .. 50,000,000
-  applyChunk?: number;          // 1,000 .. 200,000
-  deleteChunk?: number;         // 100 .. 50,000
-  writePacingRatio?: number;    // 0 .. 10
-  extractConcurrency?: number;  // 1 .. 4
+  // `null` means "clear this default" — the settings PUT merges `tuning`, so a
+  // key that is simply absent is left as-is and only an explicit null removes
+  // it. Omitting a key from a per-job request still means "inherit".
+  scanRangeWidth?: number | null;      // 10,000 .. 5,000,000
+  maxPendingPairs?: number | null;     // 50,000 .. 50,000,000
+  applyChunk?: number | null;          // 1,000 .. 200,000
+  deleteChunk?: number | null;         // 100 .. 50,000
+  writePacingRatio?: number | null;    // 0 .. 10
+  extractConcurrency?: number | null;  // 1 .. 4
   materializeLeafPairs?: boolean;
-  /** Legacy full-cube mode: materialize leaf-involving AND mixed-level pairs (scales with raw edges; can OOM FalkorDB). */
-  materializeFinePairs?: boolean;
+  /**
+   * Rollup storage. `true` (the shipped default) pre-creates every
+   * ancestor-pair combination and FAILS the job above the write budget;
+   * `'auto'` stores the full cube only while it fits the cube ceiling and
+   * falls back to the depth-diagonal + on-demand reads above it. Absent
+   * means "inherit" — the stored global default, then the env default —
+   * which is why "Auto" must be sent as `'auto'` and never by omitting the
+   * key: omission cannot override a stored `true`.
+   */
+  materializeFinePairs?: boolean | 'auto';
   /** Hard write budget: fail the job instead of writing more :AGGREGATED edges than this. */
-  maxMaterializedEdges?: number; // 10,000 .. 50,000,000
+  maxMaterializedEdges?: number | null; // 10,000 .. 50,000,000
 }
 
 export interface AggregationTriggerRequest {
@@ -41,6 +52,11 @@ export interface AggregationJobResponse {
   dataSourceId: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   triggerSource: string;
+  /** Set only when ``triggerSource === 'reconcile'``: the detector that fired
+   *  and the counts behind it, read from the audit event naming this job.
+   *  "Automatic" alone just relocates the question — this answers it. */
+  reconcileReason?: string | null;
+  reconcileEvidence?: Record<string, unknown> | null;
   progress: number;
   totalEdges: number;
   processedEdges: number;
@@ -131,6 +147,13 @@ export interface DataSourceReadinessResponse {
   /** True when a ready cube predates the depth-stamp contract and should be
    *  rebuilt — drives the per-source "rebuild to fix nested hierarchies" warning. */
   needsRebuild?: boolean;
+  /** Reconciliation verdict from the last drift check, so the profile can say
+   *  whether the rollups still match the graph without a second request. */
+  driftState?: string | null;
+  lastReconciledAt?: string | null;
+  lastReconcileReason?: string | null;
+  /** Resolved per-source → global → env. */
+  autoReconcile?: boolean | null;
   message: string;
 }
 
@@ -155,6 +178,13 @@ export interface JobsSummary {
 export interface AggregationCadence {
   rebuildMinIntervalSecs?: number | null; // 0 .. 86400 (0 disables the throttle)
   driftAutoRebuild?: boolean | null;
+  /** Whether sources are actively probed for changed counts. Off means drift
+   *  is only noticed when the much slower stats poll happens to refresh. */
+  probeEnabled?: boolean | null;
+  /** How often each source's counts are re-read, 15 .. 86400. This is the
+   *  self-detection SLO — a source nobody notifies us about is noticed within
+   *  roughly this window plus one sweep tick. */
+  probeIntervalSecs?: number | null;
 }
 
 export interface AggregationSettingsResponse {
@@ -164,6 +194,10 @@ export interface AggregationSettingsResponse {
    *  `persisted ?? envDefault` so a no-op save round-trips the real default. */
   envRebuildMinIntervalSecs?: number | null;
   envDriftAutoRebuild?: boolean | null;
+  envProbeEnabled?: boolean | null;
+  envProbeIntervalSecs?: number | null;
+  /** Tri-state, so a string: "auto" is a third mode, not a missing bool. */
+  envMaterializeFinePairs?: 'auto' | 'true' | 'false' | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
 }

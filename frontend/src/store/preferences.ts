@@ -129,6 +129,13 @@ interface PreferencesState {
    */
   showFlowRibbons: boolean
   toggleFlowRibbons: () => void
+  /**
+   * "N on this lineage" pills on the cards of a trace — how much of what is
+   * inside a closed card the lineage runs through. On by default; lives
+   * under the trace dock's Settings for readers who want a quieter board.
+   */
+  showLineageCounts: boolean
+  toggleLineageCounts: () => void
 
 
   // User avatar
@@ -171,6 +178,58 @@ interface PreferencesState {
   subtleCanvasTreeLines: boolean
   toggleSubtleCanvasTreeLines: () => void
   resetCanvasDisplaySettings: () => void
+
+
+  /** What a newly opened container frame shows: only the entities inside
+   *  it that carry lineage to the focused entity (default — that is the
+   *  question the lens exists to answer), or everything inside it with
+   *  the connected ones marked. Each frame can still be flipped on its
+   *  own; this is only the starting point. */
+  lensFrameChildren: 'connected' | 'all'
+  setLensFrameChildren: (mode: 'connected' | 'all') => void
+
+  /** Whether long runs of single pass-through steps fold into one
+   *  "— via N steps —▶" connector.
+   *
+   *  OFF by default, and the user's own ruling: "show full, end-to-end
+   *  flow rather than saying skipping 2 steps and not showing it
+   *  individually". A folded run also has no card to click, so the
+   *  connector chip was the only way onward — and it lands mid-wire,
+   *  which is how it ended up drawn over a frame and unclickable. The
+   *  folding is kept for readers who want the long view of a very long
+   *  chain, but nothing folds unless they ask for it. */
+  lensCondenseSteps: boolean
+  setLensCondenseSteps: (on: boolean) => void
+
+  /** How much of the Lens picture is FOLDED (Part H, 2026-08-21) — the
+   *  reader's own starting grain, so it follows them from lens to lens:
+   *  'overview' lands a band's bundle hosts (the databases a wall of
+   *  tables sits in) as closed cards with counts; 'grouped' — the
+   *  default, the user's ruling — as frames showing their strongest
+   *  rows; 'all' draws every card and folds nothing. "Some users might
+   *  wanna see it all but some might just wanna start at the high
+   *  level." Separate from `lensCondenseSteps` on purpose: chain folding
+   *  is off by default under an earlier ruling, grouping is on. */
+  lensDensity: 'overview' | 'grouped' | 'all'
+  setLensDensity: (density: 'overview' | 'grouped' | 'all') => void
+  /** How the Lens draws the wires between two containers (2026-08-22):
+   *  one bundle when there are many ('auto', the default), always
+   *  ('bundled'), or every wire ('all'). The wires a bundle hides come
+   *  back for a card the reader hovers or selects. A preference, like
+   *  density: it follows the reader from lens to lens. */
+  lensWires: 'auto' | 'bundled' | 'all'
+  setLensWires: (wires: 'auto' | 'bundled' | 'all') => void
+
+  /** How many hops each direction the Lens fetches when it opens on a
+   *  NEW entity. One is the answer to "what feeds this", which is what
+   *  people open the lens for — the only value a fresh focal is ever
+   *  fetched at now (T28 R1 removed the header's 1/2/3 control, the
+   *  only thing that ever set this to anything else). Fixed rather than
+   *  deleted outright: an OLD share link can still carry a deeper
+   *  `depth` for the one focal it names (see shareCodec.ts), and
+   *  `useLensWalk`'s own depth parameter stays wired to read from here
+   *  either way. */
+  lensInitialDepth: number
 
   // Icon picker — recently used Lucide icon names (most recent first).
   recentIcons: string[]
@@ -266,6 +325,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       showFlowRibbons: true,
       toggleFlowRibbons: () =>
         set((state) => ({ showFlowRibbons: !state.showFlowRibbons })),
+      showLineageCounts: true,
+      toggleLineageCounts: () =>
+        set((state) => ({ showLineageCounts: !state.showLineageCounts })),
 
       // User avatar
       avatarId: null,
@@ -339,6 +401,17 @@ export const usePreferencesStore = create<PreferencesState>()(
         subtleCanvasTreeLines: false,
       }),
 
+      // Lineage Lens body mode
+      lensFrameChildren: 'connected',
+      setLensFrameChildren: (lensFrameChildren) => set({ lensFrameChildren }),
+      lensCondenseSteps: false,
+      setLensCondenseSteps: (lensCondenseSteps) => set({ lensCondenseSteps }),
+      lensDensity: 'grouped',
+      setLensDensity: (lensDensity) => set({ lensDensity }),
+      lensWires: 'auto',
+      setLensWires: (lensWires) => set({ lensWires }),
+      lensInitialDepth: 1,
+
       // Icon picker recents
       recentIcons: [],
       addRecentIcon: (name) => set((s) => ({
@@ -359,6 +432,43 @@ export const usePreferencesStore = create<PreferencesState>()(
     }),
     {
       name: 'nexus-preferences',
+      // v1 (2026-08-19 am): lensFrameChildren default flipped to 'all'.
+      // v2 (2026-08-19 pm, USER RULING): back to 'connected' — Connected
+      // is the default lens story ("only what is on this lineage"), now
+      // COMPLETE because a fresh focus opens its whole lineage-carrying
+      // subtree; All stays one click away. The whole state persists (no
+      // partialize), so each default change needs a one-time migrate; an
+      // explicit choice made AFTER v2 ships persists untouched.
+      // v3 (2026-08-21): `lensDensity` arrives, default 'grouped' (USER
+      // RULING: a band of 200 partner tables folds into its databases by
+      // default; Every card stays one click away). Nothing else moves.
+      // v4 (2026-08-22): `lensInitialDepth` back to 1. The header's 1/2/3
+      // control was retired (T28 R1) but a 2 or 3 it had written stayed in
+      // storage, so "One hop" quietly fetched two or three hops — a HOP 2
+      // band under a control that says one. A share link still carries its
+      // own depth for the focal it names; the preference is one hop.
+      // v5 (2026-08-22): the Lens's List body is retired — a stored 'list'
+      // becomes 'graph', so the Lens opens as the graph for everyone.
+      // v6 (2026-08-22): `lensWires` — the wires between two containers
+      // fold into one bundle when there are many; the default is 'auto'.
+      // v7 (2026-08-23): the Lens's List body is GONE — the branch, its
+      // columns and this preference are removed, so the key is dropped
+      // rather than migrated. A state written before v5 no longer needs
+      // its 'list' → 'graph' step either; nothing reads the field.
+      version: 7,
+      migrate: (persisted, version) => {
+        let state = persisted as Record<string, unknown>
+        if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
+        if (version < 3) state = { ...state, lensDensity: 'grouped' }
+        if (version < 4) state = { ...state, lensInitialDepth: 1 }
+        if (version < 6) state = { ...state, lensWires: 'auto' }
+        if (version < 7) {
+          const next = { ...state }
+          delete next.lensViewMode
+          state = next
+        }
+        return state
+      },
     }
   )
 )

@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Set, Union
+from typing import List, Dict, Any, Literal, Optional, Set, Union
 from enum import Enum
 from pydantic import BaseModel, Field, validator
 
@@ -166,12 +166,69 @@ class TraceRequest(BaseModel):
         populate_by_name = True
 
 
+class TraceClosureRequest(BaseModel):
+    """Focus-lineage-closure request: walk a bounded upstream/downstream
+    closure around a single node. Deliberately a NEW model, not an
+    extension of TraceRequest — it must not accept the re-anchoring-era
+    skeleton/expand concepts (level, includeInheritedLineage,
+    includeAncestorChain).
+    """
+    urn: str                                   # focus (initial) or the card being extended (walk)
+    # Closed set, not a free string: every reader of this field ELSES into
+    # "downstream" (the endpoint's cursor guard, the engine's depth
+    # zeroing), so a typo did not fail — it quietly paged the opposite
+    # direction and returned 200 with the wrong lineage in it.
+    direction: Literal["upstream", "downstream", "both"] = "both"
+    upstream_depth: int = Field(1, alias="upstreamDepth", ge=0, le=25)
+    downstream_depth: int = Field(1, alias="downstreamDepth", ge=0, le=25)
+    lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
+    max_nodes: Optional[int] = Field(None, alias="maxNodes", ge=1)          # engine clamps to TRACE_MAX_NODES
+    # Walk continuation: the specific lineage-participating leaves to extend from (e.g. the
+    # visible leaves under a rolled-up container card). Skips the container seed walk;
+    # keeps the walk scoped to the FOCUS's lineage, not the container's whole lineage.
+    seed_urns: Optional[List[str]] = Field(None, alias="seedUrns", max_length=500)
+    exclude_urns: Optional[List[str]] = Field(None, alias="excludeUrns", max_length=2000)
+    after_cursor: Optional[str] = Field(None, alias="afterCursor")          # "e:<edge-id>"; hub paging
+    # Seed-page continuation (2026-08-19): a CONTAINER focus with more
+    # lineage-bearing descendants than the seed reserve used to truncate its
+    # own contents with no way to resume — the one non-resumable cap. The
+    # cursor is "s:<last-descendant-urn>" from the previous response's
+    # seedCursor; the continuation collects the NEXT keyset page of
+    # descendants (urn > cursor) and walks from those. Mutually exclusive
+    # with afterCursor and seedUrns (endpoint-validated).
+    seed_cursor: Optional[str] = Field(None, alias="seedCursor")
+    # The grain of the answer (Part G, 2026-08-21). 'coarse' asks for the
+    # `:AGGREGATED` rollup cells incident to the focus — partner containers
+    # and how many flows, one shot, in milliseconds — the first paint the
+    # raw pages refine behind. Absent/'fine' is the degree-exact walk. A
+    # provider without a rollup lane (drafts, versioned branches) serves a
+    # coarse request with the fine walk and the result says `grain: fine`.
+    # Optional and omitted from the dump when unset, so an old client's
+    # cache key does not change by a byte.
+    grain: Optional[Literal["fine", "coarse"]] = Field(None, alias="grain")
+
+    class Config:
+        populate_by_name = True
+
+
 class ExpandRequest(BaseModel):
     source_urn: str = Field(alias="sourceUrn")
     target_urn: str = Field(alias="targetUrn")
-    next_level: Union[str, int] = Field(alias="nextLevel")
+    #: ``None`` is a legitimate value, not a missing one: an ontology
+    #: that repeats an entity type at two containment depths (Container
+    #: inside Container) has no single honest level to send, and the
+    #: provider drills STRUCTURALLY — one containment step — when none
+    #: is given. Requiring a level here made every such expand fail
+    #: request validation before any code ran.
+    next_level: Optional[Union[str, int]] = Field(None, alias="nextLevel")
     lineage_edge_types: Optional[List[str]] = Field(None, alias="lineageEdgeTypes")
     include_containment_edges: bool = Field(True, alias="includeContainmentEdges")
+    #: Which anchor is being OPENED. Only that side descends; the partner
+    #: contributes itself and its whole subtree, so a Data Domain and a
+    #: Table five containment levels below it can still meet. Omit for
+    #: the historical symmetric drill, which is correct only when the
+    #: pair already sits at comparable depth.
+    drill_anchor: Optional[str] = Field(None, alias="drillAnchor")
 
     class Config:
         populate_by_name = True
@@ -293,6 +350,45 @@ class TraceResult(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+class TraceFrontierNode(BaseModel):
+    """One node at the edge of a closure that was not expanded further —
+    either because depth ran out or the closure is paging a hub. total_count
+    / next_cursor let the client decide whether to show a '+N more'
+    affordance or page the frontier.
+    """
+    urn: str
+    total_count: Optional[int] = Field(None, alias="totalCount")   # full-graph degree that direction; None = unknown
+    next_cursor: Optional[str] = Field(None, alias="nextCursor")   # only on the paging shape
+    # WHY the node is on the frontier. ``cut``: the node budget or the
+    # deadline stopped the walk before this anchor — the client completes it
+    # hands-free (re-root via ``seedUrns``, or page by ``nextCursor`` for a
+    # hub). ``depth``: the requested depth ended here — the next hop, offered
+    # as a pill, never drained by a one-hop client. Additive: old payloads
+    # carry None.
+    reason: Optional[Literal["cut", "depth"]] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class TraceClosureResult(TraceResult):
+    """Result of a focus-lineage-closure walk. Adds the frontier (nodes at
+    the closure boundary) on top of TraceResult's nodes/edges/containment/
+    truncation shape.
+    """
+    frontier_up: List[TraceFrontierNode] = Field(default_factory=list, alias="frontierUp")
+    frontier_down: List[TraceFrontierNode] = Field(default_factory=list, alias="frontierDown")
+    seed_truncated: bool = Field(False, alias="seedTruncated")     # container seed walk hit the cap
+    # Resume point for a capped container seed walk: "s:<last-descendant-urn>",
+    # or None when the focus's contents are fully seeded. Send back as the
+    # request's seedCursor to walk the next page of contents.
+    seed_cursor: Optional[str] = Field(None, alias="seedCursor")
+    # Which grain actually served this page — 'coarse' for the rollup
+    # lane, 'fine' when a coarse request fell back to the degree-exact
+    # walk, None from providers that predate the field.
+    grain: Optional[Literal["fine", "coarse"]] = None
 
 
 class TraceResultV2(TraceResult):

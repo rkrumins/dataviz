@@ -15,10 +15,10 @@
  * changes a number. "Attention" is the server-aligned marker-OR-failed set;
  * a rebuilding source is healthy in-progress, counted on its own.
  */
-import { ChevronDown, ChevronRight, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, Waves, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessRow, ProviderFreshnessSummary } from '@/services/freshnessService'
-import { isNeverBuilt, isRebuilding, needsAttention } from './freshnessTriage'
+import { isDrifting, isNeverBuilt, isRebuilding, needsAttention } from './freshnessTriage'
 
 interface Props {
     providerId: string
@@ -52,6 +52,7 @@ export function FreshnessGroupHeader({
             rebuilding: summary.pending,
             notBuilt: summary.notBuilt,
             attention: summary.needsAttention,
+            drifting: summary.drifting ?? rows.filter(isDrifting).length,
         }
         : {
             total,
@@ -60,6 +61,7 @@ export function FreshnessGroupHeader({
             rebuilding: rows.filter(isRebuilding).length,
             notBuilt: rows.filter(isNeverBuilt).length,
             attention: rows.filter(needsAttention).length,
+            drifting: rows.filter(isDrifting).length,
         }
     const coverage = cov.total > 0 ? Math.round((cov.cached / cov.total) * 100) : 0
 
@@ -96,6 +98,17 @@ export function FreshnessGroupHeader({
                                 </>
                             )}
                         </span>
+                        {/* Drifting is called out separately from "attention",
+                            which it is also part of: a collapsed healthy-looking
+                            group must not hide the one source whose rollups no
+                            longer match its data. Icon + word, never colour
+                            alone — this sits right beside the amber count. */}
+                        {cov.drifting > 0 && (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">
+                                <Waves className="w-3 h-3 shrink-0" />
+                                {cov.drifting} drifting
+                            </span>
+                        )}
                         {cov.attention > 0 && (
                             <span className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
                                 · {cov.attention} attention

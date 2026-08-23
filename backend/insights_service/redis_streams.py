@@ -38,15 +38,18 @@ class StreamConfig:
     """Identity of one Redis Stream + its consumer group + dedup namespace.
 
     ``lane`` groups streams into worker concurrency budgets: ``fast``
-    (cheap counts polls + discovery), ``heavy`` (full schema-stats scan
-    sets), ``purge`` (long-running deletes). One slow heavy job can then
-    never occupy the slots that keep counts fresh — see worker.run.
+    (cheap counts polls + user-initiated discovery), ``sweep`` (background
+    discovery refreshes), ``heavy`` (full schema-stats scan sets),
+    ``purge`` (long-running deletes), ``probe`` (constant-time counts).
+    One slow heavy job can then never occupy the slots that keep counts
+    fresh — see worker.run.
     """
-    kind: str            # 'stats_poll' | 'stats_deep' | 'discovery' | 'purge'
+    kind: str            # 'stats_poll' | 'stats_deep' | 'discovery' | 'purge' | 'probe'
     stream: str          # Redis stream key
     group: str           # XREADGROUP consumer group
     dedup_prefix: str    # SET NX key prefix for the producer-side claim
-    lane: str = "fast"   # worker concurrency lane: 'fast' | 'heavy' | 'purge'
+    # worker concurrency lane: 'fast' | 'sweep' | 'heavy' | 'purge' | 'probe'
+    lane: str = "fast"
 
 
 # All streams use one consumer group so a single XREADGROUP call can
@@ -104,9 +107,38 @@ PURGE_STREAM = StreamConfig(
     lane="purge",
 )
 
+# Drift probe — constant-time counts (``provider.get_counts_fast``), the
+# tripwire the reconcile sweep keys on. Its own lane, not ``fast``: a probe
+# takes milliseconds and a counts poll on a large graph takes minutes, so
+# sharing a budget would let one slow scan hold up the freshness signal for
+# the whole fleet. That is the same argument that split heavy from fast.
+#
+# The lane budget is only half of it: a probe also takes no per-graph
+# semaphore (see ``worker._resolve_scope_lock_key``), or it would park behind
+# an in-flight scan of the same graph and the private lane would buy nothing
+# for exactly the source whose counts just moved.
+PROBE_STREAM = StreamConfig(
+    kind="probe",
+    stream="insights.jobs.probe",
+    group=SHARED_GROUP,
+    dedup_prefix="insights:probe",
+    lane="probe",
+)
+
+# Signal-driven probes (an external system told us its load finished).
+# SHARES the sweep stream's dedup prefix so a source is never queued twice
+# across the two, exactly like discovery's hot/background pair.
+PROBE_HOT_STREAM = StreamConfig(
+    kind="probe",
+    stream="insights.jobs.probe.hot",
+    group=SHARED_GROUP,
+    dedup_prefix="insights:probe",
+    lane="probe",
+)
+
 ALL_STREAMS: tuple[StreamConfig, ...] = (
     STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, DISCOVERY_HOT_STREAM,
-    PURGE_STREAM,
+    PURGE_STREAM, PROBE_STREAM, PROBE_HOT_STREAM,
 )
 
 # Kind → default producer stream. ``discovery`` deliberately maps to the
@@ -114,7 +146,10 @@ ALL_STREAMS: tuple[StreamConfig, ...] = (
 # ``stream=DISCOVERY_HOT_STREAM`` explicitly (see enqueue.py).
 _BY_KIND: dict[str, StreamConfig] = {
     s.kind: s
-    for s in (STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM)
+    for s in (
+        STATS_STREAM, STATS_DEEP_STREAM, DISCOVERY_STREAM, PURGE_STREAM,
+        PROBE_STREAM,
+    )
 }
 
 DLQ_STREAM = "insights.dlq"

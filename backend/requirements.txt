@@ -1,18 +1,23 @@
 # Core backend
 fastapi>=0.141.1         # >=0.109.1: PYSEC-2024-38 (ReDoS via crafted Content-Type)
-uvicorn[standard]>=0.52.1
+uvicorn[standard]>=0.52.4
 gunicorn>=23.0.0         # >=23.0.0: GHSA-hc5x-x2vx-497g (request smuggling via Transfer-Encoding). WSGI server (uvicorn workers) for viz/graph.
 pydantic>=2.13.4          # >=2.4.0: GHSA-mr82-8j83-vxmv (email regex ReDoS)
 
 # FalkorDB graph provider (persistent graph backend)
-FalkorDB>=1.6.2
+FalkorDB>=1.7.1
 redis>=8.1.0
+# C parser for every FalkorDB/Redis reply. Without it redis-py parses in pure
+# Python: a 2,000-node trace-closure page spent ~1.2 s parsing ~300k reply
+# lines on the event loop (the event_loop_lag warnings). redis-py picks it up
+# automatically when importable.
+hiredis>=3.4.1
 
 # Management DB — Postgres v16 only (dev parity with prod; no SQLite branch)
-sqlalchemy>=2.0.51
+sqlalchemy>=2.0.52
 asyncpg>=0.31.0          # PostgreSQL async driver — runtime
-psycopg2-binary>=2.9.9   # PostgreSQL sync driver — Alembic migrations
-alembic>=1.18.5          # Schema migrations
+psycopg2-binary>=2.9.12   # PostgreSQL sync driver — Alembic migrations
+alembic>=1.19.1          # Schema migrations
 
 # Security (credential encryption + authentication)
 cryptography>=48.0.1     # >=48.0.1: GHSA-537c-gmf6-5ccf + prior OpenSSL-bundle advisories
@@ -32,17 +37,17 @@ python3-saml>=1.16.0
 # Local-dev .env auto-load. ``auth_service.core.config`` imports it
 # behind a try/except + ENV/file-existence gate, so a missing dep
 # silently falls back to the explicit-export path (no boot crash).
-python-dotenv>=1.2.2     # >=1.2.2: GHSA-mf9w-mj56-hr94 (set_key follows symlinks)
+python-dotenv>=1.2.3     # >=1.2.2: GHSA-mf9w-mj56-hr94 (set_key follows symlinks)
 
 # Graph adapter dependencies
 neo4j>=5.14.0            # Neo4j async driver (Phase 4)
 httpx>=0.28.1            # DataHub GraphQL HTTP client + async test client
-google-cloud-spanner>=3.69.0                 # Spanner Graph adapter (bundles spanner_admin_database_v1 for CREATE TABLE / CREATE PROPERTY GRAPH bootstrap)
+google-cloud-spanner>=3.69.1                 # Spanner Graph adapter (bundles spanner_admin_database_v1 for CREATE TABLE / CREATE PROPERTY GRAPH bootstrap)
 anyio>=4.14.2                                 # Threadpool used by Spanner async/sync seam
 
 # Structured logging
-python-json-logger>=4.1.0
+python-json-logger>=4.2.0
 
-greenlet>=3.5.4          # pin off floor: 3.1.x ships cp313 wheels; SQLAlchemy async seam needs it
+greenlet>=3.5.5          # pin off floor: 3.1.x ships cp313 wheels; SQLAlchemy async seam needs it
 python-multipart>=0.0.32 # >=0.0.31: path traversal, multipart/urlencoded DoS series (GHSA-wp53-j4wj-2cfg ... GHSA-v9pg-7xvm-68hf)
 openpyxl>=3.1.5          # .xlsx import/export adapter (bulk import/export) — pure-Python read+write

@@ -2,7 +2,7 @@ import { memo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Loader2, AlertCircle, ChevronRight, RotateCcw, StopCircle, Play, Trash2,
-    AlertTriangle, Server, FolderOpen,
+    AlertTriangle, Server, FolderOpen, ShieldCheck,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,11 @@ import {
     formatDuration, timeAgo, triggerLabel, STATUS_CONFIG, type DataSourceMeta,
     PHASES, PHASE_BANDS, PhaseStepper, phaseLabel,
 } from './shared'
+// One vocabulary for the detector codes across Job History and the Freshness
+// cockpit — they must never disagree about what "overlay_missing" is called,
+// nor about what its evidence means.
+import { REASON_LABEL as RECONCILE_REASON_LABEL } from '../Freshness/DriftStateBadge'
+import { ReconcileWhy } from '../Freshness/reconcileEvidence'
 
 /**
  * History-informed ETA: uses the PREVIOUS completed run's per-phase
@@ -286,6 +291,24 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                         <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-400">
                             <Trash2 className="w-3 h-3" /> Purge
                         </span>
+                    ) : job.triggerSource === 'reconcile' ? (
+                        // An automatic rebuild says WHY on the row itself. The
+                        // reason is the whole reason this trigger source
+                        // exists — "Reconciliation" alone just relocates the
+                        // question.
+                        <span
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-600 dark:text-sky-400"
+                            title={job.reconcileReason
+                                ? `Automatic reconciliation — ${RECONCILE_REASON_LABEL[job.reconcileReason] ?? job.reconcileReason}`
+                                : 'Queued by automatic reconciliation'}
+                        >
+                            <ShieldCheck className="w-3 h-3 shrink-0" />
+                            <span className="truncate">
+                                {job.reconcileReason
+                                    ? RECONCILE_REASON_LABEL[job.reconcileReason] ?? 'Reconciliation'
+                                    : 'Reconciliation'}
+                            </span>
+                        </span>
                     ) : (
                         <span className="text-[11px] text-ink-muted">{triggerLabel(job.triggerSource)}</span>
                     )}
@@ -542,6 +565,20 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                     />
                                                 )}
                                             </div>
+                                        )}
+
+                                        {/* Why an automatic reconciliation queued
+                                            this — the counts that justified it,
+                                            in the operator's own units. This is
+                                            the same evidence the Freshness
+                                            drawer shows, reached from the other
+                                            end of the trail. */}
+                                        {job.triggerSource === 'reconcile' && (
+                                            <ReconcileWhy
+                                                reason={job.reconcileReason}
+                                                evidence={job.reconcileEvidence}
+                                                dataSourceId={job.dataSourceId}
+                                            />
                                         )}
 
                                         {/* Stat grid */}

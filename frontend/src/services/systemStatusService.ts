@@ -155,6 +155,15 @@ export interface StatsPollingSection {
     recentErrors: StatsPollingError[]
 }
 
+export interface ReconciliationSection {
+    enabled: boolean
+    intervalSecs: number
+    lastStartedAt: string | null
+    stopped: boolean
+    notYetRun: boolean
+    suspendedCount: number
+}
+
 export interface OutboxSection {
     pending: number
     oldestPendingAgeS: number | null
@@ -217,6 +226,7 @@ export interface SystemStatusSnapshot {
     aggregationJobs: AggregationJobsSection | null
     bootstrapJobs: BootstrapJobsSection | null
     statsPolling: StatsPollingSection | null
+    reconciliation: ReconciliationSection | null
     outbox: OutboxSection | null
 }
 

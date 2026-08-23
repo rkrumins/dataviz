@@ -58,6 +58,7 @@ const TUNING_FIELDS: TuningField[] = [
 
 function DefaultsDialog({ onClose }: { onClose: () => void }) {
     const [tuning, setTuning] = useState<AggregationTuning>({})
+    const [envFinePairs, setEnvFinePairs] = useState<'auto' | 'true' | 'false'>('true')
     const [loading, setLoading] = useState(true)
     const [saving, setSaving] = useState(false)
     const [message, setMessage] = useState<string | null>(null)
@@ -65,7 +66,11 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
     useEffect(() => {
         let cancelled = false
         aggregationService.getAggregationSettings()
-            .then(res => { if (!cancelled) setTuning(res.tuning ?? {}) })
+            .then(res => {
+                if (cancelled) return
+                setTuning(res.tuning ?? {})
+                if (res.envMaterializeFinePairs) setEnvFinePairs(res.envMaterializeFinePairs)
+            })
             .catch(() => { /* fresh install — empty defaults */ })
             .finally(() => { if (!cancelled) setLoading(false) })
         return () => { cancelled = true }
@@ -74,11 +79,11 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
     const setField = (key: keyof AggregationTuning, raw: string) => {
         setMessage(null)
         if (raw === '') {
-            setTuning(prev => {
-                const next = { ...prev }
-                delete next[key]
-                return next
-            })
+            // An explicit null, not a deleted key: the server MERGES `tuning`
+            // now (so the Automation modal's rollup-storage save cannot wipe
+            // these numbers), and a merge can only be told to clear a field by
+            // being sent one.
+            setTuning(prev => ({ ...prev, [key]: null }))
             return
         }
         const num = Number(raw)
@@ -93,6 +98,11 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
             return { ...prev, [key]: Math.max(field.min, Math.min(field.max, val)) }
         })
     }
+
+    // Absent means INHERIT, so what the fleet would actually run is the stored
+    // value or, failing that, whatever the server says it resolves to.
+    const resolvedFinePairs = tuning.materializeFinePairs ?? envFinePairs
+    const finePairsIsFull = resolvedFinePairs === true || resolvedFinePairs === 'true'
 
     const save = async () => {
         setSaving(true)
@@ -163,14 +173,45 @@ function DefaultsDialog({ onClose }: { onClose: () => void }) {
                             />
                             Materialize leaf-to-leaf mirror pairs (legacy behavior; doubles write volume)
                         </label>
-                        <label className="flex items-center gap-2 text-[12px] text-ink">
-                            <input
-                                type="checkbox"
-                                checked={tuning.materializeFinePairs === true}
-                                onChange={e => setTuning(prev => ({ ...prev, materializeFinePairs: e.target.checked || undefined }))}
-                            />
-                            Materialize fine pairs (legacy full cube: leaf-involving + mixed-level) — scales with raw edges and can exceed FalkorDB memory
-                        </label>
+                        {/* Not a checkbox. Unchecking one used to write
+                            `undefined`, and an absent key means INHERIT — which
+                            now resolves to full detail, so the box would have
+                            read "off" while meaning "on". Both states are
+                            written explicitly, in the trigger dialog's words. */}
+                        <div>
+                            <span className="block text-[10px] text-ink-muted/70 uppercase tracking-wider font-bold mb-1">
+                                Rollup storage
+                            </span>
+                            <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Rollup storage">
+                                {([
+                                    ['auto', 'Auto', 'Full detail within budget; diagonal + on-demand above it.'],
+                                    ['full', 'Always full detail', 'Pre-create every combination; fails instead of exceeding the budget.'],
+                                ] as const).map(([id, label, help]) => {
+                                    const selected = id === 'full' ? finePairsIsFull : !finePairsIsFull
+                                    return (
+                                        <button
+                                            key={id}
+                                            type="button"
+                                            role="radio"
+                                            aria-checked={selected}
+                                            onClick={() => setTuning(prev => ({
+                                                ...prev,
+                                                materializeFinePairs: id === 'full' ? true : 'auto',
+                                            }))}
+                                            className={cn(
+                                                'px-2.5 py-2 rounded-lg border text-left transition-colors duration-150',
+                                                selected
+                                                    ? 'border-indigo-500/40 bg-indigo-500/5'
+                                                    : 'border-glass-border hover:border-indigo-500/20',
+                                            )}
+                                        >
+                                            <span className="block text-[11px] font-medium text-ink-secondary">{label}</span>
+                                            <span className="block text-[10px] text-ink-muted/60 mt-0.5">{help}</span>
+                                        </button>
+                                    )
+                                })}
+                            </div>
+                        </div>
                         {message && (
                             <p className="text-[11px] font-medium text-ink-muted">{message}</p>
                         )}

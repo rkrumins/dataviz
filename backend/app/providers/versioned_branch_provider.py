@@ -24,7 +24,8 @@ from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import (
     AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
-    GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult, TraceResult,
+    GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult,
+    TraceClosureResult, TraceFocus, TraceResult,
 )
 
 
@@ -168,12 +169,171 @@ class VersionedBranchProvider:
             max_nodes=max_nodes, include_containment_edges=include_containment_edges)
         return TraceResult(**d)
 
+    async def trace_closure(
+        self, urn: str, upstream_depth: int, downstream_depth: int,
+        lineage_edge_types: List[str], containment_edge_types: List[str],
+        max_nodes: int, timeout_ms: int,
+        seed_urns: Optional[List[str]] = None,
+        exclude_urns: Optional[List[str]] = None,
+        after_cursor: Optional[str] = None,
+        seed_cursor: Optional[str] = None,
+    ) -> TraceClosureResult:
+        """The closure walk over this branch's state (2026-08-20 — closes the
+        501 that made the Lens and the native canvas trace structurally dead
+        on every versioned source).
+
+        One bounded, honest walk: a draft is draft-scale, so the whole flow
+        ships in one response — no cursors are ever issued (the client's
+        walk driver sees empty frontiers and reads the response as
+        exhausted), and the ``max_nodes`` cap is said out loud via
+        ``truncated``. Containment ancestor chains ship for nesting, exactly
+        as the FalkorDB closure does.
+        """
+        def _empty(reason: Optional[str] = None) -> TraceClosureResult:
+            return TraceClosureResult(
+                nodes=[], edges=[], containmentEdges=[],
+                upstreamUrns=set(), downstreamUrns=set(),
+                focus=TraceFocus(urn=urn, level=0, entityType=""),
+                effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+                truncated=reason is not None, truncationReason=reason,
+                frontierUp=[], frontierDown=[],
+                seedTruncated=False, seedCursor=None,
+            )
+
+        # This provider never ISSUES cursors — an arriving continuation (a
+        # client bug or a cross-provider cache echo) gets a safe empty page
+        # rather than an error or a duplicate walk.
+        if after_cursor or seed_cursor:
+            return _empty()
+
+        ltypes = [t for t in (lineage_edge_types or []) if t]
+        ctypes = [t for t in (containment_edge_types or []) if t]
+        if not ltypes:
+            return _empty()
+
+        chunk = 200
+        hop_bound = 16
+
+        async def _edges(*, sources: Optional[List[str]] = None,
+                         targets: Optional[List[str]] = None,
+                         types: List[str]) -> List[GraphEdge]:
+            urns_list = sources if sources is not None else (targets or [])
+            out: List[GraphEdge] = []
+            for i in range(0, len(urns_list), chunk):
+                batch = urns_list[i:i + chunk]
+                out.extend(await self.get_edges(EdgeQuery(
+                    source_urns=batch if sources is not None else None,
+                    target_urns=batch if targets is not None else None,
+                    edge_types=types, limit=max(1, max_nodes) * 4,
+                )))
+            return out
+
+        # ── Seeds: the walk starts at whatever grain carries lineage — the
+        # explicit seeds (or the focus) plus their containment descendants.
+        seeds = set(seed_urns or [urn])
+        seeds.add(urn)
+        if ctypes:
+            frontier = list(seeds)
+            for _ in range(hop_bound):
+                if not frontier or len(seeds) >= max_nodes:
+                    break
+                kids = await _edges(sources=frontier, types=ctypes)
+                frontier = [e.target_urn for e in kids if e.target_urn not in seeds]
+                seeds.update(frontier)
+
+        # ── Lineage BFS, per-direction depths, capped at max_nodes.
+        discovered = set(seeds)
+        upstream_urns: set = set()
+        downstream_urns: set = set()
+        edges_by_id: Dict[str, GraphEdge] = {}
+        truncation: Optional[str] = None
+        up_frontier, down_frontier = list(seeds), list(seeds)
+        for hop in range(1, max(upstream_depth, downstream_depth) + 1):
+            if truncation or (not up_frontier and not down_frontier):
+                break
+            next_up: List[str] = []
+            next_down: List[str] = []
+            if hop <= upstream_depth and up_frontier:
+                for e in await _edges(targets=up_frontier, types=ltypes):
+                    edges_by_id[e.id] = e
+                    if e.source_urn in discovered:
+                        continue
+                    if len(discovered) >= max_nodes:
+                        truncation = "max_nodes"
+                        break
+                    discovered.add(e.source_urn)
+                    upstream_urns.add(e.source_urn)
+                    next_up.append(e.source_urn)
+            if not truncation and hop <= downstream_depth and down_frontier:
+                for e in await _edges(sources=down_frontier, types=ltypes):
+                    edges_by_id[e.id] = e
+                    if e.target_urn in discovered:
+                        continue
+                    if len(discovered) >= max_nodes:
+                        truncation = "max_nodes"
+                        break
+                    discovered.add(e.target_urn)
+                    downstream_urns.add(e.target_urn)
+                    next_down.append(e.target_urn)
+            up_frontier, down_frontier = next_up, next_down
+
+        # Only edges whose BOTH endpoints were kept ship — a capped walk
+        # must not carry hops into nodes it never delivered.
+        edges = [e for e in edges_by_id.values()
+                 if e.source_urn in discovered and e.target_urn in discovered]
+
+        # ── Containment ancestor chains for every participant (nesting).
+        containment_by_id: Dict[str, GraphEdge] = {}
+        ancestor_urns: set = set()
+        if ctypes:
+            batch = list(discovered)
+            seen_anc = set(discovered)
+            for _ in range(hop_bound):
+                if not batch:
+                    break
+                nxt: List[str] = []
+                for e in await _edges(targets=batch, types=ctypes):
+                    containment_by_id[e.id] = e
+                    if e.source_urn not in seen_anc:
+                        seen_anc.add(e.source_urn)
+                        ancestor_urns.add(e.source_urn)
+                        nxt.append(e.source_urn)
+                batch = nxt
+
+        # ── Hydrate. `exclude_urns` governs re-SHIPPING only (never where
+        # the walk starts); the focus itself always ships.
+        excluded = set(exclude_urns or [])
+        excluded.discard(urn)
+        ship = [u for u in (discovered | ancestor_urns) if u not in excluded]
+        nodes: List[GraphNode] = []
+        for i in range(0, len(ship), chunk):
+            nodes.extend(await self.get_nodes(NodeQuery(urns=ship[i:i + chunk], limit=chunk)))
+        focus_type = next((n.entity_type for n in nodes if n.urn == urn), "") or ""
+
+        return TraceClosureResult(
+            nodes=nodes,
+            edges=edges,
+            containmentEdges=list(containment_by_id.values()),
+            upstreamUrns=upstream_urns,
+            downstreamUrns=downstream_urns,
+            focus=TraceFocus(urn=urn, level=0, entityType=focus_type),
+            effectiveLevel=0, isInherited=False, inheritedFromUrn=None,
+            truncated=truncation is not None,
+            truncationReason=truncation,
+            frontierUp=[], frontierDown=[],
+            seedTruncated=False, seedCursor=None,
+        )
+
     async def expand_aggregated(
-        self, source_urn: str, target_urn: str, next_level: int,
+        self, source_urn: str, target_urn: str, next_level: Optional[int],
         lineage_edge_types: List[str], containment_edge_types: List[str],
         max_nodes: int, timeout_ms: int, use_raw_edges: bool = False,
         include_containment_edges: bool = False,
+        drill_anchor: Optional[str] = None,
     ) -> TraceResult:
+        # `drill_anchor` is accepted for contract parity and ignored: a
+        # branch state replays raw edges rather than reading AGGREGATED
+        # cells, so there is no pair collection to make asymmetric.
         d = await self._svc.expand_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
             source_urn=source_urn, target_urn=target_urn, next_level=next_level,

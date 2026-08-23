@@ -31,3 +31,7 @@ lerna-debug.log*
 # TypeScript
 *.tsbuildinfo
 
+
+# Generated visual output — regenerate with `npm run harness:shot`.
+.harness/
+.superpowers-shots/

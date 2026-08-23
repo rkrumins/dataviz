@@ -11,6 +11,77 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ## [Unreleased] — View sharing that means what it says
 
+### Changed
+
+**Rollups are stored in full detail by default.** Every ancestor-pair
+combination is now pre-created — leaf-involving and mixed-level included — so
+no canvas granularity can come back thin. This closes a real gap on
+self-nesting ontology types (`Node ⊃ Node ⊃ Node`), where the boundary mode's
+on-demand reader still reasons in ontology type levels and could return
+incomplete mixed-granularity drill answers. The previous default, `auto`,
+stored the full cube only while it fit the cube ceiling and fell back to the
+depth-diagonal above it.
+
+It applies everywhere without new plumbing, because every automatic rebuild
+already resolves its configuration server-side: reconciliation drift and first
+builds, the cron drift sweep, the stale-marker reconciler, Refresh rollups, the
+projector heal hook, and the Ingestion re-trigger dialog.
+
+**Rollup storage is now a fleet-wide setting an operator owns.** Ingestion →
+Freshness → Automation → ③ Act → Advanced switches the whole fleet between
+Auto and Always full detail, and every subsequent run picks it up. The
+workspace Defaults dialog gained the same control in place of its
+"Materialize fine pairs" checkbox.
+
+**Machine-queued rebuilds get the same stall window as a hand-started one.**
+`AGGREGATION_STALL_TIMEOUT_SECS` moves 900 → 10800 (3h), matching what every UI
+trigger path already sent explicitly. Only the machine paths leave a job's
+`timeout_secs` NULL, so they were the only rebuilds being killed for making no
+progress for fifteen minutes — on exactly the graphs large enough to do that,
+with nobody watching. A progressing job was never affected; this is a
+no-forward-progress window, not a runtime cap.
+
+### Fixed
+
+**"Auto" could not turn full detail back off.** Rollup storage had three
+meanings but only two wire values: "Auto" was expressed by omitting the field,
+and an omitted field means *inherit*. So once a global default of full detail
+was stored, the trigger dialog showed "Auto (recommended)" while the job it
+queued ran the full cube. `materializeFinePairs` now accepts `"auto"` as a
+value, and the dialog resolves an absent field against the default the server
+reports rather than assuming Auto.
+
+**Saving one aggregation default no longer erases the others.**
+`aggregation_settings.tuning_json` has two editors now, and it was written by
+replacement — so whichever saved last wiped the other's fields. It is merged,
+like `cadence_json` already was; clearing a value means sending it explicitly
+as `null`.
+
+**Picking a performance profile no longer discards the rollup-storage
+choice**, and a profile again reads as active once one is set.
+
+### Upgrading
+
+**Rollup storage changes behaviour on upgrade.** A graph whose full cube
+exceeds `AGGREGATION_MAX_MATERIALIZED_EDGES` (default 25M, ~12.5GB at ~0.5KB
+per edge, sized against ONE shard) now fails its rebuild terminally on
+`MaterializationBudgetExceeded` where `auto` would have degraded to the
+depth-diagonal and served finer granularities on demand. A forced cube skips
+the up-front estimate, so that failure lands part-way through and leaves a
+partial cube until the next successful rebuild reconciles it; reconciliation's
+breaker suspends a source after three such passes.
+
+Check your largest graph against the budget before upgrading. To keep the old
+behaviour fleet-wide, set Rollup storage to **Auto** in Ingestion → Freshness →
+Automation (③ Act → Advanced), or set
+`AGGREGATION_MATERIALIZE_FINE_PAIRS=auto`. Note that a value stored from the UI
+beats the environment variable.
+
+Deployments pinning `AGGREGATION_STALL_TIMEOUT_SECS` should raise it to 10800
+to pick up the watchdog change (`deploy/k8s/base/configmaps/worker-config.yaml`
+is updated); keep it below `2 × AGGREGATION_JOB_TIMEOUT_SECS` so the control
+plane's stale-job backstop stays the backstop.
+
 ### Security
 
 **Private views were not private.** The view-access evaluator checked

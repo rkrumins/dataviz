@@ -55,8 +55,9 @@ export interface UseTraceFilteredHierarchyOptions {
   displayMap: Map<string, HierarchyNode>
   /** True when a trace is active. When false, hook is a no-op. */
   isTracing: boolean
-  /** Strict trace membership — URNs returned by /trace/v2 (focus + upstream + downstream). */
-  traceNodes: Set<string>
+  /** Strict trace membership — URNs returned by /trace/v2 (focus + upstream + downstream)
+   *  or, for the native canvas trace, the closure walk model's URN set. */
+  traceNodes: ReadonlySet<string>
   /** Drill-down results from /trace/expand keyed by `${s}->${t}@${level}`. */
   drilldowns: Map<string, TraceV2Result>
   /** Canvas containment hierarchy: child id → parent id. From useContainmentHierarchy. */
