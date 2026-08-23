@@ -1097,7 +1097,7 @@ def redact_summary(doc: dict, scope) -> dict:
 _PUBLIC_INSIGHTS = frozenset({
     "signups", "active", "views", "signup-mix", "stickiness",
     "trace-empty", "search-miss", "funnel-leak", "concentration",
-    "semantic-coverage",
+    "semantic-coverage", "views-not-opened",
 })
 
 #: Rules that describe the behaviour of individuals in aggregate ("more people

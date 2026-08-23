@@ -935,6 +935,59 @@ async def test_drilling_into_a_workspace_you_are_not_in_is_refused(db_session):
     assert mine is not None and mine["name"] == "Live"
 
 
+def test_every_insight_rule_is_classified_for_an_audience():
+    """A new rule must be given an audience, or it reaches almost nobody.
+
+    `redact_summary` filters the strip through three allow-lists and drops
+    anything unlisted. Failing closed is right — an unreviewed rule should not
+    reach a public tier by default — but it is SILENT: the rule fires, the key
+    is dropped, and every non-privileged reader simply never sees it while
+    nothing errors and no test goes red. That is what happened to
+    `views-not-opened`, which shipped invisible to everyone except an admin.
+
+    Scans the source rather than running the rules, so a rule that needs a rare
+    document to fire is still checked. Both call shapes are covered: the
+    literal `_insight("key", ...)` and the key passed through `_swing`. A third
+    kind of indirection would slip past this — if you add one, extend the scan.
+    """
+    import re
+    from pathlib import Path
+
+    src = Path(analytics_repo.__file__).read_text()
+    literal = set(re.findall(r'_insight\(\s*\n?\s*"([a-z0-9-]+)"', src))
+    via_swing = set(re.findall(r'_swing\([^,]+,\s*"([a-z0-9-]+)"', src))
+    emitted = literal | via_swing
+    assert len(emitted) >= 13, f"the scan stopped finding rules: {sorted(emitted)}"
+
+    classified = (
+        analytics_repo._PUBLIC_INSIGHTS
+        | analytics_repo._PEOPLE_INSIGHTS
+        | analytics_repo._OPERATIONS_INSIGHTS
+    )
+    assert not (emitted - classified), (
+        "these rules reach only privileged readers because nothing classified "
+        f"them: {sorted(emitted - classified)}"
+    )
+    assert not (classified - emitted), (
+        f"allow-listed keys no rule emits: {sorted(classified - emitted)}"
+    )
+
+
+async def test_the_catalogue_insight_reaches_a_public_reader(db_session):
+    """It names no person and no workspace, so it belongs to everyone."""
+    await _seed(db_session)
+    doc = await analytics_repo.platform_summary(
+        db_session, days=7, now=NOW, scope=_public("ws_live"))
+    keys = {i["key"] for i in doc["insights"]}
+    # The rule only fires past half the catalogue; what is under test is that
+    # the redactor would not strip it if it did.
+    assert "views-not-opened" in analytics_repo._PUBLIC_INSIGHTS
+    assert keys <= analytics_repo._PUBLIC_INSIGHTS, (
+        f"a strict reader was shown a non-public insight: "
+        f"{sorted(keys - analytics_repo._PUBLIC_INSIGHTS)}"
+    )
+
+
 def test_the_cache_key_is_the_window_alone():
     """One entry per window, shared by every reader.
 
