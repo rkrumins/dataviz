@@ -82,13 +82,57 @@ def _flag(name: str, default: bool = True) -> bool:
     return raw.strip().lower() not in ("false", "0", "no", "off")
 
 
+#: Every kill-switch that gates a real authorization check, so startup
+#: can say what state they are in rather than leaving it to a grep.
+#:
+#: These are not feature flags. ``RBAC_ENFORCE_VIEWS`` guards nineteen
+#: checks in ``endpoints/views.py``, including the ``can_read_view``
+#: object-level test, and the routes it guards take
+#: ``get_optional_user`` — which never 401s. Turned off, the flag is not
+#: "less strict"; it is the only authorization on that surface, gone,
+#: at runtime, with no redeploy and nothing in the audit log.
+RBAC_ENFORCEMENT_FLAGS = (
+    "RBAC_ENFORCE_VIEWS",
+    "RBAC_ENFORCE_WORKSPACES",
+)
+
+
 def rbac_flag(name: str) -> bool:
     """Read a kill-switch at request time.
 
     Reads the env var on every call so tests can flip a flag mid-run
-    via ``monkeypatch.setenv`` without touching module state.
+    via ``monkeypatch.setenv`` without touching module state. That is
+    also what makes an accidental production value take effect
+    instantly, which is why ``assert_rbac_enforcement_intact`` runs at
+    startup.
     """
     return _flag(name)
+
+
+def assert_rbac_enforcement_intact() -> None:
+    """Refuse to serve production with authorization switched off.
+
+    The switches exist for fast rollback if new enforcement causes an
+    incident, and that is a real need — so they are not being removed.
+    But an emergency lever left down is indistinguishable from one
+    nobody pulled, and nothing anywhere reported the difference. Now the
+    process will not start.
+    """
+    disabled = [n for n in RBAC_ENFORCEMENT_FLAGS if not _flag(n)]
+    if not disabled:
+        return
+    if os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+        raise RuntimeError(
+            f"RBAC enforcement is disabled ({', '.join(disabled)}) and ENV is "
+            "production. These are emergency rollback levers, not settings — "
+            "with them off, the surfaces they guard have no authorization at "
+            "all. Unset them, or set ENV appropriately for a non-production "
+            "deployment."
+        )
+    logger.warning(
+        "RBAC enforcement DISABLED for: %s. The surfaces these guard have no "
+        "authorization while this holds.", ", ".join(disabled),
+    )
 
 
 def _identity_service(request: Request) -> IdentityService:

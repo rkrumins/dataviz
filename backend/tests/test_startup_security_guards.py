@@ -1,0 +1,184 @@
+"""Configurations that would leave the app unprotected must not boot.
+
+Each of these was reachable by setting one environment variable, took
+effect silently, and left nothing in any log saying the protection was
+gone. Several were emergency levers that are perfectly reasonable to
+have — the problem was that a lever left down looked exactly like one
+nobody pulled.
+"""
+from __future__ import annotations
+
+import pytest
+
+from backend.app.auth.dependencies import (
+    RBAC_ENFORCEMENT_FLAGS,
+    assert_rbac_enforcement_intact,
+)
+from backend.auth_service.core import config as auth_config
+
+
+# ── RBAC enforcement kill-switches ───────────────────────────────────
+
+@pytest.mark.parametrize("flag", RBAC_ENFORCEMENT_FLAGS)
+def test_production_refuses_to_start_with_enforcement_disabled(
+    flag, monkeypatch,
+):
+    """`RBAC_ENFORCE_VIEWS=false` is not "less strict".
+
+    It guards nineteen checks in views.py including the object-level
+    `can_read_view`, on routes that take `get_optional_user` and
+    therefore never 401. Off, it is the only authorization on that
+    surface, gone.
+    """
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv(flag, "false")
+    with pytest.raises(RuntimeError) as err:
+        assert_rbac_enforcement_intact()
+    assert flag in str(err.value)
+
+
+@pytest.mark.parametrize("flag", RBAC_ENFORCEMENT_FLAGS)
+def test_non_production_only_warns(flag, monkeypatch, caplog):
+    """The lever has to stay usable — that is what it is for."""
+    monkeypatch.setenv("ENV", "dev")
+    monkeypatch.setenv(flag, "false")
+    with caplog.at_level("WARNING"):
+        assert_rbac_enforcement_intact()
+    assert flag in caplog.text
+
+
+def test_the_default_posture_is_enforcing(monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    for flag in RBAC_ENFORCEMENT_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+    assert_rbac_enforcement_intact()
+
+
+# ── Signing algorithm ────────────────────────────────────────────────
+
+def test_alg_none_is_refused_at_startup(monkeypatch):
+    """Building the key ring proved a key existed, never that it could
+    be used with the configured algorithm — so `none` booted clean."""
+    monkeypatch.setattr(auth_config, "JWT_ALGORITHM", "none", raising=False)
+    with pytest.raises(auth_config.UnsupportedAlgorithm):
+        auth_config.assert_signing_secret()
+
+
+def test_an_asymmetric_algorithm_is_refused(monkeypatch):
+    """Every entry in the ring is a secret string; RS256 would need a
+    PEM there and no code path loads one."""
+    monkeypatch.setattr(auth_config, "JWT_ALGORITHM", "RS256", raising=False)
+    with pytest.raises(auth_config.UnsupportedAlgorithm):
+        auth_config.assert_signing_secret()
+
+
+@pytest.mark.parametrize("alg", ["HS256", "HS384", "HS512"])
+def test_the_hmac_family_is_accepted(alg, monkeypatch):
+    monkeypatch.setattr(auth_config, "JWT_ALGORITHM", alg, raising=False)
+    auth_config.assert_signing_secret()
+
+
+# ── Reserved claims ──────────────────────────────────────────────────
+
+def test_extra_claims_cannot_override_the_audience():
+    """`aud` is the only thing keeping a refresh token from being
+    replayed as an access token, and `payload.update(extra)` ran after
+    it was set."""
+    from backend.auth_service.core.tokens import (
+        create_access_token,
+        decode_token,
+    )
+
+    token = create_access_token(
+        user_id="usr_1", email="a@b.c", role="user",
+        extra={"sid": "sess_1", "aud": "attacker", "sub": "usr_other"},
+    )
+    claims = decode_token(token)
+    assert claims["sub"] == "usr_1"
+    assert claims["aud"] != "attacker"
+    assert claims["sid"] == "sess_1", "legitimate extras must survive"
+
+
+# ── Auth posture defaults ────────────────────────────────────────────
+
+def test_the_failsafe_posture_closes_jit_but_not_sign_in():
+    """Two different questions that were answered by one object.
+
+    ``_DEFAULTS`` is "nothing has configured a posture" — a fresh
+    install — and must match the column server-defaults. ``_FAILSAFE``
+    is "we could not READ the posture", which is when a DB blip on a
+    cold cache used to silently re-enable account creation an operator
+    had deliberately turned off.
+    """
+    from backend.auth_service.app_auth_config import _DEFAULTS, _FAILSAFE
+
+    assert _DEFAULTS.allow_jit_provisioning is True
+    assert _FAILSAFE.allow_jit_provisioning is False
+
+    # Sign-in stays permissive in both: failing it closed locks everyone
+    # out of an application that is otherwise fine.
+    for posture in (_DEFAULTS, _FAILSAFE):
+        assert posture.allow_local_login is True
+        assert posture.sso_enabled is True
+
+
+async def test_a_failing_loader_with_no_cache_serves_the_closed_default():
+    from backend.auth_service.app_auth_config import CachedAuthConfigProvider
+
+    async def _boom():
+        raise RuntimeError("db is down")
+
+    snap = await CachedAuthConfigProvider(_boom).get()
+    assert snap.allow_jit_provisioning is False
+    assert snap.allow_local_login is True
+
+
+async def test_a_failing_loader_prefers_the_last_good_snapshot():
+    """A stale snapshot is what the operator configured; the defaults
+    are a guess. Only reached on a cold cache."""
+    from backend.auth_service.app_auth_config import (
+        AuthConfigSnapshot,
+        CachedAuthConfigProvider,
+    )
+
+    good = AuthConfigSnapshot(
+        sso_enabled=True, allow_local_login=False,
+        allow_jit_provisioning=True, version=3, updated_at="",
+    )
+    calls = {"n": 0}
+
+    async def _flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        raise RuntimeError("db is down")
+
+    provider = CachedAuthConfigProvider(_flaky, ttl_seconds=0)
+    assert (await provider.get()).version == 3
+    again = await provider.get()
+    assert again.version == 3
+    assert again.allow_local_login is False
+
+
+# ── Reset tokens ─────────────────────────────────────────────────────
+
+async def test_a_reset_token_row_with_no_expiry_is_refused(db_session):
+    """The guard was `if expires_at:`, so a missing expiry meant
+    "never expires" — the wrong direction for a credential."""
+    from backend.app.auth.password import hash_password
+    from backend.app.db.repositories import user_repo
+
+    user = await user_repo.create_user(
+        db_session, email="noexp@corp.example",
+        password_hash=hash_password("C0mpl3x!Passw0rd#"),
+        first_name="No", last_name="Exp", status="active",
+    )
+    token, _expires = await user_repo.create_reset_token(db_session, user.id)
+    assert await user_repo.verify_reset_token(db_session, token) is not None
+
+    # Now the shape a partial write or a hand-edit leaves behind.
+    fresh = await user_repo.get_user_by_id(db_session, user.id)
+    fresh.reset_token_expires_at = None
+    await db_session.flush()
+
+    assert await user_repo.verify_reset_token(db_session, token) is None

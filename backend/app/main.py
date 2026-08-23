@@ -6,8 +6,10 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI
+from starlette.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from .api.v1.api import api_router
@@ -823,6 +825,12 @@ async def lifespan(_app: FastAPI):
     # by every module in the import graph.
     _auth_config.assert_signing_secret()
     _assert_session_config_coherent()
+    # Imported here, like the checks above it: this module must stay
+    # importable by processes that hold no keys and enforce nothing.
+    from backend.app.auth.dependencies import (
+        assert_rbac_enforcement_intact,
+    )
+    assert_rbac_enforcement_intact()
     logger.info("Auth service initialised (provider=local, rbac_claims=on)")
 
     # 5. Wire up the aggregation service (role-gated)
@@ -1492,6 +1500,23 @@ async def lifespan(_app: FastAPI):
 # App                                                                  #
 # ------------------------------------------------------------------ #
 
+#: Whether the interactive API docs and the OpenAPI schema are served.
+#:
+#: They were unconditional, and ``frontend/nginx.conf`` publishes
+#: ``/openapi.json``, ``/viz-docs`` and ``/viz-redoc`` at the edge — so
+#: an anonymous caller could pull the complete route inventory, every
+#: request and response schema, and every parameter name for ~426
+#: endpoints, admin routes included. That is the single most useful
+#: thing an attacker can be handed for free.
+#:
+#: Off in production, on everywhere else, and ``API_DOCS_ENABLED``
+#: overrides either way for an operator who wants them behind their own
+#: ingress auth. Reachable through a port-forward regardless.
+_DOCS_ENABLED = (
+    os.getenv("API_DOCS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    or os.getenv("ENV", "dev").strip().lower() not in ("prod", "production")
+)
+
 app = FastAPI(
     title="Synodic Visualization Service",
     description=(
@@ -1500,6 +1525,9 @@ app = FastAPI(
     ),
     version="0.2.0",
     lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
 # Rate-limit 429 handler.
@@ -1813,6 +1841,75 @@ app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 # provider can never block a request indefinitely.                     #
 # ------------------------------------------------------------------ #
 
+class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Refuse a request body larger than the cap, before parsing it.
+
+    There was no application-level limit at all. The only bound was
+    nginx's ``client_max_body_size 100m``, which (a) is an edge setting
+    that a caller reaching the container directly never meets, and (b)
+    is deliberately generous because bulk import/export needs it. So
+    every JSON endpoint would accept 100 MB and hand it to Pydantic,
+    which parses it into memory before any handler sees it. The
+    unbounded-array bodies are the sharp edge — ``graph/save`` takes
+    ``nodes`` and ``edges`` lists with no ``max_length``.
+
+    Enforced on ``Content-Length`` rather than by counting the stream:
+    a chunked request has no declared length, and the streaming case is
+    what the tiered timeout above already bounds. This closes the
+    "declare 100 MB and send it" shape, which is the cheap one.
+
+    The generous per-route needs are met by ``_LARGE_BODY_PREFIXES``
+    rather than by raising the global cap, so a route that has not asked
+    for a big body cannot receive one.
+    """
+
+    #: Routes that legitimately take large payloads (bulk import, graph
+    #: save). Everything else gets the ordinary cap.
+    _LARGE_BODY_PREFIXES = (
+        "/api/v1/import",
+        "/api/v1/versioning",
+    )
+
+    def __init__(self, app, *, default_bytes: int, large_bytes: int):
+        super().__init__(app)
+        self._default = default_bytes
+        self._large = large_bytes
+
+    def _cap_for(self, path: str) -> int:
+        if path.endswith("/graph/save") or any(
+            path.startswith(p) for p in self._LARGE_BODY_PREFIXES
+        ):
+            return self._large
+        return self._default
+
+    async def dispatch(self, request: Request, call_next):
+        raw = request.headers.get("content-length")
+        if raw:
+            try:
+                declared = int(raw)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400,
+                    content={"detail": "Malformed Content-Length."},
+                )
+            cap = self._cap_for(request.url.path)
+            if declared > cap:
+                logger.warning(
+                    "Rejecting %s %s: body %d bytes exceeds the %d cap",
+                    request.method, request.url.path, declared, cap,
+                )
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": (
+                            f"Request body is {declared} bytes; the limit for "
+                            f"this endpoint is {cap}."
+                        )
+                    },
+                )
+        return await call_next(request)
+
+
 class _TimeoutMiddleware:
     """ASGI middleware: tiered per-path timeout for HTTP requests.
 
@@ -2041,12 +2138,32 @@ class _TimeoutMiddleware:
                 path, timeout,
             )
 
-# Must be added FIRST so it wraps all other middleware.
-app.add_middleware(_TimeoutMiddleware)
+# ------------------------------------------------------------------ #
+# Middleware                                                           #
+# ------------------------------------------------------------------ #
+#
+# REGISTRATION ORDER IS THE REVERSE OF EXECUTION ORDER. Starlette's
+# ``add_middleware`` does ``user_middleware.insert(0, ...)`` and builds
+# the stack by wrapping in ``reversed()``, so the LAST one added ends up
+# OUTERMOST.
+#
+# The block below used to be labelled "outermost → innermost" and was
+# the exact opposite. Two things followed from that, neither visible:
+# ``_TimeoutMiddleware``, commented "must be added FIRST so it wraps all
+# other middleware", was innermost and therefore did not cover the gzip
+# pass it was most needed for — the multi-MB graph payloads whose
+# on-loop compression the comment forty lines down calls out as the
+# thing that stalls a worker. And ``CSRFMiddleware``, commented
+# "innermost", was outermost, so its early 403 returned without the
+# security headers or CORS the middleware below it would have added.
+#
+# Registered innermost-first, which reads backwards but is what the
+# framework does. ``test_middleware_order`` asserts the resulting stack
+# so the comment cannot drift from it again.
 
-# ------------------------------------------------------------------ #
-# Middleware (outermost → innermost order)                             #
-# ------------------------------------------------------------------ #
+# Innermost — closest to the route, so a CSRF 403 is still decorated by
+# everything registered after this point on the way out.
+app.add_middleware(CSRFMiddleware)
 
 _cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "")
 _cors_origins = (
@@ -2087,10 +2204,22 @@ app.add_middleware(RequestIdMiddleware)
 # Security headers (X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.)
 app.add_middleware(SecurityHeadersMiddleware)
 
-# CSRF double-submit. Innermost so it runs closest to the route — the
-# preceding middleware (CORS, security headers) must complete first so
-# that browser preflight checks succeed before we enforce the CSRF rule.
-app.add_middleware(CSRFMiddleware)
+# Just inside the timeout: an oversized body is refused before anything
+# reads or parses it, while the deadline still bounds the check itself.
+app.add_middleware(
+    _BodySizeLimitMiddleware,
+    default_bytes=int(os.getenv("MAX_REQUEST_BODY_BYTES", str(8 * 1024 * 1024))),
+    large_bytes=int(
+        os.getenv("MAX_IMPORT_BODY_BYTES", str(100 * 1024 * 1024))
+    ),
+)
+
+# Outermost, so the deadline actually covers everything inside it —
+# including the gzip pass above, whose on-loop CPU cost on multi-MB
+# graph payloads is the case the timeout exists for. Registered LAST
+# because registration order is reversed; the previous "add first"
+# placement put it innermost and left gzip outside the deadline.
+app.add_middleware(_TimeoutMiddleware)
 
 # ------------------------------------------------------------------ #
 # Routers                                                              #
@@ -2190,6 +2319,37 @@ async def dependency_health():
     except Exception as exc:
         result["dependencies"]["management_db"] = f"unhealthy: {exc}"
         result["status"] = "unhealthy"
+
+    # Revocation store. Not a ping — the question is whether the
+    # backend is SHARED, because an in-process fallback means revoking a
+    # session lands on 1 worker in 4N and a signed-out user keeps
+    # working everywhere else until their token expires. The fallback is
+    # deliberate (raising on the hot auth path would turn a config typo
+    # into a total outage), but until now the only signal was a startup
+    # log line that nothing watches.
+    try:
+        from backend.app.services.revocation_service import revocation_is_shared
+
+        if revocation_is_shared():
+            result["dependencies"]["revocation_store"] = "shared"
+        elif os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+            result["dependencies"]["revocation_store"] = (
+                "DEGRADED: in-process only — session revocation does not "
+                "reach other workers or replicas"
+            )
+            if result["status"] == "healthy":
+                result["status"] = "degraded"
+                result.setdefault("reason", "revocation_not_shared")
+        else:
+            # Normal for a local stack with no Redis. Reported, but not
+            # escalated: a dev environment that always reads "degraded"
+            # teaches everyone to ignore the field, which costs more
+            # than the case it would have caught.
+            result["dependencies"]["revocation_store"] = (
+                "in-process (expected outside production)"
+            )
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["dependencies"]["revocation_store"] = f"unknown: {exc}"
 
     # Provider breaker state (O(1), in-memory only — no provider I/O).
     try:

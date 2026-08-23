@@ -737,6 +737,29 @@ def build_revocation_backend() -> "RedisBackend":
     return RedisBackend(build_redis_client(cfg))
 
 
+def revocation_is_shared() -> bool:
+    """Whether revocation state is shared across workers and replicas.
+
+    ``False`` means the service fell back to ``InMemoryBackend``, and
+    the consequence is worth stating plainly: with 4 gunicorn workers
+    per container across N replicas, revoking a session takes effect on
+    1 worker in 4N. A signed-out or suspended user keeps working
+    everywhere else until their access token expires, and nothing on
+    the request path can tell.
+
+    The fallback itself is correct and stays — see
+    ``get_revocation_service`` for why raising here would turn a config
+    typo into a total auth outage. What was missing is that the only
+    signal was one log line at startup, which nothing watches. This is
+    what ``/health/deps`` reports so a deployment does not sit in that
+    state unnoticed.
+    """
+    svc = _INSTANCE
+    if svc is None:
+        return False
+    return not isinstance(getattr(svc, "_backend", None), InMemoryBackend)
+
+
 def get_revocation_service() -> RevocationService:
     """Return the process-singleton service.
 
