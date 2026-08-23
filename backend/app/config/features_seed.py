@@ -134,7 +134,7 @@ SEED_CATEGORIES: list[dict[str, Any]] = [
     _category("display", "Display & UI", "Palette", "blue", 6, preview=True),
     _category("security", "Security", "Shield", "rose", 7, preview=True),
     _category("integrations", "Integrations", "Plug", "sky", 8, preview=True),
-    _category("analytics", "Analytics", "BarChart3", "teal", 9, preview=True),
+    _category("analytics", "Analytics", "BarChart3", "teal", 9),
     _category("experimental", "Experimental", "FlaskConical", "fuchsia", 10, preview=True),
     _category("performance", "Performance", "Zap", "orange", 11, preview=True),
     _category("other", "Other", "LayoutTemplate", "slate", 99, preview=True),
@@ -142,6 +142,133 @@ SEED_CATEGORIES: list[dict[str, Any]] = [
 
 
 SEED_DEFINITIONS: list[dict[str, Any]] = [
+    # ── Analytics ──────────────────────────────────────────────────────────────
+    {
+        "key": "analyticsWorkspaceVisibility",
+        "name": "Show every workspace in Analytics",
+        "description": (
+            "Let everyone see each workspace's name and figures in Analytics, including "
+            "workspaces they are not a member of. Reporting only — it does not grant "
+            "access to the workspace itself, and links into a workspace still appear "
+            "only for people who can actually open it."
+        ),
+        "impact_when_off": (
+            "Workspaces someone is not a member of appear as locked rows: counted in "
+            "the platform totals, with their name and figures hidden. This matches how "
+            "the rest of the product already scopes workspaces."
+        ),
+        "category_id": "analytics",
+        "type": "boolean",
+        # OFF by default: on, Analytics reports on workspaces the rest of the
+        # product hides from that person. That is a reasonable choice for a
+        # single-company deployment and a poor one anywhere else, so it is a
+        # decision an operator makes rather than a default they inherit.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn this on for a single-company deployment where workspace names are "
+            "team names rather than secrets. It widens what Analytics REPORTS beyond "
+            "what workspace permissions allow, so the change is recorded in the "
+            "feature-change log. The alternative, if you want people to see everything "
+            "everywhere, is to grant them the 'system:org-viewer' permission — that "
+            "widens the whole product consistently instead of just this page."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
+        "key": "analyticsPrivacyMode",
+        "name": "What everyone can see",
+        "description": (
+            "How much detail Analytics shows to people who are not administrators or "
+            "auditors. Workspace access is never affected by this setting — that always "
+            "follows the same permissions as the rest of the product."
+        ),
+        "impact_when_off": (
+            "Not applicable — this is a choice between levels rather than a switch. If "
+            "the value cannot be read, Analytics falls back to aggregate-only."
+        ),
+        "category_id": "analytics",
+        "type": "string",
+        # Internal-first: this platform is mostly deployed inside a single company,
+        # where colleague names are already in the workspace member lists and hiding
+        # them is friction that protects nobody. Operational health is the step
+        # beyond, and is held back because "which sources are failing" is a map of
+        # where the gaps are.
+        "default_value": json.dumps("internal"),
+        "options": json.dumps([
+            {"id": "strict", "label": "Aggregate only"},
+            {"id": "internal", "label": "Show colleagues"},
+            {"id": "full", "label": "Show colleagues and operations"},
+        ]),
+        "help_url": None,
+        "admin_hint": (
+            "Aggregate only — counts and trends, nobody is ever named. Show colleagues "
+            "— adds leaderboards and who built what; right for an internal deployment, "
+            "though publishing per-person activity to all staff is a works-council "
+            "question in parts of the EU. Show colleagues and operations — also adds "
+            "access-request backlogs, invite acceptance and refresh failures. None of "
+            "these reveal a workspace someone cannot already open."
+        ),
+        "sort_order": 1,
+        "deprecated": False,
+    },
+    {
+        "key": "analyticsShowEmailAddresses",
+        "name": "Let people contact each other from Analytics",
+        "description": (
+            "Show a colleague's email address beside their name in Analytics, so someone "
+            "who finds the person behind a view or a busy workspace can reach out without "
+            "hunting for them. Only where the person is attached to something the reader "
+            "can already open \u2014 never on the platform-wide activity ranking."
+        ),
+        "impact_when_off": (
+            "Names still appear (subject to the privacy level); addresses do not. The "
+            "reader can still reach a view's author the way they always could \u2014 by "
+            "opening the view, where the address has always been shown."
+        ),
+        "category_id": "analytics",
+        "type": "boolean",
+        # OFF by default. Addresses are already reachable one page over, so this
+        # is not the thing protecting them \u2014 but a ranked page that lists several
+        # at once is a different artefact from a detail panel showing one, and an
+        # operator should turn that on knowing their deployment, not inherit it.
+        "default_value": json.dumps(False),
+        "options": None,
+    },
+    {
+        "key": "analyticsPublicEnabled",
+        "name": "Analytics for everyone",
+        "description": (
+            "Open the Analytics section to every signed-in person, not just administrators "
+            "and auditors. Everyone sees platform-wide growth and usage; workspaces they "
+            "are not a member of stay locked, and no individual's activity is ever shown."
+        ),
+        "impact_when_off": (
+            "Analytics disappears from the sidebar for everyone except administrators, "
+            "auditors and organisation admins, and the server refuses their requests. "
+            "Privileged users keep the full section either way — this switch only decides "
+            "whether everyone else gets the redacted view."
+        ),
+        "category_id": "analytics",
+        "type": "boolean",
+        # OFF by default, and deliberately: this widens who can see how many people
+        # use the platform and how many workspaces exist. That is a disclosure
+        # decision an operator should make on purpose, not inherit from a default.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turning this on is a disclosure decision. Non-privileged people see aggregate "
+            "growth and usage for the whole platform, plus full detail for workspaces they "
+            "belong to. Names of other workspaces, their data sources, and every per-person "
+            "leaderboard stay hidden no matter who is looking."
+        ),
+        "sort_order": 0,
+        "deprecated": False,
+    },
+
     # ── Editing ────────────────────────────────────────────────────────────────
     {
         "key": "editModeEnabled",

@@ -15,7 +15,7 @@
  * Returns `null` for routes that belong to no primary section (account pages,
  * docs, guide) so nothing is highlighted — rather than the wrong thing.
  */
-export type NavigationTab = 'dashboard' | 'explore' | 'workspaces' | 'ingestion' | 'schema' | 'admin'
+export type NavigationTab = 'dashboard' | 'explore' | 'workspaces' | 'ingestion' | 'schema' | 'analytics' | 'admin'
 
 export function tabForPath(pathname: string): NavigationTab | null {
     if (pathname.startsWith('/dashboard')) return 'dashboard'
@@ -25,6 +25,7 @@ export function tabForPath(pathname: string): NavigationTab | null {
     if (pathname.startsWith('/ingestion') || pathname.startsWith('/datasources')) return 'ingestion'
     if (pathname.startsWith('/workspaces')) return 'workspaces'
     if (pathname.startsWith('/schema')) return 'schema'
+    if (pathname.startsWith('/analytics')) return 'analytics'
     if (pathname.startsWith('/admin')) return 'admin'
     return null
 }

@@ -87,6 +87,7 @@ import { EntitiesStep } from './steps/EntitiesStep'
 import { PreviewStep } from './steps/PreviewStep'
 import { AssignmentStep } from './steps/AssignmentStep'
 import { ScopeStep } from './steps/ScopeStep'
+import { viewTypeLabel } from '@/lib/domainLabels'
 
 // ============================================
 // Types
@@ -193,14 +194,14 @@ const LAYOUT_TYPES = [
     },
     {
         id: 'hierarchy' as const,
-        label: 'Hierarchy',
+        label: viewTypeLabel('hierarchy'),
         icon: <ListTree className="w-8 h-8" />,
         description: 'Nested tree view',
         features: ['Clear parent-child structure', 'Expandable/collapsible nodes', 'Best for organizational charts'],
     },
     {
         id: 'reference' as const,
-        label: 'Context View',
+        label: viewTypeLabel('reference'),
         icon: <LayoutTemplate className="w-8 h-8" />,
         description: 'Horizontal layer columns',
         features: ['Layer-based organization', 'Rule-driven entity assignment', 'Best for data pipelines'],

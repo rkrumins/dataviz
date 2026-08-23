@@ -54,6 +54,13 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
     // gate edit affordances separately.
     ingestion:  { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:provider:read', 'workspace:datasource:manage'] },
     schema:     { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'workspace:ontology:read'] },
+    // Business analytics is read by two audiences that don't imply each
+    // other: auditors (system:audit:read) and cross-workspace operators
+    // (system:org-admin). Note this is the PRIVILEGED spec only —
+    // `analyticsPublicEnabled` opens a redacted section to everyone else, and
+    // that OR lives in `useAnalyticsAccess` because a flag is not a permission.
+    // What stays true here: holding any of these always grants access.
+    analytics:  { kind: 'anyPerm', perms: ['system:admin', 'system:org-admin', 'system:audit:read'] },
     admin:      { kind: 'anyPerm', perms: ['system:admin', 'system:groups:manage'] },
 }
 

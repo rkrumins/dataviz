@@ -90,6 +90,7 @@ import { REVEAL_PAGE, isolationCone, buildWalkExport, walkExportToCsv, type Lens
 import { timeAgo } from '@/lib/timeAgo'
 import { FIT_MAX_ZOOM, useFrameCamera } from './useFrameCamera'
 import { bumpRenderCount } from './renderProbe'
+import { recordEvent } from '@/services/telemetryService'
 
 /** The longest edge an exported image may have, BEFORE `pixelRatio`
  *  doubles it. A ceiling on the FILE, never on the content: a board
@@ -4111,6 +4112,9 @@ function GraphControls({ reducedMotion, exportName, graph, focalUrn, onResetLayo
       a.href = dataUrl
       a.download = `lineage-${(exportName ?? 'focus').replace(/[^\p{L}\p{N}_-]+/gu, '-')}.png`
       a.click()
+      // Same feature family as the data export, different medium — someone took
+      // a lineage picture out of the product to show a human.
+      recordEvent('graph.export', { format: 'png', scope: 'lens' })
     } catch {
       // Rasterization can fail on exotic content (e.g. blocked images);
       // the graph itself is unaffected — just release the button.
