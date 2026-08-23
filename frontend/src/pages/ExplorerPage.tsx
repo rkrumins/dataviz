@@ -913,7 +913,6 @@ export function ExplorerPage() {
         view={previewView}
         isOpen={!!previewView}
         onClose={() => setPreviewView(null)}
-        onToggleFavourite={() => previewView && toggleFavourite(previewView.id)}
         onShare={() => previewView && handleShareDialog(previewView)}
         onEdit={previewView ? () => { setPreviewView(null); openViewEditor(previewView.id) } : undefined}
         editDisabled={false}
