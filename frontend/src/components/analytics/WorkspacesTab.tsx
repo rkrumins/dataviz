@@ -12,7 +12,7 @@
  * section divider, whichever the reader happens to expect.
  */
 import { useMemo, useState } from 'react'
-import { ArrowUpDown, Lock, MoonStar } from 'lucide-react'
+import { ArrowUpDown, ChevronDown, ChevronUp, Lock, MoonStar } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import type { AnalyticsRangeSelection } from '@/services/analyticsService'
@@ -20,6 +20,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { WithheldValue } from './Redacted'
 import { WorkspaceLink } from './EntityLink'
 import { RequestAccessButton } from './RequestAccessButton'
+import { WorkspaceEstate } from './WorkspaceEstate'
 import { compact, exact } from '@/lib/formatMetric'
 import type { WorkspaceAnalyticsRow } from '@/services/analyticsService'
 import { useChartTheme } from './charts/chartTheme'
@@ -74,6 +75,16 @@ export function WorkspacesTab({
 
     const dormant = rows.filter((r) => r.dormant).length
 
+    // Every locked row renders identically — same name, same dashes, same
+    // button — so a tenancy where most workspaces are closed to the reader
+    // buries the two they can act on under a wall of them. Collapsed into one
+    // line by default, opened on request. The rows still EXIST either way:
+    // the table has to keep agreeing with the totals above it.
+    const [showLocked, setShowLocked] = useState(false)
+    const lockedRows = sorted.filter((r) => r.redacted)
+    const openRows = sorted.filter((r) => !r.redacted)
+    const visibleRows = showLocked ? sorted : openRows
+
     const toggle = (key: SortKey) => {
         if (key === sortKey) setAsc((v) => !v)
         else { setSortKey(key); setAsc(false) }
@@ -81,6 +92,12 @@ export function WorkspacesTab({
 
     return (
         <div className={cn('space-y-4 transition-opacity duration-200', isStale && 'opacity-50')}>
+            {/* What the tenancy is MADE of, before any individual row. Nobody
+                arrives asking about workspace X; they arrive wanting to know
+                whether this is a handful of busy places or a long tail of
+                abandoned ones, and no sort order answers that. */}
+            <WorkspaceEstate rows={rows} />
+
             {dormant > 0 && (
                 <p className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-900 dark:text-amber-100">
                     <MoonStar className="w-3.5 h-3.5 shrink-0" aria-hidden />
@@ -127,7 +144,7 @@ export function WorkspacesTab({
                         </tr>
                     </thead>
                     <tbody>
-                        {sorted.map((row) => {
+                        {visibleRows.map((row) => {
                             const locked = row.redacted === true
                             const value = Number(row[sortKey]) || 0
                             // A locked row has no measurement to shade, so it
@@ -235,6 +252,41 @@ export function WorkspacesTab({
                             <tr>
                                 <td colSpan={COLUMNS.length} className="px-3 py-10 text-center text-ink-muted">
                                     No workspaces yet.
+                                </td>
+                            </tr>
+                        )}
+                        {lockedRows.length > 0 && !showLocked && (
+                            <tr className="border-t border-glass-border">
+                                <td colSpan={COLUMNS.length} className="px-3 py-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowLocked(true)}
+                                        className="inline-flex items-center gap-2 rounded-lg px-1.5 py-1 text-[11px] text-ink-muted outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                    >
+                                        <Lock className="h-3 w-3" aria-hidden />
+                                        <span>
+                                            <strong className="font-semibold text-ink-secondary">
+                                                {lockedRows.length}
+                                            </strong>{' '}
+                                            more {lockedRows.length === 1 ? 'workspace' : 'workspaces'} you
+                                            are not a member of — counted in the figures above
+                                        </span>
+                                        <ChevronDown className="h-3 w-3" aria-hidden />
+                                    </button>
+                                </td>
+                            </tr>
+                        )}
+                        {lockedRows.length > 0 && showLocked && (
+                            <tr>
+                                <td colSpan={COLUMNS.length} className="px-3 pb-3 pt-1">
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowLocked(false)}
+                                        className="inline-flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-[11px] text-ink-muted outline-none transition-colors hover:text-ink focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                    >
+                                        <ChevronUp className="h-3 w-3" aria-hidden />
+                                        Hide the {lockedRows.length} you cannot open
+                                    </button>
                                 </td>
                             </tr>
                         )}
