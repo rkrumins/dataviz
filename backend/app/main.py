@@ -498,6 +498,10 @@ async def lifespan(_app: FastAPI):
                 linking_policy=row.linking_policy,
                 button_label=row.button_label,
                 button_icon=row.button_icon,
+                # Carried so the registry can refuse an unpublished row.
+                # The repo defaults new rows to 'live' for the env
+                # boot-seeder; the admin create path sets 'draft'.
+                lifecycle=getattr(row, "lifecycle", None) or "live",
             )
 
     async def _resolve_email_domain(domain: str):
@@ -510,14 +514,53 @@ async def lifespan(_app: FastAPI):
                 if row is not None else None
             )
 
+    # SAML assertion replay defence. ``SamlProvider`` has always called a
+    # replay cache; until now nothing ever handed it one, so it fell back
+    # to a process-local dict that the registry then threw away every 60
+    # seconds along with the provider. Bind the shared store here, where
+    # the revocation backend is already resolved.
+    _builders = dict(PROVIDER_BUILDERS)
+    if SAML_AVAILABLE and "saml2" in _builders:
+        from backend.app.services.revocation_service import (
+            get_saml_replay_cache,
+        )
+        _saml_replay = get_saml_replay_cache()
+        if _saml_replay is None:
+            # No shared store. In prod that is not a degraded mode, it is
+            # an absent control: every worker would forget every
+            # assertion independently, so a captured SAMLResponse is
+            # replayable for its whole validity window. Refuse to serve
+            # SAML rather than appear to protect it — the same
+            # fail-closed stance ``require_encryption_or_plaintext_ok``
+            # takes for credential encryption.
+            if os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+                raise RuntimeError(
+                    "SAML is configured but the revocation store is "
+                    "unavailable, so assertion-replay protection cannot "
+                    "be enforced across workers. Fix REDIS/Memorystore "
+                    "connectivity, or remove the SAML providers."
+                )
+            logger.warning(
+                "SAML replay cache is process-local (no shared revocation "
+                "store). A replayed assertion will be accepted by any "
+                "worker that has not seen it. Never deploy this.",
+            )
+        else:
+            _saml_builder = _builders["saml2"]
+
+            def _build_saml_with_replay_cache(snap, _b=_saml_builder, _c=_saml_replay):
+                return _b(snap, replay_cache=_c)
+
+            _builders["saml2"] = _build_saml_with_replay_cache
+
     _registry = ProviderRegistry(
         loader=_DbProviderConfigLoader(),
-        builders=PROVIDER_BUILDERS,
+        builders=_builders,
     )
     configure_registry(_registry)
     logger.info(
         "Provider registry configured (builders=%s)",
-        sorted(PROVIDER_BUILDERS.keys()),
+        sorted(_builders.keys()),
     )
 
     # Boot-seed: write a default OIDC / SAML / custom row from env

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import os
 from dataclasses import dataclass
 from typing import Iterable, Optional, Protocol
@@ -132,6 +133,7 @@ class RevocationBackend(Protocol):
     async def health(self) -> bool: ...
     # Session claim payload.
     async def set_value(self, key: str, value: str, ttl_seconds: int) -> None: ...
+    async def set_if_absent(self, key: str, ttl_seconds: int) -> bool: ...
     # Existence of *flag_key* and the value at *value_key*, fetched
     # together. One method rather than two calls because this pair is read
     # on every authenticated request: separately it is two round trips, and
@@ -169,6 +171,21 @@ class RedisBackend:
     async def set_with_ttl(self, key: str, ttl_seconds: int) -> None:
         try:
             await self._client.set(key, "1", ex=ttl_seconds)
+        except Exception as exc:
+            raise RevocationBackendError(str(exc)) from exc
+
+    async def set_if_absent(self, key: str, ttl_seconds: int) -> bool:
+        """Claim ``key`` if nobody holds it. True when this caller won.
+
+        ``NX`` matters: a read-then-write would let two concurrent
+        replays of one assertion both observe "absent" and both proceed,
+        which is exactly the race a replay defence exists to lose
+        safely. Redis decides it in one round trip.
+        """
+        try:
+            return bool(await self._client.set(
+                key, "1", ex=max(ttl_seconds, 1), nx=True,
+            ))
         except Exception as exc:
             raise RevocationBackendError(str(exc)) from exc
 
@@ -256,6 +273,13 @@ class InMemoryBackend:
         # TTL is ignored in the fake; tests that need expiry should
         # call ``delete`` explicitly.
         self._set.add(key)
+
+    async def set_if_absent(self, key: str, ttl_seconds: int) -> bool:
+        # TTL ignored, as above. Single-process, so no race to lose.
+        if key in self._set:
+            return False
+        self._set.add(key)
+        return True
 
     async def delete(self, key: str) -> None:
         self._set.discard(key)
@@ -528,6 +552,64 @@ async def revoke_subject_sessions(
         return count
 
     return 0
+
+
+#: Assertion-id keyspace. Separate prefix from the revocation keys so a
+#: flush of one never takes the other with it.
+_SAML_ASSERTION_PREFIX = "saml:asid:"
+
+
+class SharedSamlReplayCache:
+    """One-time-use enforcement for SAML assertion ids, shared fleet-wide.
+
+    ``SamlProvider`` has always called a replay cache — it just never got
+    a real one. ``build_saml_provider`` did not accept the argument, so
+    every provider fell back to a process-local dict, and the registry
+    rebuilds that provider every 60 s. The result looked like replay
+    protection in code review and in the docs, and enforced nothing: a
+    captured ``SAMLResponse`` re-POSTed inside its ``NotOnOrAfter``
+    window minted a session as the victim on any of the 4N workers that
+    had not seen it, or on the same worker a minute later.
+
+    Backed by the revocation store rather than a second Redis client:
+    it is the same shared, already-configured, already-monitored
+    keyspace that session tombstones use.
+
+    A store failure raises. That is deliberate and it is the one place
+    in this module that does not degrade: everything else here fails
+    open because the JWT TTL is still a floor, whereas "we could not
+    check for a replay" has no floor under it at all — it is the whole
+    control. The ACS turns the exception into a rejected sign-in.
+    """
+
+    def __init__(self, backend: RevocationBackend):
+        self._backend = backend
+
+    async def record(self, assertion_id: str, expires_at_epoch: int) -> bool:
+        """True if this assertion is new; False if it has been seen.
+
+        TTL is the assertion's own remaining validity — once it is past
+        ``NotOnOrAfter`` the signature check refuses it anyway, so
+        holding the key longer buys nothing and costs memory.
+        """
+        ttl = max(int(expires_at_epoch) - int(time.time()), 1)
+        return await self._backend.set_if_absent(
+            f"{_SAML_ASSERTION_PREFIX}{assertion_id}", ttl,
+        )
+
+
+def get_saml_replay_cache() -> Optional["SharedSamlReplayCache"]:
+    """A fleet-wide replay cache, or ``None`` when there isn't one.
+
+    ``None`` means the revocation service fell back to its in-process
+    backend, so nothing here can be shared between workers. Callers must
+    treat that as a configuration failure in production rather than
+    substituting the local dict — see ``app/main.py``.
+    """
+    backend = getattr(get_revocation_service(), "_backend", None)
+    if backend is None or isinstance(backend, InMemoryBackend):
+        return None
+    return SharedSamlReplayCache(backend)
 
 
 async def revoke_every_session_for_user(

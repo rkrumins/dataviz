@@ -336,7 +336,7 @@ class SamlProvider:
 
     # ── Leg 2: process the ACS POST and verify the assertion ─────────
 
-    def fetch_identity(
+    async def fetch_identity(
         self,
         *,
         host: str,
@@ -377,7 +377,7 @@ class SamlProvider:
         assertion_id = auth.get_last_assertion_id() or ""
         expires_epoch = _expires_epoch(auth)
         if assertion_id:
-            is_new = self._replay_cache.record(
+            is_new = await self._replay_cache.record(
                 assertion_id, expires_epoch or (int(time.time()) + 600),
             )
             if not is_new:
@@ -523,14 +523,29 @@ def _expires_epoch(auth) -> Optional[int]:
 
 
 class _MemoryReplayCache:
-    """Process-local replay cache used when no Redis-backed one is
-    injected. Loses state across restarts — fine for tests + dev, never
-    for prod. The real one is wired in ``backend/app/main.py``."""
+    """Process-local replay cache. Tests and single-process dev ONLY.
+
+    It cannot enforce one-time-use in any real deployment, and the ways
+    it fails are not obvious, so they are worth naming:
+
+    * viz-service runs 4 gunicorn workers per container and N replicas.
+      Each holds its own dict, so a replayed assertion only has to land
+      on a worker that has not seen it — probability ``1 - 1/4N`` on the
+      first try.
+    * ``ProviderRegistry`` rebuilds the provider every 60 s, and the
+      rebuild constructs a NEW provider, hence a new empty dict. So even
+      a single worker forgets every assertion once a minute, which is
+      well inside the ``NotOnOrAfter`` window it is supposed to bound.
+
+    This is why ``build_saml_provider`` takes an explicit cache and
+    ``app/main.py`` refuses to serve SAML in prod without a shared one:
+    the fallback silently *looks* like replay protection.
+    """
 
     def __init__(self) -> None:
         self._seen: dict[str, int] = {}
 
-    def record(self, assertion_id: str, expires_at_epoch: int) -> bool:
+    async def record(self, assertion_id: str, expires_at_epoch: int) -> bool:
         now = int(time.time())
         # GC expired entries occasionally.
         if len(self._seen) > 10000:
@@ -541,10 +556,19 @@ class _MemoryReplayCache:
         return True
 
 
-def build_saml_provider(snap: ProviderConfigSnapshot) -> SamlProvider:
+def build_saml_provider(
+    snap: ProviderConfigSnapshot,
+    *,
+    replay_cache=None,
+) -> SamlProvider:
     """Factory for the registry. Materialises a working
-    :class:`SamlProvider` from a snapshot."""
-    return SamlProvider(settings_from_snapshot(snap))
+    :class:`SamlProvider` from a snapshot.
+
+    ``replay_cache`` must be supplied by anything serving real traffic —
+    see ``_MemoryReplayCache`` for what omitting it actually costs. The
+    registry binds it in ``app/main.py``; the default is for tests.
+    """
+    return SamlProvider(settings_from_snapshot(snap), replay_cache=replay_cache)
 
 
 # ── Admin-time IdP metadata import ───────────────────────────────────

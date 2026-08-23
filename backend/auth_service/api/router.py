@@ -790,14 +790,39 @@ async def _require_sso_enabled(request: Request) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "SSO is not configured")
 
 
+def _holds_dryrun_cookie(request: Request) -> bool:
+    """Whether this request carries a valid rehearsal cookie.
+
+    ``nx_dryrun`` is signed with the platform key and minted only by the
+    admin-authed ``/admin/idp-providers/{id}/dry-run/start``, so holding
+    one is proof an operator started a rehearsal. That is what entitles
+    a request to resolve an unpublished provider — the whole point of a
+    dry-run is to exercise a draft before publishing it.
+
+    Deliberately coarser than ``_is_dryrun``, which also matches the
+    provider id: that check needs a resolved provider, and this one runs
+    to decide whether resolution is allowed at all. The narrower check
+    still happens afterwards.
+    """
+    raw = read_dryrun_cookie(request)
+    if not raw:
+        return False
+    try:
+        decode_dryrun_token(raw)
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return False
+    return True
+
+
 async def _resolve_provider(slug: str, *, request: Request):
-    """Slug -> provider instance; raises 404 on unknown / disabled OR
-    when the platform master kill-switch is off."""
+    """Slug -> provider instance; raises 404 on unknown / disabled /
+    unpublished, OR when the platform master kill-switch is off."""
     await _require_sso_enabled(request)
+    allow_draft = _holds_dryrun_cookie(request)
     try:
         registry = get_registry()
-        provider_id = await registry.resolve_slug(slug)
-        provider = await registry.get(provider_id)
+        provider_id = await registry.resolve_slug(slug, allow_draft=allow_draft)
+        provider = await registry.get(provider_id, allow_draft=allow_draft)
     except (ProviderNotFound, ProviderDisabled):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
     except RuntimeError as exc:  # registry not configured
@@ -809,13 +834,20 @@ async def _resolve_provider(slug: str, *, request: Request):
     return provider
 
 
-async def _provider_snapshot(slug: str):
+async def _provider_snapshot(slug: str, *, request: Request | None = None):
     """Lookup helper used by the public catalog and by the linking-
-    policy / display_name pull-throughs in callbacks."""
+    policy / display_name pull-throughs in callbacks.
+
+    Takes ``request`` for one reason: the callback handlers call this
+    after ``_resolve_provider`` has already admitted the provider, so if
+    this refused drafts unconditionally it would 404 halfway through
+    every dry-run — the one flow that is supposed to exercise a draft.
+    """
+    allow_draft = bool(request is not None and _holds_dryrun_cookie(request))
     try:
         registry = get_registry()
-        provider_id = await registry.resolve_slug(slug)
-        return await registry.get_snapshot(provider_id)
+        provider_id = await registry.resolve_slug(slug, allow_draft=allow_draft)
+        return await registry.get_snapshot(provider_id, allow_draft=allow_draft)
     except (ProviderNotFound, ProviderDisabled):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
 
@@ -1353,7 +1385,7 @@ async def oidc_callback(
     if not isinstance(provider, OidcProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not an OIDC provider")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="OIDC callback",
@@ -1423,7 +1455,7 @@ async def saml_acs(slug: str, request: Request):
     if SamlProvider is None or not isinstance(provider, SamlProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a SAML provider")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="SAML ACS",
@@ -1448,7 +1480,7 @@ async def saml_acs(slug: str, request: Request):
 
     host, https, path = _request_https_host(request)
     try:
-        identity = provider.fetch_identity(
+        identity = await provider.fetch_identity(
             host=host, https=https, path=path,
             post_data={k: v for k, v in form.multi_items()},
         )
@@ -1549,7 +1581,7 @@ async def _custom_login_flow(
     if not AUTH_CUSTOM_PROVIDER_ENABLED:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Custom IdP disabled")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
     raw = read_mock_identity_cookie(request)
     if not raw:
         from urllib.parse import quote
@@ -1658,7 +1690,7 @@ async def _custom_profile_login_flow(
     Both paths matter for the 24h SSO re-auth bounce, which sends the
     browser to this endpoint with ``force=1``.
     """
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
     source = provider.settings.source
 
     if source in BROWSER_STORAGE_SOURCES:
@@ -1727,7 +1759,7 @@ async def custom_profile_browser_login(
             status.HTTP_404_NOT_FOUND,
             "Provider does not read its profile from browser storage",
         )
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     try:
         identity = provider.fetch_identity(body.payload)
