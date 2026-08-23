@@ -41,6 +41,7 @@ from backend.auth_service.cookies import (
 # assertion and the fingerprint log.
 from backend.auth_service.core import config as _auth_config
 from backend.auth_service.core.config import (
+    ALLOWED_HOSTS,
     AUTH_ENVIRONMENT_ID as _AUTH_ENVIRONMENT_ID,
     COOKIE_DOMAIN as _COOKIE_DOMAIN,
     COOKIE_SAMESITE as _COOKIE_SAMESITE,
@@ -1881,6 +1882,69 @@ app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 # provider can never block a request indefinitely.                     #
 # ------------------------------------------------------------------ #
 
+class _TrustedHostMiddleware(BaseHTTPMiddleware):
+    """Refuse a request whose ``Host`` is not one this deployment answers to.
+
+    Starlette ships a ``TrustedHostMiddleware`` and this is not it, for one
+    reason: k8s probes connect to the pod IP, so their ``Host`` is a dynamic
+    address no operator can put in an allowlist. Starlette's version has no
+    path exemption, so adding it would have made every pod fail its own
+    readiness probe. The probe paths are exempt here instead.
+
+    The concrete threat this closes is narrow and worth stating, because the
+    usual one does not apply: the app sends no email and builds no reset or
+    invite links, so there is no Host-poisoning-to-account-takeover chain.
+    What does depend on the claimed host is SAML. python3-saml derives
+    ``current_url`` from it to validate an assertion's ``Destination`` and
+    ``Recipient``, so an attacker replaying an assertion minted for a
+    different SP can set the header to match. ``_request_https_host``
+    already honours ``ALLOWED_HOSTS`` for exactly that; this refuses the
+    forged host at the perimeter instead of per-consumer.
+
+    Off when ``ALLOWED_HOSTS`` is unset — the same posture the SAML check
+    takes, and it keeps every local and CI stack working unchanged.
+    """
+
+    #: Reached by kubelet on the pod IP, where Host is a dynamic address
+    #: no operator can allowlist. The viz-service manifest probes
+    #: ``/health`` and ``/api/v1/health/ready``; Compose probes
+    #: ``/api/v1/health``. Matched by prefix rather than enumerated so a
+    #: new probe route cannot silently start failing — every health
+    #: endpoint is unauthenticated already and none of them reads Host,
+    #: so exempting the whole family costs nothing.
+    #: ``test_trusted_host`` asserts this covers every health route the
+    #: app actually mounts.
+    _EXEMPT_PREFIXES = ("/health", "/api/v1/health")
+
+    def __init__(self, app, *, allowed_hosts: tuple[str, ...]):
+        super().__init__(app)
+        # Ports stripped on both sides: one deployment answers on :80,
+        # :443 and :8000 and they are the same host, and an operator who
+        # writes "example.com:8443" means the host.
+        self._allowed = frozenset(
+            h.split(":")[0].strip().lower() for h in allowed_hosts if h.strip()
+        )
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if any(
+            path == p or path.startswith(p + "/") for p in self._EXEMPT_PREFIXES
+        ):
+            return await call_next(request)
+        host = request.headers.get("host", "").split(":")[0].strip().lower()
+        if host and host not in self._allowed:
+            logger.warning(
+                "Refused request claiming Host=%r (not in ALLOWED_HOSTS)", host,
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Host header not recognised for this deployment."
+                },
+            )
+        return await call_next(request)
+
+
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """Refuse a request body larger than the cap, before parsing it.
 
@@ -2241,6 +2305,13 @@ app.add_middleware(StructuredLoggingMiddleware)
 # X-Request-ID generation / propagation
 app.add_middleware(RequestIdMiddleware)
 
+# Host allowlist, when one is configured. Registered here so it sits
+# INSIDE SecurityHeadersMiddleware — a refusal still carries the headers
+# — and OUTSIDE CSRFMiddleware, which derives its same-origin allowance
+# from the very Host header this validates.
+if ALLOWED_HOSTS:
+    app.add_middleware(_TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+
 # Security headers (X-Content-Type-Options, X-Frame-Options, CSP, HSTS, etc.)
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -2508,6 +2579,49 @@ async def readiness_check():
                 "schema_applied": schema_state["applied"],
                 "schema_expected": schema_state["expected"],
                 "reason": "schema_mismatch — run synodic-upgrade",
+                "providers": {},
+            },
+        )
+
+    # Session revocation must be SHARED across workers to mean anything.
+    #
+    # ``get_revocation_service`` catches broadly and installs an
+    # in-process backend when Redis cannot be reached, whose own
+    # docstring says not to use it in production. With 4 gunicorn
+    # workers per container across N replicas, that turns every
+    # revocation into a no-op for 4N-1 of them: the admin UI shows the
+    # session killed and the browser keeps working. It logged at ERROR
+    # and nothing failed readiness, so a Redis misconfiguration was
+    # invisible.
+    #
+    # Reported everywhere, but only decisive in prod: a dev stack has
+    # one worker, so the in-process backend is genuinely equivalent
+    # there, and failing readiness would just stop ./dev.sh working.
+    #
+    # What this catches is a MISCONFIGURATION — the backend that got
+    # built at boot — not a live outage. A Redis that was reachable at
+    # startup and dies later leaves a RedisBackend installed and this
+    # still reports "shared". Deliberate: a Redis round trip does not
+    # belong on a probe hot path (that is what /health/deps is for), and
+    # dropping every replica out of rotation on a transient blip is a
+    # worse failure than the fail-open it would be protecting against.
+    from backend.app.services.revocation_service import revocation_is_shared
+
+    shared = revocation_is_shared()
+    result["revocation"] = "shared" if shared else "in_process"
+    if not shared and _is_production():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "postgres": "healthy",
+                "schema_at_head": True,
+                "revocation": "in_process",
+                "reason": (
+                    "session revocation has no shared store, so a revoked "
+                    "session stays live on every other worker — fix Redis "
+                    "connectivity"
+                ),
                 "providers": {},
             },
         )
