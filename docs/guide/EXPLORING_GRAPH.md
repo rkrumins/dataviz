@@ -63,6 +63,30 @@ themselves left **closed, with their counts** — open one when you want its
 rows. **Depth** in the dock narrows what the canvas *shows* of a trace; it
 never fetches less, so turning it down is always reversible.
 
+### Handing a trace to someone else
+
+A trace is usually an answer to somebody's question — *what feeds this
+dashboard*, *what breaks if I drop this column* — so it can be handed over as
+a link rather than a screenshot. **Share** in the trace dock copies a URL that
+reopens the trace: the same entity, the same direction, the same hop limits,
+and the same cards you had open.
+
+The popover says what the link carries before you copy it, and one switch
+decides how much travels:
+
+| Switch | What your reader lands on |
+| --- | --- |
+| **Include the open cards** (default) | Your exact picture — the containers you opened, the rows you drilled into |
+| Off | The same question, drawn the way a fresh trace opens |
+
+Opening a link starts the trace on the reader's own canvas, so **it re-runs
+against today's lineage** — it is a question, not a frozen snapshot, and it
+takes as long as that trace takes. Anyone who can open the view can open the
+trace; nobody else can. The trace also joins their own **Recent traces**, so
+it is one click away after they close it.
+
+---
+
 ```mermaid
 flowchart LR
   subgraph Upstream

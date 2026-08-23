@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clock,
+  Share2,
   X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -18,6 +19,7 @@ import type { HierarchyNode } from '@/types/hierarchy'
 import { useCountUp } from './useCountUp'
 import { TraceRecentPopover } from './TraceRecentPopover'
 import { TraceModeIndicator, deriveTraceMode } from './TraceModeIndicator'
+import { TraceSharePopover, type TraceShareSummary } from './TraceSharePopover'
 
 export interface TraceDockTitleBarProps {
   trace: UseUnifiedTraceResult
@@ -33,6 +35,14 @@ export interface TraceDockTitleBarProps {
   /** Driven by the NATIVE trace engine: direction is a VIEW toggle on a flow
    *  already walked to exhaustion, never a new request. */
   nativeMode?: boolean
+  /** Everything the Share control needs, or absent for a host that cannot
+   *  build a link (the legacy dock). No summary, no button. */
+  share?: TraceShareSummary
+  /** The traced entity's name, resolved by the host. The canvas can only
+   *  name what it has LOADED, and a trace opened from a shared link is
+   *  routinely on something the recipient has never expanded — which used to
+   *  put a raw urn in the dock's focus chip. */
+  focusLabel?: string
 }
 
 type Direction = 'up' | 'both' | 'down'
@@ -68,14 +78,18 @@ export function TraceDockTitleBar({
   canHistoryBack = false,
   canHistoryForward = false,
   nativeMode = false,
+  share,
+  focusLabel,
 }: TraceDockTitleBarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const recentTriggerRef = useRef<HTMLButtonElement>(null)
+  const shareTriggerRef = useRef<HTMLButtonElement>(null)
   const [recentOpen, setRecentOpen] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
   const [focusedIdx, setFocusedIdx] = useState(0)
 
   const focusNode = trace.focusId ? displayMap.get(trace.focusId) : undefined
-  const focusName = focusNode?.name ?? trace.focusId ?? 'Unknown'
+  const focusName = focusLabel || focusNode?.name || trace.focusId || 'Unknown'
   const focusType = focusNode?.typeId
   const liveMsg = `Tracing ${focusName}${focusType ? `, ${focusType}` : ''}. ${trace.upstreamCount} upstream, ${trace.downstreamCount} downstream nodes.`
 
@@ -310,6 +324,42 @@ export function TraceDockTitleBar({
           >
             <ArrowRight className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {/* SHARE — a trace is a finding, and findings get handed on. Sits with
+          the other "what do I do with this trace" controls rather than in
+          the header, where it would only ever be live during a trace. */}
+      {share && (
+        <div className="relative shrink-0">
+          <button
+            ref={shareTriggerRef}
+            type="button"
+            data-trace-control
+            aria-haspopup="dialog"
+            aria-expanded={shareOpen}
+            aria-label="Share this trace"
+            title="Copy a link that reopens this trace"
+            onClick={() => setShareOpen(v => !v)}
+            className={cn(
+              'inline-flex items-center gap-2 px-3.5 h-9 rounded-xl text-sm font-semibold',
+              'transition-all duration-200',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+              shareOpen
+                ? 'bg-accent-lineage text-white border border-accent-lineage shadow-lg shadow-accent-lineage/30'
+                : 'bg-white/[0.08] border border-white/[0.15] text-ink hover:bg-white/[0.14] hover:border-white/[0.25]',
+            )}
+          >
+            <Share2 className="w-4 h-4" strokeWidth={2.4} />
+            <span className="hidden md:inline tracking-tight">Share</span>
+          </button>
+          {shareOpen && (
+            <TraceSharePopover
+              {...share}
+              onClose={() => { setShareOpen(false); shareTriggerRef.current?.focus() }}
+              triggerRef={shareTriggerRef}
+            />
+          )}
         </div>
       )}
 

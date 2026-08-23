@@ -19,10 +19,11 @@ import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { act, fireEvent, screen } from '@testing-library/react'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate, coarseThenFineEstate } from '@/test/fixtures/traceEstates'
+import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(22))
+afterAll(() => expectTestsRan(24))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -570,6 +571,76 @@ describe('the trace overlay on the real canvas', () => {
     await h.openTraceHistory()
     expect(h.traceHistoryLabels()).toEqual(['CFO Revenue Dashboard'])
     expect(h.nameLookups()).toBe(lookups)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // A TRACE IS A FINDING, and findings get handed on. The link carries what
+  // the history entry carries — focus, sides, hop limits, open cards — so
+  // the recipient lands on the same picture without a single click.
+  it('a shared link opens the trace it names, with the sender\'s picture', async () => {
+    const token = encodeTraceShare({
+      urn: 'cfo',
+      label: 'CFO Revenue Dashboard',
+      up: true,
+      down: false,
+      depthUp: 3,
+      depthDown: 25,
+      open: ['orders'],
+    })
+    // The recipient's canvas holds its lane roots and nothing else — they
+    // have never opened this dashboard; the link is how they meet it.
+    const base = cfoEstate()
+    const estate = {
+      ...base,
+      model: {
+        ...base.model,
+        nodes: base.model.nodes.map(n => (n.urn === 'cfo' ? { ...n, displayName: 'CFO Revenue Dashboard' } : n)),
+      },
+    }
+    const h = await renderCanvasWithTrace(estate, {
+      focus: 'cfo',
+      search: `?trace=${token}`,
+      browseHolds: ['snowflake', 'tableau', 'INTERMEDIATE_T2', 'REPORTING'],
+    })
+
+    // Nobody clicked anything: the link traced.
+    await h.waitForCard('cfo')
+    expect(h.isTracing()).toBe(true)
+    expect(h.direction()).toBe('up')
+    // And it says what it is tracing — never the urn the link carried.
+    expect(h.dockFocus()).toBe('CFO Revenue Dashboard')
+    // The sender had `orders` open, so its columns are on the recipient's
+    // board too — the picture, not just the question.
+    expect(h.visibleCardIds()).toContain('orders.channel')
+    // The token is consumed: a refresh, or this URL pasted onward, is clean.
+    expect(window.location.search).toBe('')
+
+    // And it joins the recipient's own history, so it survives that strip.
+    h.pressEscape()
+    await h.settle()
+    await h.openTraceHistory()
+    expect(h.traceHistoryLabels()).toContain('CFO Revenue Dashboard')
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('a link the sender writes says what it carries, and carries what it says', async () => {
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
+    await h.startTrace('cfo')
+    await h.setDirection('up')
+    await h.openShare()
+
+    // The popover states the finding BEFORE the copy, not after it.
+    expect(h.shareSummary()).toMatch(/Root cause/)
+    expect(h.shareSummary()).toMatch(/cfo/)
+
+    const withPicture = decodeTraceShare(new URL(await h.copyShareLink()).searchParams.get('trace') ?? '')
+    expect(withPicture).toMatchObject({ urn: 'cfo', up: true, down: false })
+    expect(withPicture!.open.length).toBeGreaterThan(0)
+
+    // Switched off, the same link is the plain question — "open it as it draws".
+    await h.toggleSharePicture()
+    const plain = decodeTraceShare(new URL(await h.copyShareLink()).searchParams.get('trace') ?? '')
+    expect(plain).toMatchObject({ urn: 'cfo', up: true, down: false, open: [] })
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 

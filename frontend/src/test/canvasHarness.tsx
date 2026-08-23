@@ -138,6 +138,22 @@ export interface TraceCanvasHarness {
   resumeTraceHistory(label: string): Promise<void>
   /** How many name lookups the provider has served. */
   nameLookups(): number
+  /** Which side the dock's direction control is on. */
+  direction(): 'up' | 'down' | 'both'
+  /** The name the dock's focus chip is showing. */
+  dockFocus(): string | null
+  /** Wait until a card is on the board — a trace nobody pressed (a shared
+   *  link) lands on its own schedule, so a test has to wait for the board
+   *  rather than assume the mount settled it. */
+  waitForCard(id: string): Promise<void>
+  /** Open the dock's Share popover. */
+  openShare(): Promise<void>
+  /** What the Share popover says the link carries. */
+  shareSummary(): string
+  /** Flip "include the open cards". */
+  toggleSharePicture(): Promise<void>
+  /** Press Copy link; resolves with what reached the clipboard. */
+  copyShareLink(): Promise<string>
   /** Open the entity drawer on a node. */
   openDrawer(id: string): Promise<void>
   /** The entity the details drawer is showing, or null when it shows none. */
@@ -170,6 +186,19 @@ let releaseConsole: (() => void) | null = null
 
 /** jsdom reports no geometry; the virtualizer and the flow overlay both need
  *  some. Idempotent — several harnesses may mount in one file. */
+/** What the Share popover last wrote to the clipboard. jsdom has none, and
+ *  an unstubbed `navigator.clipboard` makes the copy path throw into the
+ *  popover's own "your browser blocked it" branch — which would pass a test
+ *  that never actually copied anything. */
+const clipboard = { text: '' }
+
+function installClipboard(): void {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: async (text: string) => { clipboard.text = text } },
+  })
+}
+
 function installJsdomLayout(): void {
   if (typeof globalThis.IntersectionObserver === 'undefined') {
     globalThis.IntersectionObserver = class {
@@ -450,9 +479,13 @@ export async function renderCanvasWithTrace(
      *  estate; pass the lane roots to model a reader who traced before
      *  expanding anything, so the walk's partners are new to the store. */
     browseHolds?: readonly string[]
+    /** The search string the canvas mounts on — `?trace=…` for a shared
+     *  trace link, exactly as a recipient's browser would present it. */
+    search?: string
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
+  installClipboard()
   // A HARNESS MOUNT IS A FRESH BROWSER. The trace history persists per view
   // in localStorage, so without this each test inherits every trace the
   // previous ones ran — and a test that reads the history reads the file's
@@ -477,6 +510,8 @@ export async function renderCanvasWithTrace(
   useFeaturesStore.setState({
     values: { ...useFeaturesStore.getState().values, editModeEnabled: !!opts.draft },
   } as never)
+  // A recipient opens a link: the canvas must find it in the URL at mount.
+  window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
   seedView(estate)
 
@@ -712,6 +747,51 @@ export async function renderCanvasWithTrace(
       await settle()
     },
     nameLookups: () => providerCalls.getNodes,
+    async waitForCard(id: string) {
+      await waitFor(() => {
+        if (!document.querySelector(`#${CSS.escape(CARD_ID_PREFIX + id)}`)) {
+          throw new Error(`${id} never reached the board`)
+        }
+      }, { timeout: 4000 })
+      await settle()
+    },
+    dockFocus: () => {
+      const el = document.querySelector<HTMLElement>('[aria-label^="Trace controls for "]')
+      return el?.getAttribute('aria-label')?.replace(/^Trace controls for /, '') ?? null
+    },
+    direction: () => {
+      const checked = [...document.querySelectorAll<HTMLElement>('[role="radio"]')]
+        .find(r => r.getAttribute('aria-checked') === 'true')
+      const name = checked?.getAttribute('aria-label') ?? ''
+      return /upstream/i.test(name) ? 'up' : /downstream/i.test(name) ? 'down' : 'both'
+    },
+    async openShare() {
+      const trigger = document.querySelector<HTMLButtonElement>('[aria-label="Share this trace"]')
+      if (!trigger) throw new Error('the dock is not offering a Share control')
+      await act(async () => { fireEvent.click(trigger) })
+      await settle()
+    },
+    shareSummary: () => {
+      const panel = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Share this trace"]')
+      return [...(panel?.querySelectorAll<HTMLElement>('p') ?? [])].map(p => p.textContent?.trim() ?? '').join(' | ')
+    },
+    async toggleSharePicture() {
+      const sw = document.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Include the open cards"]')
+      if (!sw) throw new Error('the share popover is not offering the picture switch')
+      await act(async () => { fireEvent.click(sw) })
+      await settle()
+    },
+    async copyShareLink() {
+      const panel = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Share this trace"]')
+      // By its hook, not its text: the button says "Link copied" for a
+      // moment after a copy, and a second copy has to reach the same button.
+      const button = panel?.querySelector<HTMLButtonElement>('[data-share-copy]')
+      if (!button) throw new Error('the share popover is not offering Copy link')
+      clipboard.text = ''
+      await act(async () => { fireEvent.click(button) })
+      await settle()
+      return clipboard.text
+    },
     async openDrawer(id: string) {
       await act(async () => { useCanvasStore.getState().openNodeDrawer(id) })
       await settle()

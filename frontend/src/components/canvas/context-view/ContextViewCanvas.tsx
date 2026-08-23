@@ -127,6 +127,8 @@ import {
 } from '@/hooks/lib/traceHistoryStack'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 import { useResolvedNames } from '@/hooks/useResolvedNames'
+import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
+import type { TraceShareSummary } from '@/components/canvas/trace/TraceSharePopover'
 
 /** The native canvas trace has no per-edge drilldowns — the closure walk
  *  model is complete at leaf grain. One shared empty map keeps the trace
@@ -1649,14 +1651,25 @@ export function ContextViewCanvas({
   // looks (and, ungated, still is) live.
   const canvasWritable = canEditGraph && !traceActive
   const traceModel = canvasTrace.walkEntry?.model ?? null
+  // A SHARED TRACE (`?trace=…`) — decoded once during the first render, so
+  // the trace opens on the shared picture with no un-restored flash, and so
+  // every piece of state below can simply START there rather than being set
+  // into place by an effect. A malformed token decodes to null and the view
+  // opens normally: a link arrives from outside and must never be able to
+  // break the canvas.
+  const [initialTraceShare] = useState(() => {
+    const raw = new URLSearchParams(window.location.search).get('trace')
+    return raw ? decodeTraceShare(raw) : null
+  })
   // Direction visibility — the dock's upstream/downstream toggles. Reset
-  // on every trace start so a new trace always opens with the whole flow.
-  const [traceShowUpstream, setTraceShowUpstream] = useState(true)
-  const [traceShowDownstream, setTraceShowDownstream] = useState(true)
+  // on every trace start so a new trace always opens with the whole flow;
+  // a shared link starts on the sides its sender was reading.
+  const [traceShowUpstream, setTraceShowUpstream] = useState(initialTraceShare?.up ?? true)
+  const [traceShowDownstream, setTraceShowDownstream] = useState(initialTraceShare?.down ?? true)
   // Hop-depth limits — VIEW-side (the walk fetched everything; ≥ the
   // walk's own fetch depth means unlimited). Reset on trace start.
-  const [traceDepthUp, setTraceDepthUp] = useState(FULL_WALK_INITIAL_DEPTH)
-  const [traceDepthDown, setTraceDepthDown] = useState(FULL_WALK_INITIAL_DEPTH)
+  const [traceDepthUp, setTraceDepthUp] = useState(initialTraceShare?.depthUp ?? FULL_WALK_INITIAL_DEPTH)
+  const [traceDepthDown, setTraceDepthDown] = useState(initialTraceShare?.depthDown ?? FULL_WALK_INITIAL_DEPTH)
 
   // THE TRACE OVERLAY. Everything a trace draws — lanes, cards, counts,
   // wires — is a pure function of (walk model, this view's placement,
@@ -1720,8 +1733,26 @@ export function ContextViewCanvas({
   // restore refetches like any trace.
   const authUserId = useAuthStore((s) => s.user?.id ?? 'anon')
   const traceHistoryKey = `nx:trace-history:v1:${authUserId}:${activeView?.id ?? 'no-view'}`
-  const [traceHistory, setTraceHistory] = useState<TraceHistoryStack>(() =>
-    hydrateTraceHistory(typeof localStorage === 'undefined' ? null : localStorage.getItem(traceHistoryKey)))
+  const [traceHistory, setTraceHistory] = useState<TraceHistoryStack>(() => {
+    const stored = hydrateTraceHistory(typeof localStorage === 'undefined' ? null : localStorage.getItem(traceHistoryKey))
+    // The shared trace joins the recipient's own history, so it survives the
+    // param strip below: after a reload it is one click away in the launcher
+    // rather than gone with the URL.
+    return initialTraceShare
+      ? pushTraceFocal(stored, {
+          urn: initialTraceShare.urn,
+          focusId: initialTraceShare.urn,
+          view: {
+            showUpstream: initialTraceShare.up,
+            showDownstream: initialTraceShare.down,
+            depthUp: initialTraceShare.depthUp,
+            depthDown: initialTraceShare.depthDown,
+            traceExpansion: initialTraceShare.open,
+          },
+          timestamp: Date.now(),
+        })
+      : stored
+  })
   // Re-hydrate when the user/view (and so the key) changes.
   const traceHistoryKeyRef = useRef(traceHistoryKey)
   useEffect(() => {
@@ -1856,6 +1887,21 @@ export function ContextViewCanvas({
     }
     beginTrace(entry.urn)
   }, [beginTrace])
+  // OPENING A SHARED TRACE. Everything the link carries is already in place
+  // — the direction, the depths and the history entry all START there — so
+  // what is left is to actually run it, once, and to restore the picture the
+  // sender had open. The overlay owns expansion, so this cannot be a state
+  // initializer like the rest.
+  const sharedTraceStarted = useRef(false)
+  useEffect(() => {
+    if (!initialTraceShare || sharedTraceStarted.current) return
+    sharedTraceStarted.current = true
+    if (initialTraceShare.open.length > 0) {
+      overlayRef.current?.restoreExpansion(initialTraceShare.urn, initialTraceShare.open)
+    }
+    beginTrace(initialTraceShare.urn)
+  }, [initialTraceShare, beginTrace])
+
   const traceHistoryGo = useCallback((next: TraceHistoryStack) => {
     if (next === traceHistory) return
     // A toggle inside the debounce window belongs to the entry the reader is
@@ -2040,6 +2086,55 @@ export function ContextViewCanvas({
     timestamp: e.timestamp,
     config: { ...trace.config, upstreamDepth: e.view.depthUp, downstreamDepth: e.view.depthDown },
   })), [traceHistory, trace.config, historyLabels])
+  // THE TRACED ENTITY'S NAME, resolved once for everything that says it.
+  // The canvas can only name what it has loaded, and a trace opened from a
+  // shared link is routinely on something the recipient has never expanded —
+  // so the walk model answers next, then the link's own label (all anyone
+  // has during the seconds the walk is out), then the urn tail.
+  const tracedLabel = useMemo(() => {
+    const urn = canvasTrace.tracedUrn
+    if (!urn) return null
+    return displayMap.get(urnToIdMap.get(urn) ?? urn)?.name
+      || (traceNodeIndex?.get(urn)?.data as { label?: string } | undefined)?.label
+      || (initialTraceShare?.urn === urn ? initialTraceShare.label : undefined)
+      || urn.split(/[:/]/).pop()
+      || urn
+  }, [canvasTrace.tracedUrn, displayMap, urnToIdMap, traceNodeIndex, initialTraceShare])
+
+  // WHAT THE SHARE CONTROL OFFERS. Built from what is on screen right now:
+  // the focus and its name, the sides being read, the hop limits, and the
+  // cards that are open. `buildLink` is called on click, so the link is
+  // always the trace as it stands rather than as it stood when the popover
+  // opened. `lens` is dropped from the URL — one link, one thing to open.
+  const traceShare = useMemo<TraceShareSummary | undefined>(() => {
+    const urn = canvasTrace.tracedUrn
+    if (!traceActive || !urn || !tracedLabel) return undefined
+    const label = tracedLabel
+    const open = [...(overlay.traceExpansion ?? [])] as string[]
+    return {
+      label,
+      direction: traceShowUpstream && traceShowDownstream ? 'both' : traceShowUpstream ? 'up' : 'down',
+      depthUp: traceDepthUp,
+      depthDown: traceDepthDown,
+      openCards: open.length,
+      buildLink: (includePicture: boolean) => {
+        const token = encodeTraceShare({
+          urn,
+          label,
+          up: traceShowUpstream,
+          down: traceShowDownstream,
+          depthUp: traceDepthUp,
+          depthDown: traceDepthDown,
+          open: includePicture ? open : [],
+        })
+        const url = new URL(window.location.href)
+        url.searchParams.set('trace', token)
+        url.searchParams.delete('lens')
+        return url.toString()
+      },
+    }
+  }, [traceActive, canvasTrace.tracedUrn, tracedLabel, overlay.traceExpansion, traceShowUpstream, traceShowDownstream, traceDepthUp, traceDepthDown])
+
   const dockTrace = useMemo<UseUnifiedTraceResult>(() => {
     if (!traceActive || !traceModel || !tracedNodeId) return trace
     const result: TraceResult = {
@@ -3771,6 +3866,10 @@ export function ContextViewCanvas({
   // system updates — happen in the mount effect below. Malformed
   // tokens decode to null and the canvas opens normally.
   const [initialLensShare] = useState(() => {
+    // A link that carries both opens the TRACE: it is the more specific
+    // state, and two overlays racing each other on arrival is nobody's
+    // intent. The lens token is dropped with the param strip below.
+    if (initialTraceShare) return null
     const raw = new URLSearchParams(window.location.search).get('lens')
     return raw ? decodeLensShare(raw) : null
   })
@@ -3867,11 +3966,12 @@ export function ContextViewCanvas({
   // had two must not put a reader into a body that no longer exists.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    if (!params.has('lens')) return
+    if (!params.has('lens') && !params.has('trace')) return
     params.delete('lens')
+    params.delete('trace')
     const qs = params.toString()
     window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
-  }, [initialLensShare])
+  }, [initialLensShare, initialTraceShare])
 
   // ── Anchor Rail — the selected node's off-screen partners docked as
   // proxy chips in their owning columns. The overlay computes the
@@ -4347,6 +4447,8 @@ export function ContextViewCanvas({
               canHistoryBack={traceHistory.cursor > 0}
               canHistoryForward={traceHistory.cursor < traceHistory.entries.length - 1}
               nativeMode={traceActive}
+              share={traceShare}
+              focusLabel={tracedLabel ?? undefined}
               outsideView={overlay.view?.outsideView ?? 0}
             />
         )}
