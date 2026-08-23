@@ -473,10 +473,16 @@ describe('useTraceOverlay — restoreExpansion', () => {
     expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
 
     act(() => result.current.restoreExpansion('cfo', ['INTERMEDIATE_T2']))
-    expect([...result.current.traceExpansion]).toEqual(['INTERMEDIATE_T2'])
-    // The picture follows: the partner is open, the focus chain is not.
+    // What it named, plus the hosts those cards need in order to be on
+    // screen at all — `tableau` holds the focus (see `withHosts`). REPORTING,
+    // a partner host the picture did not name, is gone: that is what
+    // "replaces" means.
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'tableau'])
     expect(result.current.view!.visible.has('orders')).toBe(true)
-    expect(result.current.view!.visible.has('cfo')).toBe(false)
+    // The focus is REACHABLE but still shut: whether it opens is the seed's
+    // call (a container with a hundred children lands closed), never a
+    // restore's.
+    expect(result.current.traceExpansion.has('cfo')).toBe(false)
   })
 
   it('a restore issued while the walk is still loading WINS over the seed when the model lands', () => {
@@ -489,15 +495,32 @@ describe('useTraceOverlay — restoreExpansion', () => {
     expect(result.current.active).toBe(false)
 
     rerender(args())
-    // The seed would have given ['cfo', 'tableau'] — the reader's own
-    // picture is what they get instead.
-    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'orders'])
+    // The seed would have given ['cfo', 'tableau'] — the reader's own picture
+    // is what they get instead, completed with the hosts it needs (`tableau`
+    // holds the focus).
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'orders', 'tableau'])
     expect(result.current.view!.visible.has('orders.channel')).toBe(true)
     // And it is consumed: the next wave of the same walk does not re-apply
     // it over whatever the reader has done since.
     act(() => result.current.toggle('orders'))
     rerender(args({ model: grownModel() }))
-    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2'])
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'tableau'])
+  })
+
+  // A shared link caps the picture it carries, and a link written by hand may
+  // never have had the containers in it. A card whose hosts are shut is not
+  // on screen at all — so the restore opens them rather than restoring a
+  // board of closed lane roots (measured on the first shared-link journey).
+  it('completes a picture that names a card but not the containers it lives in', () => {
+    const { result, rerender } = renderHook(
+      (a: UseTraceOverlayArgs) => useTraceOverlay(a),
+      { initialProps: args({ model: emptyWalkModel('cfo') }) },
+    )
+    act(() => result.current.restoreExpansion('cfo', ['orders']))
+    rerender(args())
+
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'orders', 'tableau'])
+    expect(result.current.view!.visible.has('orders.channel')).toBe(true)
   })
 
   it('a restore for ANOTHER focus leaves this one alone until the focus switches', () => {
@@ -509,7 +532,9 @@ describe('useTraceOverlay — restoreExpansion', () => {
     expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'REPORTING', 'cfo', 'tableau'])
 
     rerender(args({ focusUrn: 'aov' }))
-    expect([...result.current.traceExpansion]).toEqual(['INTERMEDIATE_T2'])
+    // Its own set, plus the hosts of the new focus (`aov` sits in cfo, in
+    // tableau) — without them the board would restore to closed lane roots.
+    expect([...result.current.traceExpansion].sort()).toEqual(['INTERMEDIATE_T2', 'cfo', 'tableau'])
   })
 
   // A pending restore belongs to the navigation that issued it. If the reader

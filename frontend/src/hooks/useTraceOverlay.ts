@@ -156,6 +156,44 @@ function viewInputs(a: UseTraceOverlayArgs, traceExpansion: ReadonlySet<string>)
 /** The focus chain, plus the hosts between each hop-1 partner and its lane
  *  root. See the file header for why "hop-1" is measured off the focus node
  *  itself rather than off the view model's hop. */
+/**
+ * A RESTORED PICTURE IS CLOSED UNDER ITS HOSTS (2026-08-23).
+ *
+ * A card cannot be on screen unless every container between it and its lane
+ * root is open, and a set that names the card but not those containers
+ * restores to nothing at all — the lane roots sit closed and the picture the
+ * reader was promised never appears. Restores come from outside this session
+ * (a shared link, whose cap trims the very biggest pictures; a history entry
+ * written by an older build), so the set is completed here rather than
+ * trusted.
+ *
+ * Parents come from `buildTraceView` for the same reason `seedExpansion`
+ * asks it: where a card is anchored is the view's decision, not raw
+ * containment's. One provisional build, on the frame a restore lands.
+ */
+function withHosts(a: UseTraceOverlayArgs, ids: ReadonlySet<string>): ReadonlySet<string> {
+  if (ids.size === 0) return ids
+  const inputs = viewInputs(a, EMPTY_EXPANSION)
+  if (!inputs) return ids
+  const parents = new Map<string, string | null>()
+  for (const lane of buildTraceView(inputs).lanes) {
+    for (const [urn, card] of lane.cards) parents.set(urn, card.parentId)
+  }
+  // The FOCUS's own hosts are walked too, without opening the focus itself:
+  // a trace that does not show the entity it is about is not a picture worth
+  // restoring, and whether the focus opens is `seedExpansion`'s call (a
+  // container with a hundred children lands closed).
+  const out = new Set(ids)
+  for (const id of [...ids, inputs.focusUrn]) {
+    let cursor = parents.get(id) ?? null
+    while (cursor && !out.has(cursor)) {
+      out.add(cursor)
+      cursor = parents.get(cursor) ?? null
+    }
+  }
+  return out
+}
+
 function seedExpansion(a: UseTraceOverlayArgs): ReadonlySet<string> {
   const inputs = viewInputs(a, EMPTY_EXPANSION)
   if (!inputs) return EMPTY_EXPANSION
@@ -254,10 +292,15 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // wipe out the very picture the reader pressed Back for.
   let stored = seed.set
   let restored = seed.restored
-  if (seed.forFocus !== focusUrn || (!seed.seeded && focusInModel)) {
-    const restore = seed.pending?.forFocus === focusUrn && focusInModel ? seed.pending : null
-    stored = restore ? restore.set : seedExpansion(a)
-    restored = restore ? restore.set : null
+  // ONE consumption point for every restore, whenever the model can honour
+  // it — including a restore issued for the focus already on screen. Both
+  // roads then run through `withHosts`, so a picture is completed the same
+  // way whether it arrived before the walk or after it.
+  const honourable = seed.pending?.forFocus === focusUrn && focusInModel
+  if (seed.forFocus !== focusUrn || (!seed.seeded && focusInModel) || honourable) {
+    const restore = honourable ? seed.pending : null
+    stored = restore ? withHosts(a, restore.set) : seedExpansion(a)
+    restored = restore ? stored : null
     // A pending restore belongs to the navigation that issued it. Landing on
     // a DIFFERENT focus means the reader abandoned that navigation, so it is
     // dropped rather than left armed to fire on some later, unrelated visit
@@ -334,10 +377,13 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
   // Already showing that focus, already seeded: nothing to wait for, so the
   // picture goes straight on screen (this is the "resume the trace you are
   // already in" case, where no focus change would ever re-run the seed).
+  /** Put a picture back — from history, or from a shared link. Always
+   *  recorded as PENDING: the render-time branch above is the one place that
+   *  knows the model, and so the one place that can complete the set with the
+   *  hosts each named card needs. It is consumed on the next render when the
+   *  model holds the focus, and waits when it does not. */
   const restoreExpansion = useCallback((forFocus: string, ids: readonly string[]) => setSeed(prev => (
-    prev.forFocus === forFocus && prev.seeded
-      ? { ...prev, set: new Set(ids), restored: new Set(ids), closed: EMPTY_EXPANSION, pending: null }
-      : { ...prev, pending: { forFocus, set: new Set(ids) } }
+    { ...prev, pending: { forFocus, set: new Set(ids) } }
   )), [])
 
   // Drops the expansion. The caller clears its own focus alongside — leaving

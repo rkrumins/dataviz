@@ -13,6 +13,7 @@ import { TraceDockSettings } from './TraceDockSettings'
 import { shouldShowTruncationNotice } from './TraceDockNoticeStrip'
 import type { GranularityOption } from './TraceDockControls'
 import { useTraceEscStack } from './useTraceEscStack'
+import type { TraceShareSummary } from './TraceSharePopover'
 
 export interface TraceBottomDockProps {
   trace: UseUnifiedTraceResult
@@ -38,6 +39,10 @@ export interface TraceBottomDockProps {
   /** Chains the view cannot place anywhere (see `TraceView.outsideView`).
    *  Surfaced in the Overview strip; hidden at 0. */
   outsideView?: number
+  /** Everything the title bar's Share control needs. Absent = no control. */
+  share?: TraceShareSummary
+  /** The traced entity's name, resolved by the host (see the title bar). */
+  focusLabel?: string
 }
 
 const COMPACT_HEIGHT = 64
@@ -87,6 +92,8 @@ export function TraceBottomDock({
   canHistoryForward = false,
   nativeMode = false,
   outsideView = 0,
+  share,
+  focusLabel,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -260,6 +267,8 @@ export function TraceBottomDock({
           onHistoryForward={onHistoryForward}
           canHistoryBack={canHistoryBack}
           canHistoryForward={canHistoryForward}
+          share={share}
+          focusLabel={focusLabel}
           nativeMode={nativeMode}
         />
 
