@@ -11,6 +11,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, CheckCircle, ArrowRight, Sparkles, PauseCircle } from 'lucide-react'
 import { usePolling } from '@/hooks/usePolling'
 import { useAnnouncementStore } from '@/store/announcements'
+import { safeHref } from '@/utils/safeHref'
 
 const SNOOZE_TICK = 1000 // re-check snooze expiry every second
 
@@ -127,10 +128,13 @@ export function GlobalAnnouncementBanner() {
                     </span>
                   </div>
 
-                  {/* CTA button */}
-                  {ann.ctaText && ann.ctaUrl && (
+                  {/* CTA button. safeHref, not ctaUrl: the server refuses
+                      anything but http(s) and site-relative paths on write,
+                      but rows predating that validator are still in the
+                      table and a `javascript:` one would render here. */}
+                  {ann.ctaText && safeHref(ann.ctaUrl) && (
                     <a
-                      href={ann.ctaUrl}
+                      href={safeHref(ann.ctaUrl)!}
                       target="_blank"
                       rel="noopener noreferrer"
                       className={`shrink-0 inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider transition-all backdrop-blur-sm ${cfg.cta}`}

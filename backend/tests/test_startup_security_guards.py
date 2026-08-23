@@ -182,3 +182,58 @@ async def test_a_reset_token_row_with_no_expiry_is_refused(db_session):
     await db_session.flush()
 
     assert await user_repo.verify_reset_token(db_session, token) is None
+
+
+# ── Access-token TTL ceiling ─────────────────────────────────────────
+#
+# With claims in the token, JWT_EXPIRY_MINUTES *is* the revocation
+# latency: a role change, a suspension or a forced sign-out does not
+# reach a live session until its next rotation. Three of the four
+# shipped configs said 60 while the release notes said 15 — a warning
+# had been in the log the whole time and nobody read it.
+
+def _with_ttl(monkeypatch, minutes: int, *, prod: bool, ceiling: int = 15):
+    """Point the boot check at a given TTL.
+
+    ``_assert_session_config_coherent`` imports its values inside the
+    function body, so setting the module attributes is enough — no
+    reload, which would reset the revocation singleton and leak into
+    every test that runs after this file.
+    """
+    import backend.app.main as main_module
+    import backend.app.services.revocation_service as revocation_service
+
+    monkeypatch.setattr(auth_config, "JWT_EXPIRY_MINUTES", minutes)
+    monkeypatch.setattr(main_module, "_MAX_ACCESS_TTL_MINUTES", ceiling)
+    monkeypatch.setattr(main_module, "_is_production", lambda: prod)
+    # A long TTL needs a tombstone that outlives it, or the earlier
+    # coherence check fires first and we would be asserting on that.
+    monkeypatch.setattr(revocation_service, "REVOCATION_TTL_SECONDS", 99999)
+    return main_module
+
+
+def test_production_refuses_an_access_ttl_over_the_ceiling(monkeypatch):
+    main_module = _with_ttl(monkeypatch, 60, prod=True)
+    with pytest.raises(RuntimeError) as err:
+        main_module._assert_session_config_coherent()
+    assert "JWT_EXPIRY_MINUTES=60" in str(err.value)
+    assert "15-minute ceiling" in str(err.value)
+
+
+def test_non_production_only_warns_about_a_long_access_ttl(monkeypatch, caplog):
+    main_module = _with_ttl(monkeypatch, 60, prod=False)
+    with caplog.at_level("WARNING", logger=main_module.logger.name):
+        main_module._assert_session_config_coherent()
+    assert "JWT_EXPIRY_MINUTES=60" in caplog.text
+
+
+def test_the_shipped_default_is_within_the_ceiling(monkeypatch):
+    main_module = _with_ttl(monkeypatch, 15, prod=True)
+    main_module._assert_session_config_coherent()  # no raise
+
+
+def test_the_ceiling_is_raisable_deliberately(monkeypatch):
+    """An operator who has weighed the revocation-latency tradeoff can
+    lift it — but by naming it, not by drifting a compose default."""
+    main_module = _with_ttl(monkeypatch, 60, prod=True, ceiling=60)
+    main_module._assert_session_config_coherent()  # no raise

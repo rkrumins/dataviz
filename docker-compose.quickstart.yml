@@ -79,7 +79,7 @@ services:
       # entrypoint change — not to substitute a different literal here.
       JWT_SECRET_KEY: quickstart-demo-key
       JWT_ALGORITHM: HS256
-      JWT_EXPIRY_MINUTES: "60"
+      JWT_EXPIRY_MINUTES: "15"
       ADMIN_EMAIL: admin@nexuslineage.local
       ADMIN_PASSWORD: admin123
 

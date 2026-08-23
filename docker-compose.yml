@@ -304,7 +304,12 @@ services:
       # Auth — fail fast if secrets aren't set
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      JWT_EXPIRY_MINUTES: "${JWT_EXPIRY_MINUTES:-60}"
+      # 15, not 60. Permissions ride in the access token, so a role or
+      # revocation change does not reach a live session until its next
+      # rotation, and every tombstone has to be held in Redis for the
+      # whole window. The k8s configmap has always used 15; this file
+      # had drifted to 60 and the release notes claimed otherwise.
+      JWT_EXPIRY_MINUTES: "${JWT_EXPIRY_MINUTES:-15}"
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@synodic.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}
 

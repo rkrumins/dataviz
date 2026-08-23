@@ -160,6 +160,16 @@ async def _db_health_loop(_app: FastAPI, interval: float = 15.0) -> None:
             logger.debug("DB health loop iteration failed unexpectedly: %s", exc)
 
 
+#: Ceiling on the access-token TTL. Overridable, because a deployment
+#: that has weighed the revocation-latency tradeoff may want a different
+#: number — but not silently, and not by drifting a compose default.
+_MAX_ACCESS_TTL_MINUTES = int(os.getenv("MAX_ACCESS_TTL_MINUTES", "15"))
+
+
+def _is_production() -> bool:
+    return os.getenv("ENV", "dev").strip().lower() in ("prod", "production")
+
+
 def _assert_session_config_coherent() -> None:
     """Fail fast when the access TTL outlives its revocation tombstone.
 
@@ -224,14 +234,30 @@ def _assert_session_config_coherent() -> None:
             SESSION_IDLE_MAX_SECONDS, SESSION_ABSOLUTE_MAX_SECONDS,
         )
 
-    if JWT_EXPIRY_MINUTES > 15:
-        logger.warning(
-            "JWT_EXPIRY_MINUTES=%s is long for claims-in-token auth: a "
-            "permission or role change does not reach a live session until "
-            "its next rotation, and every revocation has to be held in "
-            "Redis for the whole window. 15 or less is the intended range.",
-            JWT_EXPIRY_MINUTES,
+    if JWT_EXPIRY_MINUTES > _MAX_ACCESS_TTL_MINUTES:
+        # Permissions ride in the access token, so this number IS the
+        # revocation latency: a role change, a suspension or a forced
+        # sign-out does not reach a live session until its next rotation,
+        # and every tombstone has to be held in Redis for the whole
+        # window. It is also the exposure window for the fail-open
+        # revocation tier (see _FAIL_CLOSED_PERMISSIONS).
+        #
+        # Warning was not enough. Three of the four shipped configs said
+        # 60 while the release notes said 15, and nobody read the log
+        # line. In prod the value is a security control, so refuse.
+        msg = (
+            f"JWT_EXPIRY_MINUTES={JWT_EXPIRY_MINUTES} exceeds the "
+            f"{_MAX_ACCESS_TTL_MINUTES}-minute ceiling. With claims in the "
+            "token this is the revocation latency: a role change or a "
+            "forced sign-out does not reach a live session until its next "
+            "rotation."
         )
+        if _is_production():
+            raise RuntimeError(
+                msg + " Lower it, or raise the ceiling deliberately via "
+                "MAX_ACCESS_TTL_MINUTES."
+            )
+        logger.warning("%s", msg)
     logger.info(
         "Session config: access_ttl=%ds refresh_ttl=%dd revocation_ttl=%ds "
         "rotation_grace=%ds clock_skew_leeway=%ds sso_ceiling=%dh "
@@ -583,7 +609,7 @@ async def lifespan(_app: FastAPI):
             get_saml_replay_cache,
         )
         _saml_replay = get_saml_replay_cache()
-        _prod = os.getenv("ENV", "dev").strip().lower() in ("prod", "production")
+        _prod = _is_production()
 
         if _saml_replay is None and not _prod:
             logger.warning(

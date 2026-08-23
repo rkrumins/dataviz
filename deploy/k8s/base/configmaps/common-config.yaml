@@ -55,10 +55,20 @@ data:
   DB_STARTUP_RETRY_TIMEOUT_SECS: "60"
   JWT_ALGORITHM: "HS256"
   JWT_EXPIRY_MINUTES: "15"
-  # Trust X-Forwarded-For from the ingress. The ingress pod's address is
-  # not stable enough to enumerate, and the container port is only
-  # reachable inside the cluster, so "*" is the workable value here.
-  # Without it gunicorn keeps its 127.0.0.1 default, discards the header,
-  # and every caller is recorded as the ingress — which put the whole
-  # cluster in one rate-limit bucket.
-  FORWARDED_ALLOW_IPS: "*"
+  # Which peers may tell us the client's address via X-Forwarded-For.
+  #
+  # This was "*", which means uvicorn believes the header from ANY peer.
+  # The container port is reachable from anywhere inside the cluster, so
+  # any pod — or anything that reaches one — could set its own
+  # X-Forwarded-For and therefore its own slowapi rate-limit bucket, a
+  # fresh one per request. (The per-ACCOUNT limiter is unaffected, which
+  # is what keeps password spray bounded; this is the per-IP tier.)
+  #
+  # The ingress pod's address is not stable enough to enumerate, but its
+  # RANGE is: pod CIDRs are RFC1918 on GKE and on every other managed
+  # cluster we target. Narrowing to those ranges keeps the header working
+  # from the ingress while refusing it from outside the cluster network.
+  # Override per-overlay if a cluster uses a non-RFC1918 pod CIDR — the
+  # symptom of getting it wrong is every caller being recorded as the
+  # ingress, i.e. one shared rate-limit bucket, not an outage.
+  FORWARDED_ALLOW_IPS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1"
