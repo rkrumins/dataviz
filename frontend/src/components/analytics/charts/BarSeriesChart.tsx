@@ -59,6 +59,14 @@ export function BarSeriesChart({
         return { max: Math.max(peak, t[t.length - 1] ?? peak), ticks: t }
     }, [values, ghost])
 
+    /** Where the previous period's tick belongs, or null when there is nothing
+     *  worth marking. See the note at the call site. */
+    const ghostAt = (i: number): number | null => {
+        const prev = ghost?.[i]
+        if (!prev) return null
+        return PAD.top + plotH * (1 - prev / max)
+    }
+
     const band = buckets.length ? plotW / buckets.length : plotW
     const barW = Math.min(MARK.maxBarWidth, Math.max(2, band - MARK.surfaceGap * 2))
     const labelEvery = Math.max(1, Math.ceil(buckets.length / 7))
@@ -106,14 +114,26 @@ export function BarSeriesChart({
                             )}
                             {/* Previous period: a hairline tick, slightly wider
                                 than the bar so it reads as a reference line
-                                rather than part of the column. */}
-                            {ghost !== undefined && (
+                                rather than part of the column.
+
+                                Drawn only where there was something to compare
+                                against. A tick for a previous value of ZERO
+                                lands exactly on the axis, where it adds nothing
+                                the baseline does not already say — and on a
+                                quiet stretch the consecutive ones merge into a
+                                continuous rule that reads as a plotted series.
+                                On a sparse window that made the whole chart
+                                look broken: a field of floating dashes with one
+                                real bar among them. */}
+                            {ghostAt(i) !== null && (
                                 <line
                                     x1={bx - 2} x2={bx + barW + 2}
-                                    y1={PAD.top + plotH * (1 - (ghost[i] ?? 0) / max)}
-                                    y2={PAD.top + plotH * (1 - (ghost[i] ?? 0) / max)}
+                                    y1={ghostAt(i)!} y2={ghostAt(i)!}
                                     stroke={color}
-                                    strokeOpacity={0.45}
+                                    // Lighter than the bars by a clear margin:
+                                    // a comparison must never out-shout the
+                                    // thing it is a comparison FOR.
+                                    strokeOpacity={0.32}
                                     strokeWidth={1.5}
                                     strokeLinecap="round"
                                 />

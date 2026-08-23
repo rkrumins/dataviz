@@ -1,14 +1,17 @@
 /**
  * ContentTab — the views themselves: what exists, what gets read, who builds it.
  */
+import { useState } from 'react'
 import { Eye, EyeOff, LayoutGrid, PenLine, Share2 } from 'lucide-react'
 
+import { cn } from '@/lib/utils'
 import { compact, exact, percent, shortDate } from '@/lib/formatMetric'
 import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
 import { viewTypeLabel, visibilityLabel } from '@/lib/domainLabels'
 import { ViewLink } from './EntityLink'
+import { viewMeta } from './viewMeta'
 import { KpiCard } from './KpiCard'
 import { WithheldPanel } from './Redacted'
 import { Leaderboard } from './Leaderboard'
@@ -29,6 +32,15 @@ export function ContentTab({
 }) {
     const theme = useChartTheme()
     const { totals, series, breakdowns, leaderboards } = data
+    // Restricted rows stay by DEFAULT so the ranking agrees with the opens
+    // total above it — "the most-opened thing here is something you cannot
+    // see" is itself worth knowing. But a reader who can act on none of them
+    // should be able to get them out of the way in one click.
+    const [hideRestricted, setHideRestricted] = useState(false)
+    const restrictedCount = leaderboards.topViews.filter((v) => v.redacted).length
+    const shownViews = hideRestricted
+        ? leaderboards.topViews.filter((v) => !v.redacted)
+        : leaderboards.topViews
     const vs = comparisonLabel(range)
 
     return (
@@ -37,7 +49,7 @@ export function ContentTab({
                 <KpiCard
                     label="Views" metric="views" value={totals.views.total} icon={LayoutGrid}
                     changePct={totals.views.changePct} comparisonLabel={vs}
-                    sub={`${exact(totals.views.current ?? 0)} created in range`}
+                    sub={`${exact(totals.views.current ?? 0)} created in ${rangePhrase(range)}`}
                     trend={series.viewsCreated} accent="indigo"
                 />
                 <KpiCard
@@ -152,16 +164,37 @@ export function ContentTab({
                     title="Most popular views"
                     subtitle="Opens, and how many distinct people did the opening"
                     isStale={isStale}
-                    isEmpty={leaderboards.topViews.length === 0}
-                    emptyLabel="No views opened in this range."
+                    isEmpty={shownViews.length === 0}
+                    emptyLabel={hideRestricted && restrictedCount
+                        ? 'Every view in this ranking is one you cannot open.'
+                        : 'No views opened in this range.'}
+                    action={restrictedCount > 0 ? (
+                        <button
+                            type="button"
+                            onClick={() => setHideRestricted((v) => !v)}
+                            aria-pressed={hideRestricted}
+                            title={hideRestricted
+                                ? `Show the ${restrictedCount} view${restrictedCount === 1 ? '' : 's'} you cannot open`
+                                : `Hide the ${restrictedCount} view${restrictedCount === 1 ? '' : 's'} you cannot open`}
+                            className={cn(
+                                'inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                hideRestricted
+                                    ? 'border-indigo-500/30 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400'
+                                    : 'border-glass-border text-ink-muted hover:text-ink',
+                            )}
+                        >
+                            {hideRestricted ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
+                            {hideRestricted ? 'Showing yours only' : `Hide ${restrictedCount} restricted`}
+                        </button>
+                    ) : undefined}
                     table={
                         <ChartTable
                             rowLabel="View"
-                            rows={leaderboards.topViews.map((v) => v.name)}
+                            rows={shownViews.map((v) => v.name)}
                             columns={[
-                                { key: 'opens', label: 'Opens', values: leaderboards.topViews.map((v) => v.opens) },
-                                { key: 'people', label: 'People', values: leaderboards.topViews.map((v) => v.uniqueViewers) },
-                                { key: 'favs', label: 'Favourites', values: leaderboards.topViews.map((v) => v.favourites) },
+                                { key: 'opens', label: 'Opens', values: shownViews.map((v) => v.opens) },
+                                { key: 'people', label: 'People', values: shownViews.map((v) => v.uniqueViewers) },
+                                { key: 'favs', label: 'Favourites', values: shownViews.map((v) => v.favourites) },
                             ]}
                         />
                     }
@@ -169,14 +202,12 @@ export function ContentTab({
                     <Leaderboard
                         unit="opens"
                         slot={1}
-                        rows={leaderboards.topViews.map((v) => ({
+                        rows={shownViews.map((v) => ({
                             id: v.viewId,
                             label: <ViewLink viewId={v.viewId} name={v.name} canOpen={v.canOpen} />,
                             meta: (
                                 <span className="flex items-center gap-1.5 truncate">
-                                    <span className="shrink-0">
-                                        {viewTypeLabel(v.viewType)} · {visibilityLabel(v.visibility)}
-                                    </span>
+                                    <span className="shrink-0">{viewMeta(v)}</span>
                                     <ContactLink email={v.createdByEmail} name={v.createdByName} />
                                 </span>
                             ),

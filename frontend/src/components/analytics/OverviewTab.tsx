@@ -11,11 +11,14 @@ import {
 } from 'lucide-react'
 
 import { compact, exact, percent } from '@/lib/formatMetric'
+import { cn } from '@/lib/utils'
+import { viewMeta } from './viewMeta'
 import type {
     AnalyticsRangeSelection, AnalyticsSummary,
 } from '@/services/analyticsService'
 import { HeroFigure, KpiCard } from './KpiCard'
 import { InsightStrip } from './InsightStrip'
+import { MetricInfo } from './MetricInfo'
 import { FirstRun, isFirstRun } from './FirstRun'
 import { WithheldPanel } from './Redacted'
 import { ViewLink, WorkspaceLink } from './EntityLink'
@@ -96,25 +99,25 @@ export function OverviewTab({
                 <KpiCard
                     label="Total users" metric="totalUsers" value={totals.users.total} icon={Users}
                     changePct={totals.users.changePct} comparisonLabel={vs}
-                    sub={`${exact(totals.users.current ?? 0)} new in range`}
+                    sub={`${exact(totals.users.current ?? 0)} new in ${rangePhrase(range)}`}
                     trend={series.signups} accent="indigo"
                 />
                 <KpiCard
                     label="Workspaces" metric="workspaces" value={totals.workspaces.total} icon={Boxes}
                     changePct={totals.workspaces.changePct} comparisonLabel={vs}
-                    sub={`${exact(totals.workspaces.current ?? 0)} new in range`}
+                    sub={`${exact(totals.workspaces.current ?? 0)} new in ${rangePhrase(range)}`}
                     trend={series.workspacesCreated} trendTone="amber" accent="amber"
                 />
                 <KpiCard
                     label="Views" metric="views" value={totals.views.total} icon={LayoutGrid}
                     changePct={totals.views.changePct} comparisonLabel={vs}
-                    sub={`${exact(totals.views.current ?? 0)} created in range`}
+                    sub={`${exact(totals.views.current ?? 0)} created in ${rangePhrase(range)}`}
                     trend={series.viewsCreated} trendTone="emerald" accent="cyan"
                 />
                 <KpiCard
                     label="View opens" metric="viewOpens" value={totals.viewOpens.total} icon={MousePointerClick}
                     changePct={totals.viewOpens.changePct} comparisonLabel={vs}
-                    sub={`${exact(totals.viewOpens.current ?? 0)} in range`}
+                    sub={`${exact(totals.viewOpens.current ?? 0)} opens in ${rangePhrase(range)}`}
                     trend={series.viewOpens} trendTone="indigo" accent="pink"
                 />
             </div>
@@ -269,7 +272,7 @@ export function OverviewTab({
                             // what the row IS, which no address replaces.
                             meta: (
                                 <span className="flex items-center gap-1.5 truncate">
-                                    <span className="shrink-0">{v.viewType} · {v.visibility}</span>
+                                    <span className="shrink-0">{viewMeta(v)}</span>
                                     <ContactLink email={v.createdByEmail} name={v.createdByName} />
                                 </span>
                             ),
@@ -305,13 +308,50 @@ export function OverviewTab({
                 subtitle="What has been onboarded, all time"
                 isStale={isStale}
             >
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                    <ScaleTile label="Graph nodes" value={graph.nodes} icon={Activity} />
-                    <ScaleTile label="Graph edges" value={graph.edges} icon={TrendingUp} />
-                    <ScaleTile label="Entity types" value={graph.entityTypes} icon={LayoutGrid} />
-                    <ScaleTile label="Data sources" value={totals.dataSources.total} icon={Database} />
-                    <ScaleTile label="Semantic layers" value={totals.ontologies.total} icon={Eye} />
-                    <ScaleTile label="Context models" value={totals.contextModels.total} icon={Boxes} />
+                {/* Three across rather than six: each tile now says what its
+                    number MEANS, and a sentence needs room to be read. Six
+                    columns of bare figures was a scoreboard nobody could act
+                    on — "4.1M" is not information until you know 4.1M of
+                    what, and whether that is a lot. */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <ScaleTile
+                        label="Graph nodes" value={graph.nodes} icon={Activity} accent="indigo"
+                        meaning="Every table, column, dashboard and job the platform knows about."
+                        context={graph.entityTypes
+                            ? `across ${exact(graph.entityTypes)} kinds of thing`
+                            : undefined}
+                    />
+                    <ScaleTile
+                        label="Graph edges" value={graph.edges} icon={TrendingUp} accent="violet"
+                        meaning="Connections between them. Each one is a hop somebody can trace."
+                        context={graph.nodes
+                            ? `${(graph.edges / graph.nodes).toFixed(1)} per node`
+                            : undefined}
+                    />
+                    <ScaleTile
+                        label="Entity types" value={graph.entityTypes} icon={LayoutGrid} accent="cyan"
+                        metric="entityTypes"
+                        meaning="How much of the estate is described. Two types is a table list; lineage gets useful as the things around the tables are modelled too."
+                    />
+                    <ScaleTile
+                        label="Data sources" value={totals.dataSources.total} icon={Database} accent="amber"
+                        meaning="Systems connected to the platform. Everything above is built from these."
+                        context={totals.dataSources.current
+                            ? `${exact(totals.dataSources.current)} added in ${rangePhrase(range)}`
+                            : undefined}
+                    />
+                    <ScaleTile
+                        label="Semantic layers" value={totals.ontologies.total} icon={Eye} accent="emerald"
+                        metric="semanticLayers"
+                        meaning="Ontologies that give raw technical metadata a business meaning."
+                        context={totals.dataSources.total
+                            ? `for ${exact(totals.dataSources.total)} sources`
+                            : undefined}
+                    />
+                    <ScaleTile
+                        label="Context models" value={totals.contextModels.total} icon={Boxes} accent="pink"
+                        meaning="Reusable shapes of the graph — the starting points people build views from."
+                    />
                 </div>
             </ChartFrame>
 
@@ -360,20 +400,68 @@ function Figure({
     )
 }
 
+const SCALE_ACCENTS = {
+    indigo: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
+    amber: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+    cyan: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
+    pink: 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/20',
+    violet: 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20',
+    emerald: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+} as const
+
+/**
+ * One dimension of the estate, with the sentence that makes the number mean
+ * something.
+ *
+ * The figure alone was the whole tile once, and it answered nothing: "4.1M" is
+ * not information until the reader knows 4.1M of what, built out of what, and
+ * whether it is a lot. `meaning` says what is being counted; `context` relates
+ * it to another number on the same page so the size has a reference.
+ */
 function ScaleTile({
-    label, value, icon: Icon,
+    label, value, icon: Icon, accent = 'indigo', meaning, context, metric,
 }: {
     label: string
     value: number
     icon: React.ComponentType<{ className?: string }>
+    accent?: keyof typeof SCALE_ACCENTS
+    /** What this counts, in a sentence. */
+    meaning: string
+    /** Relates the figure to another one — "3.1 per node", "of 34 sources". */
+    context?: string
+    /** Key into METRICS, where a fuller definition already exists. */
+    metric?: string
 }) {
     return (
-        <div className="rounded-xl border border-glass-border bg-glass-base/30 p-3">
-            <Icon className="w-3.5 h-3.5 text-ink-muted mb-2" aria-hidden />
-            <p className="text-lg font-bold text-ink leading-none" title={exact(value)}>
-                {compact(value)}
-            </p>
-            <p className="mt-1 text-[10px] text-ink-muted">{label}</p>
+        <div className="group flex gap-3 rounded-xl border border-glass-border bg-canvas-elevated p-4 shadow-sm transition-colors hover:border-indigo-500/25">
+            <span
+                aria-hidden
+                className={cn(
+                    'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border',
+                    SCALE_ACCENTS[accent],
+                )}
+            >
+                <Icon className="h-4 w-4" />
+            </span>
+            <div className="min-w-0">
+                <p className="flex items-baseline gap-2">
+                    <span className="text-xl font-bold leading-none text-ink" title={exact(value)}>
+                        {compact(value)}
+                    </span>
+                    {context && (
+                        <span className="truncate text-[11px] font-medium text-ink-muted">
+                            {context}
+                        </span>
+                    )}
+                </p>
+                <p className="mt-1 flex items-center gap-1 text-xs font-semibold text-ink-secondary">
+                    {label}
+                    {metric && <MetricInfo metric={metric} />}
+                </p>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-ink-muted">
+                    {meaning}
+                </p>
+            </div>
         </div>
     )
 }

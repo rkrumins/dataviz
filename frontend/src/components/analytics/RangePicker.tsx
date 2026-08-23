@@ -24,7 +24,10 @@ export const RANGE_PRESETS = [
     { days: 365, label: '1y', title: 'Last 12 months' },
 ] as const
 
-export const DEFAULT_RANGE_DAYS = 30
+// Two weeks. Long enough that a quiet Tuesday does not swing the trend, short
+// enough that "what changed" is still about now rather than about last month —
+// and it opens on a window most people can hold in their head.
+export const DEFAULT_RANGE_DAYS = 14
 
 /** Matches the server's cap on a custom range. */
 export const MAX_RANGE_DAYS = 365

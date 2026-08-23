@@ -12,6 +12,10 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AnalyticsPage } from '@/pages/AnalyticsPage'
+// Tracks the constant rather than a literal: the default window is a
+// product decision that may move again, and a test asserting "30" would
+// fail for the change rather than for a regression.
+import { DEFAULT_RANGE_DAYS } from '@/components/analytics/RangePicker'
 import { analyticsService } from '@/services/analyticsService'
 import { useAuthStore } from '@/store/auth'
 
@@ -217,14 +221,14 @@ describe('AnalyticsPage', () => {
 
     it('ignores a range that is not an offered preset', async () => {
         renderAt('/analytics?range=9999')
-        await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalledWith(preset(30)))
+        await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS)))
         expect(analyticsService.getSummary).not.toHaveBeenCalledWith(preset(9999))
     })
 
     it('refetches everything below when the range changes', async () => {
         const user = userEvent.setup()
         renderAt('/analytics')
-        await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalledWith(preset(30)))
+        await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS)))
 
         await user.click(screen.getByRole('button', { name: '7d' }))
         await waitFor(() => expect(analyticsService.getSummary).toHaveBeenCalledWith(preset(7)))
@@ -236,7 +240,7 @@ describe('AnalyticsPage', () => {
         expect(analyticsService.listWorkspaces).not.toHaveBeenCalled()
 
         renderAt('/analytics?tab=workspaces')
-        await waitFor(() => expect(analyticsService.listWorkspaces).toHaveBeenCalledWith(preset(30)))
+        await waitFor(() => expect(analyticsService.listWorkspaces).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS)))
         expect(await screen.findByText('Finance')).toBeInTheDocument()
     })
 
@@ -256,7 +260,7 @@ describe('AnalyticsPage', () => {
         // End before start — the server would 422; the UI must not even ask.
         renderAt('/analytics?from=2026-03-31&to=2026-03-01')
         await waitFor(() =>
-            expect(analyticsService.getSummary).toHaveBeenCalledWith(preset(30)))
+            expect(analyticsService.getSummary).toHaveBeenCalledWith(preset(DEFAULT_RANGE_DAYS)))
     })
 
     it('applying a custom range clears the preset from the URL', async () => {

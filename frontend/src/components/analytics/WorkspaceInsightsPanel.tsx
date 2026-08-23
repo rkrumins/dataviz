@@ -96,7 +96,7 @@ export function WorkspaceInsightsPanel({
                                     label="Views" metric="views" value={data.totals.views.total} icon={LayoutGrid}
                                     changePct={data.totals.views.changePct}
                                     comparisonLabel={comparisonLabel(range)}
-                                    sub={`${exact(data.totals.views.current ?? 0)} new in range`}
+                                    sub={`${exact(data.totals.views.current ?? 0)} new in ${rangePhrase(range)}`}
                                     accent="indigo"
                                 />
                                 <KpiCard
