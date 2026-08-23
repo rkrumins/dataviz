@@ -60,6 +60,15 @@ config:
     pollTimeoutLargeSecs: "600"
     pollLargeThreshold: "100000"
 
+  # Analytics. One shared ConfigMap feeds every service here, which is exactly
+  # what this setting needs: warmIntervalSeconds is BOTH the controlplane's
+  # warm cadence and the grid the web tier snaps each analytics window to, and
+  # the two must never diverge — a warmer on a different grid from its readers
+  # writes cache entries nobody looks up.
+  analytics:
+    warmIntervalSeconds: "300"           # floor of 30 enforced in code
+    productEventRetentionDays: "400"     # floor of 365; product_events grows with usage
+
 # ── Secrets ───────────────────────────────────────────────────────────
 # create=true renders a Secret from the values below. For production prefer
 # create=false + an existingSecret you created out-of-band (kubectl/SealedSecret).

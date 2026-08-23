@@ -58,9 +58,18 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     # separately by the manage perm at the component level.
     "ingestion":  ("Ingestion",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:provider:read", "workspace:datasource:manage"])),
     "schema":     ("Semantic Layers", NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "workspace:ontology:read"])),
-    # The PRIVILEGED audiences, and the reason there are three: auditors
+    # The PRIVILEGED audiences. `system:analytics:read` is the dedicated one and
+    # leads for that reason; the other three are the implications kept for
+    # deployments whose roles were customised before it existed — auditors
     # (system:audit:read) and cross-workspace operators (system:org-admin) do
     # not imply each other, and system:admin implies both.
+    #
+    # Every one of these must appear here, because this list is what the client
+    # reads as "privileged" (`useAnalyticsAccess`). Omitting the dedicated
+    # permission did not merely hide the nav item: the route guard refused a
+    # holder of it outright, with a panel explaining that the section was not
+    # open on this deployment — which was false, and the server would have
+    # served them the full document.
     #
     # This spec is not the whole story any more. `analyticsPublicEnabled` opens
     # a redacted version of the section to everyone else, and a feature flag is
@@ -69,7 +78,7 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     # item and the route guard, both through `useAnalyticsAccess`. What stays
     # true here is that holding any of these three ALWAYS grants access,
     # whatever the flag says.
-    "analytics":  ("Analytics",     NavSpecAnyPerm(perms=["system:admin", "system:org-admin", "system:audit:read"])),
+    "analytics":  ("Analytics",     NavSpecAnyPerm(perms=["system:analytics:read", "system:admin", "system:org-admin", "system:audit:read"])),
     "admin":      ("Administration", NavSpecAnyPerm(perms=["system:admin", "system:groups:manage"])),
 }
 

@@ -257,6 +257,15 @@ async def test_workspace_detail_scopes_to_one_workspace(db_session):
     assert {v["viewId"] for v in detail["topViews"]} == {"view_a"}
     assert detail["topContributors"][0]["userId"] == "usr_old"
 
+    # The CHART has to be the same measurement as the figure above it. It was
+    # not: the KPI came from a workspace-scoped fold while the series counted
+    # every open on the platform, so this panel showed ws_live's total sitting
+    # on top of ws_quiet's traffic as well.
+    assert sum(detail["series"]["viewOpens"]) == \
+        detail["totals"]["viewOpens"]["total"], (
+            "the open series must be scoped to this workspace, like its KPI"
+        )
+
     assert await analytics_repo.workspace_detail(
         db_session, "ws_nope", days=7, now=NOW) is None
 
@@ -722,6 +731,135 @@ async def test_cache_does_not_store_a_missing_workspace(db_session):
     assert await analytics_cache.cached("ws:nope:d30", _missing) is None
     assert calls["n"] == 2
     assert "ws:nope:d30" not in analytics_cache._memory
+
+
+async def test_the_summary_does_not_fan_out(db_session):
+    """A ceiling on the round trips one summary costs.
+
+    The document is built by a long sequence of awaits on ONE session, so its
+    cost is the sum of its round trips and it holds a connection for all of
+    them. The failure this guards is the easy one to introduce: a per-workspace
+    or per-view loop, which looks fine against a seed fixture and turns into a
+    fan-out on a real platform.
+
+    The number is deliberately a bound, not an assertion of the current count —
+    it should fall, and a change that lowers it is welcome. What it must not do
+    is grow with the amount of DATA, and that is what a per-entity loop would
+    do here.
+
+    Note what this canNOT see: most of the cost of a bad query is rows scanned,
+    not queries issued. Scoping a leaderboard's favourites lookup or ranking a
+    fallback in SQL leaves this count unchanged while removing a whole-table
+    group-by. Those need EXPLAIN against Postgres, which nothing in CI runs.
+    """
+    await _seed(db_session)
+
+    issued: list[str] = []
+    original = db_session.execute
+
+    async def _counting(stmt, *args, **kwargs):
+        issued.append(str(stmt))
+        return await original(stmt, *args, **kwargs)
+
+    db_session.execute = _counting
+    try:
+        await analytics_repo.platform_summary(
+            db_session, scope=None, days=30, now=NOW)
+    finally:
+        db_session.execute = original
+
+    assert len(issued) <= 90, (
+        f"the summary issued {len(issued)} queries against a fixture of five "
+        "views and three workspaces — something is looping per entity"
+    )
+
+
+async def test_the_memory_tier_cannot_grow_without_bound(db_session):
+    """Every key carries the epoch it was built for, so no key is ever asked
+    for twice across a slot boundary.
+
+    Eviction here is lazy — an entry is dropped when the key it belongs to is
+    looked up and found expired — so an entry whose key can never be requested
+    again is never reached by it. Left unbounded the map grew by one entry per
+    surface per window per epoch, forever, in each of the worker processes,
+    holding a whole analytics document each.
+    """
+    from backend.app.services import analytics_cache
+
+    async def _build():
+        return {"doc": "x" * 64}
+
+    # Several times the cap, all of them unreachable the moment their epoch
+    # rolls over. Deliberately well past `_MEMORY_MAX_ENTRIES` — a run that
+    # stays under it would pass whether or not anything bounds the map.
+    keys = 0
+    for epoch in range(200):
+        for surface in ("summary", "workspaces", "ws:a", "ws:b", "ws:c"):
+            await analytics_cache.cached(f"raw:v2:e{epoch}:{surface}:d30", _build)
+            keys += 1
+    assert keys > analytics_cache._MEMORY_MAX_ENTRIES * 3
+
+    assert len(analytics_cache._memory) <= analytics_cache._MEMORY_MAX_ENTRIES, (
+        f"in-process cache grew to {len(analytics_cache._memory)} entries"
+    )
+
+
+async def test_one_readers_redaction_cannot_reach_the_next(db_session):
+    """`_serve` must hand each reader a document nothing else can see.
+
+    The cached entry is shared, unredacted, and returned by identity on every
+    in-process hit. Today's redactors happen to rebuild rather than write into
+    what they are handed, so this holds without help — which is exactly why it
+    needs a test: the property belongs to `_serve`, not to a convention the
+    redactors are currently keeping. The redactor below writes in place, the
+    way a future one reaching a level deeper would.
+    """
+    from backend.app.api.v1.endpoints import analytics as endpoint
+    from backend.app.services import analytics_cache
+    from backend.app.services.analytics_scope import PrivacyMode, ViewerScope
+
+    await _seed(db_session)
+    epoch, args = endpoint._at_epoch({"days": 30})
+    key = analytics_cache.document_key("summary", {"days": 30}, epoch=epoch)
+
+    async def _build():
+        return await analytics_repo.platform_summary(db_session, scope=None, **args)
+
+    def _mutating_redactor(doc, scope):
+        # Nested, in place — the shape the copy exists to contain.
+        doc["totals"]["users"]["total"] = -1
+        doc["seen_by"] = scope.user_id
+        return doc
+
+    first_reader = ViewerScope(
+        privileged=False, visible_workspaces=frozenset(),
+        privacy=PrivacyMode.STRICT, user_id="usr_new1",
+    )
+    second_reader = ViewerScope(
+        privileged=False, visible_workspaces=frozenset({"ws_live"}),
+        privacy=PrivacyMode.INTERNAL, user_id="usr_old",
+    )
+
+    first = await endpoint._serve(key, _build, _mutating_redactor, first_reader)
+    assert first["seen_by"] == "usr_new1"
+
+    cached_doc = analytics_cache._memory[key][1]
+    assert "seen_by" not in cached_doc, "the shared entry was redacted in place"
+    assert cached_doc["totals"]["users"]["total"] != -1, (
+        "a nested write reached the shared entry"
+    )
+
+    second = await endpoint._serve(key, _build, _mutating_redactor, second_reader)
+    assert second["seen_by"] == "usr_old"
+    assert second["totals"]["users"]["total"] == -1  # its own copy, freshly mutated
+
+    # And the real redactor still applies each reader's own scope.
+    strict = await endpoint._serve(
+        key, _build, analytics_repo.redact_summary, first_reader)
+    internal = await endpoint._serve(
+        key, _build, analytics_repo.redact_summary, second_reader)
+    assert strict["redaction"]["showsPeople"] is False
+    assert internal["redaction"]["showsPeople"] is True
 
 
 async def test_retention_sweep_keeps_the_analytics_window(db_session):

@@ -214,6 +214,14 @@ services:
       # a large-graph scan: reusing the stats TTL (1200s) would leave a source
       # un-probeable for twenty minutes after a worker died mid-probe.
       STATS_PROBE_DEDUP_TTL_SECS: "${STATS_PROBE_DEDUP_TTL_SECS:-90}"
+      # Analytics warmer + product-event retention sweep. Both run here
+      # because both are gated on runs_scheduler(). The warm interval MUST
+      # match viz-service's copy of the same variable — it is also the grid
+      # readers snap `now` to, and a warmer phase-locked to a different grid
+      # writes cache entries no reader will ever look up. Same ${VAR} on both
+      # services is what keeps them identical.
+      ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
+      PRODUCT_EVENT_RETENTION_DAYS: "${PRODUCT_EVENT_RETENTION_DAYS:-400}"
       SYNODIC_ROLE: controlplane
       # Internal service auth (WS2.3). Shared secret the control plane
       # requires on every route except health/docs. UNSET by default ->
@@ -314,6 +322,11 @@ services:
       # control plane. UNSET -> no header sent (and the CP has auth disabled
       # too), so dev works. Must match the control plane's value.
       AGGREGATION_INTERNAL_TOKEN: ${AGGREGATION_INTERNAL_TOKEN:-}
+      # Not the warmer (that is controlplane-only) — this is the grid every
+      # analytics window ends on. It has to be the SAME value the controlplane
+      # warms with, or readers ask for epochs the warmer never wrote.
+      # Retention is deliberately absent: the sweep does not run on this role.
+      ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
       SYNODIC_ROLE: web
 
       # CORS — allow the frontend container + local dev

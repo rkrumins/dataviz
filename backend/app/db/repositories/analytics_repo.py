@@ -383,6 +383,28 @@ class _OpenFold:
     total: int
 
 
+def _chunked(ids: Sequence[str]) -> Iterable[Sequence[str]]:
+    """Slices of an ``IN`` list small enough for any driver or planner."""
+    for i in range(0, len(ids), _IN_CHUNK):
+        yield ids[i:i + _IN_CHUNK]
+
+
+def _subject_chunks(view_ids: Optional[Sequence[str]]) -> list[list]:
+    """The ``subject_id`` predicate for each round trip this fold needs.
+
+    ``None`` means platform-wide: one pass, no restriction. Otherwise one pass
+    per chunk — a view id falls in exactly one chunk, so a group never splits
+    across passes and the results simply concatenate. An empty sequence yields
+    no passes at all, which is the right answer for a workspace with no views.
+    """
+    if view_ids is None:
+        return [[]]
+    return [
+        [ProductEventORM.subject_id.in_(chunk)]
+        for chunk in _chunked(list(view_ids))
+    ]
+
+
 async def _workspaces_for_views(
     session: AsyncSession, view_ids: Iterable[str],
 ) -> dict[str, str]:
@@ -399,10 +421,10 @@ async def _workspaces_for_views(
     out: dict[str, str] = {}
     # Chunked so a wide window cannot build an IN-list past what a driver or a
     # query planner will take.
-    for i in range(0, len(ids), _IN_CHUNK):
+    for chunk in _chunked(ids):
         rows = (await session.execute(
             select(ViewORM.id, ViewORM.workspace_id)
-            .where(ViewORM.id.in_(ids[i:i + _IN_CHUNK]))
+            .where(ViewORM.id.in_(chunk))
         )).all()
         out.update({vid: ws for vid, ws in rows if vid and ws})
     return out
@@ -410,7 +432,7 @@ async def _workspaces_for_views(
 
 async def _fold_opens(
     session: AsyncSession, *, since: str, until: Optional[str] = None,
-    workspace_id: Optional[str] = None,
+    view_ids: Optional[Sequence[str]] = None,
 ) -> _OpenFold:
     """Opens per view for one window, grouped in SQL.
 
@@ -423,6 +445,13 @@ async def _fold_opens(
     ``subject_id`` is the same view id in a real column, so both aggregates are
     now grouped queries served by ``idx_product_events_subject``, and what
     comes back is one row per view that was opened rather than one per open.
+
+    ``view_ids`` scopes the fold to one workspace's views IN SQL. It was a
+    ``workspace_id`` filtered in Python *after* folding the whole platform, so
+    one workspace's drill-in cost exactly what the platform summary costs —
+    twice over, once per window. Scoped this way ``by_workspace`` stays empty:
+    the caller already knows the workspace, and the attribution query exists
+    only to place the rows of an unscoped fold.
     """
     bounds = [ProductEventORM.created_at >= since]
     if until:
@@ -434,31 +463,56 @@ async def _fold_opens(
         *bounds,
     ]
 
-    counted = (await session.execute(
-        select(
-            ProductEventORM.subject_id,
-            func.count().label("opens"),
-            func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
-        ).where(*where).group_by(ProductEventORM.subject_id)
-    )).all()
+    counted: list = []
+    for restriction in _subject_chunks(view_ids):
+        counted.extend((await session.execute(
+            select(
+                ProductEventORM.subject_id,
+                func.count().label("opens"),
+                func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
+            ).where(*where, *restriction).group_by(ProductEventORM.subject_id)
+        )).all())
 
-    view_to_ws = await _workspaces_for_views(session, (row[0] for row in counted))
+    view_to_ws = (
+        {} if view_ids is not None
+        else await _workspaces_for_views(session, (row[0] for row in counted))
+    )
 
     by_view: Counter = Counter()
     by_workspace: Counter = Counter()
     viewers: dict[str, int] = {}
     total = 0
     for view_id, opens, unique_viewers in counted:
-        ws_id = view_to_ws.get(view_id)
-        if workspace_id is not None and ws_id != workspace_id:
-            continue
         total += opens
         by_view[view_id] = opens
         viewers[view_id] = unique_viewers
+        ws_id = view_to_ws.get(view_id)
         if ws_id:
             by_workspace[ws_id] += opens
     return _OpenFold(by_view=by_view, by_workspace=by_workspace,
                      viewers_by_view=viewers, total=total)
+
+
+async def _opens_by_day(
+    session: AsyncSession, *, since: str, until: Optional[str] = None,
+    view_ids: Optional[Sequence[str]] = None,
+) -> dict[str, int]:
+    """``{YYYY-MM-DD: opens}`` for one window, scoped to ``view_ids`` when given.
+
+    The workspace drill-in plotted the UNRESTRICTED count while the KPI above
+    it came from a workspace-scoped fold, so a panel showed one workspace's
+    total sitting over every workspace's trend. A chart and the figure beside
+    it have to be the same measurement.
+    """
+    out: dict[str, int] = {}
+    for restriction in _subject_chunks(view_ids):
+        part = await _count_by_day(
+            session, ProductEventORM.created_at, since=since, until=until,
+            where=[ProductEventORM.event_type == VIEW_OPENED, *restriction],
+        )
+        for day, count in part.items():
+            out[day] = out.get(day, 0) + count
+    return out
 
 
 # ── Per-entity usage ────────────────────────────────────────────────
@@ -486,9 +540,11 @@ async def view_usage(
     who never go there. This is the same question asked from the content
     itself.
 
-    TWO QUERIES, WHATEVER THE BATCH. One filters the requested ids down to what
-    this reader may actually see; one groups the event log over the survivors.
-    A per-card fetch would be two per card, which is the difference between a
+    THREE QUERIES, WHATEVER THE BATCH. One filters the requested ids down to
+    what this reader may actually see; one groups the event log over the
+    survivors for the totals; one groups it again by day for the trend, because
+    ``COUNT(DISTINCT actor)`` cannot be summed back up out of per-day rows. A
+    per-card fetch would be three per card, which is the difference between a
     gallery that loads and one that hammers the database once per tile.
 
     DISTINCT PEOPLE IS THE HEADLINE, not opens. Someone meeting a view for the
@@ -697,37 +753,41 @@ async def workspace_usage(
         name_of[view_id] = name
         out[workspace_id]["views"] += 1
 
-    per_view = {
-        r[0]: (r[1], r[2])
-        for r in (await session.execute(
-            select(
-                ProductEventORM.subject_id,
-                func.count().label("opens"),
-                func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
-            ).where(
-                ProductEventORM.event_type == VIEW_OPENED,
-                ProductEventORM.subject_id.in_(list(name_of)),
-                ProductEventORM.created_at >= w.start,
-                ProductEventORM.created_at < w.end,
-            ).group_by(ProductEventORM.subject_id)
-        )).all()
-    }
+    # Chunked, like every other IN-list in this module: `name_of` holds every
+    # live view across up to MAX_USAGE_IDS workspaces, which is thousands of
+    # ids on a real platform rather than the handful the batch size suggests.
+    window = [
+        ProductEventORM.event_type == VIEW_OPENED,
+        ProductEventORM.created_at >= w.start,
+        ProductEventORM.created_at < w.end,
+    ]
+    view_ids = list(name_of)
+
+    per_view: dict[str, tuple[int, int]] = {}
+    for restriction in _subject_chunks(view_ids):
+        per_view.update({
+            r[0]: (r[1], r[2])
+            for r in (await session.execute(
+                select(
+                    ProductEventORM.subject_id,
+                    func.count().label("opens"),
+                    func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
+                ).where(*window, *restriction)
+                .group_by(ProductEventORM.subject_id)
+            )).all()
+        })
 
     # Distinct PEOPLE cannot be summed from per-view counts — the same person
     # opening three views is one person, not three — so the actors come back
     # once and are folded per workspace here.
     actors: dict[str, set[str]] = defaultdict(set)
-    for view_id, actor in (await session.execute(
-        select(ProductEventORM.subject_id, ProductEventORM.actor_id)
-        .where(
-            ProductEventORM.event_type == VIEW_OPENED,
-            ProductEventORM.subject_id.in_(list(name_of)),
-            ProductEventORM.created_at >= w.start,
-            ProductEventORM.created_at < w.end,
-        ).distinct()
-    )).all():
-        if actor:
-            actors[view_id].add(actor)
+    for restriction in _subject_chunks(view_ids):
+        for view_id, actor in (await session.execute(
+            select(ProductEventORM.subject_id, ProductEventORM.actor_id)
+            .where(*window, *restriction).distinct()
+        )).all():
+            if actor:
+                actors[view_id].add(actor)
 
     for workspace_id, view_ids in of_workspace.items():
         entry = out[workspace_id]
@@ -833,10 +893,7 @@ async def platform_summary(
     views_by_day = await _count_by_day(session, ViewORM.created_at, since=w.start, where=live_view)
     ds_by_day = await _count_by_day(
         session, WorkspaceDataSourceORM.created_at, since=w.start, where=live_ds)
-    opens_by_day = await _count_by_day(
-        session, ProductEventORM.created_at, since=w.start,
-        where=[ProductEventORM.event_type == VIEW_OPENED],
-    )
+    opens_by_day = await _opens_by_day(session, since=w.start)
     activity_by_day = await _count_by_day(
         session, ViewActivityLogORM.created_at, since=w.start)
     signins_by_day = await _count_by_day(
@@ -973,6 +1030,8 @@ async def platform_summary(
             session, w, now=now, dau=dau, wau=wau, mau=mau,
             active_now=active_now, active_prev=active_prev,
             tracers=adoption.users((TRACE_RUN,)),
+            # Already in hand — see the note on `_retention_cohorts`.
+            actors_by_day=actors_window,
         ),
         "breakdowns": await _breakdowns(session, w, opens=opens),
         "leaderboards": await _leaderboards(session, w, opens=opens),
@@ -1735,16 +1794,19 @@ async def _access_friction(session: AsyncSession, w: Window, *, now: datetime) -
         if started and finished and finished >= started:
             waits.append((finished - started).total_seconds() / 3600)
 
-    pending_rows = (await session.execute(
-        select(AccessRequestORM.created_at)
+    # Count and oldest in one aggregate. The backlog is unbounded by the window
+    # by definition — a request pending since last year is exactly the one worth
+    # reporting — so it is the one query here that must not read its rows back.
+    pending_count, oldest_created = (await session.execute(
+        select(func.count(), func.min(AccessRequestORM.created_at))
+        .select_from(AccessRequestORM)
         .where(AccessRequestORM.status == "pending")
-    )).all()
-    oldest_pending = None
-    for (created,) in pending_rows:
-        started = _parse(created)
-        if started:
-            age = (now - started).total_seconds() / 86400
-            oldest_pending = age if oldest_pending is None else max(oldest_pending, age)
+    )).one()
+    oldest_started = _parse(oldest_created)
+    oldest_pending = (
+        (now - oldest_started).total_seconds() / 86400
+        if oldest_started else None
+    )
 
     invites_sent = await _scalar(session, select(func.count()).where(
         InviteORM.created_at >= w.start, InviteORM.created_at < w.end))
@@ -1754,7 +1816,7 @@ async def _access_friction(session: AsyncSession, w: Window, *, now: datetime) -
 
     return {
         "requests": len(requests),
-        "pending": len(pending_rows),
+        "pending": int(pending_count or 0),
         "medianHoursToApprove": round(_median(waits), 1) if waits else None,
         "oldestPendingDays": round(oldest_pending, 1) if oldest_pending is not None else None,
         "invitesSent": invites_sent,
@@ -1962,6 +2024,7 @@ async def _engagement(
     dau: int, wau: int, mau: int,
     active_now: set[str], active_prev: set[str],
     tracers: set[str],
+    actors_by_day: dict[str, set[str]],
 ) -> dict:
     """Habit, activation, and where the funnel leaks."""
     # Cohort = accounts created inside the window. An activation funnel over
@@ -2032,7 +2095,7 @@ async def _engagement(
             "resurrected": len(resurrected),
             "dormant": len(dormant),
         },
-        "cohorts": await _retention_cohorts(session, w),
+        "cohorts": await _retention_cohorts(session, w, actors_by_day=actors_by_day),
     }
 
 
@@ -2045,13 +2108,17 @@ async def _median_time_to_value(session: AsyncSession, w: Window) -> Optional[fl
     7-day window has had time to build anything).
     """
     first_view: dict[str, str] = {}
+    # The window bound is a HAVING rather than a Python filter: the group is
+    # over every view ever authored, and all but the ones whose FIRST landed in
+    # the window were being read back only to be thrown away.
     rows = (await session.execute(
-        select(ViewORM.created_by, func.min(ViewORM.created_at))
+        select(ViewORM.created_by, func.min(ViewORM.created_at).label("first_at"))
         .where(ViewORM.created_by.is_not(None), ViewORM.deleted_at.is_(None))
         .group_by(ViewORM.created_by)
+        .having(func.min(ViewORM.created_at) >= w.start)
     )).all()
     for uid, first_at in rows:
-        if uid and first_at and first_at >= w.start:
+        if uid and first_at:
             first_view[uid] = first_at
     if not first_view:
         return None
@@ -2083,8 +2150,16 @@ async def _median_time_to_value(session: AsyncSession, w: Window) -> Optional[fl
 _MIN_COHORT_DAYS = 28
 
 
-async def _retention_cohorts(session: AsyncSession, w: Window) -> list[dict]:
-    """Signup-week × weeks-active grid, scoped to the window."""
+async def _retention_cohorts(
+    session: AsyncSession, w: Window, *, actors_by_day: dict[str, set[str]],
+) -> list[dict]:
+    """Signup-week × weeks-active grid, scoped to the window.
+
+    ``actors_by_day`` is passed in rather than fetched. It is two ``GROUP BY
+    day, actor`` queries over the window — among the heaviest in the document —
+    and ``platform_summary`` has already run exactly this call before it gets
+    here, so asking again was the same scan twice per build.
+    """
     if w.days < _MIN_COHORT_DAYS:
         return []
 
@@ -2104,7 +2179,6 @@ async def _retention_cohorts(session: AsyncSession, w: Window) -> list[dict]:
     if not joined:
         return []
 
-    actors_by_day = await _actors_by_day(session, since=w.start)
     # {cohort_week_start: {weeks_since_signup: {user, …}}}
     grid: dict[str, dict[int, set[str]]] = defaultdict(lambda: defaultdict(set))
     for day, actors in actors_by_day.items():
@@ -2242,19 +2316,29 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
 
     # ── Most popular views: opens (from the payload fold) with unique viewers
     #    alongside, so a view opened 200 times by one person reads as such.
-    favourites: Counter = Counter(dict((await session.execute(
-        select(ViewFavouriteORM.view_id, func.count()).group_by(ViewFavouriteORM.view_id)
-    )).all()))
     ranked_view_ids = [vid for vid, _ in opens.by_view.most_common(TOP_N)]
     if not ranked_view_ids:
         # No open history yet (tracking is new). Fall back to the signal that
-        # does have history, so the panel is useful on day one.
+        # does have history, so the panel is useful on day one. Ranked and
+        # capped in SQL — this is a top-ten, and reading every visit row into a
+        # Counter to find it made the query grow with the table.
         ranked_view_ids = [
-            vid for vid, _ in Counter(dict((await session.execute(
-                select(ViewVisitORM.view_id, func.count())
+            vid for vid, _ in (await session.execute(
+                select(ViewVisitORM.view_id, func.count().label("n"))
                 .group_by(ViewVisitORM.view_id)
-            )).all())).most_common(TOP_N)
+                .order_by(func.count().desc())
+                .limit(TOP_N)
+            )).all() if vid
         ]
+    # Favourites for the ranked views only. The whole table was being grouped
+    # to read ten of its values.
+    favourites: Counter = Counter()
+    for chunk in _chunked(ranked_view_ids):
+        favourites.update(dict((await session.execute(
+            select(ViewFavouriteORM.view_id, func.count())
+            .where(ViewFavouriteORM.view_id.in_(chunk))
+            .group_by(ViewFavouriteORM.view_id)
+        )).all()))
     view_rows = {
         v.id: v for v in (await session.execute(
             select(ViewORM).where(ViewORM.id.in_(ranked_view_ids))
@@ -2357,7 +2441,7 @@ async def _graph_scale(session: AsyncSession) -> dict:
             .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         )).all()
     ]
-    rows = await stats_repo.list_data_source_stats(session, ds_ids)
+    rows = await _stats_for(session, ds_ids)
     entity_types: set[str] = set()
     for row in rows:
         try:
@@ -2373,6 +2457,21 @@ async def _graph_scale(session: AsyncSession) -> dict:
 
 
 # ── Per-workspace ───────────────────────────────────────────────────
+
+async def _stats_for(session: AsyncSession, ds_ids: Sequence[str]) -> list:
+    """``data_source_stats`` rows for ``ds_ids``, chunked.
+
+    ``stats_repo.list_data_source_stats`` builds one ``IN`` list from whatever
+    it is given, and the callers here hand it every live data source on the
+    platform. Chunking at the call site keeps this module's own rule — see
+    ``_IN_CHUNK`` — rather than relying on a shared helper to hold a limit it
+    never promised.
+    """
+    out: list = []
+    for chunk in _chunked(list(ds_ids)):
+        out.extend(await stats_repo.list_data_source_stats(session, chunk))
+    return out
+
 
 async def _ds_ids_by_workspace(session: AsyncSession) -> dict[str, list[str]]:
     rows = (await session.execute(
@@ -2436,7 +2535,7 @@ async def workspace_rows(
     ds_by_ws = await _ds_ids_by_workspace(session)
     all_stats = {
         s.data_source_id: s
-        for s in await stats_repo.list_data_source_stats(
+        for s in await _stats_for(
             session, [ds for ids in ds_by_ws.values() for ds in ids])
     }
 
@@ -2570,9 +2669,21 @@ async def workspace_detail(
     views_before = await _scalar(
         session, select(func.count()).where(ViewORM.created_at < w.start, *live_view))
 
-    opens = await _fold_opens(session, since=w.start, workspace_id=workspace_id)
+    # This workspace's views, resolved once and used three times: to scope both
+    # open folds and the open series in SQL, and to keep a soft-deleted view out
+    # of the ranking below. Soft-deleted ids stay in the scoping set for the
+    # reason ``_workspaces_for_views`` keeps them — those opens really happened,
+    # and dropping them would understate the workspace against its own totals.
+    ws_views = (await session.execute(
+        select(ViewORM.id, ViewORM.deleted_at)
+        .where(ViewORM.workspace_id == workspace_id)
+    )).all()
+    ws_view_ids = [vid for vid, _ in ws_views if vid]
+    live_view_ids = {vid for vid, deleted in ws_views if vid and deleted is None}
+
+    opens = await _fold_opens(session, since=w.start, view_ids=ws_view_ids)
     opens_previous = await _fold_opens(
-        session, since=w.previous_start, until=w.start, workspace_id=workspace_id)
+        session, since=w.previous_start, until=w.start, view_ids=ws_view_ids)
     opens_prev_total = opens_previous.total
 
     actors_now = await _actors_by_day(session, since=w.start, workspace_id=workspace_id)
@@ -2587,13 +2698,12 @@ async def workspace_detail(
         if bucket is not None:
             actors_per_bucket[bucket].update(actors)
 
-    opens_by_day = await _count_by_day(
-        session, ProductEventORM.created_at, since=w.start,
-        where=[ProductEventORM.event_type == VIEW_OPENED],
+    opens_by_day = await _opens_by_day(
+        session, since=w.start, view_ids=ws_view_ids,
     ) if opens.total else {}
 
     ds_ids = (await _ds_ids_by_workspace(session)).get(workspace_id, [])
-    stats = await stats_repo.list_data_source_stats(session, ds_ids)
+    stats = await _stats_for(session, ds_ids)
     entity_types: set[str] = set()
     for row in stats:
         try:
@@ -2611,19 +2721,18 @@ async def workspace_detail(
     # Per-view opens inside this workspace, ranked; falls back to visit counts
     # while open-tracking history is still short.
     ranked_view_ids = [vid for vid, _ in opens.by_view.most_common(TOP_N)]
-    workspace_view_ids = {
-        vid for (vid,) in (await session.execute(
-            select(ViewORM.id).where(*live_view)
-        )).all()
-    }
-    ranked_view_ids = [vid for vid in ranked_view_ids if vid in workspace_view_ids]
+    ranked_view_ids = [vid for vid in ranked_view_ids if vid in live_view_ids]
     if not ranked_view_ids:
-        visits = Counter(dict((await session.execute(
-            select(ViewVisitORM.view_id, func.count()).group_by(ViewVisitORM.view_id)
-        )).all()))
-        ranked_view_ids = [
-            vid for vid, _ in visits.most_common() if vid in workspace_view_ids
-        ][:TOP_N]
+        # Restricted to this workspace's views in SQL rather than grouping the
+        # whole visit table and discarding almost all of it in Python.
+        visits: Counter = Counter()
+        for chunk in _chunked(sorted(live_view_ids)):
+            visits.update(dict((await session.execute(
+                select(ViewVisitORM.view_id, func.count())
+                .where(ViewVisitORM.view_id.in_(chunk))
+                .group_by(ViewVisitORM.view_id)
+            )).all()))
+        ranked_view_ids = [vid for vid, _ in visits.most_common(TOP_N) if vid]
     view_rows = {
         v.id: v for v in (await session.execute(
             select(ViewORM).where(ViewORM.id.in_(ranked_view_ids))

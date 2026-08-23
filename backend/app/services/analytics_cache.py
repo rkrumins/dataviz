@@ -65,9 +65,24 @@ _PREFIX = "analytics:v1:"
 #: leader, not a cache lifetime, so it tracks the slowest plausible summary.
 _flight = SingleFlight(ttl_seconds=30.0)
 
-#: Per-replica fallback: ``{key: (expires_at, document)}``. Bounded by key
-#: cardinality, which is bounded by the range presets × workspaces.
+#: Per-replica fallback: ``{key: (expires_at, document)}``.
 _memory: dict[str, tuple[float, Any]] = {}
+
+#: Ceiling on the in-process tier.
+#:
+#: Eviction here is lazy — ``_memory_get`` drops an entry when the key it was
+#: asked for turns out to have expired. That only ever fires for a key someone
+#: looks up again, and every key carries the epoch it was built for, so no key
+#: is ever requested twice across a boundary. An entry therefore expires at
+#: precisely the moment nothing can ask for it again, and the lazy path never
+#: reaches it: without a bound the map grows by one entry per surface per
+#: window per epoch, forever, independently in every worker process, holding a
+#: whole analytics document each.
+#:
+#: 256 is generous next to what a slot actually needs — twelve warmed
+#: documents, plus whatever custom ranges and drill-ins were asked for — and
+#: small enough to stay a rounding error in a worker's footprint.
+_MEMORY_MAX_ENTRIES = 256
 
 #: Redis is optional. Once a call fails we stop trying for this long rather
 #: than paying a connect timeout on every request during an outage.
@@ -109,6 +124,21 @@ async def _redis_set(key: str, value: Any, ttl: float | None = None) -> bool:
         return False
 
 
+def _memory_put(key: str, value: Any) -> None:
+    """Store one entry, first dropping whatever has aged out of reach."""
+    now = time.monotonic()
+    if len(_memory) >= _MEMORY_MAX_ENTRIES:
+        for stale in [k for k, (expires_at, _) in _memory.items() if expires_at < now]:
+            _memory.pop(stale, None)
+        # Still full, so these are live entries: a burst of distinct windows
+        # rather than the accumulation above. Drop the tier instead of growing
+        # past the bound — Redis still holds them, and the worst case is a
+        # rebuild, which is what the read-through path is for.
+        if len(_memory) >= _MEMORY_MAX_ENTRIES:
+            _memory.clear()
+    _memory[key] = (now + read_ttl_seconds(), value)
+
+
 def _memory_get(key: str) -> Optional[Any]:
     entry = _memory.get(key)
     if entry is None:
@@ -133,7 +163,7 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
     if hit is not None:
         # Populate the local layer too: the next read on this replica skips
         # even the Redis round trip.
-        _memory[key] = (time.monotonic() + read_ttl_seconds(), hit)
+        _memory_put(key, hit)
         return hit
 
     async def _compute() -> Any:
@@ -149,7 +179,7 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
         # while getting no benefit. Negatives are cheap to recompute; don't
         # store them.
         if value is not None:
-            _memory[key] = (time.monotonic() + read_ttl_seconds(), value)
+            _memory_put(key, value)
             await _redis_set(key, value)
         return value
 
@@ -180,6 +210,18 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
 _DEFAULT_EPOCH_SECONDS = 300.0
 
 
+#: Floor on the grid. Each warm pass is ~25 grouped queries per window, so a
+#: very short setting turns the warmer into the load it exists to remove.
+#:
+#: It lives HERE, with the grid, because this is the single clamp — the warmer
+#: used to apply its own floor of 30 to the same variable while this function
+#: allowed 1, so ``ANALYTICS_WARM_INTERVAL_SECONDS=10`` gave readers a 10s grid
+#: and the warmer a 30s cadence: it wrote keys for epochs readers had already
+#: passed and warmed nothing, silently. Two clamps on one variable is two
+#: clocks wearing one name.
+_MIN_EPOCH_SECONDS = 30.0
+
+
 def epoch_seconds() -> float:
     raw = os.getenv("ANALYTICS_WARM_INTERVAL_SECONDS")
     if not raw:
@@ -187,9 +229,18 @@ def epoch_seconds() -> float:
     try:
         parsed = float(raw)
     except ValueError:
+        logger.warning(
+            "ANALYTICS_WARM_INTERVAL_SECONDS=%r is not a number; using %.0f",
+            raw, _DEFAULT_EPOCH_SECONDS,
+        )
         return _DEFAULT_EPOCH_SECONDS
-    # A grid finer than a second buys nothing and risks a zero divisor.
-    return max(1.0, parsed)
+    if parsed < _MIN_EPOCH_SECONDS:
+        logger.warning(
+            "ANALYTICS_WARM_INTERVAL_SECONDS=%.0f is too aggressive; "
+            "clamping to %.0fs.", parsed, _MIN_EPOCH_SECONDS,
+        )
+        return _MIN_EPOCH_SECONDS
+    return parsed
 
 
 def epoch_start(at: Optional[datetime] = None) -> datetime:
@@ -261,7 +312,7 @@ async def put(key: str, value: Any, *, ttl: float) -> bool:
     """
     if value is None:
         return False
-    _memory[key] = (time.monotonic() + read_ttl_seconds(), value)
+    _memory_put(key, value)
     return await _redis_set(key, value, ttl)
 
 

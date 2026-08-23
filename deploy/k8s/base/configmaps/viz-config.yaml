@@ -21,3 +21,10 @@ data:
   # with PgBouncer (transaction pooling) for real scale.
   DB_GRAPH_READ_POOL_SIZE: "8"
   DB_GRAPH_READ_MAX_OVERFLOW: "8"
+  # The grid every analytics window ends on. The warmer itself is
+  # controlplane-only, but this tier reads the same variable to decide which
+  # epoch it is asking for, so it MUST match controlplane-config's value —
+  # otherwise every read misses the warmed entry and rebuilds on demand.
+  # PRODUCT_EVENT_RETENTION_DAYS is deliberately absent: the sweep does not
+  # run on this role, and setting it here would only imply it did.
+  ANALYTICS_WARM_INTERVAL_SECONDS: "300"

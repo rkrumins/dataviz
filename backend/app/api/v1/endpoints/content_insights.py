@@ -20,9 +20,16 @@ every reader rather than only for privileged ones. Anything that would name a
 person stays on the Analytics section, behind its gate.
 
 BATCHED ON PURPOSE
-One request carries many ids and costs two queries regardless. A gallery asking
-per card would be two queries per tile, which is the difference between a page
-that loads and one that hammers the database once per thing it draws.
+One request carries many ids and costs three queries regardless. A gallery
+asking per card would be three queries per tile, which is the difference
+between a page that loads and one that hammers the database once per thing it
+draws.
+
+ON THE READONLY POOL
+This fires on every view page, for every reader, and it is pure aggregate
+reads. That is what ``get_readonly_db_session`` exists for: a decoration on
+someone else's page must not contend for the WEB pool that serves the page
+itself.
 """
 from __future__ import annotations
 
@@ -37,7 +44,7 @@ from backend.app.auth.dependencies import (
     get_permission_claims,
     rbac_flag,
 )
-from backend.app.db.engine import get_db_session
+from backend.app.db.engine import get_readonly_db_session
 from backend.app.db.repositories import analytics_repo
 from backend.app.services import view_access
 from backend.app.services.permission_service import PermissionClaims
@@ -71,7 +78,7 @@ async def views_usage(
     days: int = _DAYS,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_readonly_db_session),
 ) -> dict[str, Any]:
     """Opens, distinct viewers and a trend for each view the caller can read.
 
@@ -115,7 +122,7 @@ async def workspaces_usage(
     days: int = _DAYS,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_readonly_db_session),
 ) -> dict[str, Any]:
     """Is each workspace alive, and what do people come to it for?
 
