@@ -809,14 +809,29 @@ def _is_incomplete_result(result: BaseModel) -> bool:
     TTL as if they were complete — cache them only for the negative
     window. Checks the result itself and its nested AggregatedEdgeResult
     payloads: ``aggregated`` (canvas bootstrap) and ``aggregated_delta``
-    (canvas expand)."""
+    (canvas expand).
+
+    ONE EXCEPTION: a closure PAGE cut by ``max_nodes``. The degree-exact
+    walk makes such a page a pure function of (graph, request) — every
+    anchor it ships is whole and the cursor names exactly where the next
+    page starts — so it IS the complete answer to that request and keeps the
+    full TTL. A page whose reason is a FAILURE (timeout, seed/nodes/ancestors
+    failed) is still degraded; the walk reports failures ahead of
+    ``max_nodes`` for exactly this reason.
+    """
     for obj in (
         result,
         getattr(result, "aggregated", None),
         getattr(result, "aggregated_delta", None),
     ):
-        if obj is not None and (getattr(obj, "truncated", False) or getattr(obj, "stale", False)):
+        if obj is None:
+            continue
+        if getattr(obj, "stale", False):
             return True
+        if getattr(obj, "truncated", False):
+            is_closure_page = getattr(obj, "frontier_up", None) is not None
+            if not (is_closure_page and getattr(obj, "truncation_reason", None) == "max_nodes"):
+                return True
     return _has_unprobed_frontier(result)
 
 

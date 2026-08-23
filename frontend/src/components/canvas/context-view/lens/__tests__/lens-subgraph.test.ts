@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   boundaryFrontierFilter,
+  boundaryHops,
   buildLensSubgraph,
   focusAncestorChain,
   projectLensEdges,
@@ -303,8 +304,8 @@ describe('projectLensEdges — directional projection', () => {
     const result = projectLensEdges(sg, population, visible)
     expect(result).toHaveLength(2)
     const byKey = new Map(result.map(e => [`${e.sourceUrn}>${e.targetUrn}`, e]))
-    expect(byKey.get('A>B')).toEqual({ sourceUrn: 'A', targetUrn: 'B', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS' })
-    expect(byKey.get('B>A')).toEqual({ sourceUrn: 'B', targetUrn: 'A', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS' })
+    expect(byKey.get('A>B')).toEqual({ sourceUrn: 'A', targetUrn: 'B', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
+    expect(byKey.get('B>A')).toEqual({ sourceUrn: 'B', targetUrn: 'A', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
   })
 
   it('collapses hops from two children of a collapsed container into one bundle, weight 2, container as endpoint', () => {
@@ -317,7 +318,7 @@ describe('projectLensEdges — directional projection', () => {
     const population = new Set(['D1', 'a1', 'a1b', 'D2'])
     const visible = new Set(['D1', 'D2'])   // a1 / a1b collapsed under D1
     expect(projectLensEdges(sg, population, visible)).toEqual([
-      { sourceUrn: 'D1', targetUrn: 'D2', weight: 2, isLeafEdge: false, edgeTypeNorm: 'FLOWS' },
+      { sourceUrn: 'D1', targetUrn: 'D2', weight: 2, isLeafEdge: false, edgeTypeNorm: 'FLOWS', coarse: false },
     ])
   })
 
@@ -343,7 +344,7 @@ describe('projectLensEdges — directional projection', () => {
     const population = new Set(['X', 'Y'])
     const visible = new Set(['X', 'Y'])
     expect(projectLensEdges(sg, population, visible)).toEqual([
-      { sourceUrn: 'X', targetUrn: 'Y', weight: 2, isLeafEdge: false, edgeTypeNorm: '' },
+      { sourceUrn: 'X', targetUrn: 'Y', weight: 2, isLeafEdge: false, edgeTypeNorm: '', coarse: false },
     ])
   })
 
@@ -412,3 +413,78 @@ describe('boundaryFrontierFilter — whose remainder is the focus\'s to walk', (
     expect(boundaryFrontierFilter(estate(), 'dst', 'in')('dst')).toBe(true)
   })
 })
+
+/**
+ * C4 perf (2026-08-21), from a real-browser profile of the hands-free
+ * walk on the wide table: `boundaryHops` was 25 s of every 60 s — called
+ * once per ⊕ pill per render (`seedLeavesFor` → `boundaryFrontierFilter`),
+ * each call a full pass over the model's 46k hops, for ~2,000 pills. The
+ * subgraph is built once per model and never mutated, so the answer for
+ * one (subgraph, root, direction) is computed once and shared.
+ */
+describe('boundaryHops — computed once per subgraph, root and direction', () => {
+  const estate = () => buildLensSubgraph({
+    focusUrn: 'PLAT',
+    nodes: ['PLAT', 'IN', 'src', 'FAR'].map(n),
+    containmentEdges: [ce('PLAT', 'IN'), ce('IN', 'src')],
+    lineageEdges: [le('FAR', 'src')],
+  })
+
+  it('hands back the same sets for the same question on the same subgraph', () => {
+    const sg = estate()
+    const first = boundaryHops(sg, 'PLAT', 'in')
+    const again = boundaryHops(sg, 'PLAT', 'in')
+    expect(again.subtree).toBe(first.subtree)
+    expect(again.crossing).toBe(first.crossing)
+    expect(again.interiorOnly).toBe(first.interiorOnly)
+    // A different direction or root is a different question.
+    expect(boundaryHops(sg, 'PLAT', 'out').crossing).not.toBe(first.crossing)
+    expect(boundaryHops(sg, 'IN', 'in').subtree).not.toBe(first.subtree)
+  })
+
+  it('a rebuilt subgraph (a new model) answers afresh', () => {
+    const a = boundaryHops(estate(), 'PLAT', 'in')
+    const b = boundaryHops(estate(), 'PLAT', 'in')
+    expect(b.crossing).not.toBe(a.crossing)
+    expect([...b.crossing]).toEqual([...a.crossing])
+  })
+
+  it('two thousand pill counts on a twenty-thousand-hop model cost one pass, not two thousand', () => {
+    const nodes = [n('T')]
+    const containmentEdges = []
+    const lineageEdges = []
+    for (let i = 0; i < 2000; i++) {
+      nodes.push(n(`c${i}`), n(`p${i}`))
+      containmentEdges.push(ce('T', `c${i}`))
+      for (let k = 0; k < 10; k++) lineageEdges.push(le(`p${(i * 7 + k) % 2000}`, `c${i}`))
+    }
+    const sg = buildLensSubgraph({ focusUrn: 'T', nodes, containmentEdges, lineageEdges })
+    const t0 = performance.now()
+    let offered = 0
+    for (let i = 0; i < 2000; i++) if (boundaryFrontierFilter(sg, 'T', 'in')(`c${i}`)) offered++
+    const ms = performance.now() - t0
+    expect(offered).toBe(2000)
+    expect(ms).toBeLessThan(150)
+  })
+})
+
+describe('projectLensEdges — a rollup cell weighs what it summarises (Part G)', () => {
+  it('a cell of 30 is a bundle of weight 30, coarse, never a leaf edge; a raw hop beside it stays exact', () => {
+    const sg = buildLensSubgraph({
+      focusUrn: 'F',
+      nodes: ['F', 'P', 'c', 'q'].map(n),
+      containmentEdges: [ce('F', 'c'), ce('P', 'q')],
+      lineageEdges: [
+        { id: 'agg', sourceUrn: 'F', targetUrn: 'P', edgeType: 'AGGREGATED', kind: 'rollup', weight: 30 },
+        { id: 'r', sourceUrn: 'c', targetUrn: 'q', edgeType: 'FLOWS', kind: 'raw', weight: null },
+      ],
+    })
+    const all = new Set(['F', 'P', 'c', 'q'])
+    const byKey = new Map(projectLensEdges(sg, all, all).map(b => [`${b.sourceUrn}>${b.targetUrn}`, b]))
+    expect(byKey.get('F>P')).toEqual({ sourceUrn: 'F', targetUrn: 'P', weight: 30, isLeafEdge: false, edgeTypeNorm: 'AGGREGATED', coarse: true })
+    expect(byKey.get('c>q')).toEqual({ sourceUrn: 'c', targetUrn: 'q', weight: 1, isLeafEdge: true, edgeTypeNorm: 'FLOWS', coarse: false })
+    expect(sg.nodes.get('F')!.degreeDown).toBe(30)
+    expect(sg.nodes.get('P')!.degreeUp).toBe(30)
+  })
+})
+

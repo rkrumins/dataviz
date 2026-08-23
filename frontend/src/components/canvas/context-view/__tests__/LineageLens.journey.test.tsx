@@ -59,6 +59,7 @@
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
+import { chooseView } from '@/test/lensView'
 import { usePreferencesStore } from '@/store/preferences'
 import { decodeLensShare } from '../lens/shareCodec'
 import type { WalkEntry } from '@/hooks/useLensWalk'
@@ -122,7 +123,7 @@ const sharedPlatform = () => WALK_FIXTURES.walkSharedPlatform.model
 describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 1 })
+    usePreferencesStore.setState({ lensInitialDepth: 1 })
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
@@ -332,22 +333,24 @@ describe('T26 R4 — the journey acceptance suite (walkSharedPlatform)', () => {
 describe('T26 R4 — follow from every control kind × state (walkWideHub / walkLongChain)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 3, lensCondenseSteps: false })
+    usePreferencesStore.setState({ lensInitialDepth: 3, lensCondenseSteps: false })
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore(); usePreferencesStore.setState({ lensInitialDepth: 1 }) })
 
-  it('FOLLOW A BIG COHORT — 45 known groups land on the board in pages, never behind a panel', () => {
+  it('A BIG COHORT IN HAND — 45 known groups are on the board the moment the lens opens, never behind a pill or a panel', () => {
     // walkUnfetchedFanTriage's own downstream_hub: 45 known groups plus
     // an honest 60-more frontier. This used to cross a gate and open the
-    // hub-triage list instead of delivering; the list is gone (user,
-    // 2026-08-17), so the biggest cohort on the estate obeys the same
-    // one-click-one-visible-delivery rule as the smallest.
+    // hub-triage list, then (2026-08-17) reveal in pages of twelve. Both
+    // are gone: everything the walk brought back is DRAWN (user ruling,
+    // 2026-08-21 — "I expect to see all the immediate incoming and
+    // outgoing edges, not click Load more"), so the biggest cohort on the
+    // estate needs no click at all. Only what is NOT in hand — the 60
+    // more at the source — is offered, as a FETCH.
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkUnfetchedFanTriage.model))
-    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of downstream_hub/))
-    // INVARIANT 1 — visible immediately: cards, on the board.
     assertBoardShows('payments_core')
-    // ...and no panel intercepted the click.
+    expect(screen.queryByTitle(/Shows the next hop downstream of downstream_hub/)).toBeNull()
+    expect(screen.getByTitle(/Loads the next hop downstream of downstream_hub/)).toBeTruthy()
     expect(triage()).toBeNull()
     assertStrataCoherent(errorSpy)
   })
@@ -369,15 +372,14 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
     assertStrataCoherent(errorSpy)
   })
 
-  it('FOLLOW UNDER THE GATE — a small known cohort reveals directly, no wall, no panel', () => {
-    // walkLongChain's own rail end (up00) is a single-card frontier —
-    // comfortably under the triage gate.
+  it('A SMALL COHORT IN HAND — drawn directly, no pill, no wall, no panel', () => {
+    // walkLongChain's whole chain is in the model; every card of it is on
+    // the board from the first render, and nothing in hand is offered as
+    // something to "show".
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
-    const pill = screen.queryByTitle(/Shows the next hop upstream of stage_up_09 only/)
-      ?? screen.queryByTitle(/Loads the next hop upstream of stage_up_09/)
-    expect(pill).toBeTruthy()
-    fireEvent.click(pill!)
     assertBoardShows('ledger_snapshot')
+    assertBoardShows('stage_up_08')
+    expect(screen.queryByTitle(/Shows the next hop upstream of stage_up_09 only/)).toBeNull()
     assertStrataCoherent(errorSpy)
   })
 
@@ -411,51 +413,25 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
    * one the click promised) is ALWAYS its own visible top-level card
    * the instant it arrives.
    */
-  it('R4 REPRO-FIRST — a click past the old window edge delivers the card directly, no chip, ever (upstream)', () => {
+  it('R4 REPRO-FIRST — cards past the old window edge are on the board directly, no chip, ever (upstream)', () => {
+    // The user's own screenshot shape: the branch point stage_up_05 and
+    // the cards past the OLD default window (HOP_WINDOW's radius 3) used
+    // to render "Chain continues · 2 further upstream of 1 more hop"
+    // instead of cards; then (T28) a click per hop delivered them; now
+    // everything in hand is on the board from the first render — no chip
+    // ever renders, because the card kind that rendered it no longer
+    // exists in the type system.
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
-    // stage_up_09 (band -1) is admitted for free. Four reveals reach
-    // stage_up_05 (band -5) — the branch point, still just inside the
-    // OLD default window's own effective reach.
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_09 only/))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_08 only/))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_07 only/))
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_06 only/))
-    assertBoardShows('stage_up_05')
-    expect(screen.queryByText(/Chain continues/)).toBeNull()
-
-    // ONE more click, past the old edge — the exact click the user's
-    // screenshot shows failing pre-fix (delivers stage_up_04 AND
-    // branch_reconciliation together, one page, comfortably under the
-    // triage gate).
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of stage_up_05 only/))
-
-    // INVARIANT 1 — visible immediately: real cards, not a chip.
-    assertBoardShows('stage_up_04')
-    assertBoardShows('branch_reconciliation')
+    for (const stage of ['stage_up_09', 'stage_up_06', 'stage_up_05', 'stage_up_04', 'branch_reconciliation']) {
+      assertBoardShows(stage)
+    }
     expect(screen.queryByText(/Chain continues/)).toBeNull()
     assertStrataCoherent(errorSpy)
   })
 
-  it('R4 REPRO-FIRST — a click past the old window edge delivers the card directly, no chip, ever (downstream)', () => {
+  it('R4 REPRO-FIRST — cards past the old window edge are on the board directly, no chip, ever (downstream)', () => {
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
-    // stage_dn_00 (band +1) is admitted for free. Four reveals reach
-    // stage_dn_04 (band +5) — one hop short of the downstream branch
-    // point (`branchB`, mirroring `branchA`'s own upstream shape).
-    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_00 only/))
-    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_01 only/))
-    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_02 only/))
-    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_03 only/))
-    assertBoardShows('stage_dn_04')
-    expect(screen.queryByText(/Chain continues/)).toBeNull()
-
-    // ONE more click, past the old edge — delivers stage_dn_05 (dn04's
-    // own single downstream neighbour; unlike up05, `branch_adjustment`
-    // feeds INTO dn05, not out of dn04, so it arrives on the NEXT click,
-    // not this one — the asymmetry is the fixture's own shape, not this
-    // test's concern).
-    fireEvent.click(screen.getByTitle(/Shows the next hop downstream of stage_dn_04 only/))
-
-    assertBoardShows('stage_dn_05')
+    for (const stage of ['stage_dn_00', 'stage_dn_04', 'stage_dn_05']) assertBoardShows(stage)
     expect(screen.queryByText(/Chain continues/)).toBeNull()
     assertStrataCoherent(errorSpy)
   })
@@ -473,30 +449,18 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
    * see the repro-first test's own note just above for why this is not
    * a regression to assert against.)
    */
-  it('R4 WALK TO ETERNITY — seven sequential reveals upstream, each one delivers its own card, never a fold chip, never empty', () => {
+  it('R4 WALK TO ETERNITY — every walked hop is its own card at any distance, never a fold chip, never empty', () => {
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
     assertBoardShows('ledger_snapshot')
-    assertBoardShows('stage_up_09')   // admitted for free, no click
-
-    const reached: string[] = []
-    for (let i = 9; i >= 3; i--) {
-      const from = `stage_up_${String(i).padStart(2, '0')}`
-      const next = `stage_up_${String(i - 1).padStart(2, '0')}`
-      fireEvent.click(screen.getByTitle(new RegExp(`Shows the next hop upstream of ${from} only`)))
-      // INVARIANT 1, checked fresh at every step — the click JUST fired
-      // delivers a real card, immediately, whatever the distance.
-      assertBoardShows(next)
+    // Seven hops out — five bands past the old radius-3 edge
+    // (stage_up_07), the "N > the old radius" the brief asks for — all
+    // on the board at once: the board grows, the reader scrolls.
+    for (let i = 9; i >= 2; i--) {
+      assertBoardShows(`stage_up_${String(i).padStart(2, '0')}`)
       // INVARIANT 2 — the focus itself never leaves the board.
       assertBoardShows('ledger_snapshot')
       expect(screen.queryByText(/Chain continues/)).toBeNull()
-      reached.push(next)
     }
-    // Seven reveals reached stage_up_02 — five bands past the old
-    // radius-3 edge (stage_up_07), the "N > the old radius" the brief
-    // asks for.
-    expect(reached).toEqual([
-      'stage_up_08', 'stage_up_07', 'stage_up_06', 'stage_up_05', 'stage_up_04', 'stage_up_03', 'stage_up_02',
-    ])
     assertStrataCoherent(errorSpy)
   })
 
@@ -514,11 +478,8 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
    */
   it('STEPS — every hop is its own card by default; the header control folds and unfolds the run', () => {
     renderLens(['F'], doneWalk(WALK_FIXTURES.walkLongChain.model, 3))
-    // Walk out far enough that a run of pass-through cards exists to
-    // fold at all (three interior cards, past MIN_CONDENSE_RUN).
-    for (let i = 9; i >= 6; i--) {
-      fireEvent.click(screen.getByTitle(new RegExp(`Shows the next hop upstream of stage_up_${String(i).padStart(2, '0')} only`)))
-    }
+    // The whole chain is in hand and drawn, so a run of pass-through
+    // cards exists to fold (three interior cards, past MIN_CONDENSE_RUN).
     // DEFAULT — every step drawn, nothing skipped.
     const interior = ['stage_up_09', 'stage_up_08', 'stage_up_07', 'stage_up_06']
     for (const stage of [...interior, 'stage_up_05']) assertBoardShows(stage)
@@ -528,13 +489,13 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
     // (The connector chip itself is EdgeLabelRenderer geometry, which
     // jsdom has no layout for; what the fold MEANS is the drawn set,
     // and that is what this asserts.)
-    fireEvent.click(screen.getByTitle(/Fold long runs of single pass-through steps/))
+    chooseView('Steps', /^Condensed/)
     for (const stage of interior) expect(onBoard(stage)).toBe(false)
     assertBoardShows('ledger_snapshot')
     assertBoardShows('stage_up_05')
 
     // And back — the same control, the other way, nothing lost.
-    fireEvent.click(screen.getByTitle(/Show the full end-to-end flow/))
+    chooseView('Steps', /^Every step/)
     for (const stage of [...interior, 'stage_up_05']) assertBoardShows(stage)
     assertStrataCoherent(errorSpy)
   })
@@ -547,7 +508,6 @@ describe('T26 R4 — follow from every control kind × state (walkWideHub / walk
 describe('T26 R4 — spotlight across a seam (walkGrainSeamDeepNesting)', () => {
   let errorSpy: ReturnType<typeof vi.spyOn>
   beforeEach(() => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
   afterEach(() => { cleanup(); errorSpy.mockRestore() })

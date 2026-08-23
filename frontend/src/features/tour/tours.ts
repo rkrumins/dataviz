@@ -377,7 +377,7 @@ TOURS.push({
       placement: 'top',
       padding: -8,
       title: 'Explore the lineage',
-      body: '**Click** a card to inspect it. **Double-click** to focus there. **Hover** a card\'s edge for its follow control — "Load upstream", "Show 3 more sources" — and click to grow the board from exactly that entity. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it.',
+      body: 'The whole immediate lineage loads by itself — the capsule at the top says where the walk stands. **Click** a card to inspect it. **Double-click** to focus there. **Hover** a card\'s edge for its follow control — "Load upstream" — and click to grow the board from exactly that entity. The **chevron** opens what\'s inside a card, at any depth, instantly. **Drag** any card to arrange the picture — the connections follow it; **Center on focus** beside the name brings you back, and the board offers it by itself if the focus leaves the screen.',
     },
     {
       target: '[data-tour="lens-children-mode"]',
@@ -399,10 +399,10 @@ TOURS.push({
       body: '**Both / Root cause / Impact** narrows the picture to just what feeds this entity or just what it feeds — instantly, with nothing new to fetch.',
     },
     {
-      target: '[data-tour="lens-toggle"]',
+      target: '[data-tour="lens-density"]',
       placement: 'bottom',
-      title: 'Two ways to read it',
-      body: 'Prefer scanning to exploring? Switch to the **List** columns any time — the Lens remembers your choice.',
+      title: 'Choose the grain',
+      body: 'Partners that share a container fold into it — five tables under one database are one frame. **Overview** lands those containers closed with their counts, **Grouped** opens them to their strongest rows, **Every card** folds nothing. The numbers are the same at every rung; it is your preference, and it follows you.',
     },
     {
       title: 'See the path, take it with you',
@@ -412,7 +412,7 @@ TOURS.push({
       target: '[data-tour="lens-share"]',
       placement: 'bottom',
       title: 'Share what you found',
-      body: 'Copy a link that reopens this exact exploration — the walked path, everything you expanded, and your depth and direction settings — for a colleague.',
+      body: 'Copy a link that reopens this exact exploration — the walked path, everything you expanded, and your direction setting — for a colleague.',
     },
     {
       title: 'Retrace any time',

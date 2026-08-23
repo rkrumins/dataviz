@@ -1616,9 +1616,12 @@ export function LineageFlowOverlay({
                 />
               )}
 
-              {/* Bundle count — minimal pill */}
-              {isBundled && !isGhost && (
-                <g transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
+              {/* Bundle count — minimal pill, BROWSE only: a trace keeps its
+                  wires bare (the cards say "N on this lineage"). Only when
+                  the line stands for MORE than one hop: a re-anchored single
+                  hop is still one flow, and a "1" on it reads as noise. */}
+              {!isTracing && isBundled && !isGhost && edge.edgeCount > 1 && (
+                <g data-edge-badge={edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
                   <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
                   <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">
                     {edge.edgeCount}

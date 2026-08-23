@@ -49,20 +49,30 @@ entity-type levels. Containment and lineage edge types are the
 ontology-resolved sets frozen onto the job row at trigger time; the
 worker re-validates the ontology fingerprint before running.
 
-**Materialization modes (auto by default).** The pipeline ESTIMATES
-the full ancestor cross-product volume up front (one counting scan:
-Σ ancestors(src)+1 × ancestors(tgt)+1 — a conservative upper bound) and,
-when it fits `AGGREGATION_MAX_CUBE_EDGES`, stores the FULL CUBE:
-every ancestor combination (column→table, table→table, column→domain,
-…) physically exists, so every canvas granularity and expansion answers
-from storage alone. Above that ceiling it falls back to the structural
-boundary below (`AGGREGATION_MATERIALIZE_FINE_PAIRS=true|false` forces a
-mode; a forced cube over the WRITE BUDGET fails terminally, loudly). Known caveat
-of boundary mode on SELF-NESTING types: the on-demand reader still
-reasons in ontology type levels, so mixed-granularity drill answers can
-be incomplete there — depth-aware on-demand reads are the tracked
-follow-up; within-budget graphs never hit this because auto stores the
-cube.
+**Materialization modes (FULL CUBE by default).** The shipped default
+(`AGGREGATION_MATERIALIZE_FINE_PAIRS=true`) always stores the FULL CUBE:
+every ancestor combination (column→table, table→table, column→domain, …)
+physically exists, so every canvas granularity and expansion answers from
+storage alone. That is the point of the default — boundary mode has a
+caveat on SELF-NESTING types, where the on-demand reader still reasons in
+ontology type levels and mixed-granularity drill answers can come back
+incomplete (depth-aware on-demand reads are the tracked follow-up).
+
+The cost is stated plainly because it is real: a FORCED cube **skips the
+up-front estimate**, so a graph whose result exceeds the WRITE BUDGET is
+not refused before it starts — it fails terminally mid-apply, leaving a
+partial cube over the previous generation's cells, because the reconcile
+delete pass never runs. On a fleet with multi-million-edge graphs, size
+`AGGREGATION_MAX_MATERIALIZED_EDGES` against the largest of them first.
+
+`auto` is the mode that degrades instead of failing: it ESTIMATES the full
+ancestor cross-product volume up front (one counting scan: Σ ancestors(src)+1
+× ancestors(tgt)+1 — a conservative upper bound), stores the cube when it fits
+`AGGREGATION_MAX_CUBE_EDGES`, and falls back to the structural boundary below
+otherwise, so it can never pick a cube that exceeds the budget. `false` forces
+the boundary. Operators move a whole fleet between these from Ingestion →
+Freshness → Automation (③ Act → Advanced) without a redeploy; a single run is
+set in the trigger dialog's Rollup storage control.
 
 **The STRUCTURAL materialization boundary (the scale contract):**
 only CANONICAL DEPTH-BRIDGED pairs are materialized: a node is a
@@ -253,10 +263,15 @@ the **first checkpoint**, before any graph work. Resume rules:
   speeds it up — 0.5 → ≤ ~66%, 0.25 → ≤ ~80%, 0 → no sleep at all.
 * **Progress-aware watchdog** (worker): a job is killed only when it
   makes no forward progress for `AGGREGATION_STALL_TIMEOUT_SECS`
-  (default 900) or exceeds `AGGREGATION_JOB_MAX_WALL_SECS` (default
-  86400). The old fixed 2-hour kill (which terminated healthy 3-hour
-  jobs mid-flight) is gone; `job.timeout_secs` now overrides the stall
-  window.
+  (default 10800 — 3h, the same window every UI trigger path sends
+  explicitly as `timeoutSecs`) or exceeds `AGGREGATION_JOB_MAX_WALL_SECS`
+  (default 86400). The old fixed 2-hour kill (which terminated healthy
+  3-hour jobs mid-flight) is gone; `job.timeout_secs` overrides the stall
+  window per job. The default matters because only the MACHINE paths leave
+  that column NULL — reconciliation drift and first builds, the cron drift
+  sweep, the stale-marker reconciler, Refresh rollups, the projector heal
+  hook — so at 900 they were the only rebuilds being killed for going
+  quiet, on exactly the graphs large enough to do it.
 
 ## Tuning
 
@@ -279,12 +294,12 @@ pipeline).
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink-on-timeout ladder descends to (a floor-width timeout is an outage and fails the run) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
-| `AGGREGATION_MATERIALIZE_FINE_PAIRS` | auto | `auto` picks cube-vs-boundary by estimate; `true`/`false` force the legacy full cube (leaf-involving + mixed-level pairs) |
+| `AGGREGATION_MATERIALIZE_FINE_PAIRS` | true | Rollup storage. `true` (shipped default) always stores the full cube — leaf-involving and mixed-level pairs included — and FAILS above the write budget; `auto` picks cube-vs-boundary by estimate and degrades instead; `false` forces the boundary. Per-job as `materializeFinePairs`, fleet-wide from Ingestion → Freshness → Automation (③ Act → Advanced) |
 | `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Hard write budget (fail loud, never OOM). ~12.5GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
 | `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate. Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Not per-job tunable |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
-| `AGGREGATION_STALL_TIMEOUT_SECS` | 900 | Watchdog stall window |
+| `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. Matches what every UI trigger path sends as `timeoutSecs`; the machine paths (reconciliation, Refresh rollups, the projector heal hook) send nothing and land here. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS` |
 | `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net |
 | `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |
 | `AGGREGATION_LARGE_JOB_EDGE_THRESHOLD` | 500000 | Edge count classifying a job as "large" |

@@ -27,10 +27,11 @@ import {
   hydrateTraceHistory,
   TRACE_HISTORY_CAP,
   type TraceHistoryStack,
+  type TraceViewParams,
 } from '../traceHistoryStack'
 
-const view = (over: Partial<{ showUpstream: boolean; showDownstream: boolean; depthUp: number; depthDown: number }> = {}) =>
-  ({ showUpstream: true, showDownstream: true, depthUp: 25, depthDown: 25, ...over })
+const view = (over: Partial<TraceViewParams> = {}): TraceViewParams =>
+  ({ showUpstream: true, showDownstream: true, depthUp: 25, depthDown: 25, traceExpansion: [], ...over })
 
 const push = (h: TraceHistoryStack, urn: string, ts = 1000) =>
   pushTraceFocal(h, { urn, focusId: `id:${urn}`, view: view(), timestamp: ts })
@@ -100,5 +101,80 @@ describe('traceHistoryStack', () => {
     h = traceHistoryBack(h)
     const back = hydrateTraceHistory(serializeTraceHistory(h))
     expect(back).toEqual(h)
+  })
+})
+
+/**
+ * THE EXPANSION PICTURE (F8). An entry records not just WHERE the reader
+ * traced and which way they were looking, but WHICH CARDS THEY HAD OPEN —
+ * otherwise "back" restores a trace collapsed back to its seed, which is
+ * not the trace they left.
+ *
+ * The set is normalized (sorted, deduped) on the way in so two identical
+ * pictures serialize identically, and an EMPTY array means "as the trace
+ * opened" — the seed, not "everything closed". A trace the reader never
+ * touched therefore records nothing and restores to its own seed.
+ */
+describe('traceHistoryStack — the expansion picture', () => {
+  it('carries traceExpansion through push, updateCurrent and jump', () => {
+    let h = pushTraceFocal(emptyTraceHistory(), {
+      urn: 'X', focusId: 'id:X', view: view(), timestamp: 1,
+    })
+    h = updateCurrentTraceView(h, view({ traceExpansion: ['tableau', 'cfo'] }))
+    expect(currentTraceEntry(h)?.view.traceExpansion).toEqual(['cfo', 'tableau'])
+
+    h = pushTraceFocal(h, { urn: 'Y', focusId: 'id:Y', view: view(), timestamp: 2 })
+    expect(currentTraceEntry(h)?.view.traceExpansion).toEqual([])
+    h = traceHistoryJump(h, 0)
+    expect(currentTraceEntry(h)?.view.traceExpansion).toEqual(['cfo', 'tableau'])
+  })
+
+  it('normalizes on the way in — sorted and deduped', () => {
+    let h = pushTraceFocal(emptyTraceHistory(), {
+      urn: 'X', focusId: 'id:X', view: view({ traceExpansion: ['b', 'a', 'b', 'c', 'a'] }), timestamp: 1,
+    })
+    expect(currentTraceEntry(h)?.view.traceExpansion).toEqual(['a', 'b', 'c'])
+    h = updateCurrentTraceView(h, view({ traceExpansion: ['z', 'z'] }))
+    expect(currentTraceEntry(h)?.view.traceExpansion).toEqual(['z'])
+  })
+
+  it('round-trips the expansion through storage', () => {
+    let h = pushTraceFocal(emptyTraceHistory(), {
+      urn: 'X', focusId: 'id:X', view: view({ traceExpansion: ['orders', 'cfo'] }), timestamp: 7,
+    })
+    h = pushTraceFocal(h, { urn: 'Y', focusId: 'id:Y', view: view(), timestamp: 8 })
+    const back = hydrateTraceHistory(serializeTraceHistory(h))
+    expect(back).toEqual(h)
+    expect(back.entries[0]!.view.traceExpansion).toEqual(['cfo', 'orders'])
+  })
+
+  // History written before F8 is still the user's history. It loads, it
+  // just has no picture to restore — which is exactly what an empty
+  // expansion means anyway.
+  it('loads pre-F8 entries that have no traceExpansion at all, as []', () => {
+    const legacy = JSON.stringify({
+      v: 1,
+      cursor: 0,
+      entries: [{
+        urn: 'X', focusId: 'id:X', timestamp: 3,
+        view: { showUpstream: true, showDownstream: false, depthUp: 25, depthDown: 25 },
+      }],
+    })
+    const h = hydrateTraceHistory(legacy)
+    expect(h.entries.length).toBe(1)
+    expect(h.entries[0]!.view.traceExpansion).toEqual([])
+    expect(h.entries[0]!.view.showDownstream).toBe(false)
+  })
+
+  it('rejects a malformed expansion rather than half-loading it', () => {
+    const junk = JSON.stringify({
+      v: 1,
+      cursor: 0,
+      entries: [{
+        urn: 'X', focusId: 'id:X', timestamp: 3,
+        view: { showUpstream: true, showDownstream: true, depthUp: 25, depthDown: 25, traceExpansion: 'cfo' },
+      }],
+    })
+    expect(hydrateTraceHistory(junk).entries).toEqual([])
   })
 })

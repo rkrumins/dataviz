@@ -37,13 +37,17 @@
 import type { LineageNode } from '@/store/canvas'
 import {
     boundaryFrontierFilter,
+    hopWeight,
     focusAncestorChain,
     projectLensEdges,
     visibleLensNodes,
+    type LensEdgeLike,
     type LensSubgraph,
     type LensSubgraphNode,
     type ProjectedLensEdge,
 } from './lens-subgraph'
+import { applyQueryDimming } from './query-dimming'
+import { ancestorsFor, subtreeFor } from './model-cache'
 import type { LensWalkNode } from './closure-adapter'
 import {
     assignLanes,
@@ -68,6 +72,11 @@ import {
     nameLinesFor,
     FRAME_WINDOW,
     FRAME_WINDOW_ALL,
+    BUNDLE_WINDOW,
+    OPEN_PARTNERS_PER_BAND,
+    WIRE_BUNDLE_THRESHOLD,
+    type LensDensity,
+    type LensWires,
     NO_FRAME_ROWS,
     UNRESOLVED_TYPE,
     type FocusCard,
@@ -208,6 +217,15 @@ export interface FocusLayoutInput {
      *  pill remainder stays true when the user toggles back. Defaults to
      *  'both' (nothing suppressed). */
     directionFilter?: LensDirectionFilter
+    /** How much of the picture is folded (Part H) — the reader's
+     *  preference. Defaults to 'all' (nothing folded) so a caller that
+     *  has not asked for a grain gets the whole picture. */
+    density?: LensDensity
+    /** How the wires between two containers draw (2026-08-22): one bundle
+     *  when there are many ('auto', the reader's default), always
+     *  ('bundled'), or every wire ('all' — the layout's default, so a
+     *  caller that has not asked gets the whole picture). */
+    wires?: LensWires
 }
 
 /** Every focal-transition kind the lens recognizes (T26 R1). All five
@@ -419,6 +437,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         sg, view, query, hiddenTypes, extendStatus,
         childrenAll, childrenAllStatus, walkStatus,
         directionFilter = 'both',
+        density = 'all',
+        wires = 'all',
     } = input
     const model = sg.nodes
 
@@ -427,7 +447,6 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // cycle to depth 0 rather than throwing, so the tree it hands over
     // can still contain one.
 
-    const ancestorCache = new Map<string, string[]>()
     /**
      * Containment ancestors, ROOT-FIRST. WHOLE chain, cycle-guarded.
      *
@@ -449,41 +468,14 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * The cap still applies where it was always meant to: `emit` slices
      * the ribbon it prints.
      */
-    const ancestorsOf = (urn: string): string[] => {
-        const hit = ancestorCache.get(urn)
-        if (hit) return hit
-        const out: string[] = []
-        const seen = new Set<string>([urn])
-        let cursor = model.get(urn)?.parent ?? null
-        while (cursor && !seen.has(cursor)) {
-            seen.add(cursor)
-            out.push(cursor)
-            cursor = model.get(cursor)?.parent ?? null
-        }
-        out.reverse()
-        ancestorCache.set(urn, out)
-        return out
-    }
+    // Cached against the MODEL, not this build — see `model-cache.ts`.
+    const ancestorsOf = (urn: string): string[] => ancestorsFor(model, urn)
     const rootOf = (urn: string): string => ancestorsOf(urn)[0] ?? urn
 
-    const subtreeCache = new Map<string, Set<string>>()
     /** The entity plus every containment descendant IN THE MODEL. The
      *  model's children are already scoped to walk participants, so this
-     *  can never reach outside the lineage. */
-    const subtreeOf = (urn: string): Set<string> => {
-        const hit = subtreeCache.get(urn)
-        if (hit) return hit
-        const out = new Set<string>()
-        const stack = [urn]
-        while (stack.length > 0) {
-            const next = stack.pop()!
-            if (out.has(next) || !model.has(next)) continue
-            out.add(next)
-            for (const child of model.get(next)!.children) stack.push(child)
-        }
-        subtreeCache.set(urn, out)
-        return out
-    }
+     *  can never reach outside the lineage. Cached against the model. */
+    const subtreeOf = (urn: string): Set<string> => subtreeFor(model, urn)
 
     const nodeOf = (urn: string): LensSubgraphNode<LensWalkNode> | undefined => model.get(urn)
     const dataOf = (urn: string): Record<string, unknown> =>
@@ -515,6 +507,29 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const seed = new Set(population)
 
     const groupCache = new Map<string, RevealGroup[]>()
+    // Lineage hops by endpoint, built once per layout on first use.
+    let bySourceIdx: Map<string, LensEdgeLike[]> | null = null
+    let byTargetIdx: Map<string, LensEdgeLike[]> | null = null
+    const hopsBySource = (): Map<string, LensEdgeLike[]> => {
+        if (bySourceIdx === null) {
+            bySourceIdx = new Map()
+            for (const hop of sg.lineageEdges) {
+                const list = bySourceIdx.get(hop.sourceUrn)
+                if (list) list.push(hop); else bySourceIdx.set(hop.sourceUrn, [hop])
+            }
+        }
+        return bySourceIdx
+    }
+    const hopsByTarget = (): Map<string, LensEdgeLike[]> => {
+        if (byTargetIdx === null) {
+            byTargetIdx = new Map()
+            for (const hop of sg.lineageEdges) {
+                const list = byTargetIdx.get(hop.targetUrn)
+                if (list) list.push(hop); else byTargetIdx.set(hop.targetUrn, [hop])
+            }
+        }
+        return byTargetIdx
+    }
     /**
      * Groups of not-yet-shown neighbours reachable from `near`, ranked.
      * Weight is raw hops — the wire the reveal would draw.
@@ -538,15 +553,19 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const hit = groupCache.get(cacheKey)
         if (hit) return hit
         const byRoot = new Map<string, { weight: number; members: Map<string, number> }>()
-        for (const hop of sg.lineageEdges) {
-            const from = dir === 'in' ? hop.targetUrn : hop.sourceUrn
+        // Only the subtree's OWN hops, by endpoint index — scanning every
+        // lineage edge per card was O(cards × edges) on a 20k-node model.
+        const index = dir === 'in' ? hopsByTarget() : hopsBySource()
+        for (const from of subtree) {
+            for (const hop of index.get(from) ?? []) {
             const far = dir === 'in' ? hop.sourceUrn : hop.targetUrn
-            if (!subtree.has(from) || subtree.has(far) || seed.has(far)) continue
+            if (subtree.has(far) || seed.has(far)) continue
             const root = rootOf(far)
             const group = byRoot.get(root) ?? { weight: 0, members: new Map<string, number>() }
             group.weight += 1
             group.members.set(far, (group.members.get(far) ?? 0) + 1)
             byRoot.set(root, group)
+            }
         }
         const ranked = [...byRoot.entries()]
             .map(([root, g]) => ({
@@ -633,7 +652,12 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // pinned entity reaches the board through its own container exactly
     // the way any other admission does, and becomes a full citizen of
     // everything downstream (weight, rank, wires, Reach).
-    for (const urn of view.pinned) admit(urn)
+    const pinnedRoots = new Set<string>()
+    for (const urn of view.pinned) {
+        if (!model.has(urn)) continue
+        admit(urn)
+        pinnedRoots.add(rootOf(urn))
+    }
 
     // ── the column a card sits in: its signed hop distance ───────────
 
@@ -722,6 +746,20 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     const isLeafHopCarrier = (urn: string): boolean =>
         carriesHop.has(urn) && (nodeOf(urn)?.children.length ?? 0) === 0
 
+    const holdsCache = new Map<string, boolean>()
+    /** Does anything in this entity's population subtree carry a hop? The
+     *  containers above that grain are chrome the answer sits under. */
+    const holdsHopCarrier = (urn: string): boolean => {
+        const hit = holdsCache.get(urn)
+        if (hit !== undefined) return hit
+        let out = false
+        for (const inside of subtreeOf(urn)) {
+            if (inside !== urn && population.has(inside) && carriesHop.has(inside)) { out = true; break }
+        }
+        holdsCache.set(urn, out)
+        return out
+    }
+
     /** Levels the layout opens by itself, and — of those — the ones it
      *  opens WITHOUT drawing, because they are chrome the answer sits
      *  under. Separate sets: a container holding rows is opened AND
@@ -749,19 +787,88 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // counted, searchable and paged in place — and draw it. Never
         // above the focus, where nothing is drawn at all (R1).
         if (!above && kids.some(isLeafHopCarrier)) { spine.add(urn); return }
-        // Otherwise chrome, and seen through: a level above the focus, or
-        // a PASS-THROUGH the data source has not itself named as a
-        // lineage end. Sticky, because the population only grows: a level
-        // once drawn through stays drawn through for this view state, or
-        // the arrival of a second child would turn it into a card and
-        // swallow the one already on the board.
-        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))) {
+        // Otherwise chrome, and seen through: a level above the focus, a
+        // PASS-THROUGH the data source has not itself named as a lineage
+        // end, or — R1, partners at THEIR OWN grain — any container whose
+        // hop-carrying grain lies deeper (a layer holding forty partner
+        // tables is breadcrumb chrome; the tables are the cards). Sticky,
+        // because the population only grows: a level once drawn through
+        // stays drawn through for this view state, or the arrival of a
+        // second child would turn it into a card and swallow the one
+        // already on the board.
+        const holding = kids.filter(holdsHopCarrier)
+        if (above || view.walkedThrough.has(urn) || (kids.length === 1 && !carriesHop.has(urn))
+            || (!carriesHop.has(urn) && holding.length > 0)) {
             spine.add(urn)
             walkedThrough.add(urn)
-            for (const kid of kids) openThrough(kid)
+            for (const kid of (holding.length > 0 ? holding : kids)) openThrough(kid)
         }
     }
     for (const group of admittedGroups) openThrough(group.root)
+    // A PIN OPENS THE WAY TO ITS ENTITY exactly as a reveal does. Pinned
+    // entities used to be admitted to the population and then left inside
+    // CLOSED roots: the spine walk ran only for reveal-admitted groups, so
+    // a one-hop walk of 20,212 nodes drew 13 cards (live, 2026-08-21 —
+    // every partner layer a closed root with its tables hidden inside).
+    for (const root of pinnedRoots) openThrough(root)
+
+    // ── 2b. FAN-IN BUNDLES (Part H, 2026-08-21) ───────────────────────
+    //
+    // Reported: 100+ inputs and 100+ outputs — 200+ partner tables drawn
+    // as separate cards, "so tiny when opened" — that share 18 databases.
+    // The walk above sees every container through to the grain that
+    // carries the hops, which is right for three tables and a wall for
+    // two hundred. A per-container limit would miss the report (eleven
+    // tables per database, every one under any sensible cap): the
+    // judgement is the BAND's — "this column is overwhelming" — and the
+    // remedy is "fold the cards into the containers they sit in". The
+    // rule reads parent pointers and the hop grain only; it names no
+    // type, label or level, so it holds for Domain ⊃ Department ⊃
+    // Database ⊃ Table ⊃ Column, Root ⊃ Node ⊃ Node ⊃ Node, or whatever
+    // the ontology says.
+    //
+    //  • A unit is what the walk would present as a top-level card: a
+    //    population child of a walked-through level that is not itself
+    //    walked through, or a root that is not chrome. Every unit counts
+    //    toward its band's total, wherever it sits.
+    //  • A host qualifies to fold when every population child of it is a
+    //    unit — a level that also holds chrome is not the grain to fold
+    //    at (a ragged table beside a walked-through database stays a
+    //    card) — and never above the focus (R1: nothing is drawn there).
+    //  • It folds when it holds TWO or more units: it stops being chrome
+    //    and becomes a drawn frame; its units become its rows, CLOSED,
+    //    one level per click — unless the reader already opened one. A
+    //    lone unit stays a card with its parent as a crumb: grouping one
+    //    thing under its parent is a click for nothing. (2026-08-22: this
+    //    used to wait for the band to pass a 12-card budget, so five
+    //    fact tables sharing GOLD were five loose cards each saying
+    //    "⋯› GOLD" — the shared parent IS the grouping, wide band or not.)
+    //    One level only: the frame's own parent stays chrome, because a
+    //    frame of frames puts the answer two clicks away.
+    //  • Overview lands the host CLOSED too: the database as a card with
+    //    its count, the tables one click away.
+    //  • It runs AFTER the sticky walk-through and overrides it in the
+    //    grow direction only: a database seen through at one table folds
+    //    when a later wave brings a sibling. The board only ever gets
+    //    calmer as the walk grows, never noisier.
+    const bundled = new Set<string>()
+    if (density !== 'all') {
+        const unitsByHost = new Map<string, string[]>()
+        for (const host of walkedThrough) {
+            if (focusAncestors.has(host) || host === sg.focusUrn) continue
+            const units = childrenInPopulation(host)
+                .filter(k => !walkedThrough.has(k) && !focusAncestors.has(k) && k !== sg.focusUrn)
+            unitsByHost.set(host, units)
+        }
+        for (const [host, units] of unitsByHost) {
+            if (units.length < 2) continue
+            if (childrenInPopulation(host).some(k => walkedThrough.has(k))) continue
+            bundled.add(host)
+            walkedThrough.delete(host)
+            for (const unit of units) spine.delete(unit)
+            if (density === 'overview') spine.delete(host)
+        }
+    }
     // The focus's own contents deliberately do NOT join the walk. FOCUS
     // +1 (2026-08-19, re-refined the same day): the focus's frame shows
     // its direct children as CLOSED rows with honest counts, and that is
@@ -770,6 +877,43 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     // client-side, seedCursor pages server-side). Auto-opening the
     // children pre-splayed the grandchildren across the board ("far too
     // much" — the DATAPLATFORM/Snowflake report).
+
+    // ── 2c. PARTNER GRAIN (Part H, 2026-08-22) ───────────────────────
+    //
+    // The walk above OPENS a partner that holds the hop carriers — the
+    // table with its connected columns as rows — which is the right grain
+    // for two partners and a wall for eleven (reported: a platform's one hop
+    // at half zoom, every table showing eight rows). The density rung says
+    // how the partners LAND: Overview closed — the card, its count, its
+    // chevron; Grouped the strongest OPEN_PARTNERS_PER_BAND per band open
+    // and the rest closed; Every card all open. Strength is what the reader
+    // came for: how many of the partner's own rows are on this lineage. A
+    // partner the reader opened (`expandedContainment`) is theirs and stays
+    // open at any rung — drilling in is the reader's move, one level at a
+    // time, and the closed card says exactly what a click will show.
+    /** Partners the LAYOUT opened under the rung: they show the strongest
+     *  BUNDLE_WINDOW rows, like a bundle; a partner the reader opened keeps
+     *  the full frame window. */
+    const grainOpened = new Set<string>()
+    if (density !== 'all') {
+        const opened = [...spine].filter(u =>
+            u !== sg.focusUrn && !focusAncestors.has(u) && !walkedThrough.has(u) && !bundled.has(u)
+            && childrenInPopulation(u).some(isLeafHopCarrier))
+        const strength = (u: string): number => childrenInPopulation(u).filter(k => carriesHop.has(k)).length
+        const byBand = new Map<number, string[]>()
+        for (const u of opened) {
+            const band = signedHop(u)
+            const list = byBand.get(band) ?? []
+            list.push(u)
+            byBand.set(band, list)
+        }
+        for (const list of byBand.values()) {
+            list.sort((a, b) => strength(b) - strength(a) || labelFor(a).localeCompare(labelFor(b)) || a.localeCompare(b))
+            const keep = density === 'overview' ? 0 : OPEN_PARTNERS_PER_BAND
+            for (const u of list.slice(0, keep)) if (!view.expandedContainment.has(u)) grainOpened.add(u)
+            for (const u of list.slice(keep)) spine.delete(u)
+        }
+    }
 
     const expanded = new Set<string>([...view.expandedContainment, ...spine])
     for (const urn of view.collapsedContainment) expanded.delete(urn)
@@ -1017,70 +1161,88 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     }
 
     /**
-     * WHICH ROW OF `frameUrn` SPEAKS FOR THIS ENDPOINT — the child of
-     * that container the endpoint is, or sits inside. Null when the
-     * endpoint is outside it entirely.
-     *
-     * A hop inside an opened warehouse can name a COLUMN two levels
-     * down; the frame's own arrangement is about its rows, so the hop is
-     * asked which row it enters and leaves by, never at what depth.
-     */
-    const rowUnder = (frameUrn: string, endpoint: string): string | null => {
-        let cursor: string | null = endpoint
-        const guard = new Set<string>()
-        while (cursor && !guard.has(cursor)) {
-            const parent: string | null = model.get(cursor)?.parent ?? null
-            if (parent === frameUrn) return cursor
-            guard.add(cursor)
-            cursor = parent
-        }
-        return null
-    }
-
-    /**
      * The lineage that stays INSIDE a container, stated in its own rows —
      * what `frame-flow` arranges the rows by and routes through the
      * gutter. Deduped by row pair: two columns of one table feeding two
      * columns of another is ONE flow between those two rows, which is
      * what the reader sees and what the lane allocator must budget for.
      */
-    const internalHopsCache = new Map<string, InternalEdgeRef[]>()
+    // ONE PASS, NOT ONE PER FRAME (2026-08-21). A hop is internal to exactly
+    // ONE container — the lowest ancestor the two endpoints share: above it
+    // both endpoints sit in the same row (`s === t`), below it one is
+    // outside. Scanning every projected bundle per frame was O(frames ×
+    // bundles): a one-hop walk of a 2,935-column table (~500 frames, ~3k
+    // bundles) spent half a second here per merge. Indexed lazily, once.
+    let internalHopsIndex: Map<string, InternalEdgeRef[]> | null = null
     const internalHopsOf = (frameUrn: string): InternalEdgeRef[] => {
-        const hit = internalHopsCache.get(frameUrn)
-        if (hit) return hit
-        const out: InternalEdgeRef[] = []
-        const seen = new Set<string>()
-        for (const hop of projected) {
-            const s = rowUnder(frameUrn, hop.sourceUrn)
-            const t = rowUnder(frameUrn, hop.targetUrn)
-            if (!s || !t || s === t) continue
-            const id = `${s}>${t}`
-            if (seen.has(id)) continue
-            seen.add(id)
-            out.push({ id, source: s, target: t })
+        if (internalHopsIndex === null) {
+            internalHopsIndex = new Map()
+            const seenByFrame = new Map<string, Set<string>>()
+            for (const hop of projected) {
+                // Root-first chains; walk them in step from the root and stop
+                // at the first divergence — that is the row pair, under the
+                // last shared ancestor.
+                const a = [...ancestorsOf(hop.sourceUrn), hop.sourceUrn]
+                const b = [...ancestorsOf(hop.targetUrn), hop.targetUrn]
+                let i = 0
+                while (i < a.length && i < b.length && a[i] === b[i]) i++
+                if (i === 0 || i >= a.length || i >= b.length) continue   // no shared container, or one is the other's ancestor
+                const frame = a[i - 1]!
+                const s = a[i]!, t = b[i]!
+                const id = `${s}>${t}`
+                let seen = seenByFrame.get(frame)
+                if (!seen) { seen = new Set(); seenByFrame.set(frame, seen) }
+                if (seen.has(id)) continue
+                seen.add(id)
+                let list = internalHopsIndex.get(frame)
+                if (!list) { list = []; internalHopsIndex.set(frame, list) }
+                list.push({ id, source: s, target: t })
+            }
         }
-        internalHopsCache.set(frameUrn, out)
-        return out
+        return internalHopsIndex.get(frameUrn) ?? []
     }
 
-    const needle = query.trim().toLowerCase()
-    const matches = (label: string): boolean => needle === '' || label.toLowerCase().includes(needle)
+    // THE BOARD-WIDE FILTER IS NOT COMPUTED HERE any more (2026-08-22).
+    // It only ever set `dimmed`, and doing that inside the layout made
+    // every keystroke rebuild the whole board — 325 ms of blocked main
+    // thread per letter on the wide table. The layout is now independent
+    // of what is typed; `applyQueryDimming` (called on the way out, and
+    // by the lens over its FINISHED board) dims the result. A frame's
+    // OWN Find (`hostQuery`) still dims here: it decides which rows a
+    // frame lists, which is structural.
 
     /** Raw hops this card's subtree carries to the rest of the picture —
      *  what the wires into it add up to, and the rank of its slot. */
-    const weightCache = new Map<string, number>()
-    const weightOf = (urn: string): number => {
-        const hit = weightCache.get(urn)
-        if (hit !== undefined) return hit
-        const sub = subtreeOf(urn)
-        let n = 0
+    // CROSSINGS, INDEXED ONCE (2026-08-21). "Hops that cross this entity's
+    // subtree boundary" used to be a scan of every lineage edge per card —
+    // O(cards × edges), 1.3 s per merge on the wide table's 20k-node model.
+    // A hop crosses the boundary of exactly the ancestors-or-self of one
+    // endpoint that are NOT ancestors-or-self of the other, so one pass over
+    // the edges, walking two short chains each, counts every entity at once.
+    let crossIndex: Map<string, { in: number; out: number; approx: boolean }> | null = null
+    const crossings = (): Map<string, { in: number; out: number; approx: boolean }> => {
+        if (crossIndex !== null) return crossIndex
+        crossIndex = new Map()
+        const bump = (urn: string, key: 'in' | 'out', by: number, coarse: boolean) => {
+            let c = crossIndex!.get(urn)
+            if (!c) { c = { in: 0, out: 0, approx: false }; crossIndex!.set(urn, c) }
+            c[key] += by
+            c.approx = c.approx || coarse
+        }
         for (const hop of sg.lineageEdges) {
             if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
-            if (sub.has(hop.sourceUrn) === sub.has(hop.targetUrn)) continue
-            n += 1
+            const by = hopWeight(hop)
+            const coarse = hop.kind === 'rollup'
+            const a = new Set([...ancestorsOf(hop.sourceUrn), hop.sourceUrn])
+            const b = new Set([...ancestorsOf(hop.targetUrn), hop.targetUrn])
+            for (const u of a) if (!b.has(u)) bump(u, 'out', by, coarse)     // leaves u's subtree
+            for (const u of b) if (!a.has(u)) bump(u, 'in', by, coarse)      // arrives into u's subtree
         }
-        weightCache.set(urn, n)
-        return n
+        return crossIndex
+    }
+    const weightOf = (urn: string): number => {
+        const c = crossings().get(urn)
+        return c ? c.in + c.out : 0
     }
     /**
      * `weightOf` split by direction — the hops crossing this card's own
@@ -1093,25 +1255,9 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
      * both sides (its columns carry the lineage; the table itself has
      * none of its own).
      */
-    const crossCache = new Map<string, { in: number; out: number }>()
-    const crossingOf = (urn: string): { in: number; out: number } => {
-        const hit = crossCache.get(urn)
-        if (hit) return hit
-        const sub = subtreeOf(urn)
-        let arrives = 0
-        let leaves = 0
-        for (const hop of sg.lineageEdges) {
-            if (!population.has(hop.sourceUrn) || !population.has(hop.targetUrn)) continue
-            const from = sub.has(hop.sourceUrn)
-            const to = sub.has(hop.targetUrn)
-            if (from === to) continue
-            if (to) arrives += 1
-            else leaves += 1
-        }
-        const out = { in: arrives, out: leaves }
-        crossCache.set(urn, out)
-        return out
-    }
+    const NO_CROSSINGS = { in: 0, out: 0, approx: false } as const
+    const crossingOf = (urn: string): { in: number; out: number; approx: boolean } =>
+        crossings().get(urn) ?? NO_CROSSINGS
 
     /** A card already on the board keeps the slot it was first drawn in;
      *  anything else ranks by weight, behind all of them. */
@@ -1394,15 +1540,29 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
     /** The type of the one hop this card carries, when it carries exactly
      *  one — a frame states a shared relationship once instead of every
      *  row repeating it. */
+    // Indexed once, lazily, AFTER emit has assigned every card id (its only
+    // callers run then): scanning every projected bundle per row card was
+    // O(rows × bundles) — six seconds per rebuild on a 4,000-row board.
+    let edgeTypesByCard: Map<string, Set<string>> | null = null
     const edgeTypeOf = (cardId: string): string => {
-        const types = new Set<string>()
-        for (const bundle of projected) {
-            const s = cardIdByUrn.get(bundle.sourceUrn)
-            const t = cardIdByUrn.get(bundle.targetUrn)
-            if (s !== cardId && t !== cardId) continue
-            types.add((bundle.edgeTypeNorm || '').toUpperCase())
+        if (edgeTypesByCard === null) {
+            edgeTypesByCard = new Map()
+            const add = (id: string | undefined, type: string) => {
+                if (!id) return
+                let set = edgeTypesByCard!.get(id)
+                if (!set) { set = new Set(); edgeTypesByCard!.set(id, set) }
+                set.add(type)
+            }
+            for (const bundle of projected) {
+                const type = (bundle.edgeTypeNorm || '').toUpperCase()
+                const s = cardIdByUrn.get(bundle.sourceUrn)
+                const t = cardIdByUrn.get(bundle.targetUrn)
+                add(s, type)
+                if (t !== s) add(t, type)
+            }
         }
-        return types.size === 1 ? [...types][0] : ''
+        const types = edgeTypesByCard.get(cardId)
+        return types && types.size === 1 ? [...types][0]! : ''
     }
 
     /**
@@ -1522,7 +1682,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const { pillUp, pillDown, deadEnd } = focusContents.has(urn)
             ? { pillUp: null, pillDown: null, deadEnd: false }
             : walkStateOf(urn, isFrame, band)
-        const windowSize = showAll ? FRAME_WINDOW_ALL : FRAME_WINDOW
+        const windowSize = showAll ? FRAME_WINDOW_ALL : (bundled.has(urn) || grainOpened.has(urn)) ? BUNDLE_WINDOW : FRAME_WINDOW
         // The scroll window can never travel past what has loaded: a
         // restored share link, or a roster that shrank under a new
         // search, must land on rows rather than on empty space.
@@ -1571,6 +1731,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             ancestry: ancestry.map(labelFor),
             ancestryIds: ancestry,
             count: Math.max(1, weightOf(urn)),
+            approx: crossingOf(urn).approx,
             // What this card is connected to: what is drawn, plus what
             // the data source says is still out there. The pill for that
             // side already IS the remainder (a reveal's own not-yet-shown
@@ -1650,7 +1811,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                         : showAll && childrenAllStatus.get(urn) === 'error' ? 'error'
                             : showAll && childrenAllStatus.get(urn) === 'unsupported' ? 'unsupported'
                                 : null,
-            dimmed: !matches(label) || (hostQuery !== '' && !label.toLowerCase().includes(hostQuery)),
+            dimmed: hostQuery !== '' && !label.toLowerCase().includes(hostQuery),
         }
         const id = pushCard(card)
         if (id !== card.id) return
@@ -1763,7 +1924,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
                 // it is never re-dimmed against `frameQuery` locally —
                 // only the board-wide filter still applies, same as any
                 // other row.
-                dimmed: !matches(rosterLabel),
+                dimmed: false,
             })
         }
     }
@@ -1954,7 +2115,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             existing.count += bundle.weight
             if (existing.edgeTypeNorm !== norm) existing.edgeTypeNorm = ''
             existing.cycleBack = existing.cycleBack || runsBackwards(bundle)
-            existing.grainCoarse = existing.grainCoarse || bundleCoarse
+            existing.grainCoarse = existing.grainCoarse || bundleCoarse || bundle.coarse
+            existing.approx = (existing.approx ?? false) || bundle.coarse
             continue
         }
         byPair.set(id, {
@@ -1973,7 +2135,8 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
             cycleAnchor: false,
             labelVisible: false,
             labelT: 0.5,
-            grainCoarse: bundleCoarse,
+            grainCoarse: bundleCoarse || bundle.coarse,
+            approx: bundle.coarse,
             // Filled in just below, once every card's `frameId` is fixed.
             sameAncestorFrame: null,
             // Filled in by the in-frame routing pass below (the lane's own
@@ -2008,6 +2171,73 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         const targetChain = new Set(frameChain(edge.target))
         for (const host of frameChain(edge.source)) {
             if (targetChain.has(host)) { edge.sameAncestorFrame = host; break }
+        }
+    }
+
+    /**
+     * WIRE BUNDLES (2026-08-22) — one wire per pair of CONTAINERS when
+     * the pair has too many. Wires land on the finest visible card at
+     * both ends, so two frames showing five and eight rows are forty
+     * wires, and a wide estate in Grouped was "one thick mass". The
+     * top-level card each end sits in (its outermost frame) is the pair;
+     * a pair over the threshold — or every pair with a row at either end,
+     * under 'bundled' — draws ONE wire between the two containers, its
+     * count the sum, and the member wires move to `bundledWires` for the
+     * view to add back around a hovered or selected card. A wire between
+     * two top-level cards is already one wire; a same-frame wire is an
+     * internal lane; a condensed run is its own chip — none of those fold.
+     * Before the lane and badge passes, so they place only what is drawn.
+     */
+    const topOf = (cardId: string): string => {
+        const chain = frameChain(cardId)
+        return chain.length > 0 ? chain[chain.length - 1] : cardId
+    }
+    const bundledWires: FocusEdge[] = []
+    if (wires !== 'all') {
+        const groups = new Map<string, FocusEdge[]>()
+        for (const edge of edges) {
+            if (edge.condensed || edge.sameAncestorFrame) continue
+            const inRow = !!byId.get(edge.source)?.frameId || !!byId.get(edge.target)?.frameId
+            if (!inRow) continue
+            const key = `${topOf(edge.source)}>${topOf(edge.target)}`
+            const list = groups.get(key)
+            if (list) list.push(edge)
+            else groups.set(key, [edge])
+        }
+        const folded = new Set<FocusEdge>()
+        for (const [key, members] of groups) {
+            if (wires === 'auto' && members.length <= WIRE_BUNDLE_THRESHOLD) continue
+            const [source, target] = key.split('>')
+            const id = `b:${source}>${target}`
+            const first = members[0]
+            const bundle: FocusEdge = {
+                id,
+                source,
+                target,
+                count: members.reduce((acc, e) => acc + e.count, 0),
+                edgeTypeNorm: members.every(e => e.edgeTypeNorm === first.edgeTypeNorm) ? first.edgeTypeNorm : '',
+                dimmed: members.every(e => e.dimmed),
+                cycleBack: members.some(e => e.cycleBack),
+                cycleAnchor: false,
+                labelVisible: false,
+                labelT: 0.5,
+                grainCoarse: members.some(e => e.grainCoarse),
+                approx: members.some(e => e.approx ?? false),
+                sameAncestorFrame: null,
+                inFrameLane: null,
+                seamSlotted: false,
+                bundle: { members: members.length },
+            }
+            for (const m of members) { m.inBundle = id; folded.add(m); bundledWires.push(m) }
+            edges.push(bundle)
+            // The containers need ports for it.
+            const s = byId.get(source); if (s) s.wired = true
+            const t = byId.get(target); if (t) t.wired = true
+        }
+        if (folded.size > 0) {
+            const kept = edges.filter(e => !folded.has(e))
+            edges.length = 0
+            edges.push(...kept)
         }
     }
 
@@ -2132,7 +2362,7 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
 
     // ── 5. GEOMETRY ──────────────────────────────────────────────────
 
-    layoutBands(cards)
+    const bandX = layoutBands(cards)
 
     // The lanes now have somewhere to be: their frame has a position, so
     // each one's absolute centre is the frame's own left padding plus its
@@ -2278,9 +2508,11 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         if (card.nodeId && !drawnRank.has(card.nodeId)) drawnRank.set(card.nodeId, nextRank++)
     }
 
-    return {
+    return applyQueryDimming({
         cards,
         edges,
+        bundledWires,
+        bandX,
         hiddenByChips,
         hiddenByChipsIn,
         hiddenByChipsOut,
@@ -2292,10 +2524,13 @@ export function buildFocusLayout(input: FocusLayoutInput): FocusGraph {
         // builds of the same view state did. The consumer folds it back
         // in (see `LensViewState.walkedThrough`) so a level once seen
         // through stays seen through while the walk grows.
-        walkedThrough: new Set([...view.walkedThrough, ...walkedThrough]),
+        // …except what a bundle folded: a host that stopped being chrome
+        // is no longer fed back as chrome.
+        walkedThrough: new Set([...view.walkedThrough, ...walkedThrough].filter(u => !bundled.has(u))),
+        bundled,
         drawnRank,
         bandTotals,
-    }
+    }, query)
 }
 
 // ── isolation cone ───────────────────────────────────────────────────

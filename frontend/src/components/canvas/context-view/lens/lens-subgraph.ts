@@ -42,7 +42,19 @@ export interface LensEdgeLike {
     sourceUrn: string
     targetUrn: string
     edgeType?: string
+    /** Grain of this edge: a raw hop, or a materialised rollup cell. */
+    kind?: 'raw' | 'rollup'
+    /** Rollup weight (flows summarised), null for raw or unknown. */
+    weight?: number | null
 }
+
+/** What one edge WEIGHS on the board: a raw hop is one flow; a rollup cell
+ *  is the flows it summarises (Part G, 2026-08-21 — before the coarse
+ *  first paint a cell counted as one hop, so a partner "fed by 30 flows"
+ *  read as 1). Every count on the board — degrees, crossings, bundles,
+ *  neighbour records — goes through this. */
+export const hopWeight = (e: LensEdgeLike): number =>
+    e.kind === 'rollup' ? Math.max(1, e.weight ?? 1) : 1
 
 /** parent → child */
 export interface LensContainmentEdgeLike {
@@ -58,6 +70,12 @@ export interface LensFrontierEntry {
     totalCount: number | null
     /** Paging cursor for the rest, or null when there is nothing further. */
     nextCursor: string | null
+    /** `cut`: the server's budget/deadline stopped before this anchor — the
+     *  walk is OWED here and the driver completes it hands-free in every
+     *  mode. `depth`: the requested depth ended here — the next hop, offered
+     *  as a pill and drained only by a full walk. The adapter always sets
+     *  it; a hand-built entry without one reads as `depth`. */
+    kind?: 'cut' | 'depth'
 }
 
 export interface LensSubgraphInput<N extends LensNodeLike = LensNodeLike> {
@@ -233,8 +251,8 @@ export function buildLensSubgraph<N extends LensNodeLike>(
     const degreeUpOf = new Map<string, number>()
     const degreeDownOf = new Map<string, number>()
     for (const e of lineageEdges) {
-        degreeDownOf.set(e.sourceUrn, (degreeDownOf.get(e.sourceUrn) ?? 0) + 1)
-        degreeUpOf.set(e.targetUrn, (degreeUpOf.get(e.targetUrn) ?? 0) + 1)
+        degreeDownOf.set(e.sourceUrn, (degreeDownOf.get(e.sourceUrn) ?? 0) + hopWeight(e))
+        degreeUpOf.set(e.targetUrn, (degreeUpOf.get(e.targetUrn) ?? 0) + hopWeight(e))
     }
 
     // Frontier stamping: keyed from the input lists. An entry for an urn
@@ -363,7 +381,30 @@ export function boundaryHops<N extends LensNodeLike>(
     sg: LensSubgraph<N>,
     root: string,
     dir: 'in' | 'out',
-): { subtree: Set<string>; crossing: Set<string>; interiorOnly: Set<string> } {
+): BoundaryHops {
+    // Computed once per (subgraph, root, direction). A subgraph is built
+    // once per model and never mutated, and this is asked once per ⊕
+    // pill per render — ~2,000 times per wave on the wide table, each a
+    // full pass over 46k hops: 25 s of every 60 s in a real-browser
+    // profile of the hands-free walk (C4, 2026-08-21).
+    let perRoot = boundaryCache.get(sg)
+    if (!perRoot) { perRoot = new Map(); boundaryCache.set(sg, perRoot) }
+    const key = `${dir}|${root}`
+    const hit = perRoot.get(key)
+    if (hit) return hit
+    const computed = computeBoundaryHops(sg, root, dir)
+    perRoot.set(key, computed)
+    return computed
+}
+
+interface BoundaryHops { subtree: Set<string>; crossing: Set<string>; interiorOnly: Set<string> }
+const boundaryCache = new WeakMap<object, Map<string, BoundaryHops>>()
+
+function computeBoundaryHops<N extends LensNodeLike>(
+    sg: LensSubgraph<N>,
+    root: string,
+    dir: 'in' | 'out',
+): BoundaryHops {
     const subtree = new Set<string>()
     const stack = [root]
     while (stack.length > 0) {
@@ -483,6 +524,9 @@ export interface ProjectedLensEdge {
     isLeafEdge: boolean
     /** The bundle's one shared edge type, or '' when it bundles more than one. */
     edgeTypeNorm: string
+    /** A rollup cell contributed: the weight is a summary, not a count of
+     *  hops the board holds — it draws coarse and reads "≈". */
+    coarse: boolean
 }
 
 /**
@@ -507,15 +551,31 @@ export function projectLensEdges<N extends LensNodeLike>(
     population: ReadonlySet<string>,
     visible: ReadonlySet<string>,
 ): ProjectedLensEdge[] {
+    // MEMOISED (2026-08-22): this walk is asked of the SAME urns over and
+    // over — once per hop, and a wide table carries 17,567 of them, which
+    // measured 168 ms of a single interaction window. The answer depends
+    // only on (urn, visible), and `visible` is fixed for this call.
+    const landing = new Map<string, string | null>()
     const nearestVisible = (urn: string): string | null => {
+        const hit = landing.get(urn)
+        if (hit !== undefined) return hit
+        // Every entity on the way up gets the same answer, so one walk
+        // fills the whole chain rather than just its head.
+        const chain: string[] = []
         let cursor: string | null = urn
         const guard = new Set<string>()
+        let found: string | null = null
         while (cursor && !guard.has(cursor)) {
-            if (visible.has(cursor)) return cursor
+            const cached = landing.get(cursor)
+            if (cached !== undefined) { found = cached; break }
+            if (visible.has(cursor)) { found = cursor; break }
             guard.add(cursor)
+            chain.push(cursor)
             cursor = sg.nodes.get(cursor)?.parent ?? null
         }
-        return null
+        for (const step of chain) landing.set(step, found)
+        landing.set(urn, found)
+        return found
     }
 
     const bundles = new Map<string, ProjectedLensEdge>()
@@ -543,17 +603,20 @@ export function projectLensEdges<N extends LensNodeLike>(
         const hopType = hop.edgeType ?? ''
         const key = `${s} ${t}`
         const existing = bundles.get(key)
+        const coarse = hop.kind === 'rollup'
         if (existing) {
-            existing.weight += 1
+            existing.weight += hopWeight(hop)
             existing.isLeafEdge = false     // more than one hop ⇒ it's a bundle
+            existing.coarse = existing.coarse || coarse
             if (existing.edgeTypeNorm !== hopType) existing.edgeTypeNorm = ''
         } else {
             bundles.set(key, {
                 sourceUrn: s,
                 targetUrn: t,
-                weight: 1,
-                isLeafEdge: s === hop.sourceUrn && t === hop.targetUrn,
+                weight: hopWeight(hop),
+                isLeafEdge: !coarse && s === hop.sourceUrn && t === hop.targetUrn,
                 edgeTypeNorm: hopType,
+                coarse,
             })
         }
     }

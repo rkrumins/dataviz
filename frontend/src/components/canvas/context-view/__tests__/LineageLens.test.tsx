@@ -20,10 +20,9 @@ import { render, screen, fireEvent, cleanup, within, act } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
 import { LineageLens, type LensWalkSeed } from '../LineageLens'
+import { chooseView, viewValue } from '@/test/lensView'
 import { usePreferencesStore } from '@/store/preferences'
-import { useSchemaStore } from '@/store/schema'
 import { decodeLensShare } from '../lens/shareCodec'
-import { FRAME_CONTENT_W } from '../lens/focus-cards'
 import type { WalkEntry } from '@/hooks/useLensWalk'
 import {
   toLensClosure,
@@ -169,7 +168,7 @@ const collateralsEstate = () => walkModel('F', {
 })
 
 describe('the business journey — a table\'s lineage through a seven-level estate', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
+  beforeEach(() => usePreferencesStore.setState({ lensFrameChildren: 'connected' }))
   afterEach(() => cleanup())
 
   it('shows the upstream TABLE immediately, with its whole spine as breadcrumb', () => {
@@ -596,8 +595,11 @@ const pillCatalogue = () => {
 }
 
 
-/** Fourteen upstream groups against a REVEAL_PAGE of twelve, so the
- *  focus's own ⊕ has a remainder to offer from data already in hand. */
+/** Fourteen upstream groups — more than the layout's REVEAL_PAGE of
+ *  twelve. Everything the walk FETCHED is drawn (user ruling, 2026-08-21:
+ *  "I expect to see all the immediate incoming and outgoing edges, not
+ *  click Load more"), so there is nothing left to reveal from data in
+ *  hand. */
 const crowdedFanIn = () => {
   const nodes = [wnode('F', 'dataset', 'dim_customer')]
   const lineageEdges = []
@@ -610,16 +612,13 @@ const crowdedFanIn = () => {
 }
 
 describe('the ⊕ tells the truth about what it costs', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
-  it('a reveal is instant: more cards, no request', () => {
+  it('one hop draws every partner it fetched: fourteen sources, fourteen cards, no reveal pill, no request', () => {
     const { api } = renderLens(['F'], doneWalk(crowdedFanIn()))
-    // Twelve of fourteen fit on the first page.
-    expect(onBoard('source_12')).toBe(false)
-    fireEvent.click(screen.getByTitle(/Shows the next hop upstream of dim_customer only · 2 data flows recorded/))
-    expect(onBoard('source_12')).toBe(true)
-    expect(onBoard('source_13')).toBe(true)
+    for (let i = 0; i < 14; i++) expect(onBoard(`source_${String(i).padStart(2, '0')}`)).toBe(true)
+    // Nothing in hand is held back, so the focus offers no "reveal".
+    expect(screen.queryByTitle(/Shows the next hop upstream of dim_customer/)).toBeNull()
     expect(api.extend).not.toHaveBeenCalled()
     expect(api.page).not.toHaveBeenCalled()
   })
@@ -772,14 +771,6 @@ describe('the ⊕ tells the truth about what it costs', () => {
     expect(extend.textContent).not.toMatch(/\d/)
 
     cleanup()
-    // A reveal: fourteen sources, twelve drawn, two waiting — and those
-    // two carry one connection each. The FACE shows the card count (2,
-    // a visible arrival); the hover states the same two as flows.
-    renderLens(['F'], doneWalk(crowdedFanIn()))
-    const reveal = screen.getByTitle(/Shows the next hop upstream of dim_customer only · 2 data flows recorded/)
-    expect(reveal.textContent).toContain('2')
-
-    cleanup()
     renderLens(['F'], doneWalk(pillCatalogue()))
     expect(screen.getByTitle(/Loads the next hop upstream of partially_loaded only · 96 data flows recorded/)).toBeTruthy()
   })
@@ -795,7 +786,6 @@ describe('the ⊕ tells the truth about what it costs', () => {
 })
 
 describe('F1 — the follow pill never blocks the row it sits on', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
   const nestedColumnWithPill = () => doneWalk(walkModel('F', {
@@ -824,7 +814,7 @@ describe('F1 — the follow pill never blocks the row it sits on', () => {
     // tests below (own-hover-only, outward growth) are the real
     // regression guards: they pin the CSS that stops the pill from
     // covering the chevron in the first place, reviewed round 1.
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'all' })
+    usePreferencesStore.setState({ lensFrameChildren: 'all' })
     const onLoadAllChildren = vi.fn()
     const { api } = renderLens(['F'], nestedColumnWithPill(), { onLoadAllChildren })
     const chevron = screen.getByLabelText("Show what's inside shipping_address")
@@ -871,61 +861,24 @@ describe('F1 — the follow pill never blocks the row it sits on', () => {
     return walkModel('F', { nodes, lineageEdges, upstreamUrns: new Set(nodes.slice(1).map(n => n.urn)) })
   }
 
-  it('a reveal pill with a 4-digit count stays inside PILL_ZONE at rest, degrading honestly', () => {
+  it('nothing in hand is ever held behind a reveal pill — not even 1,200 sources', () => {
+    // The counted-rest pill ("1.2K", max-w-[36px]) was the face of a
+    // REVEAL: groups already fetched but not yet drawn. Everything fetched
+    // is drawn now (user ruling, 2026-08-21), so the reveal kind has no
+    // subject: every source is on the board and the focus offers only
+    // what is NOT in hand. The F1 hover-resize CSS stays in the pill for
+    // the day a counted face returns.
     renderLens(['F'], doneWalk(massiveFanIn()))
-    const pill = screen.getByTitle(/Shows the next hop upstream of dim_customer/)
-    expect(pill.className).toMatch(/max-w-\[36px\]/)
-    // Ellipsis-clipped digits would silently claim a SMALLER, WRONG
-    // count ("1,2…" reads as a different number); compact notation
-    // ("1.2K") stays honest while fitting the capped rest width. The
-    // exact count is still what the hover title states in full.
-    expect(pill.textContent).toContain('1.2K')
-  })
-  // A HOVER THAT MOVES THE CONTROL OUT FROM UNDER THE POINTER FLICKERS
-  // FOREVER. Reported live: "it non stop keeps flicking until mouse is
-  // on the right location as if there is a deadzone". The expansion
-  // pins the pill's REST edge and grows the far edge outward — but the
-  // pinned value assumed the icon-only rest width, while a pill showing
-  // a count rests up to 36px wide. The strip between the two was inside
-  // the rest box and outside the expanded one: enter, expand away,
-  // leave, shrink back under the pointer, enter again.
-  //
-  // The invariant, asserted on the CSS the pill actually carries: the
-  // expanded box's pinned edge is at least the rest box's own outer
-  // edge, so the expanded box always CONTAINS the box the pointer
-  // entered.
-  it('a counted pill expands outward from its OWN rest edge, never from a narrower one', () => {
-    // A pill INSIDE a frame (only those expand outward) that shows a
-    // COUNT at rest (only those rest wider than the icon).
-    renderLens(['F'], doneWalk(walkModel('F', {
-      nodes: [
-        wnode('F', 'dataset', 'stg_orders'),
-        wnode('T', 'dataset', 'raw_orders', { childCount: 1 }),
-        wnode('c1', 'schemaField', 'order_id'),
-        ...Array.from({ length: 40 }, (_, i) => wnode(`s${i}`, 'dataset', `source_${i}`)),
-      ],
-      containmentEdges: [holds('T', 'c1')],
-      lineageEdges: [hop('c1', 'F'), ...Array.from({ length: 40 }, (_, i) => hop(`s${i}`, 'c1'))],
-      upstreamUrns: new Set(['c1', ...Array.from({ length: 40 }, (_, i) => `s${i}`)]),
-    })))
-    const pill = screen.getByTitle(/upstream of order_id/)
-    expect(pill.className).toMatch(/max-w-\[36px\]/)   // it really is a counted rest state
-    const outer = pill.style.getPropertyValue('--pill-outer')
-    expect(outer).not.toBe('')
-    // `--pill-outer` is `cardWidth - restEdge`, so a SMALLER value means
-    // a pinned edge further from the row's left edge. The counted pill's
-    // rest box can reach 40px (left-1 + max-w-[36px]); the pin must be
-    // at least that far out or the strip between them is a dead zone.
-    const cardW = FRAME_CONTENT_W
-    expect(cardW - Number.parseFloat(outer)).toBeGreaterThanOrEqual(40)
-  })
+    expect(screen.queryByTitle(/Shows the next hop upstream of dim_customer/)).toBeNull()
+    expect(onBoard('source_0')).toBe(true)
+    expect(onBoard('source_1199')).toBe(true)
+  }, 30_000)   // 1,200 cards through jsdom: slow under a parallel run, not a failure
 
 })
 
 // ── F7 — PARENT ⊕ VS ROW ⊕: SCOPE-NAMING + "ALL" TAG ─────────────────
 
 describe('F7 — a frame-level follow control names its scope; a row-level one names its own (T24 F7)', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
   // T holds two columns, BOTH with their own upstream frontier — so T's
@@ -978,12 +931,15 @@ describe('F7 — a frame-level follow control names its scope; a row-level one n
 // ── STATUS SURFACES ──────────────────────────────────────────────────
 
 describe('what the lens says while it cannot answer', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
   it('narrates the walk instead of claiming "no connections"', () => {
     renderLens(['F'], { model: walkModel('F', {}), status: 'loading', error: null, extendStatus: new Map(), depth: 1 })
-    expect(screen.getByText(/Walking the lineage from the data source/)).toBeTruthy()
+    // The capsule, since 2026-08-22 — the same one the canvas trace shows.
+    // Nothing has landed, so the focus has no name yet and the capsule
+    // says exactly that rather than printing its URN (2026-08-23).
+    expect(screen.getByRole('status')).toHaveTextContent(/finding the focus/i)
+    expect(screen.queryByText(/no connections/i)).toBeNull()
   })
 
   it('surfaces a failure with its reason, and a Retry that re-kicks the walk', () => {
@@ -1004,15 +960,19 @@ describe('what the lens says while it cannot answer', () => {
     expect(screen.queryByText(/No upstream sources in the data source/)).toBeNull()
   })
 
-  it('says when the data source stopped early, so the counts read as floors', () => {
+  it('a partial model on its own says nothing — what the server owes is drained hands-free', () => {
+    // Partiality is no longer a user problem. A model that still reads
+    // truncated while the walk is neither running nor failed has nothing
+    // to ask of the reader: no strip, no "Load everything", no "Keep walking".
     const model = walkModel('F', {
       nodes: [wnode('F'), wnode('u')],
       lineageEdges: [hop('u', 'F')],
       truncated: true,
-      truncationReason: 'node budget reached',
+      truncationReason: 'max_nodes',
     })
     renderLens(['F'], doneWalk(model))
-    expect(screen.getByText(/stopped early \(node budget reached\)/)).toBeTruthy()
+    expect(screen.queryByText(/Partial picture/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /load everything|load more contents|keep walking/i })).toBeNull()
   })
 })
 
@@ -1030,7 +990,6 @@ describe('reach — how far the walk got, and whether that is all of it', () => 
   })
 
   it('counts what the data source named, and marks them as floors while a frontier is open', () => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], doneWalk(reachModel(true)))
     // Upstream has an open frontier; downstream is drained, and must
     // NOT be marked as a floor just because the other side is. u1/u2
@@ -1040,17 +999,18 @@ describe('reach — how far the walk got, and whether that is all of it', () => 
   })
 
   it('drops the floor mark once nothing is left to walk', () => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], doneWalk(reachModel(false)))
     expect(screen.getByText(/Fed by 2 sources across 2 systems/)).toBeTruthy()
     expect(screen.getByText(/feeds 1 consumer$/)).toBeTruthy()
   })
 
   it('claims no reach at all while the walk is still running', () => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['F'], { model: reachModel(true), status: 'loading', error: null, extendStatus: new Map(), depth: 1 })
-    expect(screen.queryByText(/Fed by|feeds/)).toBeNull()
-    expect(screen.getByText(/Walking the lineage…/)).toBeTruthy()
+    // The orientation sentence itself — not the Direction control's own
+    // description, which says "what this entity feeds" on every board.
+    expect(screen.queryByText(/Fed by \d|feeds \d+ consumer/)).toBeNull()
+    // The board says it is working through the walk capsule.
+    expect(screen.getByRole('status')).toHaveTextContent(/Mapping the lineage of/)
   })
 
   /** Nothing has been fetched upstream (reach.up === 0) but the server
@@ -1061,18 +1021,7 @@ describe('reach — how far the walk got, and whether that is all of it', () => 
     frontierUp: [frontier('F', 66)],
   })
 
-  it('fix round 1 — a side with a real frontier but nothing fetched yet never claims "no sources" (list body)', () => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
-    renderLens(['F'], doneWalk(whollyUnfetchedModel()))
-    // The false negative this pin rules out: "No upstream sources"
-    // rendered right beside a control offering to load exactly what it
-    // just denied existed.
-    expect(screen.queryByText('No upstream sources')).toBeNull()
-    expect(screen.getByText(/nothing loaded upstream yet/)).toBeTruthy()
-  })
-
   it('fix round 1 — the same honesty in the graph body\'s own orientation sentence', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['F'], doneWalk(whollyUnfetchedModel()))
     expect(screen.queryByText(/No upstream sources/)).toBeNull()
     expect(screen.getByText(/nothing loaded upstream yet/)).toBeTruthy()
@@ -1099,8 +1048,7 @@ describe('the list body and the graph body are two renderings of one model', () 
   })
 
   it('agrees about the counts whichever body is on screen', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
-    const { unmount } = renderLens(['F'], doneWalk(model()))
+    renderLens(['F'], doneWalk(model()))
     // The focal card, in the graph. Its number is REACH — what the data
     // source named around this entity — not the walk's own loaded degree:
     // "2 in / 1 out" used to sit here and grew every time the user
@@ -1108,29 +1056,11 @@ describe('the list body and the graph body are two renderings of one model', () 
     // one system; OUT has no parent, its own system.
     expect(screen.getByText(/Fed by 2 sources/)).toBeTruthy()
     expect(screen.getByText(/feeds 1 consumer/)).toBeTruthy()
-    unmount()
 
-    usePreferencesStore.setState({ lensViewMode: 'list' })
-    renderLens(['F'], doneWalk(model()))
-    const sourcesHeader = screen.getByText('Data Sources').closest('div')!
-    expect(within(sourcesHeader).getByText('2')).toBeTruthy()
-    // The same two columns, named — grouped under the table that holds
-    // them, which is the structural story the graph tells by nesting.
-    expect(screen.getByText('order_id')).toBeTruthy()
-    expect(screen.getByText('customer_id')).toBeTruthy()
-    expect(screen.getByText('raw_orders')).toBeTruthy()
   })
 
-  it('re-centers from a list row', () => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
-    const onRecenter = vi.fn()
-    renderLens(['F'], doneWalk(model()), { onRecenter })
-    fireEvent.click(screen.getByText('fct_orders'))
-    expect(onRecenter).toHaveBeenCalledWith('OUT')
-  })
 
   it('a type chip hides entities and keeps saying how many', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['F'], doneWalk(walkModel('F', {
       nodes: [wnode('F'), wnode('v', 'view', 'reporting_view'), wnode('d', 'dataset', 'fct_orders')],
       lineageEdges: [hop('v', 'F'), hop('F', 'd')],
@@ -1163,7 +1093,6 @@ describe('the shell around the picture', () => {
   })
 
   it('is a labelled dialog naming what it is about', () => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
     renderLens(['b'], simple())
     expect(screen.getByRole('dialog', { name: 'Connections of label-b' })).toBeTruthy()
   })
@@ -1201,7 +1130,7 @@ describe('the shell around the picture', () => {
     // in the header — invisible from the PATH bar, where "Copy path"
     // only ever copied plain TEXT. Reported: a reader scanning the path
     // for "how do I share this" found no link action there at all.
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 2 })
+    usePreferencesStore.setState({ lensInitialDepth: 2 })
     const writeText = vi.fn()
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     renderLens(['a', 'b', 'c'], simple(), { history: { entries: ['a', 'b', 'c'], cursor: 1 }, onJumpTo: vi.fn() })
@@ -1222,25 +1151,37 @@ describe('the shell around the picture', () => {
     usePreferencesStore.setState({ lensInitialDepth: 1 })
   })
 
-  it('the body toggle switches to the list and persists the preference', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
+  it('the List body is GONE: a legacy stored preference cannot bring it back (2026-08-23)', () => {
+    // It was kept one release behind `lensViewMode` for a rollback. That
+    // release is over: the branch, the columns and the preference are
+    // removed, so a state written before the retirement draws the graph.
+    expect('lensViewMode' in usePreferencesStore.getState()).toBe(false)
+    // Even written by hand, the retired value draws the graph.
+    usePreferencesStore.setState({ lensViewMode: 'list' } as never)
     renderLens(['b'], simple())
     expect(screen.queryByText('Upstream')).toBeNull()
-    fireEvent.click(screen.getByTitle('List — scan all connections as columns'))
-    expect(screen.getByText('Upstream')).toBeTruthy()
-    expect(usePreferencesStore.getState().lensViewMode).toBe('list')
+    expect(screen.queryByText('Downstream')).toBeNull()
+    expect(document.querySelector('.react-flow')).toBeTruthy()
+  })
+
+  it('the Graph | List toggle is gone — the graph is the Lens (2026-08-22)', () => {
+    // The list body is retired: kept behind the store for a release, never
+    // offered. Nothing in the header switches bodies any more.
+    renderLens(['b'], simple())
+    expect(screen.queryByRole('button', { name: 'List' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Graph' })).toBeNull()
+    expect(screen.queryByText('Upstream')).toBeNull()
   })
 
   it('the container default is a preference, persisted like the body mode', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' })
+    usePreferencesStore.setState({ lensFrameChildren: 'connected' })
     renderLens(['b'], simple())
-    fireEvent.click(screen.getByTitle(/Containers you open next show everything inside/))
+    chooseView('Next', /^All/)
     expect(usePreferencesStore.getState().lensFrameChildren).toBe('all')
     usePreferencesStore.setState({ lensFrameChildren: 'connected' })
   })
 
   it('offers the picture as an image without throwing', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
     const download = screen.getByLabelText('Download this lineage as an image')
     expect(() => fireEvent.click(download)).not.toThrow()
@@ -1254,7 +1195,6 @@ describe('the shell around the picture', () => {
   // delayed and takes ages to appear compared to other sections". The
   // corners are rounded on the end buttons instead.
   it('the board control stack does not clip its own hover labels', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
     const zoom = screen.getByLabelText('Zoom in')
     // The label is a sibling of the button it explains...
@@ -1268,7 +1208,6 @@ describe('the shell around the picture', () => {
   })
 
   it('offers the walk as JSON and CSV downloads, beside the image export', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
     expect(() => fireEvent.click(screen.getByLabelText('Export lineage data as JSON'))).not.toThrow()
     expect(() => fireEvent.click(screen.getByLabelText('Export lineage data as CSV'))).not.toThrow()
@@ -1279,34 +1218,31 @@ describe('the shell around the picture', () => {
     // Connected|All pair on an open frame, but seeds only the NEXT
     // container opened — it never touches one already open — and read
     // as a global toggle because nothing on its face said otherwise.
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['b'], simple())
-    const group = screen.getByLabelText(/What containers you open next will show/)
-    expect(within(group).getByText('Next')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Next: Connected' })).toBeInTheDocument()
   })
 
   it('the direction preset filters the board view-side, with no fetch, and toggles back cleanly', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     const { api } = renderLens(['b'], simple())
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(true)
 
-    fireEvent.click(screen.getByTitle('Show only what feeds this entity — upstream'))
+    chooseView('Direction', /^Root cause/)
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(false)
     expect(api.extend).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByTitle('Show upstream and downstream'))
+    chooseView('Direction', /^Both/)
     expect(onBoard('label-a')).toBe(true)
     expect(onBoard('label-c')).toBe(true)
   })
 
   it('the share link encodes the exploration on screen as v3 (T23 — pinned/condensedOpen; T28 R3 — railWindow always null now)', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph', lensInitialDepth: 2 })
+    usePreferencesStore.setState({ lensInitialDepth: 2 })
     const writeText = vi.fn()
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     renderLens(['F'], doneWalk(collateralsEstate()))
-    fireEvent.click(screen.getByTitle('Show only what feeds this entity — upstream'))
+    chooseView('Direction', /^Root cause/)
     fireEvent.click(screen.getByLabelText('Copy exploration link'))
 
     expect(writeText).toHaveBeenCalledTimes(1)
@@ -1328,7 +1264,6 @@ describe('the shell around the picture', () => {
   })
 
   it('every card is movable, and a frame carries its children rather than shedding them', () => {
-    usePreferencesStore.setState({ lensViewMode: 'graph' })
     renderLens(['F'], doneWalk(walkModel('F', {
       nodes: [
         wnode('F', 'dataset', 'stg_orders'),
@@ -1361,7 +1296,6 @@ describe('the shell around the picture', () => {
   // per-card "Show on the canvas behind" action still reveals one
   // entity — which is what the reveal was actually wanted for.
   it('no longer offers a whole-neighbourhood reveal from the footer', () => {
-    usePreferencesStore.setState({ lensViewMode: 'list' })
     const onLocateAll = vi.fn()
     renderLens(['b'], simple(), { onLocateAll })
     expect(screen.queryByText(/Reveal \d+ on canvas/)).toBeNull()
@@ -1373,7 +1307,6 @@ describe('the shell around the picture', () => {
 // ── ISOLATION ────────────────────────────────────────────────────────
 
 describe('pointing at an element isolates its lineage cone', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
   /**
@@ -1550,7 +1483,7 @@ describe('pointing at an element isolates its lineage cone', () => {
     // directly. What this integration-level check still verifies is that
     // the isolation state machinery itself is unaffected by the motion
     // preference.
-    usePreferencesStore.setState({ lensViewMode: 'graph', reducedMotion: true })
+    usePreferencesStore.setState({ reducedMotion: true })
     try {
       renderLens(['b'], siblings())
       fireEvent.click(screen.getByText('label-a'))
@@ -1716,7 +1649,6 @@ describe('pointing at an element isolates its lineage cone', () => {
 // ── THE TRAIL ────────────────────────────────────────────────────────
 
 describe('THE TRAIL — cards the reader has explicitly walked through', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
   const TRAIL_TITLE = "Part of the path you've walked"
@@ -1757,7 +1689,7 @@ describe('THE TRAIL — cards the reader has explicitly walked through', () => {
 // ── EVERYTHING INSIDE ────────────────────────────────────────────────
 
 describe('what is really inside a container', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'connected' }))
+  beforeEach(() => usePreferencesStore.setState({ lensFrameChildren: 'connected' }))
   afterEach(() => cleanup())
 
   // TWO columns on the lineage, so the table is the grain the answer is
@@ -2454,7 +2386,6 @@ const toResponse = (doc: RawClosureDoc) => ({
  * nothing, so the board is invisible to `getByRole`.
  */
 describe('browsing what is inside — the peek and the keyboard', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
   /** A table of four columns, two of them on this lineage — the shape a
@@ -2560,10 +2491,12 @@ describe('browsing what is inside — the peek and the keyboard', () => {
       lineageEdges,
       upstreamUrns: new Set(['c1', ...Array.from({ length: 40 }, (_, i) => `s${String(i).padStart(3, '0')}`)]),
     })))
-    fireEvent.click(row('order_id'))
-    fireEvent.click(within(peek() as HTMLElement).getByText(/Walk further upstream/))
-    // ONE CLICK, ONE VISIBLE DELIVERY: the cohort lands on the board.
+    // Everything in hand is DRAWN (2026-08-21): the forty sources are on
+    // the board from the first render, so the peek has no reveal to
+    // offer — its follow button only ever dispatches a FETCH now.
     expect(onBoard('source_000')).toBe(true)
+    fireEvent.click(row('order_id'))
+    expect(within(peek() as HTMLElement).queryByText(/Walk further upstream/)).toBeNull()
   })
 
   // FOCUS THE PARENT, FROM A ROW (user, 2026-08-17: "shouldn't I be
@@ -2788,7 +2721,6 @@ describe('browsing what is inside — the peek and the keyboard', () => {
 })
 
 describe('the real wire shape reaches the board', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph' }))
   afterEach(() => cleanup())
 
   it('renders a merged two-response walk built from the shared backend fixture', () => {
@@ -2817,30 +2749,8 @@ describe('the real wire shape reaches the board', () => {
   })
 })
 
-// ── SCHEMA WORDING ───────────────────────────────────────────────────
-
-describe('relationship wording comes from the ontology', () => {
-  afterEach(() => {
-    cleanup()
-    useSchemaStore.setState({ schema: null } as never)
-  })
-
-  it('prints the schema\'s own display name for a relationship, not the raw id', () => {
-    useSchemaStore.setState({
-      schema: {
-        entityTypes: [],
-        relationshipTypes: [{ id: 'DERIVES_FROM', name: 'Derives from', description: 'Computed from' }],
-      },
-    } as never)
-    usePreferencesStore.setState({ lensViewMode: 'list' })
-    renderLens(['F'], doneWalk(walkModel('F', {
-      nodes: [wnode('F'), wnode('u', 'dataset', 'upstream_table')],
-      lineageEdges: [hop('u', 'F')],
-      upstreamUrns: new Set(['u']),
-    })))
-    expect(screen.getByText('Derives from')).toBeTruthy()
-  })
-})
+// The relationship-wording pin moved to `lens/__tests__/focus-cards.labels.test.ts`
+// when the List body — the surface it read through — was removed (2026-08-23).
 
 // ── the hook count never depends on what is on the board ─────────────
 //
@@ -2928,7 +2838,7 @@ describe('the lens survives gaining and losing its focal', () => {
 // never fetched and only the flow-carrying child drew. The effect must
 // fetch a missing first page itself whenever nothing is in flight.
 describe('Contents=All focal seed — the roster actually FETCHES', () => {
-  beforeEach(() => usePreferencesStore.setState({ lensViewMode: 'graph', lensFrameChildren: 'all' }))
+  beforeEach(() => usePreferencesStore.setState({ lensFrameChildren: 'all' }))
   afterEach(() => usePreferencesStore.setState({ lensFrameChildren: 'connected' }))
 
   it('a focal seeded into All mode requests its full roster without any click', async () => {
@@ -2959,5 +2869,153 @@ describe('Contents=All focal seed — the roster actually FETCHES', () => {
     })
     await new Promise(r => setTimeout(r, 500))
     expect(onLoadAllChildren).not.toHaveBeenCalled()
+  })
+})
+
+describe('the header explains itself (2026-08-22)', () => {
+  // "Break this down into different categories that the user clicks and
+  // can control." Every category of how the picture draws is ONE chip —
+  // its name and its current value — that opens a menu where every
+  // option carries a line of meaning. Nothing needs a hover to be
+  // understood before it is chosen.
+  afterEach(() => cleanup())
+  const simple = () => doneWalk(walkModel('b', {
+    nodes: [wnode('a', 'dataset', 'label-a'), wnode('b', 'dataset', 'label-b'), wnode('c', 'dataset', 'label-c')],
+    lineageEdges: [hop('a', 'b'), hop('b', 'c')],
+    upstreamUrns: new Set(['a']),
+    downstreamUrns: new Set(['c']),
+  }))
+
+  const describedBy = (el: HTMLElement) => {
+    const id = el.getAttribute('aria-describedby')
+    expect(id, `${el.textContent} has no description`).toBeTruthy()
+    return document.getElementById(id!)!
+  }
+
+  it('every category is a chip showing its current value, explained on hover and open to its options', () => {
+    renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
+    const expectations: Array<[string, string, RegExp, Array<[RegExp, RegExp]>]> = [
+      ['Density', 'Grouped', /how much of the picture is folded/i, [[/^Overview/, /start at the high level/i], [/^Grouped/, /strongest rows first/i], [/^Every card/, /every card on its own/i]]],
+      ['Wires', 'Auto', /how the wires between two containers draw/i, [[/^Auto/, /more than 12/i], [/^Bundled/, /one wire per pair of containers/i], [/^Every wire/, /however many/i]]],
+      ['Walk', 'One hop', /how far the lens walks on its own/i, [[/^One hop/, /⊕ on a card fetches its next hop/i], [/^Full flow/, /until the whole end-to-end flow is drawn/i]]],
+      ['Steps', 'Every step', /how a long pass-through path is drawn/i, [[/^Every step/, /every hop on the path is its own card/i], [/^Condensed/, /fold long runs/i]]],
+      ['Next', 'Connected', /what the next container you open will show/i, [[/^Connected/, /only what is on this lineage/i], [/^All/, /everything inside/i]]],
+    ]
+    for (const [category, current, meaning, options] of expectations) {
+      const chip = screen.getByRole('button', { name: `${category}: ${current}` })
+      expect(describedBy(chip).textContent).toMatch(meaning)
+      expect(chip.getAttribute('title')).toBeNull()
+      fireEvent.click(chip)
+      const menu = screen.getByRole('menu', { name: category })
+      expect(menu).toHaveTextContent(meaning)
+      for (const [name, why] of options) expect(screen.getByRole('menuitemradio', { name })).toHaveTextContent(why)
+      fireEvent.click(chip)                                     // the chip toggles its menu closed
+      expect(screen.queryByRole('menu')).toBeNull()
+    }
+  })
+
+  it('Direction is first class: Both · Root cause · Impact always on the row, never behind a menu', () => {
+    // "It is critical users are able to see upstream, downstream or full
+    // lineage without having to click into Direction."
+    renderLens(['b'], simple())
+    const group = screen.getByRole('group', { name: /which side of the story/i })
+    const both = within(group).getByRole('button', { name: 'Both' })
+    const up = within(group).getByRole('button', { name: 'Root cause' })
+    const down = within(group).getByRole('button', { name: 'Impact' })
+    expect(both).toHaveAttribute('aria-pressed', 'true')
+    expect(up).toHaveAttribute('aria-pressed', 'false')
+    expect(describedBy(up).textContent).toMatch(/what feeds this entity/i)
+    expect(describedBy(down).textContent).toMatch(/what this entity feeds/i)
+    expect(screen.queryByRole('button', { name: /^Direction: / })).toBeNull()       // not a chip
+    // It heads the row, before the first chip.
+    expect(group.compareDocumentPosition(screen.getByRole('button', { name: /^Density: / })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.click(up)
+    expect(up).toHaveAttribute('aria-pressed', 'true')
+    expect(both).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('with no walk yet, the Path\'s own place says what will appear there', () => {
+    // The header's middle is the Path's room. Before there is a path it
+    // was blank; now it teaches the gesture that fills it (2026-08-22).
+    renderLens(['b'], simple())
+    expect(screen.queryByRole('navigation', { name: /path/i })).toBeNull()
+    expect(screen.getByText(/double-click a card to focus it/i)).toBeInTheDocument()
+  })
+
+  it('once a path exists it takes that room, and the hint is gone', () => {
+    renderLens(['a', 'b'], simple(), { onJumpTo: vi.fn() })
+    expect(screen.getByRole('navigation', { name: /path/i })).toBeInTheDocument()
+    expect(screen.queryByText(/double-click a card to focus it/i)).toBeNull()
+  })
+
+  it('choosing an option closes the menu and the chip reads the new value', () => {
+    renderLens(['b'], simple())
+    chooseView('Density', /^Overview/)
+    expect(viewValue('Density')).toBe('Overview')
+    expect(usePreferencesStore.getState().lensDensity).toBe('overview')
+    usePreferencesStore.setState({ lensDensity: 'grouped' })
+  })
+
+  it('search is always on the first row, beside the name — never behind a menu', () => {
+    renderLens(['b'], simple())
+    expect(screen.getByPlaceholderText('Filter connections…')).toBeInTheDocument()
+  })
+
+  it('a narrow row folds the least-used categories into a More menu — the day-to-day ones stay in reach', () => {
+    // jsdom lays nothing out; give the chips row and its chips widths so
+    // the toolbar has evidence: a 700px row, six 150px chips. Three fit
+    // beside the menu; three fold — least important first.
+    const rect = HTMLElement.prototype.getBoundingClientRect
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      const w = this.dataset.toolbarGroup !== undefined ? 150 : this.querySelector?.('[data-toolbar-group]') ? 700 : 0
+      return { width: w, height: 30, x: 0, y: 0, top: 0, left: 0, right: w, bottom: 30, toJSON() { return this } } as DOMRect
+    }
+    try {
+      renderLens(['b'], simple(), { onFullWalkToggle: vi.fn() })
+      const more = screen.getByRole('button', { name: /^More view controls/ })
+      expect(more).toHaveTextContent('3')
+      expect(screen.getByRole('group', { name: /which side of the story/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Density: / })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Wires: / })).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /^Steps: / })).toBeNull()
+      fireEvent.click(more)
+      expect(screen.getByRole('button', { name: /^Steps: / })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Walk: / })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Next: / })).toBeInTheDocument()
+      chooseView('Steps', /^Condensed/)
+      expect(usePreferencesStore.getState().lensCondenseSteps).toBe(true)
+      usePreferencesStore.setState({ lensCondenseSteps: false })
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = rect
+    }
+  })
+
+  it('the status bar\'s two tints switch Direction — the legend is a control (2026-08-23)', () => {
+    renderLens(['b'], simple())
+    expect(viewValue('Direction')).toBe('Both')
+    fireEvent.click(screen.getByRole('button', { name: /show only what feeds this entity/i }))
+    expect(viewValue('Direction')).toBe('Root cause')
+    // The header and the legend are the same switch, seen twice.
+    expect(screen.getByRole('button', { name: /show only what feeds this entity/i })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /show only what feeds this entity/i }))
+    expect(viewValue('Direction')).toBe('Both')
+  })
+
+  it('the Wires control writes the preference', () => {
+    usePreferencesStore.setState({ lensWires: 'auto' })
+    renderLens(['b'], simple())
+    chooseView('Wires', /^Every wire/)
+    expect(usePreferencesStore.getState().lensWires).toBe('all')
+    chooseView('Wires', /^Bundled/)
+    expect(usePreferencesStore.getState().lensWires).toBe('bundled')
+    usePreferencesStore.setState({ lensWires: 'auto' })
+  })
+
+  it('the header offers "Center on focus" beside Back and Forward, explained like every control', () => {
+    renderLens(['a', 'b'], simple())
+    const button = screen.getByRole('button', { name: /center on focus/i })
+    expect(describedBy(button).textContent).toMatch(/middle/i)
+    expect(button.compareDocumentPosition(screen.getByRole('button', { name: /^back$/i })) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    fireEvent.click(button)
   })
 })

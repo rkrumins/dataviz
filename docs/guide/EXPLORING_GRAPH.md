@@ -38,11 +38,54 @@ node's **right-click menu**:
 | --- | --- |
 | **Trace Upstream** | Reveals where the data came from (its sources) |
 | **Trace Downstream** | Reveals what the data feeds (its consumers) |
-| **Depth** | How many hops to follow — 1 for neighbours, more for full chains |
+| **Depth** | How many hops to *show* — 1 for neighbours, more for full chains |
 
 The traced path highlights the **blast radius** — everything connected to your
 node in that direction. This is exactly what you want before changing or
 trusting a piece of data.
+
+A trace is **complete, hands-free**. The moment you start one, a **capsule**
+at the top of the canvas says where the walk stands — **Focus · Picture ·
+Flows · Drawn** — with the nodes, flows and requests ticking as each page
+lands, and "N more to go" when the data source has said how many steps are
+still owed. The immediate picture comes first, from the data source's own
+summaries, and the detailed flows fill in behind it: a partner's count reads
+"≈N flows" until its exact flows have landed. There is nothing to click to
+keep it going — no "load more", no budget. A very large flow pauses once,
+around fifty thousand nodes, to ask whether to **Continue**, because the rest
+may slow your browser; a step that fails at the data source says so in the
+dock and offers **Try again**, and what is already drawn stays.
+
+Tracing a **table** shows exactly what tracing each of its columns would,
+together: every partner whose columns feed or consume any of its columns,
+with the container paths between them opened for you and the partners
+themselves left **closed, with their counts** — open one when you want its
+rows. **Depth** in the dock narrows what the canvas *shows* of a trace; it
+never fetches less, so turning it down is always reversible.
+
+### Handing a trace to someone else
+
+A trace is usually an answer to somebody's question — *what feeds this
+dashboard*, *what breaks if I drop this column* — so it can be handed over as
+a link rather than a screenshot. **Share** in the trace dock copies a URL that
+reopens the trace: the same entity, the same direction, the same hop limits,
+and the same cards you had open.
+
+The popover says what the link carries before you copy it, and one switch
+decides how much travels:
+
+| Switch | What your reader lands on |
+| --- | --- |
+| **Include the open cards** (default) | Your exact picture — the containers you opened, the rows you drilled into |
+| Off | The same question, drawn the way a fresh trace opens |
+
+Opening a link starts the trace on the reader's own canvas, so **it re-runs
+against today's lineage** — it is a question, not a frozen snapshot, and it
+takes as long as that trace takes. Anyone who can open the view can open the
+trace; nobody else can. The trace also joins their own **Recent traces**, so
+it is one click away after they close it.
+
+---
 
 ```mermaid
 flowchart LR
@@ -85,12 +128,14 @@ As a graph grows, use these to keep it legible:
 
 ## Focus with the Lineage Lens
 
-When a graph gets dense, switch on the **Lineage Lens** (also called the
-**Context View**) to spotlight just the lineage around a chosen node — its
-upstream and downstream context — while everything unrelated fades into the
-background. It's the fastest way to answer *"what actually touches this?"*
-without hiding the rest by hand. Full walkthrough:
-[The Lineage Lens](/guide/lineage-lens).
+When a graph gets dense, open the **Lineage Lens** on a node (select it and
+press **F**) for a focus room that lays out just its lineage — sources on the
+left, consumers on the right, the focus in the middle — complete, grouped by
+the containers the partners share, and folded to the grain you choose
+(**Overview · Grouped · Every card**). It's the fastest way to answer *"what
+actually touches this?"* without hiding the rest by hand. A Trace keeps the
+browse picture underneath and paints the lineage over it; the Lens gives the
+lineage the whole screen. Full walkthrough: [The Lineage Lens](/guide/lineage-lens).
 
 For big graphs, the **Layer Strip** along the edge of the canvas lets you move
 through the picture one layer at a time — collapsing, expanding, and resizing

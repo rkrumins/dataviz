@@ -1,8 +1,16 @@
 import { ArrowUp, ArrowDown, ChevronDown, Layers, Filter } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { TraceConfig } from '@/hooks/useUnifiedTrace'
+import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
 import { TraceDockSlider } from './TraceDockSlider'
 import { TraceDockEdgeFilter } from './TraceDockEdgeFilter'
+
+/** The native engine's "apply": there is nothing to apply. Depth already
+ *  re-projected on change; the only thing `onApply` could still reach is
+ *  `continueWalk`, which grants budget and re-arms failed frontiers — a
+ *  network round-trip behind a control whose contract is that it makes none.
+ *  Continuing an unfinished walk belongs to the truncation notice. */
+const NO_APPLY = (): void => {}
 
 export interface GranularityOption {
   id: string
@@ -17,12 +25,21 @@ export interface TraceDockControlsProps {
   resolveEdgeColor: (edgeType: string) => string
   onChangeConfig: (patch: Partial<TraceConfig>) => void
   onApply: () => void
+  /** Driven by the NATIVE trace engine, which walks the whole flow once and
+   *  answers every later question from the model it already holds. The
+   *  edge-type filter and the hierarchy level are parameters of a /trace/v2
+   *  request that will never be made, so they are withdrawn rather than left
+   *  on screen doing nothing. */
+  nativeMode?: boolean
 }
 
 /**
  * Settings tab controls — 2x2 grid:
  *   [ Upstream slider     ]  [ Downstream slider   ]
  *   [ Hierarchy level sel ]  [ Edge filter         ]
+ *
+ * …and in `nativeMode`, only the top row: the bottom two configure a fetch
+ * the native engine does not make.
  *
  * Each control opens with a 6x6 gradient icon container + 10px eyebrow,
  * matching the app's premium pattern. The Level select is a styled
@@ -36,7 +53,12 @@ export function TraceDockControls({
   resolveEdgeColor,
   onChangeConfig,
   onApply,
+  nativeMode = false,
 }: TraceDockControlsProps) {
+  // The other `onApply` callers (edge filter, level select) are withdrawn in
+  // native mode already; the sliders are the one control that survives, so
+  // this is the whole seam.
+  const commit = nativeMode ? NO_APPLY : onApply
   const isAllSelected = config.lineageEdgeTypes.length === 0
   const effectiveSet = new Set(isAllSelected ? availableEdgeTypes : config.lineageEdgeTypes)
 
@@ -66,8 +88,9 @@ export function TraceDockControls({
         icon={<ArrowUp className="w-3.5 h-3.5" strokeWidth={2.4} />}
         accent="blue"
         value={config.upstreamDepth}
+        max={nativeMode ? FULL_WALK_INITIAL_DEPTH : undefined}
         onChange={v => onChangeConfig({ upstreamDepth: v })}
-        onCommit={onApply}
+        onCommit={commit}
       />
 
       <TraceDockSlider
@@ -75,10 +98,12 @@ export function TraceDockControls({
         icon={<ArrowDown className="w-3.5 h-3.5" strokeWidth={2.4} />}
         accent="emerald"
         value={config.downstreamDepth}
+        max={nativeMode ? FULL_WALK_INITIAL_DEPTH : undefined}
         onChange={v => onChangeConfig({ downstreamDepth: v })}
-        onCommit={onApply}
+        onCommit={commit}
       />
 
+      {!nativeMode && (
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2">
           <div
@@ -128,7 +153,9 @@ export function TraceDockControls({
           />
         </div>
       </div>
+      )}
 
+      {!nativeMode && (
       <div className="flex flex-col gap-2 min-w-0">
         <div className="flex items-center gap-2">
           <div
@@ -153,6 +180,7 @@ export function TraceDockControls({
           />
         </div>
       </div>
+      )}
     </div>
   )
 }

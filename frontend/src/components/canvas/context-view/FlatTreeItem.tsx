@@ -166,7 +166,16 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     : undefined
 
   const childCount = (node.data.childCount as number) || (node.data._collapsedChildCount as number) || 0
-  const hasChildren = node.children.length > 0 || childCount > 0
+  // In TRACE mode the chevron is the GRAPH's answer to "is there anything
+  // inside this?", never `children.length` — the trace holds only the
+  // children that carry lineage, so a table with 300 columns would offer a
+  // chevron that opens onto one row, or none at all.
+  // In a trace the chevron means "there is lineage INSIDE": it opens only
+  // onto children that contribute (the view model's onLineage), so a card
+  // whose children carry no lineage offers no drill — the graph-wide
+  // childCount would promise rows the trace will never show.
+  const traceOnLineage = (node.data.onLineage as number) || 0
+  const hasChildren = isTracing ? traceOnLineage > 0 : (node.children.length > 0 || childCount > 0)
 
   // Advanced-search roll-up: number of matches sitting anywhere in this
   // node's subtree (N levels deep, deduped per hit). Drives the
@@ -188,12 +197,30 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     ancestorBreakdown: ancestorMatchBreakdown,
     isSpotlightDim,
   } = useSearchHighlight(urnOrId, { isSelected })
-  // In trace mode, useTraceFilteredHierarchy already prunes node.children to
-  // the trace context, so children.length reflects what the user will see on
-  // expand. The graph-wide childCount would mislead them with siblings the
-  // trace filter immediately hides.
+  // The collapsed-row count. Browse counts what expanding will show. TRACE
+  // states what is inside the card ON THIS LINEAGE — the view model's own
+  // `onLineage` (participants in the subtree, self excluded), which is the
+  // same statement the Lens makes and the honest invitation beside the
+  // chevron: the graph-wide childCount would promise rows the trace hides,
+  // and `children.length` is only whatever happens to be open.
+  const onLineageCount = traceOnLineage
+  // TRACE TINT: a row the lineage actually runs through wears the lineage
+  // accent — the same one click-highlight uses. HOSTS deliberately do not:
+  // they are the containers the flow passes through, never things on it, and
+  // tinting them would make a lane of chrome look like the answer.
+  const traceRole = node.data.traceRole as string | undefined
+  const isOnLineage = isTracing && !!traceRole && traceRole !== 'host'
+  // The trace pill is a dock setting (on by default) for readers who want a
+  // quieter board; the browse "+N" is not a setting.
+  const showLineageCounts = usePreferencesStore(s => s.showLineageCounts) ?? true
   const descendantCount = hasChildren && !isExpanded
-    ? (isTracing ? node.children.length : (childCount || node.children.length))
+    ? (isTracing ? (showLineageCounts ? onLineageCount : 0) : (childCount || node.children.length))
+    : 0
+  // THE COARSE FIRST PAINT (Part G): a partner known only from a rollup
+  // cell has no rows on this lineage yet — its pill says what the cell
+  // says, "≈N flows", until the raw pages replace it.
+  const traceApprox = isTracing && showLineageCounts && !isExpanded && descendantCount === 0
+    ? ((node.data.traceApprox as number | undefined) ?? 0)
     : 0
 
   // Density-aware sizing — driven by usePreferencesStore.canvasDensity. The
@@ -377,7 +404,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // Focus node (trace target)
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
         // Highlighted in trace
-        isHighlighted && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
+        (isHighlighted || isOnLineage) && !isFocusNode && "bg-gradient-to-r from-accent-lineage/10 to-transparent",
         // Click-highlight: subtle glow on connected nodes
         isClickHighlighted && !isSelected && "ring-1 ring-blue-400/40 bg-gradient-to-r from-blue-500/10 to-transparent",
         // Hover-highlight: lighter ephemeral glow on connected nodes
@@ -458,8 +485,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         </div>
       )}
 
-      {/* Edge authoring: hover-reveal handle on the card's right edge. */}
-      {onBeginConnect && (
+      {/* Edge authoring: hover-reveal handle on the card's right edge. Never
+          while tracing — dragging one stages a create_edge, and the canvas is
+          read-only for the whole trace. The canvas withholds the prop too;
+          this keeps the row honest on its own. */}
+      {onBeginConnect && !isTracing && (
         <NodeConnectionHandle
           visible={isHovered}
           onBeginConnect={(start) => onBeginConnect(node.id, start)}
@@ -594,7 +624,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
           textClass,
-          isHighlighted ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
+          (isHighlighted || isOnLineage) ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
           // Strikethrough for a delete (staged or committed) makes the destruction intent unmissable
           isPendingDelete && "line-through decoration-rose-300/80 decoration-2",
@@ -643,7 +673,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           ``right-[3.125rem]`` when a badge is present so it lands
           to the LEFT of the badge, never on top of it. */}
       <div className="flex items-center gap-1.5 flex-shrink-0 relative z-[5]">
-        {descendantCount > 0 && (
+        {(descendantCount > 0 || traceApprox > 0) && (
           <span className={cn(
             "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",
             "bg-white/[0.06] border border-white/[0.08]",
@@ -651,7 +681,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             "transition-opacity duration-150",
             isHovered && "opacity-0 pointer-events-none",
           )}>
-            +{descendantCount}
+            {descendantCount > 0
+              ? (isTracing ? `${descendantCount} on this lineage` : `+${descendantCount}`)
+              : `≈${traceApprox.toLocaleString()} flow${traceApprox === 1 ? '' : 's'}`}
           </span>
         )}
 
@@ -727,8 +759,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
-        {/* Search children button */}
-        {hasChildren && onToggleSearch && (
+        {/* Search children button. Hidden while tracing: child search
+            REPLACES a parent's loaded children in the canvas store, which a
+            trace can never undo on exit, so the handler refuses it — and an
+            affordance that does nothing is worse than no affordance. */}
+        {hasChildren && onToggleSearch && !isTracing && (
           <button
             onClick={(e) => {
               e.stopPropagation()
