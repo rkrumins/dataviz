@@ -858,6 +858,7 @@ def test_history_reads_sit_behind_the_ingestion_gate_not_platform_admin():
     assert on_ingestion == {
         "/data-sources/{ds_id}/history",
         "/data-sources/{ds_id}/history.csv",
+        "/history/sources",
         "/providers/{provider_id}/history",
         "/history/fleet",
         "/alerts",
@@ -1012,3 +1013,98 @@ async def test_the_csv_export_honours_the_same_boundary(db_session: AsyncSession
             claims=workspace_claims("ws_ep1"),
         )
     assert exc.value.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# The movement board
+# --------------------------------------------------------------------------
+# Every other read starts from a source you already picked. This one starts
+# from "what moved" and lets the source be the answer.
+
+
+async def test_the_board_lists_a_row_per_source_with_its_movement(
+    db_session: AsyncSession,
+):
+    await _two_tenants(db_session)
+    result = await insights.get_movement_board(
+        session=db_session, claims=OPERATOR,
+        provider_id=None, workspace_id=None,
+    )
+    rows = {r["data_source_id"]: r for r in result["data"]["rows"]}
+    assert set(rows) == {DS_ID, "ds_theirs", "ds_theirs_same_prov"}
+    ours = rows[DS_ID]
+    assert (ours["node_first"], ours["node_last"], ours["node_delta"]) == (100, 140, 40)
+    assert ours["name"] == "Ours", "a board of raw ids is unusable"
+    assert ours["provider_name"] or ours["provider_id"]
+
+
+async def test_the_board_is_a_worklist_not_a_directory(db_session: AsyncSession):
+    """Ordered by what needs attention, not alphabetically — and rank beats
+    size, so a wipe on a small source outranks churn on a large one."""
+    from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+
+    db_session.add(WorkspaceORM(id="ws_ep1", name="Analytics"))
+    await db_session.flush()
+    for ds, label in (("ds_calm", "Calm"), ("ds_wiped", "Wiped")):
+        db_session.add(WorkspaceDataSourceORM(
+            id=ds, workspace_id="ws_ep1", provider_id="prov_ep1",
+            graph_name=ds, label=label,
+        ))
+    await db_session.flush()
+
+    # Big but ordinary movement for a source that always moves a lot.
+    for i, hours in enumerate(range(20, 10, -1)):
+        await _snap(db_session, at=_iso(hours), ds_id="ds_calm",
+                    graph_name="ds_calm", entities={"T": 100_000 + i * 20_000})
+    # A near-total loss on a much smaller graph.
+    await _snap(db_session, at=_iso(20), ds_id="ds_wiped", graph_name="ds_wiped",
+                entities={"T": 40_000})
+    await _snap(db_session, at=_iso(11), ds_id="ds_wiped", graph_name="ds_wiped",
+                entities={"T": 100})
+
+    result = await insights.get_movement_board(
+        session=db_session, claims=OPERATOR, grain="hour",
+        provider_id=None, workspace_id=None,
+    )
+    rows = result["data"]["rows"]
+    assert rows[0]["data_source_id"] == "ds_wiped", (
+        "the wipe must lead; ordering by magnitude alone buries it under "
+        "routine churn on a bigger source"
+    )
+    assert rows[0]["significance"] == "critical"
+
+
+async def test_the_board_shows_a_workspace_caller_only_their_own_sources(
+    db_session: AsyncSession,
+):
+    await _two_tenants(db_session)
+    result = await insights.get_movement_board(
+        session=db_session, claims=workspace_claims("ws_ep1"),
+        provider_id=None, workspace_id=None,
+    )
+    ids = {r["data_source_id"] for r in result["data"]["rows"]}
+    assert ids == {DS_ID}
+    assert result["data"]["platform_wide"] is False, (
+        "the board must say which altitude it is at — 'nothing moved' means "
+        "different things platform-wide and within one workspace"
+    )
+
+
+async def test_the_board_says_when_it_is_platform_wide(db_session: AsyncSession):
+    await _two_tenants(db_session)
+    result = await insights.get_movement_board(
+        session=db_session, claims=OPERATOR,
+        provider_id=None, workspace_id=None,
+    )
+    assert result["data"]["platform_wide"] is True
+
+
+async def test_a_board_filter_narrows_and_never_widens(db_session: AsyncSession):
+    """A workspace filter is a convenience on top of the caller's scope. Asking
+    for somebody else's workspace returns nothing, not their rows."""
+    await _two_tenants(db_session)
+    result = await insights.get_movement_board(
+        session=db_session, claims=workspace_claims("ws_ep1"),
+        provider_id=None, workspace_id="ws_other",
+    )
+    assert result["data"]["rows"] == []

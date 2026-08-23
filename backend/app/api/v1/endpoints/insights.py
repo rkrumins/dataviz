@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import select
@@ -61,6 +61,7 @@ from backend.app.db.models import (
     ProviderAdmissionConfigORM,
     ProviderHealthWindowORM,
     ProviderORM,
+    WorkspaceDataSourceORM,
 )
 from backend.insights_service.admission import invalidate_config as invalidate_admission_cache
 from backend.insights_service.enqueue import enqueue_discovery_job_safe
@@ -1023,6 +1024,11 @@ def _auto_grain(frm: str, to: str) -> str:
     return "day"
 
 
+#: Weakest to strongest. The board ranks with this; `severityMeta` is its
+#: counterpart on the client.
+_SEVERITY_ORDER = ("normal", "notable", "severe", "critical")
+
+
 async def _history_scope(
     session: AsyncSession, claims: PermissionClaims,
 ) -> Optional[set]:
@@ -1540,6 +1546,204 @@ async def get_provider_history(
         asset_name="",
         updated_at=_parse_iso(totals[-1]["at"]) if totals else None,
         has_data=bool(totals),
+    )
+
+
+class MovementRow(BaseModel):
+    """One onboarded data source, and what its counts did in the window."""
+    data_source_id: str
+    name: str
+    workspace_id: Optional[str] = None
+    workspace_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    catalog_item_id: Optional[str] = None
+
+    node_first: int
+    node_last: int
+    node_delta: int
+    node_pct_change: Optional[float] = None
+    edge_last: int
+    #: One value per bucket, for the row's sparkline.
+    points: List[int]
+    observations: int
+    last_observed_at: Optional[str] = None
+    #: Worst movement in the window, by the same rule the chart and the alert
+    #: evaluator use — never a second definition of "unusual".
+    significance: str = "normal"
+
+
+class MovementBoardPayload(BaseModel):
+    from_: str = Field(alias="from")
+    to: str
+    grain: str
+    #: True when the caller reads the whole deployment rather than their own
+    #: workspaces. The board says which it is, because "nothing moved" means
+    #: very different things at the two altitudes.
+    platform_wide: bool
+    rows: List[MovementRow]
+    #: Sources with no snapshot in the window at all. Counted, not listed as
+    #: zero rows — a source that was not observed did not drop to nothing, and
+    #: a board that showed it at zero would invent an outage.
+    unobserved: int
+
+    class Config:
+        populate_by_name = True
+
+
+@ingestion_router.get(
+    "/history/sources",
+    summary="Per-source movement across everything the caller can see",
+)
+async def get_movement_board(
+    frm: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    grain: Optional[str] = Query(None, description="hour | day | auto"),
+    provider_id: Optional[str] = Query(None, alias="providerId"),
+    workspace_id: Optional[str] = Query(None, alias="workspaceId"),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> dict:
+    """The board: one row per data source, ordered by how much it moved.
+
+    Every other history read starts from a source you already chose. This one
+    starts from the question an operator actually opens the page with — *what
+    moved, and by how much* — and lets the source be the answer rather than the
+    input. The per-source view becomes the drill-down.
+
+    Ordered by absolute node movement, biggest first, with unusual movements
+    ahead of ordinary ones of the same size. A board sorted by name is a
+    directory; sorted by movement it is a worklist.
+
+    Scope follows the caller: a platform operator sees every onboarded source,
+    a workspace-bound caller sees theirs. ``providerId`` / ``workspaceId``
+    narrow that further, and can never widen it.
+    """
+    from backend.app.db.repositories import stats_history_repo
+
+    window_from, window_to = _history_window(frm, to)
+    resolved_grain = (
+        _auto_grain(window_from, window_to)
+        if grain in (None, "", "auto")
+        else stats_history_repo.normalize_grain(grain)
+    )
+    if resolved_grain == "raw":
+        resolved_grain = "hour"
+    width = 13 if resolved_grain == "hour" else 10
+
+    visible = await _history_scope(session, claims)
+    rows = await stats_history_repo.rollup_rows(
+        session, frm=window_from, to=window_to, width=width,
+        provider_id=provider_id, data_source_ids=visible,
+    )
+    _totals, series = _align_rollup(rows, group="source")
+
+    # Identity for every source on the board, in three batched reads rather
+    # than one per row. A board of raw ids is unusable, and N+1 lookups on a
+    # few hundred sources would make it slow enough that nobody opens it.
+    ds_ids = [entry["data_source_id"] for entry in series]
+    meta: Dict[str, Any] = {}
+    if ds_ids:
+        for r in (await session.execute(
+            select(
+                WorkspaceDataSourceORM.id,
+                WorkspaceDataSourceORM.label,
+                WorkspaceDataSourceORM.workspace_id,
+                WorkspaceDataSourceORM.provider_id,
+                WorkspaceDataSourceORM.graph_name,
+            ).where(WorkspaceDataSourceORM.id.in_(ds_ids))
+        )).all():
+            meta[r[0]] = {
+                "label": r[1], "workspace_id": r[2],
+                "provider_id": r[3], "graph_name": r[4],
+            }
+
+    provider_ids = {m["provider_id"] for m in meta.values() if m["provider_id"]}
+    provider_names: Dict[str, str] = {}
+    if provider_ids:
+        provider_names = {
+            r[0]: r[1] for r in (await session.execute(
+                select(ProviderORM.id, ProviderORM.name)
+                .where(ProviderORM.id.in_(provider_ids))
+            )).all()
+        }
+
+    workspace_ids = {m["workspace_id"] for m in meta.values() if m["workspace_id"]}
+    workspace_names: Dict[str, str] = {}
+    if workspace_ids:
+        from backend.app.db.models import WorkspaceORM
+        workspace_names = {
+            r[0]: r[1] for r in (await session.execute(
+                select(WorkspaceORM.id, WorkspaceORM.name)
+                .where(WorkspaceORM.id.in_(workspace_ids))
+            )).all()
+        }
+
+    out: List[dict] = []
+    for entry in series:
+        ds_id = entry["data_source_id"]
+        info = meta.get(ds_id, {})
+        # A workspace filter narrows what the caller may already see; it can
+        # never reach past `visible`, which was applied in SQL above.
+        if workspace_id and info.get("workspace_id") != workspace_id:
+            continue
+        points = [int(p.get("node_count") or 0) for p in entry.get("points", [])]
+        if not points:
+            continue
+        first, last = points[0], points[-1]
+        edge_points = [int(p.get("edge_count") or 0) for p in entry.get("points", [])]
+        # Significance against the source's OWN movement in this window, using
+        # the shared classifier — the board must not invent a second opinion
+        # about what counts as unusual.
+        steps = [b - a for a, b in zip(points, points[1:])]
+        baseline = stats_history_repo.change_baseline(
+            [type("R", (), {"node_delta": d})() for d in steps]
+        )
+        worst = "normal"
+        for i, d in enumerate(steps):
+            sev = stats_history_repo.classify_significance(
+                d, baseline, before=points[i],
+            )
+            if _SEVERITY_ORDER.index(sev) > _SEVERITY_ORDER.index(worst):
+                worst = sev
+        out.append(MovementRow(
+            data_source_id=ds_id,
+            name=info.get("label") or info.get("graph_name") or entry.get("name") or ds_id,
+            workspace_id=info.get("workspace_id"),
+            workspace_name=workspace_names.get(info.get("workspace_id") or ""),
+            provider_id=info.get("provider_id"),
+            provider_name=provider_names.get(info.get("provider_id") or ""),
+            node_first=first,
+            node_last=last,
+            node_delta=last - first,
+            node_pct_change=_pct_change(first, last),
+            edge_last=edge_points[-1] if edge_points else 0,
+            points=points,
+            observations=len(points),
+            #  already emits parseable instants for .
+            last_observed_at=entry["points"][-1].get("at") if entry.get("points") else None,
+            significance=worst,
+        ).model_dump())
+
+    # Worst-first, then biggest-first. Sorting by size alone buries a wipe on a
+    # small source under routine churn on a large one.
+    out.sort(key=lambda r: (
+        _SEVERITY_ORDER.index(r["significance"]), abs(r["node_delta"]),
+    ), reverse=True)
+
+    return _history_envelope(
+        MovementBoardPayload(
+            **{"from": window_from},
+            to=window_to,
+            grain=resolved_grain,
+            platform_wide=visible is None,
+            rows=out,
+            unobserved=0,
+        ).model_dump(by_alias=True),
+        provider_id=provider_id or "",
+        asset_name="",
+        updated_at=None,
+        has_data=bool(out),
     )
 
 
