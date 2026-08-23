@@ -9,29 +9,35 @@
  * separating. A stroke drawn around a bar to "separate" it is data-weight ink
  * that carries no data.
  *
- * A previous period is drawn as a PAIRED COLUMN, not as a reference tick. The
- * tick was cheaper in ink and it was wrong: on a sparse window — most buckets
- * zero, which is the common case for "things created per day" — the surviving
- * ticks read as a field of floating dashes with one real bar among them, and
- * the chart looks broken rather than quiet. In a bar chart every value is a
- * bar, including last period's.
+ * ── The previous period ──────────────────────────────────────────────
  *
- * The two columns differ in THREE ways at once, not one: now is solid, before
- * is hatched, outlined and pale. Opacity alone was not enough — a dimmer copy
- * of the same shape reads as "disabled", not as "earlier", and at a glance the
- * two are still the same mark. Hatching is a categorical difference that
- * survives greyscale, low contrast and every kind of colour blindness, because
- * it is not carried by colour at all. The outline is what makes the pale
- * column MEASURABLE: a 16%-alpha fill has no top edge to read off the axis.
+ * It is drawn on the SAME axis, in chronological position, immediately to the
+ * left of the current period. One chart, one time axis, every bar sitting on
+ * the date it actually happened.
  *
- * The hatch is dropped below ~7px of column width, where the stripes stop
- * being a texture and start being noise; the tint and outline carry it alone.
+ * It was drawn two other ways first, and both misled. As a hairline tick
+ * across each column it vanished into a field of floating dashes on a sparse
+ * window. As a paired column beside each current one it was legible — but it
+ * was placed by bucket INDEX against an axis labelled with the CURRENT
+ * period's dates, so a bar for the 4th of July sat on the 3rd of August and
+ * the axis quietly lied about it. A reader asking "what am I looking at?" was
+ * asking the right question, and no amount of styling was going to answer it.
+ *
+ * Laid out chronologically the question does not arise: the left half is
+ * before, the right half is now, the divider is the boundary, and the
+ * comparison is the shape of one half against the other. A hatch marks the
+ * earlier half so it stays distinguishable when a screenshot is cropped or the
+ * legend is out of view — a texture, not a colour, so it survives greyscale
+ * and every kind of colour blindness.
+ *
+ * The cost is a doubled x-range: pick "30 days" and the axis spans 60. That is
+ * stated in the subtitle and in the in-plot captions rather than left to be
+ * discovered, and it buys an axis that tells the truth.
  */
 import { useId, useMemo, useState } from 'react'
-import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import { exact, niceTicks, shortDate, signedPercent } from '@/lib/formatMetric'
+import { exact, niceTicks, shortDate } from '@/lib/formatMetric'
 import { MARK, useChartTheme, useChartWidth } from './chartTheme'
 
 interface Props {
@@ -39,13 +45,13 @@ interface Props {
     values: number[]
     label: string
     /**
-     * The same measure over the previous period, aligned by bucket index.
-     *
-     * Drawn as a faded column beside each current one. The pair shares the
-     * band, so each column is narrower than a lone one would be — the cost of
-     * a comparison that can actually be read off the axis.
+     * The same measure over the previous period, WITH the dates it happened
+     * on — the dates are what let it be drawn in chronological position
+     * rather than stacked against this period's axis by index.
      */
-    previous?: number[]
+    previous?: { buckets: string[]; values: number[] }
+    /** Names the earlier half in the plot, e.g. "Previous 30 days". */
+    previousLabel?: string
     /** Slot into the categorical palette. One series → one colour for every
      *  bar; darkening bars by value would double-encode height as hue. */
     slot?: number
@@ -55,8 +61,12 @@ interface Props {
 
 const PAD = { top: 12, right: 12, bottom: 22, left: 44 }
 
+/** Below this, an in-plot caption has nowhere to sit without colliding. */
+const CAPTION_MIN_WIDTH = 96
+
 export function BarSeriesChart({
-    buckets, values, label, previous, slot = 0, height = 200, className,
+    buckets, values, label, previous, previousLabel = 'Previous period',
+    slot = 0, height = 200, className,
 }: Props) {
     const theme = useChartTheme()
     const [hover, setHover] = useState<number | null>(null)
@@ -71,42 +81,36 @@ export function BarSeriesChart({
     const plotH = height - PAD.top - PAD.bottom
     const color = theme.series[slot % theme.series.length]
 
-    // Only trust a comparison that lines up with this axis exactly.
-    const ghost = previous?.length === buckets.length ? previous : undefined
+    // Only trust a comparison that carries a date for every value.
+    const ghost = previous && previous.buckets.length === previous.values.length
+        && previous.buckets.length > 0
+        ? previous
+        : undefined
+
+    // The two periods laid end to end, oldest first. From here on there is one
+    // series and one axis; `before` is the only thing that distinguishes them.
+    const { days, series, before } = useMemo(() => ({
+        days: [...(ghost?.buckets ?? []), ...buckets],
+        series: [...(ghost?.values ?? []), ...values],
+        before: ghost?.buckets.length ?? 0,
+    }), [ghost, buckets, values])
 
     const { max, ticks } = useMemo(() => {
-        // The ghost is inside the scale: a previous period taller than this one
-        // must not be clipped, or a decline would render as a flat ceiling.
-        const peak = Math.max(1, ...values, ...(ghost ?? []))
+        const peak = Math.max(1, ...series)
         const t = niceTicks(peak)
         return { max: Math.max(peak, t[t.length - 1] ?? peak), ticks: t }
-    }, [values, ghost])
+    }, [series])
 
-    const band = buckets.length ? plotW / buckets.length : plotW
+    const band = days.length ? plotW / days.length : plotW
+    const barW = Math.min(MARK.maxBarWidth, Math.max(1, band - MARK.surfaceGap * 2))
+    const labelEvery = Math.max(1, Math.ceil(days.length / 7))
 
-    // An all-zero comparison gets no column of its own — reserving half the
-    // band for a series that draws nothing would thin the bars that DO carry
-    // data, in exchange for air.
-    const paired = Boolean(ghost?.some((v) => v > 0))
-    const columns = paired ? 2 : 1
-    const groupW = Math.max(2, Math.min(
-        MARK.maxBarWidth * columns + MARK.surfaceGap * (columns - 1),
-        band - MARK.surfaceGap * 2,
-    ))
-    // The gap yields before the bars do: at a dense window a fixed 2px would
-    // eat a column that is only 2px wide to begin with.
-    const innerGap = paired ? Math.min(MARK.surfaceGap, groupW / 6) : 0
-    const barW = Math.max(1, (groupW - innerGap * (columns - 1)) / columns)
-    const labelEvery = Math.max(1, Math.ceil(buckets.length / 7))
-
-    // Stripes need room to read as stripes. Under about seven pixels they are
-    // just a dirty edge, so the tint and the outline carry the distinction.
-    const hatched = paired && barW >= 7
-    const ghostStroke = Math.min(1.25, barW / 3)
-
-    /** A column's top edge, and 0 height for a bucket with nothing in it — a
-     *  2px stub for a real value, so a 1 next to a 400 is still visible. */
-    const columnTop = (v: number) => (v > 0 ? Math.max(2, plotH * (v / max)) : 0)
+    // Stripes need room to read as stripes. Under about five pixels they are
+    // just a dirty edge, and the pale fill carries the distinction alone.
+    const hatched = barW >= 5
+    const boundary = PAD.left + before * band
+    const beforeWidth = before * band
+    const afterWidth = plotW - beforeWidth
 
     return (
         <div ref={wrapRef} className={cn('relative', className)}>
@@ -116,10 +120,12 @@ export function BarSeriesChart({
                 viewBox={`0 0 ${width} ${height}`}
                 className="overflow-visible"
                 role="img"
-                aria-label={`${label} per period`}
+                aria-label={before
+                    ? `${label} per period, this period and the one before it`
+                    : `${label} per period`}
                 onMouseLeave={() => setHover(null)}
             >
-                {hatched && (
+                {hatched && before > 0 && (
                     <defs>
                         <pattern
                             id={hatchId} width={6} height={6}
@@ -130,6 +136,26 @@ export function BarSeriesChart({
                                   strokeOpacity={0.45} strokeWidth={2} />
                         </pattern>
                     </defs>
+                )}
+
+                {/* The earlier half gets a wash and a boundary rule, so the two
+                    periods read as periods even before a single bar is looked
+                    at — and so a bar near the divider cannot be mistaken for
+                    being on the other side of it. */}
+                {before > 0 && (
+                    <>
+                        {/* A dark surface swallows a 4% wash, so it gets a
+                            little more. The wash is what makes the halves read
+                            as REGIONS before a single bar is looked at. */}
+                        <rect
+                            x={PAD.left} y={PAD.top} width={beforeWidth} height={plotH}
+                            fill={color} fillOpacity={theme.isDark ? 0.09 : 0.045}
+                        />
+                        <line
+                            x1={boundary} x2={boundary} y1={PAD.top} y2={PAD.top + plotH}
+                            stroke={theme.grid} strokeWidth={1} strokeDasharray="3 3"
+                        />
+                    </>
                 )}
 
                 {ticks.map((t) => {
@@ -146,44 +172,40 @@ export function BarSeriesChart({
                     )
                 })}
 
-                {buckets.map((b, i) => {
-                    const v = values[i] ?? 0
-                    const pv = paired ? (ghost?.[i] ?? 0) : 0
-                    const h = columnTop(v)
-                    const ph = columnTop(pv)
-                    const groupX = PAD.left + i * band + (band - groupW) / 2
+                {/* Direct labels beat a legend when the question is "which half
+                    am I looking at": the answer sits on the half itself. */}
+                {before > 0 && beforeWidth >= CAPTION_MIN_WIDTH && (
+                    <text x={PAD.left + 6} y={PAD.top - 2}
+                          className="fill-ink-muted" style={{ fontSize: 10 }}>
+                        {previousLabel}
+                    </text>
+                )}
+                {before > 0 && afterWidth >= CAPTION_MIN_WIDTH && (
+                    <text x={boundary + 6} y={PAD.top - 2}
+                          className="fill-ink-secondary font-semibold" style={{ fontSize: 10 }}>
+                        This period
+                    </text>
+                )}
+
+                {days.map((day, i) => {
+                    const v = series[i] ?? 0
+                    // A 2px stub for a real value, so a 1 beside a 400 is still
+                    // visible; nothing at all for a bucket that is empty.
+                    const h = v > 0 ? Math.max(2, plotH * (v / max)) : 0
+                    const bx = PAD.left + i * band + (band - barW) / 2
                     const isHover = hover === i
-                    // Non-hovered columns step back so the hovered pair reads
-                    // as the selected one; the ghost keeps its share of that.
-                    const dim = hover === null || isHover ? 1 : 0.55
+                    const earlier = i < before
                     return (
-                        <g key={b}>
+                        <g key={day}>
                             {h > 0 && (
                                 <path
-                                    d={roundedTopBar(groupX, PAD.top + plotH - h, barW, h, MARK.barRadius)}
-                                    fill={color}
-                                    opacity={dim}
-                                    className="transition-opacity duration-150"
-                                />
-                            )}
-                            {/* Previous period: same hue, different MARK.
-                                Same hue because a second colour would say
-                                these are different measures rather than the
-                                same one, earlier — identity stays with the
-                                series. Different mark because that is what
-                                makes the pair legible at a glance. */}
-                            {ph > 0 && (
-                                <path
-                                    d={roundedTopBar(
-                                        groupX + barW + innerGap,
-                                        PAD.top + plotH - ph, barW, ph, MARK.barRadius,
-                                    )}
-                                    fill={hatched ? `url(#${hatchId})` : color}
-                                    fillOpacity={hatched ? 1 : 0.16}
-                                    stroke={color}
-                                    strokeOpacity={0.5}
-                                    strokeWidth={ghostStroke}
-                                    opacity={dim}
+                                    d={roundedTopBar(bx, PAD.top + plotH - h, barW, h, MARK.barRadius)}
+                                    fill={earlier && hatched ? `url(#${hatchId})` : color}
+                                    fillOpacity={earlier && !hatched ? 0.3 : 1}
+                                    stroke={earlier ? color : undefined}
+                                    strokeOpacity={earlier ? 0.5 : undefined}
+                                    strokeWidth={earlier ? Math.min(1.25, barW / 3) : undefined}
+                                    opacity={hover === null || isHover ? 1 : 0.55}
                                     className="transition-opacity duration-150"
                                 />
                             )}
@@ -196,8 +218,8 @@ export function BarSeriesChart({
                                 tabIndex={0}
                                 role="button"
                                 aria-label={
-                                    `${shortDate(b, true)}: ${exact(v)} ${label}`
-                                    + (ghost ? `, previously ${exact(ghost[i] ?? 0)}` : '')
+                                    `${shortDate(day, true)}: ${exact(v)} ${label}`
+                                    + (earlier ? ` (${previousLabel.toLowerCase()})` : '')
                                 }
                                 onMouseEnter={() => setHover(i)}
                                 onFocus={() => setHover(i)}
@@ -207,11 +229,11 @@ export function BarSeriesChart({
                     )
                 })}
 
-                {buckets.map((b, i) => (
+                {days.map((day, i) => (
                     i % labelEvery === 0 ? (
-                        <text key={`x-${b}`} x={PAD.left + i * band + band / 2} y={height - 6}
+                        <text key={`x-${day}`} x={PAD.left + i * band + band / 2} y={height - 6}
                               textAnchor="middle" className="fill-ink-muted" style={{ fontSize: 10 }}>
-                            {shortDate(b)}
+                            {shortDate(day)}
                         </text>
                     ) : null
                 ))}
@@ -221,45 +243,24 @@ export function BarSeriesChart({
                 <div
                     className="pointer-events-none absolute top-2 z-10 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2 shadow-lg"
                     style={{
-                        left: `${((PAD.left + hover * band + band / 2 - PAD.left) / plotW) * 100}%`,
-                        transform: hover / Math.max(buckets.length - 1, 1) > 0.6
+                        left: `${((hover * band + band / 2) / plotW) * 100}%`,
+                        transform: hover / Math.max(days.length - 1, 1) > 0.6
                             ? 'translateX(-100%) translateX(-12px)' : 'translateX(12px)',
                     }}
                 >
                     <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-muted">
-                        {shortDate(buckets[hover], true)}
+                        {shortDate(days[hover], true)}
                     </p>
                     <p className="text-sm font-bold text-ink tabular-nums">
-                        {exact(values[hover] ?? 0)}
+                        {exact(series[hover] ?? 0)}
                         <span className="ml-1.5 text-[11px] font-medium text-ink-secondary">{label}</span>
                     </p>
-                    {/* Two columns are plotted, so two numbers are read off
-                        them — plus the one the reader actually came for, which
-                        is the difference between them. Making someone do that
-                        arithmetic against an axis is the whole reason a
-                        comparison chart feels like work.
-
-                        The direction is an arrow, never a colour: this chart
-                        does not know whether up is good. A falling
-                        time-to-value is progress; a falling signup count is
-                        not, and only the caller knows which it is holding. */}
-                    {ghost && (
-                        <p className="mt-0.5 flex items-center gap-1 text-[11px] font-medium text-ink-muted tabular-nums">
-                            {(() => {
-                                const prev = ghost[hover] ?? 0
-                                const now = values[hover] ?? 0
-                                const Icon = now === prev ? Minus
-                                    : now > prev ? ArrowUpRight : ArrowDownRight
-                                const pct = prev > 0
-                                    ? signedPercent(((now - prev) / prev) * 100)
-                                    : null
-                                return (
-                                    <>
-                                        <Icon className="w-3 h-3 shrink-0" aria-hidden />
-                                        <span>{exact(prev)} previously{pct ? ` · ${pct}` : ''}</span>
-                                    </>
-                                )
-                            })()}
+                    {/* Which side of the divider this bar is on, in words. The
+                        wash and the hatch say it visually; a reader hovering a
+                        bar near the boundary deserves it said outright. */}
+                    {before > 0 && (
+                        <p className="mt-0.5 text-[11px] font-medium text-ink-muted">
+                            {hover < before ? previousLabel : 'This period'}
                         </p>
                     )}
                 </div>

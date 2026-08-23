@@ -21,6 +21,11 @@ const BUCKETS = Array.from({ length: 14 }, (_, i) => {
     return d.toISOString().slice(0, 10)
 })
 
+const PREV_BUCKETS = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(Date.UTC(2026, 4, 19 + i))
+    return d.toISOString().slice(0, 10)
+})
+
 const series = (seed: number, scale = 1) =>
     BUCKETS.map((_, i) =>
         Math.round((Math.abs(Math.sin((i + seed) * 1.7)) * 40 + 8) * scale))
@@ -74,6 +79,7 @@ export const PRIVILEGED: AnalyticsSummary = {
         activityEvents: series(5, 32),
         dataSourcesOnboarded: BUCKETS.map((_, i) => (i % 4 === 0 ? 1 : 0)),
         previous: {
+            buckets: PREV_BUCKETS,
             signups: series(6, 0.3),
             viewsCreated: series(8, 0.34),
             viewOpens: series(9, 48),
@@ -286,6 +292,7 @@ export const FIRST_RUN: AnalyticsSummary = {
         viewOpens: BUCKETS.map(() => 0), activityEvents: BUCKETS.map(() => 0),
         dataSourcesOnboarded: BUCKETS.map(() => 0),
         previous: {
+            buckets: PREV_BUCKETS,
             signups: BUCKETS.map(() => 0), viewsCreated: BUCKETS.map(() => 0),
             viewOpens: BUCKETS.map(() => 0), activeUsers: BUCKETS.map(() => 0),
         },

@@ -7,7 +7,7 @@ status code.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -775,13 +775,39 @@ async def test_ghost_series_measure_the_previous_period(db_session):
     data = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
 
     ghost = data["series"]["previous"]
-    assert set(ghost) == {"signups", "viewsCreated", "viewOpens", "activeUsers"}
+    assert set(ghost) == {
+        "buckets", "signups", "viewsCreated", "viewOpens", "activeUsers"}
     # usr_prev signed up 10 days ago — inside the previous 7-day window, and
     # deliberately outside the current one.
     assert sum(ghost["signups"]) == 1
     assert sum(data["series"]["signups"]) == 2
     # pev_old is the single open recorded in the previous window.
     assert sum(ghost["viewOpens"]) == 1
+
+
+async def test_the_ghost_carries_the_dates_it_actually_happened_on(db_session):
+    """Without them a client can only lay the ghost out by INDEX, against an
+    axis labelled with the CURRENT window's dates — so a bar for the 4th of
+    July gets drawn sitting on the 3rd of August and the axis lies about it."""
+    await _seed(db_session)
+    data = await analytics_repo.platform_summary(db_session, days=7, now=NOW)
+
+    buckets = data["series"]["buckets"]
+    ghost = data["series"]["previous"]["buckets"]
+
+    # One date per value, so every mark has somewhere to sit.
+    assert len(ghost) == len(buckets)
+    for key in ("signups", "viewsCreated", "viewOpens", "activeUsers"):
+        assert len(data["series"]["previous"][key]) == len(ghost)
+
+    # Ascending, and ending immediately before the current window opens: the
+    # two lists laid end to end are one unbroken run of days.
+    assert ghost == sorted(ghost)
+    assert ghost[-1] < buckets[0]
+    combined = ghost + buckets
+    for earlier, later in zip(combined, combined[1:]):
+        gap = date.fromisoformat(later) - date.fromisoformat(earlier)
+        assert gap == timedelta(days=1)
 
 
 async def test_previous_window_is_equal_length_and_adjacent():

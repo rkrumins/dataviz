@@ -136,7 +136,10 @@ export function ContentTab({
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame
                     title="Views created"
-                    subtitle="New views per period"
+                    // The axis carries BOTH periods, so it says so: someone
+                    // picking "30 days" and seeing 60 on the axis deserves to
+                    // read why rather than work it out.
+                    subtitle={`New views per bucket, against ${previousLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={
                         // Both periods, not just this one: a chart that hid
@@ -151,17 +154,34 @@ export function ContentTab({
                     table={
                         <ChartTable
                             rowLabel="Date"
-                            rows={series.buckets.map((b) => shortDate(b, true))}
+                            rows={[...series.previous.buckets, ...series.buckets]
+                                .map((b) => shortDate(b, true))}
                             columns={[
-                                { key: 'created', label: 'Views created', values: series.viewsCreated },
-                                { key: 'prev', label: previousLabel(range), values: series.previous.viewsCreated },
+                                {
+                                    key: 'created', label: 'Views created',
+                                    values: [...series.previous.viewsCreated, ...series.viewsCreated],
+                                },
+                                // The chart puts both periods on one axis, so the
+                                // table does too — a twin that disagreed with the
+                                // marks would be the wrong kind of twin.
+                                {
+                                    key: 'period', label: 'Period',
+                                    values: [
+                                        ...series.previous.buckets.map(() => previousLabel(range)),
+                                        ...series.buckets.map(() => 'This period'),
+                                    ],
+                                },
                             ]}
                         />
                     }
                 >
                     <BarSeriesChart
                         buckets={series.buckets} values={series.viewsCreated}
-                        previous={series.previous.viewsCreated}
+                        previous={{
+                            buckets: series.previous.buckets,
+                            values: series.previous.viewsCreated,
+                        }}
+                        previousLabel={previousLabel(range)}
                         label="views" slot={0}
                     />
                 </ChartFrame>

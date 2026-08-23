@@ -74,6 +74,10 @@ const SUMMARY = {
         workspacesCreated: [0, 1, 0], cumulativeWorkspaces: [2, 3, 3],
         viewOpens: [4, 6, 8], activityEvents: [2, 2, 3], dataSourcesOnboarded: [0, 1, 0],
         previous: {
+            // Real dates, ending the day before `buckets` opens — the bar
+            // charts lay both periods on one axis and need somewhere to put
+            // these.
+            buckets: ['2026-06-10', '2026-06-11', '2026-06-12'],
             signups: [0, 1, 0], viewsCreated: [1, 1, 0],
             viewOpens: [2, 2, 3], activeUsers: [1, 1, 2],
         },

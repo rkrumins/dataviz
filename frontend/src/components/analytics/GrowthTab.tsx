@@ -87,7 +87,7 @@ export function GrowthTab({
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <ChartFrame
                     title="New accounts"
-                    subtitle={`Signups per period over ${rangePhrase(range)}`}
+                    subtitle={`Signups over ${rangePhrase(range)}, against ${previousLabel(range).toLowerCase()}`}
                     isStale={isStale}
                     isEmpty={
                         // Both periods, not just this one: a chart that hid
@@ -102,17 +102,34 @@ export function GrowthTab({
                     table={
                         <ChartTable
                             rowLabel="Date"
-                            rows={series.buckets.map((b) => shortDate(b, true))}
+                            rows={[...series.previous.buckets, ...series.buckets]
+                                .map((b) => shortDate(b, true))}
                             columns={[
-                                { key: 'signups', label: 'Signups', values: series.signups },
-                                { key: 'prev', label: previousLabel(range), values: series.previous.signups },
+                                {
+                                    key: 'signups', label: 'Signups',
+                                    values: [...series.previous.signups, ...series.signups],
+                                },
+                                // The chart puts both periods on one axis, so the
+                                // table does too — a twin that disagreed with the
+                                // marks would be the wrong kind of twin.
+                                {
+                                    key: 'period', label: 'Period',
+                                    values: [
+                                        ...series.previous.buckets.map(() => previousLabel(range)),
+                                        ...series.buckets.map(() => 'This period'),
+                                    ],
+                                },
                             ]}
                         />
                     }
                 >
                     <BarSeriesChart
                         buckets={series.buckets} values={series.signups}
-                        previous={series.previous.signups} label="signups"
+                        previous={{
+                            buckets: series.previous.buckets,
+                            values: series.previous.signups,
+                        }}
+                        previousLabel={previousLabel(range)} label="signups"
                     />
                 </ChartFrame>
 

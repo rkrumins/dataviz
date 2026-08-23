@@ -777,8 +777,8 @@ async def platform_summary(
             "viewOpens": w.align(opens_by_day),
             "activityEvents": w.align(activity_by_day),
             "dataSourcesOnboarded": w.align(ds_by_day),
-            # The previous period's shape, aligned by bucket index, for the
-            # ghost line drawn behind each series.
+            # The previous period's shape AND its real dates — the bar charts
+            # lay it out chronologically, the line charts by bucket index.
             "previous": await _ghost_series(
                 session, w, live_user=live_user, live_view=live_view),
         },
@@ -1404,27 +1404,41 @@ _SOURCE_LABELS = {
 
 async def _ghost_series(
     session: AsyncSession, w: Window, *, live_user, live_view,
-) -> dict[str, list[int]]:
-    """The previous period's shape, aligned to the CURRENT window's bucket count.
+) -> dict[str, list]:
+    """The previous period's shape, and the DATES it actually happened on.
 
     The KPI deltas already say a number moved. This says how it moved — whether
     growth is steady, front-loaded, or a single spike — which a percentage
     cannot express and a reader would otherwise have to hold two screenshots
     side by side to see.
 
-    Aligned by bucket INDEX, not by date: bucket 3 of last month sits under
-    bucket 3 of this one. Lists are padded or truncated to the current window's
-    length so a month boundary (28 vs 31 days) can never make the ghost run off
-    the end of the axis.
+    ``buckets`` carries the previous window's own dates, one per value. Without
+    them a client can only lay these out by INDEX, against an axis labelled
+    with the CURRENT window's dates — so a bar for the 4th of July is drawn
+    sitting on the 3rd of August, and the axis quietly lies about it. Sending
+    the dates lets a chart put every bar where it belongs. Values are still
+    padded or truncated to the current window's length, so index alignment
+    stays available to charts that want it (a ghost LINE behind a live one is
+    a shape comparison, and shape comparison is exactly what index alignment
+    is for).
     """
     prev = previous_window(w)
     width = len(w.buckets)
+    step = timedelta(days=7 if prev.granularity == "week" else 1)
 
     def _fit(values: list[int]) -> list[int]:
         # Take the LAST `width` buckets: the ghost's right edge is the moment
         # just before the current window opened, so that is the end to keep.
         trimmed = values[-width:]
         return [0] * (width - len(trimmed)) + trimmed
+
+    def _fit_days(days: list[str]) -> list[str]:
+        """The same trim, but padding with the dates that WOULD have preceded
+        the first real bucket — every value has to have a date to sit on."""
+        trimmed = list(days[-width:]) or [w.buckets[0]]
+        while len(trimmed) < width:
+            trimmed.insert(0, (date.fromisoformat(trimmed[0]) - step).isoformat())
+        return trimmed
 
     bounds = {"since": prev.start, "until": prev.end}
     signups = await _count_by_day(
@@ -1443,6 +1457,7 @@ async def _ghost_series(
             per_bucket[bucket].update(people)
 
     return {
+        "buckets": _fit_days(prev.buckets),
         "signups": _fit(prev.align(signups)),
         "viewsCreated": _fit(prev.align(views)),
         "viewOpens": _fit(prev.align(opens)),

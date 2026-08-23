@@ -61,15 +61,21 @@ export interface PlatformSeries {
     activityEvents: number[]
     dataSourcesOnboarded: number[]
     /**
-     * The same measures over the PREVIOUS period, aligned by bucket index
-     * (bucket 3 of last month under bucket 3 of this one) and padded to the
-     * current window's length.
+     * The same measures over the PREVIOUS period, padded to the current
+     * window's length, with `buckets` carrying the dates they happened on.
      *
-     * Drawn as a recessive ghost behind each live series. The KPI delta says a
-     * number moved; this says what shape the move was — steady growth, one
-     * spike, or a late collapse all produce the same percentage.
+     * The KPI delta says a number moved; this says what shape the move was —
+     * steady growth, one spike, or a late collapse all produce the same
+     * percentage. Two layouts read it: the bar charts put it in chronological
+     * position on one shared axis, and the line charts overlay it by bucket
+     * index, which is the alignment a SHAPE comparison wants.
      */
     previous: {
+        /** The dates these values happened on, one per value, ending the day
+         *  before `buckets` opens. Without them the only possible layout is by
+         *  bucket INDEX against an axis labelled with THIS period's dates —
+         *  which puts a bar for the 4th of July on the 3rd of August. */
+        buckets: string[]
         signups: number[]
         viewsCreated: number[]
         viewOpens: number[]
