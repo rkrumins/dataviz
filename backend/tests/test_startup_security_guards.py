@@ -199,16 +199,29 @@ def _with_ttl(monkeypatch, minutes: int, *, prod: bool, ceiling: int = 15):
     function body, so setting the module attributes is enough — no
     reload, which would reset the revocation singleton and leak into
     every test that runs after this file.
+
+    Patched by dotted STRING, not through this file's ``auth_config``
+    binding. ``test_auth_config`` and ``test_auth_environment_isolation``
+    both pop ``backend.auth_service.core.config`` out of ``sys.modules``,
+    so once either has run, the module object bound at import time here
+    is no longer the one the function under test re-imports — the patch
+    lands on an orphan and the assertion silently measures the code
+    default instead. That passed in isolation and failed in the full
+    suite. The string form resolves through ``sys.modules`` at patch
+    time, which is the object the function will import.
     """
     import backend.app.main as main_module
-    import backend.app.services.revocation_service as revocation_service
 
-    monkeypatch.setattr(auth_config, "JWT_EXPIRY_MINUTES", minutes)
+    monkeypatch.setattr(
+        "backend.auth_service.core.config.JWT_EXPIRY_MINUTES", minutes
+    )
     monkeypatch.setattr(main_module, "_MAX_ACCESS_TTL_MINUTES", ceiling)
     monkeypatch.setattr(main_module, "_is_production", lambda: prod)
     # A long TTL needs a tombstone that outlives it, or the earlier
     # coherence check fires first and we would be asserting on that.
-    monkeypatch.setattr(revocation_service, "REVOCATION_TTL_SECONDS", 99999)
+    monkeypatch.setattr(
+        "backend.app.services.revocation_service.REVOCATION_TTL_SECONDS", 99999
+    )
     return main_module
 
 
