@@ -38,14 +38,24 @@ from backend.app.common.single_flight import SingleFlight
 
 logger = logging.getLogger(__name__)
 
-#: How long a READ-THROUGH document stays servable. Short enough that "as of"
-#: never reads as wrong, long enough to absorb tab-switching and a room full of
-#: admins opening the same dashboard.
-#:
-#: Warmed documents are written with their own, much longer TTL — see
-#: ``analytics_warmer``. Under normal operation nothing expires and no reader
-#: ever pays for a build; this value governs the fallback path only.
-TTL_SECONDS = 60.0
+def read_ttl_seconds() -> float:
+    """How long a READ-THROUGH document stays servable: exactly one epoch.
+
+    It was a flat 60 seconds, chosen when every build stamped its own ``now``
+    and a shorter TTL genuinely meant fresher numbers. Once ``now`` snaps to
+    the epoch that stopped being true in both directions.
+
+    Shorter than an epoch is pure waste. Inside a slot the window bounds are
+    pinned, so rebuilding at second 10 and again at second 250 produces the
+    same document — at 60 seconds the fallback path paid for the same ~25
+    grouped queries five times per slot and got the same answer five times.
+
+    Longer than an epoch buys nothing either, because the epoch is part of the
+    key: at the boundary the key changes and the old entry is unreachable no
+    matter how long it lives. So an entry should live exactly as long as it can
+    still be used, and every key is computed at most once, ever.
+    """
+    return epoch_seconds()
 
 #: Redis key prefix. Versioned so a payload-shape change cannot serve a
 #: document the current frontend cannot read — bump it when the shape changes.
@@ -80,9 +90,10 @@ async def _redis_get(key: str) -> Optional[Any]:
         return None
 
 
-async def _redis_set(key: str, value: Any, ttl: float = TTL_SECONDS) -> bool:
+async def _redis_set(key: str, value: Any, ttl: float | None = None) -> bool:
     """Write one entry. Returns whether it actually reached Redis."""
     global _redis_down_until
+    ttl = read_ttl_seconds() if ttl is None else ttl
     if time.monotonic() < _redis_down_until:
         return False
     try:
@@ -122,7 +133,7 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
     if hit is not None:
         # Populate the local layer too: the next read on this replica skips
         # even the Redis round trip.
-        _memory[key] = (time.monotonic() + TTL_SECONDS, hit)
+        _memory[key] = (time.monotonic() + read_ttl_seconds(), hit)
         return hit
 
     async def _compute() -> Any:
@@ -138,7 +149,7 @@ async def cached(key: str, build: Callable[[], Awaitable[Any]]) -> Any:
         # while getting no benefit. Negatives are cheap to recompute; don't
         # store them.
         if value is not None:
-            _memory[key] = (time.monotonic() + TTL_SECONDS, value)
+            _memory[key] = (time.monotonic() + read_ttl_seconds(), value)
             await _redis_set(key, value)
         return value
 
@@ -232,14 +243,25 @@ def document_key(
 async def put(key: str, value: Any, *, ttl: float) -> bool:
     """Store a precomputed document. Returns whether Redis took it.
 
-    The warmer's write path. A long ``ttl`` is what makes reads never miss:
-    the entry outlives several refresh passes, so a warmer that stalls or a
-    scheduler that restarts degrades to slightly staler numbers rather than to
-    a stampede of readers all rebuilding at once.
+    The warmer's write path.
+
+    ``ttl`` used to be several refresh passes long, so a warmed entry outlived
+    a missed pass and a stalled warmer degraded to staler numbers rather than
+    to a stampede. The epoch in the key ended that: at the next slot the key
+    changes, and last slot's entry cannot be served however long it lives. An
+    entry only needs to outlast its own slot now, and a longer TTL just leaves
+    dead keys squatting in Redis.
+
+    The failure mode moved with it, deliberately. A missed pass no longer means
+    "everyone sees slightly older numbers"; it means readers rebuild that slot
+    on demand, deduplicated by single-flight. Correct but slower, which is what
+    the fallback path has always been — and the alternative was serving last
+    slot's 14-day document beside this slot's 7-day one, which is the
+    contradiction all of this exists to prevent.
     """
     if value is None:
         return False
-    _memory[key] = (time.monotonic() + TTL_SECONDS, value)
+    _memory[key] = (time.monotonic() + read_ttl_seconds(), value)
     return await _redis_set(key, value, ttl)
 
 

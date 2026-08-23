@@ -62,12 +62,13 @@ _SURFACES = ("summary", "workspaces")
 #: ago" is not a number anyone argues with.
 _DEFAULT_INTERVAL_SECONDS = 300.0
 
-#: How many passes an entry outlives. A warmed document must survive a missed
-#: pass — a slow refresh, a scheduler restart, a deploy — because the moment
-#: entries expire together every reader rebuilds at once, which is the exact
-#: stampede this service exists to prevent. Three is enough to ride out a
-#: restart without letting numbers go visibly stale.
-_TTL_MULTIPLE = 3
+#: How many epochs an entry outlives. It was three, so a warmed document
+#: survived a missed pass and a stalled warmer degraded to staler numbers
+#: rather than to a stampede. The epoch in the cache key ended that: at the
+#: next slot the key changes and last slot's entry is unreachable however long
+#: it lives, so two is slack for a write that lands late in its own slot, and
+#: anything beyond that is dead keys squatting in Redis.
+_TTL_MULTIPLE = 2
 
 
 def interval_seconds() -> float:
@@ -134,6 +135,22 @@ async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
     return stored
 
 
+def _seconds_to_boundary(grid: float) -> float:
+    """How long until the next slot starts.
+
+    The loop used to sleep a fixed interval from wherever the last pass
+    finished, so its passes drifted against the absolute epoch grid: start the
+    process 290 seconds into a five-minute slot and every pass thereafter warms
+    a slot with ten seconds left on it, which is work nobody gets to use.
+
+    Sleeping to the boundary phase-locks the pass to the epoch it is warming,
+    so each one lands at the start of its slot with the whole slot ahead of it.
+    """
+    remaining = grid - (time.time() % grid)
+    # Landing exactly on a boundary would otherwise spin.
+    return remaining if remaining > 1.0 else remaining + grid
+
+
 async def run_warmer(
     session_factory,
     shutdown: asyncio.Event,
@@ -147,6 +164,9 @@ async def run_warmer(
         "Analytics warmer started (interval=%.0fs, ttl=%.0fs, windows=%s)",
         interval, ttl, ",".join(f"{d}d" for d in WARM_WINDOWS),
     )
+    # The first pass runs immediately rather than waiting for a boundary: a
+    # cache that is warm now beats one that is perfectly phased in five
+    # minutes. Every pass after this one is aligned.
     warned_no_redis = False
     while not shutdown.is_set():
         started = time.monotonic()
@@ -176,7 +196,8 @@ async def run_warmer(
             logger.warning("Analytics warm pass failed: %s", exc, exc_info=True)
 
         try:
-            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            await asyncio.wait_for(
+                shutdown.wait(), timeout=_seconds_to_boundary(interval))
         except asyncio.TimeoutError:
             pass
 

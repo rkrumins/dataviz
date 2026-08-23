@@ -952,6 +952,69 @@ async def test_two_windows_asked_seconds_apart_end_at_the_same_instant():
         assert stamp in key
 
 
+async def test_the_unwarmed_surfaces_share_the_clock_too(db_session, monkeypatch):
+    """Drill-ins and custom ranges are not warmed, so they always take the
+    read-through path — and that is exactly why they have to snap to the same
+    epoch. A workspace panel opened beside the summary that quotes a different
+    instant is the reported contradiction with a smaller audience.
+    """
+    from backend.app.services import analytics_cache
+    from backend.app.api.v1.endpoints import analytics as endpoint
+
+    await _seed(db_session)
+    pinned = analytics_cache.epoch_start(NOW)
+    monkeypatch.setattr(analytics_cache, "epoch_start", lambda at=None: pinned)
+
+    # A preset, a custom range and a per-workspace drill-in.
+    _, preset = endpoint._at_epoch({"days": 30})
+    _, custom = endpoint._at_epoch({"start": "2026-05-16", "end": "2026-06-15"})
+    _, drill = endpoint._at_epoch({"days": 30})
+
+    summary = await analytics_repo.platform_summary(db_session, scope=None, **preset)
+    ranged = await analytics_repo.platform_summary(db_session, scope=None, **custom)
+    detail = await analytics_repo.workspace_detail(
+        db_session, "ws_live", scope=None, **drill)
+
+    stamp = pinned.isoformat()
+    assert summary["generatedAt"] == stamp
+    assert ranged["generatedAt"] == stamp
+    assert detail["generatedAt"] == stamp
+
+    # And the drill-in's numbers cannot exceed the platform's, which is the
+    # cross-surface version of the same guarantee.
+    assert (detail["totals"]["viewOpens"]["current"]
+            <= summary["totals"]["viewOpens"]["current"])
+
+
+async def test_every_cached_surface_keys_on_the_epoch(monkeypatch):
+    """Whatever is cached must roll over with everything else. A surface that
+    kept a stale key would go on being served beside freshly-keyed neighbours,
+    which is the bug this whole seam exists to prevent."""
+    from backend.app.services import analytics_cache
+    from backend.app.api.v1.endpoints import analytics as endpoint
+
+    early = analytics_cache.epoch_start(NOW)
+    later = analytics_cache.epoch_start(
+        NOW + timedelta(seconds=analytics_cache.epoch_seconds()))
+
+    for surface, args in (
+        ("summary", {"days": 30}),
+        ("workspaces", {"days": 30}),
+        ("ws:ws_live", {"days": 30}),
+        ("summary", {"start": "2026-05-16", "end": "2026-06-15"}),
+    ):
+        assert (endpoint._cache_key(surface, args, epoch=early)
+                != endpoint._cache_key(surface, args, epoch=later)), surface
+
+
+async def test_a_read_through_entry_lives_exactly_one_epoch():
+    """Shorter and the fallback path rebuilds an identical document several
+    times a slot; longer and it outlives the key that can reach it."""
+    from backend.app.services import analytics_cache
+
+    assert analytics_cache.read_ttl_seconds() == analytics_cache.epoch_seconds()
+
+
 async def test_the_endpoint_and_the_warmer_write_the_same_key(db_session, monkeypatch):
     """A warmer that writes a key the reader does not look up warms nothing.
 
