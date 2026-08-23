@@ -33,7 +33,8 @@ const SORT_OPTIONS: { key: SortOption; label: string; group?: string }[] = [
   { key: 'updated', label: 'Recently edited (settings)' },
   { key: 'newest', label: 'Newest created', group: 'By creation' },
   { key: 'oldest', label: 'Oldest created' },
-  { key: 'popular', label: 'Most popular', group: 'Other' },
+  { key: 'popular', label: 'Most liked', group: 'Other' },
+  { key: 'most-opened', label: 'Most opened' },
   { key: 'az', label: 'A \u2192 Z' },
   { key: 'za', label: 'Z \u2192 A' },
 ]

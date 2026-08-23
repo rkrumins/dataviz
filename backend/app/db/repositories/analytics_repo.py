@@ -476,6 +476,7 @@ async def view_usage(
     days: int = 30,
     now: Optional[datetime] = None,
     readable=None,
+    viewer_id: Optional[str] = None,
 ) -> dict[str, dict]:
     """Opens, distinct viewers and a daily trend, per view.
 
@@ -490,11 +491,26 @@ async def view_usage(
     A per-card fetch would be two per card, which is the difference between a
     gallery that loads and one that hammers the database once per tile.
 
-    NO IDENTITIES, EVER. Counts and dates only — no actor ids, no names, not
-    even a "most frequent viewer". That is what makes this safe to answer for
-    any reader who can open the view, without the dashboard's privacy modes:
-    there is nothing here to redact. Anything that would name a person belongs
-    on the Analytics section, behind its gate.
+    DISTINCT PEOPLE IS THE HEADLINE, not opens. Someone meeting a view for the
+    first time is asking "can I trust this?", and 340 opens by one person
+    answers that very differently from 340 by twelve: the first is somebody's
+    scratchpad, the second is a thing a team relies on. The raw total cannot
+    tell them apart, which is why ``uniqueViewers`` leads and ``onlyAuthor``
+    exists — the categorical version of the same question, and the one a
+    number cannot express.
+
+    NO IDENTITIES, EVER. Counts, dates and booleans only — no actor ids, no
+    names, not even a "most frequent viewer". ``onlyAuthor`` says that the one
+    person who opened this is the one who made it; it does not say who that is,
+    and the reader can already see the author on the card. That is what makes
+    this safe to answer for any reader who can open the view, without the
+    dashboard's privacy modes: there is nothing here to redact. Anything that
+    would name a person belongs on the Analytics section, behind its gate.
+
+    ``viewer_id`` adds the reader's OWN usage — their opens in the window and
+    when they last looked. It is about them, so it discloses nothing, and it is
+    what turns a shelf of counters into navigation: "new to you" is only
+    sayable if we know what you have already seen.
     """
     ids = [v for v in dict.fromkeys(view_ids) if v][:MAX_USAGE_IDS]
     if not ids:
@@ -505,12 +521,17 @@ async def view_usage(
     # 1. What may this reader see? `readable` is the caller's SQL rendering of
     #    the view read rule — the same predicate the catalogue lists with, so
     #    usage can never disagree with visibility.
-    allowed_stmt = select(ViewORM.id).where(
+    #
+    #    `created_by` rides along because "only its author has opened this" is
+    #    the one qualitative signal worth stating, and it needs to know who the
+    #    author is to say it. It never leaves this function.
+    allowed_stmt = select(ViewORM.id, ViewORM.created_by).where(
         ViewORM.id.in_(ids), ViewORM.deleted_at.is_(None),
     )
     if readable is not None:
         allowed_stmt = allowed_stmt.where(readable)
-    allowed = [row[0] for row in (await session.execute(allowed_stmt)).all()]
+    author_of = {row[0]: row[1] for row in (await session.execute(allowed_stmt)).all()}
+    allowed = list(author_of)
     if not allowed:
         return {}
 
@@ -542,6 +563,56 @@ async def view_usage(
     for view_id, bucket, count in per_day:
         series[view_id][bucket] = count
 
+    # 3. Lifetime opens — the same aggregate with the window taken off. Asked
+    #    for because "how many times has this ever been opened" is a fair
+    #    question; kept out of the headline because the answer is largely a
+    #    proxy for how long the view has existed, and ranking a catalogue by it
+    #    entrenches whatever was built first.
+    lifetime = dict((await session.execute(
+        select(ProductEventORM.subject_id, func.count())
+        .where(
+            ProductEventORM.event_type == VIEW_OPENED,
+            ProductEventORM.subject_id.in_(allowed),
+        )
+        .group_by(ProductEventORM.subject_id)
+    )).all())
+
+    # 4. Who opened it, but only enough to answer "anyone besides the author?".
+    #    Two distinct actors is already the answer, so the set is capped rather
+    #    than collected — a popular view would otherwise drag every actor id it
+    #    ever had into memory to compute one boolean.
+    openers: dict[str, set[str]] = defaultdict(set)
+    for view_id, actor in (await session.execute(
+        select(ProductEventORM.subject_id, ProductEventORM.actor_id)
+        .where(
+            ProductEventORM.event_type == VIEW_OPENED,
+            ProductEventORM.subject_id.in_(allowed),
+        )
+        .distinct()
+    )).all():
+        if actor and len(openers[view_id]) < 2:
+            openers[view_id].add(actor)
+
+    # 5. The reader's own. `view_visits` is the purpose-built table — one row
+    #    per person per view, upserted on every open — so "when did I last look
+    #    at this" is a lookup rather than a scan, and it reaches back past the
+    #    window where the event log has already been pruned.
+    mine_opens: dict[str, int] = {}
+    mine_last: dict[str, str] = {}
+    if viewer_id:
+        mine_opens = dict((await session.execute(
+            select(ProductEventORM.subject_id, func.count())
+            .where(*where, ProductEventORM.actor_id == viewer_id)
+            .group_by(ProductEventORM.subject_id)
+        )).all())
+        mine_last = dict((await session.execute(
+            select(ViewVisitORM.view_id, ViewVisitORM.visited_at)
+            .where(
+                ViewVisitORM.view_id.in_(allowed),
+                ViewVisitORM.user_id == viewer_id,
+            )
+        )).all())
+
     out: dict[str, dict] = {}
     for view_id in allowed:
         row = next((r for r in totals if r[0] == view_id), None)
@@ -556,7 +627,123 @@ async def view_usage(
             # x-axis, which is what makes a row of sparklines comparable.
             "trend": w.align(series.get(view_id, {})),
             "windowDays": days,
+            "lifetimeOpens": lifetime.get(view_id, 0),
+            # True only when somebody HAS opened it and that somebody is the
+            # person who made it. A view nobody has opened at all is a
+            # different state, and `opens == 0` already says so.
+            "onlyAuthor": bool(
+                openers.get(view_id)
+                and openers[view_id] == {author_of.get(view_id)}
+            ),
+            "yourOpens": mine_opens.get(view_id, 0),
+            "yourLastOpenedAt": mine_last.get(view_id),
         }
+    return out
+
+
+async def workspace_usage(
+    session: AsyncSession,
+    workspace_ids: Sequence[str],
+    *,
+    days: int = 30,
+    now: Optional[datetime] = None,
+    readable=None,
+) -> dict[str, dict]:
+    """Is this workspace alive, and what do people actually use it for?
+
+    Two facts per workspace, because they answer different halves of the same
+    question. The ROLLUP — opens and distinct people across its views — says
+    whether anybody is here. The TOP VIEW says what they come for, which is the
+    part a name and a member count cannot tell you and the part that makes a
+    workspace worth opening.
+
+    COUNTS FOLLOW THE CONTENT, same rule as `view_usage` and for the same
+    reason: this sums the views the CALLER may read, so two readers can see
+    different totals for one workspace and that is correct rather than a bug.
+    The alternative is quoting a figure that includes content the reader is not
+    allowed to know exists, and naming a top view they cannot open — which
+    would leak through a usage endpoint what the catalogue is careful to hide.
+
+    THREE QUERIES, WHATEVER THE BATCH. Views for the workspaces, opens for
+    those views, names for the winners.
+    """
+    ids = [w for w in dict.fromkeys(workspace_ids) if w][:MAX_USAGE_IDS]
+    if not ids:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    w = build_window(days, now=now)
+
+    view_stmt = select(ViewORM.id, ViewORM.workspace_id, ViewORM.name).where(
+        ViewORM.workspace_id.in_(ids), ViewORM.deleted_at.is_(None),
+    )
+    if readable is not None:
+        view_stmt = view_stmt.where(readable)
+    rows = (await session.execute(view_stmt)).all()
+
+    out: dict[str, dict] = {
+        ws: {
+            "workspaceId": ws, "views": 0, "opens": 0, "uniqueViewers": 0,
+            "topView": None, "windowDays": days,
+        }
+        for ws in ids
+    }
+    if not rows:
+        return out
+
+    of_workspace: dict[str, list[str]] = defaultdict(list)
+    name_of: dict[str, str] = {}
+    for view_id, workspace_id, name in rows:
+        of_workspace[workspace_id].append(view_id)
+        name_of[view_id] = name
+        out[workspace_id]["views"] += 1
+
+    per_view = {
+        r[0]: (r[1], r[2])
+        for r in (await session.execute(
+            select(
+                ProductEventORM.subject_id,
+                func.count().label("opens"),
+                func.count(func.distinct(ProductEventORM.actor_id)).label("viewers"),
+            ).where(
+                ProductEventORM.event_type == VIEW_OPENED,
+                ProductEventORM.subject_id.in_(list(name_of)),
+                ProductEventORM.created_at >= w.start,
+                ProductEventORM.created_at < w.end,
+            ).group_by(ProductEventORM.subject_id)
+        )).all()
+    }
+
+    # Distinct PEOPLE cannot be summed from per-view counts — the same person
+    # opening three views is one person, not three — so the actors come back
+    # once and are folded per workspace here.
+    actors: dict[str, set[str]] = defaultdict(set)
+    for view_id, actor in (await session.execute(
+        select(ProductEventORM.subject_id, ProductEventORM.actor_id)
+        .where(
+            ProductEventORM.event_type == VIEW_OPENED,
+            ProductEventORM.subject_id.in_(list(name_of)),
+            ProductEventORM.created_at >= w.start,
+            ProductEventORM.created_at < w.end,
+        ).distinct()
+    )).all():
+        if actor:
+            actors[view_id].add(actor)
+
+    for workspace_id, view_ids in of_workspace.items():
+        entry = out[workspace_id]
+        people: set[str] = set()
+        best: Optional[tuple[str, int]] = None
+        for view_id in view_ids:
+            opens = per_view.get(view_id, (0, 0))[0]
+            entry["opens"] += opens
+            people |= actors.get(view_id, set())
+            if opens and (best is None or opens > best[1]):
+                best = (view_id, opens)
+        entry["uniqueViewers"] = len(people)
+        if best:
+            entry["topView"] = {
+                "viewId": best[0], "name": name_of[best[0]], "opens": best[1],
+            }
     return out
 
 

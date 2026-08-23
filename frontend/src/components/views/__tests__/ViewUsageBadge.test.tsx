@@ -34,7 +34,8 @@ describe('ViewUsageBadge', () => {
             v1: {
                 viewId: 'v1', opens: 1840, uniqueViewers: 214,
                 lastOpenedAt: '2026-06-15T09:00:00+00:00',
-                trend: [3, 9, 4, 12, 7], windowDays: 30,
+                trend: [3, 9, 4, 12, 7], windowDays: 30, lifetimeOpens: 0, onlyAuthor: false,
+            yourOpens: 0, yourLastOpenedAt: null,
             },
         })
         renderBadge()
@@ -46,7 +47,8 @@ describe('ViewUsageBadge', () => {
         vi.mocked(service.getViewUsage).mockResolvedValue({
             v1: {
                 viewId: 'v1', opens: 0, uniqueViewers: 0, lastOpenedAt: null,
-                trend: [0, 0, 0], windowDays: 30,
+                trend: [0, 0, 0], windowDays: 30, lifetimeOpens: 0, onlyAuthor: false,
+            yourOpens: 0, yourLastOpenedAt: null,
             },
         })
         renderBadge()

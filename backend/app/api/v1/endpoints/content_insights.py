@@ -48,6 +48,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _DAYS = Query(30, ge=1, le=365, description="Trailing window, in days.")
+_WS_IDS = Query(
+    ...,
+    description=(
+        "Comma-separated workspace ids. Rollups cover only the views the "
+        "caller may read, so two readers can see different totals for one "
+        "workspace — which is the access rule showing through, not a bug."
+    ),
+)
 _IDS = Query(
     ...,
     description=(
@@ -93,5 +101,45 @@ async def views_usage(
 
     usage = await analytics_repo.view_usage(
         session, requested, days=days, readable=readable,
+        # The reader's own usage is about the reader, so it discloses nothing
+        # — and it is what lets a card say "new to you" rather than reciting a
+        # number at somebody who has never seen the view before.
+        viewer_id=user.id,
     )
     return {"views": usage, "windowDays": days}
+
+
+@router.get("/workspaces")
+async def workspaces_usage(
+    ids: str = _WS_IDS,
+    days: int = _DAYS,
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Is each workspace alive, and what do people come to it for?
+
+    Same shape and same access rule as `/views`: unreadable content is simply
+    not counted, and the top view named back is always one the caller could
+    open — a usage endpoint must not become the way to learn that a view
+    exists.
+    """
+    requested = [i.strip() for i in ids.split(",") if i.strip()]
+    if not requested:
+        return {"workspaces": {}, "windowDays": days}
+
+    readable = None
+    if rbac_flag("RBAC_ENFORCE_VIEWS"):
+        if not claims.ws_available and "system:admin" not in claims.global_perms:
+            raise HTTPException(
+                status_code=503, detail="Authorization temporarily unavailable",
+            )
+        ctx = await view_access.ViewerContext.build(
+            session, user=user, claims=claims)
+        scope = await view_access.build_read_scope(session, ctx)
+        readable = view_access.readable_views_clause(scope)
+
+    usage = await analytics_repo.workspace_usage(
+        session, requested, days=days, readable=readable,
+    )
+    return {"workspaces": usage, "windowDays": days}
