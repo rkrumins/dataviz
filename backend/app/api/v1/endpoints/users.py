@@ -808,9 +808,41 @@ async def admin_reset_password(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Giving a password to an SSO-only account is a posture change, not
+    # a reset — it removes the disabled-password sentinel that keeps the
+    # user on the IdP path, and with it the org's conditional access and
+    # MFA. Legitimate when an org is retiring SSO, so it is a switch
+    # rather than a refusal; it just has to be asked for.
+    converting_sso_only = not is_password_set(user.password_hash)
+    if converting_sso_only and not body.allow_sso_only_override:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "sso_only_account",
+                "message": (
+                    f"{user.email} signs in through an identity provider and "
+                    "has no password. Setting one lets them sign in around "
+                    "the IdP; pass allowSsoOnlyOverride to do it deliberately."
+                ),
+            },
+        )
+
     _check_password_strength(body.new_password)
     hashed = hash_password(body.new_password)
     await user_repo.update_password(session, user_id, hashed)
+
+    if converting_sso_only:
+        logger.warning(
+            "Admin %s gave a password to SSO-only user %s", admin.id, user_id,
+        )
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.local_login_enabled",
+            payload={
+                "user_id": user_id, "actor": admin.id,
+                "reason": "admin_reset_password_override",
+            },
+        )
 
     # Same reasoning as the self-service reset: an admin resetting
     # somebody's password is usually responding to a compromise, and a

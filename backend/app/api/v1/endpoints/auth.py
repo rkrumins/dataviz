@@ -22,6 +22,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.password import hash_password
+from backend.auth_service.core.password import is_password_set
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import user_repo
 from backend.common.display_name import resolve_display_name
@@ -738,14 +739,41 @@ async def reset_password(
             detail="Invalid or expired reset token.",
         )
 
-    # 2. Validate password strength
+    # 2. An SSO-only account stays SSO-only.
+    #
+    # Such an account carries the disabled-password sentinel, and that
+    # sentinel is the only thing keeping the user on the IdP path — where
+    # the organisation's conditional access and MFA are. Redeeming a
+    # reset token here would remove it permanently and silently, turning
+    # a federated identity into one that signs in around the IdP.
+    #
+    # Refused outright rather than gated, because the person redeeming
+    # the token is not the person who should be making that call. The
+    # admin endpoint has an explicit, audited override for the case where
+    # an org is genuinely retiring SSO.
+    if not is_password_set(user.password_hash):
+        logger.warning(
+            "Refused password reset for SSO-only user %s", user.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "sso_only_account",
+                "message": (
+                    "This account signs in through your identity provider "
+                    "and has no password to reset."
+                ),
+            },
+        )
+
+    # 3. Validate password strength
     _check_password_strength(body.new_password)
 
-    # 3. Update password (also clears the reset token)
+    # 4. Update password (also clears the reset token)
     hashed = hash_password(body.new_password)
     await user_repo.update_password(session, user.id, hashed)
 
-    # 4. End every session the account already had.
+    # 5. End every session the account already had.
     #
     # This is the whole point of the flow. A password reset is what
     # somebody performs *because* they believe their account is

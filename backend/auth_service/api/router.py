@@ -77,6 +77,7 @@ from ..cookies import (
 # module stays importable without a signing secret.
 from ..core import config as jwt_config
 from ..core.config import (
+    ALLOWED_HOSTS,
     AUTH_CUSTOM_PROVIDER_ENABLED,
     AUTH_ENVIRONMENT_ID,
     COOKIE_DOMAIN,
@@ -1287,16 +1288,52 @@ async def resolve_email_domain(request: Request, body: _ResolveBody):
 
 def _request_https_host(request: Request) -> tuple[str, bool, str]:
     """Extract (host, is_https, path) for python3-saml's request_data
-    builder. Honors X-Forwarded-* headers when running behind a proxy."""
+    builder. Honors X-Forwarded-* headers when running behind a proxy.
+
+    The host is not cosmetic here. python3-saml derives ``current_url``
+    from it and validates the assertion's ``Destination`` and
+    ``SubjectConfirmationData/@Recipient`` against that — so whoever
+    controls this value controls what those checks compare to. And it is
+    attacker-controllable by default: nginx forwards ``Host $host`` from
+    a catch-all ``server_name _``, and gunicorn's
+    ``--forwarded-allow-ips`` filters ``X-Forwarded-For`` but not
+    ``X-Forwarded-Host``. An assertion minted for a different SP can
+    therefore be replayed here with the header set to match its own
+    Destination.
+
+    ``ALLOWED_HOSTS`` closes it: a claimed host outside the list is
+    ignored in favour of the first configured one, so the SAML checks
+    compare against a URL the operator declared rather than one the
+    caller supplied. Unset, behaviour is unchanged — which is why the
+    deployment configs set it.
+    """
     fwd_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     https = fwd_proto.lower() == "https"
-    host = (
+    claimed = (
         request.headers.get("x-forwarded-host")
         or request.headers.get("host")
         or request.url.hostname or ""
     )
+    host = _allowed_host_or_default(claimed)
     path = request.url.path
     return host, https, path
+
+
+def _allowed_host_or_default(claimed: str) -> str:
+    """*claimed* if this deployment answers to it, else the canonical one."""
+    if not ALLOWED_HOSTS:
+        return claimed
+    # Compare without the port: an allowlist entry is a hostname, and a
+    # deployment reached on a non-default port is still itself.
+    bare = claimed.split(":", 1)[0].strip().lower()
+    if bare in ALLOWED_HOSTS:
+        return claimed
+    logger.warning(
+        "Ignoring unrecognised Host %r; using the configured host instead. "
+        "Add it to ALLOWED_HOSTS if this deployment really answers to it.",
+        claimed,
+    )
+    return ALLOWED_HOSTS[0]
 
 
 @router.get("/{slug}/login")

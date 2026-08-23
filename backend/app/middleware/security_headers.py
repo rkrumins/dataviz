@@ -12,6 +12,18 @@ from starlette.responses import Response
 
 _DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
 
+#: Cookie-name prefix for the session cookies. Matched by prefix rather
+#: than exactly because ``AUTH_ENVIRONMENT_ID`` suffixes them
+#: (``nx_access_uat``), and this must not need updating when it is set.
+_SESSION_COOKIE_PREFIX = "nx_access"
+
+
+def _carries_a_session(request: Request) -> bool:
+    return any(
+        name.startswith(_SESSION_COOKIE_PREFIX)
+        for name in request.cookies
+    ) or "authorization" in request.headers
+
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -46,6 +58,32 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "font-src 'self'; "
                 "connect-src 'self'; "
                 "frame-ancestors 'none'"
+            )
+
+        # Cross-origin isolation for the API surface. Cheap, and it stops
+        # a response being embedded as a subresource by another origin.
+        response.headers.setdefault(
+            "Cross-Origin-Opener-Policy", "same-origin",
+        )
+        response.headers.setdefault(
+            "Cross-Origin-Resource-Policy", "same-origin",
+        )
+
+        # Authenticated responses must not be cached.
+        #
+        # Nothing set this, so /users/me, /me/permissions and /directory
+        # were storable by any intermediary and by the browser's
+        # back/forward cache — which is how a shared workstation shows
+        # the previous user's identity after a sign-out.
+        #
+        # Keyed on the request carrying a session rather than on the
+        # response, because the response to an authenticated request is
+        # user-specific whether or not it happens to contain the user.
+        # ``setdefault`` so a handler that has deliberately chosen its
+        # own caching (the branding manifest, the docs) keeps it.
+        if _carries_a_session(request):
+            response.headers.setdefault(
+                "Cache-Control", "no-store, no-cache, must-revalidate, private",
             )
 
         # HSTS only when behind TLS

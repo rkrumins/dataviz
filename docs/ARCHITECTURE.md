@@ -343,19 +343,42 @@ Authorization separates **global-tier roles** (organization-wide) from **workspa
 | Layer | Mechanism | Details |
 |-------|-----------|---------|
 | **Password** | Argon2id | OWASP-recommended, constant-time comparison |
-| **Tokens** | JWT (HS256) | 60-min expiry, contains user_id, email, role |
-| **Credentials** | Fernet | Symmetric encryption for provider credentials at rest |
-| **Headers** | CSP, HSTS, X-Frame-Options | Applied via middleware to all responses |
-| **Rate Limiting** | slowapi | 5/min signup, 10/min login, 30/60s feature updates |
-| **CORS** | Configurable origins | `CORS_ALLOWED_ORIGINS` env var |
+| **Session transport** | HttpOnly cookies | `nx_access` / `nx_refresh`. **No token is ever in web storage** — see [SSO.md §1.1](SSO.md) |
+| **Access token** | JWT (HS256, key ring) | 15 min; carries `sub`, `email`, `sid` and global permission claims. Per-workspace grants live in the session store, not the token |
+| **Refresh token** | JWT (HS256), rotating | 7 days, allow-by-record, reuse detection with family revocation |
+| **Session ceilings** | idle + absolute | 12 h idle, 7 d absolute, on every session; 24 h IdP re-auth for SSO |
+| **CSRF** | double-submit bound to `sid`, plus Origin | See [SSO_INTEGRATION.md §10](SSO_INTEGRATION.md) |
+| **Credentials** | Fernet | Symmetric encryption for provider credentials at rest; fails closed in prod |
+| **Headers** | CSP, HSTS, X-Frame-Options | On API responses via middleware, **and on the SPA document via `frontend/nginx.conf`** — the backend never sees the request for `index.html` |
+| **Rate Limiting** | slowapi + a per-account limiter | Per-IP is a coarse flood guard; the per-account window is the brute-force control |
+| **CORS** | Configurable origins | `CORS_ALLOWED_ORIGINS` env var, no wildcard default |
 
 ### Production Security Notes
 
-> **Warning:** The three items below are non-negotiable before a production deployment. Shipping with the dev defaults (plaintext credentials, localStorage tokens, the bootstrap admin password) leaves the platform exploitable. See [Technical Debt § Security](/docs/technical-debt#1-security-concerns) for the full risk analysis.
+> **Note:** This section previously warned about JWTs in `localStorage`.
+> That has not been true for some time — sessions ride HttpOnly cookies
+> and no token reaches web storage. The stale warning is recorded here
+> rather than silently deleted, because it was still being read as
+> current.
 
-- **JWT Storage**: Currently stored in `localStorage` (XSS risk). Planned migration to HttpOnly cookies with CSRF protection.
-- **Credential Encryption**: Optional in development (`CREDENTIAL_ENCRYPTION_KEY` not set falls back to plaintext). **REQUIRED in production** — generate a key via `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-- **Default Admin Password**: Bootstrap uses `admin@nexuslineage.local` / `admin123` (override via `ADMIN_EMAIL` / `ADMIN_PASSWORD`) — must be changed immediately in production.
+- **Signing key**: `JWT_SECRET_KEY` is required, must be ≥32 characters,
+  and published placeholder values are denylisted — the process refuses
+  to start otherwise. Rotate via `JWT_SECRET_KEY_PREVIOUS`; see
+  [MULTI_ENVIRONMENT_SESSIONS.md §4](MULTI_ENVIRONMENT_SESSIONS.md).
+- **Credential Encryption**: Optional in development
+  (`CREDENTIAL_ENCRYPTION_KEY` unset falls back to plaintext).
+  **Fails closed in production** — generate a key via
+  `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+- **Default Admin Password**: the bootstrap accepts `ADMIN_PASSWORD`,
+  but an account seeded with a value published in this repo
+  (`changeme`, `admin123`) is created with `must_change_password`, and
+  every route outside the password-change allowlist returns
+  `403 password_change_required` until it is rotated.
+- **Host allowlist**: set `ALLOWED_HOSTS` when using SAML — it is what
+  the assertion's `Destination` is validated against.
+- **Ports**: the compose file binds Postgres, Redis, FalkorDB and the
+  aggregation control plane to `127.0.0.1`. Only the frontend port is
+  published.
 
 ### Scalability Considerations
 

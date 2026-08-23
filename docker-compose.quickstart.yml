@@ -62,6 +62,21 @@ services:
       FALKORDB_GRAPH_NAME: nexus_lineage
 
       # Auth
+      #
+      # BROKEN AS SHIPPED, and deliberately not patched with another
+      # literal. ``quickstart-demo-key`` is 19 characters, below the
+      # 32-character floor, AND it is named in the published-placeholder
+      # denylist in ``auth_service/core/config._reject_placeholder`` —
+      # so ``assert_signing_secret()`` refuses to boot. The denylist
+      # entry was added by the signing-key hardening; nothing updated
+      # this file to match.
+      #
+      # Refusing to boot is the correct behaviour: a signing key
+      # published in this repository lets anyone forge an admin token
+      # for any deployment that copied it forward, which is exactly what
+      # the denylist exists to stop. The fix is for the quickstart image
+      # to mint an ephemeral key at container start — a Dockerfile
+      # entrypoint change — not to substitute a different literal here.
       JWT_SECRET_KEY: quickstart-demo-key
       JWT_ALGORITHM: HS256
       JWT_EXPIRY_MINUTES: "60"

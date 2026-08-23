@@ -40,6 +40,8 @@ from .base import ProviderCredentials, ProviderIdentity
 from .claim_mapper import apply_claim_mapping, ClaimMappingError
 from .registry import ProviderConfigSnapshot
 
+from .outbound import BlockedOutboundRequest, fetch_metadata
+
 logger = logging.getLogger(__name__)
 
 
@@ -652,15 +654,22 @@ async def fetch_idp_metadata(url: str, *, timeout: float = 10.0) -> str:
     python3-saml ships ``parse_remote``, but it uses urllib synchronously and
     would block the event loop, so we fetch with httpx and hand the body to
     :func:`parse_idp_metadata`.
+
+    Goes through ``outbound.fetch_metadata``, which refuses a target
+    inside this deployment's own network and — importantly here — does
+    not follow redirects. This call used to set
+    ``follow_redirects=True``, which meant a public URL could bounce the
+    request to an internal one after any pre-flight check had already
+    passed. No IdP needs a redirect to serve its own metadata.
     """
     import httpx
 
     if not (url or "").strip():
         raise SamlError("metadata URL is required")
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(url.strip())
-            resp.raise_for_status()
-            return resp.text
+        resp = await fetch_metadata(url.strip(), timeout=timeout)
+        return resp.text
+    except BlockedOutboundRequest as exc:
+        raise SamlError(f"metadata target refused: {exc}") from exc
     except httpx.HTTPError as exc:
         raise SamlError(f"could not fetch metadata: {exc}") from exc

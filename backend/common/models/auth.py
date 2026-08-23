@@ -91,6 +91,20 @@ class AdminResetPasswordRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     new_password: str = Field(alias="newPassword", min_length=8)
+    #: Required to give a password to an account that has none.
+    #:
+    #: An SSO-only account carries the disabled-password sentinel, and
+    #: that sentinel is what keeps the user on the IdP path — which is
+    #: where the org's conditional access and MFA live. Setting a
+    #: password removes it permanently and silently, converting a
+    #: federated identity into one that can sign in around the IdP.
+    #:
+    #: There are legitimate reasons to do it (an org retiring SSO), so
+    #: this is a deliberate switch rather than a refusal — but it has to
+    #: be asked for, and it is audited when used.
+    allow_sso_only_override: bool = Field(
+        default=False, alias="allowSsoOnlyOverride",
+    )
 
 
 class ChangeMyPasswordRequest(BaseModel):

@@ -391,6 +391,28 @@ SSO_SESSION_MAX_AGE_HOURS: float = float(
 SSO_SESSION_MAX_AGE_SECONDS: int = int(SSO_SESSION_MAX_AGE_HOURS * 3600)
 
 
+# Hostnames this deployment answers to, comma-separated. Empty = accept
+# whatever the request claims, which is the historical behaviour.
+#
+# It matters for one specific thing: python3-saml validates an
+# assertion's ``Destination`` and ``Recipient`` against the URL it
+# believes it was reached at, and that URL is built from the Host /
+# X-Forwarded-Host headers. nginx passes ``Host $host`` through from a
+# catch-all ``server_name _``, and gunicorn's ``--forwarded-allow-ips``
+# does not filter X-Forwarded-Host at all — so an attacker replaying an
+# assertion minted for a DIFFERENT service provider can set the header
+# to match its Destination and satisfy the check.
+#
+# Note what this is NOT for: the app sends no email and builds no reset
+# or invite links, so there is no Host-poisoning-to-account-takeover
+# chain here. Scoping the claim keeps the setting honest.
+ALLOWED_HOSTS: tuple[str, ...] = tuple(
+    h.strip().lower()
+    for h in os.getenv("ALLOWED_HOSTS", "").split(",")
+    if h.strip()
+)
+
+
 # Absolute and idle ceilings for EVERY session, SSO or local.
 #
 # Rotation mints a brand-new 7-day refresh token every time, and nothing
