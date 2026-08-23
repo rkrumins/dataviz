@@ -11,6 +11,7 @@
  * keyed on the data source, and the catalog-only frames (a provider asset
  * nobody has onboarded yet) have nothing to show.
  */
+import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowUpRight, History, Loader2 } from 'lucide-react'
 
@@ -37,7 +38,14 @@ export function HistoryCard({ dataSourceId, catalogId, className }: {
     // Fixed 30-day window here. The card is a glance, not a control surface:
     // a second window selector inside a 440px drawer would compete with the
     // real one on the History view for no gain.
-    const range = resolveWindow('30d')
+    //
+    // MEMOISED, and that is not a micro-optimisation. `resolveWindow` ends the
+    // range at `new Date()`, and the range is part of the query key — so
+    // computing it during render gave every render a new key, hence a new
+    // pending query, hence another render. The card sat on "Loading history…"
+    // forever and refetched in a loop for as long as it was mounted. Freeze it
+    // at mount; `staleTime` and refetch-on-focus keep it current.
+    const range = useMemo(() => resolveWindow('30d'), [])
     const { data, isLoading } = useCountHistory(dataSourceId, range, {
         enabled: canRead,
     })
