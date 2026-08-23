@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,7 +59,10 @@ _SURFACES = ("summary", "workspaces")
 #: How often to recompute. Long enough that the aggregation cost is negligible
 #: (12 documents per pass on one replica), short enough that "as of 4 minutes
 #: ago" is not a number anyone argues with.
-_DEFAULT_INTERVAL_SECONDS = 300.0
+#:
+#: Aliased rather than restated: the warm cadence and the epoch grid must be
+#: the same number, and a second literal here is how they drift apart again.
+_DEFAULT_INTERVAL_SECONDS = analytics_cache._DEFAULT_EPOCH_SECONDS
 
 #: How many epochs an entry outlives. It was three, so a warmed document
 #: survived a missed pass and a stalled warmer degraded to staler numbers
@@ -72,27 +74,17 @@ _TTL_MULTIPLE = 2
 
 
 def interval_seconds() -> float:
-    """Refresh interval, overridable per deployment."""
-    raw = os.getenv("ANALYTICS_WARM_INTERVAL_SECONDS")
-    if not raw:
-        return _DEFAULT_INTERVAL_SECONDS
-    try:
-        parsed = float(raw)
-    except ValueError:
-        logger.warning(
-            "ANALYTICS_WARM_INTERVAL_SECONDS=%r is not a number; using %.0f",
-            raw, _DEFAULT_INTERVAL_SECONDS,
-        )
-        return _DEFAULT_INTERVAL_SECONDS
-    # A very short interval turns the warmer into the load it was meant to
-    # remove: each pass is ~25 grouped queries per window.
-    if parsed < 30:
-        logger.warning(
-            "ANALYTICS_WARM_INTERVAL_SECONDS=%.0f is too aggressive; "
-            "clamping to 30s.", parsed,
-        )
-        return 30.0
-    return parsed
+    """Refresh interval, overridable per deployment.
+
+    Delegates rather than parsing the variable a second time. Both readers used
+    to clamp it themselves and disagreed — the cache allowed a 1-second grid
+    while this floored at 30 — so a short setting gave readers one epoch length
+    and the warmer another, and every pass wrote keys for a slot the readers
+    had already left. The pass is phase-locked to this value and the epoch is
+    stamped from the same one, which only holds while there is exactly one
+    place that decides it.
+    """
+    return analytics_cache.epoch_seconds()
 
 
 async def warm_once(session: AsyncSession, *, ttl: float | None = None) -> int:
