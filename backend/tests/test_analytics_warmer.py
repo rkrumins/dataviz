@@ -132,3 +132,26 @@ def test_the_interval_cannot_be_configured_into_a_load_generator(monkeypatch):
 
     monkeypatch.setenv("ANALYTICS_WARM_INTERVAL_SECONDS", "600")
     assert analytics_warmer.interval_seconds() == 600.0
+
+
+def test_the_warmer_and_the_readers_share_one_grid(monkeypatch):
+    """One variable, one clamp.
+
+    The warmer floored ``ANALYTICS_WARM_INTERVAL_SECONDS`` at 30 while the cache
+    that stamps the epoch allowed 1, so setting it to 10 gave readers a 10s grid
+    and the warmer a 30s cadence phase-locked to a 30s grid. Every pass then
+    wrote keys for a slot the readers had already left: the warmer warmed
+    nothing, silently, and the only symptom was a slow dashboard.
+    """
+    from backend.app.services import analytics_cache
+
+    for raw in ("1", "10", "29", "300", "600", "nonsense", ""):
+        monkeypatch.setenv("ANALYTICS_WARM_INTERVAL_SECONDS", raw)
+        assert analytics_warmer.interval_seconds() == analytics_cache.epoch_seconds(), (
+            f"warm cadence and epoch grid disagree at {raw!r}"
+        )
+
+    # And the floor still holds wherever it is now applied.
+    monkeypatch.setenv("ANALYTICS_WARM_INTERVAL_SECONDS", "1")
+    assert analytics_warmer.interval_seconds() == 30.0
+

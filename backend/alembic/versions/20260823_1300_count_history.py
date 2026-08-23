@@ -1,7 +1,7 @@
 """Historical entity counts: append-only per-source count snapshots.
 
-Revision ID: 20260820_1200_count_history
-Revises: 20260817_1400_recon_pause
+Revision ID: 20260823_1300_count_history
+Revises: 20260823_1200_analytics_perm
 Create Date: 2026-08-20 12:00
 
 ``data_source_stats`` is a single row per data source, upserted in place —
@@ -40,8 +40,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260820_1200_count_history"
-down_revision: Union[str, None] = "20260817_1400_recon_pause"
+revision: str = "20260823_1300_count_history"
+down_revision: Union[str, None] = "20260823_1200_analytics_perm"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

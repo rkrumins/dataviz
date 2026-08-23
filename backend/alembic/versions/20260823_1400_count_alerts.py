@@ -1,7 +1,7 @@
 """Counts anomalies: recorded alerts plus the policy behind them.
 
-Revision ID: 20260821_1200_count_alerts
-Revises: 20260820_1200_count_history
+Revision ID: 20260823_1400_count_alerts
+Revises: 20260823_1300_count_history
 Create Date: 2026-08-21 12:00
 
 ``data_source_count_snapshots`` records what happened to a graph. This records
@@ -37,8 +37,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260821_1200_count_alerts"
-down_revision: Union[str, None] = "20260820_1200_count_history"
+revision: str = "20260823_1400_count_alerts"
+down_revision: Union[str, None] = "20260823_1300_count_history"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

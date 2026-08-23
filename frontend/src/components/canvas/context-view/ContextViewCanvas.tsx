@@ -142,6 +142,10 @@ const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
  *  projecting it only produces noise (see the call site). */
 const EMPTY_EDGES: unknown[] = []
 const EMPTY_AGG_EDGES: Map<string, unknown> = new Map()
+/** Module constant, not an inline `?? []`. `LayerColumn` is `React.memo`'d, and
+ *  a fresh array literal per render defeated that memo for every EMPTY column —
+ *  so the columns with nothing in them re-rendered on every canvas render. */
+const EMPTY_LAYER_NODES: HierarchyNode[] = []
 /** Trailing edge for recording the reader's expansion into the history
  *  entry. One reveal opens a whole chain and one drill peels a level per
  *  click; without this each of those rewrites the entry (and its
@@ -1427,6 +1431,7 @@ export function ContextViewCanvas({
     // Defer two frames: first to let React commit the padding change, second
     // to let layout settle so getBoundingClientRect reads the new geometry.
     let cancelRaf2: number | null = null
+    let settleTimer: ReturnType<typeof setTimeout> | null = null
     const raf1 = requestAnimationFrame(() => {
       cancelRaf2 = requestAnimationFrame(() => {
         const container = horizontalScrollRef.current
@@ -1463,7 +1468,7 @@ export function ContextViewCanvas({
           })
           // Lineage edges measure node positions from the DOM; redraw once the
           // smooth scroll has settled so trace edges follow the column.
-          setTimeout(() => triggerEdgeRedrawRef.current?.(), 350)
+          settleTimer = setTimeout(() => triggerEdgeRedrawRef.current?.(), 350)
         }
         lastAutoScrolledForSelectionRef.current = selectedNodeId
       })
@@ -1471,6 +1476,9 @@ export function ContextViewCanvas({
     return () => {
       cancelAnimationFrame(raf1)
       if (cancelRaf2 != null) cancelAnimationFrame(cancelRaf2)
+      // The settle-redraw timer outlived this cleanup, so a rapid selection
+      // change left redraws queued against a scroll that had been superseded.
+      if (settleTimer != null) clearTimeout(settleTimer)
     }
   }, [selectedNodeId, isEdgePanelOpen, effectiveAssignments])
 
@@ -5004,7 +5012,7 @@ export function ContextViewCanvas({
               <LayerColumn
                 key={layer.id}
                 layer={layer}
-                nodes={renderByLayer.get(layer.id) ?? []}
+                nodes={renderByLayer.get(layer.id) ?? EMPTY_LAYER_NODES}
                 schema={schema}
                 // An empty column means something different in each: in a Context View the
                 // entities exist and just aren't assigned here; in a blank model nothing has

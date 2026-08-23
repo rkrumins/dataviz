@@ -7,7 +7,10 @@
  */
 import { useQuery } from '@tanstack/react-query'
 
-import { getViewUsage, type ViewUsage } from '@/services/contentInsightsService'
+import {
+    getViewUsage, getWorkspaceUsage,
+    type ViewUsage, type WorkspaceUsage,
+} from '@/services/contentInsightsService'
 
 /** Window for in-product usage. Deliberately fixed rather than a control: this
  *  is a glance, not a dashboard, and a range picker on a view page would be a
@@ -25,6 +28,17 @@ export function useViewUsage(viewIds: string[], enabled = true) {
         // as someone pans a canvas would be pure noise.
         staleTime: 5 * 60_000,
         // Never retry: this is decoration on someone else's page.
+        retry: false,
+    })
+}
+
+export function useWorkspaceUsage(workspaceIds: string[], enabled = true) {
+    const key = [...workspaceIds].sort()
+    return useQuery<Record<string, WorkspaceUsage>>({
+        queryKey: ['workspace-usage', USAGE_WINDOW_DAYS, key.join(',')],
+        queryFn: () => getWorkspaceUsage(key, USAGE_WINDOW_DAYS),
+        enabled: enabled && key.length > 0,
+        staleTime: 5 * 60_000,
         retry: false,
     })
 }

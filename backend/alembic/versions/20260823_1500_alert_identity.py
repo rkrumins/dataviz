@@ -1,7 +1,7 @@
 """Alerts: a fourth severity, and the names behind the ids.
 
-Revision ID: 20260821_1500_alert_identity
-Revises: 20260821_1200_count_alerts
+Revision ID: 20260823_1500_alert_identity
+Revises: 20260823_1400_count_alerts
 Create Date: 2026-08-21 15:00
 
 Two changes, both about answering "what exactly is broken" without a second
@@ -34,8 +34,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "20260821_1500_alert_identity"
-down_revision: Union[str, None] = "20260821_1200_count_alerts"
+revision: str = "20260823_1500_alert_identity"
+down_revision: Union[str, None] = "20260823_1400_count_alerts"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

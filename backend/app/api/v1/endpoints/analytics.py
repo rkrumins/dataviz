@@ -4,10 +4,17 @@ Three read-only endpoints backing the Analytics section: a platform-wide
 summary, one aggregate row per workspace, and a per-workspace drill-down.
 All aggregation lives in ``analytics_repo``; this module is the HTTP contract.
 
-**Access.** Gated on ``system:audit:read`` OR ``system:org-admin`` (and
-``system:admin``, which implies everything). Growth and per-user activity is
-the same class of read as the audit log — but cross-workspace operators are a
-legitimate second audience, and neither permission implies the other.
+**Access.** Gated on ``system:analytics:read`` — the dedicated privilege —
+or on ``system:org-admin`` / ``system:audit:read``, kept as implications for
+deployments whose roles predate it, or on ``system:admin``, which implies
+everything. Resolved once by ``analytics_scope.resolve_scope``, which answers
+"may they load this?" and "what may they be told?" together. With
+``analyticsPublicEnabled`` on, everyone else gets a redacted document instead
+of a refusal.
+
+**Pool.** These are aggregate reads on a page people leave open, so they take
+``get_readonly_db_session``: a dashboard rebuild must not sit in the WEB pool
+that serves the rest of the product.
 
 **Window.** ``days`` matches the ``/admin/telemetry/summary?days=`` convention
 already in the codebase. Totals are all-time; everything else is measured over
@@ -20,8 +27,8 @@ safety — the frontend's ``analyticsService`` types are the consumed contract.
 """
 from __future__ import annotations
 
-import copy
 from datetime import datetime
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -29,7 +36,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.engine import get_db_session
+from backend.app.db.engine import get_readonly_db_session
 from backend.app.db.repositories import analytics_repo
 from backend.app.services import analytics_cache
 from backend.app.services.analytics_scope import ViewerScope, resolve_scope
@@ -111,15 +118,36 @@ async def _serve(
     request. `_serve` is the only way anything leaves this cache, and it cannot
     return a document without applying a redactor to it.
 
-    The copy is not optional. Cache hits from the in-process tier hand back the
-    SAME object every time, and the redactors assign into the document they are
-    given — so redacting in place would edit the shared entry and serve the
-    first reader's redaction to the second.
+    THE COPY, AND WHAT IT ACTUALLY GUARDS. Cache hits from the in-process tier
+    hand back the SAME object every time, so anything a redactor writes into
+    the document it is given would edit the shared entry and serve the first
+    reader's redaction to the second.
+
+    Today no redactor does that: each one shallow-copies and then reassigns
+    whole top-level keys with freshly built objects. The copy here is therefore
+    insurance, not a fix for a live bug — but it is the cheap kind. A future
+    redactor reaching one level deeper (``doc["health"]["access"] = …``) would
+    corrupt the shared entry silently, for every subsequent reader, and a
+    cross-reader disclosure is not a class of bug worth leaving to a convention
+    nothing enforces.
+
+    So it is kept for readers who get redacted, and skipped for the privileged,
+    whose redactors provably return the document untouched — there it was a
+    deep clone of twelve series, a ghost series, cohort grids and four
+    leaderboards, made on the event loop and discarded unchanged, on the
+    posture this section actually ships in.
+
+    Where a copy IS taken it goes through JSON rather than ``copy.deepcopy``.
+    The document is already pure JSON data — Redis stores it via ``json.dumps``
+    — and a C round trip beats a pure-Python recursive clone carrying a memo
+    table across every field it touches.
     """
     raw = await analytics_cache.cached(key, build)
     if raw is None:
         return None
-    return redact(copy.deepcopy(raw), scope)
+    if scope.privileged:
+        return redact(raw, scope)
+    return redact(json.loads(json.dumps(raw)), scope)
 
 
 @router.get("/summary")
@@ -128,7 +156,7 @@ async def analytics_summary(
     date_from: str | None = _FROM,
     date_to: str | None = _TO,
     scope: ViewerScope = Depends(resolve_scope),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_readonly_db_session),
 ) -> dict[str, Any]:
     """Platform-wide KPIs, time series, breakdowns, leaderboards, and funnel."""
     args = _window_args(days, date_from, date_to)
@@ -152,7 +180,7 @@ async def analytics_workspaces(
     date_from: str | None = _FROM,
     date_to: str | None = _TO,
     scope: ViewerScope = Depends(resolve_scope),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_readonly_db_session),
 ) -> list[dict[str, Any]]:
     """One aggregate row per live workspace — the Workspaces tab's table."""
     args = _window_args(days, date_from, date_to)
@@ -175,7 +203,7 @@ async def analytics_workspace_detail(
     date_from: str | None = _FROM,
     date_to: str | None = _TO,
     scope: ViewerScope = Depends(resolve_scope),
-    session: AsyncSession = Depends(get_db_session),
+    session: AsyncSession = Depends(get_readonly_db_session),
 ) -> dict[str, Any]:
     """Full insights for one workspace, in the same shape as the summary."""
     args = _window_args(days, date_from, date_to)

@@ -1,6 +1,25 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
+import { sameRows } from './rowEquality'
+
+/**
+ * Keep the previous viewport object when neither number moved.
+ *
+ * The scroll handler minted a fresh `{scrollTop, clientHeight}` on every
+ * animation frame, so the overlay re-rendered — and re-filtered every edge —
+ * per frame even when the scroller had not actually moved (a rubber-band, a
+ * horizontal-only scroll, a resize that changed nothing vertically).
+ */
+function nextViewport(
+  prev: { scrollTop: number; clientHeight: number },
+  scrollTop: number,
+  clientHeight: number,
+): { scrollTop: number; clientHeight: number } {
+  return prev.scrollTop === scrollTop && prev.clientHeight === clientHeight
+    ? prev
+    : { scrollTop, clientHeight }
+}
 import { groupAnchorProxies, anchorRailFingerprint } from './anchorRail'
 import type { AnchorProxyCandidate } from './anchorRail'
 import { useColumnPeripheryStore, PERIPHERY_PARTNER_CAP } from '@/store/columnPeriphery'
@@ -224,15 +243,10 @@ export function LineageFlowOverlay({
       // viewport.scrollTop/clientHeight stale for the edge-virtualization cull.
       scrollParentRef.current = containerRef.current.closest('.overflow-auto') as HTMLElement
       if (scrollParentRef.current) {
-        setViewport({
-          scrollTop: scrollParentRef.current.scrollTop,
-          clientHeight: scrollParentRef.current.clientHeight
-        })
+        const sp = scrollParentRef.current
+        setViewport(prev => nextViewport(prev, sp.scrollTop, sp.clientHeight))
       } else {
-        setViewport({
-          scrollTop: 0,
-          clientHeight: containerRect.height || window.innerHeight
-        })
+        setViewport(prev => nextViewport(prev, 0, containerRect.height || window.innerHeight))
       }
     }
 
@@ -699,7 +713,9 @@ export function LineageFlowOverlay({
       // is the single, honest off-screen indicator.
     })
 
-    setComputedEdges(newComputedEdges)
+    // Keep the previous array when nothing moved — see rowEquality.ts. A scroll
+    // or resize tick that changes no geometry must cost zero edge renders.
+    setComputedEdges(prev => (sameRows(prev, newComputedEdges) ? prev : newComputedEdges))
 
     // ── Per-node lineage ribbons ────────────────────────────────────────
     //
@@ -774,8 +790,8 @@ export function LineageFlowOverlay({
         partnerTotal: bucket.partnerSet.size,
       })
     })
-    setOverflowBadges(badges)
-    setProxyEdges(proxyEdgesNext)
+    setOverflowBadges(prev => (sameRows(prev, badges) ? prev : badges))
+    setProxyEdges(prev => (sameRows(prev, proxyEdgesNext) ? prev : proxyEdgesNext))
 
     // Periphery emission — through the dedicated store so only the
     // columns whose numbers changed re-render (never the canvas), and
@@ -1072,10 +1088,7 @@ export function LineageFlowOverlay({
     const handleScroll = () => {
       if (rafId !== null) return // debounce
       rafId = requestAnimationFrame(() => {
-        setViewport({
-          scrollTop: scrollParent.scrollTop,
-          clientHeight: scrollParent.clientHeight
-        })
+        setViewport(prev => nextViewport(prev, scrollParent.scrollTop, scrollParent.clientHeight))
         rafId = null
       })
     }
@@ -1122,41 +1135,72 @@ export function LineageFlowOverlay({
   }, [updateFlow, scheduleUpdate, expandedNodesFingerprint])
 
   // ── 4.2 Hover Preview ────────────────────────────────────────────────────────
-  // Pure DOM/CSS — zero React re-renders. Reads document.dataset.hoveredNode set
-  // by FlatTreeItem, then dims/highlights visual edge <g> elements directly.
+  //
+  // Still pure DOM/CSS — no React re-render on hover — but event-driven and
+  // O(edges touching the hovered node) rather than what this used to be: an
+  // unconditional `requestAnimationFrame` recursion running for the overlay's
+  // entire lifetime, polling `document.documentElement.dataset.hoveredNode` 60
+  // times a second whether or not anything was hovered, and on each change
+  // walking EVERY edge <g> to write an inline `opacity`.
+  //
+  // Two things are different now:
+  //
+  //  * A `MutationObserver` on the one attribute replaces the poll, so an idle
+  //    board schedules no frames at all.
+  //  * The dimming is expressed in CSS off `data-flow-hover` on the container
+  //    plus `data-edge-hot` on the few edges that actually touch the hovered
+  //    node (see globals.css). Only the matching edges are touched, and only
+  //    the previously-matching ones are cleared.
+  //
+  // The effect deliberately has NO dependency array: it re-runs after every
+  // render so the marks are re-applied to elements React has just re-created.
+  // The old version could not do that — it kept `lastNode` in a closure, saw no
+  // change, and left the freshly-rendered edges undimmed until the pointer moved
+  // again, which is the highlight "flickering" on and off.
+  const hotEdgesRef = useRef<SVGGElement[]>([])
   useEffect(() => {
-    let rafId: number
-    let lastNode: string | undefined
+    const applyHover = () => {
+      const container = containerRef.current
+      if (!container) return
+      // Detached nodes (React re-rendered under us) ignore this harmlessly.
+      for (const g of hotEdgesRef.current) g.removeAttribute('data-edge-hot')
+      hotEdgesRef.current = []
 
-    const tick = () => {
       const hovered = document.documentElement.dataset.hoveredNode
-      if (hovered !== lastNode) {
-        lastNode = hovered
-        const groups = containerRef.current?.querySelectorAll<SVGGElement>('g[data-edge-id]')
-        groups?.forEach(g => {
-          if (!hovered) {
-            g.style.removeProperty('opacity')
-          } else if (g.dataset.edgeSrc === hovered || g.dataset.edgeTgt === hovered) {
-            g.style.opacity = '1'
-          } else {
-            g.style.opacity = '0.06'
-          }
-        })
+      if (!hovered) {
+        container.removeAttribute('data-flow-hover')
+        return
       }
-      rafId = requestAnimationFrame(tick)
+      container.setAttribute('data-flow-hover', '')
+      const id = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(hovered) : hovered
+      const hot = Array.from(
+        container.querySelectorAll<SVGGElement>(`g[data-edge-src="${id}"], g[data-edge-tgt="${id}"]`),
+      )
+      for (const g of hot) g.setAttribute('data-edge-hot', '')
+      hotEdgesRef.current = hot
     }
 
-    rafId = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(rafId)
-  }, [])
+    applyHover()
 
-  // VERY FAST Virtualization Filter: Only render edges that intersect the scroll viewport
+    if (typeof MutationObserver === 'undefined') return
+    const observer = new MutationObserver(applyHover)
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-hovered-node'],
+    })
+    return () => observer.disconnect()
+  })
+
   const VIEWPORT_MARGIN = 400
-  const visibleEdges = computedEdges.filter(edge => {
+  // VERY FAST Virtualization Filter: Only render edges that intersect the scroll
+  // viewport. Memoized: this ran on EVERY render of the overlay, re-walking the
+  // full edge list each time — and with the two guards above the common render is
+  // now one where neither `computedEdges` nor `viewport` moved at all.
+  const visibleEdges = useMemo(() => computedEdges.filter(edge => {
     if (edge.maxY < viewport.scrollTop - VIEWPORT_MARGIN) return false
     if (edge.minY > viewport.scrollTop + viewport.clientHeight + VIEWPORT_MARGIN) return false
     return true
-  })
+  }), [computedEdges, viewport])
 
   // ── Density-adaptive render tier ───────────────────────────────────────
   //
