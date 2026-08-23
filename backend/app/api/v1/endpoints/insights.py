@@ -48,7 +48,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel, Field
 
-from backend.app.auth.dependencies import get_current_user, requires
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_permission_claims,
+    requires,
+)
+from backend.app.services.permission_service import PermissionClaims
 from backend.app.config import resilience
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
@@ -1018,6 +1023,24 @@ def _auto_grain(frm: str, to: str) -> str:
     return "day"
 
 
+async def _history_scope(
+    session: AsyncSession, claims: PermissionClaims,
+) -> Optional[set]:
+    """Which data sources may this caller be told about? ``None`` = all.
+
+    The seam between the two journeys. A platform operator
+    (``system:admin`` / ``system:org-admin``) reads the whole deployment; a
+    workspace-bound caller reads the sources in their own workspaces, and the
+    SAME rollup endpoints then answer "everything I own" rather than
+    "everything there is". One set of endpoints, two altitudes, no second
+    implementation to drift.
+    """
+    from backend.app.services.workspace_visibility import (
+        compute_visible_data_source_ids,
+    )
+    return await compute_visible_data_source_ids(session, claims)
+
+
 def _significance_of(row, baseline: int) -> str:
     """Classify one raw snapshot, supplying the pre-movement count so the
     proportional ``critical`` test can run."""
@@ -1179,6 +1202,7 @@ async def get_data_source_history(
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None, description="raw | hour | day | auto"),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> dict:
     """Counts over time for one data source, per label, with deltas.
 
@@ -1190,6 +1214,11 @@ async def get_data_source_history(
     from backend.app.db.repositories import stats_history_repo
 
     ds_id = await _resolve_history_scope(session, ds_id)
+    # Authorise AFTER resolution: the route accepts a catalog id too, and the
+    # thing that must be checked is the workspace data source it resolves to.
+    # 404 rather than 403 so ids cannot be enumerated by watching the refusal.
+    from backend.app.services.workspace_visibility import ensure_data_source_visible
+    await ensure_data_source_visible(session, claims, ds_id)
     window_from, window_to = _history_window(frm, to)
     resolved_grain = (
         _auto_grain(window_from, window_to)
@@ -1454,6 +1483,7 @@ async def get_provider_history(
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None, description="hour | day | auto"),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> dict:
     """The same series rolled up across every onboarded source on a provider.
 
@@ -1481,9 +1511,14 @@ async def get_provider_history(
         resolved_grain = "hour"
     width = 13 if resolved_grain == "hour" else 10
 
+    # Tenant scope, applied in SQL rather than after the fact. An operator gets
+    # None (the whole deployment); a workspace-bound caller gets their own
+    # sources, so this same endpoint answers "every source I own on this
+    # provider" for one persona and "every source on it" for the other.
     rows = await stats_history_repo.rollup_rows(
         session, frm=window_from, to=window_to, width=width,
         provider_id=provider_id,
+        data_source_ids=await _history_scope(session, claims),
     )
 
     totals, sources = _align_rollup(rows, group="source")
@@ -1517,6 +1552,7 @@ async def get_fleet_history(
     to: Optional[str] = Query(None),
     grain: Optional[str] = Query(None, description="hour | day | auto"),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> dict:
     """Total entities over time across every onboarded source, series per
     provider.
@@ -1541,8 +1577,13 @@ async def get_fleet_history(
         resolved_grain = "hour"
     width = 13 if resolved_grain == "hour" else 10
 
+    # Same endpoint, two altitudes. For an operator this is the platform; for a
+    # workspace-bound caller it is every source they own, across every provider
+    # and workspace they are in — which is the rollup that journey actually
+    # wants and had no way to ask for.
     rows = await stats_history_repo.rollup_rows(
         session, frm=window_from, to=window_to, width=width,
+        data_source_ids=await _history_scope(session, claims),
     )
     totals, providers = _align_rollup(rows, group="provider")
 
@@ -1587,6 +1628,7 @@ async def export_data_source_history_csv(
     frm: Optional[str] = Query(None, alias="from"),
     to: Optional[str] = Query(None),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ):
     """The raw series as CSV — always raw, never downsampled.
 
@@ -1608,6 +1650,11 @@ async def export_data_source_history_csv(
     from backend.app.db.repositories import stats_history_repo
 
     ds_id = await _resolve_history_scope(session, ds_id)
+    # Authorise AFTER resolution: the route accepts a catalog id too, and the
+    # thing that must be checked is the workspace data source it resolves to.
+    # 404 rather than 403 so ids cannot be enumerated by watching the refusal.
+    from backend.app.services.workspace_visibility import ensure_data_source_visible
+    await ensure_data_source_visible(session, claims, ds_id)
     window_from, window_to = _history_window(frm, to)
     rows = await stats_history_repo.list_snapshots(
         session, ds_id, frm=window_from, to=window_to,
@@ -1765,6 +1812,7 @@ async def list_count_alerts(
     open_only: bool = Query(False, alias="openOnly"),
     limit: int = Query(100, ge=1, le=500),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> CountAlertsResponse:
     """Newest first, fleet-wide or scoped to one source.
 
@@ -1776,14 +1824,20 @@ async def list_count_alerts(
     from backend.app.db.repositories import count_alerts_repo
 
     resolved = await _resolve_history_scope(session, ds_id) if ds_id else None
+    # The caller's tenant scope bounds BOTH reads. The badge especially: an
+    # operator's open count is the deployment's, a workspace user's is their
+    # own, and a badge counting anomalies someone cannot open is a number they
+    # can do nothing about.
+    visible = await _history_scope(session, claims)
     rows = await count_alerts_repo.list_alerts(
         session,
         data_source_id=resolved,
+        data_source_ids=visible,
         unacknowledged_only=open_only,
         limit=limit,
     )
     open_rows = await count_alerts_repo.list_alerts(
-        session, unacknowledged_only=True, limit=500,
+        session, data_source_ids=visible, unacknowledged_only=True, limit=500,
     )
     return CountAlertsResponse(
         alerts=[_alert_model(r) for r in rows],
@@ -1798,16 +1852,32 @@ async def list_count_alerts(
 )
 async def acknowledge_count_alert(
     alert_id: str = Path(...),
-    # Identity, not authorisation — the router gate already decided that.
-    # Whoever can see an anomaly can clear it: making acknowledgement
-    # admin-only leaves the person who actually fixed the loader unable to
-    # say so, and the alert then nags everyone who cannot act on it.
+    # Identity, not authorisation — the router gate decides WHETHER, the scope
+    # check below decides WHICH. Whoever can see an anomaly can clear it:
+    # admin-only acknowledgement leaves the person who actually fixed the
+    # loader unable to say so, and the alert then nags everyone who cannot act.
     user=Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> dict:
     """Idempotent, and the first acknowledgement wins — re-acknowledging must
     not rewrite who actually looked at it."""
     from backend.app.db.repositories import count_alerts_repo
+
+    # Scope BEFORE the write. Acknowledging is a mutation of shared state — it
+    # silences the alert for everyone it was raised to — so clearing another
+    # tenant's anomaly would be worse than merely reading one.
+    from backend.app.services.workspace_visibility import (
+        compute_visible_data_source_ids,
+    )
+    visible = await compute_visible_data_source_ids(session, claims)
+    existing = await count_alerts_repo.get_alert(session, alert_id)
+    if existing is None or (
+        visible is not None and existing.data_source_id not in visible
+    ):
+        # Same 404 either way: whether it does not exist or is not yours is
+        # itself information.
+        raise HTTPException(status_code=404, detail=f"Alert {alert_id!r} not found")
 
     row = await count_alerts_repo.acknowledge(
         session, alert_id, actor_id=getattr(user, "id", None),

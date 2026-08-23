@@ -29,7 +29,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -403,13 +403,28 @@ async def list_alerts(
     session: AsyncSession,
     *,
     data_source_id: Optional[str] = None,
+    data_source_ids: Optional[Set[str]] = None,
     unacknowledged_only: bool = False,
     limit: int = 100,
 ) -> List[DataSourceCountAlertORM]:
-    """Newest first. Scoped to one source, or the whole fleet."""
+    """Newest first. Scoped to one source, or the whole fleet.
+
+    ``data_source_ids`` is the caller's TENANT scope and is separate from
+    ``data_source_id``, which is a filter the caller chose. ``None`` means
+    unrestricted (a platform operator); an EMPTY set means a caller who may see
+    nothing, and must therefore be given nothing.
+
+    Applied in SQL, not after the read, because ``limit`` would otherwise be
+    spent on rows the caller is not allowed to see — a workspace user would get
+    a short page, or an empty one, while alerts they own sat just past the cut.
+    """
     stmt = select(DataSourceCountAlertORM)
     if data_source_id:
         stmt = stmt.where(DataSourceCountAlertORM.data_source_id == data_source_id)
+    if data_source_ids is not None:
+        stmt = stmt.where(
+            DataSourceCountAlertORM.data_source_id.in_(data_source_ids)
+        )
     if unacknowledged_only:
         stmt = stmt.where(DataSourceCountAlertORM.acknowledged_at.is_(None))
     stmt = stmt.order_by(DataSourceCountAlertORM.detected_at.desc()).limit(limit)
@@ -472,3 +487,17 @@ __all__: Sequence[str] = (
     "resolve_alert_policy",
     "sources_to_evaluate",
 )
+
+
+async def get_alert(
+    session: AsyncSession, alert_id: str,
+) -> Optional[DataSourceCountAlertORM]:
+    """One alert by id, or None.
+
+    Exists so a caller can check WHO an alert belongs to before acting on it.
+    ``acknowledge`` deliberately does not take a tenant scope: mixing "find it"
+    with "may I have it" in one query makes the authorisation invisible at the
+    call site, and this is a mutation of shared state — acknowledging silences
+    the alert for everyone it was raised to.
+    """
+    return await session.get(DataSourceCountAlertORM, alert_id)

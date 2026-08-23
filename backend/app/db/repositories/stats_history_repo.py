@@ -37,7 +37,7 @@ import time as _time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -635,6 +635,7 @@ async def rollup_rows(
     to: str,
     width: int,
     provider_id: Optional[str] = None,
+    data_source_ids: Optional[Set[str]] = None,
 ) -> List[RollupRow]:
     """Each source's LAST observation per bucket, bucketed in SQL.
 
@@ -649,6 +650,14 @@ async def rollup_rows(
     ``provider_id`` scopes it to one provider; omitted, it is the whole
     platform. The window function is the same one ``latest_refresh_event_map``
     already uses, so it is portable to the SQLite the tests run on.
+
+    ``data_source_ids`` is the TENANT scope, and it is separate from
+    ``provider_id`` on purpose: one says which slice of the platform is being
+    asked about, the other says which slice the asker is allowed to be told
+    about. ``None`` means unrestricted — the platform operator — and an EMPTY
+    set means a caller who can see nothing, which must return nothing rather
+    than everything. Passing an empty set through as "no filter" is the
+    classic way this kind of scoping fails open.
     """
     bucket = func.substr(DataSourceCountSnapshotORM.captured_at, 1, width).label("bucket")
     ranked = (
@@ -671,6 +680,12 @@ async def rollup_rows(
     )
     if provider_id is not None:
         ranked = ranked.where(DataSourceCountSnapshotORM.provider_id == provider_id)
+    if data_source_ids is not None:
+        # `.in_(())` is a guaranteed-false predicate in SQLAlchemy, which is
+        # exactly right: a caller scoped to no sources gets no rows.
+        ranked = ranked.where(
+            DataSourceCountSnapshotORM.data_source_id.in_(data_source_ids)
+        )
 
     sub = ranked.subquery()
     rows = (await session.execute(

@@ -22,6 +22,28 @@ from backend.app.db.models import (
 from backend.app.db.repositories import stats_history_repo
 
 
+# ── The two journeys ────────────────────────────────────────────────
+# History answers the same questions at two altitudes, and which one you get
+# is decided by your claims, not by a different endpoint. These are the two
+# callers every read below is exercised as.
+
+from backend.app.services.permission_service import PermissionClaims
+
+#: The platform operator: sees every onboarded source in the deployment.
+OPERATOR = PermissionClaims(sid="sess_op", global_perms=("system:admin",), ws_perms={})
+
+
+def workspace_claims(*workspace_ids: str) -> PermissionClaims:
+    """A workspace-bound caller: sees only the sources in these workspaces."""
+    return PermissionClaims(
+        sid="sess_ws",
+        global_perms=(),
+        ws_perms={ws: ("workspace:datasource:manage",) for ws in workspace_ids},
+    )
+
+
+
+
 DS_ID = "ds_ep1"
 
 
@@ -80,8 +102,7 @@ async def test_no_history_reports_computing_rather_than_404(
     """A source whose first snapshot has not landed is a normal, self-resolving
     state. A 404 would read as "this source does not exist"."""
     result = await insights.get_data_source_history(
-        ds_id="ds_never_seen", session=db_session,
-    )
+        ds_id="ds_never_seen", session=db_session, claims=OPERATOR)
     assert result["meta"]["status"] == "computing"
     assert result["meta"]["source"] == "none"
     assert result["data"]["points"] == []
@@ -91,7 +112,7 @@ async def test_history_reports_fresh_when_points_exist(db_session: AsyncSession)
     await _snap(db_session, at=_iso(3), entities={"Table": 10})
     await _snap(db_session, at=_iso(1), entities={"Table": 12}, delta=2)
 
-    result = await insights.get_data_source_history(ds_id=DS_ID, session=db_session)
+    result = await insights.get_data_source_history(ds_id=DS_ID, session=db_session, claims=OPERATOR)
     assert result["meta"]["status"] == "fresh"
     assert len(result["data"]["points"]) == 2
 
@@ -100,7 +121,7 @@ async def test_history_reports_fresh_when_points_exist(db_session: AsyncSession)
 
 async def test_the_default_window_is_thirty_days(db_session: AsyncSession):
     await _snap(db_session, at=_iso(1), entities={"Table": 1})
-    result = await insights.get_data_source_history(ds_id=DS_ID, session=db_session)
+    result = await insights.get_data_source_history(ds_id=DS_ID, session=db_session, claims=OPERATOR)
 
     frm = datetime.fromisoformat(result["data"]["from"])
     span_days = (datetime.now(timezone.utc) - frm).days
@@ -117,8 +138,7 @@ async def test_a_short_window_stays_raw(db_session: AsyncSession):
     # handler directly would otherwise hand it the unresolved Query default and
     # never exercise the auto path at all.
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24), to=None, grain=None, session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24), to=None, grain=None, session=db_session, claims=OPERATOR)
     assert result["data"]["grain"] == "raw"
     assert len(result["data"]["points"]) == 3
 
@@ -128,8 +148,7 @@ async def test_a_long_window_downsamples_to_days(db_session: AsyncSession):
         await _snap(db_session, at=_iso(hours), entities={"Table": 1})
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24 * 60), to=None, grain=None, session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24 * 60), to=None, grain=None, session=db_session, claims=OPERATOR)
     assert result["data"]["grain"] == "day"
 
 
@@ -138,8 +157,7 @@ async def test_a_mid_length_window_downsamples_to_hours(db_session: AsyncSession
         await _snap(db_session, at=_iso(hours), entities={"Table": 1})
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24 * 7), to=None, grain=None, session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24 * 7), to=None, grain=None, session=db_session, claims=OPERATOR)
     assert result["data"]["grain"] == "hour"
 
 
@@ -148,8 +166,7 @@ async def test_an_explicit_grain_is_honoured(db_session: AsyncSession):
         await _snap(db_session, at=_iso(hours), entities={"Table": hours})
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24), grain="day", session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24), grain="day", session=db_session, claims=OPERATOR)
     assert result["data"]["grain"] == "day"
     # One bucket for one day — the closing observation of it.
     assert len(result["data"]["points"]) == 1
@@ -161,8 +178,7 @@ async def test_a_bucket_keeps_its_closing_observation(db_session: AsyncSession):
     await _snap(db_session, at=_iso(4), entities={"Table": 25})
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24), grain="day", session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24), grain="day", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["node_count"] == 25
 
 
@@ -176,8 +192,7 @@ async def test_a_downsampled_bucket_still_reports_its_extremes(
     await _snap(db_session, at=_iso(4), entities={"Table": 100})
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24), grain="day", session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24), grain="day", session=db_session, claims=OPERATOR)
     point = result["data"]["points"][-1]
     assert point["node_min"] == 4
     assert point["node_max"] == 100
@@ -188,8 +203,7 @@ async def test_raw_grain_carries_no_band(db_session: AsyncSession):
     await _snap(db_session, at=_iso(2), entities={"Table": 12})
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24), grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24), grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][0]["node_min"] is None
 
 
@@ -202,8 +216,7 @@ async def test_label_states_name_what_appeared_and_disappeared(
     await _snap(db_session, at=_iso(1), entities={"Table": 12, "Dashboard": 3})
 
     summary = (await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    ))["data"]["summary"]
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR))["data"]["summary"]
     assert summary["labels_added"] == ["Dashboard"]
     assert summary["labels_removed"] == ["Column"]
 
@@ -219,8 +232,7 @@ async def test_the_largest_drop_is_found_from_the_raw_rows(
     await _snap(db_session, at=_iso(28), entities={"Table": 1000}, delta=900)
 
     summary = (await insights.get_data_source_history(
-        ds_id=DS_ID, grain="day", session=db_session,
-    ))["data"]["summary"]
+        ds_id=DS_ID, grain="day", session=db_session, claims=OPERATOR))["data"]["summary"]
     assert summary["largest_drop"] is not None
     assert summary["largest_drop"]["delta"] == -900
     assert summary["largest_drop"]["before"] == 1000
@@ -231,8 +243,7 @@ async def test_no_drop_reports_none(db_session: AsyncSession):
     await _snap(db_session, at=_iso(1), entities={"Table": 20}, delta=10)
 
     summary = (await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    ))["data"]["summary"]
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR))["data"]["summary"]
     assert summary["largest_drop"] is None
 
 
@@ -245,8 +256,7 @@ async def test_coverage_from_reports_the_oldest_row_at_any_age(
     await _snap(db_session, at=_iso(1), entities={"Table": 5})
 
     summary = (await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24), session=db_session,
-    ))["data"]["summary"]
+        ds_id=DS_ID, frm=_iso(24), session=db_session, claims=OPERATOR))["data"]["summary"]
     assert summary["coverage_from"] is not None
     assert "200" not in summary["coverage_from"]  # sanity: it is a timestamp
     oldest = datetime.fromisoformat(summary["coverage_from"])
@@ -259,8 +269,7 @@ async def test_pct_change_is_none_from_a_zero_baseline(db_session: AsyncSession)
     await _snap(db_session, at=_iso(1), entities={"Table": 40000}, delta=40000)
 
     summary = (await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    ))["data"]["summary"]
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR))["data"]["summary"]
     assert summary["node_pct_change"] is None
     assert summary["node_delta"] == 40000
 
@@ -273,8 +282,7 @@ async def test_heartbeat_rows_are_not_counted_as_changes(
     await _snap(db_session, at=_iso(2), entities={"Table": 11}, reason="changed", delta=1)
 
     summary = (await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    ))["data"]["summary"]
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR))["data"]["summary"]
     assert summary["snapshots"] == 3
     assert summary["changed_snapshots"] == 2  # first + changed, not heartbeat
 
@@ -294,8 +302,7 @@ async def test_a_catalog_id_resolves_to_the_data_source_that_observed_it(
     await _snap(db_session, at=_iso(2), entities={"Table": 10})
 
     result = await insights.get_data_source_history(
-        ds_id="cat_ep1", grain="raw", session=db_session,
-    )
+        ds_id="cat_ep1", grain="raw", session=db_session, claims=OPERATOR)
     assert result["meta"]["status"] == "fresh"
     assert result["data"]["data_source_id"] == DS_ID
 
@@ -304,8 +311,7 @@ async def test_an_unresolvable_catalog_id_reports_no_history(
     db_session: AsyncSession,
 ):
     result = await insights.get_data_source_history(
-        ds_id="cat_missing", session=db_session,
-    )
+        ds_id="cat_missing", session=db_session, claims=OPERATOR)
     assert result["meta"]["status"] == "computing"
 
 
@@ -318,8 +324,7 @@ async def test_the_provider_rollup_sums_across_sources(db_session: AsyncSession)
                 graph_name="gy")
 
     result = await insights.get_provider_history(
-        provider_id="prov_ep1", frm=_iso(24), grain="hour", session=db_session,
-    )
+        provider_id="prov_ep1", frm=_iso(24), grain="hour", session=db_session, claims=OPERATOR)
     assert result["meta"]["status"] == "fresh"
     assert result["data"]["totals"][-1]["node_count"] == 50
     assert result["data"]["totals"][-1]["sources"] == 2
@@ -339,8 +344,7 @@ async def test_a_source_not_observed_in_a_bucket_carries_forward(
                 graph_name="gx")
 
     result = await insights.get_provider_history(
-        provider_id="prov_ep1", frm=_iso(24), grain="hour", session=db_session,
-    )
+        provider_id="prov_ep1", frm=_iso(24), grain="hour", session=db_session, claims=OPERATOR)
     assert result["data"]["totals"][-1]["node_count"] == 51
 
 
@@ -352,15 +356,13 @@ async def test_the_provider_rollup_never_serves_raw_grain(
     await _snap(db_session, at=_iso(2), entities={"Table": 1}, ds_id="ds_x")
 
     result = await insights.get_provider_history(
-        provider_id="prov_ep1", frm=_iso(24), grain="raw", session=db_session,
-    )
+        provider_id="prov_ep1", frm=_iso(24), grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["grain"] == "hour"
 
 
 async def test_an_empty_provider_reports_computing(db_session: AsyncSession):
     result = await insights.get_provider_history(
-        provider_id="prov_nothing", session=db_session,
-    )
+        provider_id="prov_nothing", session=db_session, claims=OPERATOR)
     assert result["meta"]["status"] == "computing"
     assert result["data"]["totals"] == []
 
@@ -383,8 +385,7 @@ async def test_significance_is_relative_to_the_source_s_own_baseline(
     await _snap(db_session, at=_iso(2), entities={"Table": 30_000}, delta=1000)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["significance"] == "normal"
     assert result["data"]["summary"]["change_baseline"] == 1000
 
@@ -400,8 +401,7 @@ async def test_a_movement_far_outside_the_baseline_is_severe(
     await _snap(db_session, at=_iso(2), entities={"Table": 9_000}, delta=-1_000)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["significance"] == "severe"
     assert result["data"]["summary"]["severe_changes"] == 1
 
@@ -414,8 +414,7 @@ async def test_a_near_total_loss_is_critical(db_session: AsyncSession):
     await _snap(db_session, at=_iso(2), entities={"Table": 100}, delta=-9_900)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["significance"] == "critical"
     # Critical counts into the severe tally on purpose: the tile asks "how
     # much needs attention", and splitting the worst tier out under-reports it.
@@ -431,8 +430,7 @@ async def test_a_big_rise_is_never_critical(db_session: AsyncSession):
     await _snap(db_session, at=_iso(2), entities={"Table": 500_000}, delta=490_000)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["significance"] == "severe"
 
 
@@ -446,8 +444,7 @@ async def test_a_tiny_graph_losing_almost_everything_is_not_critical(
     await _snap(db_session, at=_iso(2), entities={"Table": 1}, delta=-10)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["significance"] == "normal"
 
 
@@ -459,8 +456,7 @@ async def test_significance_is_symmetric(db_session: AsyncSession):
     await _snap(db_session, at=_iso(2), entities={"Table": 40_000}, delta=30_000)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["significance"] == "severe"
 
 
@@ -475,8 +471,7 @@ async def test_a_perfectly_still_source_does_not_call_one_node_severe(
     await _snap(db_session, at=_iso(2), entities={"Table": 11}, delta=1)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    )
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR)
     assert result["data"]["points"][-1]["significance"] == "normal"
 
 
@@ -488,8 +483,7 @@ async def test_significance_is_computed_from_raw_even_at_day_grain(
     await _snap(db_session, at=_iso(50), entities={"Table": 100}, delta=-9_900)
 
     result = await insights.get_data_source_history(
-        ds_id=DS_ID, grain="day", session=db_session,
-    )
+        ds_id=DS_ID, grain="day", session=db_session, claims=OPERATOR)
     assert result["data"]["summary"]["severe_changes"] == 1
 
 
@@ -519,8 +513,7 @@ async def test_events_in_the_window_are_returned_with_the_history(
     await _snap(db_session, at=_iso(1), entities={"Table": 40}, delta=-960)
 
     events = (await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    ))["data"]["events"]
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR))["data"]["events"]
     assert len(events) == 1
     assert events[0]["origin"] == "reconcile-sweep"
     assert events[0]["reason"] == "overlay_shrunk"
@@ -531,8 +524,7 @@ async def test_events_outside_the_window_are_excluded(db_session: AsyncSession):
     await _event(db_session, ts=_iso(24 * 90))
 
     events = (await insights.get_data_source_history(
-        ds_id=DS_ID, frm=_iso(24), grain="raw", session=db_session,
-    ))["data"]["events"]
+        ds_id=DS_ID, frm=_iso(24), grain="raw", session=db_session, claims=OPERATOR))["data"]["events"]
     assert events == []
 
 
@@ -543,8 +535,7 @@ async def test_another_source_s_events_are_not_correlated(
     await _event(db_session, ts=_iso(2), ds_id="ds_someone_else")
 
     events = (await insights.get_data_source_history(
-        ds_id=DS_ID, grain="raw", session=db_session,
-    ))["data"]["events"]
+        ds_id=DS_ID, grain="raw", session=db_session, claims=OPERATOR))["data"]["events"]
     assert events == []
 
 
@@ -557,8 +548,7 @@ async def test_the_fleet_rollup_sums_across_providers(db_session: AsyncSession):
                 provider_id="prov_2", graph_name="gb")
 
     result = await insights.get_fleet_history(
-        frm=_iso(24), grain="hour", session=db_session,
-    )
+        frm=_iso(24), grain="hour", session=db_session, claims=OPERATOR)
     assert result["data"]["totals"][-1]["node_count"] == 50
     assert {s["data_source_id"] for s in result["data"]["sources"]} == {
         "prov_1", "prov_2",
@@ -574,8 +564,7 @@ async def test_a_provider_s_sources_are_summed_into_one_fleet_series(
                 provider_id="prov_1", graph_name="gb")
 
     result = await insights.get_fleet_history(
-        frm=_iso(24), grain="hour", session=db_session,
-    )
+        frm=_iso(24), grain="hour", session=db_session, claims=OPERATOR)
     assert len(result["data"]["sources"]) == 1
     assert result["data"]["sources"][0]["points"][-1]["node_count"] == 35
     # Two data sources behind that one provider series.
@@ -590,13 +579,12 @@ async def test_the_fleet_rollup_resolves_provider_names(db_session: AsyncSession
                 provider_id="prov_1", graph_name="ga")
 
     result = await insights.get_fleet_history(
-        frm=_iso(24), grain="hour", session=db_session,
-    )
+        frm=_iso(24), grain="hour", session=db_session, claims=OPERATOR)
     assert result["data"]["sources"][0]["name"] == "Falkor Prod"
 
 
 async def test_an_empty_fleet_reports_computing(db_session: AsyncSession):
-    result = await insights.get_fleet_history(session=db_session)
+    result = await insights.get_fleet_history(session=db_session, claims=OPERATOR)
     assert result["meta"]["status"] == "computing"
 
 
@@ -609,8 +597,7 @@ async def test_the_csv_export_is_always_raw(db_session: AsyncSession):
     await _snap(db_session, at=_iso(4), entities={"Table": 100}, delta=96)
 
     response = await insights.export_data_source_history_csv(
-        ds_id=DS_ID, frm=_iso(24), session=db_session,
-    )
+        ds_id=DS_ID, frm=_iso(24), session=db_session, claims=OPERATOR)
     body = response.body.decode()
     lines = [l for l in body.splitlines() if l.strip()]
     assert len(lines) == 4  # header + 3 raw rows, no bucketing
@@ -630,8 +617,7 @@ async def test_the_csv_has_one_column_per_label_across_the_window(
     import io as _io
 
     body = (await insights.export_data_source_history_csv(
-        ds_id=DS_ID, frm=_iso(24), session=db_session,
-    )).body.decode()
+        ds_id=DS_ID, frm=_iso(24), session=db_session, claims=OPERATOR)).body.decode()
     rows = list(_csv.DictReader(_io.StringIO(body)))
     assert rows[0]["node:Column"] == "50"
     assert rows[0]["node:Table"] == "10"
@@ -650,8 +636,7 @@ async def test_the_csv_export_accepts_a_catalog_id(db_session: AsyncSession):
     await _snap(db_session, at=_iso(2), entities={"Table": 10})
 
     body = (await insights.export_data_source_history_csv(
-        ds_id="cat_ep1", session=db_session,
-    )).body.decode()
+        ds_id="cat_ep1", session=db_session, claims=OPERATOR)).body.decode()
     assert len([l for l in body.splitlines() if l.strip()]) == 2
 
 
@@ -667,8 +652,7 @@ async def test_a_rollup_bucket_keeps_each_source_s_closing_value(
                     ds_id="ds_x", provider_id="prov_ep1", graph_name="gx")
 
     result = await insights.get_provider_history(
-        provider_id="prov_ep1", frm=_iso(24), grain="day", session=db_session,
-    )
+        provider_id="prov_ep1", frm=_iso(24), grain="day", session=db_session, claims=OPERATOR)
     assert result["data"]["totals"][-1]["node_count"] == 35
 
 
@@ -687,8 +671,7 @@ async def test_a_rollup_total_is_not_truncated_by_a_busy_fleet(
                     ds_id="ds_y", provider_id="prov_ep1", graph_name="gy")
 
     result = await insights.get_provider_history(
-        provider_id="prov_ep1", frm=_iso(48), grain="day", session=db_session,
-    )
+        provider_id="prov_ep1", frm=_iso(48), grain="day", session=db_session, claims=OPERATOR)
     # Closing values only: 59 + 159, regardless of the 120 observations behind
     # them.
     assert result["data"]["totals"][-1]["node_count"] == 59 + 159
@@ -708,8 +691,7 @@ async def test_rollup_timestamps_are_parseable_instants(
 
     for grain in ("hour", "day"):
         result = await insights.get_provider_history(
-            provider_id="prov_ep1", frm=_iso(24), grain=grain, session=db_session,
-        )
+            provider_id="prov_ep1", frm=_iso(24), grain=grain, session=db_session, claims=OPERATOR)
         for point in result["data"]["totals"]:
             _dt.fromisoformat(point["at"])  # raises if it is only a prefix
         for source in result["data"]["sources"]:
@@ -742,8 +724,7 @@ async def test_alerts_list_newest_first_with_their_evidence(
     await _alert(db_session, alert_id="alr_new", detected=_iso(1))
 
     result = await insights.list_count_alerts(
-        ds_id=None, open_only=False, limit=100, session=db_session,
-    )
+        ds_id=None, open_only=False, limit=100, session=db_session, claims=OPERATOR)
     assert [a["id"] for a in result.alerts] == ["alr_new", "alr_old"]
     assert result.alerts[0]["evidence"]["nodes"]["removed"] == {"Column": 900}
     assert result.alerts[0]["baseline"] == 25
@@ -759,8 +740,7 @@ async def test_the_open_count_spans_the_fleet_not_the_page(
     await _alert(db_session, alert_id="alr_3", ds_id="ds_c", acked=_iso(1))
 
     scoped = await insights.list_count_alerts(
-        ds_id="ds_a", open_only=False, limit=100, session=db_session,
-    )
+        ds_id="ds_a", open_only=False, limit=100, session=db_session, claims=OPERATOR)
     assert len(scoped.alerts) == 1
     assert scoped.open_count == 2  # fleet-wide unacknowledged
 
@@ -770,8 +750,7 @@ async def test_alerts_can_be_filtered_to_open_ones(db_session: AsyncSession):
     await _alert(db_session, alert_id="alr_done", acked=_iso(1))
 
     result = await insights.list_count_alerts(
-        ds_id=None, open_only=True, limit=100, session=db_session,
-    )
+        ds_id=None, open_only=True, limit=100, session=db_session, claims=OPERATOR)
     assert [a["id"] for a in result.alerts] == ["alr_open"]
 
 
@@ -787,8 +766,7 @@ async def test_alerts_accept_a_catalog_id_like_the_history_does(
     await _alert(db_session, alert_id="alr_1")
 
     result = await insights.list_count_alerts(
-        ds_id="cat_ep1", open_only=False, limit=100, session=db_session,
-    )
+        ds_id="cat_ep1", open_only=False, limit=100, session=db_session, claims=OPERATOR)
     assert [a["id"] for a in result.alerts] == ["alr_1"]
 
 
@@ -797,8 +775,7 @@ async def test_acknowledging_stamps_the_actor(db_session: AsyncSession):
 
     await _alert(db_session, alert_id="alr_1")
     row = await insights.acknowledge_count_alert(
-        alert_id="alr_1", user=SimpleNamespace(id="u1"), session=db_session,
-    )
+        alert_id="alr_1", user=SimpleNamespace(id="u1"), session=db_session, claims=OPERATOR)
     assert row["acknowledged_by"] == "u1"
     assert row["acknowledged_at"] is not None
 
@@ -810,8 +787,7 @@ async def test_acknowledging_a_missing_alert_is_a_404(db_session: AsyncSession):
 
     with pytest.raises(fastapi.HTTPException) as exc:
         await insights.acknowledge_count_alert(
-            alert_id="alr_nope", user=SimpleNamespace(id="u1"), session=db_session,
-        )
+            alert_id="alr_nope", user=SimpleNamespace(id="u1"), session=db_session, claims=OPERATOR)
     assert exc.value.status_code == 404
 
 
@@ -912,3 +888,127 @@ def test_both_routers_are_mounted_on_the_same_prefix_with_their_own_gates():
         "ingestion_router": "_require_ingestion_read",
     }
     assert inspect.getsource(api).count('insights.ingestion_router, prefix="/admin/insights"') == 1
+
+
+# --------------------------------------------------------------------------
+# Two journeys, one set of endpoints
+# --------------------------------------------------------------------------
+# The same routes answer "everything there is" for a platform operator and
+# "everything I own" for a workspace-bound caller. That is the whole design,
+# and it is only safe if the scope is enforced in SQL rather than assumed by
+# the UI — so these tests are written from the API, not the page.
+
+
+async def _two_tenants(session: AsyncSession):
+    """One source in ws_ep1 (ours) and one in ws_other (somebody else's)."""
+    from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
+
+    for ws in ("ws_ep1", "ws_other"):
+        session.add(WorkspaceORM(id=ws, name=ws))
+    await session.flush()
+    session.add(WorkspaceDataSourceORM(
+        id=DS_ID, workspace_id="ws_ep1", provider_id="prov_ep1",
+        graph_name="ep-graph", label="Ours",
+    ))
+    # Deliberately on a DIFFERENT provider, so the fleet rollup — which groups
+    # by provider — can tell the two tenants apart. The provider-scope test
+    # below covers the harder case of two tenants sharing one provider.
+    session.add(WorkspaceDataSourceORM(
+        id="ds_theirs", workspace_id="ws_other", provider_id="prov_other",
+        graph_name="their-graph", label="Theirs",
+    ))
+    session.add(WorkspaceDataSourceORM(
+        id="ds_theirs_same_prov", workspace_id="ws_other",
+        provider_id="prov_ep1", graph_name="their-shared-graph", label="Theirs2",
+    ))
+    await session.flush()
+    await _snap(session, at=_iso(3), entities={"Table": 100})
+    await _snap(session, at=_iso(2), entities={"Table": 140}, delta=40)
+    await _snap(session, at=_iso(3), entities={"Table": 900}, ds_id="ds_theirs",
+                provider_id="prov_other", graph_name="their-graph")
+    await _snap(session, at=_iso(2), entities={"Table": 950}, ds_id="ds_theirs",
+                provider_id="prov_other", graph_name="their-graph", delta=50)
+    await _snap(session, at=_iso(2), entities={"Table": 700},
+                ds_id="ds_theirs_same_prov", graph_name="their-shared-graph")
+
+
+async def test_the_operator_sees_every_workspace_in_the_rollup(
+    db_session: AsyncSession,
+):
+    await _two_tenants(db_session)
+    result = await insights.get_fleet_history(session=db_session, claims=OPERATOR)
+    # The fleet rollup groups by PROVIDER, so each series is a provider.
+    ids = {s["data_source_id"] for s in result["data"]["sources"]}
+    assert ids == {"prov_ep1", "prov_other"}
+
+
+async def test_a_workspace_caller_sees_only_their_own_sources(
+    db_session: AsyncSession,
+):
+    """The same endpoint, and it must NOT be the platform for this reader —
+    this is the rollup the workspace journey actually wants, and the one that
+    would be a cross-tenant leak if it came back unfiltered."""
+    await _two_tenants(db_session)
+    result = await insights.get_fleet_history(
+        session=db_session, claims=workspace_claims("ws_ep1"),
+    )
+    ids = {s["data_source_id"] for s in result["data"]["sources"]}
+    assert ids == {"prov_ep1"}, "another tenant's provider appeared in the rollup"
+    # And the totals must be OURS alone — the other tenant has 700 entities on
+    # this very provider, so a leak would show up as a number, not just an id.
+    assert result["data"]["totals"][-1]["node_count"] == 140
+
+
+async def test_a_provider_rollup_is_filtered_to_the_caller_s_workspaces(
+    db_session: AsyncSession,
+):
+    """Both sources sit on the SAME provider, so provider scope alone would
+    hand one tenant the other's counts."""
+    await _two_tenants(db_session)
+    result = await insights.get_provider_history(
+        provider_id="prov_ep1", session=db_session,
+        claims=workspace_claims("ws_ep1"),
+    )
+    ids = {s["data_source_id"] for s in result["data"]["sources"]}
+    assert ids == {DS_ID}
+
+
+async def test_reading_another_tenant_s_source_is_a_404_not_a_403(
+    db_session: AsyncSession,
+):
+    """404, because refusing by existence lets a caller enumerate other
+    tenants' data source ids by watching which ones answer differently."""
+    from fastapi import HTTPException
+
+    await _two_tenants(db_session)
+    with pytest.raises(HTTPException) as exc:
+        await insights.get_data_source_history(
+            ds_id="ds_theirs", session=db_session,
+            claims=workspace_claims("ws_ep1"),
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_a_caller_bound_to_nothing_sees_nothing_rather_than_everything(
+    db_session: AsyncSession,
+):
+    """The fail-open case worth naming: an empty visible set must be an empty
+    filter result, never 'no filter'."""
+    await _two_tenants(db_session)
+    result = await insights.get_fleet_history(
+        session=db_session, claims=workspace_claims(),
+    )
+    assert result["data"]["sources"] == []
+
+
+async def test_the_csv_export_honours_the_same_boundary(db_session: AsyncSession):
+    """An export is a read like any other — and the easiest one to forget."""
+    from fastapi import HTTPException
+
+    await _two_tenants(db_session)
+    with pytest.raises(HTTPException) as exc:
+        await insights.export_data_source_history_csv(
+            ds_id="ds_theirs", session=db_session,
+            claims=workspace_claims("ws_ep1"),
+        )
+    assert exc.value.status_code == 404
