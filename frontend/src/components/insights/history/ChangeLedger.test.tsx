@@ -126,6 +126,24 @@ describe('ChangeLedger — significance', () => {
         expect(screen.getByText('severe')).toBeInTheDocument()
     })
 
+    it('badges a wipe as critical, not as the tier below it', () => {
+        // Regression: every consumer used to compare `=== 'severe'`, so a
+        // `critical` point fell through to the notable styling — the worst
+        // event in the window drawn as the mildest.
+        render(<ChangeLedger points={[
+            point({ at: '2026-08-18T10:00:00Z', node_count: 900_000, capture_reason: 'first' }),
+            point({
+                at: '2026-08-18T12:00:00Z', node_count: 100, node_delta: -899_900,
+                significance: 'critical',
+            }),
+        ]} />)
+        const chip = screen.getByText('critical')
+        expect(chip).toBeInTheDocument()
+        // The top tier's chip is the solid one, not the amber notable tint.
+        expect(chip.className).toContain('bg-red-600')
+        expect(chip.className).not.toContain('amber')
+    })
+
     it('does not badge ordinary movement', () => {
         render(<ChangeLedger points={[
             point({ at: '2026-08-18T10:00:00Z', node_count: 10, capture_reason: 'first' }),

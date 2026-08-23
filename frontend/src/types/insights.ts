@@ -100,8 +100,14 @@ export interface HistoryPoint {
     capture_reason: 'first' | 'changed' | 'heartbeat'
     /** How far this movement sits outside what is ordinary FOR THIS SOURCE,
      *  computed from the median absolute delta in the window. A fixed
-     *  threshold cannot tell a catastrophic drop apart from a nightly rebuild. */
-    significance: 'normal' | 'notable' | 'severe'
+     *  threshold cannot tell a catastrophic drop apart from a nightly rebuild.
+     *
+     *  `critical` is the exception: it is measured against the GRAPH (a drop
+     *  taking >=90% of it), not against the source's churn, because a source
+     *  with large routine movement can lose everything without the loss
+     *  reaching 8x its own median. Rank it with `severityMeta`, never by
+     *  comparing against 'severe' — that reads a wipe as the lesser event. */
+    significance: 'normal' | 'notable' | 'severe' | 'critical'
 }
 
 /** One `refresh_events` row inside the window — what the platform was doing

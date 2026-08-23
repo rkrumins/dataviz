@@ -131,3 +131,45 @@ describe('TimelineLegend', () => {
         expect(screen.getByText('gone')).toBeInTheDocument()
     })
 })
+
+describe('CountTimeline \u2014 the worst tier is the loudest', () => {
+    it('names a critical drop critical, and does not dim its marker', () => {
+        // `critical` outranks `severe`; the marker used to dim anything that
+        // was not literally 'severe', which drew a wipe more faintly than a dip.
+        const wiped = [
+            POINTS[0],
+            point({
+                at: '2026-08-19T00:00:00Z', node_count: 100, node_delta: -899_900,
+                entity_type_counts: { Table: 100 }, significance: 'critical',
+            }),
+            POINTS[2],
+        ]
+        render(
+            <CountTimeline
+                points={wiped} grain="day" mode="total" onDropSelect={vi.fn()}
+            />,
+        )
+        const marker = screen.getByRole('button', { name: /critical drop of/i })
+        expect(marker.querySelector('polygon')?.getAttribute('class'))
+            .not.toContain('opacity-60')
+    })
+
+    it('still dims a merely-notable marker, so the tiers stay distinguishable', () => {
+        const dip = [
+            POINTS[0],
+            point({
+                at: '2026-08-19T00:00:00Z', node_count: 80, node_delta: -20,
+                entity_type_counts: { Table: 80 }, significance: 'notable',
+            }),
+            POINTS[2],
+        ]
+        render(
+            <CountTimeline
+                points={dip} grain="day" mode="total" onDropSelect={vi.fn()}
+            />,
+        )
+        const marker = screen.getByRole('button', { name: /notable drop of/i })
+        expect(marker.querySelector('polygon')?.getAttribute('class'))
+            .toContain('opacity-60')
+    })
+})

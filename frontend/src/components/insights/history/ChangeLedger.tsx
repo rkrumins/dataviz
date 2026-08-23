@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils'
 import type { HistoryEvent, HistoryPoint } from '@/types/insights'
 import {
     OUTCOME_TONE, ORIGIN_LABEL, clockUtc, compactNum, dayLabel, laneMeta,
-    nearbyEvents, signedNum,
+    nearbyEvents, severityMeta, signedNum,
 } from './shared'
 
 interface TypeDelta {
@@ -146,7 +146,12 @@ export function ChangeLedger({ points, events = [], highlightAt, onlyNotable = f
                         >
                             <span className={cn(
                                 'mt-0.5 w-7 h-7 rounded-lg flex items-center justify-center shrink-0',
-                                point.significance === 'severe' && 'ring-2 ring-red-500/40',
+                                // Rank, not equality: `critical` outranks
+                                // `severe`, and an === check would leave the
+                                // worst event as the only one unmarked.
+                                point.significance !== 'normal'
+                                    && severityMeta(point.significance).rank >= 2
+                                    && 'ring-2 ring-red-500/40',
                                 point.capture_reason === 'first'
                                     ? 'text-ink-muted bg-black/5 dark:bg-white/5'
                                     : dropped
@@ -182,9 +187,7 @@ export function ChangeLedger({ points, events = [], highlightAt, onlyNotable = f
                                         <span
                                             className={cn(
                                                 'px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide',
-                                                point.significance === 'severe'
-                                                    ? 'text-red-600 dark:text-red-400 bg-red-500/10'
-                                                    : 'text-amber-600 dark:text-amber-400 bg-amber-500/10',
+                                                severityMeta(point.significance).chip,
                                             )}
                                             title="Measured against this source's own typical movement, not a fixed threshold"
                                         >

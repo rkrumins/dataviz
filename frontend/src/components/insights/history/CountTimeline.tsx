@@ -33,7 +33,8 @@ import { AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { HistoryPoint } from '@/types/insights'
 import {
-    OTHER_COLOR, axisLabel, clockUtc, compactNum, laneMeta, seriesColor, signedNum,
+    OTHER_COLOR, axisLabel, clockUtc, compactNum, laneMeta, seriesColor,
+    severityMeta, signedNum,
 } from './shared'
 
 export type TimelineMode = 'composition' | 'total' | 'compare'
@@ -275,14 +276,18 @@ export function CountTimeline({
                     only drops would miss it entirely. */}
                 {marked.map(({ point, index }) => {
                     const lost = (point.node_delta ?? 0) < 0
-                    const severe = point.significance === 'severe'
+                    // Rank, not equality — `critical` is the tier above
+                    // `severe`, and marking only `severe` at full strength
+                    // draws a wipe more faintly than a dip.
+                    const meta = severityMeta(point.significance)
+                    const loud = meta.rank >= 2
                     return (
                         <g
                             key={`${point.at}-marker`}
                             role={onDropSelect ? 'button' : undefined}
                             tabIndex={onDropSelect ? 0 : undefined}
                             aria-label={
-                                `${severe ? 'Severe' : 'Notable'} ` +
+                                `${meta.label} ` +
                                 `${lost ? 'drop' : 'rise'} of ${signedNum(point.node_delta)} ` +
                                 `at ${axisLabel(point.at, grain)}`
                             }
@@ -303,7 +308,7 @@ export function CountTimeline({
                                 points={`${x(index) - 5},${PAD.top - 9} ${x(index) + 5},${PAD.top - 9} ${x(index)},${PAD.top - 1}`}
                                 className={cn(
                                     lost ? 'fill-red-500' : 'fill-amber-500',
-                                    !severe && 'opacity-60',
+                                    !loud && 'opacity-60',
                                 )}
                             />
                             <title>
