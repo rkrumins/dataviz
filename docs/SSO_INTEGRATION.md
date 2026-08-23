@@ -1394,6 +1394,12 @@ have it. The `delete_provider` endpoint is gated by it.
 The auth surface defends against these threats. Out-of-scope
 attacks at the bottom of the section.
 
+Several rows below are marked with what was **previously** wrong. Two of
+them once asserted controls this code did not actually implement — SAML
+assertion replay and `system:admin` via group mapping. See
+[`security/REMEDIATION_REPORT.md`](security/REMEDIATION_REPORT.md) for
+what was found, what changed, and which test pins each one.
+
 ### 10.1 In scope
 
 | Threat | Defense | Location |
