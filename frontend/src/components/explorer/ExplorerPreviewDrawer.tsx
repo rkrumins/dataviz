@@ -340,9 +340,12 @@ export function ExplorerPreviewDrawer({
   // Only while the drawer is actually open, and only for the one view it is
   // showing. The shelf behind it already batched its own; this is a single id
   // and would otherwise fire for every card the mouse passed over.
-  const usageIds = useMemo(() => (view?.id ? [view.id] : []), [view?.id])
+  // Hoisted out of the dependency array: an optional chain in there makes
+  // the React Compiler bail on memoizing the whole component.
+  const viewId = view?.id
+  const usageIds = useMemo(() => (viewId ? [viewId] : []), [viewId])
   const { data: usageMap } = useViewUsage(usageIds, isOpen)
-  const usage = view?.id ? usageMap?.[view.id] : undefined
+  const usage = viewId ? usageMap?.[viewId] : undefined
   const content = (
     <>
       <ViewActivityDrawer
