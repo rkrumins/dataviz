@@ -44,15 +44,19 @@ data:
   # I/O; change-gated plus a heartbeat so the 60s probe lane does not
   # write a row per probe. Retention is purged by age AND per-source cap,
   # and an admin can override both live in Platform settings.
-  INSIGHTS_HISTORY_ENABLED: {{ .Values.config.history.enabled | quote }}
-  INSIGHTS_HISTORY_HEARTBEAT_SECS: {{ .Values.config.history.heartbeatSecs | quote }}
-  INSIGHTS_HISTORY_RETENTION_DAYS: {{ .Values.config.history.retentionDays | quote }}
-  INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: {{ .Values.config.history.maxRowsPerSource | quote }}
-  INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: {{ .Values.config.history.purgeIntervalSecs | quote }}
-  INSIGHTS_ALERTS_ENABLED: {{ .Values.config.history.alertsEnabled | quote }}
-  INSIGHTS_ALERT_MIN_SEVERITY: {{ .Values.config.history.alertMinSeverity | quote }}
-  INSIGHTS_ALERT_COOLDOWN_SECS: {{ .Values.config.history.alertCooldownSecs | quote }}
-  INSIGHTS_ALERT_INTERVAL_SECS: {{ .Values.config.history.alertIntervalSecs | quote }}
+  PROFILING_ENABLED: {{ .Values.config.profiling.enabled | quote }}
+  PROFILING_HEARTBEAT_SECS: {{ .Values.config.profiling.heartbeatSecs | quote }}
+  PROFILING_RAW_RETENTION_DAYS: {{ .Values.config.profiling.rawRetentionDays | quote }}
+  PROFILING_HOURLY_RETENTION_DAYS: {{ .Values.config.profiling.hourlyRetentionDays | quote }}
+  PROFILING_DAILY_RETENTION_DAYS: {{ .Values.config.profiling.dailyRetentionDays | quote }}
+  PROFILING_MAX_ROWS_PER_SOURCE: {{ .Values.config.profiling.maxRowsPerSource | quote }}
+  PROFILING_COMPACT_INTERVAL_SECS: {{ .Values.config.profiling.compactIntervalSecs | quote }}
+  PROFILING_RETENTION_INTERVAL_SECS: {{ .Values.config.profiling.retentionIntervalSecs | quote }}
+  PROFILING_ALERTS_ENABLED: {{ .Values.config.profiling.alertsEnabled | quote }}
+  PROFILING_ALERT_MIN_SEVERITY: {{ .Values.config.profiling.alertMinSeverity | quote }}
+  PROFILING_ALERT_COOLDOWN_SECS: {{ .Values.config.profiling.alertCooldownSecs | quote }}
+  PROFILING_ALERT_INTERVAL_SECS: {{ .Values.config.profiling.alertIntervalSecs | quote }}
+  PROFILING_SILENT_AFTER_SECS: {{ .Values.config.profiling.silentAfterSecs | quote }}
 
   # Read by two roles on purpose: the controlplane warms on this cadence and
   # every web process snaps its analytics windows to the same grid. One

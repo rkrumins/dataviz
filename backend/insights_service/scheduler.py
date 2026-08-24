@@ -370,99 +370,205 @@ async def run_trim_scheduler(shutdown: asyncio.Event) -> None:
         except Exception as exc:
             logger.error("purge_reconcile failed: %s", exc, exc_info=True)
 
-        # Counts-history retention rides the same tick but keeps its own
-        # cadence gate, so retention can be tuned without changing how often
-        # Redis housekeeping runs.
-        try:
-            await _maybe_purge_count_history()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("history_purge failed: %s", exc, exc_info=True)
-
-        try:
-            await _maybe_evaluate_count_alerts()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("alert_sweep failed: %s", exc, exc_info=True)
-
     logger.info("Trim scheduler stopped")
 
 
-# ── counts-history retention ────────────────────────────────────────
+# ── profiling: compaction, retention, alerting ──────────────────────
+#
+# These used to ride the hourly stream-trim tick behind their own cadence
+# gates, which meant a gate could never fire faster than its host loop: an
+# alert interval of 900s was simply unreachable, and compaction cannot be
+# hourly at all — the purge may not delete raw beyond the compaction
+# watermark, so a slow compactor stalls retention. They get their own loop,
+# ticking fast enough for the shortest of the three gates to mean what it says.
 
-# Cadence gate for the history purge, checked on each trim tick. Its own
-# knob rather than the trim interval: one is Redis housekeeping, the other
-# is how long an audit trail is kept, and an operator tuning the second
-# should not have to think about the first.
-_HISTORY_PURGE_INTERVAL_SECS = float(
-    resilience.INSIGHTS_HISTORY_PURGE_INTERVAL_SECS
-)
+#: How often the loop wakes. The gates below decide what actually runs, so
+#: this only has to be no coarser than the tightest of them.
+_PROFILING_TICK_SECS = 60.0
 
-# Rows deleted per pass. Matches refresh_token_gc's batch: big enough that
-# a backlog drains in a few ticks, small enough that no single statement
-# holds a long lock on a hot table.
-_HISTORY_PURGE_BATCH = 5000
+_COMPACT_INTERVAL_SECS = float(resilience.PROFILING_COMPACT_INTERVAL_SECS)
+_RETENTION_INTERVAL_SECS = float(resilience.PROFILING_RETENTION_INTERVAL_SECS)
 
-_history_purge_state: dict = {
+# Rows touched per pass. Matches refresh_token_gc's batch: big enough that a
+# backlog drains in a few ticks, small enough that no single statement holds a
+# long lock on a table the counts path is actively writing to.
+_PROFILING_BATCH = 5000
+
+#: Buckets built per compaction pass, per grain. A first-run backfill over
+#: months of raw becomes many short passes rather than one long transaction.
+_COMPACT_MAX_BUCKETS = 96
+
+_compaction_state: dict = {
     "last_run_monotonic": 0.0,
     "last_run_at": None,
-    "last_by_age": 0,
-    "last_over_cap": 0,
+    "last_hour_rows": 0,
+    "last_day_rows": 0,
+    "last_error": None,
+}
+
+_retention_state: dict = {
+    "last_run_monotonic": 0.0,
+    "last_run_at": None,
+    "last_raw": 0,
+    "last_hour": 0,
+    "last_day": 0,
     "last_error": None,
 }
 
 
-def get_history_purge_status() -> dict:
-    """Last history-purge outcome, for the /health payload. Mirrors
-    ``get_discovery_scheduler_status()``'s shape."""
+def get_compaction_status() -> dict:
+    """Last compaction outcome, for the /health payload."""
     return {
-        "last_run_at": _history_purge_state["last_run_at"],
-        "last_by_age": _history_purge_state["last_by_age"],
-        "last_over_cap": _history_purge_state["last_over_cap"],
-        "last_error": _history_purge_state["last_error"],
-        "interval_secs": _HISTORY_PURGE_INTERVAL_SECS,
+        "last_run_at": _compaction_state["last_run_at"],
+        "last_hour_rows": _compaction_state["last_hour_rows"],
+        "last_day_rows": _compaction_state["last_day_rows"],
+        "last_error": _compaction_state["last_error"],
+        "interval_secs": _COMPACT_INTERVAL_SECS,
     }
 
 
-async def _maybe_purge_count_history() -> None:
-    """Purge ``data_source_count_snapshots`` by age and per-source cap.
+def get_history_purge_status() -> dict:
+    """Last retention outcome, for the /health payload. Mirrors
+    ``get_discovery_scheduler_status()``'s shape."""
+    return {
+        "last_run_at": _retention_state["last_run_at"],
+        "last_raw": _retention_state["last_raw"],
+        "last_hour": _retention_state["last_hour"],
+        "last_day": _retention_state["last_day"],
+        "last_error": _retention_state["last_error"],
+        "interval_secs": _RETENTION_INTERVAL_SECS,
+    }
 
-    Never raises — the caller logs, but a retention pass failing is not worth
-    interrupting stream hygiene for, and the next tick retries. Idempotent: a
-    second pass over a clean table deletes nothing.
 
-    Batched, and deliberately NOT drained in a loop here: a very large backlog
-    (a retention window shortened from 90 days to 7, say) drains over
-    successive ticks instead of holding one long transaction against a table
-    the counts path is actively writing to.
+async def _maybe_compact_profiling() -> None:
+    """Build hour buckets from raw, then day buckets from hour.
+
+    Order matters and is not interchangeable: the day tier is built FROM the
+    hour tier, so hour must run first or a day bucket is assembled from
+    whatever hours happened to exist already.
+
+    Never raises — the caller logs and the next tick retries. Idempotent: the
+    write is an upsert keyed on the bucket, so a pass killed halfway is simply
+    re-run and a pass over settled data rewrites the same values.
     """
-    from backend.app.db.repositories import stats_history_repo
+    from backend.app.db.repositories import profiling_repo
 
     now = time.monotonic()
-    last = _history_purge_state["last_run_monotonic"]
-    if last and (now - last) < _HISTORY_PURGE_INTERVAL_SECS:
+    last = _compaction_state["last_run_monotonic"]
+    if last and (now - last) < _COMPACT_INTERVAL_SECS:
         return
-    _history_purge_state["last_run_monotonic"] = now
+    _compaction_state["last_run_monotonic"] = now
 
     async with get_jobs_session() as session:
-        policy = await stats_history_repo.resolve_history_policy(session)
-        result = await stats_history_repo.purge_snapshots(
-            session, policy, batch=_HISTORY_PURGE_BATCH,
+        hour_rows = await profiling_repo.compact(
+            session, grain="hour", max_buckets=_COMPACT_MAX_BUCKETS,
+        )
+        day_rows = await profiling_repo.compact(
+            session, grain="day", max_buckets=_COMPACT_MAX_BUCKETS,
         )
         await session.commit()
 
-    _history_purge_state["last_run_at"] = datetime.now(timezone.utc).isoformat()
-    _history_purge_state["last_by_age"] = result["by_age"]
-    _history_purge_state["last_over_cap"] = result["over_cap"]
-    _history_purge_state["last_error"] = None
-    if result["by_age"] or result["over_cap"]:
-        logger.info(
-            "history_purge: removed %d by age (>%dd) and %d over cap (>%d/source)",
-            result["by_age"], policy.retention_days,
-            result["over_cap"], policy.max_rows_per_source,
+    _compaction_state["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    _compaction_state["last_hour_rows"] = hour_rows
+    _compaction_state["last_day_rows"] = day_rows
+    _compaction_state["last_error"] = None
+    if hour_rows or day_rows:
+        # Debug, not info: the trailing bucket is rebuilt on every pass by
+        # design (it was still filling when it was written), so this fires
+        # every tick in a healthy system. /health carries the liveness signal.
+        logger.debug(
+            "profiling_compact: wrote %d hour and %d day bucket row(s)",
+            hour_rows, day_rows,
         )
+
+
+async def _maybe_run_profiling_retention() -> None:
+    """Purge each tier on its own cutoff.
+
+    Raw is additionally bounded by the compaction watermark, so if compaction
+    has stalled nothing is deleted — the failure mode is a table that grows,
+    which is visible and recoverable, rather than observations that silently
+    never reached a tier.
+
+    Batched, and deliberately NOT drained in a loop here: a large backlog (a
+    retention window shortened from 400 days to 30, say) drains over
+    successive ticks instead of one long transaction.
+    """
+    from backend.app.db.repositories import profiling_repo
+
+    now = time.monotonic()
+    last = _retention_state["last_run_monotonic"]
+    if last and (now - last) < _RETENTION_INTERVAL_SECS:
+        return
+    _retention_state["last_run_monotonic"] = now
+
+    from backend.app.db.repositories import count_alerts_repo
+
+    async with get_jobs_session() as session:
+        policy = profiling_repo.env_retention_policy()
+        result = await profiling_repo.run_retention(
+            session, policy, batch=_PROFILING_BATCH,
+        )
+        # Alerts age out on the longest tier: an alert is the evidence FOR a
+        # movement, so outliving the buckets that produced it is the point,
+        # and the alert has its own frozen copy of everything it needs. This
+        # was written but never called, so the table grew without bound.
+        # Unacknowledged alerts are never purged by age, at any setting.
+        result["alerts"] = await count_alerts_repo.purge_alerts(
+            session, retention_days=policy.daily_days, batch=_PROFILING_BATCH,
+        )
+        await session.commit()
+
+    _retention_state["last_run_at"] = datetime.now(timezone.utc).isoformat()
+    _retention_state["last_raw"] = result["raw"]
+    _retention_state["last_hour"] = result["hour"]
+    _retention_state["last_day"] = result["day"]
+    _retention_state["last_error"] = None
+    if any(result.values()):
+        logger.info(
+            "profiling_retention: removed %d raw (>%dd), %d over cap, "
+            "%d hour (>%dd), %d day (>%dd), %d acknowledged alert(s)",
+            result["raw"], policy.raw_days, result["over_cap"],
+            result["hour"], policy.hourly_days,
+            result["day"], policy.daily_days, result["alerts"],
+        )
+
+
+async def run_profiling_scheduler(shutdown: asyncio.Event) -> None:
+    """Compaction, retention and anomaly evaluation, each on its own cadence.
+
+    One loop, three gates. Failures are logged and the loop continues: none of
+    these is safety-critical in the moment, and every one of them is
+    idempotent, so the next tick simply retries.
+    """
+    logger.info(
+        "Profiling scheduler started (tick=%.0fs, compact=%.0fs, "
+        "retention=%.0fs, alerts=%.0fs)",
+        _PROFILING_TICK_SECS, _COMPACT_INTERVAL_SECS,
+        _RETENTION_INTERVAL_SECS, _ALERT_INTERVAL_SECS,
+    )
+    while not shutdown.is_set():
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=_PROFILING_TICK_SECS)
+            return  # shutdown triggered while waiting
+        except asyncio.TimeoutError:
+            pass
+
+        # Compaction first: retention is bounded by what it has built, and
+        # alerting reads the series it maintains.
+        for name, task in (
+            ("profiling_compact", _maybe_compact_profiling),
+            ("profiling_retention", _maybe_run_profiling_retention),
+            ("alert_sweep", _maybe_evaluate_count_alerts),
+        ):
+            try:
+                await task()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("%s failed: %s", name, exc, exc_info=True)
+
+    logger.info("Profiling scheduler stopped")
 
 
 # A purge row stuck at pending/running with no update for this long has
@@ -746,7 +852,7 @@ async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
 # How often movements are judged. Its own knob, separate from the purge and
 # from the trim: how quickly you learn about an anomaly is a different
 # question from how long the evidence is kept.
-_ALERT_INTERVAL_SECS = float(resilience.INSIGHTS_ALERT_INTERVAL_SECS)
+_ALERT_INTERVAL_SECS = float(resilience.PROFILING_ALERT_INTERVAL_SECS)
 
 _alert_sweep_state: dict = {
     "last_run_monotonic": 0.0,
@@ -803,16 +909,16 @@ async def _maybe_evaluate_count_alerts() -> None:
         for ds_id in await count_alerts_repo.sources_to_evaluate(session):
             scanned += 1
             try:
-                notice = await count_alerts_repo.evaluate_source(
+                raised = await count_alerts_repo.evaluate_source(
                     session, ds_id, policy,
                 )
                 # Commit as soon as an alert lands, not once at the end. Most
                 # sources produce nothing, so this is rare — and it bounds what
                 # a later failure can cost to the source being judged, instead
                 # of the whole pass.
-                if notice is not None:
+                if raised:
                     await session.commit()
-                    notices.append(notice)
+                    notices.extend(raised)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -828,6 +934,26 @@ async def _maybe_evaluate_count_alerts() -> None:
                     logger.warning("alert_sweep: rollback after %s failed", ds_id)
                     break
                 continue
+
+        # Sources that have stopped reporting entirely. Separate from the loop
+        # above because it does not start from a movement: a source that has
+        # gone quiet produces nothing for the movement sweep to look at, which
+        # is precisely the condition being detected.
+        try:
+            silent = await count_alerts_repo.evaluate_silent_sources(
+                session, policy,
+            )
+            if silent:
+                await session.commit()
+                notices.extend(silent)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("alert_sweep: silent-source check failed: %s", exc)
+            try:
+                await session.rollback()
+            except Exception:  # noqa: BLE001 - already in the failure path
+                logger.warning("alert_sweep: rollback after silent check failed")
 
     if notices:
         from backend.app.db.repositories.notification_repo import (
@@ -847,6 +973,9 @@ async def _maybe_evaluate_count_alerts() -> None:
                         direction=notice.direction,
                         node_delta=notice.node_delta,
                         node_count=notice.node_count,
+                        metric=notice.metric,
+                        finding=notice.finding,
+                        subject_type=notice.subject_type,
                     )
                 await session.commit()
         except asyncio.CancelledError:

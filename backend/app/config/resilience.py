@@ -269,65 +269,110 @@ STATS_CACHE_ABSOLUTE_EXPIRY_SECS: int = int(os.getenv("STATS_CACHE_ABSOLUTE_EXPI
 STATS_SERVICE_LAGGING_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_LAGGING_THRESHOLD_SECS", "60"))
 STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS", "600"))
 
-# ── Counts history (data_source_count_snapshots) ────────────────────
+# ── Profiling: capture (data_source_count_snapshots) ────────────────
 # The append-only twin of data_source_stats: what a source looked like at
-# a point in time, per label, with the delta against the previous
+# a point in time, per type, with the delta against the previous
 # observation. Capture happens inside the stats repo's counts write, so
 # every lane (probe, poll, deep, sweep, app writes) feeds one series and
 # no new provider I/O is added anywhere.
 #
 # These live here rather than in insights_service/config.py because BOTH
 # tiers read them: the web tier captures on its own write paths and serves
-# the history API, the insights service captures and purges.
-INSIGHTS_HISTORY_ENABLED: bool = os.getenv("INSIGHTS_HISTORY_ENABLED", "true").lower() == "true"
+# the profiling API, the insights service captures, compacts and purges.
+PROFILING_ENABLED: bool = os.getenv("PROFILING_ENABLED", "true").lower() == "true"
 
 # Continuity row when nothing changed. Capture is change-gated on
 # counts_digest, so a graph nobody is writing to would otherwise leave a
 # 30-day hole that reads identically to "we lost the data". One row an
 # hour is ~720/source/month — cheap enough to be unconditional, dense
 # enough that a flat line is provably flat.
-INSIGHTS_HISTORY_HEARTBEAT_SECS: int = int(os.getenv("INSIGHTS_HISTORY_HEARTBEAT_SECS", "3600"))
+PROFILING_HEARTBEAT_SECS: int = int(os.getenv("PROFILING_HEARTBEAT_SECS", "3600"))
 
-# Age purge. 90 days against a 30-day product requirement: the extra
-# headroom is what lets someone investigating a month-old incident still
-# see the month BEFORE it, which is usually the actual question.
-INSIGHTS_HISTORY_RETENTION_DAYS: int = int(os.getenv("INSIGHTS_HISTORY_RETENTION_DAYS", "90"))
+# ── Profiling: tiered retention ─────────────────────────────────────
+# Raw is the record of what was OBSERVED; the rollup tiers are the record
+# of what a PERIOD looked like. Compaction builds hour buckets from raw
+# BEFORE raw is purged, and day buckets from hour — so coverage outlives
+# resolution instead of being bounded by it.
+#
+# This replaces a single age cutoff plus a per-source row cap. The cap is
+# still here as a raw-tier safety valve, but it can no longer decide how
+# far back history goes: it bounds ROWS, and a source thrashing under a
+# broken loader hits its cap in under a week, which silently evicted
+# exactly the source whose 30-day history someone would come looking for.
+PROFILING_RAW_RETENTION_DAYS: int = int(os.getenv("PROFILING_RAW_RETENTION_DAYS", "7"))
 
-# Per-source row cap, applied alongside (not instead of) the age cutoff.
-# The age cutoff alone is unbounded in the bad case — a source thrashing
-# under a broken loader can change every 60s probe, which is 43k rows a
-# month. This is the backstop that keeps one pathological source from
-# dominating the table.
-INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: int = int(os.getenv("INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE", "5000"))
+# The tier that carries the product's 30-day floor, with headroom.
+PROFILING_HOURLY_RETENTION_DAYS: int = int(
+    os.getenv("PROFILING_HOURLY_RETENTION_DAYS", "45")
+)
 
-# Purge cadence. Its own knob rather than being pinned to the stream-trim
-# interval it currently rides on, so retention can be tuned without
-# touching Redis housekeeping.
-INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: int = int(os.getenv("INSIGHTS_HISTORY_PURGE_INTERVAL_SECS", "3600"))
+# One row per source per day is cheap enough that the limit is judgement,
+# not cost: a year and a bit lets someone compare this quarter to the same
+# quarter last year.
+PROFILING_DAILY_RETENTION_DAYS: int = int(
+    os.getenv("PROFILING_DAILY_RETENTION_DAYS", "400")
+)
 
-# ── Counts anomaly alerting ─────────────────────────────────────────
-# Turns the history from something you go and look at into something that
+# Raw-tier safety valve, applied alongside the age cutoff. A source
+# changing on every 60s probe is 43k rows a month; this stops one
+# pathological source dominating the raw table between purges.
+PROFILING_MAX_ROWS_PER_SOURCE: int = int(
+    os.getenv("PROFILING_MAX_ROWS_PER_SOURCE", "5000")
+)
+
+# How often raw is compacted into the tiers. Much tighter than the purge
+# cadence on purpose: purge cannot delete raw beyond the compaction
+# watermark, so a slow compactor does not lose data — it stops retention
+# from progressing, and the raw table grows until it catches up.
+PROFILING_COMPACT_INTERVAL_SECS: int = int(
+    os.getenv("PROFILING_COMPACT_INTERVAL_SECS", "300")
+)
+
+# How often the retention pass runs across all three tiers.
+PROFILING_RETENTION_INTERVAL_SECS: int = int(
+    os.getenv("PROFILING_RETENTION_INTERVAL_SECS", "3600")
+)
+
+# ── Profiling: anomaly alerting ─────────────────────────────────────
+# Turns profiling from something you go and look at into something that
 # tells you. Evaluation is a sweep in the insights service, not a hook on the
 # write: significance is a property of a WINDOW (the source's own median
 # absolute movement), so judging at capture time would put a range scan on the
 # 60s probe path and would run inside the web tier as well.
-INSIGHTS_ALERTS_ENABLED: bool = os.getenv("INSIGHTS_ALERTS_ENABLED", "true").lower() == "true"
+PROFILING_ALERTS_ENABLED: bool = os.getenv(
+    "PROFILING_ALERTS_ENABLED", "true"
+).lower() == "true"
 
 # Severity floor: "severe" (>=8x the source's typical movement) alerts only on
 # the extreme tail; "notable" (>=3x) widens it. Defaults to severe because an
 # alerting default that is too eager gets muted, and a muted alert is worth
 # less than no alert — people stop reading it but still believe it is watching.
-INSIGHTS_ALERT_MIN_SEVERITY: str = os.getenv("INSIGHTS_ALERT_MIN_SEVERITY", "severe")
+PROFILING_ALERT_MIN_SEVERITY: str = os.getenv("PROFILING_ALERT_MIN_SEVERITY", "severe")
 
-# At most one alert per source per this interval. A graph thrashing under a
-# broken loader moves unusually on EVERY probe; one alert per probe turns a
-# single incident into a pager storm and trains people to ignore it.
-INSIGHTS_ALERT_COOLDOWN_SECS: int = int(os.getenv("INSIGHTS_ALERT_COOLDOWN_SECS", "21600"))
+# At most one alert per source per metric per this interval. A graph thrashing
+# under a broken loader moves unusually on EVERY probe; one alert per probe
+# turns a single incident into a pager storm and trains people to ignore it.
+# Per METRIC, not per source: an entity incident must not mute a concurrent
+# relationship one, because they fail independently.
+PROFILING_ALERT_COOLDOWN_SECS: int = int(
+    os.getenv("PROFILING_ALERT_COOLDOWN_SECS", "21600")
+)
 
-# How often the evaluation sweep runs. Its own knob, like the purge cadence:
-# how quickly you learn about an anomaly is a different question from how long
-# the evidence is kept.
-INSIGHTS_ALERT_INTERVAL_SECS: int = int(os.getenv("INSIGHTS_ALERT_INTERVAL_SECS", "900"))
+# How often the evaluation sweep runs. Its own knob, like the retention
+# cadence: how quickly you learn about an anomaly is a different question from
+# how long the evidence is kept.
+PROFILING_ALERT_INTERVAL_SECS: int = int(
+    os.getenv("PROFILING_ALERT_INTERVAL_SECS", "900")
+)
+
+# How long after its last observation a source is considered SILENT. Not the
+# same as dropping to zero: a source nobody can reach any more (expired
+# credential, dropped graph, provider rotated out) reports nothing at all, and
+# a series that simply stops is invisible on a chart of what it did report.
+# Generous against the hourly heartbeat so an idle source never trips it.
+PROFILING_SILENT_AFTER_SECS: int = int(
+    os.getenv("PROFILING_SILENT_AFTER_SECS", "21600")
+)
 
 # ── Discovery (pre-registration asset cache) ────────────────────────
 # Cadence for the background ``run_discovery_scheduler`` coroutine.

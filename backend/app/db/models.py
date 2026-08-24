@@ -217,7 +217,7 @@ class PlatformSettingsORM(Base):
     identity_property = Column(Text, nullable=True)
     name_property = Column(Text, nullable=True)
     # Counts-history retention, same "NULL means unset" semantics as the
-    # identity columns above: unset falls through to the INSIGHTS_HISTORY_*
+    # identity columns above: unset falls through to the PROFILING_*
     # env defaults. Here rather than in env alone for the reason this table
     # exists at all — retention is the kind of knob an operator changes in
     # response to something, and a row carries ``updated_by``.
@@ -1156,16 +1156,32 @@ class DataSourceCountSnapshotORM(Base):
     # change what a surviving row says happened.
     type_deltas = Column(Text, nullable=True)
 
+    #: The refresh event whose run produced this observation, when one did.
+    #: Correlating by timestamp answers "what was running around then"; this
+    #: answers "what this run did", which is the question an operator asks
+    #: after a load. NULL for the cadence lanes, which belong to no run.
+    refresh_event_id = Column(Text, nullable=True)
+
     __table_args__ = (
         Index("ix_dscs_ds_captured", "data_source_id", "captured_at"),
         Index("ix_dscs_captured", "captured_at"),
         Index("ix_dscs_provider_captured", "provider_id", "captured_at"),
+        # Tenant-scoped reads filter on this and had to scan without it. The
+        # column was already denormalised here; only the index was missing.
+        Index("ix_dscs_ws_captured", "workspace_id", "captured_at"),
+        Index("ix_dscs_refresh_event", "refresh_event_id"),
+        # A retried transaction can re-run capture with the same instant. Two
+        # rows for one observation make the rollup's "last value in bucket"
+        # arbitrary, so the pair is the real identity of a row here.
+        UniqueConstraint(
+            "data_source_id", "captured_at", name="uq_dscs_ds_instant",
+        ),
         CheckConstraint(
             "lane IN ('probe', 'poll', 'deep', 'sweep', 'write')",
             name="ck_dscs_lane",
         ),
         CheckConstraint(
-            "capture_reason IN ('first', 'changed', 'heartbeat')",
+            "capture_reason IN ('first', 'changed', 'heartbeat', 'run')",
             name="ck_dscs_reason",
         ),
     )
@@ -1174,6 +1190,107 @@ class DataSourceCountSnapshotORM(Base):
         return (
             f"<DataSourceCountSnapshot ds_id={self.data_source_id!r} "
             f"at={self.captured_at!r} nodes={self.node_count}>"
+        )
+
+
+# ------------------------------------------------------------------ #
+# data_source_count_rollups (the compacted tiers)                      #
+# ------------------------------------------------------------------ #
+
+class DataSourceCountRollupORM(Base):
+    """One time bucket of one data source's profile, compacted from raw.
+
+    Raw snapshots are the record of what was observed; this is the record of
+    what a period looked like. Both exist because they age differently: raw
+    resolution matters for days and is ruinous to keep for months, while a
+    30-day trend is cheap forever. The compactor builds ``hour`` rows from raw
+    BEFORE raw is purged, and ``day`` rows from ``hour`` — so coverage outlives
+    resolution instead of being bounded by it.
+
+    That inversion is the point. Retention used to be an age cutoff plus a
+    per-source row cap, and the cap could evict a thrashing source below the
+    30-day floor the product promises — the very source whose history someone
+    would come looking for. Here the floor is structural: a day bucket is one
+    row however violently the source moved inside it.
+
+    **Per source only.** Workspace, provider and platform series are sums of
+    these rows computed at read time. Materialising those scopes as their own
+    rows would mean four things to keep in agreement, and a membership ledger
+    that drifts is how :AGGREGATED weights got silently double-counted once
+    already. A sum over an indexed range is fast; a wrong number is not.
+
+    **Bucket-closing values, plus the extremes.** ``node_count`` is the last
+    observation in the bucket, which is what "how big was it at the end of
+    Tuesday" means. But a drop that happened and recovered inside the bucket is
+    exactly the event this feature exists to surface, and a closing value hides
+    it — so ``node_min``/``node_max`` are carried too, and the chart draws them
+    as a band at hour and day grain.
+    """
+
+    __tablename__ = "data_source_count_rollups"
+
+    id = Column(Text, primary_key=True, default=lambda: f"rlp_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    #: ``hour`` | ``day``. Raw is not a grain here — raw lives in the snapshot
+    #: table and is compacted INTO this one.
+    grain = Column(Text, nullable=False)
+    #: Inclusive start of the bucket, as an ISO prefix padded to a full
+    #: instant (``2026-08-23T14:00:00+00:00``). Text like every other instant
+    #: in this schema, so lexical ordering is chronological ordering.
+    bucket_start = Column(Text, nullable=False)
+
+    # Denormalised from the snapshot rows, for the same reason they are
+    # denormalised there: scope filtering must not JOIN out of the stats domain.
+    workspace_id = Column(Text, nullable=True)
+    provider_id = Column(Text, nullable=True)
+    graph_name = Column(Text, nullable=True)
+
+    # Bucket-closing values.
+    node_count = Column(Integer, nullable=False, default=0)
+    edge_count = Column(Integer, nullable=False, default=0)
+    entity_type_counts = Column(Text, nullable=False, default="{}")  # JSON {label: n}
+    edge_type_counts = Column(Text, nullable=False, default="{}")    # JSON {type: n}
+
+    # Intra-bucket extremes, so a downsample cannot hide a dip that recovered.
+    node_min = Column(Integer, nullable=True)
+    node_max = Column(Integer, nullable=True)
+    edge_min = Column(Integer, nullable=True)
+    edge_max = Column(Integer, nullable=True)
+
+    # Movement across the bucket boundary — closing value minus the previous
+    # bucket's. Stored rather than derived so a purged neighbour cannot change
+    # what a surviving row says happened, matching the raw table's rule.
+    node_delta = Column(Integer, nullable=True)
+    edge_delta = Column(Integer, nullable=True)
+
+    #: How many raw observations went into this bucket, and how many of those
+    #: actually moved. "One observation all day" and "1,440 observations, all
+    #: identical" are the same line on a chart and very different facts.
+    observations = Column(Integer, nullable=False, default=0)
+    changed_observations = Column(Integer, nullable=False, default=0)
+
+    #: When the compactor wrote this row. A bucket at the trailing edge is
+    #: rebuilt as more raw arrives, so this is not the bucket's own time.
+    compacted_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        # One row per source per bucket per grain — the compactor upserts on
+        # this, so a re-run over a trailing bucket refines it instead of
+        # duplicating it. That is what makes compaction safe to retry.
+        UniqueConstraint(
+            "data_source_id", "grain", "bucket_start", name="uq_dscr_bucket",
+        ),
+        Index("ix_dscr_ds_grain_bucket", "data_source_id", "grain", "bucket_start"),
+        Index("ix_dscr_grain_bucket", "grain", "bucket_start"),
+        Index("ix_dscr_provider_grain_bucket", "provider_id", "grain", "bucket_start"),
+        Index("ix_dscr_ws_grain_bucket", "workspace_id", "grain", "bucket_start"),
+        CheckConstraint("grain IN ('hour', 'day')", name="ck_dscr_grain"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceCountRollup ds_id={self.data_source_id!r} "
+            f"{self.grain}@{self.bucket_start!r} nodes={self.node_count}>"
         )
 
 
@@ -1244,6 +1361,24 @@ class DataSourceCountAlertORM(Base):
     acknowledged_at = Column(Text, nullable=True)
     acknowledged_by = Column(Text, nullable=True)
 
+    #: Which measure moved. Nodes and edges fail independently — a loader that
+    #: drops every relationship while leaving every entity intact is a total
+    #: failure that a node-only alerter cannot see — so the metric is part of
+    #: the alert's identity, not a detail inside its evidence.
+    metric = Column(Text, nullable=False, default="nodes", server_default="nodes")
+
+    #: What kind of finding this is. ``movement`` is the original: a delta far
+    #: outside what is ordinary for this source. The others are categorical and
+    #: cannot be expressed as a multiple of a baseline at all — a type that
+    #: reached zero, or a source that stopped answering.
+    finding = Column(
+        Text, nullable=False, default="movement", server_default="movement",
+    )
+
+    #: The entity/relationship type a ``type_gone`` finding is about. NULL for
+    #: findings that are about the source as a whole.
+    subject_type = Column(Text, nullable=True)
+
     __table_args__ = (
         Index("ix_dsca_ds_detected", "data_source_id", "detected_at"),
         # The fleet inbox: unacknowledged first, newest first. Partial indexes
@@ -1256,6 +1391,13 @@ class DataSourceCountAlertORM(Base):
         ),
         CheckConstraint(
             "direction IN ('drop', 'rise')", name="ck_dsca_direction",
+        ),
+        CheckConstraint(
+            "metric IN ('nodes', 'edges')", name="ck_dsca_metric",
+        ),
+        CheckConstraint(
+            "finding IN ('movement', 'type_gone', 'silent')",
+            name="ck_dsca_finding",
         ),
     )
 

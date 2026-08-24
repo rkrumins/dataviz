@@ -30,6 +30,20 @@
 
 name: synodic
 
+# ── Profiling capture, shared by every tier that writes a snapshot ──
+#
+# THREE services capture: the web tier on its own write paths, the
+# control plane's probe, and the stats service's collection lanes. Giving
+# these only to the stats service is how `PROFILING_ENABLED=false` used to
+# half-work — capture kept running in the other two with compiled-in
+# defaults, and nothing purged what they wrote. An anchor, so the set
+# cannot drift apart again.
+x-profiling-capture: &profiling-capture
+  PROFILING_ENABLED: "${PROFILING_ENABLED:-true}"
+  PROFILING_HEARTBEAT_SECS: "${PROFILING_HEARTBEAT_SECS:-3600}"
+  PROFILING_HOURLY_RETENTION_DAYS: "${PROFILING_HOURLY_RETENTION_DAYS:-45}"
+  PROFILING_MAX_ROWS_PER_SOURCE: "${PROFILING_MAX_ROWS_PER_SOURCE:-5000}"
+
 services:
 
   # ── FalkorDB (Graph Database) — vanilla image, no baked data ──────
@@ -180,6 +194,9 @@ services:
     ports:
       - "${CONTROLPLANE_PORT:-8091}:8091"
     environment:
+      # Profiling capture — this tier writes snapshots too (see the
+      # x-profiling-capture anchor for why it is shared).
+      <<: *profiling-capture
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       # Cache Redis MUST be the dedicated ``redis`` service, not the
@@ -264,6 +281,9 @@ services:
     ports:
       - "${VIZ_PORT:-8000}:8000"
     environment:
+      # Profiling capture — this tier writes snapshots too (see the
+      # x-profiling-capture anchor for why it is shared).
+      <<: *profiling-capture
       # The frontend container's nginx proxies /api here, so the peer is
       # never loopback and gunicorn would otherwise discard the
       # X-Forwarded-For nginx sets — putting every user in one
@@ -373,6 +393,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile.aggregation
     environment:
+      # Profiling capture — this tier writes snapshots too (see the
+      # x-profiling-capture anchor for why it is shared).
+      <<: *profiling-capture
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       # Dedicated cache Redis (FalkorDB provider's ancestor + URN caches).
@@ -550,25 +573,29 @@ services:
       STATS_MAX_DELIVERY_ATTEMPTS: "${STATS_MAX_DELIVERY_ATTEMPTS:-3}"
       STATS_DRAIN_TIMEOUT_SECS: "${STATS_DRAIN_TIMEOUT_SECS:-60}"
       STATS_HEALTH_PORT: "8092"
-      # Counts history: the append-only record behind the per-source
-      # history UI. Captured inside the existing counts write (no extra
-      # provider I/O); change-gated plus an hourly heartbeat so the 60s
-      # probe lane does not write 43k rows/source/month. Retention is
-      # purged by age AND by a per-source cap; an admin can override both
-      # live in Platform settings, these are the defaults.
-      INSIGHTS_HISTORY_ENABLED: "${INSIGHTS_HISTORY_ENABLED:-true}"
-      INSIGHTS_HISTORY_HEARTBEAT_SECS: "${INSIGHTS_HISTORY_HEARTBEAT_SECS:-3600}"
-      INSIGHTS_HISTORY_RETENTION_DAYS: "${INSIGHTS_HISTORY_RETENTION_DAYS:-90}"
-      INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE: "${INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE:-5000}"
-      INSIGHTS_HISTORY_PURGE_INTERVAL_SECS: "${INSIGHTS_HISTORY_PURGE_INTERVAL_SECS:-3600}"
-      # Counts anomaly alerting. Evaluated by a sweep in this service (not at
-      # capture time — "unusual" is a window property), delivered to the
-      # in-app bell, and recorded for the admin insights API. The severity
-      # floor defaults to severe: an alert that fires too eagerly gets muted.
-      INSIGHTS_ALERTS_ENABLED: "${INSIGHTS_ALERTS_ENABLED:-true}"
-      INSIGHTS_ALERT_MIN_SEVERITY: "${INSIGHTS_ALERT_MIN_SEVERITY:-severe}"
-      INSIGHTS_ALERT_COOLDOWN_SECS: "${INSIGHTS_ALERT_COOLDOWN_SECS:-21600}"
-      INSIGHTS_ALERT_INTERVAL_SECS: "${INSIGHTS_ALERT_INTERVAL_SECS:-900}"
+      # Profiling: the append-only record behind the per-source Profiling
+      # surface. Captured inside the existing counts write (no extra provider
+      # I/O); change-gated plus an hourly heartbeat so the 60s probe lane does
+      # not write 43k rows/source/month.
+      #
+      # Retention is TIERED: raw is compacted into hour buckets before raw is
+      # purged, and hour into day, so coverage outlives resolution. The purge
+      # can never delete raw beyond the compaction watermark, which is why the
+      # compact cadence is much tighter than the retention one.
+      <<: *profiling-capture
+      PROFILING_RAW_RETENTION_DAYS: "${PROFILING_RAW_RETENTION_DAYS:-7}"
+      PROFILING_DAILY_RETENTION_DAYS: "${PROFILING_DAILY_RETENTION_DAYS:-400}"
+      PROFILING_COMPACT_INTERVAL_SECS: "${PROFILING_COMPACT_INTERVAL_SECS:-300}"
+      PROFILING_RETENTION_INTERVAL_SECS: "${PROFILING_RETENTION_INTERVAL_SECS:-3600}"
+      # Profiling anomaly alerting. Evaluated by a sweep in this service (not
+      # at capture time — "unusual" is a window property), delivered to the
+      # in-app bell, and recorded for the profiling API. The severity floor
+      # defaults to severe: an alert that fires too eagerly gets muted.
+      PROFILING_ALERTS_ENABLED: "${PROFILING_ALERTS_ENABLED:-true}"
+      PROFILING_ALERT_MIN_SEVERITY: "${PROFILING_ALERT_MIN_SEVERITY:-severe}"
+      PROFILING_ALERT_COOLDOWN_SECS: "${PROFILING_ALERT_COOLDOWN_SECS:-21600}"
+      PROFILING_ALERT_INTERVAL_SECS: "${PROFILING_ALERT_INTERVAL_SECS:-900}"
+      PROFILING_SILENT_AFTER_SECS: "${PROFILING_SILENT_AFTER_SECS:-21600}"
 
       # Size-adaptive poll timeouts (owned by backend/app/config/resilience.py).
       STATS_POLL_TIMEOUT_SECS: "${STATS_POLL_TIMEOUT_SECS:-30}"

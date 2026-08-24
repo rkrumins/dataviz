@@ -23,7 +23,7 @@ does not produce 1,440 identical rows a day. Two supporting columns carry that:
     by the upsert that would capture). Deliberately separate from
     ``last_probed_at``, which belongs to the probe lane.
   * ``platform_settings.history_{retention_days,max_rows_per_source,
-    heartbeat_secs}`` — operator overrides above the INSIGHTS_HISTORY_* env
+    heartbeat_secs}`` — operator overrides above the PROFILING_* env
     defaults. NULL means unset, exactly like the identity columns beside them;
     retention is the kind of knob someone changes in response to something, and
     a row carries ``updated_by``.

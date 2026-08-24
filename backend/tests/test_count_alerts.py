@@ -29,7 +29,10 @@ def _iso(hours_ago: float) -> str:
 
 async def _snap(session: AsyncSession, *, at: str, nodes: int,
                 delta: int | None = None, ds_id: str = DS_ID,
-                provider_id: str = "prov_a1", graph_name: str = "alert-graph"):
+                provider_id: str = "prov_a1", graph_name: str = "alert-graph",
+                edges: int = 0, edge_delta: int | None = None,
+                entity_types: dict | None = None,
+                edge_types: dict | None = None):
     session.add(DataSourceCountSnapshotORM(
         id=f"snp_{ds_id}_{at}",
         data_source_id=ds_id,
@@ -38,9 +41,12 @@ async def _snap(session: AsyncSession, *, at: str, nodes: int,
         provider_id=provider_id,
         graph_name=graph_name,
         node_count=nodes,
-        edge_count=0,
-        entity_type_counts=json.dumps({"Table": nodes}),
-        edge_type_counts="{}",
+        edge_count=edges,
+        edge_delta=edge_delta,
+        entity_type_counts=json.dumps(
+            {"Table": nodes} if entity_types is None else entity_types
+        ),
+        edge_type_counts=json.dumps(edge_types or {}),
         counts_digest="d",
         lane="probe",
         capture_reason="changed",
@@ -65,6 +71,23 @@ async def _steady_then(session: AsyncSession, final_delta: int, final_nodes: int
     await _snap(session, at=_iso(2), nodes=final_nodes, delta=final_delta)
 
 
+async def _evaluate_one(session: AsyncSession, policy, **kwargs):
+    """The MOVEMENT notice this source raised, or None.
+
+    ``evaluate_source`` returns a LIST — nodes, edges and a vanished type are
+    independent findings, and collapsing them would silently drop all but one.
+    These tests are about movement, so this picks that finding out. A fixture
+    that wipes a graph legitimately raises ``type_gone`` alongside it; that is
+    covered by its own tests below rather than by weakening these.
+    """
+    notices = await count_alerts_repo.evaluate_source(
+        session, DS_ID, policy, **kwargs
+    )
+    movements = [n for n in notices if n.finding == "movement"]
+    assert len(movements) <= 1, f"fixture produced {len(movements)} movements"
+    return movements[0] if movements else None
+
+
 async def _alerts(session: AsyncSession) -> list:
     return list((await session.execute(
         select(DataSourceCountAlertORM)
@@ -79,7 +102,7 @@ async def test_a_severe_drop_raises_an_alert(db_session: AsyncSession):
     10,000 is 10%, nowhere near the proportional critical threshold."""
     await _steady_then(db_session, -1_000, 9_000)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice is not None
     assert notice.severity == "severe"
     assert notice.direction == "drop"
@@ -94,21 +117,21 @@ async def test_a_severe_rise_raises_too(db_session: AsyncSession):
     """A loader duplicating every node is as much a failure as a deletion."""
     await _steady_then(db_session, 30_000, 40_000)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice is not None
     assert notice.direction == "rise"
 
 
 async def test_ordinary_movement_raises_nothing(db_session: AsyncSession):
     await _steady_then(db_session, 10, 10_010)
-    assert await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy()) is None
+    assert await _evaluate_one(db_session, _policy()) is None
     assert await _alerts(db_session) == []
 
 
 async def test_a_single_observation_cannot_be_a_movement(db_session: AsyncSession):
     """Otherwise every newly onboarded graph alerts on its first snapshot."""
     await _snap(db_session, at=_iso(1), nodes=50_000)
-    assert await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy()) is None
+    assert await _evaluate_one(db_session, _policy()) is None
 
 
 async def test_the_severity_floor_is_respected(db_session: AsyncSession):
@@ -116,10 +139,12 @@ async def test_the_severity_floor_is_respected(db_session: AsyncSession):
     # so notable is >=75 and severe is >=200. 100 sits between them.
     await _steady_then(db_session, -100, 9_900)
 
-    assert await count_alerts_repo.evaluate_source(
-        db_session, DS_ID, _policy(min_severity="severe")) is None
-    notice = await count_alerts_repo.evaluate_source(
-        db_session, DS_ID, _policy(min_severity="notable"))
+    assert await _evaluate_one(
+        db_session, _policy(min_severity="severe"),
+) is None
+    notice = await _evaluate_one(
+        db_session, _policy(min_severity="notable"),
+)
     assert notice is not None
     assert notice.severity == "notable"
 
@@ -132,7 +157,7 @@ async def test_the_worst_movement_wins_not_the_latest(db_session: AsyncSession):
     await _snap(db_session, at=_iso(5), nodes=100, delta=-9_900)   # the event
     await _snap(db_session, at=_iso(4), nodes=1_100, delta=1_000)  # aftershock
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice.node_delta == -9_900
 
 
@@ -143,9 +168,9 @@ async def test_a_second_pass_inside_the_cooldown_stays_quiet(
 ):
     await _steady_then(db_session, -9_900, 100)
 
-    assert await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy()) is not None
+    assert await _evaluate_one(db_session, _policy()) is not None
     # Same data, immediately re-judged — an incident must ring once.
-    assert await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy()) is None
+    assert await _evaluate_one(db_session, _policy()) is None
     assert len(await _alerts(db_session)) == 1
 
 
@@ -155,22 +180,24 @@ async def test_a_stale_movement_does_not_re_alert_after_the_cooldown(
     """The cooldown elapsing is not new news. Without this the same incident
     re-alerts once per cooldown for as long as it stays in the lookback."""
     await _steady_then(db_session, -9_900, 100)
-    assert await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy()) is not None
+    assert await _evaluate_one(db_session, _policy()) is not None
 
     # Cooldown of 0: the gate is now purely "has anything happened SINCE".
-    assert await count_alerts_repo.evaluate_source(
-        db_session, DS_ID, _policy(cooldown_secs=0)) is None
+    assert await _evaluate_one(
+        db_session, _policy(cooldown_secs=0),
+) is None
 
 
 async def test_a_new_movement_after_the_cooldown_does_alert(
     db_session: AsyncSession,
 ):
     await _steady_then(db_session, -9_900, 100)
-    assert await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy()) is not None
+    assert await _evaluate_one(db_session, _policy()) is not None
 
     await _snap(db_session, at=_iso(0.1), nodes=50, delta=-9_950)
-    notice = await count_alerts_repo.evaluate_source(
-        db_session, DS_ID, _policy(cooldown_secs=0))
+    notice = await _evaluate_one(
+        db_session, _policy(cooldown_secs=0),
+)
     assert notice is not None
     assert notice.node_delta == -9_950
     assert len(await _alerts(db_session)) == 2
@@ -183,7 +210,7 @@ async def test_the_baseline_is_frozen_on_the_alert(db_session: AsyncSession):
     baseline could quietly downgrade itself and contradict the notification
     that already went out."""
     await _steady_then(db_session, -9_900, 100)
-    await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    await _evaluate_one(db_session, _policy())
 
     row = (await _alerts(db_session))[0]
     assert row.baseline > 0
@@ -203,7 +230,7 @@ async def test_the_alert_resolves_its_catalog_item_for_deep_linking(
     await db_session.flush()
     await _steady_then(db_session, -9_900, 100)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice.catalog_item_id == "cat_a1"
     assert (await _alerts(db_session))[0].catalog_item_id == "cat_a1"
 
@@ -214,7 +241,7 @@ async def test_an_unregistered_graph_still_alerts_without_a_catalog_id(
     """No catalog entry is not a reason to swallow the finding — the
     notification just falls back to a different destination."""
     await _steady_then(db_session, -9_900, 100)
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice is not None
     assert notice.catalog_item_id is None
 
@@ -234,7 +261,7 @@ async def test_acknowledgement_records_who_and_is_idempotent(
     db_session: AsyncSession,
 ):
     await _steady_then(db_session, -9_900, 100)
-    await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    await _evaluate_one(db_session, _policy())
     alert_id = (await _alerts(db_session))[0].id
 
     first = await count_alerts_repo.acknowledge(db_session, alert_id, actor_id="u1")
@@ -343,7 +370,7 @@ async def test_the_sweep_rings_only_after_the_alerts_are_committed(monkeypatch):
 
     async def fake_policy(_s): return _policy()
     async def fake_sources(_s): return [DS_ID]
-    async def fake_evaluate(_s, _ds, _p): return notice
+    async def fake_evaluate(_s, _ds, _p): return [notice]
     async def fake_notify(_s, **_kw): order.append("notify"); return 1
 
     monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
@@ -429,7 +456,7 @@ async def test_one_unreadable_source_does_not_cost_the_fleet_its_pass(monkeypatc
         seen.append(ds)
         if ds == "ds_broken":
             raise RuntimeError("unreadable")
-        return None
+        return []
 
     monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
     monkeypatch.setattr(count_alerts_repo, "resolve_alert_policy", fake_policy)
@@ -460,7 +487,7 @@ async def test_a_failed_fan_out_leaves_the_alerts_readable(monkeypatch):
 
     async def fake_policy(_s): return _policy()
     async def fake_sources(_s): return [DS_ID]
-    async def fake_evaluate(_s, _ds, _p): return notice
+    async def fake_evaluate(_s, _ds, _p): return [notice]
     async def boom(_s, **_kw): raise RuntimeError("bell is down")
 
     monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
@@ -534,7 +561,7 @@ async def test_a_poisoned_transaction_is_rolled_back_before_continuing(monkeypat
         events.append(f"judge:{ds}")
         if ds == "ds_broken":
             raise RuntimeError("constraint violation")
-        return notice
+        return [notice]
 
     monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
     monkeypatch.setattr(count_alerts_repo, "resolve_alert_policy", fake_policy)
@@ -576,7 +603,7 @@ async def test_an_alert_is_committed_as_soon_as_it_lands(monkeypatch):
     async def fake_sources(_s): return ["ds_quiet", "ds_a"]
     async def fake_evaluate(_s, ds, _p):
         events.append(f"judge:{ds}")
-        return None if ds == "ds_quiet" else notice
+        return [] if ds == "ds_quiet" else [notice]
     async def fake_notify(_s, **_kw): events.append("notify"); return 1
 
     monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
@@ -600,7 +627,7 @@ async def test_an_alert_is_committed_as_soon_as_it_lands(monkeypatch):
 async def test_a_near_total_loss_is_critical(db_session: AsyncSession):
     await _steady_then(db_session, -9_900, 100)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice.severity == "critical"
     assert (await _alerts(db_session))[0].severity == "critical"
 
@@ -619,7 +646,7 @@ async def test_critical_fires_even_when_the_multiple_would_not(
     # even "notable" by the multiples — but it is 100% of the graph.
     await _snap(db_session, at=_iso(2), nodes=0, delta=-10_000)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice is not None
     assert notice.severity == "critical"
 
@@ -628,9 +655,9 @@ async def test_critical_clears_any_configured_floor(db_session: AsyncSession):
     """A floor is a noise control; a wipe is not noise."""
     await _steady_then(db_session, -9_900, 100)
 
-    notice = await count_alerts_repo.evaluate_source(
-        db_session, DS_ID, _policy(min_severity="severe"),
-    )
+    notice = await _evaluate_one(
+        db_session, _policy(min_severity="severe"),
+)
     assert notice.severity == "critical"
 
 
@@ -639,7 +666,7 @@ async def test_a_doubling_is_never_critical(db_session: AsyncSession):
     where one that is nearly gone may have nothing left to recover from."""
     await _steady_then(db_session, 30_000, 40_000)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice.severity == "severe"
     assert notice.direction == "rise"
 
@@ -653,9 +680,9 @@ async def test_a_tiny_graph_emptying_is_not_called_critical(
         await _snap(db_session, at=_iso(hours), nodes=12, delta=1)
     await _snap(db_session, at=_iso(2), nodes=1, delta=-11)
 
-    notice = await count_alerts_repo.evaluate_source(
-        db_session, DS_ID, _policy(min_severity="notable"),
-    )
+    notice = await _evaluate_one(
+        db_session, _policy(min_severity="notable"),
+)
     assert notice is None or notice.severity != "critical"
 
 
@@ -672,7 +699,7 @@ async def test_critical_outranks_a_larger_severe_movement(
     # way that matters.
     await _snap(db_session, at=_iso(5), nodes=100, delta=-799_900)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice.severity == "critical"
     assert notice.node_delta == -799_900
 
@@ -702,7 +729,7 @@ async def test_the_alert_freezes_the_provider_and_source_names(
     await db_session.flush()
     await _steady_then(db_session, -9_900, 100)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     row = (await _alerts(db_session))[0]
 
     assert row.provider_name == "Falkor Prod"
@@ -722,7 +749,7 @@ async def test_a_renamed_provider_does_not_rewrite_an_existing_alert(
     db_session.add(_P(id="prov_a1", name="Falkor Prod", provider_type="falkordb"))
     await db_session.flush()
     await _steady_then(db_session, -9_900, 100)
-    await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    await _evaluate_one(db_session, _policy())
 
     provider = await db_session.get(_P, "prov_a1")
     provider.name = "Falkor Prod (decommissioned)"
@@ -747,7 +774,7 @@ async def test_a_missing_provider_row_does_not_cost_the_alert_its_label(
     await db_session.flush()
     await _steady_then(db_session, -9_900, 100)
 
-    notice = await count_alerts_repo.evaluate_source(db_session, DS_ID, _policy())
+    notice = await _evaluate_one(db_session, _policy())
     assert notice is not None
     row = (await _alerts(db_session))[0]
     assert row.provider_name is None
@@ -826,3 +853,256 @@ async def test_the_title_survives_a_provider_it_cannot_name(monkeypatch):
     assert captured["title"] == "alert-graph gained 900 entities"
     # No catalog entry: the bell still lands somewhere useful.
     assert captured["link"] == f"/ingestion?tab=freshness&fds={DS_ID}"
+
+
+# ── edges are judged, and judged separately ──────────────────────────
+
+
+async def test_a_relationship_collapse_alerts_even_when_entities_are_intact(
+    db_session: AsyncSession,
+):
+    """The failure this whole metric split exists for.
+
+    A loader that drops every relationship while leaving every entity in place
+    moves the node count not at all. Judged on nodes alone — which is all that
+    happened until now — a graph that has become a bag of disconnected records
+    reports nothing whatsoever.
+    """
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_000, delta=0,
+            edges=50_000, edge_delta=10,
+            edge_types={"LINKS": 50_000},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=0,
+        edges=100, edge_delta=-49_900,
+        edge_types={"LINKS": 100},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    edge_alerts = [
+        n for n in notices if n.metric == "edges" and n.finding == "movement"
+    ]
+    assert len(edge_alerts) == 1
+    assert edge_alerts[0].node_delta == -49_900
+    assert edge_alerts[0].direction == "drop"
+    assert not [n for n in notices if n.metric == "nodes"], (
+        "the entity count never moved"
+    )
+
+
+async def test_each_metric_is_baselined_against_itself(
+    db_session: AsyncSession,
+):
+    """A graph whose entities churn hugely and whose relationships never do
+    must not have its relationship failures hidden behind its entity churn."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_000, delta=9_000,
+            edges=1_000, edge_delta=10, edge_types={"LINKS": 1_000},
+        )
+    # 800 edges lost is nothing against the node baseline (9,000) and enormous
+    # against the edge one (10).
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=0,
+        edges=200, edge_delta=-800, edge_types={"LINKS": 200},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    assert any(n.metric == "edges" for n in notices), (
+        "measured against the shared node baseline this would be invisible"
+    )
+
+
+async def test_the_cooldown_is_per_metric(db_session: AsyncSession):
+    """An entity incident must not mute a concurrent relationship one — and
+    the relationship failure is the one nobody was watching for."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_000, delta=10,
+            edges=50_000, edge_delta=10, edge_types={"LINKS": 50_000},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=50, delta=-9_950,
+        edges=100, edge_delta=-49_900, edge_types={"LINKS": 100},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    metrics = {n.metric for n in notices if n.finding == "movement"}
+    assert metrics == {"nodes", "edges"}, (
+        "both measures failed and both must be reported"
+    )
+
+
+# ── a type reaching zero ─────────────────────────────────────────────
+
+
+async def test_a_vanished_type_is_its_own_finding(db_session: AsyncSession):
+    """The clearest evidence an external process deleted data.
+
+    As a share of a large graph the loss is frequently unremarkable — a
+    40-type graph losing one type moves the total by 2.5% — so it cannot be
+    expressed as a multiple of a baseline, which is exactly why it went
+    unreported.
+    """
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_000, delta=10,
+            entity_types={"Table": 9_800, "Column": 200},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=9_800, delta=-200,
+        entity_types={"Table": 9_800},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    gone = [n for n in notices if n.finding == "type_gone"]
+    assert len(gone) == 1
+    assert gone[0].subject_type == "Column"
+    assert gone[0].metric == "nodes"
+    assert gone[0].node_delta == -200
+
+
+async def test_a_vanished_relationship_type_is_reported_as_an_edge_finding(
+    db_session: AsyncSession,
+):
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=100, delta=0,
+            edges=5_000, edge_delta=0,
+            edge_types={"LINKS": 4_000, "DEPENDS_ON": 1_000},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=100, delta=0,
+        edges=4_000, edge_delta=-1_000,
+        edge_types={"LINKS": 4_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    gone = [n for n in notices if n.finding == "type_gone"]
+    assert len(gone) == 1
+    assert gone[0].subject_type == "DEPENDS_ON"
+    assert gone[0].metric == "edges"
+
+
+async def test_a_type_that_came_back_is_not_reported_as_gone(
+    db_session: AsyncSession,
+):
+    """A nightly rebuild that drops and recreates a type is not an incident.
+    Reporting it would train people to ignore the finding."""
+    await _snap(
+        db_session, at=_iso(20), nodes=10_000, delta=0,
+        entity_types={"Table": 9_800, "Column": 200},
+    )
+    await _snap(
+        db_session, at=_iso(15), nodes=9_800, delta=-200,
+        entity_types={"Table": 9_800},
+    )
+    await _snap(
+        db_session, at=_iso(10), nodes=10_000, delta=200,
+        entity_types={"Table": 9_800, "Column": 200},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    assert not [n for n in notices if n.finding == "type_gone"]
+
+
+# ── a source that stopped reporting ──────────────────────────────────
+
+
+async def _active_source(session: AsyncSession, ds_id: str = DS_ID):
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    session.add(WorkspaceDataSourceORM(
+        id=ds_id,
+        workspace_id="ws_a1",
+        provider_id="prov_a1",
+        graph_name="alert-graph",
+        label="Alerting source",
+        is_primary=False,
+        is_active=True,
+        aggregation_status="none",
+        aggregation_edge_count=0,
+        is_restricted=False,
+        created_at=_iso(1000),
+        updated_at=_iso(1000),
+    ))
+    await session.flush()
+
+
+async def test_a_source_that_stopped_reporting_is_reported(
+    db_session: AsyncSession,
+):
+    """Invisible to every other detector here.
+
+    They all judge MOVEMENT, and a source that has gone quiet produces none —
+    an expired credential or a dropped graph ends the series rather than
+    moving it, and a chart of what a source did report cannot show the
+    reports that never arrived.
+    """
+    await _active_source(db_session)
+    await _snap(db_session, at=_iso(100), nodes=10_000, delta=0)
+
+    notices = await count_alerts_repo.evaluate_silent_sources(
+        db_session, _policy(),
+    )
+    assert len(notices) == 1
+    assert notices[0].finding == "silent"
+    assert notices[0].data_source_id == DS_ID
+    assert notices[0].source_name == "Alerting source"
+
+
+async def test_a_source_reporting_normally_is_not_called_silent(
+    db_session: AsyncSession,
+):
+    await _active_source(db_session)
+    await _snap(db_session, at=_iso(0.25), nodes=10_000, delta=0)
+
+    assert await count_alerts_repo.evaluate_silent_sources(
+        db_session, _policy(),
+    ) == []
+
+
+async def test_a_deleted_source_is_not_called_silent(db_session: AsyncSession):
+    """A source that was removed is SUPPOSED to stop reporting. Alerting on it
+    would make the finding worthless within a week of any tidy-up."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    await _active_source(db_session)
+    await _snap(db_session, at=_iso(100), nodes=10_000, delta=0)
+    row = await db_session.get(WorkspaceDataSourceORM, DS_ID)
+    row.deleted_at = _iso(50)
+    await db_session.flush()
+
+    assert await count_alerts_repo.evaluate_silent_sources(
+        db_session, _policy(),
+    ) == []
+
+
+async def test_silence_does_not_re_alert_inside_the_cooldown(
+    db_session: AsyncSession,
+):
+    await _active_source(db_session)
+    await _snap(db_session, at=_iso(100), nodes=10_000, delta=0)
+
+    first = await count_alerts_repo.evaluate_silent_sources(
+        db_session, _policy(),
+    )
+    assert len(first) == 1
+
+    assert await count_alerts_repo.evaluate_silent_sources(
+        db_session, _policy(),
+    ) == [], "an outage must ring once, not once per tick"

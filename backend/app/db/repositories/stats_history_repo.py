@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 #: Bounds on the operator overrides. A retention of 0 days or a cap of 0 rows
 #: would silently turn the feature into a purge loop, and there is no honest
 #: reading of "keep history" that means that — so the floor is 1, not 0. The
-#: master switch is ``INSIGHTS_HISTORY_ENABLED``, which is the supported way to
+#: master switch is ``PROFILING_ENABLED``, which is the supported way to
 #: turn capture off.
 _MIN_RETENTION_DAYS = 1
 _MIN_MAX_ROWS = 1
@@ -104,13 +104,13 @@ def env_history_policy() -> HistoryPolicy:
     """The policy with nothing persisted — the fallback used whenever the
     settings row is missing or unreadable."""
     return HistoryPolicy(
-        enabled=resilience.INSIGHTS_HISTORY_ENABLED,
-        heartbeat_secs=resilience.INSIGHTS_HISTORY_HEARTBEAT_SECS,
-        retention_days=resilience.INSIGHTS_HISTORY_RETENTION_DAYS,
-        max_rows_per_source=resilience.INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE,
-        env_heartbeat_secs=resilience.INSIGHTS_HISTORY_HEARTBEAT_SECS,
-        env_retention_days=resilience.INSIGHTS_HISTORY_RETENTION_DAYS,
-        env_max_rows_per_source=resilience.INSIGHTS_HISTORY_MAX_ROWS_PER_SOURCE,
+        enabled=resilience.PROFILING_ENABLED,
+        heartbeat_secs=resilience.PROFILING_HEARTBEAT_SECS,
+        retention_days=resilience.PROFILING_HOURLY_RETENTION_DAYS,
+        max_rows_per_source=resilience.PROFILING_MAX_ROWS_PER_SOURCE,
+        env_heartbeat_secs=resilience.PROFILING_HEARTBEAT_SECS,
+        env_retention_days=resilience.PROFILING_HOURLY_RETENTION_DAYS,
+        env_max_rows_per_source=resilience.PROFILING_MAX_ROWS_PER_SOURCE,
     )
 
 
@@ -223,20 +223,45 @@ _CRITICAL_MIN_BEFORE = 1000
 _SIGNIFICANCE_FLOOR = 25
 
 
-def change_baseline(rows: list) -> int:
-    """The median non-zero absolute node delta in the window.
+#: The two measures a source is judged on. They move independently and are
+#: baselined independently: a graph whose entity count is rebuilt nightly and
+#: whose relationships never change has a large node baseline and a tiny edge
+#: one, and judging edges against the node baseline would hide every
+#: relationship failure behind the entity churn.
+METRICS = ("nodes", "edges")
+
+_DELTA_ATTR = {"nodes": "node_delta", "edges": "edge_delta"}
+_COUNT_ATTR = {"nodes": "node_count", "edges": "edge_count"}
+
+
+def delta_of(row, metric: str) -> Optional[int]:
+    return getattr(row, _DELTA_ATTR[metric], None)
+
+
+def count_of(row, metric: str) -> int:
+    return int(getattr(row, _COUNT_ATTR[metric], 0) or 0)
+
+
+def change_baseline(rows: list, metric: str = "nodes") -> int:
+    """The median non-zero absolute delta in the window, for one metric.
 
     "Is this drop big" has no answer in the absolute — 900 lost rows is
     catastrophic for a source that never moves and a Tuesday for one that
     rebuilds nightly. The baseline makes the question answerable per source,
     from the data already in hand.
 
+    Per METRIC, because nodes and edges fail independently. A loader that
+    drops every relationship while leaving every entity intact moves the edge
+    count enormously and the node count not at all; measured against a shared
+    baseline that failure is invisible, which is exactly how it went
+    unreported until now.
+
     Zero deltas are excluded: heartbeat rows would otherwise drag the median to
     0 on any source that is mostly idle, which is most of them.
     """
     magnitudes = sorted(
-        abs(r.node_delta) for r in rows
-        if r.node_delta is not None and r.node_delta != 0
+        abs(d) for d in (delta_of(r, metric) for r in rows)
+        if d is not None and d != 0
     )
     if not magnitudes:
         return _SIGNIFICANCE_FLOOR
@@ -494,6 +519,16 @@ async def list_snapshots(
     At ``raw`` grain every row is returned (bounded by ``limit``). At hour/day
     grain the LAST row of each bucket is returned — the bucket's closing state,
     which is what a reader means by "what did it look like that day".
+
+    **The limit takes from the NEWEST end.** Ordering ascending and then
+    limiting returns the OLDEST ``limit`` rows, so a source busy enough to
+    exceed the cap inside the window silently answered with a stale prefix:
+    the chart stopped early, ``change_baseline`` was computed from movement
+    that was over, ``largest_drop`` could not see a recent one, and
+    ``evaluate_source`` — which reads this with the default limit — judged a
+    thrashing source on observations it had already alerted about while the
+    current ones were invisible. Take newest-first, then reverse, so a
+    truncated window loses the distant past instead of the present.
     """
     stmt = (
         select(DataSourceCountSnapshotORM)
@@ -502,10 +537,10 @@ async def list_snapshots(
             DataSourceCountSnapshotORM.captured_at >= frm,
             DataSourceCountSnapshotORM.captured_at <= to,
         )
-        .order_by(DataSourceCountSnapshotORM.captured_at.asc())
+        .order_by(DataSourceCountSnapshotORM.captured_at.desc())
         .limit(limit)
     )
-    rows = list((await session.execute(stmt)).scalars().all())
+    rows = list(reversed((await session.execute(stmt)).scalars().all()))
     if grain == "raw" or not rows:
         return rows
 
@@ -591,27 +626,6 @@ async def latest_data_source_for_graph(
         .order_by(DataSourceCountSnapshotORM.captured_at.desc())
         .limit(1)
     )).scalar_one_or_none()
-
-
-async def provider_data_source_ids(
-    session: AsyncSession, provider_id: str, *, frm: str, to: str,
-) -> List[str]:
-    """Data sources with history for a provider in the window.
-
-    Reads the denormalised ``provider_id`` on the snapshot rather than joining
-    to ``workspace_data_sources`` — that JOIN would leave the stats domain, and
-    it would also drop the history of sources that have since been removed.
-    """
-    rows = (await session.execute(
-        select(DataSourceCountSnapshotORM.data_source_id)
-        .where(
-            DataSourceCountSnapshotORM.provider_id == provider_id,
-            DataSourceCountSnapshotORM.captured_at >= frm,
-            DataSourceCountSnapshotORM.captured_at <= to,
-        )
-        .distinct()
-    )).scalars().all()
-    return list(rows)
 
 
 @dataclass(frozen=True)
@@ -708,95 +722,11 @@ async def rollup_rows(
 # ── purge ────────────────────────────────────────────────────────────
 
 
-async def purge_by_age(
-    session: AsyncSession, *, retention_days: int, batch: int = 5000,
-) -> int:
-    """Delete snapshots older than the cutoff. Returns rows deleted.
-
-    ISO lexical ordering makes the cutoff a plain string compare, the same way
-    ``last_probed_at < cutoff`` already works in the probe due-check.
-    """
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))
-    ).isoformat()
-    doomed = (await session.execute(
-        select(DataSourceCountSnapshotORM.id)
-        .where(DataSourceCountSnapshotORM.captured_at < cutoff)
-        .limit(batch)
-    )).scalars().all()
-    if not doomed:
-        return 0
-    await session.execute(
-        delete(DataSourceCountSnapshotORM)
-        .where(DataSourceCountSnapshotORM.id.in_(list(doomed)))
-    )
-    return len(doomed)
-
-
-async def purge_over_cap(
-    session: AsyncSession, *, max_rows_per_source: int, batch: int = 5000,
-) -> int:
-    """Trim each source back to its newest ``max_rows_per_source`` snapshots.
-
-    The age cutoff alone is unbounded in the bad case: a source thrashing under
-    a broken loader changes on every 60s probe, and 43k rows a month of one
-    source is how this table would come to be dominated by its least healthy
-    member. This is that backstop.
-
-    Deliberately id-based rather than a window-function DELETE — the same
-    statement then runs unchanged on the SQLite the tests use.
-    """
-    cap = max(1, max_rows_per_source)
-    over = (await session.execute(
-        select(DataSourceCountSnapshotORM.data_source_id)
-        .group_by(DataSourceCountSnapshotORM.data_source_id)
-        .having(func.count(DataSourceCountSnapshotORM.id) > cap)
-    )).scalars().all()
-
-    removed = 0
-    for ds_id in over:
-        if removed >= batch:
-            break
-        keep = (await session.execute(
-            select(DataSourceCountSnapshotORM.id)
-            .where(DataSourceCountSnapshotORM.data_source_id == ds_id)
-            .order_by(DataSourceCountSnapshotORM.captured_at.desc())
-            .limit(cap)
-        )).scalars().all()
-        doomed = (await session.execute(
-            select(DataSourceCountSnapshotORM.id)
-            .where(
-                DataSourceCountSnapshotORM.data_source_id == ds_id,
-                DataSourceCountSnapshotORM.id.notin_(list(keep)),
-            )
-            .limit(batch - removed)
-        )).scalars().all()
-        if not doomed:
-            continue
-        await session.execute(
-            delete(DataSourceCountSnapshotORM)
-            .where(DataSourceCountSnapshotORM.id.in_(list(doomed)))
-        )
-        removed += len(doomed)
-    return removed
-
-
-async def purge_snapshots(
-    session: AsyncSession, policy: HistoryPolicy, *, batch: int = 5000,
-) -> Dict[str, int]:
-    """Both purge passes. Idempotent — a second run over a clean table deletes
-    nothing and reports zeroes."""
-    by_age = await purge_by_age(
-        session, retention_days=policy.retention_days, batch=batch,
-    )
-    over_cap = await purge_over_cap(
-        session, max_rows_per_source=policy.max_rows_per_source, batch=batch,
-    )
-    return {"by_age": by_age, "over_cap": over_cap}
-
-
 __all__: Sequence[str] = (
+    "METRICS",
     "HistoryPolicy",
+    "count_of",
+    "delta_of",
     "bucket_extremes",
     "change_baseline",
     "classify_significance",
@@ -809,11 +739,7 @@ __all__: Sequence[str] = (
     "maybe_capture_snapshot",
     "normalize_grain",
     "oldest_captured_at",
-    "provider_data_source_ids",
     "RollupRow",
     "rollup_rows",
-    "purge_by_age",
-    "purge_over_cap",
-    "purge_snapshots",
     "resolve_history_policy",
 )

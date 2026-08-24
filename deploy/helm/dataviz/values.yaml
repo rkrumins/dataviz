@@ -64,12 +64,22 @@ config:
   # cutoff; maxRowsPerSource bounds what one source thrashing under a broken
   # loader can contribute, which the age cutoff alone cannot. Both are
   # overridable live by an admin — these are the defaults.
-  history:
+  # Profiling: counts and composition over time. Retention is TIERED —
+  # raw is compacted into hour buckets before raw is purged, and hour into
+  # day, so how far back history goes stops being a function of how
+  # volatile a source is. maxRowsPerSource is a raw-tier safety valve only.
+  profiling:
     enabled: "true"
     heartbeatSecs: "3600"
-    retentionDays: "90"
+    rawRetentionDays: "7"
+    hourlyRetentionDays: "45"
+    dailyRetentionDays: "400"
     maxRowsPerSource: "5000"
-    purgeIntervalSecs: "3600"
+    # Much tighter than the retention cadence: the purge cannot delete raw
+    # beyond the compaction watermark, so a slow compactor stalls retention
+    # rather than losing observations.
+    compactIntervalSecs: "300"
+    retentionIntervalSecs: "3600"
     # Anomaly alerting. severe = >=8x the source's own usual movement;
     # notable = >=3x. Defaults to severe because an alert that fires too
     # eagerly gets muted, and a muted alert is worth less than none.
@@ -77,6 +87,10 @@ config:
     alertMinSeverity: "severe"
     alertCooldownSecs: "21600"
     alertIntervalSecs: "900"
+    # A source unheard-from this long is SILENT — it stopped reporting, which
+    # is not the same as dropping to zero and is invisible on a chart of what
+    # it did report. Generous against the hourly heartbeat so idle never trips.
+    silentAfterSecs: "21600"
 
   # Analytics. One shared ConfigMap feeds every service here, which is exactly
   # what this setting needs: warmIntervalSeconds is BOTH the controlplane's

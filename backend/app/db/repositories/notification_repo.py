@@ -354,6 +354,9 @@ async def notify_counts_anomaly(
     direction: str,
     node_delta: int,
     node_count: int = 0,
+    metric: str = "nodes",
+    finding: str = "movement",
+    subject_type: Optional[str] = None,
 ) -> int:
     """Bell for a graph that moved far outside its own normal range.
 
@@ -377,6 +380,11 @@ async def notify_counts_anomaly(
 
     magnitude = f"{abs(node_delta):,}"
     verb = "lost" if direction == "drop" else "gained"
+    # Nodes and edges fail independently and for different reasons, so the
+    # bell has to say which one. "Orders lost 48,900" sends someone looking
+    # for missing records when every record is present and every link between
+    # them is gone.
+    noun = "relationships" if metric == "edges" else "entities"
     # Critical is not a bigger version of severe — it means the graph is
     # nearly gone — so it gets its own sentence rather than a stronger adverb.
     scale = {
@@ -401,17 +409,38 @@ async def notify_counts_anomaly(
         # several providers reads the bell as a list, and "Orders lost 4.2M"
         # does not say which deployment to go and look at.
         title=(
-            f"{source_name} {verb} {magnitude} entities"
+            (
+                f"{source_name} has stopped reporting"
+                if finding == "silent"
+                else f"{source_name}: {subject_type} is gone"
+                if finding == "type_gone" and subject_type
+                else f"{source_name} {verb} {magnitude} {noun}"
+            )
             + (f" on {provider_name}" if provider_name else "")
         ),
         body=(
             (
-                f"Almost nothing is left — {node_count:,} entities remain. "
+                # Silence is the absence of a signal, so there is no magnitude
+                # to lead with — and no chart on which it appears, which is
+                # why nobody would otherwise notice.
+                "No counts have been observed for this source recently. "
+                "Its credentials, its graph, or the provider behind it may "
+                "have gone away — nothing on the chart can show this."
+                if finding == "silent" else
+                # A type reaching zero is categorical, so the usual "outside
+                # its normal range" framing does not apply — as a share of a
+                # large graph the loss is often unremarkable, which is exactly
+                # why it needed its own finding.
+                f"Every one of the {magnitude} {noun} of this type has gone. "
+                "Nothing about the total size says so, which is why this is "
+                "reported on its own."
+                if finding == "type_gone" else
+                f"Almost nothing is left — {node_count:,} {noun} remain. "
                 "Check the source system before anything reloads over it."
                 if scale is None else
                 f"That is {scale} this source's usual movement."
             )
-            + " Open the history to see which labels moved and what else was "
+            + " Open profiling to see which types moved and what else was "
             "running at the time."
         ),
         link=link,

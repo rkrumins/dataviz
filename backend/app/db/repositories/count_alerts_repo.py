@@ -39,6 +39,7 @@ from ..models import (
     DataSourceCountAlertORM,
     DataSourceCountSnapshotORM,
     PlatformSettingsORM,
+    WorkspaceDataSourceORM,
 )
 from . import stats_history_repo
 
@@ -78,12 +79,12 @@ class AlertPolicy:
 
 def env_alert_policy() -> AlertPolicy:
     return AlertPolicy(
-        enabled=resilience.INSIGHTS_ALERTS_ENABLED,
-        min_severity=resilience.INSIGHTS_ALERT_MIN_SEVERITY,
-        cooldown_secs=resilience.INSIGHTS_ALERT_COOLDOWN_SECS,
-        env_enabled=resilience.INSIGHTS_ALERTS_ENABLED,
-        env_min_severity=resilience.INSIGHTS_ALERT_MIN_SEVERITY,
-        env_cooldown_secs=resilience.INSIGHTS_ALERT_COOLDOWN_SECS,
+        enabled=resilience.PROFILING_ALERTS_ENABLED,
+        min_severity=resilience.PROFILING_ALERT_MIN_SEVERITY,
+        cooldown_secs=resilience.PROFILING_ALERT_COOLDOWN_SECS,
+        env_enabled=resilience.PROFILING_ALERTS_ENABLED,
+        env_min_severity=resilience.PROFILING_ALERT_MIN_SEVERITY,
+        env_cooldown_secs=resilience.PROFILING_ALERT_COOLDOWN_SECS,
     )
 
 
@@ -209,6 +210,14 @@ class PendingNotice:
     direction: str
     node_delta: int
     node_count: int
+    #: Which measure moved. Part of the notice, not a detail inside it: "12,400
+    #: entities vanished" and "12,400 relationships vanished" are different
+    #: incidents with different causes.
+    metric: str = "nodes"
+    #: ``movement`` | ``type_gone`` | ``silent``.
+    finding: str = "movement"
+    #: The entity/relationship type a ``type_gone`` notice is about.
+    subject_type: Optional[str] = None
 
 
 def _meets(severity: str, floor: str) -> bool:
@@ -224,9 +233,15 @@ def _meets(severity: str, floor: str) -> bool:
 
 
 async def _last_alert_marks(
-    session: AsyncSession, ds_id: str,
+    session: AsyncSession, ds_id: str, *,
+    metric: str = "nodes", finding: str = "movement",
 ) -> tuple[Optional[str], Optional[str]]:
-    """(last detected_at, last observed_at) for this source.
+    """(last detected_at, last observed_at) for this source and finding.
+
+    Scoped to the METRIC as well as the source. Nodes and edges fail
+    independently, so a shared cooldown lets an entity incident mute a
+    concurrent relationship one — and the relationship failure is the one
+    nobody was watching for in the first place.
 
     BOTH, because the two gates below ask different questions and answering
     either with the wrong timestamp is a bug:
@@ -244,9 +259,127 @@ async def _last_alert_marks(
         select(
             func.max(DataSourceCountAlertORM.detected_at),
             func.max(DataSourceCountAlertORM.observed_at),
-        ).where(DataSourceCountAlertORM.data_source_id == ds_id)
+        ).where(
+            DataSourceCountAlertORM.data_source_id == ds_id,
+            DataSourceCountAlertORM.metric == metric,
+            DataSourceCountAlertORM.finding == finding,
+        )
     )).first()
     return (row[0], row[1]) if row else (None, None)
+
+
+async def _record(
+    session: AsyncSession, *, ds_id: str, row, identity, now: datetime,
+    severity: str, metric: str, finding: str, delta: int, count: int,
+    baseline: int, subject_type: Optional[str] = None,
+) -> PendingNotice:
+    """Freeze one finding onto the alert table and return its notice.
+
+    The verdict is written once and never re-derived. The baseline moves as
+    the window moves, so an alert recomputed later could quietly downgrade
+    itself and contradict the notification already sent.
+    """
+    session.add(DataSourceCountAlertORM(
+        id=f"alr_{uuid.uuid4().hex[:12]}",
+        data_source_id=ds_id,
+        snapshot_id=row.id,
+        detected_at=now.isoformat(),
+        observed_at=row.captured_at,
+        workspace_id=row.workspace_id,
+        provider_id=row.provider_id,
+        graph_name=row.graph_name,
+        catalog_item_id=identity.catalog_item_id,
+        provider_name=identity.provider_name,
+        data_source_label=identity.data_source_label,
+        severity=severity,
+        direction="drop" if delta < 0 else "rise",
+        metric=metric,
+        finding=finding,
+        subject_type=subject_type,
+        node_delta=delta,
+        node_count=count,
+        baseline=baseline,
+        evidence=row.type_deltas,
+    ))
+    await session.flush()
+    return PendingNotice(
+        data_source_id=ds_id,
+        workspace_id=row.workspace_id,
+        catalog_item_id=identity.catalog_item_id,
+        provider_name=identity.provider_name,
+        # The source's own label when it has one, falling back to the physical
+        # graph name and then to the id — always something a person can match
+        # against what they see in the product.
+        source_name=identity.data_source_label or row.graph_name or ds_id,
+        severity=severity,
+        direction="drop" if delta < 0 else "rise",
+        node_delta=delta,
+        node_count=count,
+        metric=metric,
+        finding=finding,
+        subject_type=subject_type,
+    )
+
+
+def _worst_movement(rows: list, *, metric: str, baseline: int, floor: str):
+    """The worst qualifying movement in the window for one metric.
+
+    The WORST, not the most recent. A thrashing source produces several; the
+    one worth a person's attention is the biggest, and reporting the latest
+    instead would describe the aftershock rather than the event.
+    """
+    worst, worst_severity = None, "normal"
+    for row in rows:
+        delta = stats_history_repo.delta_of(row, metric)
+        severity = stats_history_repo.classify_significance(
+            delta, baseline,
+            before=stats_history_repo.count_of(row, metric) - int(delta or 0),
+        )
+        if not _meets(severity, floor):
+            continue
+        # Rank first, magnitude second. A wipe on a small graph outranks a
+        # merely-severe swing on a huge one, and ordering by magnitude alone
+        # would report the second and bury the first.
+        if worst is None or (
+            _SEVERITY_RANK[severity], abs(delta or 0)
+        ) > (
+            _SEVERITY_RANK[worst_severity],
+            abs(stats_history_repo.delta_of(worst, metric) or 0),
+        ):
+            worst, worst_severity = row, severity
+    return worst, worst_severity
+
+
+def _types_that_vanished(rows: list) -> Dict[str, tuple]:
+    """Types that were present in the window and reached zero, by name.
+
+    A type going to zero is the clearest evidence an external process deleted
+    data, and as a fraction of the whole graph it is frequently too small to
+    register as unusual movement at all — a 40-type graph losing one type
+    moves the total by 2.5%. It is a categorical event, not a magnitude, so it
+    cannot be expressed as a multiple of a baseline and was therefore
+    invisible to the only detector that existed.
+
+    Returns ``{type_name: (metric, count_before, row_where_it_vanished)}``.
+    """
+    gone: Dict[str, tuple] = {}
+    for field, metric in (
+        ("entity_type_counts", "nodes"), ("edge_type_counts", "edges"),
+    ):
+        previous: Dict[str, int] = {}
+        for row in rows:
+            current = stats_history_repo.loads_counts(getattr(row, field, None))
+            for name, before in previous.items():
+                if before and not current.get(name):
+                    # Last writer wins: if a type vanished twice in the window
+                    # the later disappearance is the live one.
+                    gone[name] = (metric, before, row)
+            # A type that came back clears its earlier disappearance.
+            for name, value in current.items():
+                if value and name in gone:
+                    gone.pop(name, None)
+            previous = current
+    return gone
 
 
 async def evaluate_source(
@@ -255,12 +388,14 @@ async def evaluate_source(
     policy: AlertPolicy,
     *,
     now: Optional[datetime] = None,
-) -> Optional[PendingNotice]:
-    """Judge one source's recent movements, recording at most one alert.
+) -> List[PendingNotice]:
+    """Judge one source's recent history, recording at most one alert per
+    finding per cooldown.
 
-    Returns the notice to ring, or ``None`` when nothing qualified — either
-    because every movement was ordinary, or because this source already
-    alerted inside the cooldown.
+    Returns the notices to ring — possibly several, because nodes, edges and
+    a vanished type are independent findings with independent causes, and
+    collapsing them into one would report whichever happened to rank highest
+    and silently drop the rest.
     """
     now = now or datetime.now(timezone.utc)
     window_from = (now - timedelta(seconds=_LOOKBACK_SECS)).isoformat()
@@ -272,88 +407,188 @@ async def evaluate_source(
     if len(rows) < 2:
         # One observation cannot be a movement. Alerting on a source's first
         # snapshot would fire on every newly onboarded graph.
-        return None
+        return []
 
-    baseline = stats_history_repo.change_baseline(rows)
+    identity = None
+    notices: List[PendingNotice] = []
+    cooldown_cutoff = (now - timedelta(seconds=policy.cooldown_secs)).isoformat()
 
-    # The WORST qualifying movement in the window wins, not the most recent.
-    # A thrashing source produces several; the one worth a person's attention
-    # is the biggest, and reporting the latest instead would describe the
-    # aftershock rather than the event.
-    worst = None
-    worst_severity = "normal"
-    for row in rows:
-        severity = stats_history_repo.classify_significance(
-            row.node_delta, baseline,
-            before=int(row.node_count or 0) - int(row.node_delta or 0),
+    async def _suppressed(metric: str, finding: str, observed_at: str) -> bool:
+        last_detected, last_observed = await _last_alert_marks(
+            session, ds_id, metric=metric, finding=finding,
         )
-        if not _meets(severity, policy.min_severity):
-            continue
-        # Rank first, magnitude second. A wipe on a small graph outranks a
-        # merely-severe swing on a huge one, and ordering by magnitude alone
-        # would report the second and bury the first.
-        if worst is None or (
-            _SEVERITY_RANK[severity], abs(row.node_delta or 0)
-        ) > (
-            _SEVERITY_RANK[worst_severity], abs(worst.node_delta or 0)
-        ):
-            worst, worst_severity = row, severity
-    if worst is None:
-        return None
-
-    last_detected, last_observed = await _last_alert_marks(session, ds_id)
-    if last_detected:
-        cutoff = (now - timedelta(seconds=policy.cooldown_secs)).isoformat()
-        if last_detected >= cutoff:
-            return None
-    if last_observed and (worst.captured_at or "") <= last_observed:
+        if last_detected and last_detected >= cooldown_cutoff:
+            return True
         # Nothing has moved since the incident we already reported. The
         # cooldown elapsing is not new news, and without this gate the same
         # movement re-alerts once per cooldown for as long as it stays inside
         # the lookback window.
-        return None
+        return bool(last_observed and (observed_at or "") <= last_observed)
 
-    delta = int(worst.node_delta or 0)
-    identity = await _identity_for(
-        session,
-        data_source_id=ds_id,
-        provider_id=worst.provider_id,
-        graph_name=worst.graph_name,
+    # ── movement, judged per metric ──
+    for metric in stats_history_repo.METRICS:
+        baseline = stats_history_repo.change_baseline(rows, metric)
+        worst, severity = _worst_movement(
+            rows, metric=metric, baseline=baseline, floor=policy.min_severity,
+        )
+        if worst is None:
+            continue
+        if await _suppressed(metric, "movement", worst.captured_at):
+            continue
+        if identity is None:
+            identity = await _identity_for(
+                session, data_source_id=ds_id,
+                provider_id=worst.provider_id, graph_name=worst.graph_name,
+            )
+        notices.append(await _record(
+            session, ds_id=ds_id, row=worst, identity=identity, now=now,
+            severity=severity, metric=metric, finding="movement",
+            delta=int(stats_history_repo.delta_of(worst, metric) or 0),
+            count=stats_history_repo.count_of(worst, metric),
+            baseline=baseline,
+        ))
+
+    # ── a type reached zero ──
+    for type_name, (metric, before, row) in _types_that_vanished(rows).items():
+        if await _suppressed(metric, "type_gone", row.captured_at):
+            continue
+        if identity is None:
+            identity = await _identity_for(
+                session, data_source_id=ds_id,
+                provider_id=row.provider_id, graph_name=row.graph_name,
+            )
+        notices.append(await _record(
+            session, ds_id=ds_id, row=row, identity=identity, now=now,
+            # A type disappearing is severe by construction, not by
+            # magnitude: the question "how unusual is this for this source"
+            # has no bearing on whether one of its types no longer exists.
+            severity="severe", metric=metric, finding="type_gone",
+            delta=-int(before),
+            count=stats_history_repo.count_of(row, metric),
+            baseline=int(before), subject_type=type_name,
+        ))
+
+    return notices
+
+
+async def evaluate_silent_sources(
+    session: AsyncSession,
+    policy: AlertPolicy,
+    *,
+    now: Optional[datetime] = None,
+) -> List[PendingNotice]:
+    """Sources that have stopped reporting at all.
+
+    Not the same as dropping to zero, and invisible to every other detector
+    here: those all judge MOVEMENT, and a source that has gone quiet produces
+    no movement to judge. An expired credential, a graph dropped on the
+    provider, a source rotated out of a cluster — each of these ends the
+    series rather than moving it, and a chart of what a source did report
+    cannot show the reports that never arrived.
+
+    Deliberately joined against ``workspace_data_sources``: a source that was
+    deleted is *supposed* to stop reporting, and alerting on it would make the
+    finding worthless within a week of any tidy-up.
+
+    Bounded by the same scan cap as the movement sweep, and it says so when it
+    trims — a silent-source check that silently skipped sources would be its
+    own joke.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = (
+        now - timedelta(seconds=max(60, int(resilience.PROFILING_SILENT_AFTER_SECS)))
+    ).isoformat()
+
+    last_seen = (
+        select(
+            DataSourceCountSnapshotORM.data_source_id.label("ds_id"),
+            func.max(DataSourceCountSnapshotORM.captured_at).label("last_at"),
+        )
+        .group_by(DataSourceCountSnapshotORM.data_source_id)
+        .subquery()
     )
-    session.add(DataSourceCountAlertORM(
-        id=f"alr_{uuid.uuid4().hex[:12]}",
-        data_source_id=ds_id,
-        snapshot_id=worst.id,
-        detected_at=now.isoformat(),
-        observed_at=worst.captured_at,
-        workspace_id=worst.workspace_id,
-        provider_id=worst.provider_id,
-        graph_name=worst.graph_name,
-        catalog_item_id=identity.catalog_item_id,
-        provider_name=identity.provider_name,
-        data_source_label=identity.data_source_label,
-        severity=worst_severity,
-        direction="drop" if delta < 0 else "rise",
-        node_delta=delta,
-        node_count=int(worst.node_count or 0),
-        baseline=baseline,
-        evidence=worst.type_deltas,
-    ))
-    await session.flush()
-    return PendingNotice(
-        data_source_id=ds_id,
-        workspace_id=worst.workspace_id,
-        catalog_item_id=identity.catalog_item_id,
-        provider_name=identity.provider_name,
-        # The source's own label when it has one, falling back to the physical
-        # graph name and then to the id — always something a person can match
-        # against what they see in the product.
-        source_name=identity.data_source_label or worst.graph_name or ds_id,
-        severity=worst_severity,
-        direction="drop" if delta < 0 else "rise",
-        node_delta=delta,
-        node_count=int(worst.node_count or 0),
-    )
+    rows = (await session.execute(
+        select(
+            last_seen.c.ds_id, last_seen.c.last_at,
+            WorkspaceDataSourceORM.workspace_id,
+            WorkspaceDataSourceORM.provider_id,
+            WorkspaceDataSourceORM.graph_name,
+        )
+        .join(
+            WorkspaceDataSourceORM,
+            WorkspaceDataSourceORM.id == last_seen.c.ds_id,
+        )
+        .where(
+            last_seen.c.last_at < cutoff,
+            WorkspaceDataSourceORM.deleted_at.is_(None),
+            WorkspaceDataSourceORM.is_active.is_(True),
+        )
+        .order_by(last_seen.c.last_at.asc())
+        .limit(_SOURCE_SCAN_CAP + 1)
+    )).all()
+
+    if len(rows) > _SOURCE_SCAN_CAP:
+        logger.warning(
+            "silent_sweep: more than %d silent sources; judging the %d "
+            "quietest this pass",
+            _SOURCE_SCAN_CAP, _SOURCE_SCAN_CAP,
+        )
+        rows = rows[:_SOURCE_SCAN_CAP]
+
+    notices: List[PendingNotice] = []
+    cooldown_cutoff = (now - timedelta(seconds=policy.cooldown_secs)).isoformat()
+    for ds_id, last_at, workspace_id, provider_id, graph_name in rows:
+        last_detected, last_observed = await _last_alert_marks(
+            session, ds_id, metric="nodes", finding="silent",
+        )
+        if last_detected and last_detected >= cooldown_cutoff:
+            continue
+        # Novelty against the observation, as everywhere else: re-alerting on
+        # the same silence once per cooldown is how an outage becomes noise.
+        if last_observed and (last_at or "") <= last_observed:
+            continue
+
+        identity = await _identity_for(
+            session, data_source_id=ds_id,
+            provider_id=provider_id, graph_name=graph_name,
+        )
+        session.add(DataSourceCountAlertORM(
+            id=f"alr_{uuid.uuid4().hex[:12]}",
+            data_source_id=ds_id,
+            snapshot_id=None,
+            detected_at=now.isoformat(),
+            observed_at=last_at,
+            workspace_id=workspace_id,
+            provider_id=provider_id,
+            graph_name=graph_name,
+            catalog_item_id=identity.catalog_item_id,
+            provider_name=identity.provider_name,
+            data_source_label=identity.data_source_label,
+            severity="severe",
+            # A silence is a loss of information, not a rise in it.
+            direction="drop",
+            metric="nodes",
+            finding="silent",
+            node_delta=0,
+            node_count=0,
+            baseline=0,
+            evidence=None,
+        ))
+        await session.flush()
+        notices.append(PendingNotice(
+            data_source_id=ds_id,
+            workspace_id=workspace_id,
+            catalog_item_id=identity.catalog_item_id,
+            provider_name=identity.provider_name,
+            source_name=identity.data_source_label or graph_name or ds_id,
+            severity="severe",
+            direction="drop",
+            node_delta=0,
+            node_count=0,
+            metric="nodes",
+            finding="silent",
+        ))
+    return notices
 
 
 async def sources_to_evaluate(
@@ -481,6 +716,7 @@ __all__: Sequence[str] = (
     "PendingNotice",
     "acknowledge",
     "env_alert_policy",
+    "evaluate_silent_sources",
     "evaluate_source",
     "list_alerts",
     "purge_alerts",

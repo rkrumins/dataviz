@@ -6,6 +6,7 @@ per month describing a graph that mostly did not change. These tests pin the
 three outcomes: a first snapshot, a snapshot when the digest moves, and
 silence when it does not.
 """
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -116,7 +117,7 @@ async def test_unchanged_counts_past_the_heartbeat_capture_a_continuity_row(
 
     # Heartbeat of 0s: every unchanged observation is now past due.
     monkeypatch.setattr(
-        stats_history_repo.resilience, "INSIGHTS_HISTORY_HEARTBEAT_SECS", 0,
+        stats_history_repo.resilience, "PROFILING_HEARTBEAT_SECS", 0,
     )
     stats_history_repo.invalidate_history_policy_cache()
     await _write(db_session, ds_id, {"Table": 10}, {"OWNS": 4})
@@ -129,7 +130,7 @@ async def test_unchanged_counts_past_the_heartbeat_capture_a_continuity_row(
 async def test_capture_can_be_switched_off(db_session: AsyncSession, monkeypatch):
     ds_id = await _seed(db_session)
     monkeypatch.setattr(
-        stats_history_repo.resilience, "INSIGHTS_HISTORY_ENABLED", False,
+        stats_history_repo.resilience, "PROFILING_ENABLED", False,
     )
     stats_history_repo.invalidate_history_policy_cache()
     await _write(db_session, ds_id, {"Table": 10}, {"OWNS": 4})
@@ -280,3 +281,47 @@ async def test_persisted_overrides_win_and_are_floored(db_session: AsyncSession)
     assert policy.retention_days == 1
     assert policy.max_rows_per_source == 42
     assert policy.persisted_max_rows_per_source == 42
+
+
+# ── window truncation ────────────────────────────────────────────────
+
+
+async def test_a_truncated_window_keeps_the_newest_observations(
+    db_session: AsyncSession,
+):
+    """Ordering ascending and then limiting returns the OLDEST rows.
+
+    A source busy enough to exceed the cap inside its window then answered
+    with a stale prefix — and ``evaluate_source`` reads this with the default
+    limit, so a thrashing source was judged on movement it had already
+    alerted about while its current movement was invisible. The cap must cost
+    the distant past, never the present.
+    """
+    from backend.app.db.models import DataSourceCountSnapshotORM
+
+    base = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    for i in range(10):
+        db_session.add(DataSourceCountSnapshotORM(
+            id=f"snp_trunc_{i}",
+            data_source_id="ds_trunc",
+            captured_at=(base + timedelta(hours=i)).isoformat(),
+            node_count=i,
+            edge_count=0,
+            entity_type_counts="{}",
+            edge_type_counts="{}",
+            counts_digest=f"d{i}",
+            lane="probe",
+            capture_reason="changed",
+        ))
+    await db_session.flush()
+
+    rows = await stats_history_repo.list_snapshots(
+        db_session, "ds_trunc",
+        frm=base.isoformat(),
+        to=(base + timedelta(days=1)).isoformat(),
+        limit=3,
+    )
+
+    assert [r.node_count for r in rows] == [7, 8, 9], (
+        "the newest three, still oldest-first"
+    )
