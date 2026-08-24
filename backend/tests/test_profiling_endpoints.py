@@ -7,6 +7,7 @@ in what the payload says and, more importantly, what it refuses to say.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -959,3 +960,73 @@ async def test_a_caller_bound_to_no_workspace_gets_nothing_not_everything(
     board = await _board(db_session, NOBODY)
     assert board["data"]["rows"] == []
     assert board["data"]["platform_wide"] is False
+
+
+# ── the CSV download's filename is a response header ─────────────────
+#
+# `_scope_for` resolves and authorises an id only when scope == "source".
+# For "workspace" and "provider" the id is arbitrary caller-supplied text,
+# and export_csv interpolated it into Content-Disposition. Confirmed by
+# running it, not by reading it: a quote closed the quoted string and
+# appended a second filename parameter, and a raw CRLF put a newline
+# inside a header value.
+#
+# Nothing here asserts on the ATTACK strings. It asserts the property:
+# the header carries no CR, no LF, and exactly one filename parameter,
+# whatever the caller sends.
+
+_HOSTILE_IDS = [
+    ('quote breakout', 'x";filename="setup.exe'),
+    ('crlf split', "ws_1\r\nX-Injected: 1"),
+    ('bare lf', "ws_1\nX-Injected: 1"),
+    ('semicolon', "ws_1; filename=other.csv"),
+    ('path traversal', "../../../etc/passwd"),
+    ('double quote', 'ws"1'),
+    ('backslash', "ws\\1"),
+]
+
+
+@pytest.mark.parametrize("label,hostile", _HOSTILE_IDS, ids=[h[0] for h in _HOSTILE_IDS])
+async def test_the_csv_filename_cannot_carry_a_header_payload(
+    label, hostile, db_session: AsyncSession,
+):
+    await _source(db_session, "ds_csv", workspace="ws_1")
+    await _snap(db_session, "ds_csv", _iso(2), nodes=10, workspace="ws_1")
+
+    resp = await profiling.export_csv(
+        scope="workspace", id=hostile, window="24h", frm=None, to=None,
+        grain="raw", breakdown="none",
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    disposition = resp.headers["content-disposition"]
+
+    assert "\r" not in disposition and "\n" not in disposition, (
+        f"{label}: a newline in a header value is response splitting"
+    )
+    # Exactly one filename parameter. A second one is what a quote
+    # breakout produces, and it is the one a browser may honour.
+    assert disposition.count("filename=") == 1, (
+        f"{label}: {disposition!r} declares more than one filename"
+    )
+    # The value is a single quoted token with nothing after it.
+    assert re.fullmatch(
+        r'attachment; filename="[A-Za-z0-9._-]+"', disposition
+    ), f"{label}: unexpected shape {disposition!r}"
+
+
+async def test_a_legitimate_csv_filename_is_still_readable(
+    db_session: AsyncSession,
+):
+    """The sanitiser must not reduce every download to underscores."""
+    await _source(db_session, "ds_csv", workspace="ws_1")
+    await _snap(db_session, "ds_csv", _iso(2), nodes=10, workspace="ws_1")
+
+    resp = await profiling.export_csv(
+        scope="workspace", id="ws_1", window="24h", frm=None, to=None,
+        grain="raw", breakdown="none",
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    assert (
+        resp.headers["content-disposition"]
+        == 'attachment; filename="profiling-workspace-ws_1-raw.csv"'
+    )
