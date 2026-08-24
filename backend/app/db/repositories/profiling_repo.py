@@ -1208,11 +1208,27 @@ async def movement_board(
         )).all():
             labels[ds_id] = label
             catalog_ids[ds_id] = catalog_item_id
-    provider_names: Dict[str, str] = {
-        pid: name for pid, name in (await session.execute(
-            select(ProviderORM.id, ProviderORM.name)
+    # Provider identity, including the TYPE — the board renders a logo, and
+    # a name alone cannot pick one.
+    providers: Dict[str, tuple] = {
+        pid: (name, ptype) for pid, name, ptype in (await session.execute(
+            select(ProviderORM.id, ProviderORM.name, ProviderORM.provider_type)
         )).all()
     }
+
+    # Workspace names, so a fleet board can say WHOSE source moved. An id is
+    # not something an operator recognises under pressure.
+    workspaces: Dict[str, str] = {}
+    ws_ids = {e["workspace_id"] for e in per_source.values() if e["workspace_id"]}
+    if ws_ids:
+        from backend.app.db.models import WorkspaceORM
+
+        workspaces = {
+            wid: name for wid, name in (await session.execute(
+                select(WorkspaceORM.id, WorkspaceORM.name)
+                .where(WorkspaceORM.id.in_(list(ws_ids)))
+            )).all()
+        }
 
     out: List[Dict[str, Any]] = []
     for ds_id, entry in per_source.items():
@@ -1226,8 +1242,10 @@ async def movement_board(
             "name": labels.get(ds_id) or entry["graph_name"] or ds_id,
             "catalog_item_id": catalog_ids.get(ds_id),
             "workspace_id": entry["workspace_id"],
+            "workspace_name": workspaces.get(entry["workspace_id"] or ""),
             "provider_id": entry["provider_id"],
-            "provider_name": provider_names.get(entry["provider_id"] or ""),
+            "provider_name": providers.get(entry["provider_id"] or "", (None, None))[0],
+            "provider_type": providers.get(entry["provider_id"] or "", (None, None))[1],
             "first": entry["first"],
             "last": entry["last"],
             "delta": movement,
