@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach } from 'vitest'
+import { cancelHealthProbes } from '@/store/health'
 
 // jsdom implements neither of these, and two separate surfaces need them
 // on mount: React Flow (Lens graph mode) needs a ResizeObserver to mount
@@ -21,4 +22,10 @@ if (!Element.prototype.scrollIntoView) {
 
 afterEach(() => {
   cleanup()
+  // The health store defers its probes (250ms, then 2s). Without this a
+  // file that provokes one request failure leaves a live timer that
+  // fires inside the NEXT file, or after teardown — where
+  // `navigator.onLine` throws a ReferenceError that vitest reports as an
+  // unhandled error against a test that had nothing to do with it.
+  cancelHealthProbes()
 })
