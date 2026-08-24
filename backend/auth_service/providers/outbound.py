@@ -41,8 +41,31 @@ MAX_METADATA_BYTES = 1024 * 1024
 _PROD_ENV_VALUES = {"prod", "production"}
 
 
-class BlockedOutboundRequest(RuntimeError):
-    """The URL resolves somewhere this service must not reach."""
+class OutboundError(RuntimeError):
+    """An outbound request that did not produce a usable response."""
+
+
+class BlockedOutboundRequest(OutboundError):
+    """The URL resolves somewhere this service must not reach, or the
+    response broke one of the transport rules — a redirect, an oversized
+    body, a body that is not JSON."""
+
+
+class OutboundStatusError(OutboundError):
+    """The endpoint answered, with a status we cannot use.
+
+    Separate from :class:`BlockedOutboundRequest` because the *status*
+    is the whole signal for one caller: the back-channel liveness check
+    has to tell "the IdP says this session is over" (401/403 — act on
+    it, end the session) from "the IdP did not answer properly"
+    (5xx — do not act on it, this is an outage). Collapsing the two
+    would either log everyone out during a gateway incident or keep
+    sessions alive after they were revoked upstream.
+    """
+
+    def __init__(self, url: str, status_code: int) -> None:
+        super().__init__(f"{url!r} answered HTTP {status_code}.")
+        self.status_code = status_code
 
 
 def _is_prod() -> bool:
@@ -278,9 +301,7 @@ async def request_json(
                     "pre-flight address check gets bypassed."
                 )
             if resp.status_code >= 400:
-                raise BlockedOutboundRequest(
-                    f"{url!r} answered HTTP {resp.status_code}."
-                )
+                raise OutboundStatusError(url, resp.status_code)
             body = bytearray()
             async for chunk in resp.aiter_bytes():
                 body.extend(chunk)

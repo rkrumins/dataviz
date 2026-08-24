@@ -113,6 +113,10 @@ from ..providers import (
 )
 from ..providers.assurance import assurance_for
 from ..providers.custom import CustomIdentityError, CustomIdentityProvider
+from ..providers.backchannel import (
+    BackchannelError,
+    BackchannelProvider,
+)
 from ..providers.custom_profile import (
     BROWSER_STORAGE_SOURCES,
     CustomProfileError,
@@ -876,7 +880,16 @@ async def refresh(request: Request, response: Response):
             detail="Missing refresh token",
         )
     try:
-        user, tokens = await svc.refresh(token)
+        # The request's own cookies and headers ride along so a
+        # back-channel session can be re-confirmed with its IdP on this
+        # rotation. Nothing here contributes to identity — the service
+        # reads at most the one ambient token its provider row names,
+        # and hands it straight back to the IdP that issued it.
+        user, tokens = await svc.refresh(
+            token,
+            ambient_cookies=dict(request.cookies),
+            ambient_headers=dict(request.headers),
+        )
     except SsoReauthRequired as exc:
         clear_session_cookies(response, request)
         logger.info("SSO re-auth required (provider=%s)", exc.provider)
@@ -1228,6 +1241,7 @@ def _request_https_host(request: Request) -> tuple[str, bool, str]:
 
 
 @router.get("/{slug}/login")
+@limiter.limit(RATELIMIT_LOGIN_PER_IP)
 async def sso_login(
     slug: str,
     request: Request,
@@ -1236,6 +1250,12 @@ async def sso_login(
 ):
     """Slug-routed SSO entry point. Dispatches to the right provider
     kind based on the registry row.
+
+    Rate-limited like the other login entry points. It was not, which
+    was survivable while every kind either redirected the browser or
+    read a local cookie — but a ``backchannel`` row makes up to two
+    outbound calls per hit, so an unlimited entry point here is a lever
+    on somebody else's identity service as well as on ours.
 
     The ``force=1`` flag is set by the daily SSO re-auth bounce; we
     pass it through to the provider so OIDC adds ``prompt=login`` and
@@ -1292,6 +1312,11 @@ async def sso_login(
 
     if isinstance(provider, CustomProfileProvider):
         return await _custom_profile_login_flow(
+            request, slug=slug, provider=provider, next_path=next_path,
+        )
+
+    if isinstance(provider, BackchannelProvider):
+        return await _backchannel_login_flow(
             request, slug=slug, provider=provider, next_path=next_path,
         )
 
@@ -1649,6 +1674,70 @@ async def _custom_profile_login_flow(
     await _audit_degraded_trust(
         svc, provider=provider, snap=snap, via=source,
     )
+    return await _finish_sso_login(
+        request, svc=svc, snap=snap, slug=slug, identity=identity,
+        next_path=next_path, fail=_fail,
+    )
+
+
+def read_ambient_token(request: Request, provider: BackchannelProvider) -> str | None:
+    """Pull the enterprise's ambient session token off the request.
+
+    Deliberately the only thing the browser contributes to a
+    ``backchannel`` login. Its presence starts the flow; its *value* is
+    never parsed, only handed straight back to the issuing IdP. Nothing
+    read here influences which user we end up with — that comes from
+    the gateway's own answer.
+    """
+    key = provider.settings.token_source_key
+    if provider.settings.token_source == "header":
+        return request.headers.get(key)
+    return request.cookies.get(key)
+
+
+async def _backchannel_login_flow(
+    request: Request, *, slug: str, provider: BackchannelProvider,
+    next_path: str,
+) -> Response:
+    """``GET /auth/{slug}/login`` for a back-channel row.
+
+    A plain redirect flow with no handshake cookie, because there is no
+    handshake: the user is already signed in to the enterprise portal,
+    and the whole exchange happens server-to-server between this request
+    and the response to it. That also means it works with an HttpOnly
+    corporate cookie and needs no JavaScript.
+
+    ``force=1`` (the 24h SSO re-auth bounce) is accepted and has no
+    special effect — there is no upstream prompt to force. The bounce
+    still does its job, because the exchange re-asks the IdP and a
+    fresh ``auth_time`` comes back with the claims.
+
+    Login-CSRF applies here and is benign: a hostile page can navigate
+    the user to this route and cause a session to be minted *as
+    themselves*. There is nothing to defend, and a state cookie would
+    only add a failure mode.
+    """
+    snap = await _provider_snapshot(slug)
+    svc = _identity_service(request)
+    _fail = _sso_failure_handler(
+        svc, slug=slug, snap=snap, log_label="Back-channel login",
+    )
+
+    raw = read_ambient_token(request, provider)
+    if not raw:
+        return await _fail(
+            f"ambient_token_missing_from_{provider.settings.token_source}"
+        )
+
+    try:
+        identity = await provider.fetch_identity(raw)
+    except BackchannelError as exc:
+        # Every failure lands here — a refused destination, a redirect,
+        # a timeout, an upstream rejection, an unmappable payload. None
+        # of them produce a partial identity, and the reason is audited
+        # rather than shown.
+        return await _fail(f"backchannel_rejected:{exc}")
+
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
         next_path=next_path, fail=_fail,

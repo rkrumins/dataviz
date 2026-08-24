@@ -150,6 +150,26 @@ def _drive_custom(client, slug, monkeypatch, cookies):
     )
 
 
+def _drive_backchannel(client, slug, monkeypatch, cookies):
+    """The ambient cookie is the only thing the browser contributes, and
+    the two outbound legs are stubbed at ``fetch_identity`` — the same
+    seam the OIDC and SAML drivers use. What the gateway says is this
+    file's business only insofar as an identity comes back."""
+    from backend.auth_service.providers.backchannel import BackchannelProvider
+
+    async def _fetch(self, raw):
+        assert raw == "ambient-xyz"   # the driver really did present it
+        return _identity("backchannel")
+
+    monkeypatch.setattr(BackchannelProvider, "fetch_identity", _fetch)
+    jar = {"corp_session": "ambient-xyz", **cookies}
+    return client.get(
+        f"/api/v1/auth/{slug}/login?next=/dashboard",
+        headers={"Cookie": "; ".join(f"{k}={v}" for k, v in jar.items())},
+        follow_redirects=False,
+    )
+
+
 DRIVERS = [
     KindDriver("oidc", {
         "issuer": "https://idp", "client_id": "c", "client_secret": "s",
@@ -166,6 +186,13 @@ DRIVERS = [
         "shared_secret": _SECRET, "max_age_seconds": 300,
     }, _drive_custom_profile),
     KindDriver("custom", {"shared_secret": _SECRET}, _drive_custom),
+    KindDriver("backchannel", {
+        "token_source": "cookie", "token_source_key": "corp_session",
+        "gateway_url": "https://gw.corp.example/redeem",
+        "gateway_send_as": "cookie",
+        "gateway_token_path": "access_token",
+        "exchange_url": "https://gw.corp.example/userinfo",
+    }, _drive_backchannel),
 ]
 
 _IDS = [d.kind for d in DRIVERS]

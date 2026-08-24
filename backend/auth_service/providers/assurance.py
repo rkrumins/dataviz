@@ -70,6 +70,19 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
         # claim mapper — JWKS for OIDC, the IdP x509 cert for SAML.
         return VERIFIED
 
+    if kind == "backchannel":
+        # No signature is checked here, and it is still the strongest
+        # kind we have. The claims did not arrive from the browser at
+        # all: they came back over TLS from the provider's own endpoint,
+        # in answer to a question we asked during this login. A
+        # signature attests to a statement made at some past instant; a
+        # back-channel answer is current, so a session revoked thirty
+        # seconds ago fails now rather than at the assertion's ``exp``.
+        # Nothing about the row can weaken that — there is no
+        # ``trust_unsigned`` equivalent, because there is nothing to
+        # trust unsigned.
+        return VERIFIED
+
     if kind == "custom_profile":
         # An unsigned payload is unverifiable regardless of how it arrived,
         # so this check comes first: a JSON payload delivered by header is

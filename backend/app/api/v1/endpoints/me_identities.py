@@ -166,7 +166,9 @@ async def start_link(
     provider = await idp_provider_repo.get_provider_by_slug(session, provider_slug)
     if provider is None or not provider.enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
-    if provider.kind not in {"oidc", "saml2", "custom", "custom_profile"}:
+    if provider.kind not in {
+        "oidc", "saml2", "custom", "custom_profile", "backchannel",
+    }:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported provider kind")
 
     token = create_link_intent_token(

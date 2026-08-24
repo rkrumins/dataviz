@@ -125,11 +125,33 @@ DEFAULT_CUSTOM_PROFILE: dict[str, Any] = {
 }
 
 
+# A back-channel gateway returns its own user object over an API, so the
+# casings are the same grab-bag a portal payload uses. The one real
+# difference is ``auth_time``: ``iat`` is NOT a candidate here, because
+# there is no token being read — an ``iat`` in the claims would be the
+# exchange response's own age, not the moment the user authenticated,
+# and silently satisfying the 24h re-auth ceiling with it would defeat
+# the ceiling.
+DEFAULT_BACKCHANNEL: dict[str, Any] = {
+    "external_id":    ["sub", "userId", "user_id", "employeeId", "uid", "email"],
+    "email":          ["email", "emailAddress", "email_address", "mail", "upn"],
+    "email_verified": ["email_verified", "emailVerified"],
+    "first_name":     ["firstName", "first_name", "givenName", "given_name"],
+    "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
+    "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
+    "groups":         ["groups", "roles", "memberOf", "groupMembership"],
+    "auth_time":      ["auth_time", "authTime", "authenticationTime",
+                       "lastLogin", "last_login"],
+    "extras":         {},
+}
+
+
 KIND_DEFAULTS = {
     "oidc":           DEFAULT_OIDC,
     "saml2":          DEFAULT_SAML,
     "custom":         DEFAULT_CUSTOM,
     "custom_profile": DEFAULT_CUSTOM_PROFILE,
+    "backchannel":    DEFAULT_BACKCHANNEL,
 }
 
 
@@ -169,6 +191,13 @@ def _resolve(claims: Any, path: str) -> Any:
         if pos < len(path) and path[pos] == ".":
             pos += 1
     return cur
+
+
+#: Public name for the walker above. ``backchannel`` resolves operator-
+#: configured paths into arbitrary API responses with it, and reaching
+#: for the underscored name across modules would misreport it as
+#: private to this one.
+resolve_path = _resolve
 
 
 def _first_non_empty(claims: dict, paths: Iterable[str]) -> Any:

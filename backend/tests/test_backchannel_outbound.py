@@ -20,6 +20,7 @@ import pytest
 from backend.auth_service.providers import outbound
 from backend.auth_service.providers.outbound import (
     BlockedOutboundRequest,
+    OutboundStatusError,
     assert_fetchable,
     host_port_key,
     request_json,
@@ -169,12 +170,16 @@ async def test_a_redirect_is_an_error_not_a_hop(monkeypatch, status):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 502, 503])
 async def test_a_failure_status_fails_closed(monkeypatch, status):
+    """And carries the code, which the liveness check reads to tell
+    "the IdP revoked this session" from "the IdP is having an
+    outage"."""
     monkeypatch.setattr(
         outbound.httpx, "AsyncClient",
         _mock_client(lambda r: httpx.Response(status, json={"error": "nope"})),
     )
-    with pytest.raises(BlockedOutboundRequest):
+    with pytest.raises(OutboundStatusError) as err:
         await request_json(URL, timeout=2.0)
+    assert err.value.status_code == status
 
 
 @pytest.mark.asyncio
@@ -208,7 +213,7 @@ async def test_the_response_body_never_reaches_the_error_message(monkeypatch):
         outbound.httpx, "AsyncClient",
         _mock_client(lambda r: httpx.Response(500, content=secret.encode())),
     )
-    with pytest.raises(BlockedOutboundRequest) as err:
+    with pytest.raises(OutboundStatusError) as err:
         await request_json(URL, timeout=2.0)
     assert secret not in str(err.value)
 

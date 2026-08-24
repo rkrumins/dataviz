@@ -34,10 +34,7 @@ from backend.auth_service.providers import (
     assurance_for,
     apply_claim_mapping,
     ClaimMappingError,
-    DEFAULT_OIDC,
-    DEFAULT_SAML,
-    DEFAULT_CUSTOM,
-    DEFAULT_CUSTOM_PROFILE,
+    KIND_DEFAULTS,
     get_registry,
     resolved_sources,
 )
@@ -225,13 +222,11 @@ async def get_default_mapping(
 ):
     """Return the default claim mapping for a kind so the admin UI can
     pre-fill the editor when an operator starts a fresh provider."""
-    defaults = {
-        "oidc": DEFAULT_OIDC,
-        "saml2": DEFAULT_SAML,
-        "custom": DEFAULT_CUSTOM,
-        "custom_profile": DEFAULT_CUSTOM_PROFILE,
-    }
-    mapping = defaults.get(kind)
+    # ``KIND_DEFAULTS`` rather than a local copy of it. The copy that
+    # used to live here was a fifth place a new provider kind had to be
+    # registered, and the only one where forgetting produced a 404 from
+    # a route the admin UI calls on every "new provider" click.
+    mapping = KIND_DEFAULTS.get(kind)
     if mapping is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown kind")
     return mapping

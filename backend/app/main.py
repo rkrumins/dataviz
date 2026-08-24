@@ -510,14 +510,51 @@ async def lifespan(_app: FastAPI):
                 if row is not None else None
             )
 
+    from backend.app.db.repositories import backchannel_host_repo
+
+    async def _allowed_backchannel_hosts() -> frozenset[str]:
+        """Which internal ``host:port`` destinations SSO may reach.
+
+        Read per call, not per provider build: the registry caches
+        provider instances for 60s, and an operator removing a host
+        expects that to take effect on the next login rather than a
+        minute later. One small indexed query on a path that is already
+        about to make two outbound HTTP calls.
+
+        Fails CLOSED. If the DB read fails we return the empty set,
+        which refuses every private destination — the same state as a
+        deployment that has allowlisted nothing. The alternative,
+        raising, would take out the whole login route; the alternative
+        of retaining a previous answer would mean a removed host kept
+        working precisely when we could not confirm it had been removed.
+        """
+        try:
+            async with get_async_session() as session:
+                return await backchannel_host_repo.allowed_host_keys(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Back-channel host allowlist unreadable (%s); refusing "
+                "every internal destination until it can be read.", exc,
+            )
+            return frozenset()
+
+    _builders = dict(PROVIDER_BUILDERS)
+    if "backchannel" in _builders:
+        _base_backchannel = _builders["backchannel"]
+
+        def _backchannel_builder(snap, _base=_base_backchannel):
+            return _base(snap, allowed_hosts=_allowed_backchannel_hosts)
+
+        _builders["backchannel"] = _backchannel_builder
+
     _registry = ProviderRegistry(
         loader=_DbProviderConfigLoader(),
-        builders=PROVIDER_BUILDERS,
+        builders=_builders,
     )
     configure_registry(_registry)
     logger.info(
         "Provider registry configured (builders=%s)",
-        sorted(PROVIDER_BUILDERS.keys()),
+        sorted(_builders.keys()),
     )
 
     # Boot-seed: write a default OIDC / SAML / custom row from env

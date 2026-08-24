@@ -97,6 +97,8 @@ class SQLAlchemyRefreshStore:
         mint_ms: int,
         expires_at_iso: str,
         revoked_at_iso: Optional[str] = None,
+        idp_provider_id: Optional[str] = None,
+        idp_checked_at: Optional[int] = None,
     ) -> bool:
         """Write the row that makes a freshly minted token usable.
 
@@ -121,6 +123,8 @@ class SQLAlchemyRefreshStore:
                         expires_at=expires_at_iso,
                         created_at=_now_iso(),
                         revoked_at=revoked_at_iso,
+                        idp_provider_id=idp_provider_id,
+                        idp_checked_at=idp_checked_at,
                     )
                 )
             return True
@@ -146,7 +150,25 @@ class SQLAlchemyRefreshStore:
             consumed_at_iso=row.consumed_at,
             successor_jti=row.successor_jti,
             revoked_at_iso=row.revoked_at,
+            idp_provider_id=row.idp_provider_id,
+            idp_checked_at=row.idp_checked_at,
         )
+
+    async def touch_idp_check(self, jti: str, *, checked_at: int) -> bool:
+        """Record a SUCCESSFUL upstream liveness confirmation.
+
+        Never called on a failure. The value is the anchor the outage
+        grace window measures from, so advancing it when the gateway did
+        not answer would let an outage renew the very allowance it
+        should be spending down — the session would ride out an
+        indefinite outage one grace window at a time.
+        """
+        result = await self._session.execute(
+            update(RefreshTokenORM)
+            .where(RefreshTokenORM.jti == jti)
+            .values(idp_checked_at=int(checked_at))
+        )
+        return bool(result.rowcount)
 
     async def consume(self, jti: str, *, successor_jti: str) -> bool:
         """Rotate this token away, atomically.
