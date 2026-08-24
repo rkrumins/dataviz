@@ -242,6 +242,46 @@ async def get_optional_user(request: Request) -> User | None:
     return await _identity_service(request).validate_session(read_access_cookie(request))
 
 
+async def assert_session_alive_or_503(
+    claims: "PermissionClaims", *, permission: str, user_id: str,
+) -> None:
+    """Confirm the session is not revoked, refusing if we cannot tell.
+
+    The second, opt-in revocation probe. ``get_current_user`` already
+    checks the tombstone on every authenticated request, but it does so
+    FAIL-OPEN: if the backend is unreachable it logs and honours the JWT,
+    because the token TTL is still a floor and a Redis blip must not sign
+    the whole platform out.
+
+    For a sensitive route that trade is the wrong way round. "I cannot
+    confirm this session is still alive" should not read as "carry on"
+    when the thing being authorised is platform administration, so here
+    an unreachable backend is a 503 rather than a pass.
+
+    Extracted so ``require_admin`` can run it too. It gates
+    ``system:admin`` — which is in ``_FAIL_CLOSED_PERMISSIONS`` — but it
+    never ran this probe, so its call sites (admin users, announcements,
+    ontologies, groups, stats-admin) were fail-OPEN despite being the
+    most sensitive surface in the product.
+    """
+    try:
+        if claims.sid and await get_revocation_service().is_revoked(claims.sid):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session revoked",
+            )
+    except RevocationBackendError as exc:
+        logger.warning(
+            "Revocation backend unavailable on fail-closed path "
+            "(perm=%s user=%s): %s",
+            permission, user_id, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authorization temporarily unavailable",
+        )
+
+
 async def require_admin(
     request: Request,
     user: User = Depends(get_current_user),
@@ -265,6 +305,11 @@ async def require_admin(
     state: if you don't have the claim, you don't have admin.
     """
     claims = await get_permission_claims(request)
+    # Before the permission test, not after: a revoked session must not
+    # reach an admin route even to be told it lacks the claim.
+    await assert_session_alive_or_503(
+        claims, permission="system:admin", user_id=user.id,
+    )
     if has_permission(claims, "system:admin"):
         return user
     raise HTTPException(
@@ -610,22 +655,9 @@ def requires(
         # be reached if we can't confirm the session is alive), so
         # we run a second, opt-in revocation probe here.
         if fail_closed:
-            try:
-                if claims.sid and await get_revocation_service().is_revoked(claims.sid):
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Session revoked",
-                    )
-            except RevocationBackendError as exc:
-                logger.warning(
-                    "Revocation backend unavailable on fail-closed path "
-                    "(perm=%s user=%s): %s",
-                    permission, user.id, exc,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Authorization temporarily unavailable",
-                )
+            await assert_session_alive_or_503(
+                claims, permission=permission, user_id=user.id,
+            )
 
         # Resolve workspace id from the path, if scoped.
         workspace_id: Optional[str] = None
