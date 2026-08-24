@@ -43,6 +43,16 @@ export interface Series {
 
 interface Props {
     buckets: string[]
+    /**
+     * Compact labels for the x-axis, when they differ from `buckets`.
+     *
+     * The axis and the tooltip want different things from the same instant.
+     * An axis reads left to right and can elide whatever the previous tick
+     * already said; a tooltip is read alone and must carry the whole date.
+     * Six ticks over two days printing the date six times is texture, not
+     * information — but a tooltip saying only "07:00" is a riddle.
+     */
+    axisLabels?: string[]
     series: Series[]
     height?: number
     /** Label the last point of each series. Off past ~4 series, where end
@@ -77,8 +87,8 @@ const PAD = { top: 12, right: 16, bottom: 22, left: 44 }
 const LABEL_GUTTER = 52
 
 export function TimeSeriesChart({
-    buckets, series, height = 220, labelEnds = true, showPrevious = true,
-    annotations, baseline, className,
+    buckets, axisLabels, series, height = 220, labelEnds = true,
+    showPrevious = true, annotations, baseline, className,
 }: Props) {
     const theme = useChartTheme()
     const gradientId = useId()
@@ -182,12 +192,12 @@ export function TimeSeriesChart({
                             key={b} x={x(i)} y={height - 6} textAnchor="middle"
                             className="fill-ink-muted" style={{ fontSize: 10 }}
                         >
-                            {shortDate(b)}
+                            {axisLabels?.[i] ?? shortDate(b)}
                         </text>
                     ) : null
                 ))}
         </>
-    ), [ticks, buckets, labelEvery, width, padRight, theme, height, x, y])
+    ), [ticks, buckets, axisLabels, labelEvery, width, padRight, theme, height, x, y])
 
     // Only the annotations that land on a bucket in this window — the plot and
     // the key below it must name exactly the same set.

@@ -62,8 +62,11 @@ export interface BoardRow {
     name: string
     catalog_item_id: string | null
     workspace_id: string | null
+    workspace_name: string | null
     provider_id: string | null
     provider_name: string | null
+    /** Picks the logo. A name alone cannot. */
+    provider_type: string | null
     first: number
     last: number
     delta: number
@@ -79,7 +82,7 @@ export interface BoardPayload {
     from: string
     to: string
     window: ProfilingWindow
-    metric: 'nodes' | 'edges'
+    metric: ProfilingMetric
     platform_wide: boolean
     rows: BoardRow[]
     total: number
@@ -150,8 +153,11 @@ export interface Finding {
     detected_at: string
     observed_at: string | null
     workspace_id: string | null
+    workspace_name: string | null
     provider_id: string | null
     provider_name: string | null
+    /** Picks the logo. A name alone cannot. */
+    provider_type: string | null
     data_source_label: string | null
     graph_name: string | null
     catalog_item_id: string | null
@@ -182,15 +188,39 @@ export interface ProfilingPolicy {
     hourlyRetentionDays: number
     dailyRetentionDays: number
     maxRowsPerSource: number
+    heartbeatSecs: number
+    silentAfterSecs: number
     alertsEnabled: boolean
     alertMinSeverity: string
     alertCooldownSecs: number
+    /** What the deployment would use with nothing persisted — the editor shows
+     *  these as placeholders, so a blank field means "inherit" rather than
+     *  pinning today's value forever. */
     defaults: {
         rawRetentionDays: number
         hourlyRetentionDays: number
         dailyRetentionDays: number
         maxRowsPerSource: number
+        heartbeatSecs: number
+        silentAfterSecs: number
+        alertMinSeverity: string
+        alertCooldownSecs: number
     }
+    /** Fields an operator has actually set, so the editor can mark them. */
     overridden: string[]
     editable: boolean
+    /** Deployment cadences: reported so an operator can see how hard the
+     *  service works, never settable — the purge cannot delete raw beyond the
+     *  compaction watermark, so a live-editable compact interval is a way to
+     *  stall retention from a settings page. */
+    cadences: {
+        captureHeartbeatSecs: number
+        compactIntervalSecs: number
+        retentionIntervalSecs: number
+        alertIntervalSecs: number
+        readOnly: true
+    }
 }
+
+/** `-1` clears an override and returns that field to the deployment default. */
+export const INHERIT_DEFAULT = -1

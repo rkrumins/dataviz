@@ -32,8 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.aggregation import _require_ingestion_read
 from backend.app.auth.dependencies import get_permission_claims
+from backend.app.config import resilience
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import count_alerts_repo, profiling_repo
+from backend.app.db.repositories import (
+    count_alerts_repo, profiling_repo, stats_history_repo,
+)
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services import profiling_series
 from backend.app.services.workspace_visibility import (
@@ -220,7 +223,7 @@ async def get_board(
     to: Optional[str] = Query(None),
     workspace_id: Optional[str] = Query(None, alias="workspaceId"),
     provider_id: Optional[str] = Query(None, alias="providerId"),
-    metric: str = Query("nodes", description="nodes | edges"),
+    metric: str = Query("nodes", description="total | nodes | edges"),
     unusual_only: bool = Query(False, alias="unusualOnly"),
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
@@ -431,6 +434,7 @@ class PolicyRequest(BaseModel):
     dailyRetentionDays: Optional[int] = Field(None, ge=-1)
     maxRowsPerSource: Optional[int] = Field(None, ge=-1)
     heartbeatSecs: Optional[int] = Field(None, ge=-1)
+    silentAfterSecs: Optional[int] = Field(None, ge=-1)
     alertsEnabled: Optional[bool] = None
     alertMinSeverity: Optional[str] = None
     alertCooldownSecs: Optional[int] = Field(None, ge=-1)
@@ -452,25 +456,53 @@ async def get_policy(
     retention, overrides = await profiling_repo.resolve_retention_policy(session)
     env = profiling_repo.env_retention_policy()
     alerts = await count_alerts_repo.resolve_alert_policy(session)
+    # RESOLVED, not env. Reporting the environment value for a field the
+    # operator can override means their saved change reads back as ignored —
+    # and the capture path honours it, so the page would be contradicting the
+    # behaviour rather than describing it.
+    capture = await stats_history_repo.resolve_history_policy(session)
+    silent_after = (
+        overrides.get("silentAfterSecs") or resilience.PROFILING_SILENT_AFTER_SECS
+    )
     return {"data": {
         "rawRetentionDays": retention.raw_days,
         "hourlyRetentionDays": retention.hourly_days,
         "dailyRetentionDays": retention.daily_days,
         "maxRowsPerSource": retention.max_rows_per_source,
+        "heartbeatSecs": capture.heartbeat_secs,
+        "silentAfterSecs": silent_after,
         "alertsEnabled": alerts.enabled,
         "alertMinSeverity": alerts.min_severity,
         "alertCooldownSecs": alerts.cooldown_secs,
         # What the deployment would use with nothing persisted, so the editor
         # can show it as the placeholder and a blank field can mean "inherit"
         # rather than pinning today's default forever.
+        # What the deployment would use with nothing persisted, so the editor
+        # can show it as a placeholder and a blank field can mean "inherit"
+        # rather than pinning today's default forever.
         "defaults": {
             "rawRetentionDays": env.raw_days,
             "hourlyRetentionDays": env.hourly_days,
             "dailyRetentionDays": env.daily_days,
             "maxRowsPerSource": env.max_rows_per_source,
+            "heartbeatSecs": resilience.PROFILING_HEARTBEAT_SECS,
+            "silentAfterSecs": resilience.PROFILING_SILENT_AFTER_SECS,
+            "alertMinSeverity": count_alerts_repo.env_alert_policy().min_severity,
+            "alertCooldownSecs": count_alerts_repo.env_alert_policy().cooldown_secs,
         },
         "overridden": sorted(overrides),
         "editable": _can_edit_policy(claims),
+        # Deployment concerns, reported so an operator can SEE the cadences
+        # without being able to wedge retention from a settings page: the
+        # purge cannot delete raw beyond the compaction watermark, so a
+        # live-editable compaction interval is a way to stall retention.
+        "cadences": {
+            "captureHeartbeatSecs": resilience.PROFILING_HEARTBEAT_SECS,
+            "compactIntervalSecs": resilience.PROFILING_COMPACT_INTERVAL_SECS,
+            "retentionIntervalSecs": resilience.PROFILING_RETENTION_INTERVAL_SECS,
+            "alertIntervalSecs": resilience.PROFILING_ALERT_INTERVAL_SECS,
+            "readOnly": True,
+        },
     }}
 
 
@@ -492,6 +524,15 @@ async def put_policy(
             status_code=403,
             detail="Changing the profiling policy requires system:admin",
         )
-    await profiling_repo.persist_policy(session, body.model_dump(exclude_none=True))
+    values = body.model_dump(exclude_none=True)
+    current, _overrides = await profiling_repo.resolve_retention_policy(session)
+    try:
+        # Rejected, not clamped. Silently rewriting a number someone typed is
+        # how a settings page stops being trustworthy.
+        profiling_repo.validate_policy(values, current)
+    except profiling_repo.PolicyConflict as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await profiling_repo.persist_policy(session, values)
     await session.commit()
     return await get_policy(session=session, claims=claims)

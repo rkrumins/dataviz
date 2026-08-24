@@ -495,8 +495,18 @@ async def evaluate_silent_sources(
     own joke.
     """
     now = now or datetime.now(timezone.utc)
+    # Persisted override first: how patient to be before calling a source
+    # silent is a product judgement, and an operator who tuned it expects the
+    # sweep to use it.
+    silent_after = resilience.PROFILING_SILENT_AFTER_SECS
+    try:
+        row = await session.get(PlatformSettingsORM, 1)
+        if row is not None and getattr(row, "profiling_silent_after_secs", None):
+            silent_after = row.profiling_silent_after_secs
+    except Exception:  # noqa: BLE001 - policy must never break the sweep
+        logger.warning("silent_sweep: settings unreadable; using env default")
     cutoff = (
-        now - timedelta(seconds=max(60, int(resilience.PROFILING_SILENT_AFTER_SECS)))
+        now - timedelta(seconds=max(60, int(silent_after)))
     ).isoformat()
 
     last_seen = (

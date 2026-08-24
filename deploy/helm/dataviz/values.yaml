@@ -70,11 +70,16 @@ config:
   # volatile a source is. maxRowsPerSource is a raw-tier safety valve only.
   profiling:
     enabled: "true"
-    heartbeatSecs: "3600"
+    # Aligned to STATS_DEFAULT_INTERVAL_SECS: a 24h view should reflect
+    # what was polled, not one observation in four.
+    heartbeatSecs: "900"
     rawRetentionDays: "7"
+    # Hourly for audit: clears a 30-day floor with headroom, so a month-old
+    # incident still has the month BEFORE it at hourly resolution.
     hourlyRetentionDays: "45"
     dailyRetentionDays: "400"
-    maxRowsPerSource: "5000"
+    # Covers 7 days at one observation per minute.
+    maxRowsPerSource: "10000"
     # Much tighter than the retention cadence: the purge cannot delete raw
     # beyond the compaction watermark, so a slow compactor stalls retention
     # rather than losing observations.

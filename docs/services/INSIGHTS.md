@@ -134,11 +134,21 @@ never disagree with the current-state row about what was observed.
 
 **Why it is gated.** The drift probe writes every 60s. A row per write would
 be ~43k rows per source per month describing a graph that mostly did not
-change. So a snapshot is written when `counts_digest` moves, at most once per
-`PROFILING_HEARTBEAT_SECS` otherwise, and unconditionally at a **run
-boundary** — a refresh that changed nothing is itself a finding, and it
-carries the `refresh_event_id` that caused it so "counts per run, per type in
-the run" is an exact join rather than a ±15-minute correlation.
+change. So a snapshot is written when `counts_digest` moves, and at most once
+per `PROFILING_HEARTBEAT_SECS` otherwise.
+
+**A change is never gated.** Only the heartbeat is suppressed inside its
+window — see `maybe_capture_snapshot`. So an incident is always pinned to the
+observation that saw it, at the observing lane's own resolution (60s on the
+drift probe, `STATS_DEFAULT_INTERVAL_SECS` on the counts poll). The heartbeat
+buys resolution for STILLNESS, not for incidents.
+
+**The heartbeat is aligned to the poll, not chosen independently.** The
+insights service observes each source every 900s; at the original hourly
+heartbeat we recorded roughly one observation in four, so a 24-hour window
+showed ~9 points for a source that had been polled ~96 times. Nine flat points
+reads as a dead pipeline, which is the exact ambiguity this feature exists to
+remove — and it made "stable" indistinguishable from "unwatched".
 
 **What a failed collection writes: nothing.** Capture is reached only after
 the provider has answered. A FalkorDB pod rotation makes the collection raise
@@ -162,11 +172,43 @@ looking for. A day bucket is one row however violently the source moved inside
 it, which makes the 30-day floor structural. The cap survives as a raw-tier
 safety valve only.
 
-| Tier | Default | Built from |
-|---|---|---|
-| raw | 7 days | the counts write |
-| hour | 45 days | raw, before raw is purged |
-| day | 400 days | hour |
+| Tier | Default | Built from | Rows per source |
+|---|---|---|---|
+| raw | 7 days | the counts write | ~672/week at a 900s heartbeat |
+| hour | 45 days | raw, before raw is purged | 24/day |
+| day | 400 days | hour | 1/day |
+
+Hourly at 45 days is deliberate headroom over a 30-day audit floor: someone
+investigating a month-old incident needs the month BEFORE it at the same
+resolution, which is usually the actual question.
+
+### What it costs
+
+Measured on a live estate, fully loaded (heap plus every index): **~1 kB per
+row** for both tables.
+
+**The rollup tiers are bounded by BUCKETS, not by observations.** An hour
+bucket is one row per source per hour whether the source was sampled every 15
+minutes or every 15 seconds. So the capture cadence does not affect 30- or
+90-day storage at all — it touches the 7-day raw tier alone.
+
+| Sources | 30-day floor¹ | 90 days, hourly throughout² | 90 days, hourly for 30³ |
+|---|---|---|---|
+| 100 | 150 MB | 320 MB | 180 MB |
+| 500 | 750 MB | 1.6 GB | 900 MB |
+| 1,000 | 1.5 GB | 3.2 GB | 1.8 GB |
+| 5,000 | 7.5 GB | 16 GB | 9 GB |
+
+¹ raw 7d + hourly 30d + daily 90d ² hourly 90d + daily 400d ³ hourly stays 30d
+
+Moving the heartbeat from 3600s to 900s costs about **+0.5 GB at 1,000
+sources**, all of it raw.
+
+**The binding constraint is write amplification, not disk.** Compaction
+upserts the trailing bucket on every pass, and each update rewrites the tuple
+and all six index entries. On a large estate raise
+`PROFILING_COMPACT_INTERVAL_SECS` before worrying about storage, and consider
+a lower `fillfactor` on the rollup table so HOT updates stay in-page.
 
 Rollups are **per source only**; workspace, provider and platform series are
 sums of them at read time. Materialising those scopes would be four things to
@@ -243,6 +285,43 @@ agree with.
 | POST | `/profiling/alerts/{id}/acknowledge` | Mark one seen. First ack wins. |
 | GET/PUT | `/profiling/policy` | Retention + alerting. Read for any reader, write for `system:admin`. |
 
+### Configuring it
+
+Every retention and alerting knob is settable live through
+`PUT /api/v1/profiling/policy`, persisted on `platform_settings`, and resolved
+as **`persisted ?? env`** — so an untouched deployment tracks its environment
+defaults rather than pinning whatever they happened to be the first time
+someone opened the dialog.
+
+| Field | Default | What it decides |
+|---|---|---|
+| `rawRetentionDays` | 7 | Full-fidelity tier |
+| `hourlyRetentionDays` | 45 | The audit tier — clears a 30-day floor with headroom |
+| `dailyRetentionDays` | 400 | Long tier |
+| `maxRowsPerSource` | 10000 | Raw-tier safety valve; covers 7 days at one observation a minute |
+| `heartbeatSecs` | 900 | Continuity snapshot when nothing changed |
+| `silentAfterSecs` | 21600 | How long unheard-from before a source is `silent` |
+| `alertsEnabled` | true | Master switch for finding evaluation |
+| `alertMinSeverity` | severe | Floor; `critical` ignores it |
+| `alertCooldownSecs` | 21600 | One finding per source per metric per interval |
+
+`-1` clears an override and returns that field to the environment default.
+
+**Tiers must nest.** A save is REFUSED — not clamped — when daily would not
+reach at least as far back as hourly, or hourly as far as raw. A read picks the
+finest tier that COVERS its window, so inverted tiers leave windows no tier can
+answer while every tier still holds rows: it looks like data loss and is really
+a settings mistake. Silently rewriting a number someone typed is how a settings
+page stops being trustworthy.
+
+**The cadences are deliberately NOT settable.** `PROFILING_COMPACT_INTERVAL_SECS`,
+`PROFILING_RETENTION_INTERVAL_SECS` and `PROFILING_ALERT_INTERVAL_SECS` decide
+how hard the service works and stay environment-only. The purge cannot delete
+raw beyond the compaction watermark, so a live-editable compaction interval is
+a way to stall retention from a settings page. They are REPORTED on
+`GET /profiling/policy` under `cadences` (with `readOnly: true`) so an operator
+can see them without being able to wedge anything.
+
 `/series` takes `scope` (`source` | `workspace` | `provider` | `all`), an `id`
 for all but `all`, a `window` token (`24h` | `7d` | `30d` | `90d`) or explicit
 `from`/`to`, `grain`, `metric` (`total` | `nodes` | `edges`), `breakdown`
@@ -258,6 +337,22 @@ Two shape decisions carry weight:
   server resolves and returns the bounds it used. A client computing
   `to=now()` on every render produces a new value every time — a cache key
   that never hits, and a React Query key that re-fetches forever.
+
+**Grain follows density, and coverage comes first.** A tier is only a
+candidate if its retention reaches the start of the window — serving raw for a
+30-day window would answer with the last week and silently drop the other
+three, a subtler wrong answer than a coarse one. Among the candidates, the
+finest whose actual bucket count fits the budget wins. The **last 24 hours gets
+a larger budget** (1,500 points, one a minute) because "when did this happen"
+is asked about the last day far more than about the last quarter, and bucketing
+that window away would hide movement that was captured.
+
+| Window | Typical grain | Why |
+|---|---|---|
+| 24 hours | `raw` | inside raw retention, and the incident window |
+| 7 days | `raw` or `hour` | inside raw retention; falls to hour at fleet scope |
+| 30 days | `hour` | past raw retention, inside hourly |
+| 90 days | `day` | past hourly retention |
 
 `scope=all` means *everything the caller can see*, not *everything*:
 `compute_visible_data_source_ids` returns `None` for a platform operator and
@@ -375,13 +470,23 @@ Providers that fail repeatedly show as degraded via the rolling success window.
   loses in-flight queue entries, which heal on the next tick but do not replay.
 - Top-level materialization and cache warming are best-effort optimizations that
   only engage above a size threshold; they never block or fail a counts write.
-- Counts history begins at the first capture, not at the data source's creation
-  — there is no backfill, because the observations simply were not recorded. The
-  history API reports `coverage_from` so the UI can say so rather than letting a
-  short series read as data loss.
+- Profiling begins at the first capture, not at the data source's creation —
+  there is no backfill, because the observations simply were not recorded. The
+  API reports `coverage_from` so the UI can say so rather than letting a short
+  series read as data loss.
 - Alerting latency is the evaluation cadence plus the capture cadence: a
   movement is recorded when a lane next observes it, and judged when the sweep
   next runs. It is a background signal, not a real-time one.
-- History resolution is bounded by the capture cadence: a change is recorded
-  when a lane next observes it, which for a FalkorDB source is the 60s probe and
-  for everything else the counts poll.
+- Resolution is bounded by the capture cadence: a change is recorded when a lane
+  next observes it, which for a FalkorDB source is the 60s probe and for
+  everything else the counts poll.
+- **Snapshots are not yet bound to refresh runs.** `refresh_event_id` and the
+  `run` capture reason exist in the schema, and the ledger renders them, but
+  nothing writes them: every row is `first`, `changed` or `heartbeat`. So "what
+  did that load do" is still answered by correlating `refresh_events` within
+  ±15 minutes of an observation, not by a join. Two runs inside one window
+  cannot be told apart. Binding capture to run completion is outstanding work.
+- The raw-tier row cap (`PROFILING_MAX_ROWS_PER_SOURCE`) can bite before the age
+  cutoff on a source changing on every probe. When it does, that source keeps
+  fewer than 7 days of RAW rows; its hour and day rollups still cover the full
+  window, because they are built before raw becomes eligible for deletion.

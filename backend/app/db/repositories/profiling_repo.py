@@ -153,6 +153,53 @@ def env_retention_policy() -> RetentionPolicy:
     )
 
 
+#: The retention half of the policy. The alert half resolves separately in
+#: ``count_alerts_repo``, because the two are read by different callers on
+#: different cadences and neither should have to load the other.
+_RETENTION_FIELDS = (
+    "rawRetentionDays", "hourlyRetentionDays", "dailyRetentionDays",
+    "maxRowsPerSource", "heartbeatSecs", "silentAfterSecs",
+)
+
+
+class PolicyConflict(ValueError):
+    """A saved policy that would not mean what it says."""
+
+
+def validate_policy(values: Dict[str, Any], current: "RetentionPolicy") -> None:
+    """Reject a policy whose tiers do not nest.
+
+    Coverage has to be monotonic — daily reaches at least as far back as
+    hourly, hourly at least as far as raw — because a read picks the finest
+    tier that COVERS the window. Inverting them leaves windows that no tier
+    can answer while every tier still holds rows, which looks like data loss
+    and is really a settings mistake.
+
+    Rejected rather than clamped: silently rewriting a number someone typed
+    is how a settings page becomes untrustworthy.
+    """
+    def _effective(field: str, fallback: int) -> int:
+        value = values.get(field)
+        if value is None or value == INHERIT:
+            return fallback
+        return int(value)
+
+    raw = _effective("rawRetentionDays", current.raw_days)
+    hourly = _effective("hourlyRetentionDays", current.hourly_days)
+    daily = _effective("dailyRetentionDays", current.daily_days)
+
+    if hourly < raw:
+        raise PolicyConflict(
+            f"Hourly retention ({hourly}d) must reach at least as far back as "
+            f"raw ({raw}d) — hourly buckets are built from raw before it is purged."
+        )
+    if daily < hourly:
+        raise PolicyConflict(
+            f"Daily retention ({daily}d) must reach at least as far back as "
+            f"hourly ({hourly}d) — daily buckets are built from hourly."
+        )
+
+
 async def resolve_retention_policy(
     session: AsyncSession,
 ) -> Tuple[RetentionPolicy, Dict[str, Any]]:
@@ -178,17 +225,19 @@ async def resolve_retention_policy(
         return env, {}
 
     overrides = {
-        "hourlyRetentionDays": row.history_retention_days,
-        "maxRowsPerSource": row.history_max_rows_per_source,
-        "heartbeatSecs": row.history_heartbeat_secs,
+        field: getattr(row, column, None)
+        for field, column in _POLICY_COLUMNS.items()
+        if field in _RETENTION_FIELDS
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
     return RetentionPolicy(
-        raw_days=env.raw_days,
+        raw_days=max(_MIN_DAYS, overrides.get("rawRetentionDays", env.raw_days)),
         hourly_days=max(
             _MIN_DAYS, overrides.get("hourlyRetentionDays", env.hourly_days),
         ),
-        daily_days=env.daily_days,
+        daily_days=max(
+            _MIN_DAYS, overrides.get("dailyRetentionDays", env.daily_days),
+        ),
         max_rows_per_source=max(
             1, overrides.get("maxRowsPerSource", env.max_rows_per_source),
         ),
@@ -738,6 +787,18 @@ SCOPES = ("source", "workspace", "provider", "all")
 #: moment something changed.
 _POINT_BUDGET = 720
 
+#: The incident window gets a bigger allowance — one point a minute for a day.
+#:
+#: "When did this happen" is asked about the last day far more than about the
+#: last quarter, and a busy source can capture more than 720 times in 24 hours
+#: once the heartbeat tracks the poll. Falling to hour grain there would bucket
+#: away movement that was captured, in exactly the window someone opened to
+#: find it. Longer windows keep the tighter budget: at 90 days nobody is
+#: reading individual minutes, and the rollups carry min/max so an intra-bucket
+#: dip still shows.
+_SHORT_WINDOW_HOURS = 26
+_SHORT_WINDOW_BUDGET = 1500
+
 
 def resolve_grain(frm: str, to: str, requested: Optional[str]) -> str:
     """Coarsest-first fallback when the caller asked for something specific,
@@ -787,6 +848,11 @@ async def choose_grain(
     if start is None or end is None:
         return "hour"
     span_days = max(0.0, (end - start).total_seconds() / 86_400.0)
+    budget = (
+        _SHORT_WINDOW_BUDGET
+        if span_days * 24 <= _SHORT_WINDOW_HOURS
+        else _POINT_BUDGET
+    )
 
     # Finest first, and only tiers whose retention reaches back far enough.
     candidates = [
@@ -801,7 +867,7 @@ async def choose_grain(
             session, scope=scope, scope_id=scope_id, visible=visible,
             frm=frm, to=to, grain=grain,
         )
-        if 0 < buckets <= _POINT_BUDGET:
+        if 0 < buckets <= budget:
             return grain
     return "day"
 
@@ -1046,10 +1112,25 @@ async def movement_board(
     drop to nothing, and a board that showed it at zero would invent an
     outage. That count was previously hardcoded to 0.
     """
-    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+    from backend.app.db.models import (
+        DataSourceStatsORM, ProviderORM, WorkspaceDataSourceORM,
+    )
     from backend.app.db.repositories import stats_history_repo
 
-    grain = "day" if _span_hours(frm, to) > _HOUR_WINDOW_HOURS else "hour"
+    # The same tier selection the series uses, rather than a width threshold
+    # of its own. A hardcoded "30 days means day grain" empties the board
+    # whenever the day tier has not been built yet — compaction runs hour
+    # first, so there is always a window where hour rollups exist and day ones
+    # do not, and a board that reports nothing during it is indistinguishable
+    # from a fleet that reported nothing.
+    grain = await choose_grain(
+        session, scope="all", scope_id=None, visible=visible,
+        frm=frm, to=to, requested=None,
+    )
+    if grain == "raw":
+        # The board summarises; it never needs per-observation resolution, and
+        # raw cannot cover a long window anyway.
+        grain = "hour"
     conditions = _scope_conditions(
         _ROLL, scope="all", scope_id=None, visible=visible,
     )
@@ -1079,8 +1160,17 @@ async def movement_board(
     deltas: Dict[str, List[int]] = {}
     for r in rows:
         ds_id = r[0]
-        value = int((r[2] if metric == "nodes" else r[3]) or 0)
-        delta = r[4] if metric == "nodes" else r[5]
+        if metric == "nodes":
+            value, delta = int(r[2] or 0), r[4]
+        elif metric == "edges":
+            value, delta = int(r[3] or 0), r[5]
+        else:
+            # total. Summed from the SAME bucket, so the pair is always read
+            # at one instant — deriving it from two separate board passes
+            # would let a source that was observed once in the window
+            # contribute its nodes and not its edges.
+            value = int(r[2] or 0) + int(r[3] or 0)
+            delta = (r[4] or 0) + (r[5] or 0)
         entry = per_source.setdefault(ds_id, {
             "data_source_id": ds_id,
             "first": value, "last": value, "points": [],
@@ -1093,6 +1183,26 @@ async def movement_board(
         entry["points"].append(value)
         if delta:
             deltas.setdefault(ds_id, []).append(int(delta))
+
+    # When each source was last PROFILED — the capture instant, not the
+    # bucket it landed in.
+    #
+    # The board reads from the rollup tier, where `bucket_start` is the start
+    # of a day or an hour. Reporting that as "last seen" makes every source
+    # observed anywhere in the same bucket report the same age: at day grain
+    # the whole fleet reads "13h ago" whether it was profiled at midnight or
+    # a minute ago. `last_snapshot_at` is stamped by the capture itself, so it
+    # is the actual answer, and it outlives the raw rows it came from.
+    last_seen: Dict[str, Optional[str]] = {}
+    if per_source:
+        last_seen = {
+            ds_id: at for ds_id, at in (await session.execute(
+                select(
+                    DataSourceStatsORM.data_source_id,
+                    DataSourceStatsORM.last_snapshot_at,
+                ).where(DataSourceStatsORM.data_source_id.in_(list(per_source)))
+            )).all()
+        }
 
     # Names, resolved once for the page rather than per row.
     labels: Dict[str, str] = {}
@@ -1107,11 +1217,27 @@ async def movement_board(
         )).all():
             labels[ds_id] = label
             catalog_ids[ds_id] = catalog_item_id
-    provider_names: Dict[str, str] = {
-        pid: name for pid, name in (await session.execute(
-            select(ProviderORM.id, ProviderORM.name)
+    # Provider identity, including the TYPE — the board renders a logo, and
+    # a name alone cannot pick one.
+    providers: Dict[str, tuple] = {
+        pid: (name, ptype) for pid, name, ptype in (await session.execute(
+            select(ProviderORM.id, ProviderORM.name, ProviderORM.provider_type)
         )).all()
     }
+
+    # Workspace names, so a fleet board can say WHOSE source moved. An id is
+    # not something an operator recognises under pressure.
+    workspaces: Dict[str, str] = {}
+    ws_ids = {e["workspace_id"] for e in per_source.values() if e["workspace_id"]}
+    if ws_ids:
+        from backend.app.db.models import WorkspaceORM
+
+        workspaces = {
+            wid: name for wid, name in (await session.execute(
+                select(WorkspaceORM.id, WorkspaceORM.name)
+                .where(WorkspaceORM.id.in_(list(ws_ids)))
+            )).all()
+        }
 
     out: List[Dict[str, Any]] = []
     for ds_id, entry in per_source.items():
@@ -1125,8 +1251,10 @@ async def movement_board(
             "name": labels.get(ds_id) or entry["graph_name"] or ds_id,
             "catalog_item_id": catalog_ids.get(ds_id),
             "workspace_id": entry["workspace_id"],
+            "workspace_name": workspaces.get(entry["workspace_id"] or ""),
             "provider_id": entry["provider_id"],
-            "provider_name": provider_names.get(entry["provider_id"] or ""),
+            "provider_name": providers.get(entry["provider_id"] or "", (None, None))[0],
+            "provider_type": providers.get(entry["provider_id"] or "", (None, None))[1],
             "first": entry["first"],
             "last": entry["last"],
             "delta": movement,
@@ -1136,7 +1264,9 @@ async def movement_board(
             ),
             "points": entry["points"],
             "observations": entry["observations"],
-            "last_observed_at": entry["last_observed_at"],
+            # Falls back to the bucket only when a source has no stats row —
+            # a coarse answer beats none, and the two agree to within a bucket.
+            "last_observed_at": last_seen.get(ds_id) or entry["last_observed_at"],
             "significance": stats_history_repo.classify_significance(
                 movement, baseline, before=entry["first"],
             ),
@@ -1370,9 +1500,15 @@ async def list_findings(
 #: product ones, and a live-editable compaction interval is a way to wedge
 #: retention from a settings page.
 _POLICY_COLUMNS = {
+    # `history_retention_days` predates the tiers and holds the HOURLY window.
+    # Renaming it would be a migration for no behavioural gain; the mapping is
+    # the one place the old name has to be understood.
     "hourlyRetentionDays": "history_retention_days",
+    "rawRetentionDays": "profiling_raw_retention_days",
+    "dailyRetentionDays": "profiling_daily_retention_days",
     "maxRowsPerSource": "history_max_rows_per_source",
     "heartbeatSecs": "history_heartbeat_secs",
+    "silentAfterSecs": "profiling_silent_after_secs",
     "alertsEnabled": "history_alerts_enabled",
     "alertMinSeverity": "history_alert_min_severity",
     "alertCooldownSecs": "history_alert_cooldown_secs",

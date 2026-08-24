@@ -13,7 +13,7 @@ import {
     Database, Search, Filter, Loader2, Trash2,
     CheckCircle2, RefreshCw, Layers,
     AlertTriangle, Zap, X, Check, ChevronDown, ChevronLeft, ChevronRight,
-    Plus, WifiOff, ArrowUpDown, ArrowUpRight,
+    Plus, WifiOff, ArrowUpDown, ArrowUpRight, LineChart,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -366,14 +366,32 @@ function AssetRow({
                             )}
                         </button>
                         {catalogId && (
-                            <button
-                                onClick={(e) => { e.stopPropagation(); onOpenProfile(catalogId) }}
-                                title="Open data source profile"
-                                aria-label={`Open profile for ${assetName}`}
-                                className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
-                            >
-                                <ArrowUpRight className="w-3.5 h-3.5" />
-                            </button>
+                            <>
+                                {/* Counts over time for THIS source. Registered
+                                    assets are profiled from the moment they are
+                                    onboarded, and the fastest way to answer
+                                    "did something delete my data" is to look at
+                                    the series — so the row links straight to it
+                                    rather than making the reader find the
+                                    Profiling tab and search for the name. */}
+                                <Link
+                                    to={`/ingestion?tab=profiling&source=${encodeURIComponent(catalogId)}`}
+                                    onClick={(e) => e.stopPropagation()}
+                                    title="See counts over time for this source"
+                                    aria-label={`Open profiling for ${assetName}`}
+                                    className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+                                >
+                                    <LineChart className="w-3.5 h-3.5" />
+                                </Link>
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); onOpenProfile(catalogId) }}
+                                    title="Open data source profile"
+                                    aria-label={`Open profile for ${assetName}`}
+                                    className="shrink-0 inline-flex items-center justify-center w-6 h-6 rounded text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+                                >
+                                    <ArrowUpRight className="w-3.5 h-3.5" />
+                                </button>
+                            </>
                         )}
                     </div>
 

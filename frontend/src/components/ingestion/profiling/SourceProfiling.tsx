@@ -26,7 +26,7 @@ import { KpiCard } from '@/components/analytics/KpiCard'
 import { profilingService } from '@/services/profilingService'
 import {
     DEFAULT_WINDOW, PROFILING_WINDOWS, type ProfilingWindowKey,
-    useProfilingObservations, useProfilingSeries,
+    useProfilingFindings, useProfilingObservations, useProfilingSeries,
 } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import type { ProfilingBreakdown, ProfilingMetric } from '@/types/profiling'
@@ -36,7 +36,8 @@ import { ProfilingChart, type BreakdownView } from './ProfilingChart'
 import { SeriesVerdict } from './Verdict'
 import { Segmented } from './BoardFilters'
 import { TypeLedger } from './TypeLedger'
-import { formatBucket, signed } from './shared'
+import { UtcChip } from './UtcChip'
+import { formatBucket, formatDay, signed } from './shared'
 
 interface Props {
     dataSourceId: string
@@ -68,6 +69,12 @@ export function SourceProfiling({
     }), [dataSourceId, window, metric, breakdown, view])
 
     const series = useProfilingSeries(seriesQuery, { enabled: canRead })
+    // Fetched here as well as in the band: React Query dedupes the request,
+    // and the chart needs the same findings to mark them on its axis.
+    const findings = useProfilingFindings(
+        { id: dataSourceId, openOnly: false, limit: 50 },
+        { enabled: canRead },
+    )
     const ledger = useProfilingObservations(
         { id: dataSourceId, window, onlyNotable, limit: 50 },
         { enabled: canRead },
@@ -138,6 +145,7 @@ export function SourceProfiling({
                     value={window}
                     onChange={setWindow}
                 />
+                <UtcChip className="ml-auto" />
                 {payload.buckets.length > 0 && (
                     <a
                         href={exportHref}
@@ -215,6 +223,7 @@ export function SourceProfiling({
 
             <ProfilingChart
                 payload={payload}
+                findings={findings.data?.alerts}
                 metric={metric}
                 breakdown={breakdown}
                 view={view}
@@ -262,11 +271,11 @@ function Coverage({ payload }: { payload: { coverage_from: string | null; from: 
         <p className="text-xs text-ink-muted">
             {partial ? (
                 <>
-                    This source's record begins {begins.toLocaleDateString()} — earlier than
-                    that is not missing, it was never observed.
+                    This source's record begins {formatDay(payload.coverage_from)} — earlier
+                    than that is not missing, it was never observed.
                 </>
             ) : (
-                <>The window is fully covered, from {requested.toLocaleDateString()}.</>
+                <>The window is fully covered, from {formatDay(payload.from)}.</>
             )}
         </p>
     )

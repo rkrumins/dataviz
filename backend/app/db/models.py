@@ -224,6 +224,15 @@ class PlatformSettingsORM(Base):
     history_retention_days = Column(Integer, nullable=True)
     history_max_rows_per_source = Column(Integer, nullable=True)
     history_heartbeat_secs = Column(Integer, nullable=True)
+    # The other two tiers. `history_retention_days` predates them and holds
+    # the HOURLY window; these complete the set so an operator can size every
+    # tier without a redeploy. Same NULL-means-unset semantics.
+    profiling_raw_retention_days = Column(Integer, nullable=True)
+    profiling_daily_retention_days = Column(Integer, nullable=True)
+    #: How long after its last observation a source is called SILENT. A
+    #: product judgement — how patient to be before saying a source has gone
+    #: away — not a deployment one, so it belongs with the other overrides.
+    profiling_silent_after_secs = Column(Integer, nullable=True)
     # Counts-anomaly alerting. Same NULL-means-unset semantics again.
     # ``history_alert_min_severity`` is the floor: 'severe' alerts only on the
     # extreme tail, 'notable' widens it. Nullable Boolean rather than a

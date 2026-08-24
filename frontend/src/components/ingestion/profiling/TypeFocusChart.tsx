@@ -15,7 +15,7 @@ import { useMemo } from 'react'
 import { exact } from '@/lib/formatMetric'
 import { ChartTable } from '@/components/analytics/charts/ChartTable'
 import { TimeSeriesChart } from '@/components/analytics/charts/TimeSeriesChart'
-import { deltaTone, formatBucket, metricNoun, signed } from './shared'
+import { axisLabels, deltaTone, formatBucketUtc, metricNoun, signed } from './shared'
 import { cn } from '@/lib/utils'
 
 export function TypeFocusChart({
@@ -85,7 +85,8 @@ export function TypeFocusChart({
             </div>
 
             <TimeSeriesChart
-                buckets={buckets.map(formatBucket)}
+                buckets={buckets.map(formatBucketUtc)}
+                axisLabels={axisLabels(buckets)}
                 series={series}
                 height={180}
             />
@@ -104,7 +105,7 @@ export function TypeFocusChart({
                 <div className="mt-2">
                     <ChartTable
                         rowLabel="Bucket"
-                        rows={buckets.map(formatBucket)}
+                        rows={buckets.map(formatBucketUtc)}
                         columns={[{ key: label, label, values }]}
                         caption={`${label} over time`}
                     />

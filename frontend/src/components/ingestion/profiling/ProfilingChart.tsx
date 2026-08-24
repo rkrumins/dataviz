@@ -22,10 +22,10 @@ import { TypeTrellis } from './TypeTrellis'
 import { TimeSeriesChart } from '@/components/analytics/charts/TimeSeriesChart'
 import { useChartTheme } from '@/components/analytics/charts/chartTheme'
 import type {
-    ProfilingBreakdown, ProfilingMetric, SeriesPayload,
+    Finding, ProfilingBreakdown, ProfilingMetric, SeriesPayload,
 } from '@/types/profiling'
 import { ControlGroup } from './BoardFilters'
-import { formatBucket } from './shared'
+import { TIME_ZONE_NOTE, axisLabels, formatBucketUtc } from './shared'
 
 const METRICS: { key: ProfilingMetric; label: string }[] = [
     { key: 'total', label: 'Everything' },
@@ -54,6 +54,14 @@ const BREAKDOWNS: { key: ProfilingBreakdown; label: string }[] = [
 
 interface Props {
     payload: SeriesPayload
+    /**
+     * Findings to mark on the timeline.
+     *
+     * The chart shows the drop; the findings band says it was reported. Until
+     * they share an axis, "was this the incident we alerted on" needs two
+     * screens and a mental join on timestamps.
+     */
+    findings?: Finding[]
     metric: ProfilingMetric
     breakdown: ProfilingBreakdown
     view: BreakdownView
@@ -70,7 +78,7 @@ interface Props {
 }
 
 export function ProfilingChart({
-    payload, metric, breakdown, view, onMetric, onBreakdown, onView,
+    payload, findings, metric, breakdown, view, onMetric, onBreakdown, onView,
     focusedType, onFocusType, compare, title = 'Counts over time',
     action, isStale,
 }: Props) {
@@ -113,7 +121,7 @@ export function ProfilingChart({
     const table = useMemo(() => (
         <ChartTable
             rowLabel="Bucket"
-            rows={(payload.buckets ?? []).map(formatBucket)}
+            rows={(payload.buckets ?? []).map(formatBucketUtc)}
             columns={drawn.map((s) => ({
                 key: s.key, label: s.label, values: s.points.map((p) => p.v),
             }))}
@@ -132,12 +140,52 @@ export function ProfilingChart({
         Math.min(240, Math.max(120, payload.buckets.length * 14 + 90)),
     )
 
+    const ticks = useMemo(() => axisLabels(payload.buckets), [payload.buckets])
+
+    /**
+     * Findings snapped to the bucket that contains them.
+     *
+     * A finding is stamped with the instant it was OBSERVED, which almost
+     * never equals a bucket boundary. Annotations are matched by label, so an
+     * unsnapped mark simply never draws — silently, which is the worst way for
+     * a forensic mark to fail. Nearest-bucket is the honest placement: the
+     * chart's resolution is the bucket, and claiming finer would be a
+     * precision the series does not have.
+     */
+    const findingMarks = useMemo(() => {
+        if (!findings?.length || !payload.buckets.length) return []
+        const times = payload.buckets.map((b) => {
+            const padded = b.length <= 10
+                ? `${b}T00:00:00Z`
+                : b.length <= 13 ? `${b}:00:00Z` : b
+            return new Date(padded).getTime()
+        })
+        return findings.flatMap((f) => {
+            const at = new Date(f.observed_at ?? f.detected_at).getTime()
+            if (Number.isNaN(at)) return []
+            let best = 0
+            for (let i = 1; i < times.length; i += 1) {
+                if (Math.abs(times[i] - at) < Math.abs(times[best] - at)) best = i
+            }
+            const noun = f.metric === 'edges' ? 'relationships' : 'entities'
+            return [{
+                bucket: formatBucketUtc(payload.buckets[best]),
+                title: f.finding === 'type_gone' && f.subject_type
+                    ? `${f.subject_type} gone · ${f.severity}`
+                    : f.finding === 'silent'
+                        ? `Stopped reporting · ${f.severity}`
+                        : `${f.delta < 0 ? '−' : '+'}${compact(Math.abs(f.delta))} ${noun} · ${f.severity}`,
+            }]
+        })
+    }, [findings, payload.buckets])
+
     const grainWord = { raw: 'every observation', hour: 'by hour', day: 'by day' }[payload.grain]
     const subtitle = [
         `${payload.buckets.length} ${payload.buckets.length === 1 ? 'point' : 'points'}, ${grainWord}`,
         view === 'share' && hasBreakdown && !focused && 'share of the total, not counts',
         payload.sources_observed > 1 && `${payload.sources_observed} sources`,
         payload.truncated && 'window trimmed to the most recent observations',
+        payload.grain !== 'day' && TIME_ZONE_NOTE,
     ].filter(Boolean).join(' · ')
 
     return (
@@ -210,11 +258,13 @@ export function ProfilingChart({
                     }))}
                     share={view === 'share'}
                     height={plotHeight + 20}
-                    formatBucket={formatBucket}
+                    formatBucket={formatBucketUtc}
+                    axisLabels={ticks}
                 />
             ) : (
                 <TimeSeriesChart
-                    buckets={payload.buckets.map(formatBucket)}
+                    buckets={payload.buckets.map(formatBucketUtc)}
+                    axisLabels={ticks}
                     series={drawn.map((s) => ({
                         key: s.key,
                         label: s.label,
@@ -228,14 +278,17 @@ export function ProfilingChart({
                             : undefined,
                     }))}
                     height={plotHeight}
-                    annotations={(payload.vanished_types ?? []).map((v) => ({
-                        // Anchored at the end of the window: the series no
-                        // longer carries this type at all, so there is no
-                        // bucket of its own to point at — what matters is that
-                        // it is gone by now.
-                        bucket: formatBucket(payload.buckets.at(-1) ?? ''),
-                        title: `${v.type} gone (peaked at ${compact(v.peak)})`,
-                    }))}
+                    annotations={[
+                        ...(payload.vanished_types ?? []).map((v) => ({
+                            // Anchored at the end of the window: the series no
+                            // longer carries this type at all, so there is no
+                            // bucket of its own to point at — what matters is
+                            // that it is gone by now.
+                            bucket: formatBucketUtc(payload.buckets.at(-1) ?? ''),
+                            title: `${v.type} gone (peaked at ${compact(v.peak)})`,
+                        })),
+                        ...findingMarks,
+                    ]}
                 />
             )}
         </ChartFrame>
