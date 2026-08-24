@@ -400,9 +400,58 @@ const CORPORATE_PORTAL: VendorPreset = {
     weight: 90,
 }
 
+const ENTERPRISE_GATEWAY: VendorPreset = {
+    id: 'backchannel',
+    name: 'Enterprise gateway',
+    blurb: 'An internal service we ask for the user, using the session they already have.',
+    kind: 'backchannel',
+    connectLabel: 'The two calls we make',
+    claimMapping: {
+        external_id: ['sub', 'userId', 'employeeId', 'uid'],
+        email: ['email', 'emailAddress', 'mail', 'upn'],
+        first_name: ['firstName', 'givenName', 'given_name'],
+        last_name: ['lastName', 'surname', 'family_name'],
+        groups: ['groups', 'roles', 'memberOf'],
+        // Deliberately no ``iat``: there is no token being read here, so
+        // an ``iat`` in the response would be the response's own age
+        // rather than when the person signed in — and satisfying the
+        // daily re-authentication ceiling with it would defeat it.
+        auth_time: ['auth_time', 'authTime', 'authenticationTime'],
+    },
+    sampleClaims: {
+        sub: 'emp-100482',
+        email: 'ada.lovelace@corp.example',
+        firstName: 'Ada',
+        lastName: 'Lovelace',
+        department: 'Engineering',
+        groups: ['engineering', 'staff'],
+        auth_time: 1700000000,
+    },
+    consoleSteps: [
+        {
+            title: 'Name the session cookie their portal already sets',
+            detail: 'It has to reach us, which means a cookie on a domain we share with the portal. We never read what is inside it.',
+        },
+        {
+            title: 'Point us at the endpoint that redeems it',
+            detail: 'We send the session, they send back a token. Tell us where the token sits in their response.',
+        },
+        {
+            title: 'Point us at the endpoint that returns the user',
+            detail: 'Optional — if the first call already returns the user, leave it blank and we will skip a round trip.',
+        },
+        {
+            title: 'Allow the gateway host',
+            detail: 'These endpoints are internal, so they are unreachable until someone with the SSO hosts permission adds the host to the allowlist.',
+        },
+    ],
+    weight: 95,
+}
+
 export const VENDOR_PRESETS: VendorPreset[] = [
     ENTRA, OKTA, AUTH0, KEYCLOAK, GOOGLE,
     ADFS, GENERIC_SAML, GENERIC_OIDC, CORPORATE_PORTAL,
+    ENTERPRISE_GATEWAY,
 ].sort((a, b) => a.weight - b.weight)
 
 export function presetById(id: string): VendorPreset | undefined {

@@ -11,7 +11,8 @@ const ADMIN = '/api/v1/admin'
 
 /** Provider kinds the backend accepts — mirrors ``VALID_KINDS`` in
  *  ``idp_provider_repo`` and the ``ck_idp_providers_kind`` CHECK. */
-export type IdpKind = 'oidc' | 'saml2' | 'custom' | 'custom_profile'
+export type IdpKind =
+    | 'oidc' | 'saml2' | 'custom' | 'custom_profile' | 'backchannel'
 
 /** How much a provider's word is worth — derived server-side from kind +
  *  settings on every read, never stored. Ordered worst to best. */
@@ -39,6 +40,48 @@ export interface CustomProfileSettings {
     audience?: string
     max_age_seconds?: number
     trusted_proxy_acknowledged?: boolean
+}
+
+/** Typed view of a ``backchannel`` row's settings blob. Optional
+ *  throughout for the same reason as above: the form builds it up and
+ *  the server owns validation. ``gateway_headers`` / ``exchange_headers``
+ *  come back redacted as a whole — we cannot know which of an
+ *  operator's own header names carries the credential. */
+export interface BackchannelSettings {
+    token_source?: 'cookie' | 'header'
+    token_source_key?: string
+    gateway_url?: string
+    gateway_method?: 'POST' | 'GET'
+    gateway_send_as?: 'cookie' | 'header' | 'body'
+    gateway_token_header?: string
+    gateway_token_prefix?: string
+    gateway_body_field?: string
+    gateway_headers?: Record<string, string>
+    gateway_token_path?: string
+    exchange_url?: string
+    exchange_method?: 'POST' | 'GET'
+    exchange_send_as?: 'body' | 'header'
+    exchange_body_field?: string
+    exchange_token_header?: string
+    exchange_token_prefix?: string
+    exchange_headers?: Record<string, string>
+    exchange_claims_path?: string
+    timeout_seconds?: number
+    require_auth_time?: boolean
+    liveness_on_refresh?: boolean
+    liveness_grace_seconds?: number
+}
+
+/** One permitted internal destination for a back-channel provider.
+ *  Platform-level rather than per-provider: a per-provider allowlist
+ *  would be circular. Managed under ``system:sso:hosts:manage``. */
+export interface BackchannelHost {
+    id: string
+    host: string
+    port: number
+    note?: string | null
+    createdAt?: string | null
+    createdBy?: string | null
 }
 
 export interface IdpProvider {
@@ -283,6 +326,36 @@ export const ssoAdminService = {
     deleteProvider(id: string): Promise<void> {
         return request<void>(
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}`,
+            { method: 'DELETE' },
+        )
+    },
+
+    // ── Back-channel host allowlist ──────────────────────────────────
+    //
+    // Which internal addresses a back-channel provider may call. Gated
+    // server-side on ``system:sso:hosts:manage`` rather than
+    // ``system:admin``, so these three can 403 for someone who can edit
+    // every other thing on this page — the UI has to say so rather than
+    // showing an empty list.
+
+    listBackchannelHosts(): Promise<BackchannelHost[]> {
+        return request<BackchannelHost[]>(
+            `${ADMIN}/idp-providers/backchannel-hosts`,
+        )
+    },
+
+    addBackchannelHost(
+        body: { host: string; port?: number; note?: string },
+    ): Promise<BackchannelHost> {
+        return request<BackchannelHost>(
+            `${ADMIN}/idp-providers/backchannel-hosts`,
+            { method: 'POST', body: JSON.stringify(body) },
+        )
+    },
+
+    deleteBackchannelHost(id: string): Promise<void> {
+        return request<void>(
+            `${ADMIN}/idp-providers/backchannel-hosts/${encodeURIComponent(id)}`,
             { method: 'DELETE' },
         )
     },

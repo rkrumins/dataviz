@@ -116,6 +116,24 @@ export const PortalLogo: React.FC<LogoProps> = ({ className }) => (
     </svg>
 )
 
+/** Two systems and a call between them — the whole shape of the
+ *  back-channel kind, and deliberately not the portal mark: this one
+ *  fetches the identity rather than being handed it. */
+export const GatewayLogo: React.FC<LogoProps> = ({ className }) => (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+        <rect x="2" y="7" width="7" height="10" rx="1.5" fill="none"
+              stroke="currentColor" strokeWidth="1.6" opacity=".75" />
+        <rect x="15" y="7" width="7" height="10" rx="1.5" fill="none"
+              stroke="currentColor" strokeWidth="1.6" opacity=".75" />
+        <path d="M9.5 10.5h5M14.5 10.5l-1.6-1.4M14.5 10.5l-1.6 1.4"
+              fill="none" stroke="currentColor" strokeWidth="1.5"
+              strokeLinecap="round" strokeLinejoin="round" opacity=".6" />
+        <path d="M14.5 13.5h-5M9.5 13.5l1.6-1.4M9.5 13.5l1.6 1.4"
+              fill="none" stroke="currentColor" strokeWidth="1.5"
+              strokeLinecap="round" strokeLinejoin="round" opacity=".45" />
+    </svg>
+)
+
 /** Preset id → mark. Keys match ``vendorPresets.ts``. */
 export const IDP_LOGOS: Record<string, ComponentType<LogoProps>> = {
     entra: EntraLogo,
@@ -127,6 +145,7 @@ export const IDP_LOGOS: Record<string, ComponentType<LogoProps>> = {
     oidc: OidcLogo,
     saml2: SamlLogo,
     custom_profile: PortalLogo,
+    backchannel: GatewayLogo,
 }
 
 /** The mark for a preset id, falling back by kind so an unknown id still
@@ -137,5 +156,6 @@ export function logoFor(
     if (presetId && IDP_LOGOS[presetId]) return IDP_LOGOS[presetId]
     if (kind === 'saml2') return SamlLogo
     if (kind === 'custom_profile') return PortalLogo
+    if (kind === 'backchannel') return GatewayLogo
     return OidcLogo
 }

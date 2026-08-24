@@ -18,6 +18,7 @@ const KIND_LABELS: Record<string, string> = {
     oidc: 'OpenID Connect',
     saml2: 'SAML 2.0',
     custom_profile: 'Corporate portal (cookie / browser storage / header)',
+    backchannel: 'Enterprise gateway (we call it for the user)',
     custom: 'Custom (dev)',
 }
 

@@ -31,6 +31,7 @@ import {
 } from '@/services/ssoAdminService'
 import { cn } from '@/lib/utils'
 import { ErrorBanner } from './ErrorBanner'
+import { BackchannelHostsPanel } from './settings/BackchannelHostsPanel'
 import { describePosture, riskChecks, type PostureTone } from './settings/posture'
 import { SsoCard, SsoSectionLabel, type CardTone } from '../ui/SsoCard'
 import { SsoSettingsSkeleton, SsoLoading } from '../ui/SsoSkeleton'
@@ -221,6 +222,12 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                     </div>
                 </motion.section>
             ))}
+
+            {/* Not one of the four switches, but the same kind of decision:
+                a platform-wide posture that decides what sign-in can
+                reach. It belongs beside them rather than inside one
+                provider's settings, where it would be circular. */}
+            <BackchannelHostsPanel />
 
             <p className="text-[11px] text-ink-muted">
                 Version {cfg?.version ?? '—'} · last changed {relative(cfg?.updatedAt)}

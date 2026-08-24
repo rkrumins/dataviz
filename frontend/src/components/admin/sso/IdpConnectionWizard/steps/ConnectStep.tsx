@@ -73,7 +73,12 @@ export function ConnectStep({
     const origin = typeof window !== 'undefined' ? window.location.origin : ''
     const values = consoleValues(slug, origin)
     const isSaml = preset.kind === 'saml2'
-    const isPortal = preset.kind === 'custom_profile'
+    // Which kinds have something to fetch. Previously written as "not a
+    // portal", which happened to be right while OIDC and SAML were the
+    // only other kinds — ``POST /discover`` supports those two and 404s
+    // for anything else, so any new kind inherited a Fetch button that
+    // could only ever fail.
+    const hasDiscovery = preset.kind === 'oidc' || isSaml
 
     return (
         <StepColumn wide>
@@ -99,7 +104,7 @@ export function ConnectStep({
                 )}
             </StepBlock>
 
-            {!isPortal && (
+            {hasDiscovery && (
                 <StepBlock>
                     <FieldLabel>{preset.connectLabel ?? 'Issuer URL'}</FieldLabel>
                     <div className="flex gap-2">
