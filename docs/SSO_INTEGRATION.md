@@ -1396,9 +1396,15 @@ attacks at the bottom of the section.
 
 Several rows below are marked with what was **previously** wrong. Two of
 them once asserted controls this code did not actually implement — SAML
-assertion replay and `system:admin` via group mapping. See
-[`security/REMEDIATION_REPORT.md`](security/REMEDIATION_REPORT.md) for
-what was found, what changed, and which test pins each one.
+assertion replay and `system:admin` via group mapping. What was found,
+what changed, and which test pins each one is written up in
+`docs/security/REMEDIATION_REPORT.md` in the repository.
+
+Deliberately a path and not a link: this page is served in-app, and the
+security write-ups under `docs/security/` are repository-only — they
+enumerate exploitable defects with reproduction detail, which does not
+belong on a surface every signed-in user can open. A markdown link here
+would also 404 in-app, since those files are not registered docs routes.
 
 ### 10.1 In scope
 
