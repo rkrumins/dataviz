@@ -23,9 +23,11 @@ substantially and is where the standard mitigations sit.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import socket
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -47,6 +49,45 @@ def _is_prod() -> bool:
     return os.getenv("ENV", "dev").strip().lower() in _PROD_ENV_VALUES
 
 
+def _unwrap(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
+    """Resolve an IPv4-mapped IPv6 address to its IPv4 form.
+
+    ``::ffff:169.254.169.254`` is the same destination as
+    ``169.254.169.254``, and a check that reads only the properties of
+    the outer form misses it.
+    """
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return mapped if mapped is not None else ip
+
+
+def _address_is_never_reachable(ip: ipaddress._BaseAddress) -> bool:
+    """True for addresses no allowlist may ever unlock.
+
+    ``assert_fetchable`` can be told to permit a private address, because
+    an internal IdP gateway legitimately lives on one. These are the
+    addresses where that argument does not apply:
+
+    * **link-local** — ``169.254.169.254`` is the cloud metadata service.
+      This is the entry that matters. Reaching it turns a
+      request-forgery into instance-credential theft, and no identity
+      provider is ever hosted there.
+    * **loopback** — the process's own admin surfaces: Redis, debug
+      ports, the app's internal endpoints.
+    * multicast, reserved, unspecified — not a destination at all.
+
+    Kept as a property check rather than a CIDR list so the IPv6 forms
+    come along for free.
+    """
+    ip = _unwrap(ip)
+    return (
+        ip.is_loopback
+        or ip.is_link_local    # 169.254.0.0/16 — cloud metadata
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
 def _address_is_reachable(ip: ipaddress._BaseAddress) -> bool:
     """False for anything that is not a public internet address.
 
@@ -56,24 +97,50 @@ def _address_is_reachable(ip: ipaddress._BaseAddress) -> bool:
     ranges — ``::ffff:169.254.169.254`` being the obvious one, which is
     why mapped addresses are unwrapped first.
     """
-    if getattr(ip, "ipv4_mapped", None) is not None:
-        ip = ip.ipv4_mapped  # type: ignore[assignment]
+    ip = _unwrap(ip)
     return not (
         ip.is_private          # RFC1918, ULA
-        or ip.is_loopback
-        or ip.is_link_local    # 169.254.0.0/16 — cloud metadata
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
+        or _address_is_never_reachable(ip)
     )
 
 
-def assert_fetchable(url: str) -> None:
-    """Raise unless *url* is a public https endpoint we may request.
+def host_port_key(url: str) -> str:
+    """The ``host:port`` an allowlist entry has to match, exactly.
+
+    Normalised so ``GW.Corp.Internal.`` and ``gw.corp.internal:443``
+    are one entry rather than three. The port is always explicit: an
+    operator permitting ``gw.corp.internal`` for https must not thereby
+    permit ``gw.corp.internal:6379``, which is a different service
+    entirely on the same box.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").strip().lower().rstrip(".")
+    port = parts.port or (443 if (parts.scheme or "").lower() == "https" else 80)
+    return f"{host}:{port}"
+
+
+def assert_fetchable(
+    url: str, *, allow_hosts: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """Raise unless *url* is an endpoint we may request.
 
     Called before the request rather than relying on the response,
     because an SSRF's value is often in the side effect (a POST-like GET
     to an internal admin endpoint) rather than in what comes back.
+
+    ``allow_hosts`` holds ``host:port`` strings — see :func:`host_port_key`
+    — that may resolve to a **private** address. An internal identity
+    gateway is the reason it exists: it is on RFC1918 by definition, so
+    without an exception this function refuses the only destination that
+    flow has. It relaxes exactly one check. Scheme, the production https
+    requirement, and :func:`_address_is_never_reachable` are unchanged by
+    it, so no allowlist entry can reach cloud metadata or loopback.
+
+    Note what an entry does and does not buy: it names a *host*, not an
+    address, so a host whose DNS is hostile can still move between
+    private addresses. That is the same reach the entry already grants,
+    which is why it is acceptable — and why the never-reachable floor is
+    an address check rather than a name check.
     """
     parts = urlsplit(url)
     scheme = (parts.scheme or "").lower()
@@ -106,15 +173,28 @@ def assert_fetchable(url: str) -> None:
         logger.debug("Skipping address check for unresolvable host %r", host)
         return
 
+    permitted = host_port_key(url) in {
+        str(entry).strip().lower() for entry in allow_hosts
+    }
+
     for family, _type, _proto, _canon, sockaddr in resolved:
         if family not in (socket.AF_INET, socket.AF_INET6):
             continue
         ip = ipaddress.ip_address(sockaddr[0])
-        if not _address_is_reachable(ip):
+        if _address_is_never_reachable(ip):
+            # Deliberately checked before the allowlist, and worded so
+            # the log says which floor was hit. An operator who has
+            # allowlisted this host still does not get here.
+            raise BlockedOutboundRequest(
+                f"{host!r} resolves to {ip}, which is a loopback, "
+                "link-local, or otherwise non-routable address. No "
+                "allowlist entry permits this."
+            )
+        if not _address_is_reachable(ip) and not permitted:
             raise BlockedOutboundRequest(
                 f"{host!r} resolves to {ip}, which is inside this "
-                "deployment's own network. IdP metadata must be on a "
-                "publicly routable host."
+                "deployment's own network, and "
+                f"{host_port_key(url)!r} is not in the allowlist."
             )
 
 
@@ -137,3 +217,82 @@ async def fetch_metadata(url: str, *, timeout: float) -> httpx.Response:
                 f"{MAX_METADATA_BYTES}."
             )
         return resp
+
+
+#: Back-channel identity responses are a user object, not a document.
+#: Separate from ``MAX_METADATA_BYTES`` so tightening one does not
+#: silently retune the other.
+MAX_JSON_BYTES = 256 * 1024
+
+
+async def request_json(
+    url: str,
+    *,
+    method: str = "POST",
+    json_body: dict | None = None,
+    headers: dict[str, str] | None = None,
+    cookies: dict[str, str] | None = None,
+    timeout: float,
+    max_bytes: int = MAX_JSON_BYTES,
+    allow_hosts: frozenset[str] | set[str] = frozenset(),
+) -> Any:
+    """Make one guarded credentialed request and return the parsed JSON.
+
+    The helper this module should have had from the start.
+    :func:`fetch_metadata` is GET-only, so the one credentialed
+    back-channel call that already existed — the OIDC token exchange —
+    was written as a bare ``httpx.post`` and inherited none of the
+    protections here: no pre-flight address check, redirects followed,
+    no size cap. Moving that call onto this function is worth doing and
+    is deliberately not done in the same change.
+
+    What is guarded:
+
+    * the destination, via :func:`assert_fetchable` before we connect;
+    * **redirects, which are refused rather than followed** — a 302 to
+      an internal address is the standard way around a pre-flight check,
+      so a 3xx is an error here, not a hop;
+    * the response size, capped **while streaming** rather than after
+      the fact, so a hostile endpoint cannot exhaust the worker before
+      the check runs;
+    * the clock, via an explicit caller-supplied timeout.
+
+    Errors never carry the response body. This is called on behalf of an
+    administrator who may be shown the failure, and a helper that echoed
+    what an internal address replied would turn a blocked request into a
+    working one.
+    """
+    assert_fetchable(url, allow_hosts=allow_hosts)
+
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=False,
+    ) as client:
+        async with client.stream(
+            method.upper(), url,
+            json=json_body, headers=headers, cookies=cookies,
+        ) as resp:
+            if 300 <= resp.status_code < 400:
+                raise BlockedOutboundRequest(
+                    f"{url!r} answered {resp.status_code} with a redirect; "
+                    "redirects are refused because they are how a "
+                    "pre-flight address check gets bypassed."
+                )
+            if resp.status_code >= 400:
+                raise BlockedOutboundRequest(
+                    f"{url!r} answered HTTP {resp.status_code}."
+                )
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise BlockedOutboundRequest(
+                        f"{url!r} exceeded the {max_bytes}-byte response cap."
+                    )
+
+    try:
+        return json.loads(bytes(body))
+    except (ValueError, UnicodeDecodeError) as exc:
+        # The parse error, not the payload — see the note above.
+        raise BlockedOutboundRequest(
+            f"{url!r} did not return valid JSON ({type(exc).__name__})."
+        ) from exc
