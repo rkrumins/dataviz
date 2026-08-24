@@ -45,8 +45,12 @@ interface Props {
     buckets: string[]
     series: StackedSeries[]
     height?: number
-    /** Formats a bucket key for the axis and the readout. */
+    /** Formats a bucket key for the readout and the tooltip — read alone, so
+     *  it must carry the whole date. */
     formatBucket?: (bucket: string) => string
+    /** Compact labels for the x-axis, where a tick may elide whatever the
+     *  previous one already said. Falls back to `formatBucket`. */
+    axisLabels?: string[]
     /**
      * Normalise every bucket to 100%.
      *
@@ -72,7 +76,7 @@ function niceMax(value: number): number {
 }
 
 export function StackedAreaChart({
-    buckets, series, height = 260, formatBucket, share, className,
+    buckets, series, height = 260, formatBucket, axisLabels, share, className,
 }: Props) {
     const theme = useChartTheme()
     const clipId = useId()
@@ -270,7 +274,7 @@ export function StackedAreaChart({
                         fontSize={10} fill="currentColor"
                         className="text-ink-muted"
                     >
-                        {label(buckets[i])}
+                        {axisLabels?.[i] ?? label(buckets[i])}
                     </text>
                 ))}
 

@@ -36,7 +36,8 @@ import { FilterSelect, SearchField, Segmented, Toggle } from './BoardFilters'
 import { FindingsBand } from './FindingsBand'
 import { ProfilingSourceDrawer } from './ProfilingSourceDrawer'
 import { BoardVerdict } from './Verdict'
-import { deltaTone, metricNoun, signed, significanceMeta } from './shared'
+import { formatInstant, deltaTone, metricNoun, signed, significanceMeta } from './shared'
+import { UtcChip } from './UtcChip'
 
 const MEASURES = [
     { key: 'nodes' as const, label: 'Entities' },
@@ -238,6 +239,7 @@ function Controls({
                 />
             )}
             <Toggle checked={unusualOnly} onChange={onUnusualOnly} label="Unusual only" />
+            <UtcChip className="ml-auto" />
         </div>
     )
 }
@@ -342,7 +344,7 @@ function BoardTable({
                                 descending={descending} onSort={onSort} align="right"
                             />
                             <SortHeader
-                                label="Last seen" sortKey="recent" active={sort === 'recent'}
+                                label="Last profiled" sortKey="recent" active={sort === 'recent'}
                                 descending={descending} onSort={onSort} align="right"
                                 className="hidden sm:table-cell"
                             />
@@ -453,7 +455,15 @@ function Row({
             </td>
 
             <td className="px-3 py-2.5 text-right text-[11px] text-ink-muted hidden sm:table-cell align-middle">
-                {row.last_observed_at ? relativeShort(row.last_observed_at) : '—'}
+                {row.last_observed_at ? (
+                    // Relative to read, absolute to check. "13h ago" answers
+                    // "is this current"; the title answers "which 13 hours",
+                    // which is what someone correlating with another system's
+                    // log actually needs.
+                    <span title={formatInstant(row.last_observed_at)}>
+                        {relativeShort(row.last_observed_at)}
+                    </span>
+                ) : '—'}
             </td>
 
             <td className="pr-3 text-ink-muted align-middle">
@@ -463,8 +473,10 @@ function Row({
     )
 }
 
-/** Buckets are ISO prefixes of varying width; this only ever needs to say
- *  "how long ago", so it parses loosely and degrades to the raw key. */
+/** "How long ago", from a capture instant.
+ *
+ *  Still pads a bucket key, because a source with no stats row falls back to
+ *  one — a coarse answer beats none, and the two agree to within a bucket. */
 function relativeShort(bucket: string): string {
     const padded = bucket.length <= 10
         ? `${bucket}T00:00:00Z`

@@ -25,7 +25,7 @@ import type {
     ProfilingBreakdown, ProfilingMetric, SeriesPayload,
 } from '@/types/profiling'
 import { ControlGroup } from './BoardFilters'
-import { formatBucket } from './shared'
+import { TIME_ZONE_NOTE, axisLabels, formatBucketUtc } from './shared'
 
 const METRICS: { key: ProfilingMetric; label: string }[] = [
     { key: 'total', label: 'Everything' },
@@ -113,7 +113,7 @@ export function ProfilingChart({
     const table = useMemo(() => (
         <ChartTable
             rowLabel="Bucket"
-            rows={(payload.buckets ?? []).map(formatBucket)}
+            rows={(payload.buckets ?? []).map(formatBucketUtc)}
             columns={drawn.map((s) => ({
                 key: s.key, label: s.label, values: s.points.map((p) => p.v),
             }))}
@@ -132,12 +132,15 @@ export function ProfilingChart({
         Math.min(240, Math.max(120, payload.buckets.length * 14 + 90)),
     )
 
+    const ticks = useMemo(() => axisLabels(payload.buckets), [payload.buckets])
+
     const grainWord = { raw: 'every observation', hour: 'by hour', day: 'by day' }[payload.grain]
     const subtitle = [
         `${payload.buckets.length} ${payload.buckets.length === 1 ? 'point' : 'points'}, ${grainWord}`,
         view === 'share' && hasBreakdown && !focused && 'share of the total, not counts',
         payload.sources_observed > 1 && `${payload.sources_observed} sources`,
         payload.truncated && 'window trimmed to the most recent observations',
+        payload.grain !== 'day' && TIME_ZONE_NOTE,
     ].filter(Boolean).join(' · ')
 
     return (
@@ -210,11 +213,13 @@ export function ProfilingChart({
                     }))}
                     share={view === 'share'}
                     height={plotHeight + 20}
-                    formatBucket={formatBucket}
+                    formatBucket={formatBucketUtc}
+                    axisLabels={ticks}
                 />
             ) : (
                 <TimeSeriesChart
-                    buckets={payload.buckets.map(formatBucket)}
+                    buckets={payload.buckets.map(formatBucketUtc)}
+                    axisLabels={ticks}
                     series={drawn.map((s) => ({
                         key: s.key,
                         label: s.label,
@@ -233,7 +238,7 @@ export function ProfilingChart({
                         // longer carries this type at all, so there is no
                         // bucket of its own to point at — what matters is that
                         // it is gone by now.
-                        bucket: formatBucket(payload.buckets.at(-1) ?? ''),
+                        bucket: formatBucketUtc(payload.buckets.at(-1) ?? ''),
                         title: `${v.type} gone (peaked at ${compact(v.peak)})`,
                     }))}
                 />

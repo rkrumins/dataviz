@@ -522,3 +522,66 @@ async def test_an_explicit_grain_is_always_honoured(db_session: AsyncSession):
         frm=_iso(24 * 90), to=_iso(0), requested="raw",
     )
     assert grain == "raw"
+
+
+# ── "last seen" is when it was PROFILED ──────────────────────────────
+
+
+async def _stats_row(session: AsyncSession, ds_id: str, last_snapshot_at: str):
+    from backend.app.db.models import DataSourceStatsORM
+
+    session.add(DataSourceStatsORM(
+        data_source_id=ds_id,
+        node_count=0, edge_count=0,
+        entity_type_counts="{}", edge_type_counts="{}",
+        last_snapshot_at=last_snapshot_at,
+    ))
+    await session.flush()
+
+
+async def test_last_seen_is_the_capture_instant_not_the_bucket(
+    db_session: AsyncSession,
+):
+    """The board reads from the rollup tier, where bucket_start is the start of
+    a day or an hour. Reporting that as "last seen" made every source observed
+    anywhere in the same bucket report the same age — at day grain the whole
+    fleet read "13h ago" whether it was profiled at midnight or a minute ago.
+    """
+    await _source(db_session, "ds_early")
+    await _source(db_session, "ds_late")
+    await _snap(db_session, "ds_early", _iso(20), nodes=100)
+    await _snap(db_session, "ds_late", _iso(1), nodes=200)
+    await _stats_row(db_session, "ds_early", _iso(20))
+    await _stats_row(db_session, "ds_late", _iso(1))
+    for _ in range(20):
+        if not await profiling_repo.compact(db_session, grain="hour"):
+            break
+
+    out = await profiling.get_board(
+        window="30d", frm=None, to=None, workspace_id=None, provider_id=None,
+        metric="nodes", unusual_only=False, limit=50, offset=0,
+        session=db_session, claims=OPERATOR,
+    )
+    seen = {r["data_source_id"]: r["last_observed_at"] for r in out["data"]["rows"]}
+    assert seen["ds_early"] != seen["ds_late"], (
+        "two sources profiled 19 hours apart must not report the same age"
+    )
+    assert seen["ds_late"] > seen["ds_early"]
+
+
+async def test_last_seen_falls_back_to_the_bucket_without_a_stats_row(
+    db_session: AsyncSession,
+):
+    """A coarse answer beats none, and the two agree to within a bucket."""
+    await _source(db_session, "ds_a")
+    await _snap(db_session, "ds_a", _iso(3), nodes=100)
+    for _ in range(20):
+        if not await profiling_repo.compact(db_session, grain="hour"):
+            break
+
+    out = await profiling.get_board(
+        window="30d", frm=None, to=None, workspace_id=None, provider_id=None,
+        metric="nodes", unusual_only=False, limit=50, offset=0,
+        session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["rows"][0]["last_observed_at"] is not None

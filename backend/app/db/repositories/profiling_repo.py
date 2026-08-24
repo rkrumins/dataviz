@@ -1046,10 +1046,25 @@ async def movement_board(
     drop to nothing, and a board that showed it at zero would invent an
     outage. That count was previously hardcoded to 0.
     """
-    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+    from backend.app.db.models import (
+        DataSourceStatsORM, ProviderORM, WorkspaceDataSourceORM,
+    )
     from backend.app.db.repositories import stats_history_repo
 
-    grain = "day" if _span_hours(frm, to) > _HOUR_WINDOW_HOURS else "hour"
+    # The same tier selection the series uses, rather than a width threshold
+    # of its own. A hardcoded "30 days means day grain" empties the board
+    # whenever the day tier has not been built yet — compaction runs hour
+    # first, so there is always a window where hour rollups exist and day ones
+    # do not, and a board that reports nothing during it is indistinguishable
+    # from a fleet that reported nothing.
+    grain = await choose_grain(
+        session, scope="all", scope_id=None, visible=visible,
+        frm=frm, to=to, requested=None,
+    )
+    if grain == "raw":
+        # The board summarises; it never needs per-observation resolution, and
+        # raw cannot cover a long window anyway.
+        grain = "hour"
     conditions = _scope_conditions(
         _ROLL, scope="all", scope_id=None, visible=visible,
     )
@@ -1094,6 +1109,26 @@ async def movement_board(
         if delta:
             deltas.setdefault(ds_id, []).append(int(delta))
 
+    # When each source was last PROFILED — the capture instant, not the
+    # bucket it landed in.
+    #
+    # The board reads from the rollup tier, where `bucket_start` is the start
+    # of a day or an hour. Reporting that as "last seen" makes every source
+    # observed anywhere in the same bucket report the same age: at day grain
+    # the whole fleet reads "13h ago" whether it was profiled at midnight or
+    # a minute ago. `last_snapshot_at` is stamped by the capture itself, so it
+    # is the actual answer, and it outlives the raw rows it came from.
+    last_seen: Dict[str, Optional[str]] = {}
+    if per_source:
+        last_seen = {
+            ds_id: at for ds_id, at in (await session.execute(
+                select(
+                    DataSourceStatsORM.data_source_id,
+                    DataSourceStatsORM.last_snapshot_at,
+                ).where(DataSourceStatsORM.data_source_id.in_(list(per_source)))
+            )).all()
+        }
+
     # Names, resolved once for the page rather than per row.
     labels: Dict[str, str] = {}
     catalog_ids: Dict[str, Optional[str]] = {}
@@ -1136,7 +1171,9 @@ async def movement_board(
             ),
             "points": entry["points"],
             "observations": entry["observations"],
-            "last_observed_at": entry["last_observed_at"],
+            # Falls back to the bucket only when a source has no stats row —
+            # a coarse answer beats none, and the two agree to within a bucket.
+            "last_observed_at": last_seen.get(ds_id) or entry["last_observed_at"],
             "significance": stats_history_repo.classify_significance(
                 movement, baseline, before=entry["first"],
             ),

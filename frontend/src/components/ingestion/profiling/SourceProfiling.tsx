@@ -36,7 +36,8 @@ import { ProfilingChart, type BreakdownView } from './ProfilingChart'
 import { SeriesVerdict } from './Verdict'
 import { Segmented } from './BoardFilters'
 import { TypeLedger } from './TypeLedger'
-import { formatBucket, signed } from './shared'
+import { UtcChip } from './UtcChip'
+import { formatBucket, formatDay, signed } from './shared'
 
 interface Props {
     dataSourceId: string
@@ -138,6 +139,7 @@ export function SourceProfiling({
                     value={window}
                     onChange={setWindow}
                 />
+                <UtcChip className="ml-auto" />
                 {payload.buckets.length > 0 && (
                     <a
                         href={exportHref}
@@ -262,11 +264,11 @@ function Coverage({ payload }: { payload: { coverage_from: string | null; from: 
         <p className="text-xs text-ink-muted">
             {partial ? (
                 <>
-                    This source's record begins {begins.toLocaleDateString()} — earlier than
-                    that is not missing, it was never observed.
+                    This source's record begins {formatDay(payload.coverage_from)} — earlier
+                    than that is not missing, it was never observed.
                 </>
             ) : (
-                <>The window is fully covered, from {requested.toLocaleDateString()}.</>
+                <>The window is fully covered, from {formatDay(payload.from)}.</>
             )}
         </p>
     )

@@ -23,6 +23,7 @@ import {
     LANE_LABEL, REASON_LABEL, deltaTone, formatBucket, metricNoun,
     signed, significanceMeta, worstSignificance,
 } from './shared'
+import { UtcChip } from './UtcChip'
 
 /** How near a refresh event has to be to be offered as an explanation. Wide
  *  enough to survive a slow capture, narrow enough that two unrelated things
@@ -290,7 +291,13 @@ export function ChangeLedger({
         <section className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden shadow-sm">
             <header className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 border-b border-glass-border">
                 <div className="min-w-0">
-                    <h3 className="text-sm font-bold text-ink">Change ledger</h3>
+                    <h3 className="flex items-center gap-2 text-sm font-bold text-ink">
+                        Change ledger
+                        {/* Every row below is an instant. The zone belongs
+                            where the eye lands before reading them, not
+                            stamped on forty consecutive rows. */}
+                        <UtcChip />
+                    </h3>
                     {/*
                       The period, stated. Without it a reader cannot tell "this
                       source is stable" from "I picked a 24-hour window", and

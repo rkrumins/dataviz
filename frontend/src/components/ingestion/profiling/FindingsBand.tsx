@@ -19,7 +19,7 @@ import { profilingService } from '@/services/profilingService'
 import { PROFILING_KEY, useProfilingFindings } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import type { Finding } from '@/types/profiling'
-import { metricNoun, significanceMeta } from './shared'
+import { formatInstant, metricNoun, significanceMeta } from './shared'
 
 const ICON = { movement: AlertTriangle, type_gone: EyeOff, silent: Radio }
 
@@ -87,8 +87,12 @@ function FindingRow({ finding, onDone }: { finding: Finding; onDone: () => void 
                 </p>
                 {finding.observed_at && (
                     <p className="text-[11px] text-ink-muted mt-1 tabular-nums">
-                        Happened {new Date(finding.observed_at).toLocaleString()} · noticed{' '}
-                        {new Date(finding.detected_at).toLocaleString()}
+                        {/* UTC, like every other instant here. These were going
+                            through toLocaleString(), so the same event read
+                            22:32 in this band and 21:32 in the ledger one card
+                            below. */}
+                        Happened {formatInstant(finding.observed_at)} · noticed{' '}
+                        {formatInstant(finding.detected_at, false)}
                     </p>
                 )}
             </div>
