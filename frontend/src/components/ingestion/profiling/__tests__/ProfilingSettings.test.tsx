@@ -67,10 +67,10 @@ describe('ProfilingSettings', () => {
     it('shows every retention tier', async () => {
         getPolicy.mockResolvedValue(policy())
         renderIt()
-        expect(await screen.findByLabelText(/raw observations/i)).toBeInTheDocument()
-        expect(screen.getByLabelText(/hourly buckets/i)).toBeInTheDocument()
-        expect(screen.getByLabelText(/daily buckets/i)).toBeInTheDocument()
-        expect(screen.getByLabelText(/raw rows per source/i)).toBeInTheDocument()
+        expect(await screen.findByRole('spinbutton', { name: /raw observations/i })).toBeInTheDocument()
+        expect(screen.getByRole('spinbutton', { name: /hourly buckets/i })).toBeInTheDocument()
+        expect(screen.getByRole('spinbutton', { name: /daily buckets/i })).toBeInTheDocument()
+        expect(screen.getByRole('spinbutton', { name: /raw rows per source/i })).toBeInTheDocument()
     })
 
     it('shows a non-admin the VALUES, not a dead form', async () => {
@@ -124,7 +124,7 @@ describe('ProfilingSettings', () => {
         const summary = () => screen.getByText(/observation by observation/i)
         expect(summary()).toHaveTextContent('45 days')
 
-        await userEvent.type(screen.getByLabelText(/hourly buckets/i), '120')
+        await userEvent.type(screen.getByRole('spinbutton', { name: /hourly buckets/i }), '120')
         await waitFor(() => expect(summary()).toHaveTextContent('120 days'))
     })
 
@@ -133,7 +133,7 @@ describe('ProfilingSettings', () => {
         // whatever it happened to be that day.
         getPolicy.mockResolvedValue(policy())
         renderIt()
-        const field = await screen.findByLabelText(/raw observations/i)
+        const field = await screen.findByRole('spinbutton', { name: /raw observations/i })
         expect(field).toHaveValue(null)
         expect(field).toHaveAttribute('placeholder', '7')
     })
@@ -144,14 +144,14 @@ describe('ProfilingSettings', () => {
         }))
         renderIt()
         expect(await screen.findByText('set')).toBeInTheDocument()
-        expect(screen.getByLabelText(/raw observations/i)).toHaveValue(14)
+        expect(screen.getByRole('spinbutton', { name: /raw observations/i })).toHaveValue(14)
     })
 
     it('sends only what changed', async () => {
         getPolicy.mockResolvedValue(policy())
         renderIt()
 
-        const field = await screen.findByLabelText(/hourly buckets/i)
+        const field = await screen.findByRole('spinbutton', { name: /hourly buckets/i })
         await userEvent.type(field, '60')
         await userEvent.click(screen.getByRole('button', { name: /save policy/i }))
 
@@ -167,7 +167,7 @@ describe('ProfilingSettings', () => {
         }))
         renderIt()
 
-        await userEvent.clear(await screen.findByLabelText(/raw observations/i))
+        await userEvent.clear(await screen.findByRole('spinbutton', { name: /raw observations/i }))
         await userEvent.click(screen.getByRole('button', { name: /save policy/i }))
 
         await waitFor(() => expect(setPolicy).toHaveBeenCalled())
@@ -183,10 +183,38 @@ describe('ProfilingSettings', () => {
         )
         renderIt()
 
-        await userEvent.type(await screen.findByLabelText(/raw observations/i), '30')
+        await userEvent.type(await screen.findByRole('spinbutton', { name: /raw observations/i }), '30')
         await userEvent.click(screen.getByRole('button', { name: /save policy/i }))
 
         expect(await screen.findByText(/must reach at least as far back/i)).toBeInTheDocument()
+    })
+
+    it('holds the save when the tiers stop nesting, and says which pair', async () => {
+        // The backend refuses this, correctly — but the drawer already has
+        // both numbers on screen, so spending a round trip to be told is a
+        // round trip wasted. Name the pair as it is typed.
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+
+        await userEvent.type(await screen.findByRole('spinbutton', { name: /raw observations/i }), '90')
+
+        expect(
+            await screen.findByText(/hourly buckets must reach back at least as far as raw/i),
+        ).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /save policy/i })).toBeDisabled()
+        expect(setPolicy).not.toHaveBeenCalled()
+    })
+
+    it('offers the common answers as one click', async () => {
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+
+        await userEvent.click(
+            await screen.findByRole('button', { name: /set raw observations to 30 days/i }),
+        )
+        await userEvent.click(screen.getByRole('button', { name: /save policy/i }))
+
+        await waitFor(() => expect(setPolicy).toHaveBeenCalledWith({ rawRetentionDays: 30 }))
     })
 
     it('shows the cadences but does not let them be edited', async () => {
@@ -218,7 +246,7 @@ describe('ProfilingSettings — alerting', () => {
         getPolicy.mockResolvedValue(policy())
         renderIt()
         expect(await screen.findByRole('switch', { name: /anomaly findings/i })).toBeInTheDocument()
-        expect(screen.getByLabelText(/quiet period/i)).toBeInTheDocument()
+        expect(screen.getByRole('spinbutton', { name: /quiet period/i })).toBeInTheDocument()
     })
 
     it('sends the switch and the floor when they change', async () => {

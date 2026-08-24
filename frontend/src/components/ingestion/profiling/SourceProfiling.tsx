@@ -26,7 +26,7 @@ import { KpiCard } from '@/components/analytics/KpiCard'
 import { profilingService } from '@/services/profilingService'
 import {
     DEFAULT_WINDOW, PROFILING_WINDOWS, type ProfilingWindowKey,
-    useProfilingObservations, useProfilingSeries,
+    useProfilingFindings, useProfilingObservations, useProfilingSeries,
 } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import type { ProfilingBreakdown, ProfilingMetric } from '@/types/profiling'
@@ -69,6 +69,12 @@ export function SourceProfiling({
     }), [dataSourceId, window, metric, breakdown, view])
 
     const series = useProfilingSeries(seriesQuery, { enabled: canRead })
+    // Fetched here as well as in the band: React Query dedupes the request,
+    // and the chart needs the same findings to mark them on its axis.
+    const findings = useProfilingFindings(
+        { id: dataSourceId, openOnly: false, limit: 50 },
+        { enabled: canRead },
+    )
     const ledger = useProfilingObservations(
         { id: dataSourceId, window, onlyNotable, limit: 50 },
         { enabled: canRead },
@@ -217,6 +223,7 @@ export function SourceProfiling({
 
             <ProfilingChart
                 payload={payload}
+                findings={findings.data?.alerts}
                 metric={metric}
                 breakdown={breakdown}
                 view={view}

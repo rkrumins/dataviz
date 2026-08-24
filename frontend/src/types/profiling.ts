@@ -62,8 +62,11 @@ export interface BoardRow {
     name: string
     catalog_item_id: string | null
     workspace_id: string | null
+    workspace_name: string | null
     provider_id: string | null
     provider_name: string | null
+    /** Picks the logo. A name alone cannot. */
+    provider_type: string | null
     first: number
     last: number
     delta: number
@@ -150,8 +153,11 @@ export interface Finding {
     detected_at: string
     observed_at: string | null
     workspace_id: string | null
+    workspace_name: string | null
     provider_id: string | null
     provider_name: string | null
+    /** Picks the logo. A name alone cannot. */
+    provider_type: string | null
     data_source_label: string | null
     graph_name: string | null
     catalog_item_id: string | null

@@ -96,6 +96,17 @@ function FindingRow({ finding, onDone }: { finding: Finding; onDone: () => void 
                     </p>
                 )}
             </div>
+            {finding.acknowledged_at ? (
+                <p className="shrink-0 text-right text-[11px] text-ink-muted">
+                    <span className="block font-semibold text-ink-secondary">Seen</span>
+                    {finding.acknowledged_by && (
+                        <span className="block">by {finding.acknowledged_by}</span>
+                    )}
+                    <span className="block tabular-nums">
+                        {formatInstant(finding.acknowledged_at, false)}
+                    </span>
+                </p>
+            ) : (
             <button
                 type="button"
                 disabled={busy}
@@ -119,6 +130,7 @@ function FindingRow({ finding, onDone }: { finding: Finding; onDone: () => void 
                 <Check className="w-3.5 h-3.5" aria-hidden />
                 {busy ? 'Marking…' : 'Mark seen'}
             </button>
+            )}
         </li>
     )
 }
@@ -126,33 +138,105 @@ function FindingRow({ finding, onDone }: { finding: Finding; onDone: () => void 
 export function FindingsBand({ dataSourceId }: { dataSourceId?: string | null }) {
     const canRead = useCanReadProfiling()
     const queryClient = useQueryClient()
-    const { data } = useProfilingFindings(
-        { id: dataSourceId ?? undefined, openOnly: true, limit: 20 },
+    /**
+     * Open by default, with the whole record one click away.
+     *
+     * Showing only unacknowledged findings meant the record vanished the
+     * moment someone cleared it — and "has this source done this before?" is
+     * the second question after every incident. The API already serves the
+     * history with its frozen evidence and who acknowledged what; this is the
+     * only place that was missing.
+     */
+    const [showAll, setShowAll] = useState(false)
+    const { data, isLoading } = useProfilingFindings(
+        { id: dataSourceId ?? undefined, openOnly: !showAll, limit: 50 },
         { enabled: canRead },
     )
 
     const findings = data?.alerts ?? []
-    if (!canRead || !findings.length) return null
+    const openCount = data?.openCount ?? 0
+
+    if (!canRead) return null
+    // Nothing is known yet. Rendering the section here would head it "0
+    // findings need a look" — an assertion about a fleet the component has
+    // not heard back about, and the one claim a findings surface must never
+    // make wrongly.
+    if (isLoading && !data) return null
+    // Nothing open and nobody asking for history: stay out of the way.
+    if (!showAll && !findings.length && !isLoading) {
+        return openCount === 0 && (data?.total ?? 0) > 0
+            ? (
+                <p className="text-xs text-ink-muted">
+                    Nothing outstanding.{' '}
+                    <button
+                        type="button"
+                        onClick={() => setShowAll(true)}
+                        className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                    >
+                        See what has been found before
+                    </button>
+                </p>
+            )
+            : null
+    }
 
     const invalidate = () => queryClient.invalidateQueries({ queryKey: [PROFILING_KEY, 'findings'] })
+    const tone = showAll
+        ? 'border-glass-border bg-canvas-elevated'
+        : 'border-amber-500/30 bg-amber-500/[0.05]'
 
     return (
         <section
-            aria-label="Open findings"
-            className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.05] overflow-hidden"
+            aria-label={showAll ? 'Findings history' : 'Open findings'}
+            className={cn('rounded-2xl border overflow-hidden', tone)}
         >
-            <header className="px-4 py-2.5 border-b border-amber-500/25">
+            <header className={cn(
+                'flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 border-b',
+                showAll ? 'border-glass-border' : 'border-amber-500/25',
+            )}>
                 <h3 className="text-sm font-bold text-ink">
-                    {findings.length === 1
-                        ? 'One finding needs a look'
-                        : `${findings.length} findings need a look`}
+                    {showAll
+                        ? 'Findings history'
+                        : findings.length === 1
+                            ? 'One finding needs a look'
+                            : `${findings.length} findings need a look`}
                 </h3>
+                <div className="flex items-center gap-1 rounded-xl bg-canvas p-0.5 border border-glass-border">
+                    {[
+                        { key: false, label: openCount ? `Open ${openCount}` : 'Open' },
+                        { key: true, label: 'All' },
+                    ].map((option) => (
+                        <button
+                            key={String(option.key)}
+                            type="button"
+                            aria-pressed={showAll === option.key}
+                            onClick={() => setShowAll(option.key)}
+                            className={cn(
+                                'px-2.5 py-1 text-[11px] font-semibold rounded-[10px] transition-colors',
+                                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
+                                showAll === option.key
+                                    ? 'bg-canvas-elevated text-ink shadow-sm ring-1 ring-glass-border'
+                                    : 'text-ink-muted hover:text-ink',
+                            )}
+                        >
+                            {option.label}
+                        </button>
+                    ))}
+                </div>
             </header>
-            <ul>
-                {findings.map((f) => (
-                    <FindingRow key={f.id} finding={f} onDone={invalidate} />
-                ))}
-            </ul>
+            {findings.length ? (
+                <ul>
+                    {findings.map((f) => (
+                        <FindingRow key={f.id} finding={f} onDone={invalidate} />
+                    ))}
+                </ul>
+            ) : (
+                <p className="px-4 py-6 text-sm text-ink-muted">
+                    {showAll
+                        ? 'Nothing has been found for this scope yet.'
+                        : 'Nothing outstanding.'}
+                </p>
+            )}
         </section>
     )
 }
