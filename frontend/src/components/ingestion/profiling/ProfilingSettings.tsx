@@ -28,6 +28,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { profilingService } from '@/services/profilingService'
 import { PROFILING_KEY, useProfilingPolicy } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
+import { Segmented } from './BoardFilters'
 import { INHERIT_DEFAULT, type ProfilingPolicy } from '@/types/profiling'
 import {
     RetentionSummary, RetentionTimeline, StorageEstimate, type Tiers,
@@ -91,6 +92,7 @@ export function ProfilingSettings({
     })
 
     const [draft, setDraft] = useState<Draft>({})
+    const [alerts, setAlerts] = useState<{ enabled: boolean; severity: string } | null>(null)
     const [saving, setSaving] = useState(false)
     const [saveError, setSaveError] = useState<string | null>(null)
 
@@ -99,6 +101,9 @@ export function ProfilingSettings({
     useEffect(() => {
         if (!policy) return
         setDraft((current) => (Object.keys(current).length ? current : seed(policy)))
+        setAlerts((current) => current ?? {
+            enabled: policy.alertsEnabled, severity: policy.alertMinSeverity,
+        })
     }, [policy])
 
     useEffect(() => {
@@ -109,7 +114,10 @@ export function ProfilingSettings({
 
     const editable = Boolean(policy?.editable)
 
-    const patch = useMemo(() => (policy ? buildPatch(draft, policy) : {}), [draft, policy])
+    const patch = useMemo(
+        () => (policy ? buildPatch(draft, policy, alerts) : {}),
+        [draft, policy, alerts],
+    )
     const dirty = Object.keys(patch).length > 0
 
     // The preview follows the DRAFT, not the saved policy. A picture that only
@@ -272,6 +280,15 @@ export function ProfilingSettings({
                             ))}
                         </Section>
 
+                        <AlertSection
+                            policy={policy}
+                            draft={draft}
+                            setDraft={setDraft}
+                            alerts={alerts}
+                            setAlerts={setAlerts}
+                            editable={editable}
+                        />
+
                         <Cadences policy={policy} />
 
                         {saveError && (
@@ -287,7 +304,13 @@ export function ProfilingSettings({
                     <footer className="flex items-center justify-between gap-3 px-5 py-4 border-t border-glass-border shrink-0 bg-canvas">
                         <button
                             type="button"
-                            onClick={() => setDraft(seed(policy))}
+                            onClick={() => {
+                                setDraft(seed(policy))
+                                setAlerts({
+                                    enabled: policy.alertsEnabled,
+                                    severity: policy.alertMinSeverity,
+                                })
+                            }}
                             className="text-xs font-semibold text-ink-muted hover:text-ink"
                         >
                             Reset
@@ -452,6 +475,7 @@ function Cadences({ policy }: { policy: ProfilingPolicy }) {
 const EDITABLE_KEYS = [
     ...RETENTION_FIELDS.map((f) => f.key),
     ...CAPTURE_FIELDS.map((f) => f.key),
+    'alertCooldownSecs',
 ]
 
 /** Only fields the operator has actually SET start with a value. Everything
@@ -469,8 +493,18 @@ function seed(policy: ProfilingPolicy): Draft {
 /** What changed, in the shape the API takes. A field cleared to blank sends
  *  the inherit sentinel rather than being omitted — omitting it would leave
  *  the old override in place, which is the opposite of what clearing means. */
-function buildPatch(draft: Draft, policy: ProfilingPolicy): Record<string, number> {
-    const patch: Record<string, number> = {}
+function buildPatch(
+    draft: Draft,
+    policy: ProfilingPolicy,
+    alerts: { enabled: boolean; severity: string } | null,
+): Record<string, number | boolean | string> {
+    const patch: Record<string, number | boolean | string> = {}
+    if (alerts) {
+        if (alerts.enabled !== policy.alertsEnabled) patch.alertsEnabled = alerts.enabled
+        if (alerts.severity !== policy.alertMinSeverity) {
+            patch.alertMinSeverity = alerts.severity
+        }
+    }
     for (const key of EDITABLE_KEYS) {
         const raw = (draft[key] ?? '').trim()
         const wasSet = policy.overridden.includes(key)
@@ -519,4 +553,105 @@ function humanise(
     if (field.unit === 'seconds') return humanDuration(value)
     if (field.unit === 'days') return humanDays(value)
     return `${value.toLocaleString()} ${field.unit}`
+}
+
+
+/**
+ * When profiling should speak up.
+ *
+ * Sits with retention because they are one decision in practice: how much
+ * evidence to keep and how loudly to react to it. Splitting them into two
+ * pages makes an operator tune one without seeing the other.
+ */
+function AlertSection({
+    policy, draft, setDraft, alerts, setAlerts, editable,
+}: {
+    policy: ProfilingPolicy
+    draft: Draft
+    setDraft: (fn: (d: Draft) => Draft) => void
+    alerts: { enabled: boolean; severity: string } | null
+    setAlerts: (next: { enabled: boolean; severity: string }) => void
+    editable: boolean
+}) {
+    const enabled = alerts?.enabled ?? policy.alertsEnabled
+    const severity = alerts?.severity ?? policy.alertMinSeverity
+
+    return (
+        <Section
+            title="When profiling speaks up"
+            note="Judged against each source's OWN usual movement, so a busy graph and a still one are held to different bars."
+        >
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold text-ink">Anomaly findings</p>
+                    <p className="text-[11px] text-ink-muted mt-0.5">
+                        Rings the in-app bell and records the evidence.
+                    </p>
+                </div>
+                {editable ? (
+                    <button
+                        type="button"
+                        role="switch"
+                        aria-checked={enabled}
+                        aria-label="Anomaly findings"
+                        onClick={() => setAlerts({ enabled: !enabled, severity })}
+                        className={cn(
+                            'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+                            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
+                            enabled ? 'bg-indigo-600' : 'bg-glass-border',
+                        )}
+                    >
+                        <span className={cn(
+                            'absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform',
+                            enabled ? 'translate-x-[1.125rem]' : 'translate-x-0.5',
+                        )} />
+                    </button>
+                ) : (
+                    <span className="shrink-0 text-sm font-bold text-ink">
+                        {enabled ? 'On' : 'Off'}
+                    </span>
+                )}
+            </div>
+
+            {enabled && (
+                <>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                            <p className="text-xs font-semibold text-ink">Report from</p>
+                            <p className="text-[11px] text-ink-muted mt-0.5 max-w-md leading-relaxed">
+                                A wipe is reported at any setting — a floor is a noise
+                                control, and losing a graph is not noise.
+                            </p>
+                        </div>
+                        {editable ? (
+                            <Segmented
+                                label="Severity floor"
+                                size="sm"
+                                value={severity as 'severe' | 'notable'}
+                                onChange={(next) => setAlerts({ enabled, severity: next })}
+                                options={[
+                                    { key: 'notable' as const, label: '3× usual' },
+                                    { key: 'severe' as const, label: '8× usual' },
+                                ]}
+                            />
+                        ) : (
+                            <span className="shrink-0 text-sm font-bold text-ink">
+                                {severity === 'notable' ? '3× usual' : '8× usual'}
+                            </span>
+                        )}
+                    </div>
+
+                    <Field
+                        field={{
+                            key: 'alertCooldownSecs',
+                            label: 'Quiet period',
+                            unit: 'seconds',
+                            help: 'One finding per source per measure per interval. A thrashing loader would otherwise page on every probe.',
+                        }}
+                        policy={policy} draft={draft} setDraft={setDraft} editable={editable}
+                    />
+                </>
+            )}
+        </Section>
+    )
 }

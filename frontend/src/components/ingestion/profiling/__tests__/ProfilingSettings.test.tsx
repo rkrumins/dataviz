@@ -204,3 +204,47 @@ describe('ProfilingSettings', () => {
         expect(container).toBeEmptyDOMElement()
     })
 })
+
+describe('ProfilingSettings — alerting', () => {
+    beforeEach(() => {
+        getPolicy.mockReset()
+        setPolicy.mockReset().mockResolvedValue(policy())
+        canRead.mockReturnValue(true)
+    })
+
+    it('offers the alert policy beside retention, not on another page', async () => {
+        // They are one decision in practice: how much evidence to keep and how
+        // loudly to react to it.
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+        expect(await screen.findByRole('switch', { name: /anomaly findings/i })).toBeInTheDocument()
+        expect(screen.getByLabelText(/quiet period/i)).toBeInTheDocument()
+    })
+
+    it('sends the switch and the floor when they change', async () => {
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+
+        await userEvent.click(await screen.findByRole('button', { name: '3× usual' }))
+        await userEvent.click(screen.getByRole('button', { name: /save policy/i }))
+
+        await waitFor(() => expect(setPolicy).toHaveBeenCalled())
+        expect(setPolicy).toHaveBeenCalledWith({ alertMinSeverity: 'notable' })
+    })
+
+    it('hides the floor when findings are off, because it decides nothing', async () => {
+        getPolicy.mockResolvedValue(policy())
+        renderIt()
+
+        await userEvent.click(await screen.findByRole('switch', { name: /anomaly findings/i }))
+        expect(screen.queryByRole('button', { name: '8× usual' })).not.toBeInTheDocument()
+    })
+
+    it('reads the alert policy without a switch for a non-admin', async () => {
+        getPolicy.mockResolvedValue(policy({ editable: false, alertMinSeverity: 'notable' }))
+        renderIt()
+        expect(await screen.findByText('On')).toBeInTheDocument()
+        expect(screen.getByText('3× usual')).toBeInTheDocument()
+        expect(screen.queryByRole('switch')).not.toBeInTheDocument()
+    })
+})
