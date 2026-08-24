@@ -297,6 +297,70 @@ class InMemoryBackend:
         return True
 
 
+class UnavailableBackend:
+    """A backend that refuses every operation instead of pretending.
+
+    The fallback below used to install :class:`InMemoryBackend` whenever
+    Redis could not be constructed. That is right for a laptop and wrong
+    for production, and the reason is not the missing durability — it is
+    that ``InMemoryBackend`` *succeeds*. ``is_revoked`` answers "no",
+    ``set_with_ttl`` returns cleanly, ``health`` says ``True``. So the
+    tiered design silently collapses: the fail-open tier honours the JWT
+    as intended, but the FAIL-CLOSED tier also sails through, because a
+    tier that refuses on ``RevocationBackendError`` never sees one. With
+    four workers per container a revoke reaches one worker in ``4N`` and
+    nothing anywhere reports a problem.
+
+    Raising out of ``get_revocation_service`` instead is not the answer
+    either — that function runs on every authenticated request, so a
+    config typo would become a total, unrecoverable auth outage. That is
+    the failure the fallback exists to prevent, and it still does.
+
+    So: fail honestly. Every operation raises, which puts the process in
+    exactly the state a real Redis outage puts it in — a state the code
+    already handles correctly and deliberately. The fail-open tier logs
+    and honours the JWT; the fail-closed tier returns 503; ``health``
+    returns False so ``/health/ready`` takes the pod out of rotation
+    (``revocation_is_shared``). Degraded, visible, and bounded by the
+    access-token lifetime rather than silently unbounded.
+    """
+
+    _WHY = (
+        "revocation backend unavailable: Redis could not be constructed "
+        "and this is a production environment, so an in-process stand-in "
+        "would silently disable session revocation across every worker"
+    )
+
+    async def exists(self, key: str) -> bool:
+        raise RevocationBackendError(self._WHY)
+
+    async def set_with_ttl(self, key: str, ttl_seconds: int) -> None:
+        raise RevocationBackendError(self._WHY)
+
+    async def set_if_absent(self, key: str, ttl_seconds: int) -> bool:
+        raise RevocationBackendError(self._WHY)
+
+    async def delete(self, key: str) -> None:
+        raise RevocationBackendError(self._WHY)
+
+    async def add_to_set(self, key: str, member: str, ttl_seconds: int) -> None:
+        raise RevocationBackendError(self._WHY)
+
+    async def set_members(self, key: str) -> set[str]:
+        raise RevocationBackendError(self._WHY)
+
+    async def set_value(self, key: str, value: str, ttl_seconds: int) -> None:
+        raise RevocationBackendError(self._WHY)
+
+    async def exists_and_get(self, exists_key: str, value_key: str):
+        raise RevocationBackendError(self._WHY)
+
+    async def health(self) -> bool:
+        # Not an exception: this is the one method whose job is to report
+        # the state rather than act on it, and /health/deps calls it.
+        return False
+
+
 class RevocationBackendError(Exception):
     """Raised when the Redis backend rejects an operation. Callers
     decide fail-open vs fail-closed based on the operation context."""
@@ -582,20 +646,48 @@ class SharedSamlReplayCache:
     control. The ACS turns the exception into a rejected sign-in.
     """
 
-    def __init__(self, backend: RevocationBackend):
+    def __init__(
+        self, backend: RevocationBackend, *, namespace: str = _SAML_ASSERTION_PREFIX,
+    ):
         self._backend = backend
+        # Namespaced so a portal payload's ``jti`` can never collide
+        # with a SAML assertion id. Both are attacker-influenced strings
+        # from different trust domains; sharing a keyspace would let one
+        # provider's id burn another's.
+        self._ns = namespace
 
     async def record(self, assertion_id: str, expires_at_epoch: int) -> bool:
         """True if this assertion is new; False if it has been seen.
 
         TTL is the assertion's own remaining validity — once it is past
-        ``NotOnOrAfter`` the signature check refuses it anyway, so
-        holding the key longer buys nothing and costs memory.
+        ``NotOnOrAfter`` (or ``exp``) the signature check refuses it
+        anyway, so holding the key longer buys nothing and costs memory.
         """
         ttl = max(int(expires_at_epoch) - int(time.time()), 1)
         return await self._backend.set_if_absent(
-            f"{_SAML_ASSERTION_PREFIX}{assertion_id}", ttl,
+            f"{self._ns}{assertion_id}", ttl,
         )
+
+
+#: Portal-assertion ``jti`` keyspace. Separate from the SAML prefix so
+#: the two trust domains cannot burn each other's ids.
+_PROFILE_JTI_PREFIX = "idp:jti:"
+
+
+def get_profile_replay_cache() -> Optional["SharedSamlReplayCache"]:
+    """Replay cache for ``custom_profile`` payload ids, or None.
+
+    Same store, same semantics, different keyspace. ``None`` carries the
+    same meaning as it does for SAML: there is no shared store, so
+    single-use cannot be enforced across workers, and production must
+    treat that as a configuration failure rather than pretend.
+    """
+    backend = getattr(get_revocation_service(), "_backend", None)
+    if backend is None or isinstance(
+        backend, (InMemoryBackend, UnavailableBackend),
+    ):
+        return None
+    return SharedSamlReplayCache(backend, namespace=_PROFILE_JTI_PREFIX)
 
 
 def get_saml_replay_cache() -> Optional["SharedSamlReplayCache"]:
@@ -607,7 +699,14 @@ def get_saml_replay_cache() -> Optional["SharedSamlReplayCache"]:
     substituting the local dict — see ``app/main.py``.
     """
     backend = getattr(get_revocation_service(), "_backend", None)
-    if backend is None or isinstance(backend, InMemoryBackend):
+    if backend is None or isinstance(
+        backend, (InMemoryBackend, UnavailableBackend),
+    ):
+        # UnavailableBackend would technically satisfy the type and then
+        # raise on every ``record``, which still fails closed — but it
+        # would do so at assertion time with a generic error. Returning
+        # None instead lets the provider builders refuse up front, with a
+        # message that names the actual problem.
         return None
     return SharedSamlReplayCache(backend)
 
@@ -740,12 +839,15 @@ def build_revocation_backend() -> "RedisBackend":
 def revocation_is_shared() -> bool:
     """Whether revocation state is shared across workers and replicas.
 
-    ``False`` means the service fell back to ``InMemoryBackend``, and
-    the consequence is worth stating plainly: with 4 gunicorn workers
-    per container across N replicas, revoking a session takes effect on
-    1 worker in 4N. A signed-out or suspended user keeps working
-    everywhere else until their access token expires, and nothing on
-    the request path can tell.
+    ``False`` means the service fell back to a stand-in — either
+    ``InMemoryBackend`` (dev) or ``UnavailableBackend`` (production),
+    and the consequence of the first is worth stating plainly: with 4
+    gunicorn workers per container across N replicas, revoking a session
+    takes effect on 1 worker in 4N. A signed-out or suspended user keeps
+    working everywhere else until their access token expires, and
+    nothing on the request path can tell. That is exactly why production
+    gets the refusing backend instead — a degraded state that announces
+    itself beats one that reports success.
 
     The fallback itself is correct and stays — see
     ``get_revocation_service`` for why raising here would turn a config
@@ -758,7 +860,9 @@ def revocation_is_shared() -> bool:
     # about the configuration rather than about whether anything has
     # authenticated since boot. ``get_revocation_service`` never raises.
     backend = getattr(get_revocation_service(), "_backend", None)
-    return backend is not None and not isinstance(backend, InMemoryBackend)
+    return backend is not None and not isinstance(
+        backend, (InMemoryBackend, UnavailableBackend),
+    )
 
 
 def get_revocation_service() -> RevocationService:
@@ -781,6 +885,24 @@ def get_revocation_service() -> RevocationService:
     if _INSTANCE is None:
         from backend.common.adapters.redis_endpoint import RedisConfigurationError
 
+        def _fallback() -> RevocationBackend:
+            """In-process stand-in, or an honest refusal in production.
+
+            See ``UnavailableBackend``: the danger of the in-process
+            backend is not that it forgets, it is that it SUCCEEDS, so
+            the fail-closed tier stops being fail-closed and nothing
+            reports it.
+            """
+            if os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+                logger.critical(
+                    "Refusing an in-process revocation backend in production. "
+                    "Session revocation is now DEGRADED: reads honour the JWT "
+                    "and privileged routes return 503 until Redis recovers. "
+                    "/health/ready reports this pod as not ready.",
+                )
+                return UnavailableBackend()
+            return InMemoryBackend()
+
         try:
             backend: RevocationBackend = build_revocation_backend()
         except ImportError:
@@ -788,7 +910,7 @@ def get_revocation_service() -> RevocationService:
                 "redis library not available — using InMemoryBackend. "
                 "RBAC revocation will not survive process restarts."
             )
-            backend = InMemoryBackend()
+            backend = _fallback()
         except RedisConfigurationError as exc:
             # e.g. a missing/empty *_PASSWORD_FILE during a secret-mount
             # race, an incomplete sentinel config, or a stray cluster
@@ -802,7 +924,7 @@ def get_revocation_service() -> RevocationService:
                 "replicas until this is fixed.",
                 exc,
             )
-            backend = InMemoryBackend()
+            backend = _fallback()
         except Exception as exc:  # noqa: BLE001 — hot auth path: any other
             # construction failure (bad int/float env cast, TLS/client
             # kwarg error, ...) has the same catastrophic shape as the
@@ -815,7 +937,7 @@ def get_revocation_service() -> RevocationService:
                 "shared across replicas until this is fixed.",
                 type(exc).__name__, exc,
             )
-            backend = InMemoryBackend()
+            backend = _fallback()
         _INSTANCE = RevocationService(backend)
     return _INSTANCE
 

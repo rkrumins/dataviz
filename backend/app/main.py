@@ -311,6 +311,40 @@ def _log_auth_fingerprint() -> None:
 
 
 
+def profile_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
+    """Wrap the custom_profile builder so it binds the shared replay cache.
+
+    Same shape and same reasoning as the SAML wrapper below. A signed
+    portal payload proves the portal minted it and says nothing about who
+    is presenting it, so without single-use enforcement a copied payload
+    is a working credential for its whole lifetime — and it produces a
+    legitimately minted session of the attacker's own, with nothing to
+    revoke and no signal that it happened.
+
+    Refused per provider rather than at boot, so a deployment that runs
+    no custom_profile provider is unaffected. Unsigned rows are exempt:
+    they have no ``jti`` to burn, they are already an explicit
+    operator-acknowledged escape hatch, and refusing them here would be
+    refusing them on a technicality rather than on their own merits.
+    """
+
+    def _build(snap):
+        signed = str(
+            (snap.settings or {}).get("payload_format") or "jwt"
+        ) == "jwt"
+        if replay_cache is None and is_prod and signed:
+            raise RuntimeError(
+                f"custom_profile provider {snap.slug!r} cannot be served: "
+                "the revocation store is unavailable, so a payload cannot "
+                "be enforced single-use and a copied one would be "
+                "replayable for its whole lifetime. Fix Redis/Memorystore "
+                "connectivity."
+            )
+        return base_builder(snap, replay_cache=replay_cache)
+
+    return _build
+
+
 def saml_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
     """Wrap the SAML provider builder so it binds the shared replay cache.
 
@@ -621,6 +655,28 @@ async def lifespan(_app: FastAPI):
 
         _builders["saml2"] = saml_builder_with_replay_cache(
             _builders["saml2"], _saml_replay, _prod,
+        )
+
+    # Same treatment for portal-asserted identities. A signed payload was
+    # verified and then trusted for its whole lifetime — no jti, no
+    # nonce, no cache anywhere — so a copied one signed the copier in as
+    # the victim.
+    if "custom_profile" in _builders:
+        from backend.app.services.revocation_service import (
+            get_profile_replay_cache,
+        )
+        _profile_replay = get_profile_replay_cache()
+        _prod_profile = _is_production()
+
+        if _profile_replay is None and not _prod_profile:
+            logger.warning(
+                "custom_profile replay cache is unavailable (no shared "
+                "revocation store), so a signed portal payload cannot be "
+                "enforced single-use. Never deploy this.",
+            )
+
+        _builders["custom_profile"] = profile_builder_with_replay_cache(
+            _builders["custom_profile"], _profile_replay, _prod_profile,
         )
 
     _registry = ProviderRegistry(

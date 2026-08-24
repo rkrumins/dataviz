@@ -1782,7 +1782,7 @@ async def _custom_profile_login_flow(
         return await _fail(f"payload_missing_from_{source}")
 
     try:
-        identity = provider.fetch_identity(raw)
+        identity = await provider.fetch_identity(raw)
     except CustomProfileError as exc:
         return await _fail(f"payload_rejected:{exc}")
 
@@ -1831,7 +1831,7 @@ async def custom_profile_browser_login(
     snap = await _provider_snapshot(slug, request=request)
 
     try:
-        identity = provider.fetch_identity(body.payload)
+        identity = await provider.fetch_identity(body.payload)
     except CustomProfileError as exc:
         # The precise reason is audited, not returned — a caller poking
         # at this endpoint shouldn't learn why their payload failed.
