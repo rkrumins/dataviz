@@ -153,6 +153,53 @@ def env_retention_policy() -> RetentionPolicy:
     )
 
 
+#: The retention half of the policy. The alert half resolves separately in
+#: ``count_alerts_repo``, because the two are read by different callers on
+#: different cadences and neither should have to load the other.
+_RETENTION_FIELDS = (
+    "rawRetentionDays", "hourlyRetentionDays", "dailyRetentionDays",
+    "maxRowsPerSource", "heartbeatSecs", "silentAfterSecs",
+)
+
+
+class PolicyConflict(ValueError):
+    """A saved policy that would not mean what it says."""
+
+
+def validate_policy(values: Dict[str, Any], current: "RetentionPolicy") -> None:
+    """Reject a policy whose tiers do not nest.
+
+    Coverage has to be monotonic — daily reaches at least as far back as
+    hourly, hourly at least as far as raw — because a read picks the finest
+    tier that COVERS the window. Inverting them leaves windows that no tier
+    can answer while every tier still holds rows, which looks like data loss
+    and is really a settings mistake.
+
+    Rejected rather than clamped: silently rewriting a number someone typed
+    is how a settings page becomes untrustworthy.
+    """
+    def _effective(field: str, fallback: int) -> int:
+        value = values.get(field)
+        if value is None or value == INHERIT:
+            return fallback
+        return int(value)
+
+    raw = _effective("rawRetentionDays", current.raw_days)
+    hourly = _effective("hourlyRetentionDays", current.hourly_days)
+    daily = _effective("dailyRetentionDays", current.daily_days)
+
+    if hourly < raw:
+        raise PolicyConflict(
+            f"Hourly retention ({hourly}d) must reach at least as far back as "
+            f"raw ({raw}d) — hourly buckets are built from raw before it is purged."
+        )
+    if daily < hourly:
+        raise PolicyConflict(
+            f"Daily retention ({daily}d) must reach at least as far back as "
+            f"hourly ({hourly}d) — daily buckets are built from hourly."
+        )
+
+
 async def resolve_retention_policy(
     session: AsyncSession,
 ) -> Tuple[RetentionPolicy, Dict[str, Any]]:
@@ -178,17 +225,19 @@ async def resolve_retention_policy(
         return env, {}
 
     overrides = {
-        "hourlyRetentionDays": row.history_retention_days,
-        "maxRowsPerSource": row.history_max_rows_per_source,
-        "heartbeatSecs": row.history_heartbeat_secs,
+        field: getattr(row, column, None)
+        for field, column in _POLICY_COLUMNS.items()
+        if field in _RETENTION_FIELDS
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
     return RetentionPolicy(
-        raw_days=env.raw_days,
+        raw_days=max(_MIN_DAYS, overrides.get("rawRetentionDays", env.raw_days)),
         hourly_days=max(
             _MIN_DAYS, overrides.get("hourlyRetentionDays", env.hourly_days),
         ),
-        daily_days=env.daily_days,
+        daily_days=max(
+            _MIN_DAYS, overrides.get("dailyRetentionDays", env.daily_days),
+        ),
         max_rows_per_source=max(
             1, overrides.get("maxRowsPerSource", env.max_rows_per_source),
         ),
@@ -738,6 +787,18 @@ SCOPES = ("source", "workspace", "provider", "all")
 #: moment something changed.
 _POINT_BUDGET = 720
 
+#: The incident window gets a bigger allowance — one point a minute for a day.
+#:
+#: "When did this happen" is asked about the last day far more than about the
+#: last quarter, and a busy source can capture more than 720 times in 24 hours
+#: once the heartbeat tracks the poll. Falling to hour grain there would bucket
+#: away movement that was captured, in exactly the window someone opened to
+#: find it. Longer windows keep the tighter budget: at 90 days nobody is
+#: reading individual minutes, and the rollups carry min/max so an intra-bucket
+#: dip still shows.
+_SHORT_WINDOW_HOURS = 26
+_SHORT_WINDOW_BUDGET = 1500
+
 
 def resolve_grain(frm: str, to: str, requested: Optional[str]) -> str:
     """Coarsest-first fallback when the caller asked for something specific,
@@ -787,6 +848,11 @@ async def choose_grain(
     if start is None or end is None:
         return "hour"
     span_days = max(0.0, (end - start).total_seconds() / 86_400.0)
+    budget = (
+        _SHORT_WINDOW_BUDGET
+        if span_days * 24 <= _SHORT_WINDOW_HOURS
+        else _POINT_BUDGET
+    )
 
     # Finest first, and only tiers whose retention reaches back far enough.
     candidates = [
@@ -801,7 +867,7 @@ async def choose_grain(
             session, scope=scope, scope_id=scope_id, visible=visible,
             frm=frm, to=to, grain=grain,
         )
-        if 0 < buckets <= _POINT_BUDGET:
+        if 0 < buckets <= budget:
             return grain
     return "day"
 
@@ -1407,9 +1473,15 @@ async def list_findings(
 #: product ones, and a live-editable compaction interval is a way to wedge
 #: retention from a settings page.
 _POLICY_COLUMNS = {
+    # `history_retention_days` predates the tiers and holds the HOURLY window.
+    # Renaming it would be a migration for no behavioural gain; the mapping is
+    # the one place the old name has to be understood.
     "hourlyRetentionDays": "history_retention_days",
+    "rawRetentionDays": "profiling_raw_retention_days",
+    "dailyRetentionDays": "profiling_daily_retention_days",
     "maxRowsPerSource": "history_max_rows_per_source",
     "heartbeatSecs": "history_heartbeat_secs",
+    "silentAfterSecs": "profiling_silent_after_secs",
     "alertsEnabled": "history_alerts_enabled",
     "alertMinSeverity": "history_alert_min_severity",
     "alertCooldownSecs": "history_alert_cooldown_secs",

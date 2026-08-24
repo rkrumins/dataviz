@@ -246,3 +246,47 @@ async def test_the_compaction_tick_has_its_own_cadence(monkeypatch):
     assert grains == ["hour", "day"], (
         "hour before day — the day tier is built FROM the hour tier"
     )
+
+
+# ── an operator override actually reaches the purge ──────────────────
+
+
+async def test_the_retention_pass_uses_the_saved_policy_not_the_environment(
+    db_session: AsyncSession, monkeypatch,
+):
+    """The worst of three outcomes would be a policy that persisted, displayed,
+    and did nothing — the settings page confirming a change the purge never
+    made. This pins that the tick resolves from the database."""
+    from backend.app.db.models import PlatformSettingsORM
+    from backend.insights_service import scheduler
+
+    db_session.add(PlatformSettingsORM(id=1, profiling_raw_retention_days=3))
+    await db_session.flush()
+
+    seen: list = []
+
+    class _Session:
+        async def __aenter__(self): return _Committing(db_session)
+        async def __aexit__(self, *exc): return False
+
+    class _Committing:
+        def __init__(self, inner): self._inner = inner
+        def __getattr__(self, name): return getattr(self._inner, name)
+        async def commit(self): return None
+
+    async def fake_run_retention(_session, policy, **_kw):
+        seen.append(policy)
+        return {"raw": 0, "over_cap": 0, "hour": 0, "day": 0}
+
+    async def fake_purge_alerts(_session, **_kw):
+        return 0
+
+    monkeypatch.setattr(scheduler, "get_jobs_session", lambda: _Session())
+    monkeypatch.setattr(profiling_repo, "run_retention", fake_run_retention)
+    monkeypatch.setattr(count_alerts_repo, "purge_alerts", fake_purge_alerts)
+    monkeypatch.setattr(scheduler, "_RETENTION_INTERVAL_SECS", 0.0)
+
+    await scheduler._maybe_run_profiling_retention()
+
+    assert seen, "the pass must have run"
+    assert seen[0].raw_days == 3, "the saved override, not the env default"

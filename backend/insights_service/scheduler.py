@@ -505,7 +505,11 @@ async def _maybe_run_profiling_retention() -> None:
     from backend.app.db.repositories import count_alerts_repo
 
     async with get_jobs_session() as session:
-        policy = profiling_repo.env_retention_policy()
+        # RESOLVED, not env. Reading the environment here would let an
+        # operator save a retention policy that persisted, displayed, and
+        # did nothing — the worst of the three, because the settings page
+        # would confirm a change the purge never made.
+        policy, _overrides = await profiling_repo.resolve_retention_policy(session)
         result = await profiling_repo.run_retention(
             session, policy, batch=_PROFILING_BATCH,
         )

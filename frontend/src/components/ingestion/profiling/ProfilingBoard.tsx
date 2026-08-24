@@ -19,7 +19,7 @@
 import { useMemo, useState } from 'react'
 import {
     ArrowDown, ArrowUp, ChevronRight, Database, EyeOff,
-    Radio, TrendingUp, TriangleAlert,
+    Radio, Settings2, TrendingUp, TriangleAlert,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
@@ -34,6 +34,7 @@ import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import type { BoardRow } from '@/types/profiling'
 import { FilterSelect, SearchField, Segmented, Toggle } from './BoardFilters'
 import { FindingsBand } from './FindingsBand'
+import { ProfilingSettings } from './ProfilingSettings'
 import { ProfilingSourceDrawer } from './ProfilingSourceDrawer'
 import { BoardVerdict } from './Verdict'
 import { formatInstant, deltaTone, metricNoun, signed, significanceMeta } from './shared'
@@ -69,6 +70,7 @@ export function ProfilingBoard({ workspaceId, onOpenSource, className }: Props) 
     // reader (the workspace panel, with its aggregation and versioning tabs)
     // passes `onOpenSource` and owns the navigation instead.
     const [drilling, setDrilling] = useState<BoardRow | null>(null)
+    const [settingsOpen, setSettingsOpen] = useState(false)
 
     const query = useMemo(() => ({
         window, workspaceId, metric, limit: 500,
@@ -132,6 +134,7 @@ export function ProfilingBoard({ workspaceId, onOpenSource, className }: Props) 
                 providerId={providerId} onProvider={setProviderId}
                 providers={providers}
                 search={search} onSearch={setSearch}
+                onOpenSettings={() => setSettingsOpen(true)}
             />
 
             {board.isLoading && <BoardSkeleton />}
@@ -204,13 +207,22 @@ export function ProfilingBoard({ workspaceId, onOpenSource, className }: Props) 
             {!onOpenSource && (
                 <ProfilingSourceDrawer row={drilling} onClose={() => setDrilling(null)} />
             )}
+
+            {settingsOpen && (
+                <ProfilingSettings
+                    onClose={() => setSettingsOpen(false)}
+                    // So the cost preview can scale from per-source to
+                    // this deployment, using what is actually reporting.
+                    sourceCount={rows.length}
+                />
+            )}
         </div>
     )
 }
 
 function Controls({
     window, onWindow, metric, onMetric, unusualOnly, onUnusualOnly,
-    providerId, onProvider, providers, search, onSearch,
+    providerId, onProvider, providers, search, onSearch, onOpenSettings,
 }: {
     window: ProfilingWindowKey
     onWindow: (next: ProfilingWindowKey) => void
@@ -223,6 +235,7 @@ function Controls({
     providers: { key: string; label: string; count: number }[]
     search: string
     onSearch: (next: string) => void
+    onOpenSettings: () => void
 }) {
     return (
         <div className="flex flex-wrap items-center gap-2">
@@ -239,7 +252,27 @@ function Controls({
                 />
             )}
             <Toggle checked={unusualOnly} onChange={onUnusualOnly} label="Unusual only" />
-            <UtcChip className="ml-auto" />
+            <span className="ml-auto flex items-center gap-2">
+                <UtcChip />
+                {/* Retention lives here because this is the fleet-wide surface
+                    and because retention is what EXPLAINS the windows beside
+                    it. Non-admins see it read-only: a policy someone cannot
+                    change is still the answer to "why does my window stop
+                    there". */}
+                <button
+                    type="button"
+                    onClick={onOpenSettings}
+                    className={cn(
+                        'inline-flex items-center gap-1.5 rounded-xl border border-glass-border',
+                        'bg-canvas px-2.5 py-1.5 text-xs font-semibold text-ink-muted',
+                        'hover:text-ink transition-colors',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
+                    )}
+                >
+                    <Settings2 className="w-3.5 h-3.5" aria-hidden />
+                    Retention
+                </button>
+            </span>
         </div>
     )
 }

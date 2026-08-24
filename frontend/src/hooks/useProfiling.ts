@@ -37,7 +37,23 @@ export const PROFILING_WINDOWS = [
 ] as const
 
 export type ProfilingWindowKey = (typeof PROFILING_WINDOWS)[number]['key']
-export const DEFAULT_WINDOW: ProfilingWindowKey = '30d'
+/**
+ * Where a surface opens.
+ *
+ * SEVEN DAYS, not thirty. Three reasons, in order of weight:
+ *
+ *  - It sits inside raw retention, so the default view is full fidelity with
+ *    no bucketing — the only window that is both wide enough to show a rhythm
+ *    and fine enough to show a minute.
+ *  - It covers a weekly cycle. Nightly loads, weekday-only pipelines and
+ *    weekend gaps are all invisible in 24 hours and diluted in 30 days.
+ *  - "What moved" is a recency question. A source that shifted three weeks ago
+ *    is history, not news, and at 30 days it outranks something that moved
+ *    this morning.
+ *
+ * 24 hours is one click away for an incident, and 30/90 for an audit.
+ */
+export const DEFAULT_WINDOW: ProfilingWindowKey = '7d'
 
 /**
  * Cadence, and why it is this lazy.

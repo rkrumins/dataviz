@@ -283,10 +283,26 @@ PROFILING_ENABLED: bool = os.getenv("PROFILING_ENABLED", "true").lower() == "tru
 
 # Continuity row when nothing changed. Capture is change-gated on
 # counts_digest, so a graph nobody is writing to would otherwise leave a
-# 30-day hole that reads identically to "we lost the data". One row an
-# hour is ~720/source/month — cheap enough to be unconditional, dense
-# enough that a flat line is provably flat.
-PROFILING_HEARTBEAT_SECS: int = int(os.getenv("PROFILING_HEARTBEAT_SECS", "3600"))
+# hole that reads identically to "we lost the data".
+#
+# ALIGNED TO THE POLL, not chosen independently. The insights service
+# observes each source every STATS_DEFAULT_INTERVAL_SECS (900); at an
+# hourly heartbeat we recorded roughly one observation in four, so a
+# 24-hour window showed ~9 points for a source that had been polled ~96
+# times. Nine flat points reads as a dead pipeline, which is the exact
+# ambiguity this feature exists to remove.
+#
+# It buys resolution for STILLNESS only. A change is never gated — see
+# `maybe_capture_snapshot` — so an incident was always pinned to the
+# observation that saw it, and this does not improve that by a second.
+# What it buys is the ability to tell "stable" from "unwatched", and a
+# 24-hour view dense enough to investigate.
+#
+# Costs the RAW tier alone: ~672 rows/source/week instead of ~168, about
+# 0.5 GB more at 1,000 sources. The rollups are bounded by BUCKETS, not
+# observations — an hour bucket is one row however often it was sampled —
+# so 30- and 90-day coverage costs exactly what it did before.
+PROFILING_HEARTBEAT_SECS: int = int(os.getenv("PROFILING_HEARTBEAT_SECS", "900"))
 
 # ── Profiling: tiered retention ─────────────────────────────────────
 # Raw is the record of what was OBSERVED; the rollup tiers are the record
@@ -316,8 +332,15 @@ PROFILING_DAILY_RETENTION_DAYS: int = int(
 # Raw-tier safety valve, applied alongside the age cutoff. A source
 # changing on every 60s probe is 43k rows a month; this stops one
 # pathological source dominating the raw table between purges.
+#
+# 10,000 covers a full 7-day raw window at one observation per minute
+# (10,080). At the previous 5,000 a source thrashing hard enough to
+# capture every minute kept only ~3.5 days of raw — and a thrashing
+# source is precisely the one someone opens a 7-day investigation on.
+# The rollups always covered the window; this makes the raw tier cover
+# it too, at a worst case of ~10 MB per pathological source.
 PROFILING_MAX_ROWS_PER_SOURCE: int = int(
-    os.getenv("PROFILING_MAX_ROWS_PER_SOURCE", "5000")
+    os.getenv("PROFILING_MAX_ROWS_PER_SOURCE", "10000")
 )
 
 # How often raw is compacted into the tiers. Much tighter than the purge

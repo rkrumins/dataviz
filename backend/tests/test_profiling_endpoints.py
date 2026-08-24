@@ -19,7 +19,7 @@ from backend.app.db.models import (
     ProviderORM,
     WorkspaceDataSourceORM,
 )
-from backend.app.db.repositories import profiling_repo
+from backend.app.db.repositories import profiling_repo, stats_history_repo
 from backend.app.services.permission_service import PermissionClaims
 
 
@@ -38,6 +38,20 @@ def workspace_claims(*workspace_ids: str) -> PermissionClaims:
 
 
 NOBODY = PermissionClaims(sid="sess_none", global_perms=(), ws_perms={})
+
+
+@pytest.fixture(autouse=True)
+def _clear_policy_cache():
+    """`resolve_history_policy` memoises for 30s in a process-global.
+
+    Harmless in production — the settings row changes roughly never, and
+    cross-process staleness is bounded by the TTL. In a test run it makes one
+    test's saved policy visible to the next, so a policy assertion passes alone
+    and fails in the suite.
+    """
+    stats_history_repo.invalidate_history_policy_cache()
+    yield
+    stats_history_repo.invalidate_history_policy_cache()
 
 
 def _iso(hours_ago: float) -> str:
@@ -585,3 +599,188 @@ async def test_last_seen_falls_back_to_the_bucket_without_a_stats_row(
         session=db_session, claims=OPERATOR,
     )
     assert out["data"]["rows"][0]["last_observed_at"] is not None
+
+
+# ── the investigation windows ────────────────────────────────────────
+
+
+async def test_the_incident_window_keeps_full_resolution(
+    db_session: AsyncSession,
+):
+    """"When did this happen" is asked about the last day far more than about
+    the last quarter. A busy source can capture more than the standard budget
+    in 24 hours once the heartbeat tracks the poll, and falling to hour grain
+    there would bucket away movement that was captured — in exactly the window
+    someone opened to find it.
+    """
+    await _source(db_session, "ds_busy")
+    # 900 captures in a day — over the 720 general budget, under the short one.
+    base = datetime.now(timezone.utc) - timedelta(hours=23)
+    for i in range(900):
+        await _snap(
+            db_session, "ds_busy",
+            (base + timedelta(seconds=i * 90)).isoformat(),
+            nodes=1000 + i,
+        )
+
+    grain = await profiling_repo.choose_grain(
+        db_session, scope="source", scope_id="ds_busy", visible=None,
+        frm=_iso(24), to=_iso(0), requested=None,
+    )
+    assert grain == "raw", "the last 24 hours must not be bucketed away"
+
+
+async def test_a_long_window_still_takes_the_tighter_budget(
+    db_session: AsyncSession,
+):
+    """At 90 days nobody is reading individual minutes, and the rollups carry
+    min/max so an intra-bucket dip still shows."""
+    await _source(db_session, "ds_a")
+    await _snap(db_session, "ds_a", _iso(2), nodes=100)
+    for _ in range(30):
+        if not await profiling_repo.compact(db_session, grain="hour"):
+            break
+        await profiling_repo.compact(db_session, grain="day")
+
+    grain = await profiling_repo.choose_grain(
+        db_session, scope="source", scope_id="ds_a", visible=None,
+        frm=_iso(24 * 90), to=_iso(0), requested=None,
+    )
+    assert grain == "day", "hourly retention (45d) cannot reach back 90 days"
+
+
+async def test_seven_days_reads_at_hourly_or_finer(db_session: AsyncSession):
+    """The other investigation window. Hourly covers 45 days, so a week is
+    always inside a tier that keeps intra-day shape."""
+    await _source(db_session, "ds_a")
+    for hours in range(0, 168, 6):
+        await _snap(db_session, "ds_a", _iso(hours + 1), nodes=100 + hours)
+    for _ in range(60):
+        if not await profiling_repo.compact(db_session, grain="hour"):
+            break
+
+    grain = await profiling_repo.choose_grain(
+        db_session, scope="source", scope_id="ds_a", visible=None,
+        frm=_iso(24 * 7), to=_iso(0), requested=None,
+    )
+    assert grain in ("raw", "hour")
+
+
+# ── the policy is settable, and settable things stick ────────────────
+
+
+async def test_every_retention_tier_persists(db_session: AsyncSession):
+    """The bug this closes: the endpoint accepted rawRetentionDays and
+    dailyRetentionDays, answered 200, and dropped them — there was no column
+    and no mapping. An API that accepts a setting and ignores it is worse than
+    one that refuses it, because the operator has no way to tell."""
+    await profiling.put_policy(
+        body=profiling.PolicyRequest(
+            rawRetentionDays=14, hourlyRetentionDays=60, dailyRetentionDays=200,
+            maxRowsPerSource=2000, silentAfterSecs=7200,
+        ),
+        session=db_session, claims=OPERATOR,
+    )
+    policy, overrides = await profiling_repo.resolve_retention_policy(db_session)
+    assert policy.raw_days == 14
+    assert policy.hourly_days == 60
+    assert policy.daily_days == 200
+    assert policy.max_rows_per_source == 2000
+    assert set(overrides) >= {
+        "rawRetentionDays", "hourlyRetentionDays", "dailyRetentionDays",
+    }
+
+
+async def test_clearing_an_override_returns_to_the_deployment_default(
+    db_session: AsyncSession,
+):
+    """A blank field means inherit, not zero. Pinning today's default the
+    first time anyone opens the dialog and saves is a trap."""
+    env = profiling_repo.env_retention_policy()
+    await profiling.put_policy(
+        body=profiling.PolicyRequest(rawRetentionDays=14),
+        session=db_session, claims=OPERATOR,
+    )
+    await profiling.put_policy(
+        body=profiling.PolicyRequest(rawRetentionDays=profiling_repo.INHERIT),
+        session=db_session, claims=OPERATOR,
+    )
+    policy, overrides = await profiling_repo.resolve_retention_policy(db_session)
+    assert policy.raw_days == env.raw_days
+    assert "rawRetentionDays" not in overrides
+
+
+async def test_a_policy_whose_tiers_do_not_nest_is_refused(
+    db_session: AsyncSession,
+):
+    """Coverage has to be monotonic, because a read picks the finest tier that
+    COVERS the window. Inverting them leaves windows no tier can answer while
+    every tier still holds rows — which looks like data loss and is really a
+    settings mistake."""
+    with pytest.raises(HTTPException) as raised:
+        await profiling.put_policy(
+            body=profiling.PolicyRequest(rawRetentionDays=90, hourlyRetentionDays=7),
+            session=db_session, claims=OPERATOR,
+        )
+    assert raised.value.status_code == 400
+    assert "at least as far back" in str(raised.value.detail)
+
+
+async def test_daily_must_reach_past_hourly(db_session: AsyncSession):
+    with pytest.raises(HTTPException) as raised:
+        await profiling.put_policy(
+            body=profiling.PolicyRequest(hourlyRetentionDays=200, dailyRetentionDays=30),
+            session=db_session, claims=OPERATOR,
+        )
+    assert raised.value.status_code == 400
+
+
+async def test_the_policy_read_is_open_to_any_profiling_reader(
+    db_session: AsyncSession,
+):
+    """A policy someone cannot change is still one they need to see: it
+    explains why the window they are looking at stops where it does. Gating
+    the READ at system:admin is what gave non-admins a permanent spinner."""
+    out = await profiling.get_policy(
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    assert out["data"]["editable"] is False
+    assert out["data"]["hourlyRetentionDays"] > 0
+
+
+async def test_writing_the_policy_stays_platform_admin(db_session: AsyncSession):
+    with pytest.raises(HTTPException) as raised:
+        await profiling.put_policy(
+            body=profiling.PolicyRequest(rawRetentionDays=14),
+            session=db_session, claims=workspace_claims("ws_1"),
+        )
+    assert raised.value.status_code == 403
+
+
+async def test_cadences_are_reported_but_not_settable(db_session: AsyncSession):
+    """Compaction interval decides how hard the service works, and the purge
+    cannot delete raw beyond the compaction watermark — so a live-editable
+    compaction interval is a way to stall retention from a settings page."""
+    out = await profiling.get_policy(session=db_session, claims=OPERATOR)
+    cadences = out["data"]["cadences"]
+    assert cadences["readOnly"] is True
+    assert cadences["compactIntervalSecs"] > 0
+    assert not hasattr(profiling.PolicyRequest(), "compactIntervalSecs")
+
+
+async def test_the_policy_reads_back_the_value_it_will_actually_use(
+    db_session: AsyncSession,
+):
+    """Reporting the environment value for a field the operator can override
+    means their saved change reads back as ignored — while the capture path
+    honours it. The page would be contradicting the behaviour."""
+    await profiling.put_policy(
+        body=profiling.PolicyRequest(heartbeatSecs=300, silentAfterSecs=1800),
+        session=db_session, claims=OPERATOR,
+    )
+    out = await profiling.get_policy(session=db_session, claims=OPERATOR)
+    assert out["data"]["heartbeatSecs"] == 300
+    assert out["data"]["silentAfterSecs"] == 1800
+    # And the deployment defaults are still reported, so a blank field can mean
+    # "inherit" rather than pinning today's value.
+    assert out["data"]["defaults"]["heartbeatSecs"] > 0
