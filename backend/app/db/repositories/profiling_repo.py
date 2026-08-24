@@ -1134,7 +1134,10 @@ async def movement_board(
     conditions = _scope_conditions(
         _ROLL, scope="all", scope_id=None, visible=visible,
     )
-    pass  # MUTATION C: narrowing params ignored entirely
+    if workspace_id:
+        conditions.append(_ROLL.workspace_id == workspace_id)
+    if provider_id:
+        conditions.append(_ROLL.provider_id == provider_id)
 
     rows = (await session.execute(
         select(
