@@ -168,6 +168,7 @@ async def collect_counts(envelope: StatsJobEnvelope) -> None:
             edge_count=int(stats.get("edgeCount", 0) or 0),
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
+            lane="poll",
         )
         await _stamp_poll_success(session, envelope.data_source_id)
 
@@ -421,6 +422,7 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
             schema_stats=schema_stats.model_dump_json(by_alias=True),
             ontology_metadata=ontology_meta.model_dump_json(by_alias=True),
             graph_schema=graph_schema.model_dump_json(by_alias=True),
+            lane="deep",
         )
         # Deep genuinely refreshed the counts too — stamping the polling
         # config resets the counts cadence so the two facets don't
@@ -542,6 +544,7 @@ async def probe_counts(envelope: StatsJobEnvelope) -> None:
             entity_type_counts=json.dumps(entity_counts),
             edge_type_counts=json.dumps(edge_counts),
             probed=True,
+            lane="probe",
         )
 
 

@@ -30,6 +30,20 @@
 
 name: synodic
 
+# ── Profiling capture, shared by every tier that writes a snapshot ──
+#
+# THREE services capture: the web tier on its own write paths, the
+# control plane's probe, and the stats service's collection lanes. Giving
+# these only to the stats service is how `PROFILING_ENABLED=false` used to
+# half-work — capture kept running in the other two with compiled-in
+# defaults, and nothing purged what they wrote. An anchor, so the set
+# cannot drift apart again.
+x-profiling-capture: &profiling-capture
+  PROFILING_ENABLED: "${PROFILING_ENABLED:-true}"
+  PROFILING_HEARTBEAT_SECS: "${PROFILING_HEARTBEAT_SECS:-900}"
+  PROFILING_HOURLY_RETENTION_DAYS: "${PROFILING_HOURLY_RETENTION_DAYS:-45}"
+  PROFILING_MAX_ROWS_PER_SOURCE: "${PROFILING_MAX_ROWS_PER_SOURCE:-10000}"
+
 services:
 
   # ── FalkorDB (Graph Database) — vanilla image, no baked data ──────
@@ -191,6 +205,9 @@ services:
       # no-op when unset, so it must not be reachable off-host.
       - "${CONTROLPLANE_BIND:-127.0.0.1}:${CONTROLPLANE_PORT:-8091}:8091"
     environment:
+      # Profiling capture — this tier writes snapshots too (see the
+      # x-profiling-capture anchor for why it is shared).
+      <<: *profiling-capture
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       # Cache Redis MUST be the dedicated ``redis`` service, not the
@@ -225,6 +242,14 @@ services:
       # a large-graph scan: reusing the stats TTL (1200s) would leave a source
       # un-probeable for twenty minutes after a worker died mid-probe.
       STATS_PROBE_DEDUP_TTL_SECS: "${STATS_PROBE_DEDUP_TTL_SECS:-90}"
+      # Analytics warmer + product-event retention sweep. Both run here
+      # because both are gated on runs_scheduler(). The warm interval MUST
+      # match viz-service's copy of the same variable — it is also the grid
+      # readers snap `now` to, and a warmer phase-locked to a different grid
+      # writes cache entries no reader will ever look up. Same ${VAR} on both
+      # services is what keeps them identical.
+      ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
+      PRODUCT_EVENT_RETENTION_DAYS: "${PRODUCT_EVENT_RETENTION_DAYS:-400}"
       SYNODIC_ROLE: controlplane
       # Internal service auth (WS2.3). Shared secret the control plane
       # requires on every route except health/docs. UNSET by default ->
@@ -271,6 +296,9 @@ services:
       # the X-Forwarded-For the rate limiter keys on.
       - "${VIZ_BIND:-127.0.0.1}:${VIZ_PORT:-8000}:8000"
     environment:
+      # Profiling capture — this tier writes snapshots too (see the
+      # x-profiling-capture anchor for why it is shared).
+      <<: *profiling-capture
       # The frontend container's nginx proxies /api here, so the peer is
       # never loopback and gunicorn would otherwise discard the
       # X-Forwarded-For nginx sets — putting every user in one
@@ -339,6 +367,11 @@ services:
       # control plane. UNSET -> no header sent (and the CP has auth disabled
       # too), so dev works. Must match the control plane's value.
       AGGREGATION_INTERNAL_TOKEN: ${AGGREGATION_INTERNAL_TOKEN:-}
+      # Not the warmer (that is controlplane-only) — this is the grid every
+      # analytics window ends on. It has to be the SAME value the controlplane
+      # warms with, or readers ask for epochs the warmer never wrote.
+      # Retention is deliberately absent: the sweep does not run on this role.
+      ANALYTICS_WARM_INTERVAL_SECONDS: "${ANALYTICS_WARM_INTERVAL_SECONDS:-300}"
       SYNODIC_ROLE: web
 
       # CORS — allow the frontend container + local dev
@@ -385,6 +418,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile.aggregation
     environment:
+      # Profiling capture — this tier writes snapshots too (see the
+      # x-profiling-capture anchor for why it is shared).
+      <<: *profiling-capture
       MANAGEMENT_DB_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       # Dedicated cache Redis (FalkorDB provider's ancestor + URN caches).
@@ -562,6 +598,29 @@ services:
       STATS_MAX_DELIVERY_ATTEMPTS: "${STATS_MAX_DELIVERY_ATTEMPTS:-3}"
       STATS_DRAIN_TIMEOUT_SECS: "${STATS_DRAIN_TIMEOUT_SECS:-60}"
       STATS_HEALTH_PORT: "8092"
+      # Profiling: the append-only record behind the per-source Profiling
+      # surface. Captured inside the existing counts write (no extra provider
+      # I/O); change-gated plus an hourly heartbeat so the 60s probe lane does
+      # not write 43k rows/source/month.
+      #
+      # Retention is TIERED: raw is compacted into hour buckets before raw is
+      # purged, and hour into day, so coverage outlives resolution. The purge
+      # can never delete raw beyond the compaction watermark, which is why the
+      # compact cadence is much tighter than the retention one.
+      <<: *profiling-capture
+      PROFILING_RAW_RETENTION_DAYS: "${PROFILING_RAW_RETENTION_DAYS:-7}"
+      PROFILING_DAILY_RETENTION_DAYS: "${PROFILING_DAILY_RETENTION_DAYS:-400}"
+      PROFILING_COMPACT_INTERVAL_SECS: "${PROFILING_COMPACT_INTERVAL_SECS:-300}"
+      PROFILING_RETENTION_INTERVAL_SECS: "${PROFILING_RETENTION_INTERVAL_SECS:-3600}"
+      # Profiling anomaly alerting. Evaluated by a sweep in this service (not
+      # at capture time — "unusual" is a window property), delivered to the
+      # in-app bell, and recorded for the profiling API. The severity floor
+      # defaults to severe: an alert that fires too eagerly gets muted.
+      PROFILING_ALERTS_ENABLED: "${PROFILING_ALERTS_ENABLED:-true}"
+      PROFILING_ALERT_MIN_SEVERITY: "${PROFILING_ALERT_MIN_SEVERITY:-severe}"
+      PROFILING_ALERT_COOLDOWN_SECS: "${PROFILING_ALERT_COOLDOWN_SECS:-21600}"
+      PROFILING_ALERT_INTERVAL_SECS: "${PROFILING_ALERT_INTERVAL_SECS:-900}"
+      PROFILING_SILENT_AFTER_SECS: "${PROFILING_SILENT_AFTER_SECS:-21600}"
 
       # Size-adaptive poll timeouts (owned by backend/app/config/resilience.py).
       STATS_POLL_TIMEOUT_SECS: "${STATS_POLL_TIMEOUT_SECS:-30}"

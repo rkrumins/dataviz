@@ -9,7 +9,7 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
     ChevronLeft, Plus, Database, Loader2, Settings2,
     GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
-    Users, ShieldOff, Send, GitPullRequestArrow,
+    Users, ShieldOff, Send, GitPullRequestArrow, LineChart,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
@@ -38,6 +38,8 @@ import { WorkspaceAggregationDashboard } from '@/components/admin/workspace/Work
 import { WorkspaceOntologyTimeline } from '@/components/admin/workspace/WorkspaceOntologyTimeline'
 import { WorkspaceMembers } from '@/components/workspaces/WorkspaceMembers'
 import { PageContainer } from '@/components/layout/PageContainer'
+import { ProfilingBoard } from '@/components/ingestion/profiling/ProfilingBoard'
+import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -83,12 +85,13 @@ export function WorkspaceDetailPage() {
     // ── Selection + tab state ──────────────────────────────
     const [selectedDsId, setSelectedDsId] = useState<string | null>(null)
     const [searchParams, setSearchParams] = useSearchParams()
+    const canReadProfiling = useCanReadProfiling()
     // Pick up ``?tab=members`` (and friends) so other pages can deep
     // link straight to a specific tab — used by the WorkspacesPage
     // "Members" shortcut.
     const tabParam = searchParams.get('tab') as
-        | 'sources' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | null
-    const [activeSection, setActiveSection] = useState<'sources' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members'>(
+        | 'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members' | null
+    const [activeSection, setActiveSection] = useState<'sources' | 'profiling' | 'views' | 'aggregation' | 'ontology' | 'reviews' | 'members'>(
         tabParam ?? 'sources',
     )
     // Reviews are a versioning surface; the tab (and a ?tab=reviews deep link)
@@ -429,6 +432,11 @@ export function WorkspaceDetailPage() {
             <div className="flex items-center gap-1 border-b border-glass-border mt-4 mb-0">
                 {([
                     { id: 'sources' as const, label: 'Data Sources', icon: Database, count: workspace.dataSources.length, hint: 'Graph databases connected to this workspace' },
+                    // Across this workspace's sources: what moved, and by how
+                    // much. The per-source view is the drill-down from here.
+                    ...(canReadProfiling
+                        ? [{ id: 'profiling' as const, label: 'Profiling', icon: LineChart, hint: 'Counts and composition over time, across this workspace' }]
+                        : []),
                     { id: 'views' as const, label: 'Views', icon: Eye, count: allWorkspaceViews.length, hint: 'Saved visual perspectives on your data' },
                     { id: 'aggregation' as const, label: 'Aggregation', icon: Settings2, hint: 'Edge materialization and job monitoring' },
                     { id: 'ontology' as const, label: 'Ontology', icon: GitBranch, hint: 'Semantic type system and change history' },
@@ -559,6 +567,24 @@ export function WorkspaceDetailPage() {
                         />
                     )}
                 </>
+            )}
+
+            {/* ── Profiling Tab ────────────────────────────── */}
+            {activeSection === 'profiling' && (
+                <div className="py-4">
+                    <ProfilingBoard
+                        workspaceId={wsId}
+                        onOpenSource={(row) => {
+                            // Drill into the source the board named, landing on
+                            // its Profiling tab rather than its Overview — the
+                            // reader arrived here asking about movement.
+                            const merged = new URLSearchParams(searchParams)
+                            merged.set('ds', row.data_source_id)
+                            merged.set('dstab', 'profiling')
+                            setSearchParams(merged, { replace: true })
+                        }}
+                    />
+                </div>
             )}
 
             {/* ── Views Tab ────────────────────────────────── */}

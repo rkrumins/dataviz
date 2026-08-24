@@ -1321,6 +1321,37 @@ async def lifespan(_app: FastAPI):
             name="refresh-token-gc",
         )
 
+    # Product-event retention sweep. ``product_events`` now takes a row per
+    # view open, lineage trace and graph search, so it grows with usage and
+    # needs a horizon. Same owner role, same reason.
+    _app.state._product_event_gc_shutdown = asyncio.Event()
+    _app.state._product_event_gc_task = None
+    if runs_scheduler():
+        from .services.product_event_gc import run_sweeper as _run_product_event_gc
+        _app.state._product_event_gc_task = asyncio.create_task(
+            _run_product_event_gc(
+                get_jobs_session,
+                _app.state._product_event_gc_shutdown,
+            ),
+            name="product-event-gc",
+        )
+
+    # Analytics warmer — precomputes the standard windows so no reader ever
+    # pays for an aggregation. Same owner role: one replica warming the shared
+    # Redis copy, not three racing to warm it. Purely an optimisation; the
+    # endpoints fall back to read-through if this never runs.
+    _app.state._analytics_warmer_shutdown = asyncio.Event()
+    _app.state._analytics_warmer_task = None
+    if runs_scheduler():
+        from .services.analytics_warmer import run_warmer as _run_analytics_warmer
+        _app.state._analytics_warmer_task = asyncio.create_task(
+            _run_analytics_warmer(
+                get_jobs_session,
+                _app.state._analytics_warmer_shutdown,
+            ),
+            name="analytics-warmer",
+        )
+
     # IdP health sweep → app.state.idp_health_cache, read by the cache-only
     # GET /admin/idp-providers/status. Same runs_scheduler() gating as the
     # relay so replicas don't each probe every IdP. The cache is initialised
@@ -1415,6 +1446,36 @@ async def lifespan(_app: FastAPI):
             _refresh_gc_task.cancel()
             try:
                 await _refresh_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the product-event sweeper before DB pool teardown, same shape.
+    _pe_gc_shutdown = getattr(_app.state, "_product_event_gc_shutdown", None)
+    _pe_gc_task = getattr(_app.state, "_product_event_gc_task", None)
+    if _pe_gc_shutdown is not None:
+        _pe_gc_shutdown.set()
+    if _pe_gc_task is not None and not _pe_gc_task.done():
+        try:
+            await asyncio.wait_for(_pe_gc_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _pe_gc_task.cancel()
+            try:
+                await _pe_gc_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    # Stop the analytics warmer before DB pool teardown, same shape.
+    _warm_shutdown = getattr(_app.state, "_analytics_warmer_shutdown", None)
+    _warm_task = getattr(_app.state, "_analytics_warmer_task", None)
+    if _warm_shutdown is not None:
+        _warm_shutdown.set()
+    if _warm_task is not None and not _warm_task.done():
+        try:
+            await asyncio.wait_for(_warm_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            _warm_task.cancel()
+            try:
+                await _warm_task
             except (asyncio.CancelledError, Exception):
                 pass
 

@@ -39,3 +39,30 @@ data:
   STATS_POLL_TIMEOUT_SECS: {{ .Values.config.stats.pollTimeoutSecs | quote }}
   STATS_POLL_TIMEOUT_LARGE_SECS: {{ .Values.config.stats.pollTimeoutLargeSecs | quote }}
   STATS_POLL_LARGE_THRESHOLD: {{ .Values.config.stats.pollLargeThreshold | quote }}
+  # Counts history — the append-only record behind the per-source history
+  # UI. Captured inside the existing counts write, so no extra provider
+  # I/O; change-gated plus a heartbeat so the 60s probe lane does not
+  # write a row per probe. Retention is purged by age AND per-source cap,
+  # and an admin can override both live in Platform settings.
+  PROFILING_ENABLED: {{ .Values.config.profiling.enabled | quote }}
+  PROFILING_HEARTBEAT_SECS: {{ .Values.config.profiling.heartbeatSecs | quote }}
+  PROFILING_RAW_RETENTION_DAYS: {{ .Values.config.profiling.rawRetentionDays | quote }}
+  PROFILING_HOURLY_RETENTION_DAYS: {{ .Values.config.profiling.hourlyRetentionDays | quote }}
+  PROFILING_DAILY_RETENTION_DAYS: {{ .Values.config.profiling.dailyRetentionDays | quote }}
+  PROFILING_MAX_ROWS_PER_SOURCE: {{ .Values.config.profiling.maxRowsPerSource | quote }}
+  PROFILING_COMPACT_INTERVAL_SECS: {{ .Values.config.profiling.compactIntervalSecs | quote }}
+  PROFILING_RETENTION_INTERVAL_SECS: {{ .Values.config.profiling.retentionIntervalSecs | quote }}
+  PROFILING_ALERTS_ENABLED: {{ .Values.config.profiling.alertsEnabled | quote }}
+  PROFILING_ALERT_MIN_SEVERITY: {{ .Values.config.profiling.alertMinSeverity | quote }}
+  PROFILING_ALERT_COOLDOWN_SECS: {{ .Values.config.profiling.alertCooldownSecs | quote }}
+  PROFILING_ALERT_INTERVAL_SECS: {{ .Values.config.profiling.alertIntervalSecs | quote }}
+  PROFILING_SILENT_AFTER_SECS: {{ .Values.config.profiling.silentAfterSecs | quote }}
+
+  # Read by two roles on purpose: the controlplane warms on this cadence and
+  # every web process snaps its analytics windows to the same grid. One
+  # ConfigMap serves both, so they cannot drift apart.
+  ANALYTICS_WARM_INTERVAL_SECONDS: {{ .Values.config.analytics.warmIntervalSeconds | quote }}
+  # Only the scheduler role acts on this — the sweep is gated on
+  # runs_scheduler() — but it is harmless and clearer to ship it fleet-wide
+  # from the same place as everything else.
+  PRODUCT_EVENT_RETENTION_DAYS: {{ .Values.config.analytics.productEventRetentionDays | quote }}

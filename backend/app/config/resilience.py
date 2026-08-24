@@ -269,6 +269,134 @@ STATS_CACHE_ABSOLUTE_EXPIRY_SECS: int = int(os.getenv("STATS_CACHE_ABSOLUTE_EXPI
 STATS_SERVICE_LAGGING_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_LAGGING_THRESHOLD_SECS", "60"))
 STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS: int = int(os.getenv("STATS_SERVICE_UNREACHABLE_THRESHOLD_SECS", "600"))
 
+# ── Profiling: capture (data_source_count_snapshots) ────────────────
+# The append-only twin of data_source_stats: what a source looked like at
+# a point in time, per type, with the delta against the previous
+# observation. Capture happens inside the stats repo's counts write, so
+# every lane (probe, poll, deep, sweep, app writes) feeds one series and
+# no new provider I/O is added anywhere.
+#
+# These live here rather than in insights_service/config.py because BOTH
+# tiers read them: the web tier captures on its own write paths and serves
+# the profiling API, the insights service captures, compacts and purges.
+PROFILING_ENABLED: bool = os.getenv("PROFILING_ENABLED", "true").lower() == "true"
+
+# Continuity row when nothing changed. Capture is change-gated on
+# counts_digest, so a graph nobody is writing to would otherwise leave a
+# hole that reads identically to "we lost the data".
+#
+# ALIGNED TO THE POLL, not chosen independently. The insights service
+# observes each source every STATS_DEFAULT_INTERVAL_SECS (900); at an
+# hourly heartbeat we recorded roughly one observation in four, so a
+# 24-hour window showed ~9 points for a source that had been polled ~96
+# times. Nine flat points reads as a dead pipeline, which is the exact
+# ambiguity this feature exists to remove.
+#
+# It buys resolution for STILLNESS only. A change is never gated — see
+# `maybe_capture_snapshot` — so an incident was always pinned to the
+# observation that saw it, and this does not improve that by a second.
+# What it buys is the ability to tell "stable" from "unwatched", and a
+# 24-hour view dense enough to investigate.
+#
+# Costs the RAW tier alone: ~672 rows/source/week instead of ~168, about
+# 0.5 GB more at 1,000 sources. The rollups are bounded by BUCKETS, not
+# observations — an hour bucket is one row however often it was sampled —
+# so 30- and 90-day coverage costs exactly what it did before.
+PROFILING_HEARTBEAT_SECS: int = int(os.getenv("PROFILING_HEARTBEAT_SECS", "900"))
+
+# ── Profiling: tiered retention ─────────────────────────────────────
+# Raw is the record of what was OBSERVED; the rollup tiers are the record
+# of what a PERIOD looked like. Compaction builds hour buckets from raw
+# BEFORE raw is purged, and day buckets from hour — so coverage outlives
+# resolution instead of being bounded by it.
+#
+# This replaces a single age cutoff plus a per-source row cap. The cap is
+# still here as a raw-tier safety valve, but it can no longer decide how
+# far back history goes: it bounds ROWS, and a source thrashing under a
+# broken loader hits its cap in under a week, which silently evicted
+# exactly the source whose 30-day history someone would come looking for.
+PROFILING_RAW_RETENTION_DAYS: int = int(os.getenv("PROFILING_RAW_RETENTION_DAYS", "7"))
+
+# The tier that carries the product's 30-day floor, with headroom.
+PROFILING_HOURLY_RETENTION_DAYS: int = int(
+    os.getenv("PROFILING_HOURLY_RETENTION_DAYS", "45")
+)
+
+# One row per source per day is cheap enough that the limit is judgement,
+# not cost: a year and a bit lets someone compare this quarter to the same
+# quarter last year.
+PROFILING_DAILY_RETENTION_DAYS: int = int(
+    os.getenv("PROFILING_DAILY_RETENTION_DAYS", "400")
+)
+
+# Raw-tier safety valve, applied alongside the age cutoff. A source
+# changing on every 60s probe is 43k rows a month; this stops one
+# pathological source dominating the raw table between purges.
+#
+# 10,000 covers a full 7-day raw window at one observation per minute
+# (10,080). At the previous 5,000 a source thrashing hard enough to
+# capture every minute kept only ~3.5 days of raw — and a thrashing
+# source is precisely the one someone opens a 7-day investigation on.
+# The rollups always covered the window; this makes the raw tier cover
+# it too, at a worst case of ~10 MB per pathological source.
+PROFILING_MAX_ROWS_PER_SOURCE: int = int(
+    os.getenv("PROFILING_MAX_ROWS_PER_SOURCE", "10000")
+)
+
+# How often raw is compacted into the tiers. Much tighter than the purge
+# cadence on purpose: purge cannot delete raw beyond the compaction
+# watermark, so a slow compactor does not lose data — it stops retention
+# from progressing, and the raw table grows until it catches up.
+PROFILING_COMPACT_INTERVAL_SECS: int = int(
+    os.getenv("PROFILING_COMPACT_INTERVAL_SECS", "300")
+)
+
+# How often the retention pass runs across all three tiers.
+PROFILING_RETENTION_INTERVAL_SECS: int = int(
+    os.getenv("PROFILING_RETENTION_INTERVAL_SECS", "3600")
+)
+
+# ── Profiling: anomaly alerting ─────────────────────────────────────
+# Turns profiling from something you go and look at into something that
+# tells you. Evaluation is a sweep in the insights service, not a hook on the
+# write: significance is a property of a WINDOW (the source's own median
+# absolute movement), so judging at capture time would put a range scan on the
+# 60s probe path and would run inside the web tier as well.
+PROFILING_ALERTS_ENABLED: bool = os.getenv(
+    "PROFILING_ALERTS_ENABLED", "true"
+).lower() == "true"
+
+# Severity floor: "severe" (>=8x the source's typical movement) alerts only on
+# the extreme tail; "notable" (>=3x) widens it. Defaults to severe because an
+# alerting default that is too eager gets muted, and a muted alert is worth
+# less than no alert — people stop reading it but still believe it is watching.
+PROFILING_ALERT_MIN_SEVERITY: str = os.getenv("PROFILING_ALERT_MIN_SEVERITY", "severe")
+
+# At most one alert per source per metric per this interval. A graph thrashing
+# under a broken loader moves unusually on EVERY probe; one alert per probe
+# turns a single incident into a pager storm and trains people to ignore it.
+# Per METRIC, not per source: an entity incident must not mute a concurrent
+# relationship one, because they fail independently.
+PROFILING_ALERT_COOLDOWN_SECS: int = int(
+    os.getenv("PROFILING_ALERT_COOLDOWN_SECS", "21600")
+)
+
+# How often the evaluation sweep runs. Its own knob, like the retention
+# cadence: how quickly you learn about an anomaly is a different question from
+# how long the evidence is kept.
+PROFILING_ALERT_INTERVAL_SECS: int = int(
+    os.getenv("PROFILING_ALERT_INTERVAL_SECS", "900")
+)
+
+# How long after its last observation a source is considered SILENT. Not the
+# same as dropping to zero: a source nobody can reach any more (expired
+# credential, dropped graph, provider rotated out) reports nothing at all, and
+# a series that simply stops is invisible on a chart of what it did report.
+# Generous against the hourly heartbeat so an idle source never trips it.
+PROFILING_SILENT_AFTER_SECS: int = int(
+    os.getenv("PROFILING_SILENT_AFTER_SECS", "21600")
+)
+
 # ── Discovery (pre-registration asset cache) ────────────────────────
 # Cadence for the background ``run_discovery_scheduler`` coroutine.
 # Each tick fans out enqueue calls for every active provider's

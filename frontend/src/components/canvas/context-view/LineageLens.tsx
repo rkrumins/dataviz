@@ -711,7 +711,15 @@ export function LineageLens({
     // a behavioural change. Since 2026-08-22 `editView` writes inside a
     // transition, so the rule no longer fires here at all — the feedback
     // is scheduled, not a synchronous cascade.
-    editView(base => ({ ...base, walkedThrough: new Set(layout.walkedThrough) }))
+    // GROW-ONLY FOR REAL — this used to write `new Set(layout.walkedThrough)`,
+    // which is a REPLACE, and the comment above was describing an intent the code
+    // did not implement. `focus-layout` builds that set with
+    // `.filter(u => !bundled.has(u))`, and `bundled` is itself derived from a
+    // layout that consumed `view.walkedThrough`. So a urn the filter dropped
+    // changed the next layout, which could un-bundle it, which re-added it —
+    // A -> B -> A, at transition priority, each lap a full board re-layout. The
+    // union can only ever grow, so the guard above ends it in one pass.
+    editView(base => ({ ...base, walkedThrough: new Set([...seen, ...layout.walkedThrough]) }))
   }, [layout.walkedThrough, view.walkedThrough, editView, seedPendingForFocal])
 
   // And so is the ORDER. A card's rank comes from its weight, and weight
@@ -722,7 +730,13 @@ export function LineageLens({
   useEffect(() => {
     // See `seedPendingForFocal`'s own doc comment above.
     if (seedPendingForFocal) return
-    if (layout.drawnRank.size === view.drawnRank.size) return
+    // Compare CONTENT, not just size. A size-only guard silently swallows a
+    // same-size/different-content change — and `drawnRank` is what fixes each
+    // card's slot, so swallowing one leaves the board ordered by a stale rank.
+    if (
+      layout.drawnRank.size === view.drawnRank.size &&
+      [...layout.drawnRank].every(([urn, rank]) => view.drawnRank.get(urn) === rank)
+    ) return
     // Same ratified layout→view feedback as `walkedThrough` above, and
     // likewise scheduled rather than synchronous since `editView` became
     // a transition.
@@ -1564,9 +1578,17 @@ export function LineageLens({
         className="fixed inset-0 z-[9990] flex items-center justify-center p-6"
       >
         {/* Backdrop — the ONE click outside the room, and the one that
-            asks before throwing a walk away. */}
+            asks before throwing a walk away.
+
+            NO `backdrop-filter` here, deliberately. This is a viewport-sized
+            layer sitting over a canvas that never stops moving — the flow
+            overlay's edges, a dozen `infinite` keyframes — so the compositor was
+            re-sampling the whole surface beneath it every frame, which is a
+            known way to make a page tear and flicker on some GPU/driver
+            combinations. The scrim does the actual work (separating the room
+            from the board); the blur was decoration on top of it. */}
         <div
-          className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+          className="absolute inset-0 bg-black/50"
           onClick={requestClose}
         />
 
@@ -2370,8 +2392,9 @@ export function LineageLens({
               only while the lens is open. So the way OUT asks, once
               there is something to lose. (The board's own background
               never gets here at all: it peels a layer and stops.) */}
+          {/* Scrim only, no `backdrop-filter` — see the outer backdrop above. */}
           {confirmClose && (
-            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+            <div className="absolute inset-0 z-[60] flex items-center justify-center bg-black/40">
               <div
                 role="alertdialog"
                 aria-modal="true"

@@ -16,7 +16,8 @@
     "prebuild": "node scripts/generate-features-fallback.js || true; node scripts/gen-doc-meta.mjs || true",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "harness": "vite --port 5199 --strictPort",
-    "harness:shot": "node scripts/harness-shot.mjs"
+    "harness:shot": "node scripts/harness-shot.mjs",
+    "harness:analytics": "node scripts/analytics-shot.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

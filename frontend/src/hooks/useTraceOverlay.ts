@@ -407,5 +407,11 @@ export function useTraceOverlay(a: UseTraceOverlayArgs): TraceOverlay {
     return []
   }, [view])
 
-  return { active, view, traceExpansion, toggle, expandPath, restoreExpansion, revealPath, exit }
+  // Memoized for the same reason as `useUnifiedTrace`'s return: consumers put this
+  // object into dependency arrays, so a fresh literal each render silently defeats
+  // every memo downstream of it.
+  return useMemo(
+    () => ({ active, view, traceExpansion, toggle, expandPath, restoreExpansion, revealPath, exit }),
+    [active, view, traceExpansion, toggle, expandPath, restoreExpansion, revealPath, exit],
+  )
 }

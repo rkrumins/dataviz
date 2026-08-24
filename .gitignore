@@ -250,3 +250,8 @@ backend/nexus_core.db-shm
 backend/nexus_lineage.db
 node_modules
 backend/.venv/
+
+# Local test virtualenvs. `.venv` above covers the usual name; this catches
+# the suffixed ones people make when the system Python has distro-managed
+# packages that `pip install -r` refuses to touch.
+.venv-*/

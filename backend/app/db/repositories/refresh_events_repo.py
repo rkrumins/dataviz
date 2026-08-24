@@ -107,6 +107,40 @@ async def list_refresh_events(
     return list(rows)
 
 
+async def list_refresh_events_between(
+    session: AsyncSession,
+    data_source_id: str,
+    *,
+    frm: str,
+    to: str,
+    limit: int = 200,
+) -> list[RefreshEventORM]:
+    """Events for a data source inside a time window, oldest first.
+
+    The counts-history view correlates against this: a snapshot says WHAT the
+    numbers did, and these say what the platform was doing at that moment — a
+    reconcile sweep, an aggregation rebuild, a script-driven refresh. Answering
+    "did an external process cause this drop" needs both halves, and without
+    the window the caller would have to pull an unbounded trail and filter it
+    client-side.
+
+    Oldest-first (unlike :func:`list_refresh_events`, which is a newest-first
+    feed) because the caller aligns these onto the same ascending time axis as
+    the snapshots.
+    """
+    rows = (await session.execute(
+        select(RefreshEventORM)
+        .where(
+            RefreshEventORM.data_source_id == data_source_id,
+            RefreshEventORM.ts >= frm,
+            RefreshEventORM.ts <= to,
+        )
+        .order_by(RefreshEventORM.ts.asc())
+        .limit(limit)
+    )).scalars().all()
+    return list(rows)
+
+
 async def latest_refresh_event_map(
     session: AsyncSession, data_source_ids: list[str],
 ) -> dict[str, RefreshEventORM]:

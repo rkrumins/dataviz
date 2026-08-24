@@ -64,9 +64,23 @@ export function useContainmentHierarchy({
   const childMapRef = useRef(new Map<string, string[]>())
   const childMapSourceRef = useRef<Map<string, Set<string>> | null>(null)
   const childMapKeyRef = useRef<string>('')
+  const nodeMapRef = useRef<Map<string, LineageNode>>(new Map())
 
   const { nodeMap, childMap, parentMap } = useMemo(() => {
-    const nMap = new Map(nodes.map((n) => [n.id, n]))
+    // Reuse the previous nodeMap when the node set is unchanged. `nodes` (the flat
+    // tree) is handed to us as a NEW array on benign upstream churn — a schema
+    // refetch that changed nothing, a parent re-render — and a fresh Map here
+    // propagates that churn straight into consumers' memo deps. That is what tore
+    // down `LineageFlowOverlay`'s observers (keyed on the flat tree) and blanked
+    // the edge layer for a frame. Same length and the same node object per id
+    // means no consumer can observe a difference, so hand back the same Map.
+    // O(n) lookups, no allocation — cheaper than the rebuild it replaces.
+    const prevNodeMap = nodeMapRef.current
+    let nMap = prevNodeMap
+    if (prevNodeMap.size !== nodes.length || nodes.some((n) => prevNodeMap.get(n.id) !== n)) {
+      nMap = new Map(nodes.map((n) => [n.id, n]))
+      nodeMapRef.current = nMap
+    }
 
     // Determine whether a full rebuild is needed
     const predicateChanged = prevIsContainmentRef.current !== isContainmentEdge

@@ -22,6 +22,7 @@ import type {
 import type { TraceMeta } from '@/services/traceApi'
 import { mapWithConcurrency } from '@/lib/concurrency'
 import { useCanvasStore } from '@/store/canvas'
+import { recordEvent } from '@/services/telemetryService'
 
 // ============================================
 // Types
@@ -839,6 +840,31 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
 
         const traceResult = await fetchTrace(nodeId, provider, urnResolver)
 
+        // The product's value moment, and until now the only unmeasured one.
+        // Every preset (upstream / downstream / full / retrace / toggle /
+        // history-jump) funnels through here, so one call site covers them all.
+        //
+        // A trace that comes back with no lineage is recorded as a DIFFERENT
+        // event type, not a flag: "how often does someone ask for lineage and
+        // get nothing back?" is the question worth answering, and a separate
+        // type keeps it a GROUP BY rather than a payload scan.
+        if (traceResult) {
+            // "Empty" means the trace found no lineage in either direction —
+            // the focus node itself is always in traceNodes, so counting that
+            // would call every failed trace a success.
+            const reach =
+                traceResult.upstreamNodes.size + traceResult.downstreamNodes.size
+            recordEvent(reach > 0 ? 'lineage.trace' : 'lineage.trace_empty', {
+                nodes: traceResult.traceNodes.size,
+                edges: traceResult.traceEdges.size,
+                upstream: traceResult.upstreamNodes.size,
+                downstream: traceResult.downstreamNodes.size,
+                level: traceResult.effectiveLevel ?? null,
+                truncated: traceResult.truncated ?? false,
+                inherited: traceResult.isInherited ?? false,
+            })
+        }
+
         if (traceResult && onTraceComplete) {
             onTraceComplete(traceResult)
         }
@@ -1028,7 +1054,18 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         }
     }, [result, upstreamCount, downstreamCount, drilldowns])
 
-    return {
+    // MEMOIZED, and it matters far more than it looks.
+    //
+    // This returned a fresh 39-field object literal on every render. Consumers put
+    // it straight into dependency arrays — `ContextViewCanvas`'s `dockTrace` memo
+    // among them — so those memos NEVER hit their cache: four `Set`s over the full
+    // trace model were rebuilt on every render of a 5,000-line component, and the
+    // whole trace dock re-rendered with them. That is the render volume the rest of
+    // the flicker chain was being multiplied by.
+    //
+    // Every field below is a zustand selection, a primitive, a `useCallback` or a
+    // `useMemo`, so this genuinely holds its identity when nothing has changed.
+    return useMemo(() => ({
         status,
         error,
         focusId,
@@ -1068,7 +1105,47 @@ export function useUnifiedTrace(options: UseUnifiedTraceOptions): UseUnifiedTrac
         recordAddedEdgeIds,
         resetAddedEdgeIds,
         expandingPairs,
-    }
+    }), [
+        status,
+        error,
+        focusId,
+        result,
+        isTracing,
+        isLoading,
+        config,
+        setConfig,
+        showUpstream,
+        showDownstream,
+        setShowUpstream,
+        setShowDownstream,
+        startTrace,
+        toggleTrace,
+        clearTrace,
+        retrace,
+        traceUpstream,
+        traceDownstream,
+        traceFullLineage,
+        isInTrace,
+        isUpstream,
+        isDownstream,
+        isFocus,
+        visibleTraceNodes,
+        traceContextSet,
+        upstreamCount,
+        downstreamCount,
+        statistics,
+        drilldowns,
+        expandAggregatedEdge,
+        expandAggregatedEdgesBatch,
+        collapseDrilldown,
+        traceHistory,
+        jumpToHistoryEntry,
+        clearTraceHistory,
+        addedEdgeIds,
+        recordAddedEdgeIds,
+        resetAddedEdgeIds,
+        expandingPairs,
+    ])
 }
 
 // ============================================

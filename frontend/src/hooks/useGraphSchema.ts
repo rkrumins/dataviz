@@ -160,6 +160,29 @@ export function useGraphSchema(options?: UseGraphSchemaOptions) {
     queryKey: [...GRAPH_SCHEMA_QUERY_KEY, workspaceId, dataSourceId, providerVersion, viewId ?? null],
     queryFn: () => fetchGraphSchema(workspaceId!, dataSourceId!, viewId),
     enabled: Boolean(workspaceId && dataSourceId),
+    // Keep serving the schema we already have while a re-key refetches.
+    //
+    // `providerVersion` is part of the key, so anything that bumps it — a
+    // projection watermark catching up, a provider health recovery — produced a
+    // COLD cache entry: `data` went `undefined`, and every gate downstream
+    // (`ViewSchemaGate`, `SchemaScope`) unmounted the canvas subtree it was
+    // guarding, taking the React Flow instance, the open lens and the trace state
+    // with it. Reusing the previous entry's data makes that a background refetch
+    // instead of a teardown.
+    //
+    // The scope guard is NOT optional: a bare `(prev) => prev` would hand
+    // workspace A's ontology to workspace B's provider, which is the exact
+    // cross-workspace contamination the key comment above exists to prevent. Only
+    // reuse when workspace, data source and view are identical and it is purely
+    // the version that moved.
+    placeholderData: (prev, prevQuery) => {
+      const key = prevQuery?.queryKey as unknown[] | undefined
+      if (!key) return undefined
+      const sameScope = key[2] === workspaceId
+        && key[3] === dataSourceId
+        && key[5] === (viewId ?? null)
+      return sameScope ? prev : undefined
+    },
     staleTime: 5 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
     // One retry buys resilience against transient blips (network drop,

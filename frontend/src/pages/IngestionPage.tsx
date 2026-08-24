@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { Server, Layers, Activity, DatabaseZap, BellOff, Gauge } from 'lucide-react'
+import { Server, Layers, Activity, DatabaseZap, BellOff, Gauge, LineChart } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { providerService } from '@/services/providerService'
 import { catalogService } from '@/services/catalogService'
@@ -12,11 +12,13 @@ import { RegistryConnections } from '@/components/admin/RegistryConnections'
 import { RegistryAssets } from '@/components/admin/RegistryAssets'
 import { RegistryJobHistory } from '@/components/admin/RegistryJobHistory'
 import { Freshness } from '@/components/admin/Freshness'
+import { ProfilingBoard } from '@/components/ingestion/profiling/ProfilingBoard'
+import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { OnboardingProgress } from '@/components/admin/OnboardingProgress'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { TourLaunchButton } from '@/features/tour/TourLaunchButton'
 
-type IngestionTab = 'providers' | 'assets' | 'jobs' | 'freshness'
+type IngestionTab = 'providers' | 'assets' | 'jobs' | 'freshness' | 'profiling'
 
 interface TabDef {
     id: IngestionTab
@@ -30,6 +32,12 @@ const ALL_TABS: TabDef[] = [
     { id: 'assets', label: 'Data Sources', icon: Layers, desc: 'Register and configure data sources' },
     { id: 'jobs', label: 'Job History', icon: Activity, desc: 'Aggregation job history and monitoring' },
     { id: 'freshness', label: 'Freshness', icon: Gauge, desc: 'Monitor overlay integrity and source freshness' },
+    // Profiling sits beside Freshness on purpose. Freshness asks "is it
+    // current?", Reconciliation asks "does it agree?", Profiling asks "what is
+    // in it, and is that changing?" — three readings of the same onboarded
+    // source, and separating one of them into its own section is what made it
+    // unreachable.
+    { id: 'profiling', label: 'Profiling', icon: LineChart, desc: 'Counts and composition over time' },
 ]
 
 /** "until 3:45 PM" for a same-day snooze, "until Wed 8:00 AM" otherwise. */
@@ -60,6 +68,7 @@ export function IngestionPage() {
     // provider:read / datasource:manage (both any-workspace, both short-circuit
     // for system/org admins). Catalog-only readers can't load it, so hide it.
     const canReadFreshness = canReadProviders || hasDataSourceManage
+    const canReadProfiling = useCanReadProfiling()
 
     // Provider-alert snooze (set from the status banner). Surfaced here so
     // it's discoverable and undoable — the banner hides itself while snoozed.
@@ -71,9 +80,13 @@ export function IngestionPage() {
     const visibleTabs = useMemo(
         () => ALL_TABS.filter(t =>
             (t.id !== 'providers' || canReadProviders) &&
-            (t.id !== 'freshness' || canReadFreshness)
+            (t.id !== 'freshness' || canReadFreshness) &&
+            // Same gate the API carries, so the tab is never offered to
+            // someone the server would refuse — and never hidden from someone
+            // it would answer.
+            (t.id !== 'profiling' || canReadProfiling)
         ),
-        [canReadProviders, canReadFreshness],
+        [canReadProviders, canReadFreshness, canReadProfiling],
     )
 
     const rawTab = searchParams.get('tab')
@@ -277,6 +290,7 @@ export function IngestionPage() {
                         {activeTab === 'providers' && canReadProviders && <RegistryConnections />}
                         {activeTab === 'assets' && <RegistryAssets />}
                         {activeTab === 'freshness' && <Freshness />}
+                        {activeTab === 'profiling' && <ProfilingBoard />}
                     </PageContainer>
                 )}
             </div>

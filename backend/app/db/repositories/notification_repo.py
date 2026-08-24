@@ -340,3 +340,111 @@ async def notify_reconcile_suspended(
         resource_id=data_source_id,
         dedupe_unread=True,
     )
+
+
+async def notify_counts_anomaly(
+    session: AsyncSession,
+    *,
+    workspace_id: Optional[str],
+    data_source_id: str,
+    catalog_item_id: Optional[str],
+    provider_name: Optional[str],
+    source_name: str,
+    severity: str,
+    direction: str,
+    node_delta: int,
+    node_count: int = 0,
+    metric: str = "nodes",
+    finding: str = "movement",
+    subject_type: Optional[str] = None,
+) -> int:
+    """Bell for a graph that moved far outside its own normal range.
+
+    Same audience and dedupe discipline as :func:`notify_reconcile_suspended`:
+    the workspace's data source managers plus globally bound platform admins,
+    unread-deduped per source so an incident that keeps moving rings once.
+
+    The copy leads with the number and the direction, because the first
+    question anyone asks is "how much, and which way" — and a title that only
+    says "anomaly detected" makes them open the page to find out.
+    """
+    managers = (
+        await users_who_can(
+            session,
+            workspace_id=workspace_id,
+            permission="workspace:datasource:manage",
+        )
+        if workspace_id else set()
+    )
+    admins = await users_with_global_permission(session, "system:admin")
+
+    magnitude = f"{abs(node_delta):,}"
+    verb = "lost" if direction == "drop" else "gained"
+    # Nodes and edges fail independently and for different reasons, so the
+    # bell has to say which one. "Orders lost 48,900" sends someone looking
+    # for missing records when every record is present and every link between
+    # them is gone.
+    noun = "relationships" if metric == "edges" else "entities"
+    # Critical is not a bigger version of severe — it means the graph is
+    # nearly gone — so it gets its own sentence rather than a stronger adverb.
+    scale = {
+        "critical": None,
+        "severe": "far outside",
+    }.get(severity, "outside")
+    # The history view is routed by CATALOG id; the alert knows the data
+    # source. When the two cannot be connected — an unregistered graph, a
+    # catalog entry since removed — fall back to the freshness cockpit, which
+    # is keyed on the data source and is where the sibling ops alert points.
+    # A link that lands somewhere useful beats a precise one that 404s.
+    link = (
+        f"/datasources/{catalog_item_id}/history?ds={data_source_id}"
+        if catalog_item_id
+        else f"/ingestion?tab=freshness&fds={data_source_id}"
+    )
+    return await notify(
+        session,
+        user_ids=managers | admins,
+        kind="insights.counts_anomaly",
+        # The provider is in the TITLE, not the body. An operator running
+        # several providers reads the bell as a list, and "Orders lost 4.2M"
+        # does not say which deployment to go and look at.
+        title=(
+            (
+                f"{source_name} has stopped reporting"
+                if finding == "silent"
+                else f"{source_name}: {subject_type} is gone"
+                if finding == "type_gone" and subject_type
+                else f"{source_name} {verb} {magnitude} {noun}"
+            )
+            + (f" on {provider_name}" if provider_name else "")
+        ),
+        body=(
+            (
+                # Silence is the absence of a signal, so there is no magnitude
+                # to lead with — and no chart on which it appears, which is
+                # why nobody would otherwise notice.
+                "No counts have been observed for this source recently. "
+                "Its credentials, its graph, or the provider behind it may "
+                "have gone away — nothing on the chart can show this."
+                if finding == "silent" else
+                # A type reaching zero is categorical, so the usual "outside
+                # its normal range" framing does not apply — as a share of a
+                # large graph the loss is often unremarkable, which is exactly
+                # why it needed its own finding.
+                f"Every one of the {magnitude} {noun} of this type has gone. "
+                "Nothing about the total size says so, which is why this is "
+                "reported on its own."
+                if finding == "type_gone" else
+                f"Almost nothing is left — {node_count:,} {noun} remain. "
+                "Check the source system before anything reloads over it."
+                if scale is None else
+                f"That is {scale} this source's usual movement."
+            )
+            + " Open profiling to see which types moved and what else was "
+            "running at the time."
+        ),
+        link=link,
+        resource_type="data_source",
+        resource_id=data_source_id,
+        dedupe_unread=True,
+    )

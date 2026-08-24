@@ -29,7 +29,7 @@
  * A failed step is never auto-retried; `retryWalk` gives it one more go.
  * Closing the lens (or re-anchoring) aborts in-flight requests.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider, TraceClosureRequest } from '@/providers/GraphDataProvider'
 import {
     toLensClosure,
@@ -512,7 +512,7 @@ export function useLensWalk(
         }
     }, [fullWalk, focusUrn, provider, state, walkMeta, page, pageSeeds, bulk])
 
-    const walkProgressFor = useCallback((urn: string): WalkProgress | null => {
+    const computeWalkProgress = useCallback((urn: string): WalkProgress | null => {
         const cacheKey = cacheKeyFor(provider, urn)
         const entry = state.get(cacheKey)
         if (!entry) return null
@@ -548,6 +548,36 @@ export function useLensWalk(
         // fire (it runs after this render).
         return { ...base, phase: fullWalk ? 'walking' : 'seeding', pending: owed }
     }, [provider, state, walkMeta, fullWalk])
+
+    /**
+     * `walkProgressFor`, but stable per (provider, urn) for as long as the walk
+     * inputs are unchanged.
+     *
+     * This is called DURING RENDER — `ContextViewCanvas` passes the result straight
+     * to the lens as a prop — and it minted a brand-new object on every call, so a
+     * value that had not actually changed re-rendered the lens on every render of
+     * its parent. The cache is thrown away whenever `provider`/`state`/`walkMeta`/
+     * `fullWalk` move, so it can never serve a stale phase; within one generation
+     * the same urn gets the same object.
+     */
+    const progressCache = useMemo(
+        () => new Map<string, WalkProgress | null>(),
+        // These deps ARE the cache key — a new Map per generation of walk inputs —
+        // so the rule's "unnecessary dependencies" reading is backwards here:
+        // dropping them makes the cache permanent and it starts serving stale phases.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [provider, state, walkMeta, fullWalk],
+    )
+
+    const walkProgressFor = useCallback((urn: string): WalkProgress | null => {
+        const cacheKey = cacheKeyFor(provider, urn)
+        const cache = progressCache
+        const hit = cache.get(cacheKey)
+        if (hit !== undefined) return hit
+        const value = computeWalkProgress(urn)
+        cache.set(cacheKey, value)
+        return value
+    }, [provider, progressCache, computeWalkProgress])
 
     const retryWalk = useCallback((urn: string) => {
         const cacheKey = cacheKeyFor(provider, urn)

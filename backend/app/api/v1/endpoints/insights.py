@@ -39,15 +39,21 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel, Field
 
+from backend.app.auth.dependencies import (
+    get_current_user,
+    get_permission_claims,
+    requires,
+)
+from backend.app.services.permission_service import PermissionClaims
 from backend.app.config import resilience
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
@@ -55,6 +61,7 @@ from backend.app.db.models import (
     ProviderAdmissionConfigORM,
     ProviderHealthWindowORM,
     ProviderORM,
+    WorkspaceDataSourceORM,
 )
 from backend.insights_service.admission import invalidate_config as invalidate_admission_cache
 from backend.insights_service.enqueue import enqueue_discovery_job_safe
@@ -63,6 +70,7 @@ from backend.insights_service.redis_streams import DISCOVERY_STREAM, claim_exist
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
 
 
 # ── Envelope helpers ────────────────────────────────────────────────

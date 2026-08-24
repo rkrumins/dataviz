@@ -684,6 +684,7 @@ class ReconciliationSweeper:
                             edge_count=edge_count,
                             entity_type_counts=json.dumps(entity),
                             edge_type_counts=json.dumps(edges),
+                            lane="sweep",
                         )
                         await session.commit()
                 except Exception as exc:
