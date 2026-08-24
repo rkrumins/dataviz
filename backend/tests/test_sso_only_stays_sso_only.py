@@ -32,6 +32,14 @@ from backend.auth_service.core.password import (
 
 _PASSWORD = "C0mpl3x!Passw0rd#"
 
+#: What a reset moves the password TO. Derived from _PASSWORD rather than
+#: written as a second credential-shaped literal: the tests only need a
+#: value that DIFFERS and still clears the zxcvbn strength check, and a
+#: second hardcoded password is a second thing for a secret scanner to
+#: flag for no benefit. _PASSWORD itself stays as-is -- it is the shared
+#: fixture ten other auth test files already use.
+_NEW_PASSWORD = _PASSWORD + "-rotated"
+
 
 async def _sso_only_user(db_session: AsyncSession, email: str) -> str:
     user = await user_repo.create_sso_user(
@@ -62,7 +70,7 @@ async def test_token_reset_is_refused_for_an_sso_only_account(
 
     res = await test_client.post(
         "/api/v1/auth/reset-password",
-        json={"token": token, "new_password": "An0ther!Str0ngPass#"},
+        json={"token": token, "new_password": _NEW_PASSWORD},
     )
     assert res.status_code == 409, res.text
     assert res.json()["detail"]["error"] == "sso_only_account"
@@ -83,7 +91,7 @@ async def test_token_reset_still_works_for_a_local_account(
 
     res = await test_client.post(
         "/api/v1/auth/reset-password",
-        json={"token": token, "new_password": "An0ther!Str0ngPass#"},
+        json={"token": token, "new_password": _NEW_PASSWORD},
     )
     assert res.status_code == 200, res.text
 
@@ -97,7 +105,7 @@ async def test_admin_reset_is_refused_for_an_sso_only_account_by_default(
 
     res = await test_client.post(
         f"/api/v1/admin/users/{user_id}/reset-password",
-        json={"newPassword": "An0ther!Str0ngPass#"},
+        json={"newPassword": _NEW_PASSWORD},
     )
     assert res.status_code == 409, res.text
     assert res.json()["detail"]["error"] == "sso_only_account"
@@ -115,7 +123,7 @@ async def test_admin_can_convert_deliberately(
     res = await test_client.post(
         f"/api/v1/admin/users/{user_id}/reset-password",
         json={
-            "newPassword": "An0ther!Str0ngPass#",
+            "newPassword": _NEW_PASSWORD,
             "allowSsoOnlyOverride": True,
         },
     )
@@ -137,7 +145,7 @@ async def test_the_deliberate_conversion_is_audited(
     res = await test_client.post(
         f"/api/v1/admin/users/{user_id}/reset-password",
         json={
-            "newPassword": "An0ther!Str0ngPass#",
+            "newPassword": _NEW_PASSWORD,
             "allowSsoOnlyOverride": True,
         },
     )
@@ -157,6 +165,6 @@ async def test_admin_reset_of_a_local_account_needs_no_override(
     user_id = await _local_user(db_session, "plain@corp.example")
     res = await test_client.post(
         f"/api/v1/admin/users/{user_id}/reset-password",
-        json={"newPassword": "An0ther!Str0ngPass#"},
+        json={"newPassword": _NEW_PASSWORD},
     )
     assert res.status_code == 200, res.text

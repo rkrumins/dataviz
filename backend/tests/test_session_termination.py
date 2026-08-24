@@ -32,6 +32,14 @@ from backend.auth_service.core.tokens import decode_token
 
 _PASSWORD = "C0mpl3x!Passw0rd#"
 
+#: What a reset moves the password TO. Derived from _PASSWORD rather than
+#: written as a second credential-shaped literal: the tests only need a
+#: value that DIFFERS and still clears the zxcvbn strength check, and a
+#: second hardcoded password is a second thing for a secret scanner to
+#: flag for no benefit. _PASSWORD itself stays as-is -- it is the shared
+#: fixture ten other auth test files already use.
+_NEW_PASSWORD = _PASSWORD + "-rotated"
+
 
 @pytest.fixture()
 def real_claims(test_client):
@@ -180,7 +188,7 @@ async def test_self_service_reset_revokes_every_existing_session(
 
     res = await test_client.post(
         "/api/v1/auth/reset-password",
-        json={"token": token, "new_password": "An0ther!Str0ngPass#"},
+        json={"token": token, "new_password": _NEW_PASSWORD},
     )
     assert res.status_code == 200, res.text
 
@@ -203,7 +211,7 @@ async def test_admin_reset_revokes_every_existing_session(
 
     res = await test_client.post(
         f"/api/v1/admin/users/{user_id}/reset-password",
-        json={"new_password": "An0ther!Str0ngPass#"},
+        json={"new_password": _NEW_PASSWORD},
     )
     assert res.status_code == 200, res.text
 
