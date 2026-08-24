@@ -16,6 +16,15 @@ function WorkspaceViewsRedirect() {
   return <Navigate to={`/workspaces/${workspaceId}?tab=views`} replace />
 }
 
+// The standalone counts-history page was retired; profiling now lives as a
+// tab ON the data source, so opening it never navigates away and "back" cannot
+// land somewhere you did not come from. Redirect any old link — including the
+// ones already sent out in notification bells.
+function DataSourceHistoryRedirect() {
+  const { catalogId } = useParams<{ catalogId: string }>()
+  return <Navigate to={`/datasources/${catalogId}?tab=profiling`} replace />
+}
+
 // Lazy-load all page-level components so their module code and hooks only
 // run when the user actually navigates to that route.
 const Dashboard = lazyWithRetry(() => import('@/components/dashboard/Dashboard').then(m => ({ default: m.Dashboard })))
@@ -180,6 +189,7 @@ export const router = createBrowserRouter([
       // Reached from the Ingestion → Data Sources list; content self-gates
       // via permission-scoped catalog reads.
       { path: 'datasources/:catalogId', element: <Lazy><DataSourceOverviewPage /></Lazy> },
+      { path: 'datasources/:catalogId/history', element: <DataSourceHistoryRedirect /> },
 
       // Top-level Workspaces (listing + detail/management). Workspace visuals
       // are view-driven — see /views and /explorer; there is no standalone canvas.

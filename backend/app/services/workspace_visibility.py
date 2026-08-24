@@ -206,3 +206,61 @@ async def compute_visible_catalog_ids(
         if _permitted_overlaps(_parse_permitted(permitted_raw), user_ws_ids):
             visible.add(item_id)
     return visible
+
+
+# ── Data sources (counts history) ──────────────────────────────────
+
+async def compute_visible_data_source_ids(
+    session: AsyncSession,
+    claims: PermissionClaims,
+) -> Optional[set[str]]:
+    """Set of workspace data source ids visible to ``claims``.
+    ``None`` = unrestricted.
+
+    This is the seam between the two counts-history journeys. A platform
+    operator (``system:admin`` / ``system:org-admin``) gets ``None`` and sees
+    every onboarded source across the deployment; a workspace-bound caller
+    gets exactly the sources in the workspaces they hold a binding in.
+
+    Deliberately NOT modelled on ``compute_visible_provider_ids``' second
+    contributor: ``permitted_workspaces`` says which workspaces may USE a
+    provider or catalog row, which is a sharing rule for a catalogue entry.
+    A workspace data source is not shared — it belongs to one workspace, and
+    its entity counts are that workspace's data. Widening on an ACL meant for
+    catalogue reuse would hand one tenant another tenant's row counts.
+    """
+    if _is_unrestricted(claims):
+        return None
+    user_ws_ids = _user_workspace_ids(claims)
+    if not user_ws_ids:
+        return set()
+    rows = await session.execute(
+        select(WorkspaceDataSourceORM.id)
+        .where(WorkspaceDataSourceORM.workspace_id.in_(user_ws_ids))
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+    )
+    return {row[0] for row in rows.all() if row[0] is not None}
+
+
+async def ensure_data_source_visible(
+    session: AsyncSession,
+    claims: PermissionClaims,
+    data_source_id: str,
+    *,
+    not_found_detail: Optional[str] = None,
+) -> None:
+    """Raise 404 if ``data_source_id`` is not visible to the caller.
+
+    404 rather than 403, matching ``ensure_ontology_visible``: refusing by
+    existence would let a caller enumerate other tenants' data sources by
+    watching which ids answer differently.
+    """
+    from fastapi import HTTPException
+    visible = await compute_visible_data_source_ids(session, claims)
+    if visible is None:
+        return
+    if data_source_id not in visible:
+        raise HTTPException(
+            status_code=404,
+            detail=not_found_detail or f"Data source '{data_source_id}' not found",
+        )

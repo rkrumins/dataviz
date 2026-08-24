@@ -10,7 +10,7 @@ from .endpoints import (
     graph, canvas, assignments, providers, ontologies, workspaces,
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
-    insights, me, system_status, redis_config, platform_settings,
+    insights, me, system_status, redis_config, platform_settings, profiling,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     versioning,
@@ -287,6 +287,14 @@ api_router.include_router(
 api_router.include_router(
     insights.router, prefix="/admin/insights", tags=["admin:insights"],
     dependencies=[Depends(requires("system:admin"))],
+)
+# Profiling — counts and composition over time. Its own prefix rather than
+# /admin/insights: this is an Ingestion-section surface a workspace data
+# source manager uses, and an /admin/ URL serving a workspace journey is a
+# statement about who it is for that the permission model does not agree with.
+# The router carries its own Ingestion-read gate.
+api_router.include_router(
+    profiling.router, prefix="/profiling", tags=["profiling"],
 )
 # Infrastructure status: /api/v1/admin/system/status — super-admin
 # single-pane snapshot of every backing service + data-plane lag.

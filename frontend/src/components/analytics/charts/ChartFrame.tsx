@@ -46,6 +46,17 @@ interface Props {
      * own opacity — so the legend and the mark cannot drift apart.
      */
     ghostLabel?: string
+    /**
+     * Controls that change what the chart draws.
+     *
+     * Its own row beneath the header, not the `action` slot. `action` sits
+     * beside the title and is sized for one or two affordances; a set of
+     * grouped controls put there either crushes the heading or, once the
+     * header wraps, floats off to the right of an empty band with nothing to
+     * align to. A control row is full width, starts at the title's left edge,
+     * and sits ABOVE the legend — because it decides what the legend lists.
+     */
+    toolbar?: React.ReactNode
     /** Held at reduced opacity while a new range loads — never a skeleton. */
     isStale?: boolean
     /**
@@ -62,7 +73,7 @@ interface Props {
 
 export function ChartFrame({
     title, subtitle, series = [], isEmpty, emptyLabel, table, ghostLabel,
-    isStale, id, action, className, children,
+    toolbar, isStale, id, action, className, children,
 }: Props) {
     const [showTable, setShowTable] = useState(false)
     const headingId = useId()
@@ -89,8 +100,15 @@ export function ChartFrame({
                 className,
             )}
         >
-            <header className="flex items-start justify-between gap-4 mb-4">
-                <div className="min-w-0">
+            {/*
+              WRAPS. A `shrink-0` action group beside a `min-w-0` title means a
+              wide action does not overflow — it crushes the heading instead,
+              and a two-word title becomes three stacked letters. Wrapping costs
+              nothing when the action fits and is the difference between a
+              readable card and a broken one when it does not.
+            */}
+            <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3 mb-4">
+                <div className="min-w-[10rem] flex-1">
                     <h3 id={headingId} className="text-sm font-bold text-ink leading-tight">
                         {title}
                     </h3>
@@ -98,7 +116,7 @@ export function ChartFrame({
                         <p className="text-xs text-ink-muted mt-0.5">{subtitle}</p>
                     )}
                 </div>
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1.5 shrink-0 ml-auto">
                     {action}
                     {table && (
                         <button
@@ -118,6 +136,12 @@ export function ChartFrame({
                     )}
                 </div>
             </header>
+
+            {toolbar && (
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 mb-3 pb-3 border-b border-glass-border">
+                    {toolbar}
+                </div>
+            )}
 
             {/* Two or more MARKS always get a legend — identity is never colour
                 alone, and a ghost is a mark like any other. The swatch mirrors

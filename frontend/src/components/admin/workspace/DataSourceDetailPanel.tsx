@@ -5,20 +5,26 @@
  */
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { MOTION } from '@/lib/motion'
 import {
     Database, Edit2, Trash2, X, ExternalLink, Settings2, Plus, Eye,
     BarChart3, AlertTriangle, Loader2,
-    GitBranch, Star, Clock, Compass, Save, RotateCcw,
+    GitBranch, Star, Clock, Compass, Save, RotateCcw, LineChart,
 } from 'lucide-react'
 import { NodeIdentityField, NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
 import type { View } from '@/services/viewApiService'
+
+/** Tab ids, in the order they appear. Hoisted so the URL parser and the
+ *  buttons cannot drift apart. */
+const DATA_SOURCE_TABS = ['insights', 'profiling', 'aggregation', 'views', 'versioning'] as const
+type DataSourceTab = (typeof DATA_SOURCE_TABS)[number]
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { DataSourceReadinessResponse } from '@/services/aggregationService'
 import { AggregationHistory } from '../AggregationHistory'
@@ -142,7 +148,28 @@ export function DataSourceDetailPanel({
     onSaveAggregationConfig,
     onClose,
 }: DataSourceDetailPanelProps) {
-    const [activeTab, setActiveTab] = useState<'insights' | 'aggregation' | 'views' | 'versioning'>('insights')
+    /**
+     * Tab state lives in the URL, not in `useState`.
+     *
+     * A notification about a source's profile has to be able to land ON the
+     * profile, and a link someone pastes to a colleague has to open what they
+     * were looking at. Local state made both impossible, and it is why the
+     * profiling surface needed a separate routable page in the first place —
+     * a page whose back button could then only ever guess where you came from.
+     */
+    const [searchParams, setSearchParams] = useSearchParams()
+    const rawTab = searchParams.get('dstab')
+    const activeTab: DataSourceTab = DATA_SOURCE_TABS.includes(rawTab as DataSourceTab)
+        ? (rawTab as DataSourceTab)
+        : 'insights'
+    const setActiveTab = (next: DataSourceTab) => {
+        const merged = new URLSearchParams(searchParams)
+        // 'insights' is the default and writes no param, so the common URL
+        // stays clean and a stale param cannot outlive the drawer.
+        if (next === 'insights') merged.delete('dstab')
+        else merged.set('dstab', next)
+        setSearchParams(merged, { replace: true })
+    }
     const versioningEnabled = useFeature('versioningEnabled')
     const [purgeConfirm, setPurgeConfirm] = useState(false)
     const [purgeLoading, setPurgeLoading] = useState(false)
@@ -366,6 +393,7 @@ export function DataSourceDetailPanel({
                         <div className="px-6 pt-3 pb-2 flex items-center gap-1.5 shrink-0 border-b border-glass-border/30">
                             <TabBtn active={activeTab === 'insights'} icon={BarChart3} label="Overview" onClick={() => setActiveTab('insights')} />
                             <TabBtn active={activeTab === 'aggregation'} icon={Settings2} label="Aggregation" onClick={() => setActiveTab('aggregation')} />
+                            <TabBtn active={activeTab === 'profiling'} icon={LineChart} label="Profiling" onClick={() => setActiveTab('profiling')} />
                             <TabBtn active={activeTab === 'views'} icon={Eye} label="Views" count={views.length} onClick={() => setActiveTab('views')} />
                             {versioningEnabled && (
                                 <TabBtn active={activeTab === 'versioning'} icon={GitBranch} label="Versioning" onClick={() => setActiveTab('versioning')} />
@@ -420,6 +448,14 @@ export function DataSourceDetailPanel({
                                 ) : (
                                     <p className="text-sm text-ink-muted">This data source isn't linked to a catalog item.</p>
                                 )
+                            )}
+
+                            {/* ─── Profiling Tab ────────────────────────── */}
+                            {activeTab === 'profiling' && (
+                                <SourceProfiling
+                                    dataSourceId={ds.id}
+                                    sourceName={ds.label || ds.graphName || undefined}
+                                />
                             )}
 
                             {/* ─── Aggregation Tab ──────────────────────── */}

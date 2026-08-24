@@ -9,7 +9,7 @@
  * overflow-proof: it reads well and never truncates at any width. The page
  * wrapper constrains it to a comfortable reading column.
  */
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { useQuery } from '@tanstack/react-query'
@@ -30,6 +30,8 @@ import { aggregationService } from '@/services/aggregationService'
 import { VocabAlignmentWarning } from '@/components/admin/workspace/VocabAlignmentWarning'
 import { isIdentityOverridden, normalizeIdentity, isNameOverridden, normalizeName } from '@/components/dataSource/NodeIdentity'
 import { PhysicalAlignmentSection } from './PhysicalAlignmentSection'
+import { SourceProfiling } from '@/components/ingestion/profiling/SourceProfiling'
+import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 
 export interface DataSourceProfileContext {
     wsId: string
@@ -268,6 +270,7 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
      *  itself (a link to the page you're already on is otherwise a no-op). */
     onNavigate?: () => void
 }) {
+    const [tab, setTab] = useState<'overview' | 'profiling'>('overview')
     const { item, provider, stats, meta, consumers, statsLoading, consumersLoading, notFound } = useDataSourceProfile(catalogId)
 
     const health = useProviderHealth(item?.providerId)
@@ -298,8 +301,26 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
         )
     }
 
+    if (!embedded && tab === 'profiling') {
+        return (
+            <div className="min-w-0 space-y-4">
+                <ProfileTabs tab={tab} onTab={setTab} />
+                <SourceProfiling
+                    // The catalog id is accepted here on purpose: the backend
+                    // resolves it to the data source that observes this graph,
+                    // so the routable page and the Ingestion drawer — neither
+                    // of which knows a `ds_` id — get the same surface as the
+                    // workspace drawer rather than an apology.
+                    dataSourceId={context?.dataSourceId ?? catalogId}
+                    sourceName={item?.name}
+                />
+            </div>
+        )
+    }
+
     return (
         <div className="min-w-0 space-y-4">
+            {!embedded && <ProfileTabs tab={tab} onTab={setTab} />}
             {/* ── Hero — suppressed when embedded (the host header already
                 shows identity + actions). ─────────────────────── */}
             {!embedded && (
@@ -504,6 +525,49 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
                     {item?.description && <DetailRow label="Description" value={item.description} />}
                 </dl>
             </Card>
+        </div>
+    )
+}
+
+
+/**
+ * Overview and Profiling, side by side.
+ *
+ * The same four numbers appear in both — the difference is whether you are
+ * looking at "now" or "since". Splitting them into a tab and a separate
+ * routable page is what made profiling read as a bolted-on feature, and it is
+ * why its back button could only ever guess where you came from.
+ */
+function ProfileTabs({ tab, onTab }: {
+    tab: 'overview' | 'profiling'
+    onTab: (next: 'overview' | 'profiling') => void
+}) {
+    const canReadProfiling = useCanReadProfiling()
+    if (!canReadProfiling) return null
+
+    const options = [
+        { key: 'overview' as const, label: 'Overview' },
+        { key: 'profiling' as const, label: 'Profiling' },
+    ]
+    return (
+        <div role="tablist" aria-label="Data source views" className="flex items-center gap-1">
+            {options.map((option) => (
+                <button
+                    key={option.key}
+                    role="tab"
+                    aria-selected={tab === option.key}
+                    onClick={() => onTab(option.key)}
+                    className={cn(
+                        'px-3 py-1.5 text-xs font-bold rounded-lg transition-colors',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
+                        tab === option.key
+                            ? 'bg-canvas-elevated text-ink border border-glass-border'
+                            : 'text-ink-muted hover:text-ink',
+                    )}
+                >
+                    {option.label}
+                </button>
+            ))}
         </div>
     )
 }
