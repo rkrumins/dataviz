@@ -223,7 +223,7 @@ async def get_board(
     to: Optional[str] = Query(None),
     workspace_id: Optional[str] = Query(None, alias="workspaceId"),
     provider_id: Optional[str] = Query(None, alias="providerId"),
-    metric: str = Query("nodes", description="nodes | edges"),
+    metric: str = Query("nodes", description="total | nodes | edges"),
     unusual_only: bool = Query(False, alias="unusualOnly"),
     limit: int = Query(_DEFAULT_LIMIT, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),

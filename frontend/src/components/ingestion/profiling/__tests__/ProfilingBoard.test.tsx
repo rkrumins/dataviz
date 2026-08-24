@@ -222,6 +222,22 @@ describe('ProfilingBoard', () => {
         expect(screen.getByRole('img', { name: /Moved over the window/i })).toBeInTheDocument()
     })
 
+    it('offers the two measures and their sum', async () => {
+        // Total is the pair added up, which is a third question — not a
+        // relabelling of one of them. It goes to the server as its own
+        // measure so the sum happens inside a single bucket.
+        getBoard.mockResolvedValue(payload([row()]))
+        renderBoard()
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Total' }))
+
+        await waitFor(() => expect(currentSearch().get('measure')).toBe('total'))
+        await waitFor(() => expect(
+            getBoard.mock.calls.some(([q]) => (q as { metric: string }).metric === 'total'),
+        ).toBe(true))
+        expect(await screen.findByText(/entities \+ relationships now/i)).toBeInTheDocument()
+    })
+
     it('explains an empty window rather than showing an empty table', async () => {
         getBoard.mockResolvedValue(payload([]))
         renderBoard()

@@ -17,18 +17,23 @@ import { Download, Search, Settings2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
 import { PROFILING_WINDOWS, type ProfilingWindowKey } from '@/hooks/useProfiling'
-import type { BoardRow } from '@/types/profiling'
+import type { BoardRow, ProfilingMetric } from '@/types/profiling'
 import { FilterMenu, type FilterOption } from './FilterMenu'
 import { UtcChip } from './UtcChip'
 
-const MEASURES = [
-    { key: 'nodes' as const, label: 'Entities' },
-    { key: 'edges' as const, label: 'Relationships' },
+const MEASURES: { key: ProfilingMetric; label: string }[] = [
+    { key: 'nodes', label: 'Entities' },
+    { key: 'edges', label: 'Relationships' },
+    // The pair, summed inside each bucket. Ranked last because it is the
+    // roll-up of the two beside it, and because "did my entities drop" is the
+    // question people arrive with — a total can hide a wipe of one measure
+    // under growth in the other.
+    { key: 'total', label: 'Total' },
 ]
 
 export interface FilterState {
     window: ProfilingWindowKey
-    metric: 'nodes' | 'edges'
+    metric: ProfilingMetric
     unusualOnly: boolean
     providerId: string
     workspaceId: string
@@ -40,7 +45,7 @@ interface Props extends FilterState {
     /** Hidden when the board is already scoped to one workspace. */
     showWorkspaceFilter: boolean
     onWindow: (next: ProfilingWindowKey) => void
-    onMetric: (next: 'nodes' | 'edges') => void
+    onMetric: (next: ProfilingMetric) => void
     onUnusualOnly: (next: boolean) => void
     onProvider: (next: string) => void
     onWorkspace: (next: string) => void
@@ -109,11 +114,21 @@ export function ProfilingFilterBar({
                         {w.label}
                     </button>
                 ))}
+            </div>
 
-                {/* Hairline, so the measure reads as a second question about the
-                    same range rather than a fifth range. */}
-                <span className="mx-1 h-5 w-px bg-glass-border" aria-hidden />
-
+            {/*
+              The measure is its OWN group, not a compartment of the range.
+              They answer different questions — "over what period" and "of
+              what" — and running them together in one pill rail made the
+              measures read as two more windows. A gap says they are separate
+              controls; the shared geometry says they belong to the same
+              decision.
+            */}
+            <div
+                role="group"
+                aria-label="Measure"
+                className="inline-flex items-center rounded-xl border border-glass-border bg-canvas-elevated p-1 shadow-sm"
+            >
                 {MEASURES.map((m) => (
                     <button
                         key={m.key}
@@ -124,7 +139,19 @@ export function ProfilingFilterBar({
                             'px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap',
                             'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
                             metric === m.key
-                                ? 'bg-canvas text-ink shadow-sm ring-1 ring-glass-border'
+                                // A solid INK pill with inverse text.
+                                //
+                                // The rail is already `bg-canvas-elevated`, so
+                                // a selected pill drawn from the same family
+                                // has nowhere lighter to go: `bg-canvas` is
+                                // DARKER than elevated in both themes, which
+                                // sank the selection into the rail — plainly
+                                // wrong in dark mode, and merely invisible in
+                                // light. Inverting instead is legible in both
+                                // by construction, and reads as a different
+                                // KIND of choice from the chromatic range
+                                // pills beside it, which is what it is.
+                                ? 'bg-ink text-canvas-elevated shadow-sm'
                                 : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
                         )}
                     >

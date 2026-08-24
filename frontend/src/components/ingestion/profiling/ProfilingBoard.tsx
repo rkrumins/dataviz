@@ -35,16 +35,19 @@ import {
 } from '@/hooks/useProfiling'
 import { profilingService } from '@/services/profilingService'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
-import type { BoardRow } from '@/types/profiling'
+import type { BoardRow, ProfilingMetric } from '@/types/profiling'
 import { ProfilingFilterBar } from './ProfilingFilterBar'
 import { FindingsBand } from './FindingsBand'
 import { ProfilingSettings } from './ProfilingSettings'
 import { ProfilingSourceDrawer } from './ProfilingSourceDrawer'
 import { BoardVerdict } from './Verdict'
-import { formatInstant, deltaTone, metricNoun, signed, significanceMeta } from './shared'
+import {
+    MEASURE_LABEL, formatInstant, deltaTone, metricNoun, signed, significanceMeta,
+} from './shared'
 
 const WINDOW_KEYS = PROFILING_WINDOWS.map((w) => w.key) as readonly ProfilingWindowKey[]
 const SORT_KEYS = ['movement', 'size', 'recent', 'name'] as const
+const MEASURE_KEYS: ProfilingMetric[] = ['nodes', 'edges', 'total']
 
 type SortKey = 'movement' | 'size' | 'name' | 'recent'
 
@@ -88,8 +91,10 @@ export function ProfilingBoard({ workspaceId, onOpenSource, className }: Props) 
     const window = (WINDOW_KEYS.includes(params.get('window') as ProfilingWindowKey)
         ? params.get('window') as ProfilingWindowKey
         : DEFAULT_WINDOW)
-    const metric: 'nodes' | 'edges' =
-        params.get('measure') === 'edges' ? 'edges' : 'nodes'
+    const metric: ProfilingMetric =
+        MEASURE_KEYS.includes(params.get('measure') as ProfilingMetric)
+            ? params.get('measure') as ProfilingMetric
+            : 'nodes'
     const unusualOnly = params.get('unusual') === '1'
     const providerId = params.get('provider') ?? ''
     const workspaceFilter = params.get('workspace') ?? ''
@@ -101,7 +106,7 @@ export function ProfilingBoard({ workspaceId, onOpenSource, className }: Props) 
 
     const setWindow = (next: ProfilingWindowKey) =>
         set('window', next === DEFAULT_WINDOW ? null : next)
-    const setMetric = (next: 'nodes' | 'edges') =>
+    const setMetric = (next: ProfilingMetric) =>
         set('measure', next === 'nodes' ? null : next)
     const setUnusualOnly = (next: boolean) => set('unusual', next ? '1' : null)
     const setProviderId = (next: string | '') => set('provider', next || null)
@@ -221,7 +226,7 @@ export function ProfilingBoard({ workspaceId, onOpenSource, className }: Props) 
                             sub={board.data.platform_wide ? 'across the platform' : 'in your workspaces'}
                         />
                         <KpiCard
-                            label={`${metric === 'nodes' ? 'Entities' : 'Relationships'} now`}
+                            label={`${MEASURE_LABEL[metric]} now`}
                             value={compact(rows.reduce((sum, r) => sum + r.last, 0))}
                             icon={TrendingUp}
                             accent="cyan"
@@ -254,7 +259,7 @@ export function ProfilingBoard({ workspaceId, onOpenSource, className }: Props) 
                         nothing in this window: say so, rather than opening
                         the board on a row that is not there. */}
                     {sourceParam && !drilling && (
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-glass-border bg-surface px-4 py-2.5 text-[13px] text-ink-secondary">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-glass-border bg-canvas-elevated px-4 py-2.5 text-[13px] text-ink-secondary">
                             <Search className="w-3.5 h-3.5 text-ink-muted shrink-0" />
                             <span>
                                 That source reported nothing in the last{' '}
@@ -365,7 +370,7 @@ function BoardTable({
 }: {
     rows: BoardRow[]
     total: number
-    metric: 'nodes' | 'edges'
+    metric: ProfilingMetric
     sort: SortKey
     descending: boolean
     onSort: (key: SortKey) => void
@@ -459,7 +464,7 @@ function Row({
     row, metric, interactive, onOpen,
 }: {
     row: BoardRow
-    metric: 'nodes' | 'edges'
+    metric: ProfilingMetric
     interactive: boolean
     onOpen: () => void
 }) {

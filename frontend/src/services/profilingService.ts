@@ -70,7 +70,7 @@ export const profilingService = {
         q: {
             window?: string; from?: string; to?: string
             workspaceId?: string | null; providerId?: string | null
-            metric?: 'nodes' | 'edges'; unusualOnly?: boolean
+            metric?: ProfilingMetric; unusualOnly?: boolean
             limit?: number; offset?: number
         },
         signal?: AbortSignal,

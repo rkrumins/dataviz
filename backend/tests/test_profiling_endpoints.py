@@ -307,6 +307,39 @@ async def test_the_board_counts_unobserved_sources_rather_than_zeroing_them(
     assert out["data"]["unobserved"] == 1
 
 
+async def test_the_board_totals_the_two_measures_rather_than_falling_through(
+    db_session: AsyncSession,
+):
+    """``total`` is nodes PLUS edges.
+
+    The first version selected the column with ``nodes if metric == "nodes"
+    else edges``, so every metric that was not ``nodes`` — ``total`` included
+    — silently read the edge column. The board then showed a "Total" that was
+    exactly the relationship count, which is wrong in a way nobody would
+    question until they added the two numbers up by hand.
+    """
+    await _source(db_session, "ds_a")
+    await _snap(db_session, "ds_a", _iso(2), nodes=120, edges=45)
+    for _ in range(5):
+        if not await profiling_repo.compact(db_session, grain="hour"):
+            break
+
+    def board(metric: str):
+        return profiling.get_board(
+            window="24h", frm=None, to=None, workspace_id=None, provider_id=None,
+            metric=metric, unusual_only=False, limit=100, offset=0,
+            session=db_session, claims=OPERATOR,
+        )
+
+    nodes = (await board("nodes"))["data"]["rows"][0]["last"]
+    edges = (await board("edges"))["data"]["rows"][0]["last"]
+    total = (await board("total"))["data"]["rows"][0]["last"]
+
+    assert (nodes, edges) == (120, 45)
+    assert total == 165
+    assert total != edges
+
+
 async def test_the_board_is_paginated(db_session: AsyncSession):
     for i in range(5):
         await _source(db_session, f"ds_{i}")

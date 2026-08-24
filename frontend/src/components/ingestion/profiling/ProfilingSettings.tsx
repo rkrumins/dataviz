@@ -420,7 +420,7 @@ function TierChips({ tiers, overrides }: { tiers: Tiers; overrides: number }) {
             {chips.map((c) => (
                 <span
                     key={c.label}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border bg-canvas px-2.5 py-1"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border bg-canvas-elevated px-2.5 py-1"
                 >
                     <span className={cn('w-1.5 h-1.5 rounded-full', c.dot)} aria-hidden />
                     <span className="text-[11px] font-medium text-ink-secondary">{c.label}</span>
@@ -460,7 +460,7 @@ function PolicyCard({
     children: React.ReactNode
 }) {
     return (
-        <section className="rounded-xl border border-glass-border bg-canvas overflow-hidden">
+        <section className="rounded-xl border border-glass-border bg-canvas-elevated overflow-hidden">
             <header className="flex items-start gap-2.5 px-4 py-3 border-b border-glass-border/70">
                 <span className={cn(
                     'shrink-0 w-7 h-7 rounded-lg flex items-center justify-center', accent,
@@ -621,7 +621,7 @@ function Cadences({ policy }: { policy: ProfilingPolicy }) {
         ['Finding evaluation', policy.cadences.alertIntervalSecs],
     ] as const
     return (
-        <section className="rounded-xl border border-glass-border bg-canvas px-4 py-3">
+        <section className="rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3">
             <h3 className="flex items-center gap-2 text-xs font-bold text-ink">
                 <Info className="w-3.5 h-3.5 text-ink-muted" aria-hidden />
                 Service cadences

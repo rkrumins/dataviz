@@ -82,7 +82,7 @@ export interface BoardPayload {
     from: string
     to: string
     window: ProfilingWindow
-    metric: 'nodes' | 'edges'
+    metric: ProfilingMetric
     platform_wide: boolean
     rows: BoardRow[]
     total: number

@@ -1160,8 +1160,17 @@ async def movement_board(
     deltas: Dict[str, List[int]] = {}
     for r in rows:
         ds_id = r[0]
-        value = int((r[2] if metric == "nodes" else r[3]) or 0)
-        delta = r[4] if metric == "nodes" else r[5]
+        if metric == "nodes":
+            value, delta = int(r[2] or 0), r[4]
+        elif metric == "edges":
+            value, delta = int(r[3] or 0), r[5]
+        else:
+            # total. Summed from the SAME bucket, so the pair is always read
+            # at one instant — deriving it from two separate board passes
+            # would let a source that was observed once in the window
+            # contribute its nodes and not its edges.
+            value = int(r[2] or 0) + int(r[3] or 0)
+            delta = (r[4] or 0) + (r[5] or 0)
         entry = per_source.setdefault(ds_id, {
             "data_source_id": ds_id,
             "first": value, "last": value, "points": [],

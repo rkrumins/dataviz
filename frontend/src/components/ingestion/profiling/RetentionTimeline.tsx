@@ -47,7 +47,7 @@ export function RetentionTimeline({ tiers }: { tiers: Tiers }) {
     }
 
     return (
-        <figure className="rounded-xl border border-glass-border bg-canvas px-4 py-3.5">
+        <figure className="rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3.5">
             <figcaption className="sr-only">
                 Retention by tier: raw {tiers.rawDays} days, hourly{' '}
                 {tiers.hourlyDays} days, daily {tiers.dailyDays} days
@@ -146,7 +146,7 @@ export function StorageEstimate({
     const perSource = rows * BYTES_PER_ROW
 
     return (
-        <div className="rounded-xl border border-glass-border bg-canvas px-4 py-3">
+        <div className="rounded-xl border border-glass-border bg-canvas-elevated px-4 py-3">
             <div className="flex items-baseline justify-between gap-3">
                 <span className="text-[11px] font-semibold text-ink">Estimated storage</span>
                 <span className="text-sm font-bold text-ink tabular-nums">

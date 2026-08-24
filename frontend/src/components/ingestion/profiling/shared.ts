@@ -5,18 +5,29 @@
  * ledger and the findings band all describe the same events and a reader who
  * learns "severe" in one must not meet a different meaning in another.
  */
-import type { Observation, Significance } from '@/types/profiling'
+import type { Observation, ProfilingMetric, Significance } from '@/types/profiling'
 
 /** Plain nouns for the two measures. "Nodes" and "edges" are what the graph
  *  calls them; these are what the people who onboard the data call them. */
 export const METRIC_NOUN = {
     nodes: { one: 'entity', many: 'entities' },
     edges: { one: 'relationship', many: 'relationships' },
+    // Both measures at once. The graph has no single word for the pair, and
+    // inventing one ("items", "records") would name something the product
+    // does not otherwise talk about — so it says both.
+    total: { one: 'entity or relationship', many: 'entities and relationships' },
 } as const
 
-export function metricNoun(metric: 'nodes' | 'edges', count: number): string {
+export function metricNoun(metric: ProfilingMetric, count: number): string {
     const noun = METRIC_NOUN[metric]
     return Math.abs(count) === 1 ? noun.one : noun.many
+}
+
+/** Title case, for a heading or a KPI label. */
+export const MEASURE_LABEL: Record<ProfilingMetric, string> = {
+    nodes: 'Entities',
+    edges: 'Relationships',
+    total: 'Entities + relationships',
 }
 
 export const SIGNIFICANCE = {
