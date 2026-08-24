@@ -1730,7 +1730,7 @@ async def get_node_ancestors(
 @router.get("/nodes/{urn}/descendants", response_model=List[GraphNode], response_model_by_alias=True)
 async def get_node_descendants(
     urn: str,
-    depth: int = Query(5, ge=1),
+    depth: int = Query(5, ge=1, le=20),
     entity_type: Optional[str] = Query(None, alias="entityType"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),

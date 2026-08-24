@@ -24,9 +24,21 @@ from fastapi.routing import APIRoute
 from backend.app.main import app
 
 
-#: Parameter names that page or slice a result set. A bound on these is
-#: what keeps one request from asking for the whole graph.
-_BOUNDED_PARAMS = ("limit", "page_size", "per_page", "top_k")
+#: Parameter names that page or slice a result set, or otherwise bound
+#: how much work one request may ask for. A bound on these is what keeps
+#: a single request from asking for the whole graph.
+#:
+#: ``depth`` and ``top`` were added when main's Profiling feature merged
+#: in. Widening the list immediately found one the original pass had
+#: missed: ``/graph/nodes/{urn}/descendants`` capped its ``limit`` and
+#: left ``depth`` at ``Query(5, ge=1)``. That is the worse of the two —
+#: ``limit`` bounds the rows returned, ``depth`` bounds how far the
+#: traversal walks to find them, so an unbounded depth is expensive
+#: before the limit ever applies.
+_BOUNDED_PARAMS = (
+    "limit", "popular_limit", "page_size", "per_page", "top_k", "top",
+    "depth",
+)
 
 #: Paths where an unbounded value cannot cost anything — none today.
 #: Kept so an exemption has to be written down and justified rather than
