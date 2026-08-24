@@ -51,7 +51,11 @@ export function TypeFocusChart({
     }
 
     return (
-        <div className="rounded-xl border border-glass-border bg-canvas-elevated p-4">
+        // `min-w-0` + `overflow-hidden`: the chart draws at its measured
+        // container width and falls back to 720px until the observer fires.
+        // Inside a table cell that transient width would push the whole
+        // table past the drawer; contained, it simply resolves.
+        <div className="rounded-xl border border-glass-border bg-canvas-elevated p-4 min-w-0 overflow-hidden">
             <div className="flex flex-wrap items-baseline justify-between gap-3 mb-3">
                 <div>
                     <h4 className="text-sm font-bold text-ink">{label} over time</h4>

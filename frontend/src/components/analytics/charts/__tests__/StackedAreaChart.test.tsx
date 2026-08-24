@@ -1,7 +1,7 @@
 /**
  * Composition over time, absolute and as a share.
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { StackedAreaChart, type StackedSeries } from '../StackedAreaChart'
@@ -75,5 +75,35 @@ describe('StackedAreaChart', () => {
     it('renders nothing without data', () => {
         const { container } = render(<StackedAreaChart buckets={[]} series={[]} />)
         expect(container).toBeEmptyDOMElement()
+    })
+})
+
+describe('StackedAreaChart — reaching the count', () => {
+    it('reports the bucket total, which the bands cannot be read off', () => {
+        // Eight bands stacking to 568,091 is a number a reader can otherwise
+        // only get by adding them up by hand.
+        render(
+            <StackedAreaChart
+                buckets={BUCKETS}
+                series={[s('a', [100, 300]), s('b', [50, 200], 1)]}
+            />,
+        )
+        // Scoped: 500 is also a y-axis tick here, and both are correct.
+        const label = screen.getByText('Total')
+        expect(within(label.parentElement as HTMLElement).getByText('500'))
+            .toBeInTheDocument()
+    })
+
+    it('keeps the count beside the share, never instead of it', () => {
+        // Share alone answers "how much of the whole" and hides "how much".
+        render(
+            <StackedAreaChart
+                buckets={BUCKETS}
+                series={[s('a', [50, 750]), s('b', [50, 250], 1)]}
+                share
+            />,
+        )
+        expect(screen.getByText('750')).toBeInTheDocument()
+        expect(screen.getByText('75.0%')).toBeInTheDocument()
     })
 })

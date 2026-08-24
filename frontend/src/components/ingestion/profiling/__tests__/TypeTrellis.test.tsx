@@ -2,7 +2,7 @@
  * Small multiples — the properties that make them multiples rather than a
  * grid of unrelated sparklines.
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -109,5 +109,41 @@ describe('TypeTrellis', () => {
             <TypeTrellis buckets={['2026-08-23']} series={[series('a', [5])]} />,
         )
         expect(container).toBeEmptyDOMElement()
+    })
+})
+
+describe('TypeTrellis — reaching the count', () => {
+    it('answers a hover with the value at that bucket', async () => {
+        // Without a hover a panel can only say where the series started and
+        // ended; the count AT a bucket was unreachable, which made the trellis
+        // the one over-time surface that would not tell you a value.
+        render(
+            <TypeTrellis
+                buckets={BUCKETS}
+                series={[series('object', [10, 250, 30])]}
+            />,
+        )
+        // At rest the footer frames the window.
+        expect(screen.getByText('+20')).toBeInTheDocument()
+
+        const hits = screen.getByRole('img', { name: /^object:/ }).querySelectorAll('rect')
+        fireEvent.mouseEnter(hits[1])
+        expect(await screen.findByText('250')).toBeInTheDocument()
+    })
+
+    it('returns to the window summary when the pointer leaves', async () => {
+        render(
+            <TypeTrellis
+                buckets={BUCKETS}
+                series={[series('object', [10, 250, 30])]}
+            />,
+        )
+        const svg = screen.getByRole('img', { name: /^object:/ })
+        fireEvent.mouseEnter(svg.querySelectorAll('rect')[1])
+        expect(await screen.findByText('250')).toBeInTheDocument()
+
+        fireEvent.mouseLeave(svg)
+        expect(screen.queryByText('250')).not.toBeInTheDocument()
+        expect(screen.getByText('+20')).toBeInTheDocument()
     })
 })

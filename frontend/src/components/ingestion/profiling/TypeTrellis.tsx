@@ -136,6 +136,11 @@ function Panel({
     scaled: boolean
     onFocus?: () => void
 }) {
+    // A panel with no hover can only ever say where the series started and
+    // ended. The count AT a bucket — the number someone is pointing at — was
+    // unreachable here, which made the trellis the one over-time surface that
+    // would not tell you a value.
+    const [hover, setHover] = useState<number | null>(null)
     const { values, color } = panel
     const stepX = values.length > 1 ? PANEL_W / (values.length - 1) : PANEL_W
     const y = (v: number) => PANEL_H - PAD_Y - (v / max) * (PANEL_H - PAD_Y * 2)
@@ -179,6 +184,7 @@ function Panel({
             <svg
                 viewBox={`0 0 ${PANEL_W} ${PANEL_H}`}
                 className="w-full h-auto overflow-visible"
+                onMouseLeave={() => setHover(null)}
                 role="img"
                 aria-label={
                     `${panel.label}: ${exact(panel.first)} to ${exact(panel.last)}`
@@ -200,14 +206,58 @@ function Panel({
                         fill="currentColor" className="text-rose-500"
                     />
                 )}
+
+                {hover !== null && (
+                    <>
+                        <line
+                            x1={hover * stepX} x2={hover * stepX}
+                            y1={0} y2={PANEL_H}
+                            stroke={color} strokeWidth={1} opacity={0.35}
+                        />
+                        <circle
+                            cx={hover * stepX} cy={y(values[hover] ?? 0)} r={3}
+                            fill={color} stroke="currentColor"
+                            className="text-canvas-elevated" strokeWidth={1.5}
+                        />
+                    </>
+                )}
+
+                {/* Hit targets wider than the marks they select. */}
+                {values.map((_v, i) => (
+                    <rect
+                        key={i}
+                        x={i * stepX - stepX / 2} y={0}
+                        width={Math.max(stepX, 8)} height={PANEL_H}
+                        fill="transparent"
+                        onMouseEnter={() => setHover(i)}
+                    />
+                ))}
             </svg>
 
-            <div className="mt-1 flex items-center justify-between text-[10px] text-ink-muted tabular-nums">
-                <span>{formatBucket(buckets[0])}</span>
-                <span className={cn('font-semibold', deltaTone(panel.delta))}>
-                    {signed(panel.delta)}
-                </span>
-                <span>{formatBucket(buckets[buckets.length - 1])}</span>
+            {/* The footer doubles as the readout. While hovering it answers
+                "what was it here"; at rest it answers "where did it start and
+                end" — two questions, one row, never both at once. */}
+            <div className="mt-1 flex items-center justify-between gap-2 text-[10px] tabular-nums min-h-[15px]">
+                {hover === null ? (
+                    <>
+                        <span className="text-ink-muted">{formatBucket(buckets[0])}</span>
+                        <span className={cn('font-semibold', deltaTone(panel.delta))}>
+                            {signed(panel.delta)}
+                        </span>
+                        <span className="text-ink-muted">
+                            {formatBucket(buckets[buckets.length - 1])}
+                        </span>
+                    </>
+                ) : (
+                    <>
+                        <span className="text-ink-muted truncate">
+                            {formatBucket(buckets[hover])}
+                        </span>
+                        <span className="font-bold text-ink shrink-0">
+                            {exact(values[hover] ?? 0)}
+                        </span>
+                    </>
+                )}
             </div>
 
             {onFocus && (

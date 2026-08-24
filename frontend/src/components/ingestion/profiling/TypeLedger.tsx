@@ -95,6 +95,16 @@ export function TypeLedger({
     )
     const total = rows.reduce((sum, r) => sum + r.last, 0)
 
+    /**
+     * Visible columns, derived ONCE.
+     *
+     * Type, Count and Share are always present; Trend and the two movement
+     * columns are conditional. An expansion row whose `colSpan` disagrees with
+     * this makes the browser reflow a phantom column, which is what dropped
+     * Count and Share out of every row the moment one was expanded.
+     */
+    const columnCount = 3 + (hasTrend ? 1 : 0) + (moved ? 2 : 0)
+
     const pageRows = rows.slice(page * PAGE, page * PAGE + PAGE)
 
     return (
@@ -220,13 +230,28 @@ export function TypeLedger({
                                     </tr>
                                     {open === row.key && data && (
                                         <tr>
-                                            <td colSpan={2 + (hasTrend ? 1 : 0) + (moved ? 2 : 0)} className="px-4 pb-4 pt-1 bg-canvas">
+                                            <td colSpan={columnCount} className="px-4 pb-4 pt-1 bg-canvas">
+                                                {/*
+                                                  `w-0 min-w-full` breaks a feedback loop.
+
+                                                  The chart measures its container to draw at
+                                                  1 viewBox unit = 1 CSS pixel, and falls back
+                                                  to 720px until the observer fires. In an
+                                                  auto-layout table the cell then sizes to that
+                                                  720px, the observer measures 720, and the
+                                                  table stays wider than the drawer for good.
+                                                  A zero-width box contributes nothing to the
+                                                  intrinsic calculation, so the table sizes from
+                                                  the real rows and this stretches to fit.
+                                                */}
+                                                <div className="w-0 min-w-full">
                                                 <TypeFocusChart
                                                     label={row.label}
                                                     buckets={data.buckets}
                                                     values={row.points}
                                                     kind={kind === 'edge_type' ? 'edges' : 'nodes'}
                                                 />
+                                                </div>
                                             </td>
                                         </tr>
                                     )}

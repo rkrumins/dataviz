@@ -159,7 +159,7 @@ export function StackedAreaChart({
         .filter((i) => i % tickStep === 0 || i === buckets.length - 1)
 
     return (
-        <div ref={wrapRef} className={cn('w-full', className)}>
+        <div ref={wrapRef} className={cn('relative w-full', className)}>
             <svg
                 width={width} height={height} role="img"
                 aria-label={
@@ -289,13 +289,43 @@ export function StackedAreaChart({
             </svg>
 
             {/*
-              A fixed readout below the plot, not a floating tooltip. A tooltip
-              ENHANCES a chart and must never gate it: on touch, and for anyone
-              reading with a keyboard, a hover-only value is no value at all.
+              BOTH, and each does a job the other cannot.
+
+              The floating tooltip puts the number where the reader is already
+              looking, which is what a line chart in this system does and what
+              made the stacked one feel like it was withholding the figure. The
+              fixed readout below stays because a tooltip ENHANCES a chart and
+              must never gate it: on touch, and for anyone reading with a
+              keyboard, a hover-only value is no value at all.
             */}
+            {hover !== null && (
+                <StackedTooltip
+                    bucket={label(buckets[hover])}
+                    total={totals[hover] || 0}
+                    share={share}
+                    rows={ordered
+                        .map((s) => ({
+                            label: s.label,
+                            value: s.values[hover] || 0,
+                            color: s.residual
+                                ? theme.neutralMark
+                                : theme.series[s.slot % theme.series.length],
+                        }))
+                        .filter((r) => r.value > 0)}
+                    leftPct={(x(hover) / Math.max(1, width)) * 100}
+                />
+            )}
             <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
                 <span className="font-semibold text-ink tabular-nums">
                     {label(buckets[active])}
+                </span>
+                {/* The sum. Eight bands stacked to 568,091 is a number a
+                    reader can only get by adding them up by hand. */}
+                <span className="inline-flex items-baseline gap-1.5">
+                    <span className="text-ink-muted">Total</span>
+                    <span className="text-ink font-bold tabular-nums">
+                        {exact(totals[active] || 0)}
+                    </span>
                 </span>
                 {ordered.map((s) => {
                     const value = s.values[active] || 0
@@ -314,12 +344,75 @@ export function StackedAreaChart({
                             />
                             <span className="text-ink-secondary">{s.label}</span>
                             <span className="text-ink font-semibold tabular-nums">
-                                {share ? `${pct.toFixed(1)}%` : exact(value)}
+                                {exact(value)}
                             </span>
+                            {/* Share without the count answers "how much of
+                                the whole" and hides "how much". Both, always. */}
+                            {share && (
+                                <span className="text-ink-muted tabular-nums">
+                                    {pct.toFixed(1)}%
+                                </span>
+                            )}
                         </span>
                     )
                 })}
             </div>
+        </div>
+    )
+}
+
+
+/** Value leads, label follows — the reader already has the series and wants
+ *  the number. Mirrors `TimeSeriesChart`'s tooltip so the two marks in this
+ *  system answer a hover the same way. */
+function StackedTooltip({
+    bucket, rows, total, share, leftPct,
+}: {
+    bucket: string
+    rows: { label: string; value: number; color: string }[]
+    total: number
+    share?: boolean
+    leftPct: number
+}) {
+    const flip = leftPct > 60
+    return (
+        <div
+            className="pointer-events-none absolute top-2 z-10 rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2 shadow-lg min-w-[11rem] max-w-[16rem]"
+            style={{
+                left: `${Math.min(Math.max(leftPct, 0), 100)}%`,
+                transform: flip ? 'translateX(-100%) translateX(-12px)' : 'translateX(12px)',
+            }}
+        >
+            <p className="flex items-baseline justify-between gap-3 text-[10px] font-semibold uppercase tracking-wide text-ink-muted mb-1.5">
+                <span>{bucket}</span>
+                <span className="text-ink tabular-nums normal-case">{exact(total)}</span>
+            </p>
+            <ul className="space-y-1">
+                {rows.slice(0, 10).map((r) => (
+                    <li key={r.label} className="flex items-center justify-between gap-3">
+                        <span className="flex items-center gap-1.5 min-w-0">
+                            <span aria-hidden className="w-3 h-[2px] rounded-full shrink-0"
+                                  style={{ backgroundColor: r.color }} />
+                            <span className="text-[11px] text-ink-secondary truncate">{r.label}</span>
+                        </span>
+                        <span className="flex items-baseline gap-1.5 shrink-0">
+                            <span className="text-xs font-bold text-ink tabular-nums">
+                                {exact(r.value)}
+                            </span>
+                            {share && total > 0 && (
+                                <span className="text-[10px] text-ink-muted tabular-nums">
+                                    {((r.value / total) * 100).toFixed(1)}%
+                                </span>
+                            )}
+                        </span>
+                    </li>
+                ))}
+                {rows.length > 10 && (
+                    <li className="text-[10px] text-ink-muted pt-0.5">
+                        and {rows.length - 10} more
+                    </li>
+                )}
+            </ul>
         </div>
     )
 }

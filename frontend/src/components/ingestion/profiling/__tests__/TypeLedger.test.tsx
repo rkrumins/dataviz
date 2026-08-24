@@ -2,7 +2,7 @@
  * Counts by type — and the rule that a column earns its place by varying.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -109,5 +109,64 @@ describe('TypeLedger', () => {
             await screen.findByRole('heading', { name: /schemaField over time/i }),
         ).toBeInTheDocument()
         expect(screen.getByText(/its own axis/i)).toBeInTheDocument()
+    })
+})
+
+describe('TypeLedger expansion', () => {
+    beforeEach(() => getSeries.mockReset())
+
+    it('keeps every column visible while a row is expanded', async () => {
+        // The regression: an expansion `colSpan` that disagreed with the
+        // header count made the browser reflow a phantom column, and Count
+        // and Share dropped out of every row the moment one was opened.
+        getSeries.mockResolvedValue(payload([
+            { key: 'schemaField', values: [55_365, 55_365, 55_365] },
+            { key: 'dataset', values: [6_060, 6_060, 6_060] },
+        ], ['2026-08-22', '2026-08-23', '2026-08-24']))
+        renderIt()
+
+        await userEvent.click(await screen.findByText('schemaField'))
+
+        expect(screen.getByRole('columnheader', { name: /count/i })).toBeInTheDocument()
+        expect(screen.getByRole('columnheader', { name: /share/i })).toBeInTheDocument()
+        // The row's own Count cell survives — that is the column that vanished.
+        const row = screen.getByText('dataset').closest('tr')
+        expect(within(row!).getByText('6,060')).toBeInTheDocument()
+        expect(within(row!).getByText(/%$/)).toBeInTheDocument()
+    })
+
+    it('spans exactly the visible columns', async () => {
+        getSeries.mockResolvedValue(payload([
+            { key: 'a', values: [10, 10, 10] },
+        ], ['2026-08-22', '2026-08-23', '2026-08-24']))
+        renderIt()
+
+        await userEvent.click(await screen.findByText('a'))
+        const expansion = document.querySelector('td[colspan]')
+        expect(expansion).not.toBeNull()
+        // Scoped to the LEDGER's table: the expanded view carries a ChartTable
+        // of its own, whose headers are not this table's columns.
+        const ledgerTable = expansion!.closest('table')
+        const headers = within(ledgerTable as HTMLElement)
+            .getAllByRole('columnheader')
+            .filter((h) => h.closest('table') === ledgerTable)
+        expect(Number(expansion!.getAttribute('colspan'))).toBe(headers.length)
+    })
+
+    it('does not let the expanded chart set the table width', async () => {
+        // The chart measures its container and falls back to 720px; inside an
+        // auto-layout table that transient width becomes the cell width, the
+        // observer then measures 720, and the table stays wider than the
+        // drawer for good. A zero-width box breaks the loop.
+        getSeries.mockResolvedValue(payload([
+            { key: 'a', values: [10, 20, 30] },
+        ], ['2026-08-22', '2026-08-23', '2026-08-24']))
+        renderIt()
+
+        await userEvent.click(await screen.findByText('a'))
+        const expansion = document.querySelector('td[colspan] > div')
+        expect(expansion).not.toBeNull()
+        expect(expansion!.className).toContain('w-0')
+        expect(expansion!.className).toContain('min-w-full')
     })
 })
