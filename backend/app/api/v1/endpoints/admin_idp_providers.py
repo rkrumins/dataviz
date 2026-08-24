@@ -22,7 +22,9 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import idp_provider_repo, user_repo
+from backend.app.db.repositories import (
+    backchannel_host_repo, idp_provider_repo, user_repo,
+)
 from backend.app.db.repositories.idp_provider_repo import (
     ProviderValidationError,
 )
@@ -262,6 +264,124 @@ async def provider_health_status(
             for h in cache.values()
         ],
     }
+
+
+# ── Back-channel host allowlist ──────────────────────────────────────
+#
+# The exception list for the outbound SSRF guard, which otherwise
+# refuses every private address. A back-channel identity gateway is on
+# RFC1918 by definition, so without this the kind has no reachable
+# destination at all.
+#
+# Gated on ``system:sso:hosts:manage`` rather than ``system:admin``,
+# because an entry lets this service make requests to an internal
+# address. Who may edit the list is a network decision and worth
+# granting on its own; the permission is also fail-closed, so an
+# unreachable revocation backend refuses these routes rather than
+# assuming the session is still good.
+#
+# What no entry can do — reach loopback, link-local or the cloud
+# metadata service — is enforced in ``providers/outbound.py``, not here.
+# It must not be possible to talk this endpoint into it.
+#
+# Declared ahead of the ``/{provider_id}`` routes so the literal path
+# segment is matched before the parameterised one.
+
+
+class BackchannelHostDTO(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    host: str
+    port: int
+    note: Optional[str] = None
+    created_at: Optional[str] = Field(default=None, alias="createdAt")
+    created_by: Optional[str] = Field(default=None, alias="createdBy")
+
+
+class BackchannelHostCreate(BaseModel):
+    host: str
+    port: int = 443
+    note: Optional[str] = None
+
+
+def _host_dto(row) -> BackchannelHostDTO:
+    return BackchannelHostDTO(
+        id=row.id, host=row.host, port=row.port, note=row.note,
+        created_at=row.created_at, created_by=row.created_by,
+    )
+
+
+@router.get("/backchannel-hosts", response_model=list[BackchannelHostDTO],
+            response_model_by_alias=True)
+async def list_backchannel_hosts(
+    session: AsyncSession = Depends(get_db_session),
+    _admin: User = Depends(requires("system:sso:hosts:manage")),
+):
+    """Every internal destination a back-channel provider may call."""
+    rows = await backchannel_host_repo.list_hosts(session)
+    return [_host_dto(r) for r in rows]
+
+
+@router.post("/backchannel-hosts", response_model=BackchannelHostDTO,
+             response_model_by_alias=True,
+             status_code=status.HTTP_201_CREATED)
+async def add_backchannel_host(
+    body: BackchannelHostCreate,
+    session: AsyncSession = Depends(get_db_session),
+    admin: User = Depends(requires("system:sso:hosts:manage")),
+):
+    """Permit one ``host:port``.
+
+    Idempotent: adding an entry that already exists returns it rather
+    than 409-ing. Two operators allowing the same gateway is not a
+    conflict anyone needs to resolve.
+    """
+    try:
+        row = await backchannel_host_repo.add_host(
+            session, host=body.host, port=body.port, note=body.note,
+            created_by=admin.id,
+        )
+    except backchannel_host_repo.BackchannelHostError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    await user_repo.create_outbox_event(
+        session, event_type="sso.backchannel_host_allowed",
+        payload={
+            "host": row.host, "port": row.port, "note": row.note,
+            "actor_id": admin.id,
+        },
+    )
+    await session.commit()
+    return _host_dto(row)
+
+
+@router.delete("/backchannel-hosts/{host_id}",
+               status_code=status.HTTP_204_NO_CONTENT)
+async def delete_backchannel_host(
+    host_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    admin: User = Depends(requires("system:sso:hosts:manage")),
+):
+    """Withdraw one entry.
+
+    Takes effect on the next login rather than on a cache TTL — the
+    allowlist is read per request precisely so that revoking a
+    destination is immediate.
+    """
+    rows = await backchannel_host_repo.list_hosts(session)
+    row = next((r for r in rows if r.id == host_id), None)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such host entry")
+
+    host, port = row.host, row.port
+    await backchannel_host_repo.delete_host(session, host_id)
+    await user_repo.create_outbox_event(
+        session, event_type="sso.backchannel_host_withdrawn",
+        payload={"host": host, "port": port, "actor_id": admin.id},
+    )
+    await session.commit()
+    return None
 
 
 @router.post("/discover", response_model=DiscoverResult,

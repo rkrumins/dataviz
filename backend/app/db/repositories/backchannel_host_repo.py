@@ -69,17 +69,25 @@ def normalise_host(raw: str) -> str:
     host = (raw or "").strip().lower().rstrip(".")
     if not host:
         raise BackchannelHostError("host is required")
+    # Bracketed IPv6 as it appears inside a URL. Stored unbracketed,
+    # because that is what ``urlsplit(...).hostname`` yields and the two
+    # forms have to be the same entry.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    # IP literals are checked BEFORE the punctuation rules below: an
+    # IPv6 address is all colons, and rejecting colons outright made a
+    # v6-only gateway impossible to allow.
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
     if "*" in host or "/" in host or ":" in host:
         raise BackchannelHostError(
             f"'{raw}' is not a plain hostname. Wildcards, CIDR ranges and "
             "URLs are not accepted — enter one host, and set the port "
             "separately."
         )
-    try:
-        ipaddress.ip_address(host)
-        return host
-    except ValueError:
-        pass
     if not _HOSTNAME_RE.match(host):
         raise BackchannelHostError(f"'{raw}' is not a valid hostname.")
     return host

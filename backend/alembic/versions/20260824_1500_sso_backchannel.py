@@ -23,6 +23,14 @@ contents, which is the floor the whole design rests on.
 ``ck_idp_providers_kind`` gains ``'backchannel'``. Without this an
 operator can fill in the whole admin form and the INSERT fails.
 
+``system:sso:hosts:manage`` is seeded here as well as in
+``rbac_seed``. ``seed_reference_data`` runs on the virgin-database path
+only, so a permission added to the seed alone reaches fresh installs
+and nothing else — absent row, absent grants, ungrantable to a custom
+role, invisible in the role-matrix UI. It goes to ``super_admin``
+alone: ``org_admin`` runs the platform, while this decides where the
+platform may send requests, which is a network decision.
+
 ``refresh_tokens`` gains ``idp_provider_id`` and ``idp_checked_at`` for
 the per-refresh liveness check, which re-confirms the upstream session
 on each rotation so our session cannot outlive the SSO session that
@@ -41,6 +49,7 @@ fails, correctly, if any ``backchannel`` row still exists.
 """
 from __future__ import annotations
 
+import json
 from typing import Sequence, Union
 
 from alembic import op
@@ -52,6 +61,31 @@ down_revision: Union[str, None] = "20260824_1400_profiling_policy"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+
+_PERMISSION = "system:sso:hosts:manage"
+_PERMISSION_CATEGORY = "system"
+_PERMISSION_DESCRIPTION = (
+    "Manage which internal hosts SSO may call back to."
+)
+_PERMISSION_LONG = (
+    "Lets you add and remove entries in the back-channel host allowlist — "
+    "the internal addresses a back-channel SSO provider is permitted to call "
+    "during a login. Deliberately SEPARATE from system:admin, because an "
+    "entry lets this service make requests to an address on your internal "
+    "network: the list is the only thing standing between an SSO "
+    "configuration form and a request-forgery tool, so who may edit it is a "
+    "decision worth making on its own. It grants no access to provider "
+    "settings or to anyone's identity, and no entry can ever unlock loopback "
+    "or the cloud metadata service."
+)
+_PERMISSION_EXAMPLES = [
+    "Allow sso-gateway.corp.internal:443 so a new back-channel provider can "
+    "reach it.",
+    "Remove a gateway that has been decommissioned.",
+]
+_ROLE_GRANTS: list[tuple[str, str]] = [
+    ("super_admin", _PERMISSION),
+]
 
 _KIND_CK = "ck_idp_providers_kind"
 _KINDS_WITH = "kind IN ('oidc', 'saml2', 'custom', 'custom_profile', 'backchannel')"
@@ -113,6 +147,35 @@ def upgrade() -> None:
 
     _rewrite_kind_check(_KINDS_WITH)
 
+    conn = op.get_bind()
+    conn.execute(
+        sa.text(
+            """
+            INSERT INTO permissions (id, description, category, long_description, examples)
+            VALUES (:id, :description, :category, :long_description, :examples)
+            ON CONFLICT (id) DO NOTHING
+            """
+        ),
+        {
+            "id": _PERMISSION,
+            "description": _PERMISSION_DESCRIPTION,
+            "category": _PERMISSION_CATEGORY,
+            "long_description": _PERMISSION_LONG,
+            "examples": json.dumps(_PERMISSION_EXAMPLES),
+        },
+    )
+    for role_name, perm_id in _ROLE_GRANTS:
+        conn.execute(
+            sa.text(
+                """
+                INSERT INTO role_permissions (role_name, permission_id)
+                VALUES (:role_name, :permission_id)
+                ON CONFLICT (role_name, permission_id) DO NOTHING
+                """
+            ),
+            {"role_name": role_name, "permission_id": perm_id},
+        )
+
     if not _has_column("refresh_tokens", "idp_provider_id"):
         op.add_column(
             "refresh_tokens",
@@ -126,6 +189,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    conn.execute(
+        sa.text("DELETE FROM role_permissions WHERE permission_id = :id"),
+        {"id": _PERMISSION},
+    )
+    conn.execute(
+        sa.text("DELETE FROM permissions WHERE id = :id"), {"id": _PERMISSION},
+    )
+
     if _has_column("refresh_tokens", "idp_checked_at"):
         op.drop_column("refresh_tokens", "idp_checked_at")
     if _has_column("refresh_tokens", "idp_provider_id"):
