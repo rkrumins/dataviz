@@ -84,6 +84,14 @@ You may answer either way:
   because the call is credentialed — echo the application's **exact
   origin** in `Access-Control-Allow-Origin` (a wildcard is forbidden
   with credentials) alongside `Access-Control-Allow-Credentials: true`.
+- **The preflight must not be challenged.** A CORS preflight is an
+  `OPTIONS` request the browser sends without credentials and will not
+  retry. If your service answers it with `401 WWW-Authenticate:
+  Negotiate` — which an authentication filter applied to every method
+  will do — the browser abandons the whole call before the real request
+  is ever made, and the failure looks like a CORS misconfiguration
+  rather than an authentication one. Exempt `OPTIONS` from
+  authentication.
 - **Browser policy for Kerberos.** Workstations must be configured to
   answer a Negotiate challenge for your host — `AuthServerAllowlist` on
   Chrome and Edge, `network.negotiate-auth.trusted-uris` on Firefox.
@@ -254,10 +262,10 @@ of them are cheaper to establish now than to discover later.
 4. Does your user reply carry a stable subject id, an email, and an
    authentication instant?
 5. Is there a validate-only endpoint (§6)?
-6. If a first call is needed: does it answer CORS preflights with the
-   application's exact origin and `Access-Control-Allow-Credentials`,
-   and are workstations policy-configured to answer Negotiate for your
-   host?
+6. If a first call is needed: is `OPTIONS` exempt from authentication,
+   does the preflight answer with the application's exact origin and
+   `Access-Control-Allow-Credentials`, and are workstations
+   policy-configured to answer Negotiate for your host?
 7. What happens to the session when someone signs out of your portal —
    is the cookie invalidated on your side, or only dropped by the
    browser? If only dropped, the application's re-check confirms "the
