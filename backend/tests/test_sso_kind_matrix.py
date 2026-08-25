@@ -18,6 +18,7 @@ the axis in a few lines rather than being quietly forgotten for two of them.
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
@@ -96,7 +97,8 @@ def _drive_oidc(client, slug, monkeypatch, cookies):
 def _drive_saml(client, slug, monkeypatch, cookies):
     from backend.auth_service.providers.saml2 import SamlProvider
 
-    def _fetch(self, *, host, https, path, post_data):
+    async def _fetch(self, *, host, https, path, post_data,
+                     expected_request_id=None):
         return _identity("saml2")
 
     monkeypatch.setattr(SamlProvider, "fetch_identity", _fetch)
@@ -115,6 +117,10 @@ def _profile_jwt(kind: str) -> str:
     return pyjwt.encode(
         {"sub": f"ext-{kind}", "emailAddress": f"{kind}@corp.example",
          "firstName": "Kind", "lastName": "Matrix",
+         # ``jti`` is required and single-use: a copied payload must not
+         # be replayable. Unique per call so a re-run of this driver does
+         # not trip the replay cache.
+         "jti": f"kind-matrix-{uuid.uuid4()}",
          "iat": now, "exp": now + 300},
         _SECRET, algorithm="HS256",
     )

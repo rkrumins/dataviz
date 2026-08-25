@@ -143,3 +143,116 @@ async def test_deps_includes_provider_breaker_states(test_client: AsyncClient, m
     body = resp.json()
     # ``providers`` is always present; empty dict when nothing instantiated.
     assert "providers" in body
+
+
+# ── /health/ready: revocation must be shared ────────────────────────
+#
+# ``get_revocation_service`` catches broadly and installs an in-process
+# backend when Redis cannot be reached, whose own docstring says not to
+# use it in production. With 4 gunicorn workers per container across N
+# replicas that turns every revocation into a no-op for 4N-1 of them:
+# the admin UI shows a session killed and the browser keeps working. It
+# logged at ERROR and nothing failed readiness, so the misconfiguration
+# was invisible. Readiness is the right place to surface it — a pod that
+# cannot revoke should not take traffic.
+#
+# Only decisive in prod: a dev stack has one worker, so the in-process
+# backend is genuinely equivalent there and failing readiness would just
+# stop ./dev.sh working.
+
+@pytest.mark.asyncio
+async def test_ready_reports_the_revocation_backend(test_client, monkeypatch):
+    import backend.app.main as main_module
+
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_engine", lambda: _HealthyEngine()
+    )
+    # Readiness refuses on a stale schema before it looks at anything
+    # else, and the test DB is not migrated. Satisfy that gate so these
+    # assertions are about the revocation one.
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_schema_state",
+        lambda: {"at_head": True, "applied": "head", "expected": "head"},
+    )
+    monkeypatch.setattr(main_module, "_is_production", lambda: False)
+    resp = await test_client.get("/api/v1/health/ready")
+    assert resp.status_code == 200
+    assert resp.json()["revocation"] in ("shared", "in_process")
+
+
+@pytest.mark.asyncio
+async def test_production_is_not_ready_without_a_shared_revocation_store(
+    test_client, monkeypatch,
+):
+    import backend.app.main as main_module
+    import backend.app.services.revocation_service as revocation_service
+
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_engine", lambda: _HealthyEngine()
+    )
+    # Readiness refuses on a stale schema before it looks at anything
+    # else, and the test DB is not migrated. Satisfy that gate so these
+    # assertions are about the revocation one.
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_schema_state",
+        lambda: {"at_head": True, "applied": "head", "expected": "head"},
+    )
+    monkeypatch.setattr(main_module, "_is_production", lambda: True)
+    monkeypatch.setattr(revocation_service, "revocation_is_shared", lambda: False)
+
+    resp = await test_client.get("/api/v1/health/ready")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "not_ready"
+    assert body["revocation"] == "in_process"
+    assert "revoked session" in body["reason"]
+
+
+@pytest.mark.asyncio
+async def test_production_is_ready_with_a_shared_revocation_store(
+    test_client, monkeypatch,
+):
+    import backend.app.main as main_module
+    import backend.app.services.revocation_service as revocation_service
+
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_engine", lambda: _HealthyEngine()
+    )
+    # Readiness refuses on a stale schema before it looks at anything
+    # else, and the test DB is not migrated. Satisfy that gate so these
+    # assertions are about the revocation one.
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_schema_state",
+        lambda: {"at_head": True, "applied": "head", "expected": "head"},
+    )
+    monkeypatch.setattr(main_module, "_is_production", lambda: True)
+    monkeypatch.setattr(revocation_service, "revocation_is_shared", lambda: True)
+
+    resp = await test_client.get("/api/v1/health/ready")
+    assert resp.status_code == 200
+    assert resp.json()["revocation"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_a_dev_stack_stays_ready_without_one(test_client, monkeypatch):
+    """One worker means the in-process backend really is equivalent, and
+    failing readiness here would just stop ./dev.sh working."""
+    import backend.app.main as main_module
+    import backend.app.services.revocation_service as revocation_service
+
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_engine", lambda: _HealthyEngine()
+    )
+    # Readiness refuses on a stale schema before it looks at anything
+    # else, and the test DB is not migrated. Satisfy that gate so these
+    # assertions are about the revocation one.
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_schema_state",
+        lambda: {"at_head": True, "applied": "head", "expected": "head"},
+    )
+    monkeypatch.setattr(main_module, "_is_production", lambda: False)
+    monkeypatch.setattr(revocation_service, "revocation_is_shared", lambda: False)
+
+    resp = await test_client.get("/api/v1/health/ready")
+    assert resp.status_code == 200
+    assert resp.json()["revocation"] == "in_process"

@@ -24,7 +24,6 @@ quadrantChart
     quadrant-2 Monitor
     quadrant-3 Accept
     quadrant-4 Plan Fix
-    JWT in localStorage: [0.65, 0.6]
     SQLite in production: [0.8, 0.55]
     Optional encryption: [0.75, 0.65]
     Default admin password: [0.7, 0.8]
@@ -42,26 +41,24 @@ quadrantChart
 
 ## 1. Security Concerns
 
-### 1.1 JWT Stored in localStorage (CRITICAL)
+### 1.1 JWT Stored in localStorage — RESOLVED
 
-**Files:** `frontend/src/store/auth.ts`
+Sessions ride HttpOnly cookies (`nx_access` / `nx_refresh`) and **no
+token is in web storage**. Every `localStorage` / `sessionStorage` call
+site in `frontend/src` holds UI state: layout widths, dismissals,
+wizard drafts, recent searches, the feature-flag cache, and a
+sessionStorage-only user DTO cache that is wiped on logout.
 
-The codebase itself acknowledges this risk:
-```
-// SECURITY NOTE: The JWT is stored in localStorage via Zustand persist.
-// localStorage is accessible to any JS running on the page, making it
-// vulnerable to XSS. ... Tracked for v2.
-```
+The recommendations listed here were all implemented: HttpOnly cookies,
+`X-CSRF-Token` double-submit (now additionally bound to the session
+`sid`), and `credentials: 'include'` on every call via
+`services/fetchWithTimeout.ts`.
 
-**Risk:** A single malicious npm dependency or CDN compromise can steal JWTs from `localStorage`, enabling full account impersonation for the token's lifetime (60 minutes).
+Left in place rather than deleted because this entry was still being
+read as current — `ARCHITECTURE.md` repeated it, and it appeared in the
+remediation plan below.
 
-**Recommendation:**
-1. Move to HttpOnly cookies set by backend (`POST /auth/set-cookie`)
-2. Add CSRF protection (`X-CSRF-Token` header)
-3. Frontend: use `credentials: 'include'` on API calls
-4. Remove JWT from localStorage entirely
-
-### 1.2 Credential Encryption is Optional (HIGH)
+### 1.2 Credential Encryption is Optional (HIGH) — RESOLVED IN PRODUCTION
 
 **Files:** `backend/app/db/repositories/connection_repo.py`
 
@@ -77,10 +74,13 @@ def _encrypt(data: dict) -> str:
 
 **Risk:** Database backups contain plaintext Neo4j passwords and API tokens.
 
-**Recommendation:**
-- Fail startup if key not set outside explicit dev mode
-- Add audit script to detect plaintext credentials in existing DB
-- Log warning on startup if encryption is disabled
+**Status:** `require_encryption_or_plaintext_ok()` raises on the write
+path when `CREDENTIAL_ENCRYPTION_KEY` is unset and `ENV` is
+`prod`/`production`, for both `graph_connections` and `idp_providers`.
+Dev and test behaviour is unchanged, and a warning is logged there.
+
+**Still outstanding:** an audit script to find plaintext credentials in
+a database that predates the guard.
 
 ### 1.3 Weak Default Admin Password (HIGH) — MOSTLY RESOLVED
 
@@ -460,7 +460,7 @@ gantt
 | Priority | Item | Effort | Impact |
 |----------|------|--------|--------|
 | **P0** | Force credential encryption | Low | Prevents plaintext credential leaks |
-| **P0** | Move JWT to HttpOnly cookies | Medium | Eliminates XSS token theft |
+| ~~**P0**~~ | ~~Move JWT to HttpOnly cookies~~ — **done**; see §1.1 | — | — |
 | **P0** | Strong default admin password | Low | Prevents trivial admin compromise |
 | **P1** | Remove CORS wildcard from Graph Service | Low | Reduces attack surface |
 | **P1** | Require MANAGEMENT_DB_URL in production | Low | Prevents SQLite corruption |
@@ -514,7 +514,7 @@ gantt
 
 > **Warning: highest-priority blockers for production deployment.**
 > 1. Force credential encryption (prevent plaintext leaks)
-> 2. Move JWT to HttpOnly cookies (prevent XSS token theft)
+> 2. ~~Move JWT to HttpOnly cookies~~ — done; see §1.1
 > 3. Require PostgreSQL in production (prevent SQLite corruption)
 > 4. Strong default admin password (prevent trivial compromise)
 > 5. CI/CD pipeline (prevent unvalidated deployments)

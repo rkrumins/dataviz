@@ -1,3 +1,4 @@
+import type { ComponentProps } from 'react'
 import { Children, isValidElement, useState } from 'react'
 import type { Components } from 'react-markdown'
 import { Link as RouterLink } from 'react-router-dom'
@@ -193,6 +194,22 @@ function extractCodeFromPre(children: React.ReactNode): { lang: string | null; t
   }
 }
 
+/**
+ * A fenced code block with a copy button, and nothing else.
+ *
+ * Factored out so the user-content map below can reuse the ordinary
+ * rendering without inheriting the widget escapes above it.
+ */
+function PlainCodeBlock({ children, ...props }: ComponentProps<'pre'>) {
+  const info = extractCodeFromPre(children)
+  return (
+    <div className="group relative">
+      {info?.text ? <CodeCopyButton text={info.text} /> : null}
+      <pre {...props}>{children}</pre>
+    </div>
+  )
+}
+
 export const markdownComponents: Components = {
   h1: ({ children, id }) => <HeadingWithAnchor level={1} id={id}>{children}</HeadingWithAnchor>,
   h2: ({ children, id }) => <HeadingWithAnchor level={2} id={id}>{children}</HeadingWithAnchor>,
@@ -218,12 +235,7 @@ export const markdownComponents: Components = {
     if (info?.lang?.startsWith('tour-')) {
       return <MarkdownTourButton tourId={info.lang.slice('tour-'.length)} />
     }
-    return (
-      <div className="group relative">
-        {info?.text ? <CodeCopyButton text={info.text} /> : null}
-        <pre {...props}>{children}</pre>
-      </div>
-    )
+    return <PlainCodeBlock {...props}>{children}</PlainCodeBlock>
   },
 
   // Tables: scrollable wrapper
@@ -282,4 +294,38 @@ export const markdownComponents: Components = {
   img: ({ src, alt }) => (
     <ZoomableImage src={typeof src === 'string' ? src : undefined} alt={alt} />
   ),
+}
+
+/**
+ * The docs map, minus the fenced-block widgets, for USER-AUTHORED text.
+ *
+ * `markdownComponents` turns three fence languages into interactive
+ * widgets: ```mermaid renders a diagram, ```lineage-demo mounts the
+ * trace demo, and ```tour-<id> mounts a tour button. Those are docs
+ * affordances, and the markdown they were written for is imported at
+ * build time from this repository.
+ *
+ * Property values are not that. They are written by users, and pointing
+ * the docs map at them has two problems that happen to share a fix:
+ *
+ *   * `MermaidBlock` runs mermaid at `securityLevel: 'loose'` and
+ *     injects the result with `dangerouslySetInnerHTML`. Mermaid does
+ *     no sanitising at that level and node labels accept raw HTML, so
+ *     the fence body becomes a script-execution primitive. Sanitising
+ *     the output was tried and rejected: DOMPurify strips the
+ *     `foreignObject` HTML labels that around fifty shipped diagrams
+ *     rely on, so it would have blanked the docs to protect a surface
+ *     that should not have had the widget in the first place.
+ *   * The preview was lying. A saved property value is rendered by
+ *     `InlineMarkdown` (see `panels/property/valueWidgets.tsx`), whose
+ *     `liteBlock` map has none of these widgets — so a mermaid fence
+ *     previewed as a diagram and then displayed to every reader as a
+ *     plain code block.
+ *
+ * Dropping them fixes both: nothing user-authored reaches the widgets,
+ * and the preview now shows what readers will actually see.
+ */
+export const userContentMarkdownComponents: Components = {
+  ...markdownComponents,
+  pre: PlainCodeBlock,
 }

@@ -516,7 +516,7 @@ async def get_job_status(job_id: str = Path(...)) -> dict:
 @router.get("/dlq")
 async def list_dlq(
     cursor: str = "-",
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
 ) -> dict:
     """Paginated list of DLQ entries.
 

@@ -26,6 +26,8 @@ import jwt as pyjwt
 
 from .core.config import (
     JWT_EXPIRY_MINUTES,
+    SESSION_ABSOLUTE_MAX_SECONDS,
+    SESSION_IDLE_MAX_SECONDS,
     JWT_REFRESH_EXPIRY_DAYS,
     REFRESH_ADOPT_RECORDLESS,
     REFRESH_ROTATION_GRACE_SECONDS,
@@ -179,6 +181,9 @@ class LocalIdentityService:
         (handles both role_binding and group_membership targets).
       * ``session_killer(user_id)`` -> None — Phase 2.E
         revoke-all-sessions hook.
+      * ``session_revoker(sid)`` -> None — tombstone ONE session. The
+        narrow sibling of ``session_killer``: sign-out on this device
+        must not end the user's sessions on their other devices.
 
     The new ``user_identity_repo`` is required for the SSO paths; the
     constructor accepts ``None`` so the local-only login flow works
@@ -199,6 +204,7 @@ class LocalIdentityService:
         sso_role_reconciler: Optional[Callable[..., Awaitable[dict]]] = None,
         sso_role_preview: Optional[Callable[..., Awaitable[dict]]] = None,
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
+        session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
     ):
         self._session_factory = session_factory
@@ -219,6 +225,7 @@ class LocalIdentityService:
         # mapping lookup, no writes.
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
+        self._session_revoker = session_revoker
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
         # ``app_auth_config``. When ``None`` (legacy test wiring), the
@@ -337,13 +344,42 @@ class LocalIdentityService:
         )
         return user, tokens
 
-    async def logout(self, refresh_token: Optional[str]) -> None:
+    async def logout(
+        self,
+        refresh_token: Optional[str],
+        access_token: Optional[str] = None,
+    ) -> None:
+        """End this session: revoke its rotation family AND tombstone
+        the access token still in the caller's hands.
+
+        Revoking the family alone is not a sign-out. It stops the
+        session being *renewed*, but the access token already issued
+        stays signature-valid until it expires, and nothing on the
+        request path consults the refresh family — ``get_current_user``
+        checks the ``sid`` tombstone. So a token captured before the
+        sign-out kept working for the rest of its lifetime: up to
+        ``JWT_EXPIRY_MINUTES + CLOCK_SKEW_LEEWAY_SECONDS``, which is an
+        hour under the shipped compose default.
+
+        The ``sid`` lives in the ACCESS token, not the refresh token,
+        which is why the caller hands both in. An expired or unreadable
+        access cookie needs no tombstone — it is already refused — so
+        those cases fall through to the family revocation alone rather
+        than failing the sign-out.
+
+        Deliberately per-session, not per-user: ``session_killer`` ends
+        every session a user has, and signing out of one browser must
+        not sign them out of the others. "Sign out everywhere" is a
+        separate, explicit action.
+        """
+        await self._revoke_this_session(access_token)
+
         if not refresh_token:
             return
         try:
             claims = decode_refresh_token(refresh_token)
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
-            return  # idempotent — nothing to revoke
+            return  # idempotent — nothing left to revoke
 
         async with self._session_factory() as session:
             store = self._refresh_store_factory(session)
@@ -353,6 +389,36 @@ class LocalIdentityService:
                     session, "user.logged_out",
                     {"user_id": claims.sub},
                 )
+
+    async def _revoke_this_session(self, access_token: Optional[str]) -> None:
+        """Tombstone the ``sid`` carried by ``access_token``, if any.
+
+        Best-effort by design: a sign-out whose tombstone write fails
+        must still revoke the refresh family and clear the cookies. The
+        failure is logged at ERROR because it leaves a live access token
+        behind, which is exactly the condition worth alerting on.
+        """
+        if not access_token or self._session_revoker is None:
+            return
+        try:
+            sid = decode_token(access_token).get("sid")
+        except Exception:  # noqa: BLE001 — see below
+            # Expired, foreign, or structurally broken: all already
+            # refused on every request, so there is nothing to tombstone.
+            # Broad rather than the two JWT errors, because this runs
+            # BEFORE the family revocation and before the cookies are
+            # cleared — anything escaping here would turn a sign-out into
+            # a 500 that also failed to sign the user out.
+            return
+        if not sid:
+            return
+        try:
+            await self._session_revoker(sid)
+        except Exception:  # noqa: BLE001 — sign-out must not fail on this
+            logger.exception(
+                "Failed to tombstone sid during logout; the access token "
+                "stays valid until it expires",
+            )
 
     async def refresh(
         self, refresh_token: str, *,
@@ -535,6 +601,54 @@ class LocalIdentityService:
                     claims.sub, claims.family_id,
                 )
                 raise _RefreshRejected(InvalidRefreshToken("sessions_revoked"))
+
+            # ── Absolute + idle session ceilings ─────────────────────
+            # Every session, SSO or local. Rotation mints a fresh 7-day
+            # refresh token each time and nothing looked at when the
+            # family started, so a local session that rotated once a
+            # week lived indefinitely — a refresh cookie stolen once was
+            # a permanent credential. The SSO ceiling below does not
+            # help there: it only fires when ``auth_time`` is set, which
+            # local logins deliberately leave NULL.
+            #
+            # Refused rather than merely not-renewed, and the family is
+            # killed with it: a session past its ceiling is over, and
+            # leaving the rest of the chain live would let the next tab
+            # walk straight back in.
+            if SESSION_IDLE_MAX_SECONDS > 0:
+                # From the server's record, not the token's own claim —
+                # the same rule ``auth_time`` follows two blocks down,
+                # and for the same reason: a value the token asserts
+                # about itself is a value whoever holds the token could
+                # have been handed with anything in it.
+                last_mint_ms = (
+                    outcome.record.mint_ms if outcome.record is not None
+                    else claims.mint_ms
+                )
+                idle_seconds = int(time.time()) - int(last_mint_ms / 1000)
+                if idle_seconds > SESSION_IDLE_MAX_SECONDS:
+                    logger.info(
+                        "Refresh rejected (session_idle) for user=%s "
+                        "family=%s idle=%ds",
+                        claims.sub, claims.family_id, idle_seconds,
+                    )
+                    raise _RefreshRejected(
+                        InvalidRefreshToken("session_idle"),
+                    )
+
+            if SESSION_ABSOLUTE_MAX_SECONDS > 0:
+                started_ms = await store.family_started_ms(claims.family_id)
+                if started_ms is not None:
+                    age_seconds = int(time.time()) - int(started_ms / 1000)
+                    if age_seconds > SESSION_ABSOLUTE_MAX_SECONDS:
+                        logger.info(
+                            "Refresh rejected (session_expired) for user=%s "
+                            "family=%s age=%ds",
+                            claims.sub, claims.family_id, age_seconds,
+                        )
+                        raise _RefreshRejected(
+                            InvalidRefreshToken("session_expired"),
+                        )
 
             # ── SSO daily re-auth ceiling ────────────────────────────
             # ``auth_time`` present means "this session was minted by an
@@ -1604,7 +1718,9 @@ class LocalIdentityService:
             access_max_age_seconds=JWT_EXPIRY_MINUTES * 60,
             refresh_token=refresh,
             refresh_max_age_seconds=JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60,
-            csrf_token=mint_csrf_token(),
+            # Bound to this session's sid so a cookie planted by a
+            # sibling subdomain cannot satisfy the double-submit check.
+            csrf_token=mint_csrf_token(extra.get("sid")),
         )
 
 

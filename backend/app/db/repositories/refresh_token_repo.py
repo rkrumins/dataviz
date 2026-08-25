@@ -28,7 +28,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -240,6 +240,26 @@ class SQLAlchemyRefreshStore:
             )
         ).scalar_one_or_none()
         return row is not None
+
+    async def family_started_ms(self, family_id: str) -> Optional[int]:
+        """When this session first signed in, in epoch milliseconds.
+
+        The earliest mint in the family, which is the original login —
+        every later row is a rotation of it. This is what the absolute
+        session ceiling measures from; the presented token's own
+        ``mint_ms`` cannot serve, because rotation resets it and that is
+        exactly how a session came to live forever.
+
+        ``None`` when the family has no rows, which under allow-by-record
+        the caller has already refused.
+        """
+        return (
+            await self._session.execute(
+                select(func.min(RefreshTokenORM.mint_ms)).where(
+                    RefreshTokenORM.family_id == family_id,
+                )
+            )
+        ).scalar_one_or_none()
 
 
 def make_refresh_store(session: AsyncSession) -> SQLAlchemyRefreshStore:

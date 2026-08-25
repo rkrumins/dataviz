@@ -33,6 +33,16 @@ slowapi>=0.1.10           # Rate limiting for auth endpoints
 # this import succeeds, so a missing install is a silent no-op.
 python3-saml>=1.16.0
 
+# python3-saml's XML stack, pinned here rather than left to transitive
+# resolution. These two perform the signature verification the entire
+# SAML trust model rests on, and they are the highest-CVE-density
+# packages in the auth path: lxml bundles libxml2/libxslt in its wheels,
+# so a libxml2 advisory is an lxml upgrade, and xmlsec wraps libxmlsec1.
+# Floors are the versions pip-audit reports clean (2026-08); the CI
+# pip-audit job is what raises them when that stops holding.
+lxml>=6.1.2
+xmlsec>=1.3.17
+
 # Local-dev .env auto-load. ``auth_service.core.config`` imports it
 # behind a try/except + ENV/file-existence gate, so a missing dep
 # silently falls back to the explicit-export path (no boot crash).

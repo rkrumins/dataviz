@@ -7,6 +7,7 @@ in what the payload says and, more importantly, what it refuses to say.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -817,3 +818,215 @@ async def test_the_policy_reads_back_the_value_it_will_actually_use(
     # And the deployment defaults are still reported, so a blank field can mean
     # "inherit" rather than pinning today's value.
     assert out["data"]["defaults"]["heartbeatSecs"] > 0
+
+
+# ── narrowing parameters can only narrow ─────────────────────────────
+#
+# Added during the security-branch merge, because this is the shape of a
+# defect this codebase has already shipped once.
+#
+# `_scope_for` calls `ensure_data_source_visible` only when scope ==
+# "source". Every other scope, and both of the board's narrowing
+# parameters, rely entirely on `_scope_conditions` ANDing the caller's
+# `visible` set into the query. That is the right design -- authorisation
+# and the query use one predicate rather than two that can disagree --
+# but nothing drove it.
+#
+# The rule: a caller-supplied id may only ever intersect with what the
+# caller can already see. If a refactor ever makes one of these replace
+# the visibility filter instead of narrowing it, that is a cross-tenant
+# read, and these tests are what notice.
+
+async def _two_tenants(session: AsyncSession):
+    """ws_1/prov_1 is ours; ws_2/prov_2 is somebody else's."""
+    await _source(session, "ds_ours", workspace="ws_1", provider="prov_1")
+    await _snap(
+        session, "ds_ours", _iso(2), nodes=100,
+        workspace="ws_1", provider="prov_1",
+    )
+    await _source(session, "ds_theirs", workspace="ws_2", provider="prov_2")
+    await _snap(
+        session, "ds_theirs", _iso(2), nodes=999,
+        workspace="ws_2", provider="prov_2",
+    )
+    # The board reads the rollup tier, never raw -- at platform scope a raw
+    # scan is the shape of a request that appears to hang. Without this the
+    # board is empty for everyone and the refusals below would pass while
+    # testing nothing.
+    for _ in range(5):
+        if not await profiling_repo.compact(session, grain="hour"):
+            break
+
+
+async def _board(session, claims, **kwargs):
+    params = dict(
+        window="24h", frm=None, to=None, workspace_id=None, provider_id=None,
+        metric="nodes", unusual_only=False, limit=100, offset=0,
+    )
+    params.update(kwargs)
+    return await profiling.get_board(session=session, claims=claims, **params)
+
+
+async def test_the_board_refuses_another_tenants_workspace_filter(
+    db_session: AsyncSession,
+):
+    """Asking for ws_2 as a ws_1 caller returns nothing, not ws_2's rows."""
+    await _two_tenants(db_session)
+
+    result = await _board(
+        db_session, workspace_claims("ws_1"), workspace_id="ws_2",
+    )
+    assert result["data"]["rows"] == []
+    # The total is the count after scoping, so a leak shows up as a wrong
+    # number even if the ids were somehow scrubbed from the rows.
+    assert result["data"]["total"] == 0
+    assert result["data"]["platform_wide"] is False
+
+
+async def test_the_board_refuses_another_tenants_provider_filter(
+    db_session: AsyncSession,
+):
+    await _two_tenants(db_session)
+
+    result = await _board(
+        db_session, workspace_claims("ws_1"), provider_id="prov_2",
+    )
+    assert result["data"]["rows"] == []
+    assert result["data"]["total"] == 0
+
+
+async def test_the_board_still_narrows_within_what_we_can_see(
+    db_session: AsyncSession,
+):
+    """The guard must not be 'refuse every filter' -- narrowing to our own
+    workspace has to keep working, or the parameter is useless."""
+    await _two_tenants(db_session)
+
+    result = await _board(
+        db_session, workspace_claims("ws_1"), workspace_id="ws_1",
+    )
+    assert [r["data_source_id"] for r in result["data"]["rows"]] == ["ds_ours"]
+
+
+async def test_an_operator_sees_both_tenants_on_the_board(
+    db_session: AsyncSession,
+):
+    """Guards the guard: if the fixtures produced no board rows at all, the
+    refusals above would pass without testing anything."""
+    await _two_tenants(db_session)
+
+    result = await _board(db_session, OPERATOR)
+    assert {r["data_source_id"] for r in result["data"]["rows"]} == {
+        "ds_ours", "ds_theirs",
+    }
+    assert result["data"]["platform_wide"] is True
+
+
+async def test_a_workspace_scoped_series_cannot_read_another_tenant(
+    db_session: AsyncSession,
+):
+    """scope='workspace' has no ensure_* check -- it rests entirely on
+    _scope_conditions ANDing `visible` into the query."""
+    await _two_tenants(db_session)
+
+    payload = (await profiling.get_series(
+        scope="workspace", id="ws_2", window="24h", frm=None, to=None,
+        grain="raw", metric="nodes", breakdown="none", top=8, compare=False,
+        session=db_session, claims=workspace_claims("ws_1"),
+    ))["data"]
+    assert payload["sources_observed"] == 0
+
+
+async def test_a_provider_scoped_series_cannot_read_another_tenant(
+    db_session: AsyncSession,
+):
+    await _two_tenants(db_session)
+
+    payload = (await profiling.get_series(
+        scope="provider", id="prov_2", window="24h", frm=None, to=None,
+        grain="raw", metric="nodes", breakdown="none", top=8, compare=False,
+        session=db_session, claims=workspace_claims("ws_1"),
+    ))["data"]
+    assert payload["sources_observed"] == 0
+
+
+async def test_a_caller_bound_to_no_workspace_gets_nothing_not_everything(
+    db_session: AsyncSession,
+):
+    """An EMPTY visible set is not None. Conflating them is the fail-OPEN
+    direction, and it is the one that matters here."""
+    await _two_tenants(db_session)
+
+    board = await _board(db_session, NOBODY)
+    assert board["data"]["rows"] == []
+    assert board["data"]["platform_wide"] is False
+
+
+# ── the CSV download's filename is a response header ─────────────────
+#
+# `_scope_for` resolves and authorises an id only when scope == "source".
+# For "workspace" and "provider" the id is arbitrary caller-supplied text,
+# and export_csv interpolated it into Content-Disposition. Confirmed by
+# running it, not by reading it: a quote closed the quoted string and
+# appended a second filename parameter, and a raw CRLF put a newline
+# inside a header value.
+#
+# Nothing here asserts on the ATTACK strings. It asserts the property:
+# the header carries no CR, no LF, and exactly one filename parameter,
+# whatever the caller sends.
+
+_HOSTILE_IDS = [
+    ('quote breakout', 'x";filename="setup.exe'),
+    ('crlf split', "ws_1\r\nX-Injected: 1"),
+    ('bare lf', "ws_1\nX-Injected: 1"),
+    ('semicolon', "ws_1; filename=other.csv"),
+    ('path traversal', "../../../etc/passwd"),
+    ('double quote', 'ws"1'),
+    ('backslash', "ws\\1"),
+]
+
+
+@pytest.mark.parametrize("label,hostile", _HOSTILE_IDS, ids=[h[0] for h in _HOSTILE_IDS])
+async def test_the_csv_filename_cannot_carry_a_header_payload(
+    label, hostile, db_session: AsyncSession,
+):
+    await _source(db_session, "ds_csv", workspace="ws_1")
+    await _snap(db_session, "ds_csv", _iso(2), nodes=10, workspace="ws_1")
+
+    resp = await profiling.export_csv(
+        scope="workspace", id=hostile, window="24h", frm=None, to=None,
+        grain="raw", breakdown="none",
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    disposition = resp.headers["content-disposition"]
+
+    assert "\r" not in disposition and "\n" not in disposition, (
+        f"{label}: a newline in a header value is response splitting"
+    )
+    # Exactly one filename parameter. A second one is what a quote
+    # breakout produces, and it is the one a browser may honour.
+    assert disposition.count("filename=") == 1, (
+        f"{label}: {disposition!r} declares more than one filename"
+    )
+    # The value is a single quoted token with nothing after it.
+    assert re.fullmatch(
+        r'attachment; filename="[A-Za-z0-9._-]+"', disposition
+    ), f"{label}: unexpected shape {disposition!r}"
+
+
+async def test_a_legitimate_csv_filename_is_still_readable(
+    db_session: AsyncSession,
+):
+    """The sanitiser must not reduce every download to underscores."""
+    await _source(db_session, "ds_csv", workspace="ws_1")
+    await _snap(db_session, "ds_csv", _iso(2), nodes=10, workspace="ws_1")
+
+    resp = await profiling.export_csv(
+        scope="workspace", id="ws_1", window="24h", frm=None, to=None,
+        grain="raw", breakdown="none",
+        session=db_session, claims=workspace_claims("ws_1"),
+    )
+    assert (
+        resp.headers["content-disposition"]
+        == 'attachment; filename="profiling-workspace-ws_1-raw.csv"'
+    )

@@ -51,6 +51,15 @@ async def list_rule_sets(
 async def get_rule_set(
     session: AsyncSession, rule_set_id: str
 ) -> Optional[RuleSetResponse]:
+    """Look a rule set up by id ALONE, with no ownership predicate.
+
+    Only safe where the caller has already established that the row
+    belongs to the scope it is acting in. The workspace-scoped HTTP
+    routes must use ``get_rule_set_for_workspace`` below: they take
+    ``ws_id`` from the path, authorize against *that* workspace, and
+    then need the lookup held to the same workspace or the gate proves
+    nothing about the row it returns.
+    """
     result = await session.execute(
         select(AssignmentRuleSetORM).where(AssignmentRuleSetORM.id == rule_set_id)
     )
@@ -121,6 +130,8 @@ async def update_rule_set(
 async def delete_rule_set(
     session: AsyncSession, rule_set_id: str
 ) -> bool:
+    """Delete by id ALONE. See the warning on ``get_rule_set`` — the
+    workspace-scoped routes must use ``delete_rule_set_for_workspace``."""
     result = await session.execute(
         select(AssignmentRuleSetORM).where(AssignmentRuleSetORM.id == rule_set_id)
     )
@@ -144,6 +155,51 @@ async def list_rule_sets_by_workspace(
         .order_by(AssignmentRuleSetORM.created_at)
     )
     return [_rule_set_to_response(r) for r in result.scalars().all()]
+
+
+async def get_rule_set_for_workspace(
+    session: AsyncSession, workspace_id: str, rule_set_id: str
+) -> Optional[RuleSetResponse]:
+    """Fetch one rule set, held to the workspace that owns it.
+
+    The workspace predicate is what makes the route's ``requires(...,
+    workspace='ws_id')`` gate mean something: that gate authorizes the
+    caller against the workspace in the PATH, so a lookup by id alone
+    happily returns another workspace's row to a caller entitled only
+    to their own. A miss and a foreign row are indistinguishable to the
+    caller (both 404), which is the same existence-hiding convention
+    ``capability_gate`` uses for views.
+    """
+    result = await session.execute(
+        select(AssignmentRuleSetORM).where(
+            AssignmentRuleSetORM.id == rule_set_id,
+            AssignmentRuleSetORM.workspace_id == workspace_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    return _rule_set_to_response(row) if row else None
+
+
+async def delete_rule_set_for_workspace(
+    session: AsyncSession, workspace_id: str, rule_set_id: str
+) -> bool:
+    """Delete one rule set, held to the workspace that owns it.
+
+    Same reasoning as ``get_rule_set_for_workspace`` — and the stakes
+    are higher here, because without the predicate the route destroys
+    another workspace's row rather than merely disclosing it.
+    """
+    result = await session.execute(
+        select(AssignmentRuleSetORM).where(
+            AssignmentRuleSetORM.id == rule_set_id,
+            AssignmentRuleSetORM.workspace_id == workspace_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        await session.delete(row)
+        return True
+    return False
 
 
 async def create_rule_set_for_workspace(
