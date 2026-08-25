@@ -237,16 +237,19 @@ real assertion, and see what actually arrived.
 These make calls out to your own network, so they fail in ways the other kinds
 cannot.
 
+The code names the failure class; the audit row's summary carries the
+specifics (which URL, which path, which status).
+
 | Code | What happened | What to do |
 |---|---|---|
-| `ambient_token_missing_from_cookie` | The request arrived without your portal's session cookie | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
-| `backchannel_rejected:idp_rejected:401` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
-| `backchannel_rejected:idp_blocked:…` | We refused to make the call | Almost always the host allowlist — Settings → *Internal gateways SSO may call*. Check the host **and the port** |
-| `backchannel_rejected:idp_unreachable:…` | The gateway did not answer in time | Network or an outage on their side. Existing sessions ride out a short one; see below |
-| `backchannel_rejected:idp_status:5xx` | The gateway answered with an error | Theirs to investigate — quote them the status |
-| `backchannel_rejected:gateway_token_absent_at:…` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
-| `backchannel_rejected:claims_absent_at:…` | Same, for the user details | Same fix |
-| `backchannel_rejected:auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+| `backchannel_no_session` | The request arrived without your portal's session cookie (or header) | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
+| `backchannel_idp_rejected:401` / `:403` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
+| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. Existing sessions ride out a short outage; see below |
+| `backchannel_token_absent` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
+| `backchannel_claims_absent` | Same, for the user details | Same fix |
+| `backchannel_claims_unmappable` | The details arrived, but the claim mapping could not produce an identity from them | Open the connection's **Claim mapping**, load the last assertion, and see which required field (subject, email) has no source |
+| `backchannel_auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+| `backchannel_failed` | None of the above — an unclassified failure, including a connection whose stored settings no longer build | Read the audit summary; if it names a setting, fix the row and save it (saving re-validates) |
 
 ### "People on the gateway connection keep getting signed out"
 
@@ -257,10 +260,11 @@ setting. Before treating it as a fault, ask
 whether the portal considers those people signed in.
 
 If the gateway itself is down, sessions are *not* dropped straight away — they
-keep working for the connection's grace period, measured from the last time the
-gateway actually answered rather than the last time we tried. A brief outage is
-invisible. A long one ends sessions rather than extending them indefinitely,
-which is deliberate: an outage should spend that allowance down, not renew it.
+keep working for the connection's grace period (15 minutes unless the
+connection sets otherwise), measured from the last time the gateway actually
+answered rather than the last time we tried. A brief outage is invisible. A
+long one ends sessions rather than extending them indefinitely, which is
+deliberate: an outage should spend that allowance down, not renew it.
 
 ---
 
