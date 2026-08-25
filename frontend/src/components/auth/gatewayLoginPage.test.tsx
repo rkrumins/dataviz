@@ -210,6 +210,29 @@ describe('silent sign-in', () => {
         expect(screen.queryByText(/could not reach/i)).not.toBeInTheDocument()
     })
 
+    it('tries again once the cooldown lapses — a tab is not parked forever', async () => {
+        // The old boolean sentinel meant the second corporate-session
+        // expiry of the day left every long-lived tab sitting on the
+        // form. The sentinel is a timestamp now.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now() - 61_000),
+        )
+        renderLogin()
+        await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
+    })
+
+    it('stays quiet and explains while a silent recovery just failed', async () => {
+        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'The sign-in service answered 503.',
+        }))
+        renderLogin()
+        expect(await screen.findByText(/could not be renewed automatically/i))
+            .toBeInTheDocument()
+        expect(await screen.findByText(/answered 503/i)).toBeInTheDocument()
+        await new Promise(r => setTimeout(r, 20))
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+    })
+
     it('does not fire when two providers could both claim it', async () => {
         // Which one would it pick? Guessing on a user's behalf is worse
         // than showing them the buttons.
@@ -228,7 +251,9 @@ describe('silent sign-in', () => {
 describe('the button', () => {
     beforeEach(() => {
         // Spend the silent attempt so the button is what is under test.
-        window.sessionStorage.setItem('nx_portal_autologin_tried', '1')
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
     })
 
     it('says what went wrong rather than navigating anyway', async () => {
@@ -255,7 +280,9 @@ describe('the button', () => {
 
 describe('the glyph', () => {
     beforeEach(() => {
-        window.sessionStorage.setItem('nx_portal_autologin_tried', '1')
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
     })
 
     it('promises a hand-off only where one happens', async () => {

@@ -15,6 +15,11 @@ import {
     type LoginContext,
     type SsoProviderSummary,
 } from '@/services/authService'
+import {
+    autoPortalAlreadyTried,
+    markAutoPortalTried,
+    readReauthFailure,
+} from '@/services/backchannelReauth'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
@@ -537,26 +542,11 @@ async function gatewaySignInBody(
 }
 
 
-/** Session-scoped guard so a rejected auto-attempt can't relaunch on
- *  every render or on a bounce back to /login. A fresh tab retries. */
-const AUTO_PORTAL_SENTINEL = 'nx_portal_autologin_tried'
-
-function autoPortalAlreadyTried(): boolean {
-    try {
-        return window.sessionStorage.getItem(AUTO_PORTAL_SENTINEL) === '1'
-    } catch {
-        return false
-    }
-}
-
-function markAutoPortalTried() {
-    try {
-        window.sessionStorage.setItem(AUTO_PORTAL_SENTINEL, '1')
-    } catch {
-        // Storage unavailable — the worst case is one retry per render
-        // cycle guarded by the in-flight ref below.
-    }
-}
+// The silent-attempt sentinel lives with the recovery machinery now: a
+// successful behind-the-scenes re-sign-in clears it, a failed one holds
+// it, and the cooldown replaces the old once-per-tab-forever boolean —
+// which meant the second corporate-session expiry of the day parked
+// every long-lived tab on this form for good.
 
 export function LoginPage() {
     const signupEnabled = useFeature('signupEnabled')
@@ -576,7 +566,19 @@ export function LoginPage() {
     const [context, setContext] = useState<LoginContext | null>(null)
     const [contextFailed, setContextFailed] = useState(false)
     const [routed, setRouted] = useState<SsoProviderSummary | null>(null)
-    const [portalError, setPortalError] = useState<string | null>(null)
+    // Landed here because a silent re-sign-in just failed? Say so from
+    // the first paint — the user was working, their corporate session
+    // expired, and the automatic recovery could not renew it. Without a
+    // reason this page reads as a random logout.
+    const [portalError, setPortalError] = useState<string | null>(() => {
+        const failure = readReauthFailure()
+        if (!failure) return null
+        return (
+            'Your corporate sign-in could not be renewed automatically.'
+            + (failure.reason ? ` ${failure.reason}` : '')
+            + ' Try again below.'
+        )
+    })
     // Escape hatch out of the email-first flow. Never shown when local
     // login is off — there would be nothing to escape to.
     const [forcePassword, setForcePassword] = useState(false)

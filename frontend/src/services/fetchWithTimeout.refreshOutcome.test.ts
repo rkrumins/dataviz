@@ -15,6 +15,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchWithTimeout, resetSessionLostLatch } from './fetchWithTimeout'
 
+const { attemptSilentReauth } = vi.hoisted(() => ({
+    attemptSilentReauth: vi.fn(),
+}))
+vi.mock('./backchannelReauth', () => ({ attemptSilentReauth }))
+
 const REFRESH_URL = '/api/v1/auth/refresh'
 const PROTECTED_URL = '/api/v1/workspaces'
 const realFetch = globalThis.fetch
@@ -69,6 +74,8 @@ beforeEach(() => {
     window.addEventListener('auth:session-lost', countSessionLost)
     resetSessionLostLatch()
     setPath('/dashboard')
+    attemptSilentReauth.mockReset()
+    attemptSilentReauth.mockResolvedValue('not-applicable')
 })
 
 afterEach(() => {
@@ -168,6 +175,66 @@ describe('the SSO re-auth envelope', () => {
         await fetchWithTimeout(PROTECTED_URL)
 
         expect(window.location.href).toBe('/api/v1/auth/entra/login')
+        expect(sessionLost).toBe(0)
+    })
+})
+
+
+describe('the silent back-channel recovery', () => {
+    const gatewayReauth = async () =>
+        new Response(
+            JSON.stringify({
+                detail: {
+                    error: 'sso_reauth_required',
+                    provider: 'corp-gateway',
+                    login_url: '/api/v1/auth/corp-gateway/login?next=%2F&force=1',
+                },
+            }),
+            { status: 401 },
+        )
+
+    it('reads a recovery as a successful refresh — no navigation, request retried', async () => {
+        attemptSilentReauth.mockResolvedValue('recovered')
+        let protectedCalls = 0
+        globalThis.fetch = vi.fn(async (...args: Parameters<typeof fetch>) => {
+            if (String(args[0]) === REFRESH_URL) return gatewayReauth()
+            protectedCalls += 1
+            // 401 before the recovery, 200 after — the retried request
+            // rides the re-established cookies.
+            return protectedCalls === 1
+                ? new Response('{}', { status: 401 })
+                : new Response('{}', { status: 200 })
+        }) as unknown as typeof fetch
+
+        const res = await fetchWithTimeout(PROTECTED_URL)
+
+        expect(attemptSilentReauth).toHaveBeenCalledWith('corp-gateway')
+        expect(res.status).toBe(200)
+        expect(window.location.href).toBe('http://localhost/dashboard')
+        expect(sessionLost).toBe(0)
+    })
+
+    it('reads a failed recovery as a lost session — one announcement, no navigation', async () => {
+        attemptSilentReauth.mockResolvedValue('failed')
+        const f = mockFetch([gatewayReauth])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        const res = await fetchWithTimeout(PROTECTED_URL)
+
+        expect(res.status).toBe(401)
+        expect(sessionLost).toBe(1)
+        expect(window.location.href).toBe('http://localhost/dashboard')
+    })
+
+    it('keeps the navigation for a provider it cannot recover', async () => {
+        attemptSilentReauth.mockResolvedValue('not-applicable')
+        const f = mockFetch([gatewayReauth])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
+        expect(window.location.href)
+            .toBe('/api/v1/auth/corp-gateway/login?next=%2F&force=1')
         expect(sessionLost).toBe(0)
     })
 })
