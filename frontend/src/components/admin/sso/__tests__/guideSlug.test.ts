@@ -36,3 +36,40 @@ describe('the SSO guide articles', () => {
         expect(getGuideEntry('sso-operations')?.title).toMatch(/running/i)
     })
 })
+
+
+describe('every provider kind an operator can pick is documented', () => {
+    /**
+     * A kind that reaches the wizard but not the guide is one people
+     * have to reverse-engineer from the form. The presets are the list
+     * of what can be picked, so they are the right thing to check
+     * against — a new preset with no guide entry fails here rather than
+     * becoming a support question.
+     */
+    it('setup covers the two internal kinds by name', async () => {
+        const text = (await getGuideEntry('sso-setup')!.importFn()).default
+        expect(text).toMatch(/Corporate portals/)
+        expect(text).toMatch(/Enterprise gateways/)
+    })
+
+    it('setup tells gateway operators the host must be allowed first', async () => {
+        // The single most likely reason a correctly-configured gateway
+        // does not work, and nothing in the connection form would ever
+        // hint at it on its own.
+        const text = (await getGuideEntry('sso-setup')!.importFn()).default
+        expect(text).toMatch(/Internal gateways SSO may call/)
+    })
+
+    it('operations explains the failures only this kind can produce', async () => {
+        const text = (await getGuideEntry('sso-operations')!.importFn()).default
+        expect(text).toMatch(/ambient_token_missing_from_cookie/)
+        expect(text).toMatch(/backchannel_rejected/)
+    })
+
+    it('operations says the re-check signing people out is the feature', async () => {
+        // Otherwise it reads as a bug, and the first instinct is to
+        // turn off the thing that closes the gap.
+        const text = (await getGuideEntry('sso-operations')!.importFn()).default
+        expect(text).toMatch(/keep getting signed out/i)
+    })
+})

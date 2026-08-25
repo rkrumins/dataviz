@@ -124,6 +124,8 @@ export function IdpConnectionWizard({
                             onDiscover={() => { void w.runDiscovery() }}
                             discovering={w.discovering}
                             discovery={w.discovery}
+                            settings={w.settings}
+                            onSettings={w.setSettings}
                         />
                     )}
                     {w.step === 'map' && w.preset && (

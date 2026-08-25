@@ -72,6 +72,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     exchange_headers: {},
     exchange_claims_path: '',
     timeout_seconds: 5,
+    max_response_bytes: 262144,
     require_auth_time: true,
     liveness_on_refresh: true,
     liveness_grace_seconds: 900,
@@ -208,7 +209,11 @@ export function BackchannelSettingsForm({
                 <h4 className="text-xs font-semibold text-ink">
                     Step 1 — redeem the ambient token
                 </h4>
-                <Field label="Gateway URL" required>
+                <Field
+                    label="Gateway URL"
+                    required
+                    hint={<>An internal address is unreachable until its host is on the allowlist &mdash; <strong>Settings &rarr; Internal gateways SSO may call</strong>. That list is managed under its own permission, so you may need someone else to add it.</>}
+                >
                     <TextField
                         value={value.gateway_url ?? ''}
                         onChange={e => set('gateway_url', e.target.value)}
@@ -263,6 +268,18 @@ export function BackchannelSettingsForm({
                             value={value.gateway_body_field ?? ''}
                             onChange={e => set('gateway_body_field', e.target.value)}
                             placeholder="sessionId"
+                        />
+                    </Field>
+                )}
+                {gatewaySendAs === 'cookie' && (
+                    <Field
+                        label={<>Send it under a different cookie name <span className="font-normal text-ink-muted">(optional)</span></>}
+                        hint={<>Leave blank and we send it as <code>{value.token_source_key || 'the name above'}</code>, the name we read it from. Fill this in only when the gateway expects a different one.</>}
+                    >
+                        <TextField
+                            value={value.gateway_cookie_name ?? ''}
+                            onChange={e => set('gateway_cookie_name', e.target.value)}
+                            placeholder={value.token_source_key || 'CORPSESSION'}
                         />
                     </Field>
                 )}
@@ -387,6 +404,18 @@ export function BackchannelSettingsForm({
                             mono={false}
                             value={String(value.timeout_seconds ?? 5)}
                             onChange={e => set('timeout_seconds', Number(e.target.value))}
+                        />
+                    </Field>
+                    <Field
+                        label="Response size limit (bytes)"
+                        hint="A cap on what either endpoint may return. A user record is small; this is here so a misbehaving gateway cannot exhaust the server."
+                    >
+                        <TextField
+                            type="number"
+                            min={1}
+                            mono={false}
+                            value={String(value.max_response_bytes ?? 262144)}
+                            onChange={e => set('max_response_bytes', Number(e.target.value))}
                         />
                     </Field>
                     <Field

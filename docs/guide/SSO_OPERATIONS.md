@@ -129,7 +129,7 @@ stored, so it always reflects reality.
 
 | Level | Means | Can grant platform admin |
 |---|---|---|
-| **Verified** | A signature over a third-party assertion was checked against a key we hold | Yes |
+| **Verified** | The identity was proved against the provider itself — either a signature checked against a key we hold, or an answer the provider gave us directly when we asked it | Yes |
 | **Asserted** | A trusted network position vouched for it — sound if your proxy strips inbound copies of the header, a full bypass if it does not | No |
 | **Unverified** | We cannot tell a genuine claim from a forged one | No |
 
@@ -231,6 +231,35 @@ Each row explains its code in place. The full vocabulary:
 Missing claims show as a mapping error naming the field. That is a claim-mapping
 problem, not a linking one: open the connection's **Claim mapping**, load the last
 real assertion, and see what actually arrived.
+
+### Enterprise gateway connections
+
+These make calls out to your own network, so they fail in ways the other kinds
+cannot.
+
+| Code | What happened | What to do |
+|---|---|---|
+| `ambient_token_missing_from_cookie` | The request arrived without your portal's session cookie | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
+| `backchannel_rejected:idp_rejected:401` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
+| `backchannel_rejected:idp_blocked:…` | We refused to make the call | Almost always the host allowlist — Settings → *Internal gateways SSO may call*. Check the host **and the port** |
+| `backchannel_rejected:idp_unreachable:…` | The gateway did not answer in time | Network or an outage on their side. Existing sessions ride out a short one; see below |
+| `backchannel_rejected:idp_status:5xx` | The gateway answered with an error | Theirs to investigate — quote them the status |
+| `backchannel_rejected:gateway_token_absent_at:…` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
+| `backchannel_rejected:claims_absent_at:…` | Same, for the user details | Same fix |
+| `backchannel_rejected:auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+
+### "People on the gateway connection keep getting signed out"
+
+Usually this is the feature working. That connection re-checks with your gateway
+every time it renews a session, so anyone your portal has signed out is signed
+out here too, within about fifteen minutes. Before treating it as a fault, ask
+whether the portal considers those people signed in.
+
+If the gateway itself is down, sessions are *not* dropped straight away — they
+keep working for the connection's grace period, measured from the last time the
+gateway actually answered rather than the last time we tried. A brief outage is
+invisible. A long one ends sessions rather than extending them indefinitely,
+which is deliberate: an outage should spend that allowance down, not renew it.
 
 ---
 

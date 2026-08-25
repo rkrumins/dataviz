@@ -114,11 +114,13 @@ from ..providers import (
 from ..providers.assurance import assurance_for
 from ..providers.custom import CustomIdentityError, CustomIdentityProvider
 from ..providers.backchannel import (
+    BackchannelConfigError,
     BackchannelError,
     BackchannelProvider,
 )
 from ..providers.custom_profile import (
     BROWSER_STORAGE_SOURCES,
+    CustomProfileConfigError,
     CustomProfileError,
     CustomProfileProvider,
 )
@@ -759,6 +761,13 @@ async def _require_sso_enabled(request: Request) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "SSO is not configured")
 
 
+#: Builder failures that mean the ROW is wrong rather than the code.
+#: Kept as a tuple next to the only place that catches them so adding a
+#: kind with its own config error is a visible one-line change rather
+#: than a silent 500 nobody notices for a month.
+_PROVIDER_CONFIG_ERRORS = (BackchannelConfigError, CustomProfileConfigError)
+
+
 async def _resolve_provider(slug: str, *, request: Request):
     """Slug -> provider instance; raises 404 on unknown / disabled OR
     when the platform master kill-switch is off."""
@@ -775,6 +784,20 @@ async def _resolve_provider(slug: str, *, request: Request):
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "SSO temporarily unavailable",
         )
+    except _PROVIDER_CONFIG_ERRORS as exc:
+        # A row whose settings cannot build a provider. Previously this
+        # escaped as a 500, which told the user nothing and told the
+        # operator less. The reason goes to the log; the caller gets the
+        # same answer an unknown provider gets, because this route is
+        # public and the message names settings fields.
+        #
+        # The operator's copy of this reason is the 400 that
+        # ``admin_idp_providers._assert_settings_usable`` now raises when
+        # the row is saved — which is where they can act on it.
+        logger.warning(
+            "Provider %r is misconfigured and cannot be built: %s", slug, exc,
+        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
     return provider
 
 
@@ -786,6 +809,16 @@ async def _provider_snapshot(slug: str):
         provider_id = await registry.resolve_slug(slug)
         return await registry.get_snapshot(provider_id)
     except (ProviderNotFound, ProviderDisabled):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
+    except _PROVIDER_CONFIG_ERRORS as exc:
+        # Same treatment as ``_resolve_provider``, and needed for the
+        # same reason rather than by symmetry: BOTH ``resolve_slug`` and
+        # ``get_snapshot`` build the provider on a cache miss, so a
+        # "snapshot" lookup is not the read-only operation its name
+        # suggests and can fail on a bad row too.
+        logger.warning(
+            "Provider %r is misconfigured and cannot be built: %s", slug, exc,
+        )
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
 
 

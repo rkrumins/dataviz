@@ -21,6 +21,7 @@ import {
     StepColumn, StepHero, StepBlock, FieldLabel, BigInput, Hint,
 } from '@/components/admin/InviteWizard/ui'
 import { consoleValues, type VendorPreset } from '../../vendorPresets'
+import { SettingsEditor } from '../../settings'
 import type { DiscoverResult } from '@/services/ssoAdminService'
 
 function CopyRow({ label, value }: { label: string; value: string }) {
@@ -59,6 +60,7 @@ function CopyRow({ label, value }: { label: string; value: string }) {
 export function ConnectStep({
     preset, displayName, onDisplayName, slug,
     connectInput, onConnectInput, onDiscover, discovering, discovery,
+    settings, onSettings,
 }: {
     preset: VendorPreset
     displayName: string
@@ -69,6 +71,8 @@ export function ConnectStep({
     onDiscover: () => void
     discovering: boolean
     discovery: DiscoverResult | null
+    settings: Record<string, unknown>
+    onSettings: (next: Record<string, unknown>) => void
 }) {
     const origin = typeof window !== 'undefined' ? window.location.origin : ''
     const values = consoleValues(slug, origin)
@@ -165,6 +169,27 @@ export function ConnectStep({
                             </div>
                         </div>
                     )}
+                </StepBlock>
+            )}
+
+            {/* A kind with no discovery has to be typed in, and until this
+                block existed there was nowhere in the wizard to type it.
+                OIDC and SAML were carried by discovery filling `settings`;
+                every other kind reached Publish with `{}` and produced a
+                connection that could not work, with nothing saying so.
+                `SettingsEditor` already dispatches per kind and already
+                carries the Advanced JSON editor, so this is the whole fix. */}
+            {!hasDiscovery && (
+                <StepBlock>
+                    <FieldLabel>{preset.connectLabel ?? 'Configuration'}</FieldLabel>
+                    <div className="mt-2">
+                        <SettingsEditor
+                            kind={preset.kind}
+                            value={settings}
+                            onChange={onSettings}
+                            redirectUriHint={values.redirectUri}
+                        />
+                    </div>
                 </StepBlock>
             )}
 

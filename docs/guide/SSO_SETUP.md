@@ -43,9 +43,12 @@ provider actually sends, a worked example of one of its payloads, and the
 instructions for its console.
 
 If yours is not listed, **Other OIDC provider** or **Other SAML 2.0 provider**
-work with anything standards-compliant. **Corporate portal** is for the case
-where something in front of {brand} has already signed the user in and hands
-over their profile — see [Corporate portals](#corporate-portals) below.
+work with anything standards-compliant. Two entries cover the internal cases:
+**Corporate portal**, where something in front of {brand} has already signed the
+user in and hands over their profile — see
+[Corporate portals](#corporate-portals) — and **Enterprise gateway**, where an
+internal service will tell us who someone is if we ask it — see
+[Enterprise gateways](#enterprise-gateways).
 
 ### 2. Connect
 
@@ -177,6 +180,106 @@ Two things decide whether this is safe:
   can set the header themselves and impersonate any user. This is why the
   header source is rated *asserted* rather than *verified* — from here, we cannot
   tell a correctly-configured proxy from a missing one.
+
+---
+
+## Enterprise gateways
+
+Some organisations have no OIDC or SAML in front of their internal apps at all.
+Instead there is a service that will tell you who someone is *if you ask it*,
+using the session they already have. If that describes yours, this is the kind
+to pick.
+
+It works differently from every other connection here, and the difference is
+worth understanding because it decides what you have to configure.
+
+### How it works
+
+The person's browser already carries a session token from your portal — a cookie
+on a domain {brand} shares with it. When they arrive at the sign-in link, we take
+that cookie and, from our server rather than their browser, make up to two calls:
+
+```mermaid
+flowchart LR
+  B[Person's browser] -->|arrives with the session cookie| A[{brand}]
+  A -->|1. redeem the cookie| G[Your gateway]
+  G -->|a token| A
+  A -->|2. exchange the token| U[Your user endpoint]
+  U -->|their details| A
+  A -->|claim mapping| P[Profile and groups]
+```
+
+Two things follow from that shape:
+
+- **We never read the cookie.** It is opaque to us. We hand it straight back to
+  the service that issued it and believe what that service replies. So the
+  connection is only as strong as your gateway, which is the right place for the
+  decision to sit.
+- **We ask every time.** Because the answer is current rather than a signature
+  over something said earlier, a person your portal has just signed out stops
+  being able to use {brand} on their next session renewal — not whenever their
+  token would have expired. This is the one connection kind that closes that gap.
+
+### What you need from your identity team
+
+Ask them for:
+
+- **The cookie's name**, and confirmation it is set on a domain {brand} shares.
+  If it is not, this cannot work — no configuration fixes a cookie the browser
+  never sends us.
+- **The endpoint that redeems it**, and where in its reply the token sits.
+- **The endpoint that returns the user**, if that is a second call — some
+  gateways answer with the person's details straight away, and then you leave
+  the second endpoint blank.
+- **Any headers the calls need** — an application id, a key. They go in the
+  connection's settings and are never sent to anyone's browser.
+- **Whether their reply includes an authentication time.** Without one there is
+  no way to tell how long ago somebody actually signed in, and the daily
+  re-authentication ceiling stops applying to them.
+
+### Allowing the host first
+
+These endpoints are internal, and {brand} refuses to make requests into a private
+network unless someone has explicitly permitted the destination. So before the
+connection can work, its host must be on the allowlist:
+
+**Admin → SSO → Settings → *Internal gateways SSO may call***.
+
+An entry is one host and one port — permitting a gateway on 443 does not permit
+whatever else answers on the same machine. That list is managed under its own
+permission, separate from ordinary platform administration, because it decides
+where {brand} may send requests. You may need to ask someone else to add it.
+
+Some addresses are refused whatever is on the list — loopback, and the addresses
+cloud providers use to hand out credentials. Nothing in the admin UI can unlock
+those.
+
+### Setting it up
+
+The five-step flow is the same, with the differences you would expect:
+
+| Step | What is different |
+|---|---|
+| **Connect** | No **Fetch** — there is no document to read. You fill in the two endpoints and where the token and the user details sit in their replies. |
+| **Map** | The same two-column mapper. Your gateway's reply is the payload being mapped. |
+| **Rehearse** | Works exactly as it does elsewhere, and matters more here: it is the only way to see what your gateway actually returned before anyone else depends on it. |
+| **Publish** | Refused if the connection is not configured enough to work. |
+
+If something is wrong, saving tells you which field and why. If a sign-in fails
+afterwards, see *Running Single Sign-On* → **Why a sign-in failed**.
+
+### Keeping sessions in step
+
+By default, {brand} re-checks with your gateway each time it renews someone's
+session — roughly every fifteen minutes. That is what makes signing out of your
+portal sign them out here too.
+
+If the gateway stops answering, sign-ins are not dropped immediately: existing
+sessions keep working for a grace period, measured from the last time the gateway
+actually answered rather than the last time we tried. So a brief outage is
+invisible, and a long one still ends sessions rather than extending them
+indefinitely. Both the re-check and the grace period are settings on the
+connection.
 
 ---
 

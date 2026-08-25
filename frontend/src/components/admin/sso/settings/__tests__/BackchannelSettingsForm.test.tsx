@@ -80,6 +80,45 @@ describe('where the token goes on each call', () => {
     })
 })
 
+describe('the gateway cookie name', () => {
+    it('is offered only when the token travels as a cookie', () => {
+        // It names the cookie we SEND. On a header or body transport
+        // there is no cookie, so the field would be a value that gets
+        // silently ignored.
+        const { rerender } = render(
+            <BackchannelSettingsForm
+                value={{ gateway_send_as: 'header' }} onChange={vi.fn()} />,
+        )
+        expect(screen.queryByText(/different cookie name/i)).not.toBeInTheDocument()
+
+        rerender(
+            <BackchannelSettingsForm
+                value={{ gateway_send_as: 'cookie' }} onChange={vi.fn()} />,
+        )
+        expect(screen.getByText(/different cookie name/i)).toBeInTheDocument()
+    })
+
+    it('is optional, and says what happens when it is left blank', () => {
+        // The backend already falls back to the name we read it from,
+        // and token_source_key is required, so the fallback always
+        // resolves. An operator should not have to discover that by
+        // reading the source.
+        renderForm({ gateway_send_as: 'cookie', token_source_key: 'CORPSESSION' })
+        // Matched on the distinctive half: "leave blank" also appears on
+        // the exchange URL, which is a different optional thing.
+        expect(screen.getByText(/the name we read it from/i)).toBeInTheDocument()
+        // And it names the actual cookie rather than saying "the same one".
+        expect(screen.getByText('CORPSESSION')).toBeInTheDocument()
+    })
+
+    it('is marked optional rather than required', () => {
+        renderForm({ gateway_send_as: 'cookie' })
+        expect(
+            screen.getByText(/different cookie name/i).textContent,
+        ).toMatch(/optional/i)
+    })
+})
+
 describe('the optional second call', () => {
     it('hides its details until there is somewhere to send them', () => {
         renderForm({ exchange_url: '' })
@@ -119,6 +158,23 @@ describe('defaults', () => {
         renderForm({ liveness_on_refresh: false, require_auth_time: false })
         const boxes = screen.getAllByRole('checkbox') as HTMLInputElement[]
         expect(boxes.some(b => b.checked)).toBe(false)
+    })
+})
+
+describe('reaching the allowlist', () => {
+    it('says an internal host is unreachable until it is allowed', () => {
+        // The single most likely reason a correctly-configured gateway
+        // does not work, and there is nothing in the form itself that
+        // would ever hint at it.
+        renderForm()
+        expect(screen.getByText(/until its host is on the allowlist/i))
+            .toBeInTheDocument()
+    })
+
+    it('names where that list lives', () => {
+        renderForm()
+        expect(screen.getByText(/Internal gateways SSO may call/i))
+            .toBeInTheDocument()
     })
 })
 

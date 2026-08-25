@@ -37,8 +37,14 @@ from backend.auth_service.providers import (
     apply_claim_mapping,
     ClaimMappingError,
     KIND_DEFAULTS,
+    PROVIDER_BUILDERS,
+    ProviderConfigSnapshot,
     get_registry,
     resolved_sources,
+)
+from backend.auth_service.providers.backchannel import BackchannelConfigError
+from backend.auth_service.providers.custom_profile import (
+    CustomProfileConfigError,
 )
 from backend.auth_service.providers.oidc import OidcError, discover_issuer
 
@@ -449,6 +455,58 @@ async def discover_provider_settings(
     )
 
 
+#: Errors a provider builder raises when the ROW is wrong rather than the
+#: code. Each one already carries the sentence an operator needs — which
+#: field is missing, which combination cannot work — so the only job here
+#: is to let it reach them.
+_CONFIG_ERRORS = (BackchannelConfigError, CustomProfileConfigError)
+
+
+def _assert_settings_usable(
+    *, kind: str, settings: dict, claim_mapping: dict | None = None,
+    linking_policy: str = "strict", require_settings: bool = False,
+) -> None:
+    """Build a provider from *settings* and turn a config error into a 400.
+
+    Until this existed, a bad settings blob was stored happily and first
+    surfaced when somebody tried to sign in — as ``500 Internal server
+    error``, because ``_resolve_provider`` does not catch a builder
+    failure. The message explaining exactly what was wrong had already
+    been written by the builder's own ``validate_settings`` and thrown
+    away.
+
+    Called BEFORE the write, on the settings that would be stored — for
+    an update that means the caller merges first, because
+    ``update_provider`` merges and judging the submitted fragment would
+    judge half a configuration. Validating first rather than writing and
+    relying on the request's rollback keeps the guarantee in this
+    function instead of in the session's error handling.
+
+    An empty blob passes unless *require_settings*: a row can
+    legitimately be created as a placeholder and filled in afterwards,
+    which is how every kind without discovery is set up. Publishing is
+    where that stops being acceptable.
+    """
+    builder = PROVIDER_BUILDERS.get(kind)
+    if builder is None:
+        return
+    if not settings and not require_settings:
+        return
+    snapshot = ProviderConfigSnapshot(
+        id="pending", slug="pending", display_name="pending", kind=kind,
+        enabled=True, priority=100, settings=settings or {},
+        claim_mapping=claim_mapping or {}, linking_policy=linking_policy,
+        button_label=None, button_icon=None,
+    )
+    try:
+        builder(snapshot)
+    except _CONFIG_ERRORS as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    # Anything else is a bug in the builder rather than a bad row, and
+    # is left to surface as a 500 rather than being reported to an
+    # operator as their mistake.
+
+
 @router.post(
     "",
     response_model=ProviderDTO,
@@ -460,6 +518,11 @@ async def create_provider(
     admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
+    _assert_settings_usable(
+        kind=body.kind, settings=body.settings or {},
+        claim_mapping=body.claim_mapping,
+        linking_policy=body.linking_policy or "strict",
+    )
     try:
         row = await idp_provider_repo.create_provider(
             session,
@@ -512,6 +575,26 @@ async def update_provider(
     admin: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ):
+    if body.settings is not None:
+        # The repo MERGES settings into what is stored, so the whole
+        # merged result is what has to be judged — an edit that empties
+        # one required field looks harmless as a fragment.
+        existing = await idp_provider_repo.get_provider(session, provider_id)
+        if existing is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+        _assert_settings_usable(
+            kind=existing.kind,
+            settings={
+                **idp_provider_repo.decrypt_settings(existing.settings),
+                **body.settings,
+            },
+            claim_mapping=(
+                body.claim_mapping
+                if body.claim_mapping is not None
+                else idp_provider_repo.parse_claim_mapping(existing)
+            ),
+            linking_policy=body.linking_policy or existing.linking_policy,
+        )
     try:
         row = await idp_provider_repo.update_provider(
             session,
@@ -672,6 +755,18 @@ async def publish_provider(
     Idempotent: publishing a live provider is a no-op, so a double-click or
     a retried request cannot fail.
     """
+    existing = await idp_provider_repo.get_provider(session, provider_id)
+    if existing is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+    # Stricter than create/update: a draft may be a placeholder, a live
+    # provider is on the login page for everyone and must actually work.
+    _assert_settings_usable(
+        kind=existing.kind,
+        settings=idp_provider_repo.decrypt_settings(existing.settings),
+        claim_mapping=idp_provider_repo.parse_claim_mapping(existing),
+        linking_policy=existing.linking_policy,
+        require_settings=True,
+    )
     row = await idp_provider_repo.publish_provider(
         session, provider_id, updated_by=admin.id,
     )
