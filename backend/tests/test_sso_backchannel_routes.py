@@ -157,13 +157,13 @@ async def test_an_upstream_failure_is_generic_to_the_user(
 # ── nothing about the row reaches the browser ────────────────────────
 
 @pytest.mark.asyncio
-async def test_the_public_catalog_exposes_no_configuration(
+async def test_the_public_catalog_exposes_nothing_without_a_trigger(
     test_client, db_session, registry,
 ):
     """``_public_config`` sits next to a decrypted settings blob holding
-    the gateway URLs and whatever credentials their headers carry. This
-    kind needs the browser to know nothing at all, so it publishes
-    nothing at all."""
+    the gateway URLs and whatever credentials their headers carry. A row
+    with no sign-in trigger needs the browser to know nothing at all, so
+    it publishes nothing at all."""
     await _make_provider(db_session)
 
     resp = await test_client.get("/api/v1/auth/providers")
@@ -174,6 +174,69 @@ async def test_the_public_catalog_exposes_no_configuration(
     for secret in ("s3cr3t", "gw.corp.example", "corp_session",
                    "X-App-Secret", "access_token"):
         assert secret not in blob, f"{secret!r} reached the login page"
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_publishes_exactly_four_keys_and_no_others(
+    test_client, db_session, registry,
+):
+    """The browser cannot make the authenticate call without the URL,
+    the method and the headers, so those are published. Everything else
+    in that settings blob is a server-side fact.
+
+    Asserted by iterating the stored settings rather than by naming the
+    forbidden keys: a denylist would publish the next setting somebody
+    adds, which is exactly how this kind of leak happens.
+    """
+    await _make_provider(
+        db_session,
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_method="POST",
+        authenticate_headers={"X-App-Id": "app-1"},
+    )
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-gateway")
+    config = entry.get("config") or {}
+
+    assert set(config) == {
+        "authenticateUrl", "authenticateMethod", "authenticateHeaders",
+    }
+
+    published = {"authenticate_url", "authenticate_method",
+                 "authenticate_headers", "authenticate_token_path"}
+    stored = await idp_provider_repo.get_provider_by_slug(
+        db_session, "corp-gateway",
+    )
+    settings = idp_provider_repo.decrypt_settings(stored.settings)
+    for key, value in settings.items():
+        if key in published or not isinstance(value, str) or not value:
+            continue
+        assert value not in resp.text, (
+            f"settings[{key!r}] = {value!r} reached the sign-in page"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_credentials_never_reach_the_browser(
+    test_client, db_session, registry,
+):
+    """``authenticate_headers`` is public by construction and sits beside
+    two fields with almost the same name that must never be. Pinning the
+    distinction, because an operator who types a credential into the
+    wrong one has published it to every visitor of the sign-in page."""
+    await _make_provider(
+        db_session,
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_headers={"X-App-Id": "public-tracking-id"},
+        gateway_headers={"X-App-Secret": "SERVER-SIDE-ONLY"},
+        exchange_headers={"X-Other-Secret": "ALSO-SERVER-SIDE"},
+    )
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    assert "public-tracking-id" in resp.text
+    assert "SERVER-SIDE-ONLY" not in resp.text
+    assert "ALSO-SERVER-SIDE" not in resp.text
 
 
 @pytest.mark.asyncio

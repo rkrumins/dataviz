@@ -65,12 +65,21 @@ export interface SsoProviderSummary {
     priority: number
     buttonLabel?: string | null
     buttonIcon?: string | null
-    /** Non-secret, per-kind hints needed to start the flow. Only
-     *  ``custom_profile`` populates it today: ``source`` always, plus
-     *  ``sourceKey`` when the payload lives in browser storage and the
-     *  client is the one that has to read it. */
+    /** Non-secret, per-kind hints needed to start the flow.
+     *
+     *  ``custom_profile``: ``source`` always, plus ``sourceKey`` when the
+     *  payload lives in browser storage and the client has to read it.
+     *
+     *  ``backchannel``: the four ``authenticate*`` keys, and only when a
+     *  sign-in trigger is configured. The server whitelists these by
+     *  name — the settings blob they come from also holds both endpoint
+     *  URLs and their credentials, none of which appear here. */
     config?: {
         source?: string
+        authenticateUrl?: string
+        authenticateMethod?: string
+        authenticateHeaders?: Record<string, string>
+        authenticateTokenPath?: string
         sourceKey?: string
     }
 }
@@ -98,6 +107,113 @@ export function needsBrowserPayload(p: SsoProviderSummary): boolean {
         p.kind === 'custom_profile' &&
         BROWSER_STORAGE_SOURCES.includes(p.config?.source ?? '')
     )
+}
+
+/** True when the sign-in button must leave this origin for the IdP.
+ *
+ *  Only OIDC and SAML do. A back-channel provider does its whole
+ *  exchange server-side, and a cookie- or header-sourced corporate
+ *  portal is read on the request — both land the user straight back
+ *  here. The button's affordance follows this, because promising a
+ *  hand-off that never happens is worse than a plain chevron. */
+export function leavesForIdp(p: SsoProviderSummary): boolean {
+    return p.kind === 'oidc' || p.kind === 'saml2'
+}
+
+/** True when signing in has to start with a call to the provider's own
+ *  authenticate endpoint before we can do anything.
+ *
+ *  This is the Kerberos/SPNEGO case, and the call CANNOT be made by our
+ *  server. The provider answers with `401 WWW-Authenticate: Negotiate`;
+ *  answering that needs a Service Ticket from the workstation's OS
+ *  credential store, which only the browser can obtain — via SSPI on
+ *  Windows, GSS-API elsewhere. `credentials: 'include'` is what lets the
+ *  browser do it, and the retry is automatic and invisible to us. */
+export function needsAuthenticateFirst(p: SsoProviderSummary): boolean {
+    return Boolean(p.config?.authenticateUrl)
+}
+
+/** Run that call.
+ *
+ *  Returns the handle when the provider answers with one, or null when
+ *  it works by setting a cookie — both are success. Throws only when the
+ *  call itself failed, so the caller can say so instead of navigating
+ *  into a sign-in that was never going to work.
+ *
+ *  Nothing here inspects the handle. It goes straight back to the
+ *  provider's own gateway, which is the only party that can say what it
+ *  means — see the note on `POST /auth/{slug}/backchannel`. */
+export async function runAuthenticateTrigger(
+    p: SsoProviderSummary,
+): Promise<string | null> {
+    const url = p.config?.authenticateUrl as string
+    const method = (p.config?.authenticateMethod as string) || 'POST'
+    const headers = (p.config?.authenticateHeaders ?? {}) as Record<string, string>
+    const tokenPath = (p.config?.authenticateTokenPath as string) || ''
+
+    const res = await fetch(url, {
+        method,
+        headers,
+        // The whole point. Without it the browser neither sends the
+        // provider's existing cookies nor offers to answer a Negotiate
+        // challenge from the OS.
+        credentials: 'include',
+    })
+    if (!res.ok) {
+        throw new Error(`The sign-in service answered ${res.status}.`)
+    }
+    if (!tokenPath) return null
+
+    let body: unknown
+    try {
+        body = await res.json()
+    } catch {
+        throw new Error('The sign-in service did not return JSON.')
+    }
+    const handle = resolvePath(body, tokenPath)
+    if (typeof handle !== 'string' || !handle) {
+        throw new Error(
+            `The sign-in service returned no value at "${tokenPath}".`,
+        )
+    }
+    return handle
+}
+
+/** Walk a dotted/indexed path, mirroring what the server does with the
+ *  gateway and claims paths so an operator configures one syntax. */
+function resolvePath(value: unknown, path: string): unknown {
+    let cur: unknown = value
+    for (const seg of path.split('.')) {
+        const m = /^([^[\]]*)((\[\d+\])*)$/.exec(seg)
+        if (!m) return undefined
+        if (m[1]) {
+            if (!cur || typeof cur !== 'object') return undefined
+            cur = (cur as Record<string, unknown>)[m[1]]
+        }
+        for (const idx of m[2].matchAll(/\[(\d+)\]/g)) {
+            if (!Array.isArray(cur)) return undefined
+            cur = cur[Number(idx[1])]
+        }
+    }
+    return cur
+}
+
+/** Complete a back-channel sign-in with a handle the trigger returned. */
+export async function loginWithBackchannelHandle(
+    slug: string, handle: string,
+): Promise<void> {
+    const res = await fetchWithTimeout(
+        `/api/v1/auth/${encodeURIComponent(slug)}/backchannel`,
+        {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ handle }),
+        },
+    )
+    if (!res.ok) {
+        throw new Error('Signing in with that session did not work.')
+    }
 }
 
 /** Read a custom-profile payload out of the browser store the provider

@@ -28,6 +28,55 @@ interface Reason {
  * `existing_status:*`) are matched by prefix below.
  */
 const REASONS: Record<string, Reason> = {
+    // ── back-channel connections ─────────────────────────────────────
+    // These call out to a service on your own network, so they fail in
+    // ways the other kinds cannot. The allowlist one is first because it
+    // is both the likeliest and the least guessable.
+    backchannel_unavailable: {
+        what: 'We could not reach the sign-in gateway, or it did not '
+            + 'answer properly.',
+        next: 'Check the host allowlist first — Settings → Internal '
+            + 'gateways SSO may call — including the port, which is part '
+            + 'of the entry. Otherwise it is an outage on their side.',
+    },
+    backchannel_no_session: {
+        what: 'The request arrived without the corporate session the '
+            + 'connection expects.',
+        next: 'Usually correct — they are not signed in to the portal. If '
+            + 'they say they are, the cookie is not reaching us: check its '
+            + 'Domain attribute covers this app\u2019s hostname.',
+    },
+    backchannel_token_absent: {
+        what: 'The gateway answered, but with nothing where we were told '
+            + 'the token would be.',
+        next: 'The path in the connection\u2019s settings does not match '
+            + 'what they actually send. Rehearse a sign-in and read the '
+            + 'reply.',
+    },
+    backchannel_claims_absent: {
+        what: 'The exchange answered, but with nothing where we were told '
+            + 'the user\u2019s details would be.',
+        next: 'Same as above, for the second call\u2019s path.',
+    },
+    backchannel_claims_unmappable: {
+        what: 'Their details came back, but a field the claim mapping '
+            + 'needs was missing.',
+        next: 'Open the connection\u2019s Claim mapping and check it '
+            + 'against what actually arrived.',
+    },
+    backchannel_auth_time_absent: {
+        what: 'Their reply carried no authentication time, and this '
+            + 'connection requires one.',
+        next: 'Ask their team to include it. Turning the requirement off '
+            + 'is possible and quietly disables the daily '
+            + 're-authentication ceiling for everyone on this connection.',
+    },
+    backchannel_failed: {
+        what: 'The back-channel sign-in failed for a reason we have not '
+            + 'catalogued.',
+        next: 'The server log carries the detail, under the same '
+            + 'reference as this row.',
+    },
     jit_disabled: {
         what: 'They have no account here, and automatic account creation is off.',
         next: 'Create the account or send an invite — or turn the switch on in Settings.',
@@ -83,6 +132,20 @@ const PREFIXED: { prefix: string; build: (rest: string) => Reason }[] = [
         }),
     },
     {
+        // The status is the useful half: 401 and 403 are both "the
+        // provider said no", but a sudden run of them means different
+        // things to the team who owns it.
+        prefix: 'backchannel_idp_rejected:',
+        build: rest => ({
+            what: `Their sign-in provider answered ${rest} — it does not `
+                + 'consider this person signed in.',
+            next: 'Usually correct: they signed out of the corporate '
+                + 'portal, or their workstation session ended. Worth '
+                + 'investigating only if they say they are still signed in '
+                + 'there.',
+        }),
+    },
+    {
         prefix: 'existing_status:',
         build: rest => ({
             what: `The account with that email is ${rest}, so it cannot be linked.`,
@@ -117,7 +180,12 @@ export function codesIn(summary: string): string[] {
     if (!tail) return []
     return tail.split(',')
         .map(s => s.trim())
-        .filter(s => /^[a-z][a-z_]*(:[a-z_]+)?$/.test(s))
+        // Several colon-separated segments, and digits, because a status
+        // code is worth carrying: `backchannel_idp_rejected:401` says
+        // something `backchannel_idp_rejected` does not. Still a closed
+        // shape — anything with a space, a quote or a slash in it is not
+        // a code, and the backend is written so none reach here.
+        .filter(s => /^[a-z][a-z0-9_]*(:[a-z0-9_]+)*$/.test(s))
 }
 
 export function ReasonHint({ summary }: { summary: string }) {

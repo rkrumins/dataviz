@@ -25,6 +25,13 @@ export interface BackchannelSettings {
     token_source?: AmbientSource
     token_source_key?: string
 
+    // The browser-side sign-in trigger. Published to the sign-in page —
+    // unlike everything below, which stays on the server.
+    authenticate_url?: string
+    authenticate_method?: 'POST' | 'GET'
+    authenticate_headers?: Record<string, string>
+    authenticate_token_path?: string
+
     gateway_url?: string
     gateway_method?: 'POST' | 'GET'
     gateway_send_as?: SendAs
@@ -55,6 +62,10 @@ export interface BackchannelSettings {
 export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     token_source: 'cookie',
     token_source_key: '',
+    authenticate_url: '',
+    authenticate_method: 'POST',
+    authenticate_headers: {},
+    authenticate_token_path: '',
     gateway_url: '',
     gateway_method: 'POST',
     gateway_send_as: 'cookie',
@@ -165,6 +176,7 @@ export function BackchannelSettingsForm({
     const gatewaySendAs = value.gateway_send_as ?? 'cookie'
     const exchangeSendAs = value.exchange_send_as ?? 'body'
     const hasExchange = Boolean((value.exchange_url ?? '').trim())
+    const hasTrigger = Boolean((value.authenticate_url ?? '').trim())
     const set = <K extends keyof BackchannelSettings>(
         k: K, v: BackchannelSettings[K],
     ) => onChange({ ...value, [k]: v })
@@ -193,7 +205,7 @@ export function BackchannelSettingsForm({
                     </Field>
                     <Field
                         label={source === 'header' ? 'Header name' : 'Cookie name'}
-                        required
+                        required={!value.authenticate_token_path}
                     >
                         <TextField
                             value={value.token_source_key ?? ''}
@@ -202,6 +214,78 @@ export function BackchannelSettingsForm({
                         />
                     </Field>
                 </FieldGrid>
+            </section>
+
+            {/* ── the browser-side trigger ── */}
+            <section className="space-y-3">
+                <h4 className="text-xs font-semibold text-ink">
+                    Sign-in trigger <span className="font-normal text-ink-muted">(optional)</span>
+                </h4>
+                <p className="text-[11px] text-ink-muted leading-relaxed">
+                    Leave blank if people already have a session with your
+                    provider by the time they reach us. Fill it in when
+                    something has to ask for one first — Kerberos being the
+                    usual case, where the provider challenges the browser
+                    and the browser answers from the workstation&rsquo;s own
+                    login. <strong>That call is made by the browser, not by
+                    us</strong>, because only the browser can reach the
+                    machine&rsquo;s credentials.
+                </p>
+                <Field
+                    label={<>Authenticate URL <span className="font-normal text-ink-muted">(optional)</span></>}
+                >
+                    <TextField
+                        value={value.authenticate_url ?? ''}
+                        onChange={e => set('authenticate_url', e.target.value)}
+                        placeholder="https://sso.corp.example/authenticate"
+                    />
+                </Field>
+                {hasTrigger && (
+                    <>
+                        <FieldGrid>
+                            <Field label="Method">
+                                <select
+                                    className={selectCls}
+                                    value={value.authenticate_method ?? 'POST'}
+                                    onChange={e => set('authenticate_method', e.target.value as 'POST' | 'GET')}
+                                >
+                                    <option value="POST">POST</option>
+                                    <option value="GET">GET</option>
+                                </select>
+                            </Field>
+                            <Field
+                                label={<>Token is at <span className="font-normal text-ink-muted">(optional)</span></>}
+                                hint="Only if this call answers with the session token itself. Leave blank when it works by setting a cookie."
+                            >
+                                <TextField
+                                    value={value.authenticate_token_path ?? ''}
+                                    onChange={e => set('authenticate_token_path', e.target.value)}
+                                    placeholder="token"
+                                />
+                            </Field>
+                        </FieldGrid>
+
+                        <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                            <p className="text-[11px] text-amber-300 leading-relaxed">
+                                <strong>These headers are sent from the
+                                user&rsquo;s browser and are readable by
+                                anyone who opens the sign-in page.</strong>{' '}
+                                They are not the same as the two header
+                                fields below, which stay on our server and
+                                are hidden once saved. Put an application
+                                identifier here; never a credential you
+                                would mind publishing.
+                            </p>
+                            <div className="mt-2">
+                                <HeaderMapField
+                                    label="Headers"
+                                    value={value.authenticate_headers}
+                                    onChange={v => set('authenticate_headers', v)}
+                                />
+                            </div>
+                        </div>
+                    </>
+                )}
             </section>
 
             {/* ── leg 1 ── */}

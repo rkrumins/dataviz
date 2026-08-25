@@ -161,6 +161,71 @@ describe('defaults', () => {
     })
 })
 
+describe('the sign-in trigger', () => {
+    it('stays out of the way until an operator needs it', () => {
+        // Most deployments do not: the session already exists by the
+        // time somebody reaches us. A section of fields for a call that
+        // will never be made is noise on every other integration.
+        renderForm({})
+        expect(screen.queryByPlaceholderText('token')).not.toBeInTheDocument()
+        expect(screen.queryByText(/readable by\s+anyone/i)).not.toBeInTheDocument()
+    })
+
+    it('says the call is made by the browser, not by us', () => {
+        // The single fact that decides whether this integration is even
+        // possible. Kerberos cannot be answered server-side, and an
+        // operator who assumes otherwise will design around a shape that
+        // cannot work.
+        renderForm()
+        expect(screen.getByText(/made by the browser, not by/i))
+            .toBeInTheDocument()
+    })
+
+    it('warns that its headers are public, unlike the other two', () => {
+        // The trap: three fields whose names differ by one word, two
+        // server-side and redacted, one published to every visitor of
+        // the sign-in page.
+        renderForm({ authenticate_url: 'https://sso.corp.example/authenticate' })
+        expect(screen.getByText(/readable by\s+anyone/i)).toBeInTheDocument()
+        expect(screen.getByText(/never a credential/i)).toBeInTheDocument()
+    })
+
+    it('offers the token path only once there is a call to read from', () => {
+        const { rerender } = render(
+            <BackchannelSettingsForm value={{}} onChange={vi.fn()} />,
+        )
+        expect(screen.queryByPlaceholderText('token')).not.toBeInTheDocument()
+        rerender(
+            <BackchannelSettingsForm
+                value={{ authenticate_url: 'https://sso.corp.example/a' }}
+                onChange={vi.fn()} />,
+        )
+        expect(screen.getByPlaceholderText('token')).toBeInTheDocument()
+    })
+
+    it('stops requiring a cookie name when the trigger supplies the token', () => {
+        // The two are alternatives, not both. A form that demands a
+        // cookie name for a provider that never sets one is asking an
+        // operator to invent a value, and the server rejects the row
+        // either way — so the asterisk has to move.
+        const marker = () =>
+            screen.getByText('Cookie name').parentElement?.textContent ?? ''
+
+        const { rerender } = render(
+            <BackchannelSettingsForm
+                value={{ token_source: 'cookie' }} onChange={vi.fn()} />,
+        )
+        expect(marker()).toContain('*')
+
+        rerender(
+            <BackchannelSettingsForm
+                value={{ token_source: 'cookie', authenticate_token_path: 'token' }}
+                onChange={vi.fn()} />,
+        )
+        expect(marker()).not.toContain('*')
+    })
+})
+
 describe('reaching the allowlist', () => {
     it('says an internal host is unreachable until it is allowed', () => {
         // The single most likely reason a correctly-configured gateway

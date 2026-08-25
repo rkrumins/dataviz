@@ -1,0 +1,158 @@
+/**
+ * The browser half of a back-channel sign-in.
+ *
+ * This half cannot move to the server, and that is the whole reason it
+ * exists. Where the enterprise uses Kerberos the provider answers
+ * `401 WWW-Authenticate: Negotiate`, and answering it needs a Service
+ * Ticket from the workstation's OS credential store — reachable through
+ * SSPI or GSS-API, by this browser, on this machine. Our backend holds
+ * no ticket for the user. `credentials: 'include'` is what lets the
+ * browser do it; without that flag the OS is never consulted and the
+ * call simply fails, so it is pinned here.
+ *
+ * The rest is about not stranding people: a machine outside the domain,
+ * or one whose browser has not been told to answer Negotiate for that
+ * host, must land on a working form with a reason — never in a loop, and
+ * never mid-navigation to a sign-in that was never going to work.
+ */
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import {
+    leavesForIdp,
+    needsAuthenticateFirst,
+    runAuthenticateTrigger,
+    type SsoProviderSummary,
+} from '@/services/authService'
+
+function provider(over: Partial<SsoProviderSummary> = {}): SsoProviderSummary {
+    return {
+        id: 'idp_1', slug: 'corp-gateway', displayName: 'Corporate Gateway',
+        kind: 'backchannel', priority: 100,
+        config: {
+            authenticateUrl: 'https://sso.corporate.com/authenticate',
+            authenticateMethod: 'POST',
+            authenticateHeaders: { 'X-App-ID': 'app-1' },
+        },
+        ...over,
+    } as SsoProviderSummary
+}
+
+const realFetch = global.fetch
+
+afterEach(() => {
+    global.fetch = realFetch
+    vi.restoreAllMocks()
+})
+
+// ── which providers need which treatment ─────────────────────────────
+
+describe('predicates', () => {
+    it('needs the trigger only when one is configured', () => {
+        expect(needsAuthenticateFirst(provider())).toBe(true)
+        expect(needsAuthenticateFirst(provider({ config: {} }))).toBe(false)
+        expect(needsAuthenticateFirst(provider({ config: undefined }))).toBe(false)
+    })
+
+    it('only OIDC and SAML actually leave this origin', () => {
+        // The button's glyph follows this. A back-channel provider
+        // resolves server-side and a cookie-sourced portal is read on the
+        // request — both land the user straight back, so promising a
+        // hand-off was false.
+        expect(leavesForIdp(provider({ kind: 'oidc' }))).toBe(true)
+        expect(leavesForIdp(provider({ kind: 'saml2' }))).toBe(true)
+        expect(leavesForIdp(provider({ kind: 'backchannel' }))).toBe(false)
+        expect(leavesForIdp(provider({ kind: 'custom_profile' }))).toBe(false)
+    })
+})
+
+// ── the call itself ──────────────────────────────────────────────────
+
+describe('the authenticate call', () => {
+    it('includes credentials, which is what lets the OS answer', async () => {
+        // Without this the browser never consults SSPI/GSS-API, the
+        // Negotiate challenge goes unanswered, and the call fails with
+        // nothing to indicate why.
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(null, { status: 204 }),
+        )
+        global.fetch = fetchMock
+
+        await runAuthenticateTrigger(provider())
+
+        const [url, init] = fetchMock.mock.calls[0]
+        expect(url).toBe('https://sso.corporate.com/authenticate')
+        expect(init.credentials).toBe('include')
+        expect(init.method).toBe('POST')
+        expect(init.headers).toEqual({ 'X-App-ID': 'app-1' })
+    })
+
+    it('returns null when the provider works by setting a cookie', async () => {
+        // Not a failure — the cookie is on a domain our backend shares,
+        // so the next navigation carries it.
+        global.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+        expect(await runAuthenticateTrigger(provider())).toBeNull()
+    })
+
+    it('returns the handle when the provider answers with one', async () => {
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({ token: 'handle-abc' }), {
+                status: 200, headers: { 'Content-Type': 'application/json' },
+            }),
+        )
+        const got = await runAuthenticateTrigger(provider({
+            config: { ...provider().config, authenticateTokenPath: 'token' },
+        }))
+        expect(got).toBe('handle-abc')
+    })
+
+    it('walks a nested path, the same syntax the server uses', async () => {
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({ data: { tokens: [{ value: 'deep' }] } }), {
+                status: 200, headers: { 'Content-Type': 'application/json' },
+            }),
+        )
+        const got = await runAuthenticateTrigger(provider({
+            config: {
+                ...provider().config,
+                authenticateTokenPath: 'data.tokens[0].value',
+            },
+        }))
+        expect(got).toBe('deep')
+    })
+
+    it('throws on a refusal rather than pretending it worked', async () => {
+        // A 401 that survives to here means the Negotiate challenge went
+        // unanswered — the machine is off-domain, or the browser has not
+        // been told to answer for this host.
+        global.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 401 }))
+        await expect(runAuthenticateTrigger(provider())).rejects.toThrow(/401/)
+    })
+
+    it('throws when the promised value is not there', async () => {
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({ nope: true }), {
+                status: 200, headers: { 'Content-Type': 'application/json' },
+            }),
+        )
+        await expect(runAuthenticateTrigger(provider({
+            config: { ...provider().config, authenticateTokenPath: 'token' },
+        }))).rejects.toThrow(/token/)
+    })
+
+    it('does not inspect the handle it returns', async () => {
+        // It is opaque. The server redeems it against the provider's own
+        // gateway, which is the only party that can say what it means —
+        // so a value that looks like nothing in particular is fine.
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({ token: '····not-a-jwt····' }), {
+                status: 200, headers: { 'Content-Type': 'application/json' },
+            }),
+        )
+        expect(await runAuthenticateTrigger(provider({
+            config: { ...provider().config, authenticateTokenPath: 'token' },
+        }))).toBe('····not-a-jwt····')
+    })
+})

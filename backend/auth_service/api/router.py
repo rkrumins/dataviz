@@ -314,6 +314,19 @@ def _identity_service(request: Request) -> IdentityService:
     return svc
 
 
+#: Exactly the ``backchannel`` settings the sign-in page needs, and
+#: nothing else. A whitelist rather than a denylist because the dict this
+#: reads from also holds both endpoint URLs and whatever credentials
+#: their headers carry — a denylist would publish every setting added
+#: after it was written.
+_BACKCHANNEL_PUBLIC_FIELDS = {
+    "authenticate_url": "authenticateUrl",
+    "authenticate_method": "authenticateMethod",
+    "authenticate_headers": "authenticateHeaders",
+    "authenticate_token_path": "authenticateTokenPath",
+}
+
+
 def _public_config(snap) -> dict:
     """Non-secret settings the login UI needs to start a flow.
 
@@ -321,10 +334,27 @@ def _public_config(snap) -> dict:
     from browser storage need the storage key client-side; nothing else
     from ``settings`` is ever exposed, because that dict also holds
     ``shared_secret``.
+
+    ``backchannel`` publishes nothing at all unless a sign-in trigger is
+    configured. When one is, the browser cannot make the call without
+    the URL, the method and the headers, so those are published — and
+    they are the only four keys that ever are. ``gateway_url``,
+    ``exchange_url``, ``gateway_headers``, ``exchange_headers`` and
+    ``token_source_key`` are server-side facts and stay that way.
     """
+    settings = snap.settings or {}
+
+    if snap.kind == "backchannel":
+        if not str(settings.get("authenticate_url") or "").strip():
+            return {}
+        return {
+            alias: settings.get(key)
+            for key, alias in _BACKCHANNEL_PUBLIC_FIELDS.items()
+            if settings.get(key) not in (None, "", {})
+        }
+
     if snap.kind != "custom_profile":
         return {}
-    settings = snap.settings or {}
     source = str(settings.get("source") or "cookie")
     out: dict = {"source": source}
     if source in BROWSER_STORAGE_SOURCES:
@@ -656,10 +686,17 @@ def _sso_failure_handler(
     lands everywhere at once.
     """
     async def _fail(reason: str, *, error_code: Optional[str] = None,
-                    email: Optional[str] = None) -> RedirectResponse:
+                    email: Optional[str] = None,
+                    detail: Optional[str] = None) -> RedirectResponse:
+        # ``detail`` is logged and NOT audited. The audit row's reason is
+        # read by a parser and rendered into a summary, so it has to stay
+        # a closed vocabulary; the detail behind it is free text that can
+        # quote a URL or an exception class and belongs in the log, under
+        # the same ref so the two still join up.
         ref = _failure_ref()
-        logger.info("%s failed (slug=%s, ref=%s): %s",
-                    log_label, slug, ref, reason)
+        logger.info("%s failed (slug=%s, ref=%s): %s%s",
+                    log_label, slug, ref, reason,
+                    f" — {detail}" if detail else "")
         await _record_sso_failure(
             svc, ref=ref, slug=slug, provider_id=snap.id, reason=reason,
         )
@@ -1759,7 +1796,11 @@ async def _backchannel_login_flow(
     raw = read_ambient_token(request, provider)
     if not raw:
         return await _fail(
-            f"ambient_token_missing_from_{provider.settings.token_source}"
+            "backchannel_no_session",
+            detail=(
+                f"no {provider.settings.token_source} "
+                f"{provider.settings.token_source_key!r} on the request"
+            ),
         )
 
     try:
@@ -1767,14 +1808,122 @@ async def _backchannel_login_flow(
     except BackchannelError as exc:
         # Every failure lands here — a refused destination, a redirect,
         # a timeout, an upstream rejection, an unmappable payload. None
-        # of them produce a partial identity, and the reason is audited
-        # rather than shown.
-        return await _fail(f"backchannel_rejected:{exc}")
+        # of them produce a partial identity.
+        #
+        # The CODE is audited, the message is logged. The message quotes
+        # whatever the failure was, up to and including the gateway's
+        # URL, and an audit summary is the wrong place for that.
+        return await _fail(exc.code, detail=str(exc))
 
     return await _finish_sso_login(
         request, svc=svc, snap=snap, slug=slug, identity=identity,
         next_path=next_path, fail=_fail,
     )
+
+
+class _BackchannelHandleBody(BaseModel):
+    """The handle the sign-in trigger returned to the browser.
+
+    Named a handle rather than a token on purpose: nothing here reads
+    it. It is passed straight to the provider's gateway, which is the
+    only party that can say what it means.
+    """
+    handle: str
+
+
+@router.post("/{slug}/backchannel", response_model=SessionResponse,
+             response_model_by_alias=True)
+@limiter.limit(RATELIMIT_LOGIN_PER_IP)
+async def backchannel_handle_login(
+    slug: str,
+    request: Request,
+    response: Response,
+    body: _BackchannelHandleBody,
+):
+    """Complete a back-channel login from a handle the browser obtained.
+
+    The other entry point reads the enterprise's session cookie off the
+    request. This one exists for the shape where the sign-in trigger
+    *answers* with a handle instead of setting a cookie — the browser
+    reads it out of that response and posts it here.
+
+    **Taking a credential from the browser is safe here, and it is worth
+    being precise about why**, because it is exactly what
+    ``custom_profile`` must never do. That kind receives an assertion and
+    *parses* it, so a forged one is a forged identity and only a
+    signature stands in the way. This kind receives an opaque handle and
+    immediately *redeems* it against the provider's own gateway. A value
+    somebody invented does not survive that call. The browser chooses
+    which handle to present; the gateway decides who it belongs to, and
+    nothing the browser says reaches the claim mapper.
+
+    Refused unless the row actually configures this shape, so the
+    endpoint cannot be used to hand a handle to a provider whose
+    operator chose the cookie transport.
+    """
+    provider = await _resolve_provider(slug, request=request)
+    if not isinstance(provider, BackchannelProvider):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Not a back-channel provider",
+        )
+    if not provider.settings.authenticate_token_path:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "This provider reads its session from the request, not the "
+            "sign-in trigger's response",
+        )
+    snap = await _provider_snapshot(slug)
+
+    try:
+        identity = await provider.fetch_identity(body.handle)
+    except BackchannelError as exc:
+        # Same split as the redirect flow: the code is audited, the
+        # message is logged, and neither reaches the caller.
+        logger.info(
+            "Back-channel handle login failed (slug=%s): %s [%s]",
+            slug, exc, exc.code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": exc.code},
+        )
+
+    # JSON rather than the HTML page the redirect flows get: this
+    # endpoint is reached by fetch(), so a page would never be seen.
+    rehearsal = await _dry_run_or_none(
+        request, svc=_identity_service(request), snap=snap, slug=slug,
+        identity=identity, as_json=True,
+    )
+    if rehearsal is not None:
+        return rehearsal
+
+    svc = _identity_service(request)
+    link_intent_user_id = await _resolve_link_intent(
+        request, svc, provider_id=snap.id,
+    )
+    try:
+        user, tokens = await svc.complete_sso_login(
+            identity,
+            provider_id=snap.id,
+            provider_slug=snap.slug,
+            linking_policy=snap.linking_policy,
+            link_intent_user_id=link_intent_user_id,
+            assurance=assurance_for(snap.kind, snap.settings),
+        )
+    except SSOAuthError as exc:
+        logger.info("Back-channel login rejected (slug=%s): %s", slug, exc)
+        detail: dict = {"error": str(exc)}
+        if str(exc) == "unsafe_auto_link":
+            detail["email"] = identity.email
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=detail,
+        )
+
+    set_session_cookies(response, tokens)
+    if read_link_intent_cookie(request) is not None:
+        clear_link_intent_cookie(response)
+    logger.info("Back-channel login succeeded (slug=%s, user=%s)", slug, user.id)
+    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
 
 
 @router.post("/{slug}/browser-profile", response_model=SessionResponse,

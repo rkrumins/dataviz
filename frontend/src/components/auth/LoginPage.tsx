@@ -5,8 +5,12 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import {
     authService,
+    leavesForIdp,
+    loginWithBackchannelHandle,
+    needsAuthenticateFirst,
     needsBrowserPayload,
     readBrowserProfile,
+    runAuthenticateTrigger,
     type LoginContext,
     type SsoProviderSummary,
 } from '@/services/authService'
@@ -137,6 +141,29 @@ function SsoButtons({
     const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
     const [busySlug, setBusySlug] = useState<string | null>(null)
 
+    async function signInViaGateway(p: SsoProviderSummary) {
+        onPortalError('')
+        setBusySlug(p.slug)
+        try {
+            if (await completeGatewaySignIn(p) === 'session') {
+                navigate('/', { replace: true })
+            }
+        } catch (err) {
+            // Say which step failed rather than navigating into a
+            // sign-in that was never going to work. The likeliest causes
+            // are a CORS rejection and a workstation whose browser has
+            // not been told to answer Negotiate for that host, and
+            // neither produces anything useful further down the flow.
+            onPortalError(
+                err instanceof Error
+                    ? `Could not reach ${p.displayName}. ${err.message}`
+                    : `Could not reach ${p.displayName}.`,
+            )
+        } finally {
+            setBusySlug(null)
+        }
+    }
+
     // ``custom_profile`` providers backed by browser storage can't use a
     // top-level GET — only JS can read the key. Read it, post it, then
     // navigate ourselves once the session cookies are set.
@@ -206,7 +233,28 @@ function SsoButtons({
                 </p>
             )}
             {(providers ?? []).map((p) => (
-                needsBrowserPayload(p) ? (
+                needsAuthenticateFirst(p) ? (
+                    <button
+                        key={p.id}
+                        type="button"
+                        disabled={busySlug === p.slug}
+                        onClick={() => { void signInViaGateway(p) }}
+                        className={cn(
+                            SSO_BUTTON,
+                            busySlug === p.slug && "opacity-70 cursor-not-allowed",
+                        )}
+                    >
+                        <span className="absolute left-3 flex items-center">
+                            <SsoMark p={p} />
+                        </span>
+                        <span className="px-12 truncate">{ssoLabel(p)}</span>
+                        <span className="absolute right-3.5 flex items-center">
+                            {busySlug === p.slug
+                                ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
+                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
+                        </span>
+                    </button>
+                ) : needsBrowserPayload(p) ? (
                     <button
                         key={p.id}
                         type="button"
@@ -240,11 +288,18 @@ function SsoButtons({
                             <SsoMark p={p} />
                         </span>
                         <span className="px-12 truncate">{ssoLabel(p)}</span>
-                        {/* ExternalLink rather than a chevron: this one
-                            leaves the page for the IdP, and saying so is
-                            worth more than a consistent glyph. */}
+                        {/* ExternalLink rather than a chevron when the
+                            button really does hand off to another site,
+                            and saying so is worth more than a consistent
+                            glyph. It only does for OIDC and SAML — a
+                            back-channel provider and a cookie-sourced
+                            corporate portal both resolve server-side and
+                            land the user straight back, so promising a
+                            hand-off there was simply false. */}
                         <span className="absolute right-3.5 flex items-center">
-                            <ExternalLink className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-0.5" />
+                            {leavesForIdp(p)
+                                ? <ExternalLink className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-0.5" />
+                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
                         </span>
                     </a>
                 )
@@ -438,6 +493,42 @@ function AlreadySignedIn({ email }: { email: string }) {
     )
 }
 
+/** Start a back-channel sign-in from the browser.
+ *
+ *  The first call has to happen here rather than on our server, and that
+ *  is not a preference. Where the enterprise uses Kerberos the provider
+ *  answers with `401 WWW-Authenticate: Negotiate`, and answering it
+ *  needs a Service Ticket from the workstation's OS credential store —
+ *  reachable through SSPI or GSS-API, by this browser, on this machine.
+ *  Our backend holds no ticket for the user and never can.
+ *
+ *  Returns `'session'` when a session now exists and the caller should
+ *  navigate, or `'redirecting'` when a full-page navigation is already
+ *  under way. Throws when the call failed, so the caller can say so.
+ */
+async function completeGatewaySignIn(
+    p: SsoProviderSummary,
+): Promise<'session' | 'redirecting'> {
+    const handle = await runAuthenticateTrigger(p)
+    if (handle) {
+        // The trigger answered with a handle rather than setting a
+        // cookie. Post it; the server redeems it against the provider's
+        // own gateway, which is what makes accepting it from a browser
+        // sound — a value somebody invented does not survive that call.
+        await loginWithBackchannelHandle(p.slug, handle)
+        return 'session'
+    }
+    // It set a cookie instead, on a domain our backend shares. A plain
+    // navigation finishes the job: the cookie rides along and the two
+    // server-side legs run.
+    window.location.assign(
+        `/api/v1/auth/${encodeURIComponent(p.slug)}/login`
+        + `?next=${encodeURIComponent('/dashboard')}`,
+    )
+    return 'redirecting'
+}
+
+
 /** Session-scoped guard so a rejected auto-attempt can't relaunch on
  *  every render or on a bounce back to /login. A fresh tab retries. */
 const AUTO_PORTAL_SENTINEL = 'nx_portal_autologin_tried'
@@ -495,24 +586,53 @@ export function LoginPage() {
 
     const providers = context?.providers ?? null
 
-    // Silent portal sign-in: on an internal deployment the corporate
-    // portal has already written the profile, so the login form is a
-    // speed bump. Attempt it once per tab when exactly one storage-
-    // backed provider is configured and its key is present. A rejection
-    // falls through to the normal form rather than looping.
+    // Silent sign-in: on an internal deployment the user is already
+    // authenticated — by the corporate portal, or by the workstation
+    // itself via Kerberos — so the login form is a speed bump in front
+    // of a door that is already open. Attempt it once per tab when
+    // exactly one provider can do it. A rejection falls through to the
+    // normal form rather than looping.
+    //
+    // Two shapes qualify, and they differ in where the credential is:
+    // a storage-backed corporate portal has already written a payload
+    // we can read, while a back-channel provider has nothing written
+    // anywhere and we have to make the call that creates it. The second
+    // is why this runs for every client of the app rather than only for
+    // someone who deliberately clicks: nobody should have to press a
+    // button to use a session their machine already holds.
     const autoAttempted = useRef(false)
     useEffect(() => {
         if (providers === null || autoAttempted.current) return
         if (isAuthenticated || autoPortalAlreadyTried()) return
 
-        const candidates = providers.filter(needsBrowserPayload)
+        const candidates = providers.filter(
+            (p) => needsBrowserPayload(p) || needsAuthenticateFirst(p),
+        )
         if (candidates.length !== 1) return
-        const payload = readBrowserProfile(candidates[0])
+        const candidate = candidates[0]
+
+        if (needsAuthenticateFirst(candidate)) {
+            autoAttempted.current = true
+            markAutoPortalTried()
+            // Silent: a failure here is expected on a machine outside
+            // the domain, or one whose browser has not been told to
+            // answer Negotiate for that host. Those users have a normal
+            // form in front of them and a button that will tell them
+            // what went wrong if they press it.
+            void completeGatewaySignIn(candidate)
+                .then((outcome) => {
+                    if (outcome === 'session') navigate('/', { replace: true })
+                })
+                .catch(() => { /* fall through to the form */ })
+            return
+        }
+
+        const payload = readBrowserProfile(candidate)
         if (!payload) return
 
         autoAttempted.current = true
         markAutoPortalTried()
-        void loginWithBrowserProfile(candidates[0].slug, payload).then((ok) => {
+        void loginWithBrowserProfile(candidate.slug, payload).then((ok) => {
             if (ok) navigate('/', { replace: true })
         })
     }, [providers, isAuthenticated, loginWithBrowserProfile, navigate])

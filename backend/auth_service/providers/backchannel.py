@@ -100,7 +100,29 @@ AllowedHostsLoader = Callable[[], Awaitable[frozenset[str]]]
 class BackchannelError(Exception):
     """Any failure obtaining an identity. Mapped to a generic login
     failure by the route; the precise reason is logged and audited,
-    never shown to the user."""
+    never shown to the user.
+
+    Carries a stable ``code`` alongside the message, and the split
+    matters. The message is free text — it quotes URLs, exception class
+    names, and whatever a library's error string says this week. The
+    code is a closed vocabulary the audit log and the diagnostics tab
+    can key on. Putting the message where the code belongs was how a
+    gateway URL ended up inside an audit summary, and how the
+    diagnostics tab came to render nothing for most of these failures:
+    its parser cannot match a code that contains a quote.
+
+    So: ``code`` is audited and explained; ``str(exc)`` is logged.
+    """
+
+    #: Overridden per raise site. The default is the honest answer for a
+    #: failure nobody has classified yet — it still parses, and still
+    #: reaches the operator, rather than being dropped.
+    code = "backchannel_failed"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code:
+            self.code = code
 
 
 class BackchannelConfigError(BackchannelError):
@@ -112,14 +134,27 @@ class BackchannelUnavailable(BackchannelError):
     """The IdP did not answer usefully — a timeout, a 5xx, a blocked
     request.
 
+    One code for all three: from the operator's side they are the same
+    situation — "it did not answer" — and the specific transport reason
+    belongs in the log rather than in a vocabulary they have to learn.
+
     Distinct from every other failure because the liveness check treats
     it differently: an outage must not end sessions, while an
     authoritative rejection must. At login it is still a refusal.
     """
 
+    code = "backchannel_unavailable"
+
 
 class SessionRevokedUpstream(BackchannelError):
-    """The IdP answered, and the answer was "not authenticated"."""
+    """The IdP answered, and the answer was "not authenticated".
+
+    The status is kept in the code — it is a three-digit number from a
+    closed set, so it stays parseable, and 401 versus 403 is worth
+    telling apart when someone asks why everybody is being signed out.
+    """
+
+    code = "backchannel_idp_rejected"
 
 
 @dataclass(frozen=True)
@@ -133,6 +168,24 @@ class BackchannelSettings:
     # Where the ambient token is on the INBOUND request.
     token_source: str = "cookie"
     token_source_key: str = ""
+
+    # The browser-side trigger. Blank ``authenticate_url`` means no
+    # trigger: the ambient token is expected to exist already, which is
+    # the original shape and stays the default.
+    #
+    # This step CANNOT move to the server when the enterprise uses
+    # Kerberos/SPNEGO. Answering a `401 WWW-Authenticate: Negotiate`
+    # needs a Service Ticket from the workstation's OS credential store,
+    # reachable only through SSPI or GSS-API — by the user's browser, on
+    # the user's machine. We hold no ticket for them.
+    authenticate_url: str = ""
+    authenticate_method: str = "POST"
+    #: PUBLISHED TO THE BROWSER. See ``validate_settings``.
+    authenticate_headers: dict = field(default_factory=dict)
+    #: Where the token sits in the trigger's OWN response, when it
+    #: answers with one rather than setting a cookie. Blank means the
+    #: call exists only to establish the cookie.
+    authenticate_token_path: str = ""
 
     # Leg 1: ambient token -> gateway token.
     gateway_url: str = ""
@@ -200,6 +253,14 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         provider_slug=snap.slug,
         token_source=str(s.get("token_source") or "cookie").strip(),
         token_source_key=str(s.get("token_source_key") or "").strip(),
+        authenticate_url=str(s.get("authenticate_url") or "").strip(),
+        authenticate_method=str(
+            s.get("authenticate_method") or "POST"
+        ).strip().upper(),
+        authenticate_headers=_as_dict(s.get("authenticate_headers")),
+        authenticate_token_path=str(
+            s.get("authenticate_token_path") or ""
+        ).strip(),
         gateway_url=str(s.get("gateway_url") or "").strip(),
         gateway_method=str(s.get("gateway_method") or "POST").strip().upper(),
         gateway_send_as=str(s.get("gateway_send_as") or "cookie").strip(),
@@ -236,10 +297,24 @@ def validate_settings(s: BackchannelSettings) -> None:
             f"token_source must be one of {sorted(VALID_TOKEN_SOURCES)}, "
             f"got '{s.token_source}'"
         )
-    if not s.token_source_key:
+    # The trigger can supply the token itself, in which case there is no
+    # cookie to name.
+    if not s.token_source_key and not s.authenticate_token_path:
         raise BackchannelConfigError(
             "token_source_key is required — name the cookie or header "
-            "carrying the ambient session token"
+            "carrying the ambient session token, or set "
+            "authenticate_token_path if the sign-in trigger returns the "
+            "token in its own response"
+        )
+    if s.authenticate_token_path and not s.authenticate_url:
+        raise BackchannelConfigError(
+            "authenticate_token_path needs authenticate_url — there is no "
+            "response to read the token out of without a call to make"
+        )
+    if s.authenticate_url and s.authenticate_method not in VALID_METHODS:
+        raise BackchannelConfigError(
+            f"authenticate_method must be one of {sorted(VALID_METHODS)}, "
+            f"got '{s.authenticate_method}'"
         )
     if not s.gateway_url:
         raise BackchannelConfigError("gateway_url is required")
@@ -379,7 +454,8 @@ class BackchannelProvider:
         except OutboundStatusError as exc:
             if exc.status_code in _AUTHORITATIVE_REJECTIONS:
                 raise SessionRevokedUpstream(
-                    f"idp_rejected:{exc.status_code}"
+                    f"idp_rejected:{exc.status_code}",
+                    code=f"backchannel_idp_rejected:{exc.status_code}",
                 ) from exc
             raise BackchannelUnavailable(
                 f"idp_status:{exc.status_code}"
@@ -402,7 +478,9 @@ class BackchannelProvider:
         the gateway twice to read one response would double the load
         for nothing."""
         if not ambient_token or not ambient_token.strip():
-            raise BackchannelError("ambient_token_missing")
+            raise BackchannelError(
+                "ambient_token_missing", code="backchannel_no_session",
+            )
         s = self._s
         return await self._call(
             url=s.gateway_url, method=s.gateway_method,
@@ -421,7 +499,8 @@ class BackchannelProvider:
             # message reaches an operator's logs and the payload is the
             # user's identity.
             raise BackchannelError(
-                f"gateway_token_absent_at:{self._s.gateway_token_path}"
+                f"gateway_token_absent_at:{self._s.gateway_token_path}",
+                code="backchannel_token_absent",
             )
         return token.strip()
 
@@ -447,7 +526,8 @@ class BackchannelProvider:
         claims = resolve_path(payload, path) if path else payload
         if not isinstance(claims, dict):
             raise BackchannelError(
-                f"claims_absent_at:{path or '<root>'}"
+                f"claims_absent_at:{path or '<root>'}",
+                code="backchannel_claims_absent",
             )
         return claims
 
@@ -486,13 +566,17 @@ class BackchannelProvider:
                 override=self._s.claim_mapping_override,
             )
         except ClaimMappingError as exc:
-            raise BackchannelError(str(exc)) from exc
+            raise BackchannelError(
+                str(exc), code="backchannel_claims_unmappable",
+            ) from exc
 
         if self._s.require_auth_time and not getattr(identity, "auth_time", None):
             # Without one, ``complete_sso_login`` falls back to "now"
             # with a warning — which quietly disables the 24h SSO
             # re-auth ceiling for every session this provider mints.
-            raise BackchannelError("auth_time_absent")
+            raise BackchannelError(
+                "auth_time_absent", code="backchannel_auth_time_absent",
+            )
         return identity
 
     # ── Liveness ─────────────────────────────────────────────────────
