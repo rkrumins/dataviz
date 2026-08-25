@@ -257,7 +257,11 @@ renewal interval, plus one full exchange per sign-in.
 
 If you have an endpoint that *validates* a handle without minting a new
 token, say so — it is cheaper for this purpose and we would rather call
-that one.
+that one. The operator points the connection's **Re-check URL** at it;
+the re-check then makes the same call there instead of the redeem
+endpoint. It must speak the same protocol: 401/403 for "this session is
+over", success with a JSON body (an empty object is fine) for "still
+live", anything else read as an outage.
 
 ---
 

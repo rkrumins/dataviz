@@ -273,6 +273,13 @@ class BackchannelSettings:
     # Liveness re-check on each token rotation.
     liveness_on_refresh: bool = True
     liveness_grace_seconds: int = 900
+    #: Optional cheaper endpoint for the re-check. The contract asks
+    #: gateway teams for one ("an endpoint that validates a handle
+    #: without minting a new token"); when they provide it, the
+    #: re-check calls it instead of ``gateway_url``, with identical
+    #: mechanics — same carrier, same headers, same status semantics,
+    #: and a JSON (or configured-JWT) body on success.
+    liveness_url: str = ""
 
     claim_mapping_override: dict = field(default_factory=dict)
     linking_policy: str = "strict"
@@ -351,6 +358,7 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         trust_gateway_email=_as_bool(s.get("trust_gateway_email", True)),
         liveness_on_refresh=_as_bool(s.get("liveness_on_refresh", True)),
         liveness_grace_seconds=_as_int(s.get("liveness_grace_seconds"), 900),
+        liveness_url=str(s.get("liveness_url") or "").strip(),
         claim_mapping_override=snap.claim_mapping or {},
         linking_policy=snap.linking_policy,
     )
@@ -580,18 +588,19 @@ class BackchannelProvider:
         strict JSON rule stays."""
         return self._s.claims_format == "jwt" and not self._s.exchange_url
 
-    async def _gateway(self, ambient_token: str) -> Any:
+    async def _gateway(self, ambient_token: str, *, url: str = "") -> Any:
         """Leg 1, raw. Separate from :meth:`redeem` because when leg 2
         is not configured the same body carries the claims, and calling
         the gateway twice to read one response would double the load
-        for nothing."""
+        for nothing. *url* overrides the destination only — the liveness
+        re-check aims the same call at the cheaper validate endpoint."""
         if not ambient_token or not ambient_token.strip():
             raise BackchannelError(
                 "ambient_token_missing", code="backchannel_no_session",
             )
         s = self._s
         return await self._call(
-            url=s.gateway_url, method=s.gateway_method,
+            url=url or s.gateway_url, method=s.gateway_method,
             send_as=s.gateway_send_as, token=ambient_token.strip(),
             header_name=s.gateway_token_header,
             header_prefix=s.gateway_token_prefix,
@@ -854,14 +863,18 @@ class BackchannelProvider:
         logout hard for every other kind.
 
         Only leg 1 runs: redeeming the ambient token is the question
-        being asked, and the claims are not needed to answer it.
+        being asked, and the claims are not needed to answer it. When
+        the operator has configured ``liveness_url`` — the validate-only
+        endpoint the contract asks gateway teams for — the same call
+        goes there instead, so the re-check stops minting a token per
+        renewal the moment the cheaper endpoint exists.
 
         Raises :class:`SessionRevokedUpstream` when the IdP says no, and
         :class:`BackchannelUnavailable` when it did not say. The caller
         must treat those differently — ending sessions on an outage
         would turn a gateway blip into a platform-wide logout.
         """
-        await self._gateway(ambient_token)
+        await self._gateway(ambient_token, url=self._s.liveness_url)
 
 
 def build_backchannel_provider(

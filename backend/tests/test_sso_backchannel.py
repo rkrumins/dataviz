@@ -532,3 +532,52 @@ async def test_an_explicit_true_needs_no_toggle(monkeypatch):
         trust_gateway_email=False,
     ).fetch_identity("ambient-xyz")
     assert identity.raw_claims["email_verified"] is True
+
+
+# ── the validate-only re-check endpoint ──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_liveness_prefers_the_validate_endpoint_when_configured(
+    monkeypatch,
+):
+    """The contract asks gateway teams for a cheaper validate-only
+    endpoint. The moment an operator configures it, renewals stop
+    minting a token apiece — same call, aimed there."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"active": True})
+
+    seen = _routes(monkeypatch, handler)
+    await _provider(
+        liveness_url="https://gw.corp.example/validate",
+    ).confirm_still_authenticated("ambient-xyz")
+    assert [r.url.path for r in seen] == ["/validate"]
+
+
+@pytest.mark.asyncio
+async def test_liveness_falls_back_to_the_gateway_without_one(monkeypatch):
+    seen = _routes(monkeypatch, _happy)
+    await _provider().confirm_still_authenticated("ambient-xyz")
+    assert [r.url.path for r in seen] == ["/redeem"]
+
+
+@pytest.mark.asyncio
+async def test_the_validate_endpoint_speaks_the_same_status_protocol(
+    monkeypatch,
+):
+    """Its 401 is as authoritative as the gateway's — otherwise moving
+    the re-check would quietly stop it ever ending a session."""
+    _routes(monkeypatch, lambda r: httpx.Response(401))
+    with pytest.raises(SessionRevokedUpstream):
+        await _provider(
+            liveness_url="https://gw.corp.example/validate",
+        ).confirm_still_authenticated("ambient-xyz")
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_never_uses_the_validate_endpoint(monkeypatch):
+    """It exists for the re-check only; the login still redeems."""
+    seen = _routes(monkeypatch, _happy)
+    await _provider(
+        liveness_url="https://gw.corp.example/validate",
+    ).fetch_identity("ambient-xyz")
+    assert [r.url.path for r in seen] == ["/redeem", "/userinfo"]

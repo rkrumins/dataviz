@@ -65,6 +65,7 @@ export interface BackchannelSettings {
     trust_gateway_email?: boolean
     liveness_on_refresh?: boolean
     liveness_grace_seconds?: number
+    liveness_url?: string
     [k: string]: unknown
 }
 
@@ -103,6 +104,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     trust_gateway_email: true,
     liveness_on_refresh: true,
     liveness_grace_seconds: 900,
+    liveness_url: '',
 }
 
 const selectCls =
@@ -610,6 +612,16 @@ export function BackchannelSettingsForm({
                     checked={value.liveness_on_refresh !== false}
                     onChange={v => set('liveness_on_refresh', v)}
                 />
+                <Field
+                    label={<>Re-check URL <span className="font-normal text-ink-muted">(optional)</span></>}
+                    hint="A cheaper validate-only endpoint for that re-check, if their team provides one — same call, aimed here instead of the gateway, so renewals stop minting a token apiece. Blank re-checks against the Gateway URL."
+                >
+                    <TextField
+                        value={value.liveness_url ?? ''}
+                        onChange={e => set('liveness_url', e.target.value)}
+                        placeholder="https://sso-gateway.corp.internal/validate"
+                    />
+                </Field>
                 <Toggle
                     label="Require an authentication time in the user details"
                     hint="Without one there is no way to tell how long ago someone actually signed in, and the daily re-authentication ceiling stops applying to them."
