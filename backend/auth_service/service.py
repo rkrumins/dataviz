@@ -1341,6 +1341,23 @@ class LocalIdentityService:
             return None
         if not provider.settings.liveness_on_refresh:
             return None
+        if not provider.settings.token_source_key:
+            # Nothing on the request carries the upstream session, so
+            # there is nothing to re-confirm. Without this the lookup
+            # below returned None and the code concluded the session had
+            # been revoked — revoking the refresh family and killing
+            # every live session, once per access-token lifetime, for a
+            # user who had done nothing wrong.
+            #
+            # "I have no way to check" and "I checked and the answer was
+            # no" are opposite conclusions, and only one of them is
+            # grounds for signing somebody out.
+            logger.debug(
+                "Provider %s names no ambient session source; skipping the "
+                "liveness check rather than treating it as revoked.",
+                provider.settings.provider_id,
+            )
+            return None
         return provider
 
     @staticmethod

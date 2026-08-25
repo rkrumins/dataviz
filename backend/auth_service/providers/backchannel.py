@@ -54,6 +54,7 @@ UI.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
@@ -79,6 +80,9 @@ VALID_TOKEN_SOURCES = frozenset({"cookie", "header"})
 #: How a token is presented on an outbound leg.
 VALID_SEND_AS = frozenset({"cookie", "header", "body"})
 VALID_METHODS = frozenset({"GET", "POST"})
+#: Shapes a browser-delivered gateway response may take.
+VALID_RESPONSE_FORMATS = frozenset({"jwt", "json"})
+VALID_ALGS = frozenset({"HS256", "RS256"})
 
 #: Statuses that mean "this session is over", as opposed to "we could
 #: not tell". Anything else — 5xx, a timeout, a blocked request — is an
@@ -200,8 +204,31 @@ class BackchannelSettings:
     gateway_token_prefix: str = ""
     gateway_body_field: str = ""
     gateway_cookie_name: str = ""
+    #: Send the ambient session as a cookie IN ADDITION to whatever
+    #: ``gateway_send_as`` carries the token in. A gateway that
+    #: authenticates by cookie and takes the token in the body needs
+    #: both on the same request, which one carrier cannot express.
+    gateway_send_ambient_cookie: bool = False
     gateway_headers: dict = field(default_factory=dict)
     gateway_token_path: str = "access_token"
+
+    # Who makes the gateway call. Server-side by default, and that is
+    # the configuration to want: the identity then arrives from the
+    # gateway over TLS, and nothing the browser says contributes to it.
+    #
+    # Browser-side exists because a gateway that challenges for Kerberos
+    # the way an authenticate endpoint does cannot be called by us at
+    # all. It costs what any browser-supplied payload costs — see
+    # ``validate_settings`` — and is gated accordingly.
+    gateway_via_browser: bool = False
+    gateway_response_format: str = "jwt"
+    gateway_signing_alg: str = "HS256"
+    gateway_shared_secret: str = ""
+    gateway_public_key: str = ""
+    gateway_issuer: str = ""
+    gateway_audience: str = ""
+    gateway_max_age_seconds: int = 300
+    gateway_trust_unsigned: bool = False
 
     # Leg 2: gateway token -> claims. Blank URL skips it.
     exchange_url: str = ""
@@ -274,10 +301,26 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         gateway_token_prefix=str(s.get("gateway_token_prefix") or ""),
         gateway_body_field=str(s.get("gateway_body_field") or "").strip(),
         gateway_cookie_name=str(s.get("gateway_cookie_name") or "").strip(),
+        gateway_send_ambient_cookie=_as_bool(
+            s.get("gateway_send_ambient_cookie")
+        ),
         gateway_headers=_as_dict(s.get("gateway_headers")),
         gateway_token_path=str(
             s.get("gateway_token_path") or "access_token"
         ).strip(),
+        gateway_via_browser=_as_bool(s.get("gateway_via_browser")),
+        gateway_response_format=str(
+            s.get("gateway_response_format") or "jwt"
+        ).strip(),
+        gateway_signing_alg=str(
+            s.get("gateway_signing_alg") or "HS256"
+        ).strip().upper(),
+        gateway_shared_secret=str(s.get("gateway_shared_secret") or ""),
+        gateway_public_key=str(s.get("gateway_public_key") or ""),
+        gateway_issuer=str(s.get("gateway_issuer") or "").strip(),
+        gateway_audience=str(s.get("gateway_audience") or "").strip(),
+        gateway_max_age_seconds=_as_int(s.get("gateway_max_age_seconds"), 300),
+        gateway_trust_unsigned=_as_bool(s.get("gateway_trust_unsigned")),
         exchange_url=str(s.get("exchange_url") or "").strip(),
         exchange_method=str(s.get("exchange_method") or "POST").strip().upper(),
         exchange_send_as=str(s.get("exchange_send_as") or "body").strip(),
@@ -330,7 +373,11 @@ def validate_settings(s: BackchannelSettings) -> None:
         send_as=s.gateway_send_as, header=s.gateway_token_header,
         body_field=s.gateway_body_field,
     )
-    if not s.gateway_token_path:
+    if s.exchange_url and not s.gateway_token_path:
+        # Only when there IS a second leg. A gateway that answers with
+        # the identity has no token to point at, and ``fetch_identity``
+        # never reads this — demanding it made an operator carry a value
+        # that meant nothing.
         raise BackchannelConfigError(
             "gateway_token_path is required — name the field in the "
             "gateway response holding the token"
@@ -346,6 +393,46 @@ def validate_settings(s: BackchannelSettings) -> None:
             send_as=s.exchange_send_as, header=s.exchange_token_header,
             body_field=s.exchange_body_field,
         )
+    if s.gateway_via_browser:
+        # The identity would arrive from a browser, which means it
+        # arrives from whoever is sitting in front of it. An unsigned
+        # JSON body carries nothing that distinguishes the gateway's
+        # real answer from one typed into a console, and TLS between the
+        # browser and the gateway does not help: the request we receive
+        # is a different request from the one the gateway answered.
+        #
+        # Same rule ``custom_profile`` applies to the same problem, for
+        # the same reason.
+        if s.gateway_response_format not in VALID_RESPONSE_FORMATS:
+            raise BackchannelConfigError(
+                "gateway_response_format must be one of "
+                f"{sorted(VALID_RESPONSE_FORMATS)}, got "
+                f"'{s.gateway_response_format}'"
+            )
+        if s.gateway_response_format == "json" and not s.gateway_trust_unsigned:
+            raise BackchannelConfigError(
+                "gateway_via_browser with an unsigned JSON response means "
+                "anyone who can open a browser console can sign in as "
+                "anyone. Ask for a signed JWT, or set "
+                "gateway_trust_unsigned=true to accept identities that "
+                "cannot be verified"
+            )
+        if s.gateway_response_format == "jwt":
+            if s.gateway_signing_alg not in VALID_ALGS:
+                raise BackchannelConfigError(
+                    f"gateway_signing_alg must be one of {sorted(VALID_ALGS)}, "
+                    f"got '{s.gateway_signing_alg}'"
+                )
+            if s.gateway_signing_alg == "HS256" and not s.gateway_shared_secret:
+                raise BackchannelConfigError(
+                    "gateway_signing_alg='HS256' requires "
+                    "gateway_shared_secret"
+                )
+            if s.gateway_signing_alg == "RS256" and not s.gateway_public_key:
+                raise BackchannelConfigError(
+                    "gateway_signing_alg='RS256' requires gateway_public_key "
+                    "(PEM)"
+                )
     if s.timeout_seconds <= 0:
         raise BackchannelConfigError("timeout_seconds must be > 0")
     if s.max_response_bytes <= 0:
@@ -435,7 +522,7 @@ class BackchannelProvider:
     async def _call(
         self, *, url: str, method: str, send_as: str, token: str,
         header_name: str, header_prefix: str, body_field: str,
-        cookie_name: str, static_headers: dict,
+        cookie_name: str, static_headers: dict, also_cookie: bool = False,
     ) -> Any:
         """One guarded leg. Raises the split errors this module's
         callers distinguish between."""
@@ -449,6 +536,13 @@ class BackchannelProvider:
             cookies = {cookie_name: token}
         else:  # body
             body = {body_field: token}
+
+        if also_cookie and cookie_name and send_as != "cookie":
+            # Both, not either. A gateway can authenticate the caller by
+            # cookie and still expect the token in the body — the cookie
+            # says who is asking, the body says what is being redeemed,
+            # and they are not the same question.
+            cookies = {**(cookies or {}), cookie_name: token}
 
         try:
             return await request_json(
@@ -496,6 +590,7 @@ class BackchannelProvider:
             body_field=s.gateway_body_field,
             cookie_name=s.gateway_cookie_name or s.token_source_key,
             static_headers=s.gateway_headers,
+            also_cookie=s.gateway_send_ambient_cookie,
         )
 
     def _token_from(self, payload: Any) -> str:
@@ -538,6 +633,73 @@ class BackchannelProvider:
         return claims
 
     # ── Identity ─────────────────────────────────────────────────────
+
+    def identity_from_browser_response(self, raw: str) -> ProviderIdentity:
+        """Turn a gateway response the BROWSER obtained into an identity.
+
+        Used only when ``gateway_via_browser``. Everything about this
+        path is weaker than the server-side one and the code says so in
+        one place rather than assuming the reader remembers: what
+        arrives is what the person in that browser chose to send.
+
+        ``jwt`` is what makes it sound — a signature over the gateway's
+        answer, checked against a key the operator holds, so a payload
+        assembled in a console does not verify. Verification is
+        delegated to ``custom_profile``, which already solves exactly
+        this problem; a second implementation of JWT checking is a
+        second place for it to be subtly wrong.
+
+        ``json`` verifies nothing and is accepted only because an
+        operator ticked a box saying so. ``assurance_for`` rates such a
+        row ``unverified``, which is what stops it granting platform
+        administration.
+        """
+        from .custom_profile import (
+            CustomProfileError, CustomProfileProvider, CustomProfileSettings,
+        )
+
+        s = self._s
+        if s.gateway_response_format == "json":
+            if not s.gateway_trust_unsigned:
+                # validate_settings already refused this row; never let
+                # an unsigned identity through on a path that skipped
+                # the builder.
+                raise BackchannelError(
+                    "unsigned_not_permitted",
+                    code="backchannel_unsigned_refused",
+                )
+            try:
+                payload = json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                raise BackchannelError(
+                    f"payload_malformed:{exc}",
+                    code="backchannel_claims_absent",
+                ) from exc
+            if not isinstance(payload, dict):
+                raise BackchannelError(
+                    "payload_malformed", code="backchannel_claims_absent",
+                )
+        else:
+            verifier = CustomProfileProvider(CustomProfileSettings(
+                payload_format="jwt",
+                signing_alg=s.gateway_signing_alg,
+                shared_secret=s.gateway_shared_secret,
+                public_key=s.gateway_public_key,
+                issuer=s.gateway_issuer,
+                audience=s.gateway_audience,
+                max_age_seconds=s.gateway_max_age_seconds,
+            ))
+            try:
+                payload = verifier._verify_jwt(raw)
+            except CustomProfileError as exc:
+                raise BackchannelError(
+                    f"gateway_payload_invalid:{exc}",
+                    code="backchannel_payload_invalid",
+                ) from exc
+
+        return self._identity_from(
+            self._claims_from(payload, s.exchange_claims_path)
+        )
 
     async def fetch_identity(self, raw: str) -> ProviderIdentity:
         """Redeem the ambient token and return a verified identity.

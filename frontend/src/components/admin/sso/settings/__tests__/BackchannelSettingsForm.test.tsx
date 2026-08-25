@@ -147,17 +147,31 @@ describe('defaults', () => {
         expect(DEFAULT_BACKCHANNEL_SETTINGS.require_auth_time).toBe(true)
     })
 
-    it('renders both toggles on for a row that has never been edited', () => {
+    // Asserted by name rather than by counting. A count breaks whenever
+    // a toggle is added, which says nothing about whether the defaults
+    // are right — and the point of these is which way each one points.
+    const toggle = (name: RegExp) =>
+        screen.getByRole('checkbox', { name }) as HTMLInputElement
+
+    it('has the two behaviour toggles on for a row never edited', () => {
         renderForm({})
-        const boxes = screen.getAllByRole('checkbox') as HTMLInputElement[]
-        expect(boxes).toHaveLength(2)
-        expect(boxes.every(b => b.checked)).toBe(true)
+        expect(toggle(/re-check with the provider/i).checked).toBe(true)
+        expect(toggle(/require an authentication time/i).checked).toBe(true)
+    })
+
+    it('leaves the gateway call on our server', () => {
+        // The default that matters most here. Server-side means the
+        // identity arrives from the gateway; browser-side means it
+        // arrives from whoever is sitting at the browser, and is only
+        // sound with a signature over it.
+        renderForm({})
+        expect(toggle(/browser make this call/i).checked).toBe(false)
     })
 
     it('respects an explicit false rather than treating it as unset', async () => {
         renderForm({ liveness_on_refresh: false, require_auth_time: false })
-        const boxes = screen.getAllByRole('checkbox') as HTMLInputElement[]
-        expect(boxes.some(b => b.checked)).toBe(false)
+        expect(toggle(/re-check with the provider/i).checked).toBe(false)
+        expect(toggle(/require an authentication time/i).checked).toBe(false)
     })
 })
 

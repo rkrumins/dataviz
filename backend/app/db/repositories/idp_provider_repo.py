@@ -58,6 +58,9 @@ _SECRET_FIELDS = frozenset({
     # the only rule that holds for a shape we do not control.
     "gateway_headers",
     "exchange_headers",
+    # The key a browser-delivered gateway payload is signed with. Not
+    # the same as authenticate_headers, which is published on purpose.
+    "gateway_shared_secret",
 })
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")

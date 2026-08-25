@@ -71,6 +71,16 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
         return VERIFIED
 
     if kind == "backchannel":
+        # A row whose gateway is called by the BROWSER is only as good
+        # as what it does with the answer. An unsigned payload from a
+        # browser is written by whoever is sitting at it — the same
+        # situation as an unsigned custom_profile, and rated the same.
+        if _as_bool(s.get("gateway_via_browser")):
+            if str(s.get("gateway_response_format") or "jwt") == "json" or (
+                _as_bool(s.get("gateway_trust_unsigned"))
+            ):
+                return UNVERIFIED
+            return VERIFIED
         # No signature is checked here, and it is still the strongest
         # kind we have. The claims did not arrive from the browser at
         # all: they came back over TLS from the provider's own endpoint,

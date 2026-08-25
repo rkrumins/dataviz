@@ -353,6 +353,33 @@ async def test_another_kind_of_sso_session_is_never_probed(registry):
 
 
 @pytest.mark.asyncio
+async def test_a_row_with_no_ambient_source_is_not_probed(registry):
+    """"I have no way to check" is not "I checked and the answer was no".
+
+    A connection whose session is delivered to the page rather than
+    carried on requests names no cookie. The check read that empty name,
+    got nothing back, and concluded the upstream session had been
+    revoked — revoking the refresh family and killing every live session
+    for a user who had done nothing wrong, once per access-token
+    lifetime, forever.
+
+    Sign-in worked, so nothing looked broken until the first refresh.
+    """
+    registry.providers[PROVIDER_ID] = probe = _Probe(token_source_key="")
+    store = InMemoryRefreshStore()
+    token, _ = await _mint(store, checked_at=int(time.time()))
+    killed: list[str] = []
+
+    user, _tokens = await _service(store, killed).refresh(
+        token, ambient_cookies={}, ambient_headers={},
+    )
+    assert user.id == "usr_1"
+    assert probe.calls == 0, "there was nothing to ask"
+    assert store.revoked_family is None, "the family was killed"
+    assert killed == [], "live sessions were killed"
+
+
+@pytest.mark.asyncio
 async def test_an_operator_can_turn_the_check_off(registry):
     registry.providers[PROVIDER_ID] = probe = _Probe(
         liveness_on_refresh=False,

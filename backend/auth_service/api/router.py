@@ -1873,16 +1873,26 @@ async def backchannel_handle_login(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "Not a back-channel provider",
         )
-    if not provider.settings.authenticate_token_path:
+    if not (
+        provider.settings.authenticate_token_path
+        or provider.settings.gateway_via_browser
+    ):
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            "This provider reads its session from the request, not the "
-            "sign-in trigger's response",
+            "This provider reads its session from the request, not from "
+            "the browser",
         )
     snap = await _provider_snapshot(slug)
 
     try:
-        identity = await provider.fetch_identity(body.handle)
+        if provider.settings.gateway_via_browser:
+            # The browser called the gateway itself and is handing us
+            # its answer. Unlike the handle above there is nothing to
+            # redeem — so this path verifies a signature, or is a row
+            # whose operator ticked a box accepting that it cannot.
+            identity = provider.identity_from_browser_response(body.handle)
+        else:
+            identity = await provider.fetch_identity(body.handle)
     except BackchannelError as exc:
         # Same split as the redirect flow: the code is audited, the
         # message is logged, and neither reaches the caller.

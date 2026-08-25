@@ -41,6 +41,16 @@ export interface BackchannelSettings {
     gateway_token_prefix?: string
     gateway_body_field?: string
     gateway_cookie_name?: string
+    gateway_send_ambient_cookie?: boolean
+    gateway_via_browser?: boolean
+    gateway_response_format?: 'jwt' | 'json'
+    gateway_signing_alg?: 'HS256' | 'RS256'
+    gateway_shared_secret?: string
+    gateway_public_key?: string
+    gateway_issuer?: string
+    gateway_audience?: string
+    gateway_max_age_seconds?: number
+    gateway_trust_unsigned?: boolean
     gateway_headers?: Record<string, string>
     gateway_token_path?: string
 
@@ -77,6 +87,16 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     gateway_body_field: '',
     gateway_headers: {},
     gateway_token_path: 'access_token',
+    gateway_send_ambient_cookie: false,
+    gateway_via_browser: false,
+    gateway_response_format: 'jwt',
+    gateway_signing_alg: 'HS256',
+    gateway_shared_secret: '',
+    gateway_public_key: '',
+    gateway_issuer: '',
+    gateway_audience: '',
+    gateway_max_age_seconds: 300,
+    gateway_trust_unsigned: false,
     exchange_url: '',
     exchange_method: 'POST',
     exchange_send_as: 'body',
@@ -394,12 +414,125 @@ export function BackchannelSettingsForm({
                     </Field>
                 </FieldGrid>
 
+                {gatewaySendAs !== 'cookie' && (
+                    <Toggle
+                        label="Also send the session as a cookie"
+                        hint="For a gateway that authenticates the caller by cookie and still expects the token in the body or a header. The cookie says who is asking; the body says what is being redeemed, and they are not the same question."
+                        checked={value.gateway_send_ambient_cookie === true}
+                        onChange={v => set('gateway_send_ambient_cookie', v)}
+                    />
+                )}
+
                 <HeaderMapField
                     label="Extra headers"
                     hint="Sent on every gateway call. Application id, secret, correlation headers. Redacted after saving."
                     value={value.gateway_headers}
                     onChange={v => set('gateway_headers', v)}
                 />
+
+                <Toggle
+                    label="Let the browser make this call instead of us"
+                    hint="Turn this on only if the gateway challenges the browser for its workstation login the way the sign-in trigger does, so our server cannot call it. Otherwise leave it off: calling it ourselves means the identity arrives from the gateway rather than from whoever is sitting at the browser."
+                    checked={value.gateway_via_browser === true}
+                    onChange={v => set('gateway_via_browser', v)}
+                />
+
+                {value.gateway_via_browser && (
+                    <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-3">
+                        <p className="text-[11px] text-amber-300 leading-relaxed">
+                            <strong>The identity will arrive from the
+                            browser, which means from whoever is sitting at
+                            it.</strong> A signed response is what makes it
+                            trustworthy: the signature is checked against a
+                            key you hold, so a payload assembled in a
+                            browser console does not verify. An unsigned one
+                            cannot be checked at all &mdash; anyone able to
+                            open devtools could sign in as anyone, and
+                            connections configured that way are rated
+                            unverified and cannot grant administration.
+                        </p>
+                        <FieldGrid>
+                            <Field label="Response format">
+                                <select
+                                    className={selectCls}
+                                    value={value.gateway_response_format ?? 'jwt'}
+                                    onChange={e => set('gateway_response_format', e.target.value as 'jwt' | 'json')}
+                                >
+                                    <option value="jwt">Signed JWT (recommended)</option>
+                                    <option value="json">Plain JSON (unverifiable)</option>
+                                </select>
+                            </Field>
+                            <Field
+                                label="Max age (seconds)"
+                                hint="Rejects a response older than this however long its expiry says. 0 disables."
+                            >
+                                <TextField
+                                    type="number"
+                                    min={0}
+                                    mono={false}
+                                    value={String(value.gateway_max_age_seconds ?? 300)}
+                                    onChange={e => set('gateway_max_age_seconds', Number(e.target.value))}
+                                />
+                            </Field>
+                        </FieldGrid>
+
+                        {(value.gateway_response_format ?? 'jwt') === 'jwt' ? (
+                            <>
+                                <FieldGrid>
+                                    <Field label="Signing algorithm">
+                                        <select
+                                            className={selectCls}
+                                            value={value.gateway_signing_alg ?? 'HS256'}
+                                            onChange={e => set('gateway_signing_alg', e.target.value as 'HS256' | 'RS256')}
+                                        >
+                                            <option value="HS256">HS256 (shared secret)</option>
+                                            <option value="RS256">RS256 (public key)</option>
+                                        </select>
+                                    </Field>
+                                    <Field label={<>Expected issuer <span className="font-normal text-ink-muted">(optional)</span></>}>
+                                        <TextField
+                                            value={value.gateway_issuer ?? ''}
+                                            onChange={e => set('gateway_issuer', e.target.value)}
+                                            placeholder="https://auth.corp.example"
+                                        />
+                                    </Field>
+                                </FieldGrid>
+                                {(value.gateway_signing_alg ?? 'HS256') === 'HS256' ? (
+                                    <Field label="Shared secret" required>
+                                        <TextField
+                                            value={value.gateway_shared_secret ?? ''}
+                                            onChange={e => set('gateway_shared_secret', e.target.value)}
+                                            placeholder="the secret their gateway signs with"
+                                        />
+                                    </Field>
+                                ) : (
+                                    <Field label="Public key (PEM)" required>
+                                        <TextAreaField
+                                            rows={4}
+                                            value={value.gateway_public_key ?? ''}
+                                            onChange={e => set('gateway_public_key', e.target.value)}
+                                            placeholder="-----BEGIN PUBLIC KEY-----"
+                                        />
+                                    </Field>
+                                )}
+                                <Field label={<>Expected audience <span className="font-normal text-ink-muted">(optional)</span></>}>
+                                    <TextField
+                                        value={value.gateway_audience ?? ''}
+                                        onChange={e => set('gateway_audience', e.target.value)}
+                                        placeholder="this application"
+                                    />
+                                </Field>
+                            </>
+                        ) : (
+                            <Toggle
+                                label="Accept identities that cannot be verified"
+                                hint="Required to save an unsigned response. Anyone who can open a browser console can sign in as anyone, and this connection will be rated unverified and refused permission to grant administration."
+                                checked={value.gateway_trust_unsigned === true}
+                                onChange={v => set('gateway_trust_unsigned', v)}
+                            />
+                        )}
+                    </div>
+                )}
             </section>
 
             {/* ── leg 2 ── */}
