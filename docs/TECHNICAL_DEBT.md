@@ -2,166 +2,268 @@
 
 > **Audience:** Developers and architects assessing risk. New users should start with [OVERVIEW.md](OVERVIEW.md) and [SETUP.md](SETUP.md).
 
-This document provides a critical analysis of the {brand} platform, identifying technical debt, security concerns, scalability issues, and prioritized recommendations.
+A live register of what is actually wrong with the {brand} platform today.
 
-**What you'll find here:**
-- A risk matrix and category-by-category debt inventory (security, data, architecture, testing, frontend, infrastructure)
-- Honest **resolved vs. open** status on every item — shipped fixes are marked, real debt is kept
-- A phased remediation plan with priorities and effort estimates
+**Verified against `dd17354` on 2026-08-25.** Every open item below carries a
+file and line you can re-check in under a minute. That is the point: the
+previous revision of this document had drifted far enough to assert that the
+repository had no CI pipeline and six test files, while CI was gating every
+merge and the suites held nearly nine thousand tests. A register that is wrong
+is worse than no register, because it moves effort to the wrong place and it
+lends stale claims the authority of a document.
 
-> **Important:** Items are labelled by severity and status. **RESOLVED** entries are retained for history, not open work — check the status line before acting. Live risk is summarized in [§8 Summary](#8-summary).
+**How to read it**
+
+- §1–§3 are the open risks, ordered by what to do about them rather than by
+  subsystem. Each carries **evidence** — the file and line that makes the claim
+  checkable — and a **recommendation** that says what to do first, not
+  everything that could be done.
+- §4 is the failure mode this codebase has demonstrably had, which is not on
+  any list of missing things.
+- §5 is the sequence.
+- **Appendix A** is what has been resolved, kept short and with evidence. It is
+  history, not work.
+
+**How to keep it true.** Every open item's evidence line is a claim about the
+tree. When you close one, delete it — git holds the history, and a resolved
+entry left in place is how the previous revision came to contradict its own
+summary. Re-verify the whole register at each release cut; §6 describes a check
+that can do most of it mechanically.
 
 ---
 
-## Risk Matrix
+## Risk matrix
+
+Open items only. Anything resolved has left this chart.
 
 ```mermaid
 quadrantChart
-    title Risk Assessment Matrix
+    title Open risk, by impact and likelihood
     x-axis Low Impact --> High Impact
     y-axis Low Likelihood --> High Likelihood
-    quadrant-1 Critical - Fix Now
+    quadrant-1 Fix before scale
     quadrant-2 Monitor
     quadrant-3 Accept
-    quadrant-4 Plan Fix
-    SQLite in production: [0.8, 0.55]
-    Optional encryption: [0.75, 0.65]
-    Default admin password: [0.7, 0.8]
-    No CI/CD: [0.5, 0.85]
+    quadrant-4 Plan fix
+    Connection-tester SSRF: [0.75, 0.6]
+    No metrics or alerting: [0.7, 0.75]
+    No load or chaos pass: [0.7, 0.55]
     Dual code paths: [0.55, 0.6]
-    Missing edges on load: [0.15, 0.35]
-    Singleton cache scaling: [0.6, 0.4]
-    Sparse test coverage: [0.5, 0.7]
-    Ontology cache TTL: [0.4, 0.3]
-    Outbox consumer missing: [0.65, 0.55]
+    No graph rate limiting: [0.5, 0.5]
     Per-worker cache isolation: [0.55, 0.35]
+    Ontology cache staleness: [0.4, 0.3]
+    Stats poller shutdown: [0.3, 0.4]
+    ORM default drift: [0.25, 0.2]
 ```
 
 ---
 
-## 1. Security Concerns
+## 1. High — fix before the next scale step
 
-### 1.1 JWT Stored in localStorage — RESOLVED
+### 1.1 SSRF via provider connection-testing
 
-Sessions ride HttpOnly cookies (`nx_access` / `nx_refresh`) and **no
-token is in web storage**. Every `localStorage` / `sessionStorage` call
-site in `frontend/src` holds UI state: layout widths, dismissals,
-wizard drafts, recent searches, the feature-flag cache, and a
-sessionStorage-only user DTO cache that is wiped on logout.
+**Evidence:** `backend/app/api/v1/endpoints/providers.py:325`
+(`POST /test-connection`). No address check exists on this path;
+`assert_fetchable` lives in `backend/auth_service/providers/outbound.py:71`
+and has exactly one caller, inside that same module.
 
-The recommendations listed here were all implemented: HttpOnly cookies,
-`X-CSRF-Token` double-submit (now additionally bound to the session
-`sid`), and `credentials: 'include'` on every call via
-`services/fetchWithTimeout.ts`.
+The onboarding wizard tests an arbitrary `host:port` from inside the cluster.
+A tenant can use it to probe internal services or the cloud metadata endpoint
+(`169.254.169.254`), which is the address that turns request-forgery into
+instance-credential theft. It is admin-gated, so this is not an unauthenticated
+hole — but the whole value of this service's network position is that it reaches
+things the caller's browser cannot, and "an admin would not" is not an access
+control.
 
-Left in place rather than deleted because this entry was still being
-read as current — `ARCHITECTURE.md` repeated it, and it appeared in the
-remediation plan below.
+**Recommendation — reuse the classifier, do not write a second one.**
+`outbound.py` already classifies addresses by *property* rather than by CIDR
+list (loopback, link-local, multicast, reserved, unspecified) and unwraps
+IPv4-mapped IPv6, so `::ffff:169.254.169.254` cannot slip past. What it does not
+do is serve a non-HTTP caller: the connection tester takes a `host:port` for a
+graph driver, not a URL.
 
-### 1.2 Credential Encryption is Optional (HIGH) — RESOLVED IN PRODUCTION
+1. Extract the address classification into a shared module (e.g.
+   `backend/common/netguard.py`) that depends on nothing in `auth_service`.
+2. Keep `assert_fetchable(url)` as the URL-shaped wrapper.
+3. Add `assert_connectable(host, port)` for the driver-shaped callers and call
+   it from `/test-connection` before any socket is opened.
 
-**Files:** `backend/app/db/repositories/connection_repo.py`
+Writing a second, independent allowlist is how the two drift, and this codebase
+has been bitten by exactly that shape before — see §4.
 
-Credentials fall back to **plaintext** if `CREDENTIAL_ENCRYPTION_KEY` is not set:
-```python
-def _encrypt(data: dict) -> str:
-    fernet = _get_fernet()
-    raw = json.dumps(data)
-    if fernet:
-        return fernet.encrypt(raw.encode()).decode()
-    return raw  # plaintext fallback
-```
+### 1.2 No metrics export or alerting
 
-**Risk:** Database backups contain plaintext Neo4j passwords and API tokens.
+**Evidence:** no `/metrics` route in `backend/app/main.py` or
+`backend/app/api/v1/api.py`; counters are collected in `jobs/metrics.py` and
+`middleware/db_metrics.py` and go nowhere.
 
-**Status:** `require_encryption_or_plaintext_ok()` raises on the write
-path when `CREDENTIAL_ENCRYPTION_KEY` is unset and `ENV` is
-`prod`/`production`, for both `graph_connections` and `idp_providers`.
-Dev and test behaviour is unchanged, and a warning is logged there.
+Resilience you cannot observe fails silently. Every control below this line in
+the document degrades quietly rather than loudly.
 
-**Still outstanding:** an audit script to find plaintext credentials in
-a database that predates the guard.
+**Recommendation — one alert before any dashboard.** The instinct is to
+enumerate everything worth graphing; the value is the first alert that fires
+before a user notices. Two, in order:
 
-### 1.3 Weak Default Admin Password (HIGH) — MOSTLY RESOLVED
+1. **Event-loop lag on the `web` role.** The wedge watchdog is log-only today,
+   which means the failure it detects is invisible unless somebody is reading
+   logs at the time.
+2. **Redis reachability.** More load-bearing than the previous revision of
+   this document reflected: revocation, rate-limit counters and the SAML
+   replay cache all resolve through it, and `/health/ready` now reports
+   `revocation: shared|in_process` and fails in production on the latter
+   (`backend/app/main.py:2728`). A Redis outage is now a readiness failure
+   rather than a silent degradation, which is the correct trade and a real
+   change in how much this dependency matters.
 
-**Files:** `backend/app/main.py`, `backend/app/auth/dependencies.py`
+Then the exporter and the rest: per-provider reachability, consumer-group lag,
+DB pool saturation, Redis memory and eviction, worker fleet size.
 
-The bootstrap still accepts a default `ADMIN_PASSWORD`, but the account can no
-longer *use* it. When the seeded password is one of the values published in this
-repo (`changeme`, `admin123`), the user is created with
-`must_change_password=True`. That rides in the access token as the `mcp` claim
-and is enforced in `get_current_user`: every route outside
-`_PASSWORD_CHANGE_ALLOWED_PATHS` returns `403 password_change_required` until a
-new password is set. Supplying a real `ADMIN_PASSWORD` skips the prompt.
+### 1.3 No system-level load or chaos pass
 
-Admin → Users badges any account still in that state, and
-`backend/scripts/reset_admin_password.py` recovers a locked-out sole admin.
+**Evidence:** absence — `backend/tests/integration/` holds 90 files, all
+component-level.
 
-**Still outstanding:**
-- Generate a random password on first run rather than defaulting to `changeme`,
-  and print it to stdout only (not logged). The forced rotation makes the
-  default unusable, but it is still a published string sitting in a
-  `password_hash` column until somebody signs in.
+Every decoupling change has been verified individually. The whole topology at
+target scale has not: a cold start against the 7.7M-entity
+`perf-load-test-layered-lineage` graph, concurrent load on a single tenant's
+FalkorDB, and a request storm that must 429-shed rather than OOM.
 
-### 1.4 CORS Wildcard on Graph Service — RESOLVED
+**Recommendation.** One soak pass, with the pass/fail criteria written *before*
+it runs. An unbounded "see what happens" run produces a story; a run with a
+stated threshold produces a decision. Note this is blocked in practice by §1.2 —
+without metrics the soak tells you it survived, not where it bent.
 
-The standalone `graph-service` (`backend/graph/main.py`) this item was about no longer exists — it was removed per [ADR-018](DECISIONS.md#adr-018-retire-the-graph-service). Provider connectivity testing now runs in-process inside the Visualization Service, under its own CORS configuration (`CORS_ALLOWED_ORIGINS`, no wildcard default — see [SETUP.md](SETUP.md)).
+### 1.4 Dual code paths (legacy connections + workspaces)
+
+**Evidence:** `backend/app/registry/provider_registry.py:53` (`_legacy_providers`),
+`:141`, `:191`; `_migrate_connection_to_workspace`; 8 endpoint references to
+`connectionId`.
+
+Two architectures run at once: `GraphConnectionORM` with a legacy provider cache
+and a `?connectionId=` parameter, alongside `WorkspaceORM`/`DataSourceORM` with
+its own cache and path-scoped routing. The risks are stale data between paths,
+duplicated business logic, and a migration bridge that is hard to test.
+
+**Recommendation — measure before you plan.** The obvious plan (announce a
+cutoff date, add deprecation warnings, write a migration tool, delete)
+front-loads the political step and back-loads the informational one, and it
+assumes a migration tool is needed before anyone has established there is
+anything to migrate.
+
+1. Emit a **counter** — not a log line — on every legacy-path hit, tagged by
+   route and tenant. (Needs §1.2.)
+2. Run it for two weeks.
+3. Let the number choose: zero means delete with no tool at all; one tenant
+   means migrate that tenant by hand; many means the tool is justified and you
+   now know which routes it must cover.
 
 ---
 
-## 2. Database & Data Integrity
+## 2. Medium — plan these
 
-### 2.1 SQLite as Default Database (CRITICAL)
+### 2.1 No rate limiting on graph query endpoints
 
-**Files:** `backend/app/db/engine.py`
+**Evidence:** `limiter.limit` appears only in
+`backend/app/api/v1/endpoints/users.py`, `.../auth.py`, and
+`backend/auth_service/api/router.py`. Nothing in `graph.py`.
 
-SQLite is the default if `MANAGEMENT_DB_URL` is not set. SQLite cannot handle:
-- Concurrent write transactions (locks entire DB)
-- Multi-process deployments (each worker = separate connection)
-- Connection pooling or replication
+The expensive endpoints are the unthrottled ones. Page size is now bounded
+(Appendix A), but a bounded page without a bounded rate permits the same total
+load in more requests.
 
-**Risk:** Data corruption or application hangs under concurrent load.
+**Recommendation.** Apply `slowapi` limits keyed on the **account**, not the
+address. Address keying is near-useless behind a corporate NAT or an ingress —
+every user shares one address, so a cap tight enough to stop an attacker stops
+an office instead. The auth surface already learned this; see
+`SSO_INTEGRATION.md §10.2`, which documents the per-address / per-account split
+and why `/refresh` keys on the rotation family.
 
-**Recommendation:**
-- Require `MANAGEMENT_DB_URL` in production
-- Fail loudly if SQLite detected outside dev/test
-- Document "SQLite is dev-only" prominently
+### 2.2 Per-worker `ProviderRegistry` cache isolation
 
-### 2.2 No Schema Versioning (Alembic) — RESOLVED
+**Evidence:** `backend/app/registry/provider_registry.py:53` — the cache is
+instance state on a per-process singleton.
 
-Schema versioning now runs through **Alembic** (`backend/alembic/versions/`) as the source of schema truth, applied by a dedicated `synodic-upgrade` service under a `pg_advisory_lock`. The API process only verifies `alembic_version` is at head at startup; it never mutates the schema itself. See [DATA_ARCHITECTURE.md §8](DATA_ARCHITECTURE.md) for the full migration strategy.
+With N workers there are N connection pools and N copies of provider config. A
+config change in one worker is invisible to the others until its TTL rolls.
 
-### 2.4 ORM vs migration disagreement on column defaults (LOW — enumerated, gated)
+**Recommendation — invalidate, do not share.** The standing suggestion is a
+Redis-backed shared cache. That is the expensive answer to a cheaper problem:
+the defect is *staleness after a write*, not cache misses, and a shared cache
+also surrenders the per-worker latency win.
 
-`0001_baseline` is `Base.metadata.create_all()` against the **live** ORM, so a database has always
-had two possible origins — `create_all` on a fresh install, the migration chain everywhere else —
-with nothing comparing the results. They had drifted.
+Publish a `provider.changed` message on the Redis instance already running for
+revocation, and have each worker drop its own entry. Roughly thirty lines
+against a rewrite. Move to a shared cache only if cold-start cost is later
+*measured* to matter — which again needs §1.2.
 
-The structural half of that drift is fixed and now gated: `synodic-upgrade verify-schema` runs in
-CI against all three install routes (`.github/workflows/schema.yml`) and fails if the ORM declares
-a table or column the database lacks. It found one — `context_models.visibility`, declared in the
-ORM, added by no migration, therefore present only on databases created after it entered the ORM —
-fixed by `20260731_1200_ctxmodel_vis`.
+### 2.3 Ontology cache staleness
 
-What remains is **column defaults**, in 44 places. Migrations write `server_default=`; the ORM
-declares only a Python-side `default=`. So a migrated database has a real `DEFAULT` and a fresh one
-does not, for the same column.
+**Evidence:** `backend/app/services/context_engine.py:69` —
+`_ONTOLOGY_CACHE_TTL = 300`.
 
-This is deliberately **not** failing CI. Every write through SQLAlchemy supplies the value from the
-Python-side default, so the application behaves identically either way; the difference is visible
-only to raw SQL that omits the column, and to `alembic revision --autogenerate`, which will keep
-proposing these until they are reconciled. `verify-schema` reports them as warnings and
-`--strict-defaults` turns them into failures for anyone working through the list.
+Ontologies change rarely and are read constantly, so a five-minute TTL is mostly
+wasted invalidation. But note the standing recommendation contains a
+contradiction worth not repeating: "raise the TTL to an hour **or** move to
+event-based invalidation" are opposite trades. Raising the TTL makes staleness
+worse, and staleness is the complaint in §2.2 one entry above.
 
-Fixing one means adding `server_default=` to the ORM column with the value the migration used —
-mechanical, but each literal has to be checked against the migration that set it, because a wrong
-one silently changes what a fresh install writes.
+**Recommendation.** Event-based invalidation, using the same mechanism as §2.2 —
+they are the same problem twice. TTL then becomes a backstop and can safely go
+to a day. Do **not** pre-warm on startup: a startup dependency bought for a
+five-minute cache is a bad trade, and it makes boot fail for a reason unrelated
+to boot.
+
+### 2.4 Stats poller has no service boundary and no graceful shutdown
+
+**Evidence:** no `SIGTERM`/`SIGINT` handling in `backend/app/jobs/`; the poller
+runs as a standalone process sharing `backend.app` imports.
+
+A crash affects nothing else, which is the good news; a silent failure means
+stale stats indefinitely, which is the bad news, and nothing surfaces it.
+
+**Recommendation.** Signal handlers first (small), then a freshness assertion on
+the stats it produces — a poller that dies loudly is better than one that dies
+quietly, and a consumer that notices stale data is better than both.
+
+---
+
+## 3. Low — track, or deliberately accept
+
+### 3.1 ORM and migrations disagree on column defaults (enumerated, gated)
+
+`0001_baseline` is `Base.metadata.create_all()` against the **live** ORM, so a
+database has always had two possible origins — `create_all` on a fresh install,
+the migration chain everywhere else — with nothing comparing the results. They
+had drifted.
+
+The structural half of that drift is fixed and gated: `synodic-upgrade
+verify-schema` runs in CI against all three install routes
+(`.github/workflows/schema.yml`) and fails if the ORM declares a table or column
+the database lacks. It found one — `context_models.visibility`, declared in the
+ORM, added by no migration, therefore present only on databases created after it
+entered the ORM — fixed by `20260731_1200_ctxmodel_vis`.
+
+What remains is **column defaults**, in 44 places. Migrations write
+`server_default=`; the ORM declares only a Python-side `default=`. So a migrated
+database has a real `DEFAULT` and a fresh one does not, for the same column.
+
+This is deliberately **not** failing CI. Every write through SQLAlchemy supplies
+the value from the Python-side default, so the application behaves identically
+either way; the difference is visible only to raw SQL that omits the column, and
+to `alembic revision --autogenerate`, which will keep proposing these until they
+are reconciled. `verify-schema` reports them as warnings and `--strict-defaults`
+turns them into failures for anyone working through the list.
+
+Fixing one means adding `server_default=` to the ORM column with the value the
+migration used — mechanical, but each literal has to be checked against the
+migration that set it, because a wrong one silently changes what a fresh install
+writes.
 
 Two further columns exist on migrated databases and in no ORM model at all —
-`resource_grants.expires_at` and `views.display_rules` — leftovers from migrations whose ORM
-counterpart was later removed. They are absent on fresh installs, harmless on old ones, and
-dropping them is a deliberate act rather than a CI job's decision. `verify-schema` lists them and
-does not fail.
+`resource_grants.expires_at` and `views.display_rules` — leftovers from
+migrations whose ORM counterpart was later removed. They are absent on fresh
+installs, harmless on old ones, and dropping them is a deliberate act rather
+than a CI job's decision. `verify-schema` lists them and does not fail.
 
 <details>
 <summary>All 44 default differences</summary>
@@ -215,309 +317,167 @@ does not fail.
 
 </details>
 
-### 2.3 Versioning merge field-loss + draft read model (RESOLVED — change control shipped)
+### 3.2 `stats` is not a real `SynodicRole`
 
-The original bug: a draft `update` op was applied as a **wholesale replace**, so a partial edit (the
-canvas sends only the edited fields) truncated the entity on `main` at publish/merge — nodes lost
-`displayName` (rendered their URN) and `properties`. Fixed by making `update` a field-level patch
-(`changeset.py::materialize` + `service.py::_apply_ops_once`, commit `4dd7df4`). Draft lineage now
-renders via a sparse read-overlay (`draft_overlay_provider.py`, commit `84a467f`).
+**Evidence:** `backend/app/runtime/role.py:21` — the enum holds `WEB`, `WORKER`,
+`CONTROLPLANE`, `DEV`. The insights/stats service sets `SYNODIC_ROLE=stats`,
+which falls through to `dev`, so the dedicated-cache guard is skipped for it.
+The structural `build_cache_client` fix still prevents FalkorDB co-location, so
+this is a missing assertion rather than a live misconfiguration.
 
-Graph **change control is now shipped**, so the recovery paths are first-class product features rather
-than a repair CLI: in-app **revert** ("Undo this change") and **restore** ("Restore to this point",
-`.../commits/{cid}/restore` + `/restore-preview`), the **version-control admin master switch**, and a
-**resumable async enable-VC bootstrap job** that copies a whole source graph into the versioned store as
-an integrity-checked `import` commit (verified on a 7.7M-entity graph). The offline repair CLI
-(`backend/scripts/repair_revert_commit.py`) remains as a break-glass tool.
+**Recommendation.** Add a `STATS` member, or set the service to `worker`. The
+second is one line and loses nothing today.
 
-**Residual (low):** a `{ "id": "{}", "confidence": "<name> <name>" }` properties leak on some nodes was
-**not reproduced** and may predate the corrupting commit (so `revert` won't clear it). After a repair,
-confirm whether it persists and reproduce-first before fixing.
+### 3.3 Provider implementations live in two trees
 
-> Full engineering memory: [VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md](https://github.com/rkrumins/dataviz/blob/main/docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md)
-> (requirements, design decisions, gaps, verification, repair runbook).
+**Evidence:** `backend/app/providers/` holds FalkorDB and the mock;
+`backend/graph/adapters/` holds Neo4j, DataHub and Spanner.
 
----
+Functional, undocumented, and confusing to a newcomer looking for "where do
+providers live".
 
-## 3. Architecture Issues
+**Recommendation.** A paragraph in `ARCHITECTURE.md` costs minutes; moving the
+files costs a merge conflict with everything in flight. Document it, and move
+them only when a change is already touching both trees.
 
-### 3.1 Dual Code Paths (Legacy + Workspace) (HIGH)
+### 3.4 Feature flags are read from the database per request
 
-**Files:** `backend/app/registry/provider_registry.py`, `backend/app/db/models.py`
+**Evidence:** `backend/app/services/feature_flags.py` — no cache, no
+change-notification.
 
-Two competing architectures run simultaneously:
+Acceptable at current scale. It becomes the same problem as §2.2 and §2.3 at
+higher traffic, and it should be solved the same way rather than separately.
 
-```mermaid
-graph LR
-    subgraph Legacy["Legacy Path"]
-        Conn["GraphConnectionORM"]
-        LCache["_legacy_providers cache"]
-        ConnID["?connectionId= param"]
-    end
+### 3.5 Control-plane scheduler is not single-flight under HA
 
-    subgraph New["Workspace Path"]
-        WS["WorkspaceORM"]
-        DS["DataSourceORM"]
-        PCache["_providers cache"]
-        Path["/{ws_id}/graph/ path"]
-    end
+The control plane runs 2 replicas, which removed a single point of failure. The
+scheduler is detect-and-log and idempotent, so 2 replicas are safe, but it
+performs 2× the drift-check reads against FalkorDB every 60s.
 
-    Bridge["_migrate_connection_to_workspace()"]
-    Legacy -.-> Bridge -.-> New
+**Recommendation.** If that read load ever shows up, gate `_tick` behind a
+Postgres advisory lock exactly as the reconciler already does. Not before.
 
-```
+### 3.6 No optimistic updates in the trace UI
 
-**Risks:**
-- Stale data between paths
-- Duplicated business logic
-- 60+ line migration function that's difficult to test
+Trace operations wait for the backend before updating. This is perceived
+latency, not correctness. Listed so it is not rediscovered as a bug.
 
-**Recommendation:**
-1. Declare hard cutoff date for legacy removal
-2. Add deprecation warnings in logs when legacy path is used
-3. Create migration script to convert all legacy connections
-4. Delete `GraphConnectionORM` and legacy cache after migration
+### 3.7 Image registry ambiguity — needs an operator answer, not code
 
-### 3.2 Singleton ProviderRegistry Scaling (MEDIUM)
-
-**Files:** `backend/app/registry/provider_registry.py`
-
-Each Uvicorn worker gets its own `ProviderRegistry` instance. With 4 workers:
-- 4 separate connection pools to FalkorDB
-- Config changes in one worker not visible to others
-- No cache coordination
-
-**Recommendation:**
-- Document single-worker limitation
-- Plan Redis-backed shared cache for distributed deployments
-- Add cache hit/miss metrics
-
-### 3.3 Ontology Cache TTL Too Aggressive (MEDIUM)
-
-**Files:** `backend/app/services/context_engine.py`
-
-5-minute TTL on resolved ontology. Ontologies rarely change but are fetched frequently.
-
-**Recommendation:**
-- Increase TTL to 1 hour or event-based invalidation
-- Move to process-level shared cache
-- Pre-warm cache on startup
+CI (`build-images.yml`) pushes to **Docker Hub**; the Makefile deploy path
+pushes to **GCP Artifact Registry**. Same image names, different registries. The
+naming drift itself is fixed; what remains is confirming which registry
+production actually pulls from. Nobody can close this from the repository alone.
 
 ---
 
-## 4. Testing & CI/CD
+## 4. The failure mode this codebase actually has
 
-### 4.1 Sparse Test Coverage (HIGH)
+Every item above is about something **absent** — no metrics, no rate limit, no
+soak test, no shared invalidation. Absent things are easy to see, which is why
+they end up on lists like this one.
 
-**Files:** `backend/tests/` (only 6 test files)
+The dangerous class is different: **a control that is present, documented, and
+inert.** The security review merged as `dd17354` found seven of them. Among
+them: a replay cache that was constructed and then never consulted; a lifecycle
+filter applied to the public provider catalog but not to the authentication path
+it was protecting; a revocation probe written inline in one guard and therefore
+missing from the sibling guard covering the most privileged routes; and a
+stand-in backend that answered "not revoked" rather than refusing when it could
+not know.
 
-Missing tests for:
-- Authentication endpoints (signup, login, password reset)
-- Provider registry cache behavior
-- Database migrations
-- Credential encryption/decryption
-- CORS and security headers
-- API contract validation
+None of these would appear on an inventory of missing features. Each one read as
+implemented — the class existed, the config existed, the documentation described
+the behaviour — and each did nothing. A reader of `SSO_INTEGRATION.md` would
+have concluded SAML replay was defended. It was not.
 
-**No frontend tests found.**
+**Recommendation — a recurring "assert the assertion" pass.** Once a release,
+take five controls the documentation claims and prove each one by breaking it:
+remove the control, watch a test fail, restore it. A control with no test that
+fails when it is removed is indistinguishable from a control that is not there.
+This is worth more than any single entry in §1–§3, because it is the only
+practice on this page that finds the defects nobody is looking for.
 
-**Recommendation:**
-- Target 70% backend coverage before v1.0
-- Add auth flow integration tests
-- Add frontend component tests (Vitest + Testing Library)
+All seven are fixed, each with a test that fails when the control is removed
+(`backend/tests/test_saml_replay_cache_wired.py` and
+`test_draft_provider_not_live.py` are the two easiest to read). That is the
+shape to copy: the fix is not the deliverable, the failing test is.
 
-### 4.2 No CI/CD Pipeline (HIGH)
-
-No `.github/workflows/` directory exists.
-
-**Recommendation:** Create GitHub Actions workflow:
-```yaml
-# ci.yml
-- pytest backend/tests/ (fail if coverage < 70%)
-- mypy backend/app/ (type checking)
-- ruff (linting)
-- npm run lint (frontend)
-- Docker build (syntax validation)
-```
-
-### 4.3 No Integration Tests (MEDIUM)
-
-No end-to-end tests verify critical flows:
-- Signup -> Approve -> Login -> Access protected endpoint
-- Create workspace -> Add data source -> Query graph
-
-**Recommendation:** Add `test_e2e_auth_flow.py` and `test_e2e_graph_flow.py`.
+It is also cheap. The seven were each found by running the code rather than
+reading it, and each took minutes once the question was asked.
 
 ---
 
-## 5. Frontend Issues
+## 5. Sequence
 
-### 5.1 Missing Edges on Initial Load — RESOLVED
+Not a Gantt chart. The previous revision carried one with fixed 2026-03 dates
+that expired without anyone noticing, which is its own small lesson about
+plans that encode calendar time rather than order.
 
-**Status:** ~~HIGH~~ → **Resolved** (2026 Q1)
+| Order | Item | Why here |
+|---|---|---|
+| 1 | §1.1 connection-tester SSRF | Live security exposure, small fix, mechanism already written |
+| 2 | §1.2 one alert, then the exporter | Unblocks §1.3, §1.4 and §2.2 — several items below cannot be *decided* without it |
+| 3 | §2.1 graph rate limits | Small, and the page-size half is already done |
+| 4 | §1.4 legacy-path counter | Two weeks of data before any migration decision |
+| 5 | §1.3 soak and chaos pass | Needs 2 to be worth running |
+| 6 | §2.2 + §2.3 + §3.4 invalidation | One mechanism, three symptoms — do them together or not at all |
+| 7 | §1.4 legacy removal | Whatever the counter says |
+| 8 | §3.x | Individually cheap, none urgent |
 
-**Files:** `frontend/src/hooks/useGraphHydration.ts` (28KB)
-
-The `useGraphHydration` hook has been implemented and provides:
-- `toCanvasNode()` / `toCanvasEdge()` — backend-to-canvas type conversion
-- `computeViewScopedRoots()` — root entity type calculation
-- Hydration phase tracking: `idle → roots → edges → children → complete`
-- Automatic loading of roots + edges on mount/view change
-
-**Remaining edge cases:** Verify the hook is fully wired into all canvas entry points (CanvasRouter, view wizard transitions). Deep-link hydration should be tested end-to-end.
-
-### 5.2 No Error Boundaries (MEDIUM)
-
-No React error boundaries at route or component level. A single component crash takes down the entire application.
-
-**Recommendation:** Add error boundaries at route level for graceful degradation.
-
-### 5.3 No Optimistic Updates (LOW)
-
-Trace operations wait for backend response before updating UI. Perceived latency could be improved.
+Running alongside, not in the queue: §4. It is a habit rather than a task.
 
 ---
 
-## 6. Missing Infrastructure
+## 6. Keeping this document honest
 
-| Gap | Severity | Recommendation |
-|-----|----------|----------------|
-| No monitoring/alerting | Medium | Prometheus metrics + structured logging |
-| No API documentation (beyond auto-generated) | Low | Add docstrings + examples to endpoints |
-| No rate limiting on graph queries | Medium | Apply slowapi limits (100 req/min/user) |
-| No pagination max limit | Low | Cap at 500-1000, fail if response > 10MB |
-| Error handling swallows startup failures | Medium | Re-raise critical seed failures |
-| ~~No structured logging~~ | ~~Medium~~ | **Resolved:** `StructuredLoggingMiddleware` now provides JSON access logs + `X-Process-Time` header |
-| ~~No health check endpoints~~ | ~~Medium~~ | **Resolved:** `/health` endpoint exists on both Viz Service and Graph Service |
-| Stats poller has no graceful shutdown | Low | Add signal handlers for SIGTERM/SIGINT |
-| **Outbox events consumer not implemented** | **HIGH** | Events written but never consumed — dead letter risk. **Blocks microservice extraction** (see ADR-012). `outbox_events` accumulate with `processed = false` indefinitely. Write-side works; consumer process needed. |
+Most of the staleness that made the previous revision misleading was in claims a
+script could have checked: "no `.github/workflows/` directory exists", "only 6
+test files", "no frontend tests found", "SQLite is the default", "no error
+boundaries". Each was false, and each stayed in the document through several
+revisions because keeping a register current is a discipline and disciplines
+lapse.
 
-### 6.1 Cross-Service Concerns (Phase 2 Findings)
+**Recommendation.** Add a test that asserts each open item's premise still holds
+and fails when one no longer does — a `test_technical_debt_register.py` that,
+for example, asserts `graph.py` still has un-`le`-bounded `limit` parameters and
+fails the day someone fixes them without updating this file. A failing test that
+says "§2.1 is fixed, delete it" is the cheapest possible maintenance.
 
-| Gap | Severity | Detail |
-|-----|----------|--------|
-| **Stats Poller isolation** | Medium | Runs as standalone process sharing `backend.app` imports. No container/service boundary enforced -- crash affects no other service but silent failure means stale stats indefinitely. |
-| **Outbox consumer missing** | Medium | `outbox_events` table accepts writes (e.g., `user.created`) but no consumer process exists. Events accumulate with `processed = false` forever. |
-| **Provider location split** | Low | FalkorDB and Mock providers live in `backend/app/providers/`, while Neo4j and DataHub live in `backend/graph/adapters/`. This split is functional but undocumented and may confuse contributors. |
-| **Feature flag hot-reload** | Low | Feature flags are fetched from DB per request. No caching or change-notification mechanism -- acceptable at current scale but will need attention with increased traffic. |
-| ~~Growing inline migrations~~ | ~~Medium~~ | **Resolved** — see §2.2. Schema changes now go through versioned Alembic migrations, not raw SQL in `init_db()`. |
-| **Per-worker ProviderRegistry cache isolation** | Medium | Each Uvicorn worker has its own `ProviderRegistry` singleton. With N workers = N separate connection pools. Config changes (eviction, provider updates) in one worker are invisible to others. Silent coherence issue at scale; fine for single-worker dev. Future: Redis-backed shared cache. |
-
-### 6.2 Pre-Production Readiness Review (2026-07)
-
-Findings from the readiness review after the strategic-decoupling wave. The k8s
-manifests were reconciled to a single system and all overlays now build (commit
-472d4a26); the items below need operator/infra decisions or work beyond the
-manifests.
-
-| Gap | Severity | Detail & recommendation |
-|-----|----------|-------------------------|
-| ~~Container image-naming drift~~ | ~~CRITICAL~~ | **Resolved** (commits d8fa3953 + 1ef7bc9c): aligned every image reference to the bare CI/Makefile/service names — `viz-service`, `aggregation-controlplane`, `aggregation-worker`, `stats-service`, `frontend`, `falkordb`, `seed` — across `base/**` + overlay `images:` maps + the Makefile build/push targets, and fixed the production `newTag` (`latest` → `prod-latest → $(TAG)`). Verified by simulating `make apply`: built name:tag == deployed name:tag on all overlays. **Remaining check (yours):** CI (`build-images.yml`) pushes those names to **Docker Hub** while the Makefile deploy pushes to **GCP Artifact Registry** — same names, different registries; confirm prod pulls from the intended one. |
-| **In-cluster single-replica data tier** | **CRITICAL** | `base/infrastructure/{postgres,redis,falkordb}` are single-replica StatefulSets. On a regional GKE cluster a reschedule = downtime / the FalkorDB zombie-key/lost-write class. **Prod should use managed Cloud SQL + MemoryStore:** add a production component that (a) drops the in-cluster StatefulSets and (b) points `MANAGEMENT_DB_URL` / `REDIS_URL` / `CACHE_REDIS_URL` at managed endpoints via secret. FalkorDB has no managed equivalent → needs its own HA + backup plan. |
-| **No metrics export / alerting** | **HIGH** | Counters are collected (`jobs/metrics.py`, `middleware/db_metrics.py`) but there is no `/metrics` scrape endpoint, Prometheus exporter, or GCP Monitoring wiring. Resilience you can't observe fails silently. **Add an exporter + dashboards + alerts** on: web event-loop lag (the wedge watchdog is log-only), per-provider reachability, stream/consumer-group lag, DB pool saturation, Redis memory/eviction, worker fleet size. |
-| **No system-level load/chaos test** | **HIGH** | Every decoupling change is verified individually, but the whole topology under target scale is not. **Run one soak/chaos pass:** "Bob's FalkorDB" under concurrent load, cold-start with the 7.7M `perf-load-test-layered-lineage` graph, and a request storm that must 429-shed rather than OOM. |
-| **FalkorDB durability + recovery runbook** | **HIGH** | History of AOF version crash-loops, snapshot zombie keys, and lost writes on restart; graph loss is catastrophic. Dev has self-heal entrypoints; **prod needs backup + a rehearsed restore procedure.** |
-| **SSRF via provider connection-testing** | **HIGH** | The onboarding wizard tests arbitrary `host:port` from inside the cluster (a tenant could probe internal services / the GCP metadata endpoint). **Add an egress allowlist / metadata-endpoint block** on the connection tester. |
-| Control-plane scheduler not single-flight under HA | Low | Control plane is now 2 replicas (SPOF removed). The scheduler is detect-and-log (idempotent), so 2 replicas is safe, but it does 2× drift-check reads against FalkorDB every 60s. If that read load matters, gate `_tick` behind a Postgres advisory lock like the reconciler. |
-| `stats` is not a real `SynodicRole` | Low | The insights/stats service sets `SYNODIC_ROLE=stats`, which falls back to `dev`, so the WS2.1 dedicated-cache guard is skipped for it (the structural `build_cache_client` fix still prevents FalkorDB co-location). Add a `STATS` role or use `worker`. |
-| ~~`DATA_ARCHITECTURE.md` §6 stale reference~~ | ~~Low~~ | **Resolved** — §6 now correctly names `backend/insights_service/`. |
+This is the same trick `backend/tests/test_sso_kind_matrix.py` plays on the SSO
+provider registry, and it is why a provider kind cannot be half-registered
+there.
 
 ---
 
-## 7. Prioritized Remediation Plan
+## Appendix A — Resolved
 
-```mermaid
-gantt
-    title Technical Debt Remediation
-    dateFormat YYYY-MM-DD
-    section Phase 1: Security
-        Force credential encryption      :crit, p1a, 2026-03-20, 3d
-        Move JWT to HttpOnly cookies      :crit, p1b, 2026-03-20, 5d
-        Strong default admin password     :crit, p1c, 2026-03-20, 1d
-        Remove CORS wildcard              :p1d, 2026-03-21, 1d
-        Require MANAGEMENT_DB_URL in prod :p1e, 2026-03-21, 1d
-    section Phase 2: Testing
-        Set up GitHub Actions CI          :p2a, 2026-03-25, 3d
-        Auth endpoint tests               :p2b, 2026-03-25, 3d
-        E2E flow tests                    :p2c, 2026-03-28, 3d
-        Frontend component tests          :p2d, 2026-03-28, 3d
-    section Phase 3: Architecture
-        Implement Alembic migrations      :p3a, 2026-04-01, 5d
-        Legacy path deprecation plan      :p3b, 2026-04-01, 2d
-        Legacy connection migration tool  :p3c, 2026-04-03, 3d
-    section Phase 3b: Event Infrastructure
-        Implement outbox consumer         :crit, p3d, 2026-04-03, 5d
-        Redis-backed provider cache       :p3e, 2026-04-08, 5d
-    section Phase 4: UX & Performance
-        Verify useGraphHydration wiring   :p4a, 2026-04-14, 2d
-        Add error boundaries              :p4b, 2026-04-14, 2d
-        Increase ontology cache TTL       :p4c, 2026-04-16, 1d
-        Add monitoring metrics            :p4d, 2026-04-16, 3d
-```
+History, not work. Kept short and with evidence so a claim here can be checked
+as easily as one above, and so nothing in this list has to be re-litigated from
+memory. Delete an entry when it stops being interesting.
 
-### Phase 1: Security & Stability (Week 1-2)
-
-| Priority | Item | Effort | Impact |
-|----------|------|--------|--------|
-| **P0** | Force credential encryption | Low | Prevents plaintext credential leaks |
-| ~~**P0**~~ | ~~Move JWT to HttpOnly cookies~~ — **done**; see §1.1 | — | — |
-| **P0** | Strong default admin password | Low | Prevents trivial admin compromise |
-| **P1** | Remove CORS wildcard from Graph Service | Low | Reduces attack surface |
-| **P1** | Require MANAGEMENT_DB_URL in production | Low | Prevents SQLite corruption |
-| **P1** | Add rate limiting to graph query endpoints | Low | Prevents DoS |
-
-### Phase 2: Testing & CI/CD (Week 3-4)
-
-| Priority | Item | Effort | Impact |
-|----------|------|--------|--------|
-| **P1** | GitHub Actions CI pipeline | Medium | Automated quality gates |
-| **P1** | Auth endpoint test coverage | Medium | Validates critical security paths |
-| **P1** | E2E flow integration tests | Medium | Catches cross-component regressions |
-| **P2** | Frontend component tests | Medium | Prevents UI regressions |
-
-### Phase 3: Architecture Cleanup (Week 5-6)
-
-| Priority | Item | Effort | Impact |
-|----------|------|--------|--------|
-| **P2** | Implement Alembic migrations | Medium | Reliable schema evolution |
-| **P2** | Legacy path deprecation plan | Low | Clarifies migration timeline |
-| **P2** | Legacy connection migration tool | Medium | Unblocks legacy removal |
-
-### Phase 3b: Event Infrastructure (Week 5-6, parallel)
-
-| Priority | Item | Effort | Impact |
-|----------|------|--------|--------|
-| **P1** | Implement outbox consumer | Medium | Unblocks microservice extraction; prevents dead-letter accumulation |
-| **P2** | Redis-backed ProviderRegistry cache | Medium | Solves per-worker cache isolation for multi-worker deployments |
-
-### Phase 4: UX & Performance (Week 7-8)
-
-| Priority | Item | Effort | Impact |
-|----------|------|--------|--------|
-| **P2** | ~~useGraphHydration~~ Verify hook wiring in all canvas entry points | Low | Confirm fix for deep-link hydration |
-| **P2** | Error boundaries | Low | Graceful error recovery |
-| **P3** | Increase ontology cache TTL | Low | Reduces DB queries |
-| **P3** | Add monitoring (Prometheus) | Medium | Production observability |
-
----
-
-## 8. Summary
-
-| Category | Critical | High | Medium | Low |
-|----------|----------|------|--------|-----|
-| **Security** | 2 (JWT, SQLite) | 2 (encryption, admin pwd) | 1 (CSP) | - |
-| **Architecture** | - | 1 (dual paths) | 3 (singleton cache, ontology TTL, provider split) | - |
-| **Testing** | - | 2 (sparse coverage, no CI) | 1 (no integration tests) | - |
-| **Frontend** | - | ~~1 (missing edges)~~ resolved | 1 (no error boundaries) | 1 (no optimistic updates) |
-| **Infrastructure** | - | 1 (outbox consumer) | 3 (no monitoring, no rate limits, per-worker cache isolation) | 3 (no API docs, no pagination cap, poller shutdown) |
-| **Resolved** | - | - | - | ~~health checks~~, ~~structured logging~~, ~~missing edges~~, ~~CORS wildcard~~, ~~no Alembic~~, ~~inline migration growth~~ |
-
-> **Warning: highest-priority blockers for production deployment.**
-> 1. Force credential encryption (prevent plaintext leaks)
-> 2. ~~Move JWT to HttpOnly cookies~~ — done; see §1.1
-> 3. Require PostgreSQL in production (prevent SQLite corruption)
-> 4. Strong default admin password (prevent trivial compromise)
-> 5. CI/CD pipeline (prevent unvalidated deployments)
+| Was | Now | Evidence |
+|---|---|---|
+| **JWT in `localStorage` (CRITICAL)** | Sessions ride HttpOnly cookies (`nx_access` / `nx_refresh`); no token is in web storage. Every remaining `localStorage`/`sessionStorage` call site holds UI state — layout widths, dismissals, wizard drafts, recent searches, the feature-flag cache, and a sessionStorage-only user DTO cache wiped on logout. The full recommendation shipped: HttpOnly cookies, `X-CSRF-Token` double-submit, and `credentials: 'include'` on every call. | `backend/auth_service/cookies.py:6`; `frontend/src/services/fetchWithTimeout.ts` |
+| **Credential encryption optional (HIGH)** | `require_encryption_or_plaintext_ok()` raises on the write path when `CREDENTIAL_ENCRYPTION_KEY` is unset and `ENV` is `prod`/`production`, for both `graph_connections` and `idp_providers`. Dev and test behaviour unchanged, with a warning logged. **Still outstanding:** an audit script to find plaintext credentials in a database predating the guard. | `backend/app/db/repositories/connection_repo.py:46` |
+| **Weak default admin password (HIGH)** | The bootstrap still accepts a default, but the account cannot use it: a password published in this repo (`changeme`, `admin123`, `REPLACE_ME`) creates the user with `must_change_password=True`, enforced on every route outside the change-password paths. Admin → Users badges any account still in that state; `backend/scripts/reset_admin_password.py` recovers a locked-out sole admin. **Still outstanding (low):** generate a random password on first run and print it to stdout only, so a published string never lands in a `password_hash` column at all. | `backend/app/main.py:504` |
+| **CORS wildcard on Graph Service (HIGH)** | The standalone `graph-service` no longer exists ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)). Connectivity testing runs in-process under `CORS_ALLOWED_ORIGINS`, with no wildcard default. | `backend/app/main.py:2389` |
+| **SQLite as default database (CRITICAL)** | There is no SQLite branch. Anything that is not an asyncpg Postgres URL is rejected at import time. | `backend/app/db/engine.py:130` |
+| **No schema versioning (CRITICAL)** | Alembic is the source of schema truth, applied by a dedicated `synodic-upgrade` service under a `pg_advisory_lock`. The API process only verifies `alembic_version` is at head; it never mutates schema. | `backend/alembic/versions/`; [DATA_ARCHITECTURE.md §8](DATA_ARCHITECTURE.md) |
+| **No CI/CD pipeline (HIGH)** | Nine workflows gate merges: `backend-tests`, `frontend-tests`, `codeql`, `security-scan`, `alembic-guards`, `schema`, `build-images`, `dependency-review`, `dependabot-auto-merge`. | `.github/workflows/` |
+| **Sparse test coverage / no frontend tests (HIGH)** | 362 backend test files and 360 frontend ones. | `backend/tests/`, `frontend/src/**/*.test.*` |
+| **No integration tests (MEDIUM)** | 90 files. | `backend/tests/integration/` |
+| **No React error boundaries (MEDIUM)** | Route-level and panel-level boundaries, wired into the router, the app shell and the canvas. | `frontend/src/components/RouteErrorBoundary.tsx`, `.../PanelErrorBoundary.tsx`, `.../ErrorBoundary.tsx` |
+| **Outbox consumer missing (HIGH)** | The relay drains `outbox_events` into `auth_audit_log` on the CONTROLPLANE/DEV process, flipping `processed` in the same transaction. Idempotent via a UNIQUE `source_event_id`, so a crash mid-write cannot double-record. | `backend/app/services/outbox_relay.py` |
+| **In-cluster single-replica data tier (CRITICAL)** | The production overlay replaces the in-cluster Postgres and Redis StatefulSets with Cloud SQL and Memorystore, with streams and cache as separate instances. FalkorDB stays self-managed by design. | `deploy/k8s/overlays/production/patches/managed-data-tier.yaml` |
+| **FalkorDB durability and recovery (HIGH)** | Backup CronJob plus a written restore procedure covering snapshot restore, reseed from Cloud SQL, and region loss. *Rehearsing* it is still an operational exercise, not a documentation gap. | [FALKORDB_DR_RUNBOOK.md](FALKORDB_DR_RUNBOOK.md); `deploy/k8s/overlays/production/resources/falkordb-dr-backup.yaml` |
+| **Container image-naming drift (CRITICAL)** | Every image reference aligned across base, overlays and the Makefile; the production `newTag` fixed. The registry question that remains is §3.7. | commits `d8fa3953`, `1ef7bc9c` |
+| **Missing edges on initial load (HIGH)** | `useGraphHydration` implements the phase-tracked load (`idle → roots → edges → children → complete`) and is wired into the canvas entry points. | `frontend/src/hooks/useGraphHydration.ts` |
+| **Versioning merge field-loss (HIGH)** | `update` is a field-level patch rather than a wholesale replace, so a partial edit no longer truncates the entity at publish. Draft lineage renders through a sparse read-overlay. Change control shipped: in-app revert and restore, the version-control master switch, and a resumable enable-VC bootstrap verified on a 7.7M-entity graph. **Residual (low):** an unreproduced `properties` leak on some nodes that may predate the corrupting commit — reproduce before fixing. | commits `4dd7df4`, `84a467f`; [VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md](https://github.com/rkrumins/dataviz/blob/main/docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md) |
+| **No structured logging / no health checks (MEDIUM)** | `StructuredLoggingMiddleware` emits JSON access logs with `X-Process-Time`; `/health` and `/health/ready` exist. | `backend/app/main.py` |
+| **Growing inline migrations (MEDIUM)** | Superseded by Alembic; `init_db()` no longer carries raw SQL. | see above |
+| **Pagination has no maximum (LOW)** | Capped everywhere. `audit.py` at 500, `freshness.py` at 200 and 2000, and all nine graph endpoints now carry an `le=` bound — the last eight closed by `dd17354`. | `backend/app/api/v1/endpoints/audit.py:372`; `.../graph.py` |
+| **`DATA_ARCHITECTURE.md` §6 stale reference (LOW)** | Corrected to `backend/insights_service/`. | — |
 
 ---
 
@@ -527,4 +487,5 @@ gantt
 - [Data Architecture](/docs/data-architecture) — credential encryption, migrations, and outbox details
 - [Decisions](/docs/decisions) — ADRs that resolved several items here (Alembic, Redis roles, graph-service retirement)
 - [Architecture When Scaling](/docs/scaling-architecture) — the deferred multi-tier design behind the cache-isolation and scaling gaps
+- [SSO Integration](/docs/sso-integration) §10 — the auth surface's own threat model and its stated residuals
 - [Overview](/docs/overview) — platform vision, maturity assessment, and roadmap
