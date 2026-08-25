@@ -228,12 +228,21 @@ Of your endpoints:
 
 What the application never does:
 
-- **Parse either token.** Both are opaque, including when they are
-  visibly JWTs. Nothing is decoded, and no claim inside them is read.
-  The user's identity comes only from leg 2's reply.
+- **Parse a credential.** The session handle, and a token that exists
+  only to be presented to the next leg, are opaque — nothing is decoded
+  and no claim inside them is read, even when they are visibly JWTs.
+  The one thing that may be decoded is the *answer itself*: if the
+  user's details arrive as a signed token rather than a JSON object
+  (the operator marks the connection accordingly), the application
+  reads that token's payload — from the same TLS response the JSON
+  shape would have used. If you publish a JWKS, the operator can point
+  the connection at it and the signature is verified as well, with
+  optional issuer and audience pins; symmetric algorithms are refused
+  there, so publish RSA or EC keys.
 - **Keep the token.** It exists for the duration of one request and is
   discarded — never cached, never written to a database, never returned
   to a browser. Its own validity period is therefore irrelevant to us.
+  (Published JWKS material is cached briefly; it is public keys.)
 - **Send anything from this exchange to the browser.** Neither token,
   nor your endpoint URLs, nor any header configured for legs 1 and 2.
 

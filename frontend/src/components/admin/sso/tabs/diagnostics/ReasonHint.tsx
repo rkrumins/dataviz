@@ -71,6 +71,20 @@ const REASONS: Record<string, Reason> = {
             + 'is possible and quietly disables the daily '
             + 're-authentication ceiling for everyone on this connection.',
     },
+    backchannel_jwt_invalid: {
+        what: 'The reply carried a signed token we could not accept — '
+            + 'undecodable, wrong signature, unknown key, or an issuer '
+            + 'or audience that does not match the pins.',
+        next: 'Compare the connection’s JWKS URL and issuer/audience '
+            + 'pins against what their team publishes. The server log '
+            + 'names the exact refusal under this reference.',
+    },
+    backchannel_jwt_expired: {
+        what: 'The signed token in their reply had already expired.',
+        next: 'Usually clock skew or a gateway answering from a cache — '
+            + 'theirs to investigate. Repeat occurrences mean their '
+            + 'token lifetime is shorter than the call is slow.',
+    },
     backchannel_failed: {
         what: 'The back-channel sign-in failed for a reason we have not '
             + 'catalogued.',

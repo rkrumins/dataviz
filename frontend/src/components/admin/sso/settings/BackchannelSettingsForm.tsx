@@ -54,6 +54,11 @@ export interface BackchannelSettings {
     exchange_headers?: Record<string, string>
     exchange_claims_path?: string
 
+    claims_format?: 'json' | 'jwt'
+    jwks_url?: string
+    jwt_issuer?: string
+    jwt_audience?: string
+
     timeout_seconds?: number
     max_response_bytes?: number
     require_auth_time?: boolean
@@ -87,6 +92,10 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     exchange_token_prefix: 'Bearer ',
     exchange_headers: {},
     exchange_claims_path: '',
+    claims_format: 'json',
+    jwks_url: '',
+    jwt_issuer: '',
+    jwt_audience: '',
     timeout_seconds: 5,
     max_response_bytes: 262144,
     require_auth_time: true,
@@ -499,6 +508,59 @@ export function BackchannelSettingsForm({
                         placeholder="data.user"
                     />
                 </Field>
+
+                <Field
+                    label="The details arrive as"
+                    hint="Some gateways answer with a signed token (JWT) instead of a plain user object — the details are the token's payload. Applies to whichever call carries the details: the exchange, or the gateway itself when there is no exchange."
+                >
+                    <select
+                        className={selectCls}
+                        value={value.claims_format ?? 'json'}
+                        onChange={e => set('claims_format', e.target.value as 'json' | 'jwt')}
+                    >
+                        <option value="json">A JSON user object</option>
+                        <option value="jwt">A signed token (JWT) carrying the user object</option>
+                    </select>
+                </Field>
+
+                {(value.claims_format ?? 'json') === 'jwt' && (
+                    <>
+                        <Field
+                            label={<>JWKS URL <span className="font-normal text-ink-muted">(optional)</span></>}
+                            hint="Set it to verify the token's signature against their published keys — the URL needs an allowlist entry if it is internal. Blank accepts the token on the strength of the TLS call that fetched it, exactly like the JSON shape."
+                        >
+                            <TextField
+                                value={value.jwks_url ?? ''}
+                                onChange={e => set('jwks_url', e.target.value)}
+                                placeholder="https://sso-gateway.corp.internal/.well-known/jwks.json"
+                            />
+                        </Field>
+                        {Boolean((value.jwks_url ?? '').trim()) && (
+                            <FieldGrid>
+                                <Field
+                                    label={<>Issuer pin <span className="font-normal text-ink-muted">(optional)</span></>}
+                                    hint={<>Refuse tokens whose <code>iss</code> differs.</>}
+                                >
+                                    <TextField
+                                        value={value.jwt_issuer ?? ''}
+                                        onChange={e => set('jwt_issuer', e.target.value)}
+                                        placeholder="https://sso.corporate.com"
+                                    />
+                                </Field>
+                                <Field
+                                    label={<>Audience pin <span className="font-normal text-ink-muted">(optional)</span></>}
+                                    hint={<>Refuse tokens whose <code>aud</code> differs.</>}
+                                >
+                                    <TextField
+                                        value={value.jwt_audience ?? ''}
+                                        onChange={e => set('jwt_audience', e.target.value)}
+                                        placeholder="dataviz"
+                                    />
+                                </Field>
+                            </FieldGrid>
+                        )}
+                    </>
+                )}
             </section>
 
             {/* ── behaviour ── */}

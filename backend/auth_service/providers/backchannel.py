@@ -30,18 +30,24 @@ IdP now**. The consequences differ in the direction that matters:
 
 Two rules follow, and both are load-bearing:
 
-**The tokens are opaque.** Never decode, parse, log or infer from
-either the ambient token or the gateway token, even when the latter is
-visibly a JWT. Reading claims out of it would turn this back into a
-bearer-assertion flow and drag in signature verification, issuer and
-audience pinning, and replay protection — every one of which this
-design gets to skip precisely because it asks the authority directly.
+**The credentials are opaque.** Never decode, parse, log or infer from
+the ambient token, or from a gateway token that exists only to be
+presented to the next leg. What MAY be decoded is the claims material
+itself: when the operator says the answer arrives as a JWT
+(``claims_format="jwt"``), the payload of that JWT *is* the user object
+this flow exists to obtain, read from the same TLS response the JSON
+shape would have been read from — the authority was still asked on this
+very request. Verification against a JWKS is available and optional
+here, because the transport already authenticates the answer; nothing
+browser-supplied is ever decoded on this path.
 
 **Nothing is cached.** The gateway token lives for the duration of one
 request and is discarded. It is never stored, never written to a
 cookie, never sent to the browser. Its own validity period is therefore
 irrelevant to us, which is the point: an hour of validity is only a
-risk for something you keep.
+risk for something you keep. (The one cache here is the JWKS document —
+public key material, held briefly so verification does not refetch it
+per login.)
 
 Every failure is a login failure. A timeout, a 5xx, a redirect, an
 oversized body, a missing field — none of them yield a partial
@@ -55,10 +61,12 @@ UI.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 import httpx
+import jwt as pyjwt
 
 from .base import ProviderCredentials, ProviderIdentity
 from .claim_mapper import apply_claim_mapping, ClaimMappingError, resolve_path
@@ -67,6 +75,7 @@ from .outbound import (
     MAX_JSON_BYTES,
     OutboundError,
     OutboundStatusError,
+    fetch_jwks,
     request_json,
 )
 from .registry import ProviderConfigSnapshot
@@ -84,6 +93,22 @@ VALID_METHODS = frozenset({"GET", "POST"})
 #: not tell". Anything else — 5xx, a timeout, a blocked request — is an
 #: outage, and the liveness check must not end a session on one.
 _AUTHORITATIVE_REJECTIONS = frozenset({401, 403})
+
+#: Shapes the claims material can arrive in.
+VALID_CLAIMS_FORMATS = frozenset({"json", "jwt"})
+
+#: Signature algorithms accepted when a JWKS is configured. Asymmetric
+#: only, spelled out rather than derived: HS* would let anyone holding
+#: the (public!) JWKS document mint tokens, and ``none`` is refused by
+#: never being on a list. Symmetric gateways belong on ``custom_profile``,
+#: which owns a shared secret properly.
+_JWT_ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512",
+                   "PS256", "PS384", "PS512")
+
+#: How long a fetched JWKS document is reused before it is refetched.
+#: Kept short — key rotation must land promptly — and a kid the cache
+#: does not know forces one refetch regardless of age.
+_JWKS_TTL_SECONDS = 300.0
 
 #: One level of nesting hoisted so an operator maps ``firstName`` rather
 #: than ``user.firstName``. An API JSON body is exactly the shape that
@@ -213,6 +238,23 @@ class BackchannelSettings:
     exchange_headers: dict = field(default_factory=dict)
     exchange_claims_path: str = ""
 
+    #: How the claims material arrives. ``json`` is the original shape:
+    #: the value at ``exchange_claims_path`` is the user object itself.
+    #: ``jwt`` says that value (or the whole response body, when the
+    #: path is blank — including a bare ``application/jwt`` body) is a
+    #: compact JWT whose *payload* is the user object.
+    claims_format: str = "json"
+    #: Optional with ``claims_format="jwt"``: verify the token's
+    #: signature against this key set. Blank decodes without verifying,
+    #: which carries exactly the trust the JSON shape already has — the
+    #: bytes came over TLS from the endpoint we called. Fetched through
+    #: the guarded outbound layer, so an internal JWKS host needs an
+    #: allowlist entry like every other internal destination.
+    jwks_url: str = ""
+    #: Optional pins, applied only when verifying.
+    jwt_issuer: str = ""
+    jwt_audience: str = ""
+
     timeout_seconds: float = 5.0
     max_response_bytes: int = MAX_JSON_BYTES
     require_auth_time: bool = True
@@ -288,6 +330,10 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         exchange_token_prefix=str(s.get("exchange_token_prefix") or "Bearer "),
         exchange_headers=_as_dict(s.get("exchange_headers")),
         exchange_claims_path=str(s.get("exchange_claims_path") or "").strip(),
+        claims_format=str(s.get("claims_format") or "json").strip().lower(),
+        jwks_url=str(s.get("jwks_url") or "").strip(),
+        jwt_issuer=str(s.get("jwt_issuer") or "").strip(),
+        jwt_audience=str(s.get("jwt_audience") or "").strip(),
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
         require_auth_time=_as_bool(s.get("require_auth_time", True)),
@@ -352,6 +398,22 @@ def validate_settings(s: BackchannelSettings) -> None:
             send_as=s.exchange_send_as, header=s.exchange_token_header,
             body_field=s.exchange_body_field,
         )
+    if s.claims_format not in VALID_CLAIMS_FORMATS:
+        raise BackchannelConfigError(
+            f"claims_format must be one of {sorted(VALID_CLAIMS_FORMATS)}, "
+            f"got '{s.claims_format}'"
+        )
+    if s.jwks_url and s.claims_format != "jwt":
+        raise BackchannelConfigError(
+            "jwks_url only applies with claims_format='jwt' — there is "
+            "no signature to verify on a JSON user object"
+        )
+    if (s.jwt_issuer or s.jwt_audience) and not s.jwks_url:
+        raise BackchannelConfigError(
+            "jwt_issuer / jwt_audience are verification pins and need "
+            "jwks_url — without a verified signature they would pin "
+            "nothing"
+        )
     if s.timeout_seconds <= 0:
         raise BackchannelConfigError("timeout_seconds must be > 0")
     if s.max_response_bytes <= 0:
@@ -408,6 +470,12 @@ class BackchannelProvider:
         # a host from the allowlist has to stop working now, not when
         # the registry's 60s provider cache next turns over.
         self._allowed_hosts = allowed_hosts
+        # The JWKS document, held per provider instance. The registry
+        # rebuilds instances every ~60s anyway, so this is a bounded,
+        # self-expiring cache of public key material — the one thing the
+        # module docstring's "nothing is cached" rule does not cover.
+        self._jwks: list | None = None
+        self._jwks_at: float = 0.0
 
     @property
     def settings(self) -> BackchannelSettings:
@@ -442,6 +510,7 @@ class BackchannelProvider:
         self, *, url: str, method: str, send_as: str, token: str,
         header_name: str, header_prefix: str, body_field: str,
         cookie_name: str, static_headers: dict, also_cookie: bool = False,
+        accept_jwt: bool = False,
     ) -> Any:
         """One guarded leg. Raises the split errors this module's
         callers distinguish between."""
@@ -469,6 +538,7 @@ class BackchannelProvider:
                 cookies=cookies, timeout=self._s.timeout_seconds,
                 max_bytes=self._s.max_response_bytes,
                 allow_hosts=await self._allow_hosts(),
+                accept_jwt=accept_jwt,
             )
         except OutboundStatusError as exc:
             if exc.status_code in _AUTHORITATIVE_REJECTIONS:
@@ -491,6 +561,13 @@ class BackchannelProvider:
         except OutboundError as exc:  # pragma: no cover — future subclasses
             raise BackchannelUnavailable(f"idp_error:{exc}") from exc
 
+    def _gateway_answers_with_jwt(self) -> bool:
+        """Whether leg 1's own response body is the claims JWT — the
+        single-leg translate shape. With a leg 2 configured the gateway
+        response is a JSON envelope carrying a token at a path, and the
+        strict JSON rule stays."""
+        return self._s.claims_format == "jwt" and not self._s.exchange_url
+
     async def _gateway(self, ambient_token: str) -> Any:
         """Leg 1, raw. Separate from :meth:`redeem` because when leg 2
         is not configured the same body carries the claims, and calling
@@ -510,6 +587,7 @@ class BackchannelProvider:
             cookie_name=s.gateway_cookie_name or s.token_source_key,
             static_headers=s.gateway_headers,
             also_cookie=s.gateway_send_ambient_cookie,
+            accept_jwt=self._gateway_answers_with_jwt(),
         )
 
     def _token_from(self, payload: Any) -> str:
@@ -539,8 +617,9 @@ class BackchannelProvider:
             header_prefix=s.exchange_token_prefix,
             body_field=s.exchange_body_field,
             cookie_name="", static_headers=s.exchange_headers,
+            accept_jwt=s.claims_format == "jwt",
         )
-        return self._claims_from(payload, s.exchange_claims_path)
+        return await self._claims_material(payload, s.exchange_claims_path)
 
     def _claims_from(self, payload: Any, path: str) -> dict:
         claims = resolve_path(payload, path) if path else payload
@@ -550,6 +629,143 @@ class BackchannelProvider:
                 code="backchannel_claims_absent",
             )
         return claims
+
+    async def _claims_material(self, payload: Any, path: str) -> dict:
+        """The user object, in whichever shape the operator said it
+        arrives. ``json``: the value at *path* is the object itself.
+        ``jwt``: that value — or the whole body, including a bare
+        ``application/jwt`` one — is a compact JWT whose payload is the
+        object."""
+        if self._s.claims_format != "jwt":
+            return self._claims_from(payload, path)
+        material = resolve_path(payload, path) if path else payload
+        if not isinstance(material, str) or not material.strip():
+            raise BackchannelError(
+                f"claims_absent_at:{path or '<root>'}",
+                code="backchannel_claims_absent",
+            )
+        return await self._decode_claims_jwt(material.strip())
+
+    async def _decode_claims_jwt(self, token: str) -> dict:
+        """Decode — and, when a JWKS is configured, verify — the claims
+        JWT. Error messages name failure classes, never token material:
+        they reach an operator's logs, and the token is the identity."""
+        if not self._s.jwks_url:
+            # Unverified decode is a deliberate trust statement, not a
+            # shortcut: the bytes arrived over TLS from the endpoint we
+            # just called, exactly like the JSON shape they replace.
+            try:
+                return pyjwt.decode(
+                    token, options={"verify_signature": False},
+                )
+            except pyjwt.InvalidTokenError as exc:
+                raise BackchannelError(
+                    f"jwt_undecodable:{type(exc).__name__}",
+                    code="backchannel_jwt_invalid",
+                ) from exc
+
+        try:
+            header = pyjwt.get_unverified_header(token)
+        except pyjwt.InvalidTokenError as exc:
+            raise BackchannelError(
+                f"jwt_undecodable:{type(exc).__name__}",
+                code="backchannel_jwt_invalid",
+            ) from exc
+        alg = str(header.get("alg") or "")
+        if alg not in _JWT_ALGORITHMS:
+            # HS* would let anyone holding the public JWKS mint tokens;
+            # ``none`` is refused by never being on the list.
+            raise BackchannelError(
+                f"jwt_alg_refused:{alg or 'absent'}",
+                code="backchannel_jwt_invalid",
+            )
+        key = await self._verification_key(header.get("kid"))
+
+        options: dict[str, Any] = {"require": ["exp"]}
+        kwargs: dict[str, Any] = {}
+        if self._s.jwt_audience:
+            kwargs["audience"] = self._s.jwt_audience
+        else:
+            options["verify_aud"] = False
+        if self._s.jwt_issuer:
+            kwargs["issuer"] = self._s.jwt_issuer
+        try:
+            return pyjwt.decode(
+                token, key=key, algorithms=list(_JWT_ALGORITHMS),
+                options=options, **kwargs,
+            )
+        except pyjwt.ExpiredSignatureError as exc:
+            raise BackchannelError(
+                "jwt_expired", code="backchannel_jwt_expired",
+            ) from exc
+        except pyjwt.InvalidTokenError as exc:
+            raise BackchannelError(
+                f"jwt_refused:{type(exc).__name__}",
+                code="backchannel_jwt_invalid",
+            ) from exc
+
+    async def _verification_key(self, kid: Any):
+        """The key *kid* names, from the configured JWKS.
+
+        A kid the cached document does not know forces one refetch —
+        that is how key rotation lands without waiting out the TTL — and
+        an unknown kid after a fresh fetch is a refusal, not a guess.
+        """
+        key = self._key_for(await self._jwks_keys(), kid)
+        if key is None:
+            key = self._key_for(await self._jwks_keys(force=True), kid)
+        if key is None:
+            raise BackchannelError(
+                f"jwt_key_unknown:{'kid' if kid else 'no_kid'}",
+                code="backchannel_jwt_invalid",
+            )
+        return key
+
+    async def _jwks_keys(self, *, force: bool = False) -> list:
+        now = time.monotonic()
+        if (
+            not force
+            and self._jwks is not None
+            and now - self._jwks_at < _JWKS_TTL_SECONDS
+        ):
+            return self._jwks
+        try:
+            doc = await fetch_jwks(
+                self._s.jwks_url, timeout=self._s.timeout_seconds,
+                max_bytes=self._s.max_response_bytes,
+                allow_hosts=await self._allow_hosts(),
+            )
+        except OutboundError as exc:
+            # The key set not answering is an outage, same as the IdP
+            # not answering: nobody's session should end over it, and no
+            # login can proceed without it.
+            raise BackchannelUnavailable(
+                f"jwks_unavailable:{type(exc).__name__}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BackchannelUnavailable(
+                f"jwks_unreachable:{type(exc).__name__}"
+            ) from exc
+        self._jwks = [k for k in doc.get("keys", []) if isinstance(k, dict)]
+        self._jwks_at = now
+        return self._jwks
+
+    @staticmethod
+    def _key_for(keys: list, kid: Any):
+        candidates = keys
+        if kid is not None:
+            candidates = [k for k in keys if k.get("kid") == kid]
+        elif len(keys) != 1:
+            # No kid on the token and more than one key on offer:
+            # trying each would make "which key verified this" an
+            # accident. The gateway team adds a kid, or trims the set.
+            return None
+        for jwk_dict in candidates:
+            try:
+                return pyjwt.PyJWK(jwk_dict).key
+            except pyjwt.exceptions.PyJWKError:
+                continue
+        return None
 
     # ── Identity ─────────────────────────────────────────────────────
 
@@ -566,7 +782,7 @@ class BackchannelProvider:
         else:
             # No leg 2 configured: this gateway answers with the claims
             # directly, so the body already in hand is the answer.
-            claims = self._claims_from(payload, s.exchange_claims_path)
+            claims = await self._claims_material(payload, s.exchange_claims_path)
 
         return self._identity_from(claims)
 
