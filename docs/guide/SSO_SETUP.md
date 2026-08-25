@@ -220,6 +220,40 @@ Two things follow from that shape:
   being able to use {brand} on their next session renewal — not whenever their
   token would have expired. This is the one connection kind that closes that gap.
 
+### When the session does not exist yet
+
+The above assumes people already hold a session with your provider by
+the time they open {brand}. Often they do. Where they do not — Kerberos
+being the usual case, where the session is created on demand from the
+workstation&rsquo;s own login — one more call is needed first, and
+**that call is made by the browser rather than by {brand}**.
+
+This is not a preference. Your provider challenges the browser, and
+answering that challenge needs a ticket from the workstation&rsquo;s
+operating system. Only the browser, on that machine, can get one; our
+server cannot, ever. So {brand} makes the call from the sign-in page,
+with the browser&rsquo;s credentials attached, and the exchange with the
+operating system happens invisibly inside it.
+
+Fill in the **Sign-in trigger** section of the connection with the
+endpoint to call. Two things to know before you do:
+
+- It runs **automatically**, once per browser tab, for anyone opening
+  {brand}. A session the machine already holds should not need a button
+  press. If it fails — an off-network laptop, a browser that has not
+  been told to answer for that host — the ordinary sign-in form is still
+  there, and pressing the button will say what went wrong.
+- **The headers on that section are public.** They are sent from the
+  user&rsquo;s browser and readable by anyone who opens the sign-in
+  page. They are *not* the same as the header fields on the two steps
+  below, which stay on our server. Put an application identifier there;
+  never a credential.
+
+Your identity team will need to allow {brand}&rsquo;s exact origin for
+credentialed cross-origin calls, and your desktop team will need
+workstations configured to answer the challenge for that host. Both are
+in the contract document below.
+
 ### What you need from your identity team
 
 Ask them for:
@@ -267,6 +301,15 @@ The five-step flow is the same, with the differences you would expect:
 
 If something is wrong, saving tells you which field and why. If a sign-in fails
 afterwards, see *Running Single Sign-On* → **Why a sign-in failed**.
+
+There is a document written for the team that owns the gateway rather
+than for you — `docs/SSO_BACKCHANNEL_CONTRACT.md` in the {brand}
+repository. It states what their endpoints have to do, and is worth
+sending them before the work starts rather than after. The section on
+status codes is the one that cannot be fixed from this side afterwards:
+if their service returns a server error for an expired session, nobody
+will ever be signed out; if it returns "unauthorised" during an outage,
+everybody will be at once.
 
 ### Keeping sessions in step
 

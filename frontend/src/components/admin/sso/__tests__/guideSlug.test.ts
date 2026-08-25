@@ -73,3 +73,28 @@ describe('every provider kind an operator can pick is documented', () => {
         expect(text).toMatch(/keep getting signed out/i)
     })
 })
+
+
+describe('the parts of the gateway flow an operator cannot infer', () => {
+    it('says the first call is made by the browser, not the server', async () => {
+        // An operator who assumes otherwise will ask their identity team
+        // for the wrong thing, and the shape they get back cannot work.
+        const text = (await getGuideEntry('sso-setup')!.importFn()).default
+        expect(text).toMatch(/made by the browser rather than by/i)
+    })
+
+    it('warns that the trigger headers are public', async () => {
+        // Three header fields, names differing by one word, one of them
+        // published to every visitor of the sign-in page.
+        const text = (await getGuideEntry('sso-setup')!.importFn()).default
+        expect(text).toMatch(/readable by anyone who opens the sign-in/i)
+    })
+
+    it('points at the contract doc by path, not as an in-app link', async () => {
+        // It is written for the client's engineers and deliberately not
+        // registered as a /docs route — a link would 404 in-app.
+        const text = (await getGuideEntry('sso-setup')!.importFn()).default
+        expect(text).toMatch(/SSO_BACKCHANNEL_CONTRACT\.md/)
+        expect(text).not.toMatch(/\/docs\/sso-backchannel/)
+    })
+})

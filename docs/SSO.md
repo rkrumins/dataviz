@@ -137,6 +137,7 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 | `oidc` | Authorization Code + PKCE + JWKS verify | Entra ID, Auth0, Ping, Keycloak, Okta-OIDC |
 | `saml2` | python3-saml strict mode + replay cache | ADFS, OneLogin, Okta-SAML, PingFederate |
 | `custom_profile` | profile handed over via cookie / browser storage / proxy header | internal deployments where a corporate portal or auth proxy already authenticated the user |
+| `backchannel` | an opaque handle redeemed server-to-server against the provider's own endpoints | internal gateways with no OIDC or SAML underneath, including Kerberos-fronted ones. Hand `docs/SSO_BACKCHANNEL_CONTRACT.md` to the team that owns the gateway |
 | `custom` | HS256-signed cookie envelope (dev/demo only) | local development, CI smoke, demo videos |
 
 Every provider is one row in `idp_providers`. The runtime
@@ -349,7 +350,7 @@ escalation.
 
 | Level | Means | Which providers |
 |---|---|---|
-| `verified` | a signature over a third-party assertion was checked against a key we hold | `oidc`, `saml2`, `custom_profile` with `payload_format=jwt` |
+| `verified` | the identity was proved against the provider itself — a signature checked against a key we hold, or an answer it gave us directly when we asked | `oidc`, `saml2`, `custom_profile` with `payload_format=jwt`, `backchannel` |
 | `asserted` | a trusted network position vouched for it — sound when the proxy strips inbound copies, a full bypass when it does not, and we cannot tell which from here | `custom_profile` with `source=header` |
 | `unverified` | we cannot distinguish a genuine claim from a forged one | `custom_profile` with `trust_unsigned`, and the dev-only `custom` kind |
 

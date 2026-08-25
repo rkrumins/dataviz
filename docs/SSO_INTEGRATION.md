@@ -195,7 +195,7 @@ graph TB
         subgraph auth_service["backend/auth_service/ (isolation-locked)"]
             ASRouter[api/router.py<br/>/auth/*]
             ASCore[core/config.py<br/>core/tokens.py<br/>core/password.py]
-            ASProv[providers/<br/>oidc / saml2 / custom / local<br/>claim_mapper + registry]
+            ASProv[providers/<br/>oidc / saml2 / custom<br/>custom_profile / backchannel / local<br/>claim_mapper + registry]
             ASSvc[service.LocalIdentityService<br/>orchestrates login/refresh/SSO]
             ASCfg[app_auth_config.py<br/>posture switches accessor]
         end
@@ -357,6 +357,8 @@ Bootstrapping order (the `app.main.lifespan` entry point):
    3. `ProviderRegistry` configured with a DB-backed loader closure;
       env-bootstrap seeds `default-oidc` / `default-saml2` /
       `default-custom` rows from legacy env vars if no row exists.
+      `custom_profile` and `backchannel` have no env seed — they are
+      created through the admin UI only.
    4. `AuthConfigProvider` (Phase 4) wired as a TTL-cached closure
       over `app_auth_config_repo.get_snapshot`.
    5. `LocalIdentityService` constructed with every injected hook
@@ -1409,6 +1411,10 @@ attacks at the bottom of the section.
 | SAML assertion replay | Redis-backed cache keyed by assertion id, TTL = NotOnOrAfter | `providers/saml2.py:fetch_identity` |
 | Signature wrapping (XSW) on SAML | strict-mode XML parsing in python3-saml | library |
 | Account takeover via email collision | `linking_policy` matrix, default `strict` | `service.py:complete_sso_login` |
+| Back-channel gateway impersonation | nothing in either token is parsed; identity comes only from the exchange reply, over TLS with redirects refused | `providers/backchannel.py:fetch_identity` |
+| Request forgery via an admin-typed gateway URL | resolved-address check before connecting; private addresses need an explicit `host:port` allowlist entry, and loopback / link-local are refused whatever it contains | `providers/outbound.py:assert_fetchable` |
+| Back-channel session outliving the upstream one | re-confirmed with the provider on every rotation; an outage is tolerated only inside a grace window anchored to the last successful answer | `service.py:_settle_liveness` |
+| Forged handle posted by a browser | redeemed against the provider's gateway rather than parsed, so an invented value does not survive leg 1 | `api/router.py:backchannel_handle_login` |
 | `system:admin` granted via group | per-mapping write-time refusal + reconcile-time skip | `idp_group_mapping_repo.FORBIDDEN_AUTO_ROLE` |
 | Operator self-lockout via posture toggle | `_admins_without_sso_identity` check | `admin_sso_config.update_config` |
 | Stale permissions after admin change | `claims_resolver` re-runs on every `/refresh` | `service.refresh` |
