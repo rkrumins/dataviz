@@ -249,6 +249,9 @@ specifics (which URL, which path, which status).
 | `backchannel_claims_absent` | Same, for the user details | Same fix |
 | `backchannel_claims_unmappable` | The details arrived, but the claim mapping could not produce an identity from them | Open the connection's **Claim mapping**, load the last assertion, and see which required field (subject, email) has no source |
 | `backchannel_auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+| `backchannel_jwt_invalid` | Their reply carried a signed token we could not accept — undecodable, wrong signature, unknown key, or an issuer/audience that fails the pins | Compare the connection's JWKS URL and pins against what their team publishes; the audit summary names the exact refusal |
+| `backchannel_jwt_expired` | The signed token in their reply had already expired | Clock skew or a cached answer on their side |
+| `backchannel_replayed` | A browser-delivered sign-in token was presented twice | Once is a harmless double submit; a pattern is replayed captured tokens — treat as an incident |
 | `backchannel_failed` | None of the above — an unclassified failure, including a connection whose stored settings no longer build | Read the audit summary; if it names a setting, fix the row and save it (saving re-validates) |
 
 ### "People on the gateway connection keep getting signed out"

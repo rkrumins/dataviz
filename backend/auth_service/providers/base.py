@@ -68,6 +68,14 @@ class ProviderIdentity:
     #: ``identity_provenance`` declines to hand the IdP ownership of a
     #: field we inferred, and the mapping preview says which it is.
     names_derived_from: Optional[str] = None
+    #: When the UPSTREAM credential behind this login expires (epoch
+    #: seconds), for providers whose server cannot re-ask later — the
+    #: browser-exchange back-channel shape, where the corporate token's
+    #: own ``exp`` is the only expiry signal we will ever hold. Carried
+    #: into the refresh token so the session cannot rotate past it.
+    #: ``None`` everywhere else, and nothing downstream then bounds the
+    #: session by it.
+    upstream_expires_at: Optional[int] = None
 
 
 @runtime_checkable

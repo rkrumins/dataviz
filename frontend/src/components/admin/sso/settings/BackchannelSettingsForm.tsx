@@ -23,8 +23,16 @@ export type AmbientSource = 'cookie' | 'header'
 export type SendAs = 'cookie' | 'header' | 'body'
 
 export interface BackchannelSettings {
+    exchange_mode?: 'server' | 'browser'
     token_source?: AmbientSource
     token_source_key?: string
+
+    // Browser mode: the translate call the sign-in page itself makes.
+    // Published to the browser, like the trigger family.
+    browser_exchange_url?: string
+    browser_exchange_method?: 'GET' | 'POST'
+    browser_exchange_headers?: Record<string, string>
+    browser_exchange_token_path?: string
 
     // The browser-side sign-in trigger. Published to the sign-in page —
     // unlike everything below, which stays on the server.
@@ -70,8 +78,13 @@ export interface BackchannelSettings {
 }
 
 export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
+    exchange_mode: 'server',
     token_source: 'cookie',
     token_source_key: '',
+    browser_exchange_url: '',
+    browser_exchange_method: 'GET',
+    browser_exchange_headers: {},
+    browser_exchange_token_path: '',
     authenticate_enabled: true,
     authenticate_url: '',
     authenticate_method: 'POST',
@@ -191,6 +204,7 @@ export function BackchannelSettingsForm({
     onChange: (next: BackchannelSettings) => void
 }) {
     const source = value.token_source ?? 'cookie'
+    const mode = value.exchange_mode ?? 'server'
     const gatewaySendAs = value.gateway_send_as ?? 'cookie'
     const exchangeSendAs = value.exchange_send_as ?? 'body'
     const hasExchange = Boolean((value.exchange_url ?? '').trim())
@@ -201,7 +215,29 @@ export function BackchannelSettingsForm({
 
     return (
         <div className="space-y-6">
+            {/* ── where the exchange runs ── */}
+            <section className="space-y-3">
+                <Field
+                    label="Who redeems the corporate session"
+                    hint="Our server can only redeem a cookie the browser sends us — one set on a parent domain this app shares. If the cookie is scoped to the SSO host alone, only the user's browser can present it, so the browser makes the translate call and hands us the signed result."
+                >
+                    <select
+                        className={selectCls}
+                        value={mode}
+                        onChange={e => set('exchange_mode', e.target.value as 'server' | 'browser')}
+                    >
+                        <option value="server">
+                            Our server — the cookie is on a shared domain
+                        </option>
+                        <option value="browser">
+                            The browser — the cookie never reaches us
+                        </option>
+                    </select>
+                </Field>
+            </section>
+
             {/* ── the ambient token ── */}
+            {mode === 'server' && (
             <section className="space-y-3">
                 <p className="text-[11px] text-ink-muted leading-relaxed">
                     The token the enterprise portal has already left on the
@@ -233,6 +269,7 @@ export function BackchannelSettingsForm({
                     </Field>
                 </FieldGrid>
             </section>
+            )}
 
             {/* ── the browser-side trigger ── */}
             <section className="space-y-3">
@@ -316,6 +353,7 @@ export function BackchannelSettingsForm({
             </section>
 
             {/* ── leg 1 ── */}
+            {mode === 'server' && (
             <section className="space-y-3">
                 <h4 className="text-xs font-semibold text-ink">
                     Step 1 — redeem the ambient token
@@ -426,8 +464,10 @@ export function BackchannelSettingsForm({
                 />
 
             </section>
+            )}
 
             {/* ── leg 2 ── */}
+            {mode === 'server' && (
             <section className="space-y-3">
                 <h4 className="text-xs font-semibold text-ink">
                     Step 2 — exchange it for the user&rsquo;s details
@@ -566,6 +606,104 @@ export function BackchannelSettingsForm({
                     </>
                 )}
             </section>
+            )}
+
+            {/* ── the browser-side exchange ── */}
+            {mode === 'browser' && (
+            <section className="space-y-3">
+                <h4 className="text-xs font-semibold text-ink">
+                    The translate call the browser makes
+                </h4>
+                <p className="text-[11px] text-ink-muted leading-relaxed">
+                    The corporate cookie only reaches its own host, so the
+                    sign-in page calls the translate endpoint itself — the
+                    browser&rsquo;s cookie jar does what ours cannot — and
+                    hands us the signed token it answers with. We verify
+                    that token&rsquo;s signature before believing a word of
+                    it, and each one signs in at most once.
+                </p>
+                <Field label="Translate URL" required>
+                    <TextField
+                        value={value.browser_exchange_url ?? ''}
+                        onChange={e => set('browser_exchange_url', e.target.value)}
+                        placeholder="https://sso.corporate.com/auth-service/translate"
+                    />
+                </Field>
+                <FieldGrid>
+                    <Field label="Method">
+                        <select
+                            className={selectCls}
+                            value={value.browser_exchange_method ?? 'GET'}
+                            onChange={e => set('browser_exchange_method', e.target.value as 'GET' | 'POST')}
+                        >
+                            <option value="GET">GET</option>
+                            <option value="POST">POST</option>
+                        </select>
+                    </Field>
+                    <Field
+                        label={<>Token is at <span className="font-normal text-ink-muted">(optional)</span></>}
+                        hint={<>Where the token sits in their JSON reply. Blank means the reply body <em>is</em> the token.</>}
+                    >
+                        <TextField
+                            value={value.browser_exchange_token_path ?? ''}
+                            onChange={e => set('browser_exchange_token_path', e.target.value)}
+                            placeholder="token"
+                        />
+                    </Field>
+                </FieldGrid>
+                <div className="rounded-xl border-2 border-amber-500/30 bg-amber-500/[0.06] p-3 space-y-3">
+                    <p className="text-[11px] leading-relaxed text-amber-800 dark:text-amber-200">
+                        These headers are sent from the user&rsquo;s browser
+                        and are readable by anyone who opens the sign-in
+                        page. Put an application identifier here; never a
+                        credential you would mind publishing.
+                    </p>
+                    <HeaderMapField
+                        label="Headers"
+                        hint="Sent on the browser's translate call."
+                        value={value.browser_exchange_headers}
+                        onChange={v => set('browser_exchange_headers', v)}
+                    />
+                </div>
+
+                <h4 className="text-xs font-semibold text-ink">
+                    Verifying what comes back
+                </h4>
+                <Field
+                    label="JWKS URL"
+                    required
+                    hint="Their published signing keys. Required in this mode — a token the browser delivers is only as good as its signature. Internal hosts need an allowlist entry."
+                >
+                    <TextField
+                        value={value.jwks_url ?? ''}
+                        onChange={e => set('jwks_url', e.target.value)}
+                        placeholder="https://sso.corporate.com/.well-known/jwks.json"
+                    />
+                </Field>
+                <FieldGrid>
+                    <Field
+                        label={<>Issuer pin <span className="font-normal text-ink-muted">(optional)</span></>}
+                        hint={<>Refuse tokens whose <code>iss</code> differs.</>}
+                    >
+                        <TextField
+                            value={value.jwt_issuer ?? ''}
+                            onChange={e => set('jwt_issuer', e.target.value)}
+                            placeholder="https://sso.corporate.com"
+                        />
+                    </Field>
+                    <Field
+                        label={<>Audience pin <span className="font-normal text-ink-muted">(optional)</span></>}
+                        hint={<>Refuse tokens whose <code>aud</code> differs.</>}
+                    >
+                        <TextField
+                            value={value.jwt_audience ?? ''}
+                            onChange={e => set('jwt_audience', e.target.value)}
+                            placeholder="dataviz"
+                        />
+                    </Field>
+                </FieldGrid>
+            </section>
+            )}
 
             {/* ── behaviour ── */}
             <section className="space-y-3">
@@ -592,6 +730,7 @@ export function BackchannelSettingsForm({
                             onChange={e => set('max_response_bytes', Number(e.target.value))}
                         />
                     </Field>
+                    {mode === 'server' && (
                     <Field
                         label="Outage grace (seconds)"
                         hint="How long sign-ins survive a gateway that has stopped answering. Measured from the last successful check, not from the last attempt."
@@ -604,24 +743,36 @@ export function BackchannelSettingsForm({
                             onChange={e => set('liveness_grace_seconds', Number(e.target.value))}
                         />
                     </Field>
+                    )}
                 </FieldGrid>
 
-                <Toggle
-                    label="Re-check with the provider on every session renewal"
-                    hint="Ends the session here when the enterprise session ends there, instead of letting it run on for the rest of its own lifetime. Costs one call per signed-in person each time their session renews."
-                    checked={value.liveness_on_refresh !== false}
-                    onChange={v => set('liveness_on_refresh', v)}
-                />
-                <Field
-                    label={<>Re-check URL <span className="font-normal text-ink-muted">(optional)</span></>}
-                    hint="A cheaper validate-only endpoint for that re-check, if their team provides one — same call, aimed here instead of the gateway, so renewals stop minting a token apiece. Blank re-checks against the Gateway URL."
-                >
-                    <TextField
-                        value={value.liveness_url ?? ''}
-                        onChange={e => set('liveness_url', e.target.value)}
-                        placeholder="https://sso-gateway.corp.internal/validate"
-                    />
-                </Field>
+                {mode === 'server' ? (
+                    <>
+                        <Toggle
+                            label="Re-check with the provider on every session renewal"
+                            hint="Ends the session here when the enterprise session ends there, instead of letting it run on for the rest of its own lifetime. Costs one call per signed-in person each time their session renews."
+                            checked={value.liveness_on_refresh !== false}
+                            onChange={v => set('liveness_on_refresh', v)}
+                        />
+                        <Field
+                            label={<>Re-check URL <span className="font-normal text-ink-muted">(optional)</span></>}
+                            hint="A cheaper validate-only endpoint for that re-check, if their team provides one — same call, aimed here instead of the gateway, so renewals stop minting a token apiece. Blank re-checks against the Gateway URL."
+                        >
+                            <TextField
+                                value={value.liveness_url ?? ''}
+                                onChange={e => set('liveness_url', e.target.value)}
+                                placeholder="https://sso-gateway.corp.internal/validate"
+                            />
+                        </Field>
+                    </>
+                ) : (
+                    <p className="text-[11px] text-ink-muted leading-relaxed">
+                        There is no re-check in this mode — the corporate
+                        session never reaches our server. Sessions end when
+                        the translate token they signed in with expires,
+                        and the sign-in page silently repeats the exchange.
+                    </p>
+                )}
                 <Toggle
                     label="Require an authentication time in the user details"
                     hint="Without one there is no way to tell how long ago someone actually signed in, and the daily re-authentication ceiling stops applying to them."

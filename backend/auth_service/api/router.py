@@ -321,12 +321,33 @@ def _identity_service(request: Request) -> IdentityService:
 #: reads from also holds both endpoint URLs and whatever credentials
 #: their headers carry — a denylist would publish every setting added
 #: after it was written.
+#:
+#: Two families, gated separately in ``_public_config``: the trigger
+#: fields publish when a trigger is configured and enabled (either
+#: mode), and the ``browser_exchange_*`` fields publish only for rows
+#: whose exchange runs in the browser — they are the call the browser
+#: has to make there, and a deliberately public family for the same
+#: reason ``authenticate_headers`` is. ``gateway_*`` and ``exchange_*``
+#: are server-side facts under every mode and never appear here.
 _BACKCHANNEL_PUBLIC_FIELDS = {
     "authenticate_url": "authenticateUrl",
     "authenticate_method": "authenticateMethod",
     "authenticate_headers": "authenticateHeaders",
     "authenticate_token_path": "authenticateTokenPath",
+    "browser_exchange_url": "browserExchangeUrl",
+    "browser_exchange_method": "browserExchangeMethod",
+    "browser_exchange_headers": "browserExchangeHeaders",
+    "browser_exchange_token_path": "browserExchangeTokenPath",
 }
+
+_BACKCHANNEL_TRIGGER_FIELDS = (
+    "authenticate_url", "authenticate_method", "authenticate_headers",
+    "authenticate_token_path",
+)
+_BACKCHANNEL_BROWSER_EXCHANGE_FIELDS = (
+    "browser_exchange_url", "browser_exchange_method",
+    "browser_exchange_headers", "browser_exchange_token_path",
+)
 
 
 def _public_config(snap) -> dict:
@@ -347,25 +368,43 @@ def _public_config(snap) -> dict:
     settings = snap.settings or {}
 
     if snap.kind == "backchannel":
-        # Disabled means the browser is told nothing, so it makes no
-        # call — the whole switch, enforced in the one place that can
-        # enforce it. Keeping the configuration while publishing none of
-        # it is the point: turning the trigger off must not cost an
-        # operator their integration.
+        out: dict = {}
+
+        # The sign-in trigger. Disabled means the browser is told
+        # nothing about it, so it makes no call — the whole switch,
+        # enforced in the one place that can enforce it. Keeping the
+        # configuration while publishing none of it is the point:
+        # turning the trigger off must not cost an operator their
+        # integration.
         #
         # Read off the raw settings rather than the provider's typed
         # view, and deliberately not mirrored onto the dataclass: this
         # is the only reader, and a parsed copy that nothing consults is
         # a second source of truth waiting to disagree with this one.
-        if settings.get("authenticate_enabled") is False:
-            return {}
-        if not str(settings.get("authenticate_url") or "").strip():
-            return {}
-        return {
-            alias: settings.get(key)
-            for key, alias in _BACKCHANNEL_PUBLIC_FIELDS.items()
-            if settings.get(key) not in (None, "", {})
-        }
+        if (
+            settings.get("authenticate_enabled") is not False
+            and str(settings.get("authenticate_url") or "").strip()
+        ):
+            out.update({
+                _BACKCHANNEL_PUBLIC_FIELDS[key]: settings.get(key)
+                for key in _BACKCHANNEL_TRIGGER_FIELDS
+                if settings.get(key) not in (None, "", {})
+            })
+
+        # The browser-exchange call, for rows whose exchange the browser
+        # runs. Published regardless of the trigger switch: the trigger
+        # asks the corporate IdP for a session, the exchange redeems the
+        # one that exists, and someone arriving already signed in to the
+        # portal needs only the second.
+        if str(
+            settings.get("exchange_mode") or "server"
+        ).strip().lower() == "browser":
+            out.update({
+                _BACKCHANNEL_PUBLIC_FIELDS[key]: settings.get(key)
+                for key in _BACKCHANNEL_BROWSER_EXCHANGE_FIELDS
+                if settings.get(key) not in (None, "", {})
+            })
+        return out
 
     if snap.kind != "custom_profile":
         return {}
@@ -1947,6 +1986,18 @@ async def _backchannel_login_flow(
         svc, slug=slug, snap=snap, log_label="Back-channel login",
     )
 
+    if provider.settings.exchange_mode == "browser":
+        # No server-readable ambient session exists in browser mode —
+        # the corporate cookie is scoped to the SSO host and never
+        # reaches us. The sign-in page drives that shape and POSTs the
+        # assertion; a bare navigation here can only fail, so it fails
+        # the standard way rather than pretending to look for a cookie.
+        return await _fail(
+            "backchannel_failed",
+            detail="browser-exchange rows complete via POST, not the "
+                   "redirect flow",
+        )
+
     raw = read_ambient_token(request, provider)
     if not raw:
         return await _fail(
@@ -1976,13 +2027,25 @@ async def _backchannel_login_flow(
 
 
 class _BackchannelHandleBody(BaseModel):
-    """The handle the sign-in trigger returned to the browser.
+    """What the browser contributes to a back-channel sign-in.
 
-    Named a handle rather than a token on purpose: nothing here reads
-    it. It is passed straight to the provider's gateway, which is the
-    only party that can say what it means.
+    Three mutually exclusive shapes, each honoured only when the row
+    configures it:
+
+    * ``handle`` — the sign-in trigger's own response token. Named a
+      handle rather than a token on purpose: nothing here reads it. It
+      is passed straight to the provider's gateway, which is the only
+      party that can say what it means.
+    * ``assertion`` — browser mode: the JWT the corporate translate
+      endpoint answered the browser with. This one IS read — verified
+      against the connection's JWKS and enforced single-use.
+    * neither — server mode's JSON entry point: the ambient corporate
+      cookie on this very request is redeemed, exactly like the
+      redirect flow, but the session comes back as JSON. This is the
+      leg the silent re-sign-in uses, so recovery needs no navigation.
     """
-    handle: str
+    handle: str | None = None
+    assertion: str | None = None
 
 
 @router.post("/{slug}/backchannel", response_model=SessionResponse,
@@ -1994,42 +2057,86 @@ async def backchannel_handle_login(
     response: Response,
     body: _BackchannelHandleBody,
 ):
-    """Complete a back-channel login from a handle the browser obtained.
+    """Complete a back-channel login from what the browser contributed.
 
-    The other entry point reads the enterprise's session cookie off the
-    request. This one exists for the shape where the sign-in trigger
-    *answers* with a handle instead of setting a cookie — the browser
-    reads it out of that response and posts it here.
+    The redirect entry point reads the enterprise's session cookie off
+    the request and answers with a Location. This one covers the shapes
+    where the browser has something to *post* — a handle the sign-in
+    trigger answered with, or (browser mode) the JWT the corporate
+    translate endpoint gave it — plus the empty-body JSON variant of the
+    cookie read itself, which exists so a silent re-sign-in can finish
+    without a navigation.
 
-    **Taking a credential from the browser is safe here, and it is worth
-    being precise about why**, because it is exactly what
-    ``custom_profile`` must never do. That kind receives an assertion and
-    *parses* it, so a forged one is a forged identity and only a
-    signature stands in the way. This kind receives an opaque handle and
-    immediately *redeems* it against the provider's own gateway. A value
-    somebody invented does not survive that call. The browser chooses
-    which handle to present; the gateway decides who it belongs to, and
-    nothing the browser says reaches the claim mapper.
+    **Taking a credential from the browser is safe here, and it is
+    worth being precise about why for each shape.** A *handle* is
+    opaque: nothing here reads it, it is immediately redeemed against
+    the provider's own gateway, and a value somebody invented does not
+    survive that call — nothing the browser says reaches the claim
+    mapper. An *assertion* IS read, which is exactly what
+    ``custom_profile`` warns about — so it is held to that bar and
+    higher: signature verification against the connection's JWKS is
+    mandatory (``validate_settings`` refuses browser mode without one),
+    ``exp`` is required, and the replay burn makes it single-use. A
+    forged one fails verification; a captured one is spent.
 
-    Refused unless the row actually configures this shape, so the
-    endpoint cannot be used to hand a handle to a provider whose
-    operator chose the cookie transport.
+    Each shape is refused unless the row actually configures it, so the
+    endpoint cannot be used to hand a credential to a provider whose
+    operator chose a different transport.
     """
     provider = await _resolve_provider(slug, request=request)
     if not isinstance(provider, BackchannelProvider):
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "Not a back-channel provider",
         )
-    if not provider.settings.authenticate_token_path:
+    if body.handle and body.assertion:
         raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            "This provider reads its session from the request, not the "
-            "sign-in trigger's response",
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "handle and assertion are different transports; send the one "
+            "this connection is configured for",
         )
+    # Each shape is refused unless the row actually configures it, so
+    # the endpoint cannot be used to hand a credential to a provider
+    # whose operator chose a different transport.
+    if body.assertion is not None:
+        if provider.settings.exchange_mode != "browser":
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "This provider does not take a browser-delivered "
+                "assertion",
+            )
+    elif body.handle is not None:
+        if not provider.settings.authenticate_token_path:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "This provider reads its session from the request, not "
+                "the sign-in trigger's response",
+            )
+    else:
+        if (
+            provider.settings.exchange_mode != "server"
+            or not provider.settings.token_source_key
+        ):
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "This provider does not read its session from the "
+                "request",
+            )
     snap = await _provider_snapshot(slug, request=request)
 
     try:
-        identity = await provider.fetch_identity(body.handle)
+        if body.assertion is not None:
+            identity = await provider.identity_from_assertion(body.assertion)
+        elif body.handle is not None:
+            identity = await provider.fetch_identity(body.handle)
+        else:
+            # The ambient cookie/header on this very request — the same
+            # read the redirect flow does, answering JSON instead of a
+            # Location. An absent cookie raises backchannel_no_session
+            # inside the provider, which the handler below turns into
+            # the 401 the silent recovery keys on.
+            identity = await provider.fetch_identity(
+                read_ambient_token(request, provider) or "",
+            )
     except BackchannelError as exc:
         # Same split as the redirect flow: the code is audited, the
         # message is logged, and neither reaches the caller.

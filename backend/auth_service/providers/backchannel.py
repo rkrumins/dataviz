@@ -60,6 +60,7 @@ UI.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -101,6 +102,9 @@ _AUTHORITATIVE_REJECTIONS = frozenset({401, 403})
 
 #: Shapes the claims material can arrive in.
 VALID_CLAIMS_FORMATS = frozenset({"json", "jwt"})
+
+#: Where the exchange runs.
+VALID_EXCHANGE_MODES = frozenset({"server", "browser"})
 
 #: Signature algorithms accepted when a JWKS is configured. Asymmetric
 #: only, spelled out rather than derived: HS* would let anyone holding
@@ -233,6 +237,28 @@ class BackchannelSettings:
     gateway_headers: dict = field(default_factory=dict)
     gateway_token_path: str = "access_token"
 
+    #: Where the exchange happens. ``server`` is the original shape and
+    #: the default: the corporate cookie reaches our backend (shared
+    #: parent domain) and both legs run server-to-server. ``browser``
+    #: exists for a cookie scoped to the SSO host alone — the browser
+    #: calls the corporate translate endpoint itself (its cookie jar
+    #: does what ours cannot) and posts the resulting JWT here, where it
+    #: is signature-verified, exp-checked and enforced single-use. The
+    #: server legs and the ambient token do not apply in that mode.
+    exchange_mode: str = "server"
+    #: The translate endpoint the BROWSER calls in ``browser`` mode.
+    #: Published to the sign-in page with its method, headers and token
+    #: path — a deliberately public family, like ``authenticate_*``, so
+    #: flipping a row's mode can never leak ``gateway_headers`` or
+    #: ``exchange_headers``, which stay server-only under every mode.
+    browser_exchange_url: str = ""
+    browser_exchange_method: str = "GET"
+    #: PUBLISHED TO THE BROWSER, like ``authenticate_headers``.
+    browser_exchange_headers: dict = field(default_factory=dict)
+    #: Where the JWT sits in the translate response. Blank means the
+    #: response body IS the token.
+    browser_exchange_token_path: str = ""
+
     # Leg 2: gateway token -> claims. Blank URL skips it.
     exchange_url: str = ""
     exchange_method: str = "POST"
@@ -340,6 +366,15 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         gateway_token_path=str(
             s.get("gateway_token_path") or "access_token"
         ).strip(),
+        exchange_mode=str(s.get("exchange_mode") or "server").strip().lower(),
+        browser_exchange_url=str(s.get("browser_exchange_url") or "").strip(),
+        browser_exchange_method=str(
+            s.get("browser_exchange_method") or "GET"
+        ).strip().upper(),
+        browser_exchange_headers=_as_dict(s.get("browser_exchange_headers")),
+        browser_exchange_token_path=str(
+            s.get("browser_exchange_token_path") or ""
+        ).strip(),
         exchange_url=str(s.get("exchange_url") or "").strip(),
         exchange_method=str(s.get("exchange_method") or "POST").strip().upper(),
         exchange_send_as=str(s.get("exchange_send_as") or "body").strip(),
@@ -366,11 +401,44 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
 
 def validate_settings(s: BackchannelSettings) -> None:
     """Refuse a row that would not work, or would work by accident."""
+    if s.exchange_mode not in VALID_EXCHANGE_MODES:
+        raise BackchannelConfigError(
+            f"exchange_mode must be one of {sorted(VALID_EXCHANGE_MODES)}, "
+            f"got '{s.exchange_mode}'"
+        )
     if s.token_source not in VALID_TOKEN_SOURCES:
         raise BackchannelConfigError(
             f"token_source must be one of {sorted(VALID_TOKEN_SOURCES)}, "
             f"got '{s.token_source}'"
         )
+    if s.authenticate_url and s.authenticate_method not in VALID_METHODS:
+        raise BackchannelConfigError(
+            f"authenticate_method must be one of {sorted(VALID_METHODS)}, "
+            f"got '{s.authenticate_method}'"
+        )
+    if s.claims_format not in VALID_CLAIMS_FORMATS:
+        raise BackchannelConfigError(
+            f"claims_format must be one of {sorted(VALID_CLAIMS_FORMATS)}, "
+            f"got '{s.claims_format}'"
+        )
+    if (s.jwt_issuer or s.jwt_audience) and not s.jwks_url:
+        raise BackchannelConfigError(
+            "jwt_issuer / jwt_audience are verification pins and need "
+            "jwks_url — without a verified signature they would pin "
+            "nothing"
+        )
+    if s.timeout_seconds <= 0:
+        raise BackchannelConfigError("timeout_seconds must be > 0")
+    if s.max_response_bytes <= 0:
+        raise BackchannelConfigError("max_response_bytes must be > 0")
+    if s.liveness_grace_seconds < 0:
+        raise BackchannelConfigError("liveness_grace_seconds must be >= 0")
+
+    if s.exchange_mode == "browser":
+        _validate_browser_mode(s)
+        return
+
+    # ── server mode: the original shape ──────────────────────────────
     # The trigger can supply the token itself, in which case there is no
     # cookie to name.
     if not s.token_source_key and not s.authenticate_token_path:
@@ -384,11 +452,6 @@ def validate_settings(s: BackchannelSettings) -> None:
         raise BackchannelConfigError(
             "authenticate_token_path needs authenticate_url — there is no "
             "response to read the token out of without a call to make"
-        )
-    if s.authenticate_url and s.authenticate_method not in VALID_METHODS:
-        raise BackchannelConfigError(
-            f"authenticate_method must be one of {sorted(VALID_METHODS)}, "
-            f"got '{s.authenticate_method}'"
         )
     if not s.gateway_url:
         raise BackchannelConfigError("gateway_url is required")
@@ -418,28 +481,49 @@ def validate_settings(s: BackchannelSettings) -> None:
             send_as=s.exchange_send_as, header=s.exchange_token_header,
             body_field=s.exchange_body_field,
         )
-    if s.claims_format not in VALID_CLAIMS_FORMATS:
-        raise BackchannelConfigError(
-            f"claims_format must be one of {sorted(VALID_CLAIMS_FORMATS)}, "
-            f"got '{s.claims_format}'"
-        )
     if s.jwks_url and s.claims_format != "jwt":
         raise BackchannelConfigError(
             "jwks_url only applies with claims_format='jwt' — there is "
             "no signature to verify on a JSON user object"
         )
-    if (s.jwt_issuer or s.jwt_audience) and not s.jwks_url:
+
+
+def _validate_browser_mode(s: BackchannelSettings) -> None:
+    """The browser-exchange shape: the corporate cookie never reaches
+    us, so the browser runs the translate call and hands over the JWT.
+    Different trust, different requirements."""
+    if not s.browser_exchange_url:
         raise BackchannelConfigError(
-            "jwt_issuer / jwt_audience are verification pins and need "
-            "jwks_url — without a verified signature they would pin "
-            "nothing"
+            "browser_exchange_url is required in browser mode — it is "
+            "the translate endpoint the sign-in page calls"
         )
-    if s.timeout_seconds <= 0:
-        raise BackchannelConfigError("timeout_seconds must be > 0")
-    if s.max_response_bytes <= 0:
-        raise BackchannelConfigError("max_response_bytes must be > 0")
-    if s.liveness_grace_seconds < 0:
-        raise BackchannelConfigError("liveness_grace_seconds must be >= 0")
+    if s.browser_exchange_method not in VALID_METHODS:
+        raise BackchannelConfigError(
+            f"browser_exchange_method must be one of "
+            f"{sorted(VALID_METHODS)}, got '{s.browser_exchange_method}'"
+        )
+    if not s.jwks_url:
+        # Not optional here, unlike the server shape: a token the
+        # BROWSER delivers is written by whoever sits at it unless a
+        # signature says otherwise. TLS authenticated nothing to us —
+        # we were not on the call.
+        raise BackchannelConfigError(
+            "jwks_url is required in browser mode — a browser-delivered "
+            "token is only as good as its signature"
+        )
+    if s.authenticate_token_path:
+        raise BackchannelConfigError(
+            "authenticate_token_path is the handle shape, which redeems "
+            "at the gateway; in browser mode the trigger exists only to "
+            "establish the corporate session, and the translate call "
+            "carries it from there"
+        )
+    if s.liveness_url:
+        raise BackchannelConfigError(
+            "liveness_url does not apply in browser mode — the server "
+            "never sees the corporate session, so there is nothing it "
+            "could re-check; the token's own expiry bounds the session"
+        )
 
 
 def _validate_leg(
@@ -472,6 +556,29 @@ def _validate_leg(
             )
 
 
+class _MemoryReplayCache:
+    """Process-local single-use cache. Tests and single-process dev ONLY.
+
+    Mirrors ``custom_profile._MemoryJtiCache`` and fails the same two
+    ways: every gunicorn worker holds its own dict, and the registry
+    rebuilds this provider (dict included) every 60 s. Which is exactly
+    why ``app/main.py`` refuses to serve a browser-mode row in
+    production without the shared store — this fallback silently *looks*
+    like replay protection.
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict[str, int] = {}
+
+    async def record(self, token_id: str, expires_at_epoch: int) -> bool:
+        now = int(time.time())
+        self._seen = {k: e for k, e in self._seen.items() if e > now}
+        if token_id in self._seen:
+            return False
+        self._seen[token_id] = max(int(expires_at_epoch), now + 1)
+        return True
+
+
 class BackchannelProvider:
     """Back-channel IdP. The route reads the ambient token off the
     request and hands the raw string over; everything else happens
@@ -484,6 +591,7 @@ class BackchannelProvider:
         settings: BackchannelSettings | None = None,
         *,
         allowed_hosts: AllowedHostsLoader | None = None,
+        replay_cache=None,
     ) -> None:
         self._s = settings or BackchannelSettings()
         # Injected, and read per request rather than per build: removing
@@ -496,6 +604,11 @@ class BackchannelProvider:
         # module docstring's "nothing is cached" rule does not cover.
         self._jwks: list | None = None
         self._jwks_at: float = 0.0
+        # Single-use enforcement for browser-delivered assertions.
+        # ``app/main.py`` binds the shared store; the local fallback is
+        # for tests and single-process dev only, and production refuses
+        # to build a browser-mode row without the real one.
+        self._replay = replay_cache or _MemoryReplayCache()
 
     @property
     def settings(self) -> BackchannelSettings:
@@ -853,6 +966,51 @@ class BackchannelProvider:
             )
         return identity
 
+    async def identity_from_assertion(self, assertion: str) -> ProviderIdentity:
+        """Browser mode: the translate JWT, delivered by the browser.
+
+        Everything the server shape gets for free from "we made the
+        call" is reconstructed explicitly here, because a value the
+        browser delivers is written by whoever sits at it until proven
+        otherwise:
+
+        * the signature says the gateway minted it — ``jwks_url`` is
+          mandatory in this mode, so ``_decode_claims_jwt`` always
+          verifies;
+        * ``exp`` bounds it, and is additionally carried into the
+          session we mint so rotation cannot outlive it;
+        * the replay burn makes it single-use — a captured assertion is
+          worthless after the sign-in it was captured from.
+        """
+        if not assertion or not assertion.strip():
+            raise BackchannelError(
+                "assertion_missing", code="backchannel_no_session",
+            )
+        payload = await self._decode_claims_jwt(assertion.strip())
+        exp = int(payload.get("exp") or 0)
+
+        jti = payload.get("jti")
+        key = (
+            str(jti) if isinstance(jti, (str, int)) and str(jti).strip()
+            else hashlib.sha256(assertion.strip().encode()).hexdigest()
+        )
+        try:
+            fresh = await self._replay.record(key, exp)
+        except Exception as exc:  # noqa: BLE001 — the store's error type
+            # lives in app-land, which this package must not import.
+            # "We could not check for a replay" has no floor under it,
+            # so it refuses the login (fail closed) as an outage.
+            raise BackchannelUnavailable(
+                f"replay_store_unavailable:{type(exc).__name__}"
+            ) from exc
+        if not fresh:
+            raise BackchannelError(
+                "assertion_replayed", code="backchannel_replayed",
+            )
+
+        identity = self._identity_from(payload)
+        return replace(identity, upstream_expires_at=exp)
+
     # ── Liveness ─────────────────────────────────────────────────────
 
     async def confirm_still_authenticated(self, ambient_token: str) -> None:
@@ -881,6 +1039,7 @@ def build_backchannel_provider(
     snap: ProviderConfigSnapshot,
     *,
     allowed_hosts: AllowedHostsLoader | None = None,
+    replay_cache=None,
 ) -> BackchannelProvider:
     """Factory for the registry. Validates before returning so a
     misconfigured row raises here rather than at login time.
@@ -888,8 +1047,12 @@ def build_backchannel_provider(
     ``allowed_hosts`` must be supplied by anything serving real traffic;
     ``app/main.py`` binds it. Without it the provider can still reach
     public addresses but no internal ones — which fails closed, and is
-    the right default for a test.
+    the right default for a test. ``replay_cache`` likewise: main binds
+    the shared store, and production refuses to build a browser-mode
+    row without one.
     """
     settings = settings_from_snapshot(snap)
     validate_settings(settings)
-    return BackchannelProvider(settings, allowed_hosts=allowed_hosts)
+    return BackchannelProvider(
+        settings, allowed_hosts=allowed_hosts, replay_cache=replay_cache,
+    )

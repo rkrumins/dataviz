@@ -673,6 +673,28 @@ class SharedSamlReplayCache:
 #: the two trust domains cannot burn each other's ids.
 _PROFILE_JTI_PREFIX = "idp:jti:"
 
+#: Browser-delivered back-channel assertion keyspace. Its own prefix for
+#: the same reason as the two above: these ids come from a third trust
+#: domain (a corporate translate endpoint), and sharing a keyspace would
+#: let one provider's id burn another's.
+_BACKCHANNEL_JTI_PREFIX = "bc:jti:"
+
+
+def get_backchannel_replay_cache() -> Optional["SharedSamlReplayCache"]:
+    """Replay cache for browser-delivered back-channel assertions.
+
+    Same store, same record semantics, same meaning for ``None``: no
+    shared backend, so single-use cannot be enforced across workers and
+    production must refuse to serve the rows that need it rather than
+    pretend.
+    """
+    backend = getattr(get_revocation_service(), "_backend", None)
+    if backend is None or isinstance(
+        backend, (InMemoryBackend, UnavailableBackend),
+    ):
+        return None
+    return SharedSamlReplayCache(backend, namespace=_BACKCHANNEL_JTI_PREFIX)
+
 
 def get_profile_replay_cache() -> Optional["SharedSamlReplayCache"]:
     """Replay cache for ``custom_profile`` payload ids, or None.

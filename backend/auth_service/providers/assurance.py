@@ -71,16 +71,25 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
         return VERIFIED
 
     if kind == "backchannel":
-        # No signature is checked here, and it is still the strongest
-        # kind we have. The claims did not arrive from the browser at
-        # all: they came back over TLS from the provider's own endpoint,
-        # in answer to a question we asked during this login. A
-        # signature attests to a statement made at some past instant; a
-        # back-channel answer is current, so a session revoked thirty
-        # seconds ago fails now rather than at the assertion's ``exp``.
-        # Nothing about the row can weaken that — there is no
-        # ``trust_unsigned`` equivalent, because there is nothing to
-        # trust unsigned.
+        # Verified under either exchange mode, on two different bases.
+        #
+        # Server mode: no signature is needed and it is still the
+        # strongest kind we have. The claims did not arrive from the
+        # browser at all: they came back over TLS from the provider's
+        # own endpoint, in answer to a question we asked during this
+        # login. A signature attests to a statement made at some past
+        # instant; a back-channel answer is current, so a session
+        # revoked thirty seconds ago fails now rather than at the
+        # assertion's ``exp``. (With ``claims_format="jwt"`` the answer
+        # is decoded, optionally signature-checked too — neither changes
+        # where it came from.)
+        #
+        # Browser mode: the assertion IS browser-delivered, so it earns
+        # the rating the OIDC/SAML way — mandatory signature
+        # verification against the connection's JWKS, ``exp`` required,
+        # single-use enforced. ``validate_settings`` refuses the mode
+        # without a key set, so there is no unsigned variant of this
+        # row to rate lower.
         return VERIFIED
 
     if kind == "custom_profile":

@@ -1,0 +1,533 @@
+"""``exchange_mode="browser"``: the corporate cookie never reaches us.
+
+The topology this exists for: the enterprise scopes its session cookie
+to the SSO host alone, so no server of ours can ever present it. The
+browser runs the translate call — its cookie jar does what ours cannot
+— and posts the answering JWT here as an ``assertion``.
+
+Everything the server topology gets from "we made the call" is
+reconstructed and pinned in this file:
+
+* the signature says the gateway minted it — ``jwks_url`` is refused
+  absent, and a wrong signature is refused present;
+* ``exp`` bounds the assertion AND the session it mints — ``idp_exp``
+  rides inside our own signed refresh token, survives rotation, and
+  ends the session the moment the corporate token would have expired;
+* the replay burn makes each assertion sign in at most once, failing
+  CLOSED when the store cannot answer;
+* the row's server-side secrets stay server-side: browser mode
+  publishes exactly its own public field family and nothing else.
+"""
+from __future__ import annotations
+
+import time
+
+import httpx
+import jwt as pyjwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+from backend.app.db.repositories import idp_provider_repo
+from backend.app.main import backchannel_builder_with_replay_cache
+from backend.auth_service.core import tokens as token_module
+from backend.auth_service.interface import SsoReauthRequired
+from backend.auth_service.providers import outbound
+from backend.auth_service.providers.backchannel import (
+    BackchannelConfigError,
+    BackchannelError,
+    BackchannelProvider,
+    BackchannelSettings,
+    BackchannelUnavailable,
+    build_backchannel_provider,
+    validate_settings,
+)
+from backend.auth_service.providers.registry import ProviderConfigSnapshot
+from backend.tests.common.refresh_store import InMemoryRefreshStore
+from backend.tests.test_sso_phase2 import (
+    _StubUserRepo,
+    _StubUserIdentityRepo,
+    _session_factory,
+)
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+TRANSLATE = "https://sso.corporate.com/auth-service/translate"
+JWKS = "https://sso.corporate.com/jwks"
+
+CLAIMS = {
+    "sub": "emp-1",
+    "email": "ada.lovelace@corporate.com",
+    "firstName": "Ada",
+    "lastName": "Lovelace",
+    "auth_time": int(time.time()) - 60,
+}
+
+_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_OTHER_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+KID = "corp-2026"
+
+
+def _jwk(key=None, kid=KID) -> dict:
+    doc = pyjwt.algorithms.RSAAlgorithm.to_jwk(
+        (key or _KEY).public_key(), as_dict=True,
+    )
+    doc["kid"] = kid
+    return doc
+
+
+def _assertion(*, key=None, exp_in=600, jti="jti-1", **extra) -> str:
+    payload = {**CLAIMS, "exp": int(time.time()) + exp_in, **extra}
+    if jti is not None:
+        payload["jti"] = jti
+    return pyjwt.encode(
+        payload, key or _KEY, algorithm="RS256", headers={"kid": KID},
+    )
+
+
+def _settings(**over) -> BackchannelSettings:
+    base = dict(
+        exchange_mode="browser",
+        browser_exchange_url=TRANSLATE,
+        jwks_url=JWKS,
+        token_source_key="",
+        gateway_url="",
+    )
+    base.update(over)
+    return BackchannelSettings(**base)
+
+
+def _routes(monkeypatch, jwks: dict | None = None):
+    seen: list[httpx.Request] = []
+
+    def _dispatch(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=jwks or {"keys": [_jwk()]})
+
+    def _make(**kwargs):
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(_dispatch), **kwargs,
+        )
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _make)
+    return seen
+
+
+# ── the provider: verify, burn, bound ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_signed_assertion_becomes_a_bounded_identity(monkeypatch):
+    _routes(monkeypatch)
+    exp = int(time.time()) + 600
+    identity = await BackchannelProvider(_settings()).identity_from_assertion(
+        _assertion(exp_in=600),
+    )
+    assert identity.email == "ada.lovelace@corporate.com"
+    assert identity.external_id == "emp-1"
+    # The corporate token's own expiry travels with the identity, so the
+    # session we mint cannot outlive it.
+    assert abs(identity.upstream_expires_at - exp) <= 2
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_signature_is_refused(monkeypatch):
+    _routes(monkeypatch)
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(_settings()).identity_from_assertion(
+            _assertion(key=_OTHER_KEY),
+        )
+    assert err.value.code == "backchannel_jwt_invalid"
+
+
+@pytest.mark.asyncio
+async def test_an_expired_assertion_is_refused(monkeypatch):
+    _routes(monkeypatch)
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(_settings()).identity_from_assertion(
+            _assertion(exp_in=-60),
+        )
+    assert err.value.code == "backchannel_jwt_expired"
+
+
+@pytest.mark.asyncio
+async def test_an_assertion_signs_in_at_most_once(monkeypatch):
+    _routes(monkeypatch)
+    provider = BackchannelProvider(_settings())
+    token = _assertion()
+    await provider.identity_from_assertion(token)
+    with pytest.raises(BackchannelError) as err:
+        await provider.identity_from_assertion(token)
+    assert err.value.code == "backchannel_replayed"
+
+
+@pytest.mark.asyncio
+async def test_a_jti_less_assertion_is_still_single_use(monkeypatch):
+    """Corporate translate endpoints often omit ``jti``; the token's own
+    bytes then key the burn, which is exact single-use either way."""
+    _routes(monkeypatch)
+    provider = BackchannelProvider(_settings())
+    token = _assertion(jti=None)
+    await provider.identity_from_assertion(token)
+    with pytest.raises(BackchannelError) as err:
+        await provider.identity_from_assertion(token)
+    assert err.value.code == "backchannel_replayed"
+
+
+@pytest.mark.asyncio
+async def test_a_replay_store_failure_refuses_the_login(monkeypatch):
+    """"We could not check for a replay" has no floor under it, so it
+    fails closed — an outage, never a free pass."""
+    class _BrokenStore:
+        async def record(self, key, exp):
+            raise RuntimeError("store down")
+
+    _routes(monkeypatch)
+    provider = BackchannelProvider(_settings(), replay_cache=_BrokenStore())
+    with pytest.raises(BackchannelUnavailable):
+        await provider.identity_from_assertion(_assertion())
+
+
+@pytest.mark.asyncio
+async def test_no_refusal_quotes_the_assertion(monkeypatch):
+    _routes(monkeypatch)
+    bad = _assertion(key=_OTHER_KEY)
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(_settings()).identity_from_assertion(bad)
+    assert bad.split(".")[1] not in str(err.value)
+
+
+# ── configuration refusals ───────────────────────────────────────────
+
+@pytest.mark.parametrize("over,needle", [
+    (dict(browser_exchange_url=""), "browser_exchange_url"),
+    (dict(jwks_url=""), "jwks_url"),
+    (dict(browser_exchange_method="DELETE"), "browser_exchange_method"),
+    (dict(authenticate_url="https://sso/x",
+          authenticate_token_path="token"), "authenticate_token_path"),
+    (dict(liveness_url="https://gw/validate"), "liveness_url"),
+])
+def test_impossible_browser_mode_rows_are_refused(over, needle):
+    with pytest.raises(BackchannelConfigError, match=needle):
+        validate_settings(_settings(**over))
+
+
+def test_browser_mode_needs_no_server_leg():
+    """The whole point: no gateway_url, no token_source_key, and the row
+    still builds."""
+    validate_settings(_settings())
+
+
+# ── the session is bounded by the corporate token ────────────────────
+
+def _service(store, killed=None):
+    from backend.auth_service.service import LocalIdentityService
+
+    async def _killer(uid):
+        (killed if killed is not None else []).append(uid)
+
+    return LocalIdentityService(
+        session_factory=_session_factory,
+        user_repo=_StubUserRepo(),
+        user_identity_repo=_StubUserIdentityRepo(has_identity=True),
+        refresh_store_factory=lambda s: store,
+        session_killer=_killer,
+    )
+
+
+async def _minted(store, *, idp_exp):
+    auth_time = int(time.time()) - 60
+    token, claims = token_module.create_refresh_token(
+        user_id="usr_1", family_id="fam1", auth_time=auth_time,
+        idp_exp=idp_exp,
+    )
+    await store.record_mint(
+        jti=claims.jti, family_id="fam1", user_id="usr_1",
+        auth_time=auth_time, mint_ms=claims.mint_ms,
+        expires_at_iso="2099-01-01T00:00:00+00:00",
+        idp_provider_id=None, idp_checked_at=None,
+    )
+    return token, claims
+
+
+@pytest.mark.asyncio
+async def test_a_live_upstream_token_lets_the_refresh_through():
+    store = InMemoryRefreshStore()
+    token, _ = await _minted(store, idp_exp=int(time.time()) + 3600)
+    user, tokens = await _service(store).refresh(token, ambient_cookies={})
+    assert user.id == "usr_1"
+    # And the successor still carries the bound — rotation must not be a
+    # way to shed it.
+    successor = token_module.decode_refresh_token(tokens.refresh_token)
+    assert successor.idp_exp is not None
+
+
+@pytest.mark.asyncio
+async def test_an_expired_upstream_token_ends_the_session():
+    """The corporate token expired between renewals. The next refresh
+    ends the family — everywhere — and answers with the reauth envelope
+    the silent re-sign-in keys on."""
+    killed: list = []
+    store = InMemoryRefreshStore()
+    token, claims = await _minted(store, idp_exp=int(time.time()) - 10)
+
+    with pytest.raises(SsoReauthRequired):
+        await _service(store, killed).refresh(token, ambient_cookies={})
+    assert killed == ["usr_1"]
+    assert store.revoked_family == claims.family_id
+
+
+@pytest.mark.asyncio
+async def test_a_session_without_the_claim_is_untouched():
+    """Server-mode and OIDC sessions carry no idp_exp; nothing about
+    their refresh moves."""
+    store = InMemoryRefreshStore()
+    token, _ = await _minted(store, idp_exp=None)
+    user, _tokens = await _service(store).refresh(token, ambient_cookies={})
+    assert user.id == "usr_1"
+
+
+# ── the production builder refuses what it cannot protect ────────────
+
+def _snap(**settings) -> ProviderConfigSnapshot:
+    base = dict(
+        exchange_mode="browser", browser_exchange_url=TRANSLATE,
+        jwks_url=JWKS,
+    )
+    base.update(settings)
+    return ProviderConfigSnapshot(
+        id="idp_bc", slug="corp", display_name="Corp", kind="backchannel",
+        enabled=True, priority=100, settings=base, claim_mapping={},
+        linking_policy="strict", button_label=None, button_icon=None,
+    )
+
+
+def test_prod_without_a_shared_store_refuses_browser_rows():
+    builder = backchannel_builder_with_replay_cache(
+        build_backchannel_provider, None, True,
+    )
+    with pytest.raises(RuntimeError, match="single-use"):
+        builder(_snap())
+
+
+def test_prod_with_a_shared_store_serves_them():
+    class _Store:
+        async def record(self, key, exp):
+            return True
+
+    builder = backchannel_builder_with_replay_cache(
+        build_backchannel_provider, _Store(), True,
+    )
+    assert isinstance(builder(_snap()), BackchannelProvider)
+
+
+def test_server_rows_are_served_regardless():
+    """Their tokens are redeemed at the gateway — its own replay
+    defence — so the store requirement does not apply."""
+    builder = backchannel_builder_with_replay_cache(
+        build_backchannel_provider, None, True,
+    )
+    provider = builder(_snap(
+        exchange_mode="server", browser_exchange_url="", jwks_url="",
+        token_source_key="corp_session",
+        gateway_url="https://gw.corp.example/redeem",
+    ))
+    assert isinstance(provider, BackchannelProvider)
+
+
+# ── the routes ───────────────────────────────────────────────────────
+
+async def _make_row(db_session, *, lifecycle="live", **over):
+    settings = dict(
+        exchange_mode="browser",
+        browser_exchange_url=TRANSLATE,
+        browser_exchange_method="GET",
+        browser_exchange_headers={"X-App-Id": "app-1"},
+        jwks_url=JWKS,
+        gateway_headers={"X-App-Secret": "s3cr3t"},
+        exchange_headers={"X-Other-Secret": "als0-s3cret"},
+    )
+    settings.update(over)
+    row = await idp_provider_repo.create_provider(
+        db_session, slug="corp-browser", display_name="Corporate (browser)",
+        kind="backchannel", settings=settings, claim_mapping={},
+        linking_policy="strict",
+    )
+    if lifecycle == "live":
+        await idp_provider_repo.publish_provider(db_session, row.id)
+    await db_session.commit()
+    return row
+
+
+@pytest.mark.asyncio
+async def test_a_posted_assertion_signs_in_and_links_by_email(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    from backend.app.db.models import UserORM
+    from sqlalchemy import select
+
+    _routes(monkeypatch)
+    await _make_row(db_session)
+
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _assertion()},
+    )
+    assert resp.status_code == 200, resp.text
+    assert "nx_access" in resp.headers.get("set-cookie", "")
+    row = (await db_session.execute(
+        select(UserORM).where(UserORM.email == "ada.lovelace@corporate.com"),
+    )).scalar_one()
+    assert row.first_name == "Ada"
+
+
+@pytest.mark.asyncio
+async def test_the_route_burns_the_assertion_across_requests(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The conftest registry rebuilds the provider per request
+    (ttl_seconds=0), so this only holds when the burn lives in a store
+    that outlives the provider instance — which is exactly what
+    production binds. A per-instance cache would pass the provider test
+    above and still fail here."""
+    class _Shared:
+        def __init__(self):
+            self.seen: set[str] = set()
+
+        async def record(self, key, exp):
+            if key in self.seen:
+                return False
+            self.seen.add(key)
+            return True
+
+    shared = _Shared()
+    from backend.auth_service.providers import PROVIDER_BUILDERS
+
+    def _wired(snap, **kw):
+        kw.pop("replay_cache", None)
+        return build_backchannel_provider(snap, replay_cache=shared, **kw)
+
+    monkeypatch.setitem(PROVIDER_BUILDERS, "backchannel", _wired)
+
+    _routes(monkeypatch)
+    await _make_row(db_session)
+    token = _assertion()
+
+    first = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel", json={"assertion": token},
+    )
+    assert first.status_code == 200, first.text
+    second = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel", json={"assertion": token},
+    )
+    assert second.status_code == 401
+    assert second.json()["detail"]["error"] == "backchannel_replayed"
+
+
+@pytest.mark.asyncio
+async def test_the_assertion_shape_is_refused_on_a_server_row(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    _routes(monkeypatch)
+    await _make_row(
+        db_session,
+        exchange_mode="server", browser_exchange_url="", jwks_url="",
+        browser_exchange_headers={},
+        token_source_key="corp_session",
+        gateway_url="https://gw.corp.example/redeem",
+    )
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _assertion()},
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_both_shapes_at_once_is_a_422(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    _routes(monkeypatch)
+    await _make_row(db_session)
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _assertion(), "handle": "h"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_the_redirect_flow_refuses_browser_rows(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """A bare navigation cannot complete this shape — no server-readable
+    cookie exists — so it fails the standard sso_error way instead of
+    pretending to look for one."""
+    _routes(monkeypatch)
+    await _make_row(db_session)
+    resp = await test_client.get(
+        "/api/v1/auth/corp-browser/login?next=/dashboard",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "sso_error=1" in resp.headers["location"]
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_verifies_without_writing(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    from backend.auth_service.core.tokens import create_dryrun_token
+
+    _routes(monkeypatch)
+    row = await _make_row(db_session, lifecycle="draft")
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _assertion()},
+        cookies={"nx_dryrun": create_dryrun_token(
+            admin_id="u-admin", provider_id=row.id,
+        )},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("dryRun") is True
+    assert "nx_access" not in resp.headers.get("set-cookie", "")
+
+
+# ── what the browser is told ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_browser_rows_publish_exactly_their_public_family(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """Four browserExchange aliases — plus the trigger family when one
+    is configured — and not one server-side fact. Checked by iterating
+    the stored settings, so the next secret someone adds cannot leak by
+    default."""
+    _routes(monkeypatch)
+    await _make_row(db_session)
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-browser")
+    assert set(entry.get("config", {})) == {
+        "browserExchangeUrl", "browserExchangeMethod",
+        "browserExchangeHeaders",
+    }
+    body = resp.text
+    assert "s3cr3t" not in body
+    assert "als0-s3cret" not in body
+    assert "jwks" not in body.lower()
+
+
+@pytest.mark.asyncio
+async def test_server_rows_publish_none_of_the_browser_family(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    _routes(monkeypatch)
+    await _make_row(
+        db_session,
+        exchange_mode="server", browser_exchange_url="", jwks_url="",
+        browser_exchange_headers={},
+        token_source_key="corp_session",
+        gateway_url="https://gw.corp.example/redeem",
+    )
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-browser")
+    assert "browserExchange" not in str(entry.get("config", {}))

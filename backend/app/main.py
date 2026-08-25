@@ -345,6 +345,36 @@ def profile_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool)
     return _build
 
 
+def backchannel_builder_with_replay_cache(
+    base_builder, replay_cache, is_prod: bool,
+):
+    """Wrap the back-channel builder so it binds the shared replay cache.
+
+    Only browser-exchange rows need it: their assertion is delivered by
+    the browser and enforced single-use, and without a shared store that
+    enforcement is a process-local dict the registry throws away every
+    60 seconds. Server-mode rows never touch the cache — their tokens
+    are redeemed against the gateway, which is its own replay defence —
+    so they are served regardless, same as unsigned custom_profile rows.
+    """
+
+    def _build(snap, **kw):
+        browser = str(
+            (snap.settings or {}).get("exchange_mode") or "server"
+        ).strip().lower() == "browser"
+        if replay_cache is None and is_prod and browser:
+            raise RuntimeError(
+                f"backchannel provider {snap.slug!r} cannot be served: "
+                "the revocation store is unavailable, so a browser-"
+                "delivered assertion cannot be enforced single-use and a "
+                "copied one would be replayable for its whole lifetime. "
+                "Fix Redis/Memorystore connectivity."
+            )
+        return base_builder(snap, replay_cache=replay_cache, **kw)
+
+    return _build
+
+
 def saml_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
     """Wrap the SAML provider builder so it binds the shared replay cache.
 
@@ -663,12 +693,28 @@ async def lifespan(_app: FastAPI):
 
     _builders = dict(PROVIDER_BUILDERS)
     if "backchannel" in _builders:
+        from backend.app.services.revocation_service import (
+            get_backchannel_replay_cache,
+        )
         _base_backchannel = _builders["backchannel"]
 
-        def _backchannel_builder(snap, _base=_base_backchannel):
-            return _base(snap, allowed_hosts=_allowed_backchannel_hosts)
+        def _backchannel_builder(snap, _base=_base_backchannel, **kw):
+            return _base(
+                snap, allowed_hosts=_allowed_backchannel_hosts, **kw,
+            )
 
-        _builders["backchannel"] = _backchannel_builder
+        _bc_replay = get_backchannel_replay_cache()
+        _bc_prod = _is_production()
+        if _bc_replay is None and not _bc_prod:
+            logger.warning(
+                "Back-channel assertion replay cache is process-local (no "
+                "shared revocation store). A browser-delivered assertion "
+                "could be replayed by any worker that has not seen it. "
+                "Never deploy this.",
+            )
+        _builders["backchannel"] = backchannel_builder_with_replay_cache(
+            _backchannel_builder, _bc_replay, _bc_prod,
+        )
     # SAML assertion replay defence. ``SamlProvider`` has always called a
     # replay cache; until now nothing ever handed it one, so it fell back
     # to a process-local dict that the registry then threw away every 60

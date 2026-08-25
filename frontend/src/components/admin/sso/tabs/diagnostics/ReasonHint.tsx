@@ -85,6 +85,13 @@ const REASONS: Record<string, Reason> = {
             + 'theirs to investigate. Repeat occurrences mean their '
             + 'token lifetime is shorter than the call is slow.',
     },
+    backchannel_replayed: {
+        what: 'A browser-delivered sign-in token was presented a second '
+            + 'time. Each one signs in at most once.',
+        next: 'Once is usually a double-submitted sign-in and harmless. '
+            + 'A pattern of these is someone replaying captured tokens — '
+            + 'treat it as an incident and involve the gateway team.',
+    },
     backchannel_failed: {
         what: 'The back-channel sign-in failed for a reason we have not '
             + 'catalogued.',

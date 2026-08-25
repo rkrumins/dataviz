@@ -15,10 +15,7 @@
  * host, must land on a working form with a reason — never in a loop, and
  * never mid-navigation to a sign-in that was never going to work.
  */
-import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
     leavesForIdp,

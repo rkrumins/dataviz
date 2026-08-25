@@ -70,16 +70,23 @@ export interface SsoProviderSummary {
      *  ``custom_profile``: ``source`` always, plus ``sourceKey`` when the
      *  payload lives in browser storage and the client has to read it.
      *
-     *  ``backchannel``: the four ``authenticate*`` keys, and only when a
-     *  sign-in trigger is configured. The server whitelists these by
-     *  name — the settings blob they come from also holds both endpoint
-     *  URLs and their credentials, none of which appear here. */
+     *  ``backchannel``: the four ``authenticate*`` keys when a sign-in
+     *  trigger is configured, and the four ``browserExchange*`` keys
+     *  when the row's exchange runs in the browser — that is the
+     *  translate call the browser itself must make, so its shape is
+     *  public by design. The server whitelists all of these by name —
+     *  the settings blob they come from also holds the server-side
+     *  endpoint URLs and their credentials, none of which appear here. */
     config?: {
         source?: string
         authenticateUrl?: string
         authenticateMethod?: string
         authenticateHeaders?: Record<string, string>
         authenticateTokenPath?: string
+        browserExchangeUrl?: string
+        browserExchangeMethod?: string
+        browserExchangeHeaders?: Record<string, string>
+        browserExchangeTokenPath?: string
         sourceKey?: string
     }
 }
@@ -243,22 +250,108 @@ function resolvePath(value: unknown, path: string): unknown {
     return cur
 }
 
-/** Complete a back-channel sign-in with a handle the trigger returned. */
-export async function loginWithBackchannelHandle(
-    slug: string, handle: string,
-): Promise<void> {
+/** True when the row's exchange runs in the browser: the corporate
+ *  cookie is scoped to the SSO host, so only this browser's cookie jar
+ *  can present it to the translate endpoint. The server publishes the
+ *  call's shape for exactly this case. */
+export function needsBrowserExchange(p: SsoProviderSummary): boolean {
+    return Boolean(p.config?.browserExchangeUrl)
+}
+
+/** Run the browser-side translate call and return the JWT it answered
+ *  with.
+ *
+ *  Same posture as the authenticate trigger: raw fetch (cross-origin,
+ *  no CSRF, no refresh-on-401), `credentials: 'include'` so the
+ *  corporate cookie rides along, and a timeout of our own. The token is
+ *  read from `browserExchangeTokenPath`, or the whole body when the
+ *  path is blank — the bare `application/jwt` shape. Nothing here
+ *  decodes it; the server verifies it against the connection's JWKS. */
+export async function runBrowserExchange(
+    p: SsoProviderSummary,
+): Promise<string> {
+    const cfg = p.config ?? {}
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
+    let res: Response
+    try {
+        res = await fetch(cfg.browserExchangeUrl as string, {
+            method: cfg.browserExchangeMethod || 'GET',
+            headers: cfg.browserExchangeHeaders ?? {},
+            credentials: 'include',
+            signal: abort.signal,
+        })
+    } catch (err) {
+        if (abort.signal.aborted) {
+            throw new Error('The sign-in service did not answer in time.')
+        }
+        throw err
+    } finally {
+        clearTimeout(timer)
+    }
+    if (!res.ok) {
+        throw new Error(`The sign-in service answered ${res.status}.`)
+    }
+
+    const path = cfg.browserExchangeTokenPath || ''
+    let token: unknown
+    if (path) {
+        let body: unknown
+        try {
+            body = await res.json()
+        } catch {
+            throw new Error('The sign-in service did not return JSON.')
+        }
+        token = resolvePath(body, path)
+    } else {
+        token = (await res.text()).trim()
+        // A translate endpoint answering JSON with a blank path is a
+        // configuration mismatch; a quoted string still reads cleanly.
+        if (typeof token === 'string' && token.startsWith('"')) {
+            try { token = JSON.parse(token) } catch { /* keep the text */ }
+        }
+    }
+    if (typeof token !== 'string' || !token) {
+        throw new Error(
+            path
+                ? `The sign-in service returned no value at "${path}".`
+                : 'The sign-in service returned an empty reply.',
+        )
+    }
+    return token
+}
+
+/** Complete a back-channel sign-in. The body picks the shape: a handle
+ *  from the trigger, an assertion from the browser exchange, or nothing
+ *  at all — the server-mode JSON entry that reads the ambient cookie
+ *  off this very request. Returns the session payload so callers can
+ *  hydrate state without a second round trip. */
+export async function loginWithBackchannel(
+    slug: string,
+    body: { handle?: string; assertion?: string },
+    opts: { skipAuthRefresh?: boolean } = {},
+): Promise<SessionResponse> {
     const res = await fetchWithTimeout(
         `/api/v1/auth/${encodeURIComponent(slug)}/backchannel`,
         {
             method: 'POST',
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ handle }),
+            body: JSON.stringify(body),
+            skipAuthRefresh: opts.skipAuthRefresh ?? false,
         },
     )
     if (!res.ok) {
         throw new Error('Signing in with that session did not work.')
     }
+    return res.json() as Promise<SessionResponse>
+}
+
+/** Complete a back-channel sign-in with a handle the trigger returned. */
+export async function loginWithBackchannelHandle(
+    slug: string, handle: string,
+): Promise<void> {
+    await loginWithBackchannel(slug, { handle })
 }
 
 /** Read a custom-profile payload out of the browser store the provider

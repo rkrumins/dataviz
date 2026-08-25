@@ -495,6 +495,10 @@ class LocalIdentityService:
             user_id=claims.sub,
             family_id=claims.family_id,
             auth_time=claims.auth_time,
+            # Family-invariant, like auth_time: the upstream credential's
+            # expiry does not move because we rotated, and dropping it
+            # here would make rotation a way to shed the ceiling.
+            idp_exp=claims.idp_exp,
         )
 
         claims_extra: dict = {}
@@ -571,6 +575,7 @@ class LocalIdentityService:
                     user_id=claims.sub,
                     family_id=claims.family_id,
                     auth_time=auth_time,
+                    idp_exp=claims.idp_exp,
                     jti=outcome.successor.successor_jti,
                     expires_at_epoch=outcome.successor.successor_exp,
                     mint_ms=outcome.successor.successor_mint_ms,
@@ -693,6 +698,43 @@ class LocalIdentityService:
                         "provider_slug": provider_slug,
                         "auth_time": auth_time,
                         "elapsed_seconds": sso_age,
+                    }),
+                )
+
+            # ── Upstream credential ceiling ──────────────────────────
+            # ``idp_exp`` is the corporate token's own expiry, captured
+            # at sign-in by the browser-exchange back-channel shape —
+            # the topology where the server never sees the corporate
+            # session and so can never re-ask about it. It is signed
+            # into our refresh token and propagated unchanged, so
+            # rotation cannot extend it. Past it, the session ends the
+            # way a failed liveness check ends one: the reauth envelope
+            # names the provider, and the sign-in page silently re-runs
+            # the browser flow against the corporate IdP.
+            #
+            # From the claim rather than a server record — unlike
+            # ``auth_time`` above — because our own signature covers it:
+            # nobody holding the cookie can edit it without failing
+            # verification, and it exists only for tokens this
+            # deployment minted with it.
+            if claims.idp_exp is not None and int(time.time()) > claims.idp_exp:
+                provider_slug = await self._latest_identity_slug(session, orm.id)
+                logger.info(
+                    "Upstream credential expired (user=%s, slug=%s, "
+                    "idp_exp=%d)",
+                    orm.id, provider_slug, claims.idp_exp,
+                )
+                raise _RefreshRejected(
+                    SsoReauthRequired(
+                        _build_reauth_url(provider_slug, next_path="/"),
+                        provider=provider_slug or "sso",
+                    ),
+                    kill_sessions_for=orm.id,
+                    audit=("user.sso_session_ended_upstream", {
+                        "user_id": orm.id,
+                        "provider_slug": provider_slug,
+                        "reason": "upstream_token_expired",
+                        "idp_exp": claims.idp_exp,
                     }),
                 )
 
@@ -1134,6 +1176,7 @@ class LocalIdentityService:
             refresh_token = await self._mint_recorded_refresh(
                 session, user_id=orm.id, family_id=None, auth_time=auth_time,
                 idp_provider_id=provider_id,
+                idp_exp=getattr(identity, "upstream_expires_at", None),
             )
 
         user = _orm_to_user(orm, role=_primary_role(roles))
@@ -1464,6 +1507,12 @@ class LocalIdentityService:
             return None
         if not provider.settings.liveness_on_refresh:
             return None
+        if provider.settings.exchange_mode == "browser":
+            # The corporate session never reaches this server in browser
+            # mode, so there is nothing on the request to re-confirm.
+            # The session is bounded instead by ``idp_exp`` — the
+            # corporate token's own expiry, checked on every refresh.
+            return None
         if not provider.settings.token_source_key:
             # Nothing on the request carries the upstream session, so
             # there is nothing to re-confirm. Without this the lookup
@@ -1638,6 +1687,7 @@ class LocalIdentityService:
         family_id: Optional[str],
         auth_time: Optional[int],
         idp_provider_id: Optional[str] = None,
+        idp_exp: Optional[int] = None,
     ) -> str:
         """Mint a refresh token and write the row that makes it usable.
 
@@ -1654,6 +1704,7 @@ class LocalIdentityService:
         """
         token, claims = create_refresh_token(
             user_id=user_id, family_id=family_id, auth_time=auth_time,
+            idp_exp=idp_exp,
         )
         store = self._refresh_store_factory(session)
         await store.record_mint(
