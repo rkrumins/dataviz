@@ -6,11 +6,12 @@ import { useAuthStore } from '@/store/auth'
 import {
     authService,
     leavesForIdp,
-    loginWithBackchannelHandle,
     needsAuthenticateFirst,
+    needsBrowserExchange,
     needsBrowserPayload,
     readBrowserProfile,
     runAuthenticateTrigger,
+    runBrowserExchange,
     type LoginContext,
     type SsoProviderSummary,
 } from '@/services/authService'
@@ -139,14 +140,18 @@ function SsoButtons({
 }) {
     const navigate = useNavigate()
     const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
+    const loginWithBackchannel = useAuthStore((s) => s.loginWithBackchannel)
     const [busySlug, setBusySlug] = useState<string | null>(null)
 
     async function signInViaGateway(p: SsoProviderSummary) {
         onPortalError('')
         setBusySlug(p.slug)
         try {
-            if (await completeGatewaySignIn(p) === 'session') {
+            const body = await gatewaySignInBody(p)
+            if (await loginWithBackchannel(p.slug, body)) {
                 navigate('/', { replace: true })
+            } else {
+                onPortalError(`Could not sign in with ${p.displayName}.`)
             }
         } catch (err) {
             // Say which step failed rather than navigating into a
@@ -233,7 +238,7 @@ function SsoButtons({
                 </p>
             )}
             {(providers ?? []).map((p) => (
-                needsAuthenticateFirst(p) ? (
+                isGatewayProvider(p) ? (
                     <button
                         key={p.id}
                         type="button"
@@ -493,39 +498,42 @@ function AlreadySignedIn({ email }: { email: string }) {
     )
 }
 
-/** Start a back-channel sign-in from the browser.
+/** True for a provider the browser has to drive: a sign-in trigger to
+ *  run, a browser-side exchange to make, or both. Everything else
+ *  starts with a plain navigation. */
+function isGatewayProvider(p: SsoProviderSummary): boolean {
+    return needsAuthenticateFirst(p) || needsBrowserExchange(p)
+}
+
+/** Run the browser's half of a back-channel sign-in and return the body
+ *  to post to `/auth/{slug}/backchannel`.
  *
- *  The first call has to happen here rather than on our server, and that
- *  is not a preference. Where the enterprise uses Kerberos the provider
- *  answers with `401 WWW-Authenticate: Negotiate`, and answering it
- *  needs a Service Ticket from the workstation's OS credential store —
- *  reachable through SSPI or GSS-API, by this browser, on this machine.
- *  Our backend holds no ticket for the user and never can.
+ *  The browser's half cannot move to our server, and that is not a
+ *  preference. Where the enterprise uses Kerberos the provider answers
+ *  `401 WWW-Authenticate: Negotiate`, and answering it needs a Service
+ *  Ticket from the workstation's OS credential store — reachable through
+ *  SSPI or GSS-API, by this browser, on this machine. And where the
+ *  corporate cookie is scoped to the SSO host alone, only this browser's
+ *  cookie jar can present it to the translate endpoint.
  *
- *  Returns `'session'` when a session now exists and the caller should
- *  navigate, or `'redirecting'` when a full-page navigation is already
- *  under way. Throws when the call failed, so the caller can say so.
+ *  Three bodies come back, matching the three configurations: an
+ *  `assertion` from the browser exchange, a `handle` the trigger
+ *  answered with, or `{}` — the trigger set a cookie on a shared domain
+ *  and the server reads it off the POST itself. Throws when a call
+ *  failed, so the caller can say which step.
  */
-async function completeGatewaySignIn(
+async function gatewaySignInBody(
     p: SsoProviderSummary,
-): Promise<'session' | 'redirecting'> {
-    const handle = await runAuthenticateTrigger(p)
-    if (handle) {
-        // The trigger answered with a handle rather than setting a
-        // cookie. Post it; the server redeems it against the provider's
-        // own gateway, which is what makes accepting it from a browser
-        // sound — a value somebody invented does not survive that call.
-        await loginWithBackchannelHandle(p.slug, handle)
-        return 'session'
+): Promise<{ handle?: string; assertion?: string }> {
+    if (needsBrowserExchange(p)) {
+        // The trigger (when present) exists to establish the corporate
+        // session; the exchange then spends it. Browser-mode rows never
+        // configure the handle shape, so its return is not consulted.
+        if (needsAuthenticateFirst(p)) await runAuthenticateTrigger(p)
+        return { assertion: await runBrowserExchange(p) }
     }
-    // It set a cookie instead, on a domain our backend shares. A plain
-    // navigation finishes the job: the cookie rides along and the two
-    // server-side legs run.
-    window.location.assign(
-        `/api/v1/auth/${encodeURIComponent(p.slug)}/login`
-        + `?next=${encodeURIComponent('/dashboard')}`,
-    )
-    return 'redirecting'
+    const handle = await runAuthenticateTrigger(p)
+    return handle ? { handle } : {}
 }
 
 
@@ -560,7 +568,7 @@ export function LoginPage() {
 
     const {
         login, error, clearError, isLoading, isAuthenticated, status, user,
-        loginWithBrowserProfile,
+        loginWithBrowserProfile, loginWithBackchannel,
     } = useAuthStore()
 
     // The page's shape is a function of the platform posture, not a fixed
@@ -606,12 +614,12 @@ export function LoginPage() {
         if (isAuthenticated || autoPortalAlreadyTried()) return
 
         const candidates = providers.filter(
-            (p) => needsBrowserPayload(p) || needsAuthenticateFirst(p),
+            (p) => needsBrowserPayload(p) || isGatewayProvider(p),
         )
         if (candidates.length !== 1) return
         const candidate = candidates[0]
 
-        if (needsAuthenticateFirst(candidate)) {
+        if (isGatewayProvider(candidate)) {
             autoAttempted.current = true
             markAutoPortalTried()
             // Silent: a failure here is expected on a machine outside
@@ -619,9 +627,10 @@ export function LoginPage() {
             // answer Negotiate for that host. Those users have a normal
             // form in front of them and a button that will tell them
             // what went wrong if they press it.
-            void completeGatewaySignIn(candidate)
-                .then((outcome) => {
-                    if (outcome === 'session') navigate('/', { replace: true })
+            void gatewaySignInBody(candidate)
+                .then((body) => loginWithBackchannel(candidate.slug, body))
+                .then((ok) => {
+                    if (ok) navigate('/', { replace: true })
                 })
                 .catch(() => { /* fall through to the form */ })
             return
@@ -635,7 +644,8 @@ export function LoginPage() {
         void loginWithBrowserProfile(candidate.slug, payload).then((ok) => {
             if (ok) navigate('/', { replace: true })
         })
-    }, [providers, isAuthenticated, loginWithBrowserProfile, navigate])
+    }, [providers, isAuthenticated, loginWithBrowserProfile,
+        loginWithBackchannel, navigate])
 
     // Read ``?error_code=...&email=...`` from the SSO failure redirect
     // path. The collision modal is the most user-actionable case; other

@@ -380,6 +380,46 @@ export const ssoAdminService = {
         )
     },
 
+    /** Complete a back-channel rehearsal inline — the shapes that have
+     *  nothing for an opened tab to carry (a handle, a browser-mode
+     *  assertion). Call after ``startDryRun`` so the marker cookie rides
+     *  along; the server answers the would-be outcome and writes
+     *  nothing. Returns a line to show the operator either way — the
+     *  verdict of a rehearsal is a result, not an error. */
+    async rehearseBackchannel(
+        slug: string, body: { handle?: string; assertion?: string },
+    ): Promise<{ ok: boolean; line: string }> {
+        const res = await fetchWithTimeout(
+            `/api/v1/auth/${encodeURIComponent(slug)}/backchannel`,
+            {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                skipAuthRefresh: true,
+            },
+        )
+        const payload = await res.json().catch(() => null)
+        if (!res.ok) {
+            return {
+                ok: false,
+                line: `Rehearsal failed: ${
+                    payload?.detail?.error ?? res.status
+                }`,
+            }
+        }
+        const outcome = payload?.outcome
+        if (!outcome) {
+            return { ok: true, line: 'Rehearsal completed, but reported nothing.' }
+        }
+        return {
+            ok: true,
+            line: `Rehearsal: would sign in as ${
+                outcome.email ?? outcome.externalId ?? 'an unnamed identity'
+            } (${outcome.action ?? 'no action recorded'}).`,
+        }
+    },
+
     /** The most recent assertion a provider sent, for mapping against
      *  reality rather than a hand-typed sample. 404s until one is captured. */
     lastAssertion(id: string): Promise<{ claims: Record<string, unknown>; capturedAt: string }> {

@@ -270,14 +270,31 @@ export function needsBrowserExchange(p: SsoProviderSummary): boolean {
 export async function runBrowserExchange(
     p: SsoProviderSummary,
 ): Promise<string> {
-    const cfg = p.config ?? {}
+    return runBrowserExchangeCall({
+        url: p.config?.browserExchangeUrl as string,
+        method: p.config?.browserExchangeMethod as string,
+        headers: p.config?.browserExchangeHeaders,
+        tokenPath: p.config?.browserExchangeTokenPath as string,
+    })
+}
+
+/** The same call, from a provider's raw settings rather than its public
+ *  config — the admin rehearsal surfaces hold the settings blob, and
+ *  rehearsing a browser-mode row means making the very call the sign-in
+ *  page would make. Same call, two callers, one implementation. */
+export async function runBrowserExchangeCall(cfg: {
+    url?: string
+    method?: string
+    headers?: Record<string, string>
+    tokenPath?: string
+}): Promise<string> {
     const abort = new AbortController()
     const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
     let res: Response
     try {
-        res = await fetch(cfg.browserExchangeUrl as string, {
-            method: cfg.browserExchangeMethod || 'GET',
-            headers: cfg.browserExchangeHeaders ?? {},
+        res = await fetch(cfg.url as string, {
+            method: cfg.method || 'GET',
+            headers: cfg.headers ?? {},
             credentials: 'include',
             signal: abort.signal,
         })
@@ -293,7 +310,7 @@ export async function runBrowserExchange(
         throw new Error(`The sign-in service answered ${res.status}.`)
     }
 
-    const path = cfg.browserExchangeTokenPath || ''
+    const path = cfg.tokenPath || ''
     let token: unknown
     if (path) {
         let body: unknown

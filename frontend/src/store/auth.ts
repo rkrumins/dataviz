@@ -17,6 +17,7 @@
 import { create } from 'zustand'
 import {
     authService,
+    loginWithBackchannel,
     type AuthUser,
     type PermissionClaims,
     type SignUpRequest,
@@ -212,6 +213,14 @@ interface AuthState {
     loginWithBrowserProfile: (
         providerSlug: string, payload: string,
     ) => Promise<boolean>
+    /** Complete a back-channel login — a handle from the sign-in
+     *  trigger, an assertion from the browser exchange, or an empty
+     *  body for the ambient-cookie shape. Same post-login hydration as
+     *  the other logins; skipping it left the user cache, permissions
+     *  and the session-lost latch stale after a gateway sign-in. */
+    loginWithBackchannel: (
+        providerSlug: string, body: { handle?: string; assertion?: string },
+    ) => Promise<boolean>
     signup: (req: SignUpRequest) => Promise<{
         ok: boolean
         message: string
@@ -373,6 +382,27 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             const message = err instanceof Error
                 ? err.message
                 : 'Portal sign-in failed'
+            clearUserCache()
+            set({ ..._unauthenticated, error: message, isLoading: false })
+            return false
+        }
+    },
+
+    loginWithBackchannel: async (providerSlug, body) => {
+        set({ error: null, isLoading: true })
+        resetClaimRecovery()
+        resetSessionLostLatch()
+        try {
+            const { user } = await loginWithBackchannel(providerSlug, body)
+            set({ ..._authenticated(user), error: null, isLoading: false })
+            writeUserCache(user)
+            await hydratePermissions(set)
+            void useNavCatalogueStore.getState().hydrate()
+            return true
+        } catch (err: unknown) {
+            const message = err instanceof Error
+                ? err.message
+                : 'Gateway sign-in failed'
             clearUserCache()
             set({ ..._unauthenticated, error: message, isLoading: false })
             return false

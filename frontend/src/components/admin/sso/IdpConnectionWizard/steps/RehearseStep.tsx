@@ -19,12 +19,20 @@ import { useState } from 'react'
 import { FlaskConical, Loader2, Check, ExternalLink, RefreshCw } from 'lucide-react'
 import { StepColumn, StepHero, StepBlock, Hint } from '@/components/admin/InviteWizard/ui'
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
-import { runAuthenticateCall } from '@/services/authService'
+import {
+    runAuthenticateCall,
+    runBrowserExchangeCall,
+} from '@/services/authService'
 
 export function RehearseStep({
-    provider, rehearsed, onRehearsed, onCreateDraft, saving,
+    provider, kind, rehearsed, onRehearsed, onCreateDraft, saving,
 }: {
     provider: IdpProvider | null
+    /** The preset's kind, known before the draft exists — the checklist
+     *  copy follows it, because promising "the redirect URI is
+     *  registered" about a connection with no redirect URI teaches the
+     *  operator the checklist is decoration. */
+    kind?: string
     rehearsed: boolean
     onRehearsed: () => void
     onCreateDraft: () => Promise<IdpProvider | null>
@@ -32,6 +40,9 @@ export function RehearseStep({
 }) {
     const [starting, setStarting] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    // Inline rehearsals (handle and browser shapes) report here rather
+    // than in a tab we cannot see.
+    const [verdict, setVerdict] = useState<string | null>(null)
 
     async function start() {
         setStarting(true)
@@ -51,29 +62,53 @@ export function RehearseStep({
             // rehearsing a correctly configured gateway failed with
             // nothing to say which part was wrong.
             const st = (row.settings ?? {}) as Record<string, unknown>
+            let handle: string | null = null
             if (
                 row.kind === 'backchannel'
                 && st.authenticate_enabled !== false
                 && String(st.authenticate_url ?? '').trim()
             ) {
-                const handle = await runAuthenticateCall({
+                handle = await runAuthenticateCall({
                     url: String(st.authenticate_url),
                     method: String(st.authenticate_method ?? 'POST'),
                     headers: (st.authenticate_headers ?? {}) as Record<string, string>,
                     tokenPath: String(st.authenticate_token_path ?? ''),
                 })
-                if (handle !== null) {
-                    // The provider answered with a handle rather than
-                    // setting a cookie, so the opened tab would carry
-                    // nothing. Say so plainly instead of opening it.
-                    setError(
-                        'This connection returns its session to the page '
-                        + 'rather than as a cookie, so it is rehearsed from '
-                        + 'the sign-in page rather than here. Publish it as '
-                        + 'a draft and sign in through it.',
-                    )
-                    return
-                }
+            }
+
+            if (
+                row.kind === 'backchannel'
+                && String(st.exchange_mode ?? 'server') === 'browser'
+            ) {
+                // Browser-mode rows: make the very call the sign-in page
+                // would make — this browser holds the corporate session —
+                // and rehearse the answer right here.
+                const assertion = await runBrowserExchangeCall({
+                    url: String(st.browser_exchange_url ?? ''),
+                    method: String(st.browser_exchange_method ?? 'GET'),
+                    headers: (st.browser_exchange_headers ?? {}) as Record<string, string>,
+                    tokenPath: String(st.browser_exchange_token_path ?? ''),
+                })
+                const res = await ssoAdminService.rehearseBackchannel(
+                    row.slug, { assertion },
+                )
+                if (!res.ok) { setError(res.line); return }
+                setVerdict(res.line)
+                onRehearsed()
+                return
+            }
+
+            if (handle !== null) {
+                // The provider answered with a handle rather than setting
+                // a cookie, so an opened tab would carry nothing. Same
+                // dry-run, rehearsed right here instead.
+                const res = await ssoAdminService.rehearseBackchannel(
+                    row.slug, { handle },
+                )
+                if (!res.ok) { setError(res.line); return }
+                setVerdict(res.line)
+                onRehearsed()
+                return
             }
 
             window.open(loginUrl, '_blank', 'noopener')
@@ -101,13 +136,22 @@ export function RehearseStep({
             <StepBlock>
                 <div className="p-4 rounded-xl border border-white/10 bg-white/5">
                     <p className="text-sm text-ink">What this checks</p>
-                    <ul className="mt-2 space-y-1 text-[12px] text-ink-muted">
-                        <li>• The redirect URI is registered and matches exactly</li>
-                        <li>• The signature verifies against their keys</li>
-                        <li>• Clocks agree closely enough</li>
-                        <li>• Your claim mapping resolves a real person</li>
-                        <li>• Which account it would create, link, or refuse</li>
-                    </ul>
+                    {kind === 'backchannel' ? (
+                        <ul className="mt-2 space-y-1 text-[12px] text-ink-muted">
+                            <li>• The gateway is reachable — allowlisted host, no redirects</li>
+                            <li>• The token and user details are where the paths say</li>
+                            <li>• Your claim mapping resolves a real person</li>
+                            <li>• Which account it would create, link, or refuse</li>
+                        </ul>
+                    ) : (
+                        <ul className="mt-2 space-y-1 text-[12px] text-ink-muted">
+                            <li>• The redirect URI is registered and matches exactly</li>
+                            <li>• The signature verifies against their keys</li>
+                            <li>• Clocks agree closely enough</li>
+                            <li>• Your claim mapping resolves a real person</li>
+                            <li>• Which account it would create, link, or refuse</li>
+                        </ul>
+                    )}
                 </div>
 
                 <button
@@ -128,11 +172,11 @@ export function RehearseStep({
                     <div className="mt-3 flex items-start gap-2 p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 text-sm text-emerald-300">
                         <Check className="w-4 h-4 mt-0.5 shrink-0" />
                         <div>
-                            <p>Rehearsal started in a new tab.</p>
+                            <p>{verdict ?? 'Rehearsal started in a new tab.'}</p>
                             <p className="mt-1 text-[11px] text-ink-muted">
-                                Check the result there. If it isn't what you
-                                expected, go back and adjust the mapping — this
-                                connection is still invisible to everyone else.
+                                {verdict
+                                    ? "If that isn't who you expected, go back and adjust the mapping — this connection is still invisible to everyone else."
+                                    : "Check the result there. If it isn't what you expected, go back and adjust the mapping — this connection is still invisible to everyone else."}
                             </p>
                         </div>
                     </div>

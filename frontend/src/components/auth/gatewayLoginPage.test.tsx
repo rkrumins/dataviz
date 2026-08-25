@@ -22,11 +22,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LoginPage } from './LoginPage'
 
 const {
-    loginContext, runAuthenticateTrigger, loginWithBackchannelHandle, navigate,
+    loginContext, runAuthenticateTrigger, runBrowserExchange,
+    storeLoginWithBackchannel, navigate,
 } = vi.hoisted(() => ({
     loginContext: vi.fn(),
     runAuthenticateTrigger: vi.fn(),
-    loginWithBackchannelHandle: vi.fn(),
+    runBrowserExchange: vi.fn(),
+    storeLoginWithBackchannel: vi.fn(),
     navigate: vi.fn(),
 }))
 
@@ -43,7 +45,7 @@ vi.mock('@/services/authService', async () => {
         ...actual,
         authService: { ...actual.authService, loginContext },
         runAuthenticateTrigger,
-        loginWithBackchannelHandle,
+        runBrowserExchange,
     }
 })
 
@@ -52,6 +54,7 @@ vi.mock('@/store/auth', () => ({
         (selector?: (s: unknown) => unknown) => {
             const state = {
                 login: vi.fn(), loginWithBrowserProfile: vi.fn(),
+                loginWithBackchannel: storeLoginWithBackchannel,
                 error: null, clearError: vi.fn(), isLoading: false,
                 isAuthenticated: false, status: 'unauthenticated',
             }
@@ -95,7 +98,8 @@ beforeEach(() => {
         allowLocalLogin: true, emailFirstLogin: false, providers: [GATEWAY],
     })
     runAuthenticateTrigger.mockResolvedValue(null)
-    loginWithBackchannelHandle.mockResolvedValue(undefined)
+    runBrowserExchange.mockResolvedValue('assertion-jwt')
+    storeLoginWithBackchannel.mockResolvedValue(true)
 })
 
 afterEach(() => { vi.restoreAllMocks() })
@@ -110,23 +114,71 @@ describe('silent sign-in', () => {
         await waitFor(() => expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1))
     })
 
-    it('navigates on to finish when the provider set a cookie', async () => {
+    it('completes in-page when the provider set a cookie', async () => {
+        // The trigger minted the corporate cookie on a shared domain; an
+        // empty body tells the server to read it off the POST itself. No
+        // full-page navigation — the recovery path depends on this leg
+        // staying silent.
         renderLogin()
         await waitFor(() => {
-            expect(assign).toHaveBeenCalledWith(
-                expect.stringContaining('/api/v1/auth/corp-gateway/login'),
-            )
+            expect(storeLoginWithBackchannel)
+                .toHaveBeenCalledWith('corp-gateway', {})
         })
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+        expect(assign).not.toHaveBeenCalled()
     })
 
     it('completes in-page when the provider answered with a handle', async () => {
         runAuthenticateTrigger.mockResolvedValue('handle-abc')
         renderLogin()
         await waitFor(() => {
-            expect(loginWithBackchannelHandle)
-                .toHaveBeenCalledWith('corp-gateway', 'handle-abc')
+            expect(storeLoginWithBackchannel)
+                .toHaveBeenCalledWith('corp-gateway', { handle: 'handle-abc' })
         })
         await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+    })
+
+    it('runs the exchange itself when the cookie never reaches us', async () => {
+        // Browser-mode row: the page calls the translate endpoint (the
+        // browser's cookie jar carries the corporate session) and posts
+        // the signed answer. With no trigger configured, none runs.
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: false,
+            providers: [{
+                ...GATEWAY,
+                config: { browserExchangeUrl: 'https://sso.corporate.com/translate' },
+            }],
+        })
+        renderLogin()
+        await waitFor(() => {
+            expect(storeLoginWithBackchannel).toHaveBeenCalledWith(
+                'corp-gateway', { assertion: 'assertion-jwt' },
+            )
+        })
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
+    })
+
+    it('runs the trigger before the exchange when both are configured', async () => {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: false,
+            providers: [{
+                ...GATEWAY,
+                config: {
+                    ...GATEWAY.config,
+                    browserExchangeUrl: 'https://sso.corporate.com/translate',
+                },
+            }],
+        })
+        renderLogin()
+        await waitFor(() => {
+            expect(storeLoginWithBackchannel).toHaveBeenCalledWith(
+                'corp-gateway', { assertion: 'assertion-jwt' },
+            )
+        })
+        expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
+        expect(runAuthenticateTrigger.mock.invocationCallOrder[0])
+            .toBeLessThan(runBrowserExchange.mock.invocationCallOrder[0])
     })
 
     it('tries once per tab, however many times the page renders', async () => {

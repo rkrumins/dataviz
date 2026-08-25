@@ -11,7 +11,10 @@ import {
     type IdpHealth,
     type IdpProvider,
 } from '@/services/ssoAdminService'
-import { runAuthenticateCall } from '@/services/authService'
+import {
+    runAuthenticateCall,
+    runBrowserExchangeCall,
+} from '@/services/authService'
 import { SsoFirstRunHero } from '../SsoFirstRunHero'
 import { IdpProviderCard } from '../IdpProviderCard'
 import { IdpConnectionWizard } from '../IdpConnectionWizard'
@@ -35,6 +38,10 @@ export function ProvidersTab({
     const [rows, setRows] = useState<IdpProvider[]>([])
     const [health, setHealth] = useState<Record<string, IdpHealth>>({})
     const [error, setError] = useState<string | null>(null)
+    // A rehearsal's verdict is a result, not a failure — it gets its own
+    // surface. Rendering "would sign in as ada@…" in the error banner
+    // taught operators that a working connection was broken.
+    const [notice, setNotice] = useState<string | null>(null)
     const [showCreate, setShowCreate] = useState(false)
     const [editingId, setEditingId] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
@@ -116,32 +123,6 @@ export function ProvidersTab({
         })
     }
 
-    /** Complete a rehearsal for the handle shape, which has no cookie
-     *  for an opened tab to carry. Returns a line to show the operator —
-     *  the dry-run's own verdict, not an error. */
-    async function rehearseWithHandle(
-        p: IdpProvider, handle: string,
-    ): Promise<string> {
-        const res = await fetch(
-            `/api/v1/auth/${encodeURIComponent(p.slug)}/backchannel`,
-            {
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ handle }),
-            },
-        )
-        const body = await res.json().catch(() => null)
-        if (!res.ok) {
-            return `Rehearsal failed: ${body?.detail?.error ?? res.status}`
-        }
-        const outcome = body?.outcome
-        if (!outcome) return 'Rehearsal completed, but reported nothing.'
-        return `Rehearsal: would sign in as ${
-            outcome.email ?? outcome.externalId ?? 'an unnamed identity'
-        } (${outcome.action ?? 'no action recorded'}).`
-    }
-
     async function dryRun(p: IdpProvider) {
         if (!confirm(
             `Sign in to ${p.slug} with your own account at that IdP.\n\n` +
@@ -150,8 +131,10 @@ export function ProvidersTab({
             'happened.',
         )) return
         setBusy(true)
+        setNotice(null)
         try {
             const { loginUrl } = await ssoAdminService.startDryRun(p.id)
+            const st = (p.settings ?? {}) as Record<string, unknown>
 
             // A connection whose sign-in starts with a call to the
             // provider has no session until that call is made, and a new
@@ -159,12 +142,34 @@ export function ProvidersTab({
             // tab that failed for a correctly configured gateway, with
             // nothing to say which part was wrong.
             const handle = await runTriggerFor(p)
+
+            if (p.kind === 'backchannel'
+                && String(st.exchange_mode ?? 'server') === 'browser') {
+                // Browser-mode rows: make the very call the sign-in page
+                // would make — this browser holds the corporate cookie —
+                // and rehearse the answer inline.
+                const assertion = await runBrowserExchangeCall({
+                    url: String(st.browser_exchange_url ?? ''),
+                    method: String(st.browser_exchange_method ?? 'GET'),
+                    headers: (st.browser_exchange_headers ?? {}) as Record<string, string>,
+                    tokenPath: String(st.browser_exchange_token_path ?? ''),
+                })
+                const verdict = await ssoAdminService.rehearseBackchannel(
+                    p.slug, { assertion },
+                )
+                ;(verdict.ok ? setNotice : setError)(verdict.line)
+                return
+            }
+
             if (handle !== null) {
                 // The provider answered with a handle rather than setting
                 // a cookie, so there is nothing for the opened tab to
                 // carry. Rehearse it here instead — the same dry-run,
                 // reported inline rather than in a page we cannot see.
-                setError(await rehearseWithHandle(p, handle))
+                const verdict = await ssoAdminService.rehearseBackchannel(
+                    p.slug, { handle },
+                )
+                ;(verdict.ok ? setNotice : setError)(verdict.line)
                 return
             }
 
@@ -204,6 +209,23 @@ export function ProvidersTab({
     return (
         <div className="space-y-4">
             {error && <ErrorBanner message={error} />}
+            {notice && (
+                <div
+                    role="status"
+                    className="flex items-start gap-2 px-3 py-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06]"
+                >
+                    <FlaskConical className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
+                    <p className="text-xs text-ink flex-1 min-w-0">{notice}</p>
+                    <button
+                        type="button"
+                        aria-label="Dismiss rehearsal result"
+                        onClick={() => setNotice(null)}
+                        className="shrink-0 text-ink-muted hover:text-ink"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            )}
 
             {filter === 'drafts' && (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.05]">
