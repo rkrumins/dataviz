@@ -26,6 +26,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 from typing import Any
 from urllib.parse import urlsplit
@@ -33,6 +34,12 @@ from urllib.parse import urlsplit
 import httpx
 
 logger = logging.getLogger(__name__)
+
+#: The shape of a compact JWS: three base64url segments. A transport-level
+#: check only — whether the token verifies is the caller's business. The
+#: signature segment may be empty here because the *shape* of an unsecured
+#: JWT is still this shape; the decode layer refuses ``alg: none``.
+_COMPACT_JWS_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$")
 
 #: Metadata documents are small. A cap stops a hostile or misconfigured
 #: endpoint streaming until the worker runs out of memory.
@@ -258,8 +265,16 @@ async def request_json(
     timeout: float,
     max_bytes: int = MAX_JSON_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
+    accept_jwt: bool = False,
 ) -> Any:
     """Make one guarded credentialed request and return the parsed JSON.
+
+    ``accept_jwt`` widens exactly one refusal: a body that is not JSON
+    but *is* a compact JWS (three base64url segments — the way a corporate
+    token-translation endpoint answers with the token as the whole body)
+    is returned as a string instead of being blocked. Anything else that
+    is not JSON stays an error. A JWT arriving inside JSON needs no flag
+    — it is just a string value the caller resolves a path to.
 
     The helper this module should have had from the start.
     :func:`fetch_metadata` is GET-only, so the one credentialed
@@ -313,7 +328,41 @@ async def request_json(
     try:
         return json.loads(bytes(body))
     except (ValueError, UnicodeDecodeError) as exc:
+        if accept_jwt:
+            try:
+                text = bytes(body).decode("ascii").strip()
+            except UnicodeDecodeError:
+                text = ""
+            if _COMPACT_JWS_RE.fullmatch(text):
+                return text
         # The parse error, not the payload — see the note above.
         raise BlockedOutboundRequest(
             f"{url!r} did not return valid JSON ({type(exc).__name__})."
         ) from exc
+
+
+async def fetch_jwks(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int = MAX_JSON_BYTES,
+    allow_hosts: frozenset[str] | set[str] = frozenset(),
+) -> dict:
+    """GET a JWKS document through the same guards as every other call.
+
+    Exists so nobody reaches for PyJWT's ``PyJWKClient``, which fetches
+    with its own urllib stack — no pre-flight address check, redirects
+    followed, no size cap. The key set decides which signatures verify,
+    so it is fetched with *more* care than an identity response, not
+    less.
+    """
+    doc = await request_json(
+        url, method="GET", timeout=timeout, max_bytes=max_bytes,
+        allow_hosts=allow_hosts,
+    )
+    if not isinstance(doc, dict) or not isinstance(doc.get("keys"), list):
+        raise BlockedOutboundRequest(
+            f"{url!r} did not return a JWKS document (an object with a "
+            "'keys' array)."
+        )
+    return doc
