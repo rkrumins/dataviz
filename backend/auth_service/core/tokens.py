@@ -10,6 +10,7 @@ so a token of one type can never be presented in place of another:
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -36,6 +37,8 @@ from .config import (
 
 _REFRESH_AUDIENCE = f"{JWT_AUDIENCE}:refresh"
 _INVITE_AUDIENCE = f"{JWT_AUDIENCE}:invite"
+
+logger = logging.getLogger(__name__)
 _OIDC_STATE_AUDIENCE = f"{JWT_AUDIENCE}:oidc_state"
 _SAML_STATE_AUDIENCE = f"{JWT_AUDIENCE}:saml_state"
 _MOCK_IDENTITY_AUDIENCE = f"{JWT_AUDIENCE}:mock_identity"
@@ -148,6 +151,31 @@ def _decode(token: str, *, audience: str, verify_exp: bool = True) -> dict:
 
 # ── Access tokens ────────────────────────────────────────────────────
 
+#: Claims a caller may never supply through ``extra``.
+#:
+#: Both mint helpers apply ``payload.update(extra)`` AFTER setting the
+#: security-critical claims, so anything in this set would silently
+#: override them — including ``aud``, which is the only thing keeping a
+#: refresh token from being replayed as an access token. Nothing does
+#: that today (``_resolve_claims`` returns ``sid`` and ``global``), but
+#: that is a property of one caller rather than of the mint, and the
+#: cost of making it a property of the mint is this frozenset.
+_RESERVED_CLAIMS = frozenset({"sub", "aud", "iss", "exp", "iat", "nbf", "jti"})
+
+
+def _safe_extra(extra: dict | None) -> dict:
+    """``extra`` with reserved claims dropped and the drop logged."""
+    if not extra:
+        return {}
+    clean = {k: v for k, v in extra.items() if k not in _RESERVED_CLAIMS}
+    if len(clean) != len(extra):
+        logger.error(
+            "Refusing to let extra claims override %s at mint",
+            sorted(set(extra) & _RESERVED_CLAIMS),
+        )
+    return clean
+
+
 def create_access_token(
     user_id: str,
     email: str,
@@ -165,8 +193,7 @@ def create_access_token(
         "iat": now,
         "exp": now + timedelta(minutes=JWT_EXPIRY_MINUTES),
     }
-    if extra:
-        payload.update(extra)
+    payload.update(_safe_extra(extra))
     return _encode(payload)
 
 
@@ -263,8 +290,13 @@ def create_refresh_token(
     }
     if auth_time is not None:
         payload["auth_time"] = int(auth_time)
-    if extra:
-        payload.update(extra)
+    # ``fam`` and ``mat`` are as load-bearing here as ``aud`` is: the
+    # family id drives reuse detection and the mint instant drives both
+    # the revocation cutoff and the idle ceiling.
+    payload.update({
+        k: v for k, v in _safe_extra(extra).items()
+        if k not in ("fam", "mat")
+    })
     token = _encode(payload)
     claims = RefreshClaims(
         sub=user_id,
@@ -426,9 +458,20 @@ def create_oidc_state_token(
     nonce: str,
     code_verifier: str,
     next_path: str,
+    provider_id: str | None = None,
     expires_in_minutes: int = 10,
 ) -> str:
-    """Sign the in-flight OIDC handshake parameters into a JWT."""
+    """Sign the in-flight OIDC handshake parameters into a JWT.
+
+    ``provider_id`` binds the flow to the provider that started it.
+    There is one ``nx_oidc`` cookie name for every slug, so without it a
+    handshake begun at provider B satisfied provider A's state check —
+    the class RFC 9207 exists to close. Token validation still pins
+    ``iss``/``aud`` to A's configuration, so this is defence in depth
+    rather than a live bypass, but the cheap half of that pair was
+    missing. Optional so a flow cookie minted before this deploy still
+    decodes; the callback treats an absent id as "cannot check".
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "purpose": "oidc_state",
@@ -441,6 +484,8 @@ def create_oidc_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
+    if provider_id is not None:
+        payload["pid"] = provider_id
     return _encode(payload)
 
 
@@ -466,8 +511,24 @@ def create_saml_state_token(
     *,
     relay_state: str,
     next_path: str,
+    provider_id: str | None = None,
+    request_id: str | None = None,
     expires_in_minutes: int = 10,
 ) -> str:
+    """Sign the in-flight SAML handshake state into a JWT.
+
+    ``request_id`` is the ``ID`` of the AuthnRequest we just sent.
+    python3-saml only compares an assertion's ``InResponseTo`` when it
+    is handed that id, and it was never captured — so nothing bound a
+    response to the request that asked for it, and unsolicited
+    IdP-initiated responses were accepted as ordinary logins.
+
+    ``provider_id`` does for SAML what it does for OIDC: one ``nx_saml``
+    cookie name serves every slug, so a flow begun at provider B
+    satisfied provider A's RelayState check.
+
+    Both optional so a cookie minted before this deploy still decodes.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "purpose": "saml_state",
@@ -478,6 +539,10 @@ def create_saml_state_token(
         "iat": now,
         "exp": now + timedelta(minutes=expires_in_minutes),
     }
+    if provider_id is not None:
+        payload["pid"] = provider_id
+    if request_id is not None:
+        payload["rid"] = request_id
     return _encode(payload)
 
 

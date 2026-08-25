@@ -4,7 +4,7 @@
 
 A live register of what is actually wrong with the {brand} platform today.
 
-**Verified against `6f90a63` on 2026-08-25.** Every open item below carries a
+**Verified against `dd17354` on 2026-08-25.** Every open item below carries a
 file and line you can re-check in under a minute. That is the point: the
 previous revision of this document had drifted far enough to assert that the
 repository had no CI pipeline and six test files, while CI was gating every
@@ -49,7 +49,6 @@ quadrantChart
     No metrics or alerting: [0.7, 0.75]
     No load or chaos pass: [0.7, 0.55]
     Dual code paths: [0.55, 0.6]
-    Unbounded graph limits: [0.5, 0.55]
     No graph rate limiting: [0.5, 0.5]
     Per-worker cache isolation: [0.55, 0.35]
     Ontology cache staleness: [0.4, 0.3]
@@ -108,10 +107,13 @@ before a user notices. Two, in order:
 1. **Event-loop lag on the `web` role.** The wedge watchdog is log-only today,
    which means the failure it detects is invisible unless somebody is reading
    logs at the time.
-2. **Redis reachability.** This one has become more load-bearing than the
-   previous revision of this document reflects: revocation, rate-limit
-   counters, and the SAML replay cache all resolve through it, and readiness
-   now depends on a *shared* store rather than a per-worker fallback.
+2. **Redis reachability.** More load-bearing than the previous revision of
+   this document reflected: revocation, rate-limit counters and the SAML
+   replay cache all resolve through it, and `/health/ready` now reports
+   `revocation: shared|in_process` and fails in production on the latter
+   (`backend/app/main.py:2728`). A Redis outage is now a readiness failure
+   rather than a silent degradation, which is the correct trade and a real
+   change in how much this dependency matters.
 
 Then the exporter and the rest: per-provider reachability, consumer-group lag,
 DB pool saturation, Redis memory and eviction, worker fleet size.
@@ -159,26 +161,15 @@ anything to migrate.
 
 ## 2. Medium — plan these
 
-### 2.1 Eight graph endpoints take an unbounded `limit`
-
-**Evidence:** `backend/app/api/v1/endpoints/graph.py` lines 1321, 1346, 1632,
-1702, 1723, 1735, 1747, 1759 — each `limit: int = Query(100, ge=1)` with no
-`le=`. Line 1156 is the one that is capped (`le=1000`).
-
-A caller can ask for an arbitrary row count against FalkorDB.
-
-**Status:** a fix is in flight in PR #433, which adds upper bounds to all eight.
-Close this entry when that merges; do not fix it twice.
-
-### 2.2 No rate limiting on graph query endpoints
+### 2.1 No rate limiting on graph query endpoints
 
 **Evidence:** `limiter.limit` appears only in
 `backend/app/api/v1/endpoints/users.py`, `.../auth.py`, and
 `backend/auth_service/api/router.py`. Nothing in `graph.py`.
 
-The expensive endpoints are the unthrottled ones. Pairs with §2.1: a bounded
-page size without a request rate still permits the same total load, just in more
-requests.
+The expensive endpoints are the unthrottled ones. Page size is now bounded
+(Appendix A), but a bounded page without a bounded rate permits the same total
+load in more requests.
 
 **Recommendation.** Apply `slowapi` limits keyed on the **account**, not the
 address. Address keying is near-useless behind a corporate NAT or an ingress —
@@ -187,7 +178,7 @@ an office instead. The auth surface already learned this; see
 `SSO_INTEGRATION.md §10.2`, which documents the per-address / per-account split
 and why `/refresh` keys on the rotation family.
 
-### 2.3 Per-worker `ProviderRegistry` cache isolation
+### 2.2 Per-worker `ProviderRegistry` cache isolation
 
 **Evidence:** `backend/app/registry/provider_registry.py:53` — the cache is
 instance state on a per-process singleton.
@@ -205,7 +196,7 @@ revocation, and have each worker drop its own entry. Roughly thirty lines
 against a rewrite. Move to a shared cache only if cold-start cost is later
 *measured* to matter — which again needs §1.2.
 
-### 2.4 Ontology cache staleness
+### 2.3 Ontology cache staleness
 
 **Evidence:** `backend/app/services/context_engine.py:69` —
 `_ONTOLOGY_CACHE_TTL = 300`.
@@ -214,15 +205,15 @@ Ontologies change rarely and are read constantly, so a five-minute TTL is mostly
 wasted invalidation. But note the standing recommendation contains a
 contradiction worth not repeating: "raise the TTL to an hour **or** move to
 event-based invalidation" are opposite trades. Raising the TTL makes staleness
-worse, and staleness is the complaint in §2.3 one entry above.
+worse, and staleness is the complaint in §2.2 one entry above.
 
-**Recommendation.** Event-based invalidation, using the same mechanism as §2.3 —
+**Recommendation.** Event-based invalidation, using the same mechanism as §2.2 —
 they are the same problem twice. TTL then becomes a backstop and can safely go
 to a day. Do **not** pre-warm on startup: a startup dependency bought for a
 five-minute cache is a bad trade, and it makes boot fail for a reason unrelated
 to boot.
 
-### 2.5 Stats poller has no service boundary and no graceful shutdown
+### 2.4 Stats poller has no service boundary and no graceful shutdown
 
 **Evidence:** no `SIGTERM`/`SIGINT` handling in `backend/app/jobs/`; the poller
 runs as a standalone process sharing `backend.app` imports.
@@ -354,7 +345,7 @@ them only when a change is already touching both trees.
 **Evidence:** `backend/app/services/feature_flags.py` — no cache, no
 change-notification.
 
-Acceptable at current scale. It becomes the same problem as §2.3 and §2.4 at
+Acceptable at current scale. It becomes the same problem as §2.2 and §2.3 at
 higher traffic, and it should be solved the same way rather than separately.
 
 ### 3.5 Control-plane scheduler is not single-flight under HA
@@ -387,7 +378,7 @@ soak test, no shared invalidation. Absent things are easy to see, which is why
 they end up on lists like this one.
 
 The dangerous class is different: **a control that is present, documented, and
-inert.** The security review that produced PR #433 found seven of them. Among
+inert.** The security review merged as `dd17354` found seven of them. Among
 them: a replay cache that was constructed and then never consulted; a lifecycle
 filter applied to the public provider catalog but not to the authentication path
 it was protecting; a revocation probe written inline in one guard and therefore
@@ -407,8 +398,13 @@ fails when it is removed is indistinguishable from a control that is not there.
 This is worth more than any single entry in §1–§3, because it is the only
 practice on this page that finds the defects nobody is looking for.
 
-It is also cheap. The seven above were each found by running the code rather
-than reading it, and each took minutes once the question was asked.
+All seven are fixed, each with a test that fails when the control is removed
+(`backend/tests/test_saml_replay_cache_wired.py` and
+`test_draft_provider_not_live.py` are the two easiest to read). That is the
+shape to copy: the fix is not the deliverable, the failing test is.
+
+It is also cheap. The seven were each found by running the code rather than
+reading it, and each took minutes once the question was asked.
 
 ---
 
@@ -421,11 +417,11 @@ plans that encode calendar time rather than order.
 | Order | Item | Why here |
 |---|---|---|
 | 1 | §1.1 connection-tester SSRF | Live security exposure, small fix, mechanism already written |
-| 2 | §1.2 one alert, then the exporter | Unblocks §1.3, §1.4 and §2.3 — several items below cannot be *decided* without it |
-| 3 | §2.2 graph rate limits | Small, and pairs with the §2.1 caps already in flight |
+| 2 | §1.2 one alert, then the exporter | Unblocks §1.3, §1.4 and §2.2 — several items below cannot be *decided* without it |
+| 3 | §2.1 graph rate limits | Small, and the page-size half is already done |
 | 4 | §1.4 legacy-path counter | Two weeks of data before any migration decision |
 | 5 | §1.3 soak and chaos pass | Needs 2 to be worth running |
-| 6 | §2.3 + §2.4 + §3.4 invalidation | One mechanism, three symptoms — do them together or not at all |
+| 6 | §2.2 + §2.3 + §3.4 invalidation | One mechanism, three symptoms — do them together or not at all |
 | 7 | §1.4 legacy removal | Whatever the counter says |
 | 8 | §3.x | Individually cheap, none urgent |
 
@@ -464,8 +460,8 @@ memory. Delete an entry when it stops being interesting.
 |---|---|---|
 | **JWT in `localStorage` (CRITICAL)** | Sessions ride HttpOnly cookies (`nx_access` / `nx_refresh`); no token is in web storage. Every remaining `localStorage`/`sessionStorage` call site holds UI state — layout widths, dismissals, wizard drafts, recent searches, the feature-flag cache, and a sessionStorage-only user DTO cache wiped on logout. The full recommendation shipped: HttpOnly cookies, `X-CSRF-Token` double-submit, and `credentials: 'include'` on every call. | `backend/auth_service/cookies.py:6`; `frontend/src/services/fetchWithTimeout.ts` |
 | **Credential encryption optional (HIGH)** | `require_encryption_or_plaintext_ok()` raises on the write path when `CREDENTIAL_ENCRYPTION_KEY` is unset and `ENV` is `prod`/`production`, for both `graph_connections` and `idp_providers`. Dev and test behaviour unchanged, with a warning logged. **Still outstanding:** an audit script to find plaintext credentials in a database predating the guard. | `backend/app/db/repositories/connection_repo.py:46` |
-| **Weak default admin password (HIGH)** | The bootstrap still accepts a default, but the account cannot use it: a password published in this repo (`changeme`, `admin123`, `REPLACE_ME`) creates the user with `must_change_password=True`, enforced on every route outside the change-password paths. Admin → Users badges any account still in that state; `backend/scripts/reset_admin_password.py` recovers a locked-out sole admin. **Still outstanding (low):** generate a random password on first run and print it to stdout only, so a published string never lands in a `password_hash` column at all. | `backend/app/main.py:385` |
-| **CORS wildcard on Graph Service (HIGH)** | The standalone `graph-service` no longer exists ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)). Connectivity testing runs in-process under `CORS_ALLOWED_ORIGINS`, with no wildcard default. | `backend/app/main.py:2034` |
+| **Weak default admin password (HIGH)** | The bootstrap still accepts a default, but the account cannot use it: a password published in this repo (`changeme`, `admin123`, `REPLACE_ME`) creates the user with `must_change_password=True`, enforced on every route outside the change-password paths. Admin → Users badges any account still in that state; `backend/scripts/reset_admin_password.py` recovers a locked-out sole admin. **Still outstanding (low):** generate a random password on first run and print it to stdout only, so a published string never lands in a `password_hash` column at all. | `backend/app/main.py:504` |
+| **CORS wildcard on Graph Service (HIGH)** | The standalone `graph-service` no longer exists ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)). Connectivity testing runs in-process under `CORS_ALLOWED_ORIGINS`, with no wildcard default. | `backend/app/main.py:2389` |
 | **SQLite as default database (CRITICAL)** | There is no SQLite branch. Anything that is not an asyncpg Postgres URL is rejected at import time. | `backend/app/db/engine.py:130` |
 | **No schema versioning (CRITICAL)** | Alembic is the source of schema truth, applied by a dedicated `synodic-upgrade` service under a `pg_advisory_lock`. The API process only verifies `alembic_version` is at head; it never mutates schema. | `backend/alembic/versions/`; [DATA_ARCHITECTURE.md §8](DATA_ARCHITECTURE.md) |
 | **No CI/CD pipeline (HIGH)** | Nine workflows gate merges: `backend-tests`, `frontend-tests`, `codeql`, `security-scan`, `alembic-guards`, `schema`, `build-images`, `dependency-review`, `dependabot-auto-merge`. | `.github/workflows/` |
@@ -480,7 +476,7 @@ memory. Delete an entry when it stops being interesting.
 | **Versioning merge field-loss (HIGH)** | `update` is a field-level patch rather than a wholesale replace, so a partial edit no longer truncates the entity at publish. Draft lineage renders through a sparse read-overlay. Change control shipped: in-app revert and restore, the version-control master switch, and a resumable enable-VC bootstrap verified on a 7.7M-entity graph. **Residual (low):** an unreproduced `properties` leak on some nodes that may predate the corrupting commit — reproduce before fixing. | commits `4dd7df4`, `84a467f`; [VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md](https://github.com/rkrumins/dataviz/blob/main/docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md) |
 | **No structured logging / no health checks (MEDIUM)** | `StructuredLoggingMiddleware` emits JSON access logs with `X-Process-Time`; `/health` and `/health/ready` exist. | `backend/app/main.py` |
 | **Growing inline migrations (MEDIUM)** | Superseded by Alembic; `init_db()` no longer carries raw SQL. | see above |
-| **Pagination has no maximum (LOW)** | Capped where it was found — `audit.py` at 500, `freshness.py` at 200 and 2000. The eight graph endpoints are the remainder and are tracked as §2.1. | `backend/app/api/v1/endpoints/audit.py:372` |
+| **Pagination has no maximum (LOW)** | Capped everywhere. `audit.py` at 500, `freshness.py` at 200 and 2000, and all nine graph endpoints now carry an `le=` bound — the last eight closed by `dd17354`. | `backend/app/api/v1/endpoints/audit.py:372`; `.../graph.py` |
 | **`DATA_ARCHITECTURE.md` §6 stale reference (LOW)** | Corrected to `backend/insights_service/`. | — |
 
 ---

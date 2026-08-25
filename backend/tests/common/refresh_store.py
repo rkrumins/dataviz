@@ -87,3 +87,10 @@ class InMemoryRefreshStore:
             r.family_id == family_id and r.revoked_at_iso is not None
             for r in self.records.values()
         )
+
+    async def family_started_ms(self, family_id: str) -> Optional[int]:
+        mints = [
+            r.mint_ms for r in self.records.values()
+            if r.family_id == family_id
+        ]
+        return min(mints) if mints else None

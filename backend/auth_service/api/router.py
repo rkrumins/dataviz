@@ -38,6 +38,7 @@ import os
 import secrets
 import time
 from typing import Callable, Optional
+from urllib.parse import unquote
 
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -76,6 +77,7 @@ from ..cookies import (
 # module stays importable without a signing secret.
 from ..core import config as jwt_config
 from ..core.config import (
+    ALLOWED_HOSTS,
     AUTH_CUSTOM_PROVIDER_ENABLED,
     AUTH_ENVIRONMENT_ID,
     COOKIE_DOMAIN,
@@ -326,12 +328,46 @@ def _public_config(snap) -> dict:
     return out
 
 
+#: Characters a browser folds into a path separator, or that let one
+#: hide inside a value that still looks relative to a prefix test.
+#: Backslash is the one that mattered: the WHATWG URL spec's
+#: relative-slash state treats it as "/", so "/\evil.com" — which
+#: starts with "/" and not "//" — is resolved by every major browser
+#: as https://evil.com/. Tab, newline and carriage return are stripped
+#: from URLs before parsing, so "/<TAB>/evil.com" arrives as
+#: "//evil.com".
+_UNSAFE_NEXT_CHARS = ("\\", "\t", "\n", "\r")
+
+
 def _safe_next(raw: str | None) -> str:
     """Only allow a same-site relative path. Anything that could escape
-    the origin (scheme, host, protocol-relative ``//``) falls back to
-    the app root — an open-redirect guard on the post-login bounce."""
-    if not raw or not raw.startswith("/") or raw.startswith("//"):
+    the origin — a scheme, a host, protocol-relative ``//``, or a
+    backslash the browser will read as ``/`` — falls back to the app
+    root. This is the open-redirect guard on the post-login bounce, and
+    it serves OIDC, the SAML ACS and both custom kinds.
+
+    The value is sealed into the signed flow cookie and consumed by
+    ``_session_redirect`` *after* the session is minted, so a bypass
+    here bounces an **authenticated** user to the attacker's origin.
+    That makes it phishing infrastructure rather than a cosmetic bug,
+    and it is why this rejects rather than sanitises: a value we cannot
+    read as unambiguously relative is not one to guess at.
+
+    One decode pass first, because ``%5c`` and ``%2f%2f`` survive the
+    naive prefix test and are decoded by the browser. Anything still
+    encoded after that pass is left alone — it is a legal path segment.
+    """
+    if not raw or not raw.startswith("/"):
         return "/"
+    try:
+        decoded = unquote(raw)
+    except (UnicodeDecodeError, ValueError):
+        return "/"
+    for candidate in (raw, decoded):
+        if not candidate.startswith("/") or candidate.startswith("//"):
+            return "/"
+        if any(ch in candidate for ch in _UNSAFE_NEXT_CHARS):
+            return "/"
     return raw
 
 
@@ -755,14 +791,39 @@ async def _require_sso_enabled(request: Request) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "SSO is not configured")
 
 
+def _holds_dryrun_cookie(request: Request) -> bool:
+    """Whether this request carries a valid rehearsal cookie.
+
+    ``nx_dryrun`` is signed with the platform key and minted only by the
+    admin-authed ``/admin/idp-providers/{id}/dry-run/start``, so holding
+    one is proof an operator started a rehearsal. That is what entitles
+    a request to resolve an unpublished provider — the whole point of a
+    dry-run is to exercise a draft before publishing it.
+
+    Deliberately coarser than ``_is_dryrun``, which also matches the
+    provider id: that check needs a resolved provider, and this one runs
+    to decide whether resolution is allowed at all. The narrower check
+    still happens afterwards.
+    """
+    raw = read_dryrun_cookie(request)
+    if not raw:
+        return False
+    try:
+        decode_dryrun_token(raw)
+    except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
+        return False
+    return True
+
+
 async def _resolve_provider(slug: str, *, request: Request):
-    """Slug -> provider instance; raises 404 on unknown / disabled OR
-    when the platform master kill-switch is off."""
+    """Slug -> provider instance; raises 404 on unknown / disabled /
+    unpublished, OR when the platform master kill-switch is off."""
     await _require_sso_enabled(request)
+    allow_draft = _holds_dryrun_cookie(request)
     try:
         registry = get_registry()
-        provider_id = await registry.resolve_slug(slug)
-        provider = await registry.get(provider_id)
+        provider_id = await registry.resolve_slug(slug, allow_draft=allow_draft)
+        provider = await registry.get(provider_id, allow_draft=allow_draft)
     except (ProviderNotFound, ProviderDisabled):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
     except RuntimeError as exc:  # registry not configured
@@ -774,13 +835,20 @@ async def _resolve_provider(slug: str, *, request: Request):
     return provider
 
 
-async def _provider_snapshot(slug: str):
+async def _provider_snapshot(slug: str, *, request: Request | None = None):
     """Lookup helper used by the public catalog and by the linking-
-    policy / display_name pull-throughs in callbacks."""
+    policy / display_name pull-throughs in callbacks.
+
+    Takes ``request`` for one reason: the callback handlers call this
+    after ``_resolve_provider`` has already admitted the provider, so if
+    this refused drafts unconditionally it would 404 halfway through
+    every dry-run — the one flow that is supposed to exercise a draft.
+    """
+    allow_draft = bool(request is not None and _holds_dryrun_cookie(request))
     try:
         registry = get_registry()
-        provider_id = await registry.resolve_slug(slug)
-        return await registry.get_snapshot(provider_id)
+        provider_id = await registry.resolve_slug(slug, allow_draft=allow_draft)
+        return await registry.get_snapshot(provider_id, allow_draft=allow_draft)
     except (ProviderNotFound, ProviderDisabled):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider")
 
@@ -852,7 +920,12 @@ async def login(
 async def logout(request: Request, response: Response):
     svc = _identity_service(request)
     refresh = read_refresh_cookie(request)
-    await svc.logout(refresh)
+    # The access cookie carries the ``sid``, and the ``sid`` is what
+    # ``get_current_user`` checks on every request. Without it the
+    # sign-out revokes renewal but not the credential the caller is
+    # holding right now.
+    access = read_access_cookie(request)
+    await svc.logout(refresh, access)
     clear_session_cookies(response, request)
     return _Ack()
 
@@ -1215,16 +1288,52 @@ async def resolve_email_domain(request: Request, body: _ResolveBody):
 
 def _request_https_host(request: Request) -> tuple[str, bool, str]:
     """Extract (host, is_https, path) for python3-saml's request_data
-    builder. Honors X-Forwarded-* headers when running behind a proxy."""
+    builder. Honors X-Forwarded-* headers when running behind a proxy.
+
+    The host is not cosmetic here. python3-saml derives ``current_url``
+    from it and validates the assertion's ``Destination`` and
+    ``SubjectConfirmationData/@Recipient`` against that — so whoever
+    controls this value controls what those checks compare to. And it is
+    attacker-controllable by default: nginx forwards ``Host $host`` from
+    a catch-all ``server_name _``, and gunicorn's
+    ``--forwarded-allow-ips`` filters ``X-Forwarded-For`` but not
+    ``X-Forwarded-Host``. An assertion minted for a different SP can
+    therefore be replayed here with the header set to match its own
+    Destination.
+
+    ``ALLOWED_HOSTS`` closes it: a claimed host outside the list is
+    ignored in favour of the first configured one, so the SAML checks
+    compare against a URL the operator declared rather than one the
+    caller supplied. Unset, behaviour is unchanged — which is why the
+    deployment configs set it.
+    """
     fwd_proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     https = fwd_proto.lower() == "https"
-    host = (
+    claimed = (
         request.headers.get("x-forwarded-host")
         or request.headers.get("host")
         or request.url.hostname or ""
     )
+    host = _allowed_host_or_default(claimed)
     path = request.url.path
     return host, https, path
+
+
+def _allowed_host_or_default(claimed: str) -> str:
+    """*claimed* if this deployment answers to it, else the canonical one."""
+    if not ALLOWED_HOSTS:
+        return claimed
+    # Compare without the port: an allowlist entry is a hostname, and a
+    # deployment reached on a non-default port is still itself.
+    bare = claimed.split(":", 1)[0].strip().lower()
+    if bare in ALLOWED_HOSTS:
+        return claimed
+    logger.warning(
+        "Ignoring unrecognised Host %r; using the configured host instead. "
+        "Add it to ALLOWED_HOSTS if this deployment really answers to it.",
+        claimed,
+    )
+    return ALLOWED_HOSTS[0]
 
 
 @router.get("/{slug}/login")
@@ -1260,6 +1369,7 @@ async def sso_login(
             state=flow["state"], nonce=flow["nonce"],
             code_verifier=flow["code_verifier"],
             next_path=flow["next"],
+            provider_id=provider.provider_id,
         )
         resp = RedirectResponse(auth_url, status_code=status.HTTP_302_FOUND)
         set_oidc_cookie(resp, state_token)
@@ -1268,7 +1378,7 @@ async def sso_login(
     if SamlProvider is not None and isinstance(provider, SamlProvider):
         host, https, path = _request_https_host(request)
         try:
-            redirect_url, relay_state = provider.build_authorization(
+            redirect_url, relay_state, request_id = provider.build_authorization(
                 host=host, https=https, path=path,
                 next_path=next_path, force_authn=force_flag,
             )
@@ -1280,6 +1390,7 @@ async def sso_login(
             )
         state_token = create_saml_state_token(
             relay_state=relay_state, next_path=next_path,
+            provider_id=provider.provider_id, request_id=request_id,
         )
         resp = RedirectResponse(redirect_url, status_code=status.HTTP_302_FOUND)
         set_saml_cookie(resp, state_token)
@@ -1298,6 +1409,27 @@ async def sso_login(
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown SSO provider kind")
 
 
+def _flow_belongs_to(flow: dict, provider) -> bool:
+    """Whether this flow cookie was minted for THIS provider.
+
+    There is one ``nx_oidc`` and one ``nx_saml`` cookie name for every
+    slug, so without this a handshake begun at provider B satisfied
+    provider A's state or RelayState check. Token validation still pins
+    ``iss``/``aud`` to A's configuration, which is why this was a
+    hardening gap rather than a live mixup — but it is the cheap half of
+    the pair RFC 9207 exists to complete.
+
+    A cookie with no ``pid`` predates this and is accepted: it
+    self-drains within the cookie's 10-minute life, and refusing it
+    would sign out every handshake in flight across the deploy for no
+    security gain.
+    """
+    claimed = flow.get("pid")
+    if not claimed:
+        return True
+    return hmac.compare_digest(str(claimed), str(provider.provider_id))
+
+
 # ── OIDC callback ─────────────────────────────────────────────────────
 
 
@@ -1313,7 +1445,7 @@ async def oidc_callback(
     if not isinstance(provider, OidcProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not an OIDC provider")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="OIDC callback",
@@ -1333,6 +1465,8 @@ async def oidc_callback(
 
     if not hmac.compare_digest(str(flow.get("state", "")), state):
         return await _fail("state_mismatch")
+    if not _flow_belongs_to(flow, provider):
+        return await _fail("flow_provider_mismatch")
 
     try:
         identity = await provider.fetch_identity(
@@ -1383,7 +1517,7 @@ async def saml_acs(slug: str, request: Request):
     if SamlProvider is None or not isinstance(provider, SamlProvider):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not a SAML provider")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="SAML ACS",
@@ -1405,12 +1539,19 @@ async def saml_acs(slug: str, request: Request):
         return await _fail(f"bad_flow_cookie:{exc}")
     if not hmac.compare_digest(str(flow.get("rs", "")), str(relay_state or "")):
         return await _fail("relay_state_mismatch")
+    if not _flow_belongs_to(flow, provider):
+        return await _fail("flow_provider_mismatch")
 
     host, https, path = _request_https_host(request)
     try:
-        identity = provider.fetch_identity(
+        identity = await provider.fetch_identity(
             host=host, https=https, path=path,
             post_data={k: v for k, v in form.multi_items()},
+            # Binds the assertion to the AuthnRequest we sent. Absent on
+            # a cookie minted before this shipped, which reads as
+            # "cannot check" rather than "refuse" — the alternative
+            # breaks every handshake in flight across the deploy.
+            expected_request_id=flow.get("rid"),
         )
     except Exception as exc:  # noqa: BLE001
         return await _fail(f"saml_validate:{exc}")
@@ -1447,10 +1588,11 @@ async def saml_sls(slug: str, request: Request):
         return resp
 
     refresh_token = read_refresh_cookie(request)
-    if refresh_token:
+    access_token = read_access_cookie(request)
+    if refresh_token or access_token:
         try:
             svc = _identity_service(request)
-            await svc.logout(refresh_token)
+            await svc.logout(refresh_token, access_token)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1508,7 +1650,7 @@ async def _custom_login_flow(
     if not AUTH_CUSTOM_PROVIDER_ENABLED:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Custom IdP disabled")
     svc = _identity_service(request)
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
     raw = read_mock_identity_cookie(request)
     if not raw:
         from urllib.parse import quote
@@ -1617,7 +1759,7 @@ async def _custom_profile_login_flow(
     Both paths matter for the 24h SSO re-auth bounce, which sends the
     browser to this endpoint with ``force=1``.
     """
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
     source = provider.settings.source
 
     if source in BROWSER_STORAGE_SOURCES:
@@ -1640,7 +1782,7 @@ async def _custom_profile_login_flow(
         return await _fail(f"payload_missing_from_{source}")
 
     try:
-        identity = provider.fetch_identity(raw)
+        identity = await provider.fetch_identity(raw)
     except CustomProfileError as exc:
         return await _fail(f"payload_rejected:{exc}")
 
@@ -1686,10 +1828,10 @@ async def custom_profile_browser_login(
             status.HTTP_404_NOT_FOUND,
             "Provider does not read its profile from browser storage",
         )
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     try:
-        identity = provider.fetch_identity(body.payload)
+        identity = await provider.fetch_identity(body.payload)
     except CustomProfileError as exc:
         # The precise reason is audited, not returned — a caller poking
         # at this endpoint shouldn't learn why their payload failed.

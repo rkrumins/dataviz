@@ -6,6 +6,7 @@ AsyncSession as the first argument (matching the project-wide pattern).
 Queries on users exclude soft-deleted rows (deleted_at IS NULL) by default.
 """
 import json
+import logging
 import secrets
 import hashlib
 from datetime import datetime, timezone, timedelta
@@ -13,6 +14,8 @@ from typing import Optional
 
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from backend.app.db.models import (
     UserORM,
@@ -653,11 +656,28 @@ async def verify_reset_token(session: AsyncSession, token: str) -> Optional[User
     user = result.scalar_one_or_none()
     if user is None:
         return None
-    # Check expiry
-    if user.reset_token_expires_at:
+    # Check expiry. A row with a hash but NO expiry is refused rather
+    # than accepted: the guard used to be ``if expires_at:``, which made
+    # a missing expiry mean "never expires" — the wrong direction for a
+    # credential, and the sort of row a partial write or a hand-edit
+    # produces. ``create_reset_token`` always sets one, so this costs
+    # nothing in normal operation.
+    if not user.reset_token_expires_at:
+        logger.warning(
+            "Refusing reset token for user %s: the row has a token hash "
+            "but no expiry", user.id,
+        )
+        return None
+    try:
         expires = datetime.fromisoformat(user.reset_token_expires_at)
-        if datetime.now(timezone.utc) > expires:
-            return None
+    except ValueError:
+        logger.warning(
+            "Refusing reset token for user %s: unparseable expiry %r",
+            user.id, user.reset_token_expires_at,
+        )
+        return None
+    if datetime.now(timezone.utc) > expires:
+        return None
     return user
 
 

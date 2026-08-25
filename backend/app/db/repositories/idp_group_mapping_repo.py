@@ -40,6 +40,7 @@ from backend.app.db.models import (
     GroupORM,
     IdpGroupRoleMappingORM,
     IdpProviderORM,
+    RoleBindingORM,
     RoleORM,
 )
 from backend.app.db.repositories.idp_provider_repo import decrypt_settings
@@ -191,9 +192,57 @@ async def _validate_role_binding_target(
             )
 
 
+async def roles_granted_by_group(
+    session: AsyncSession, group_id: str,
+) -> set[str]:
+    """Every role a member of ``group_id`` inherits through the group.
+
+    Group bindings resolve into a member's effective permissions exactly
+    as their own bindings do, so "which roles does this group hand out"
+    is the question a group-membership mapping has to answer before it
+    can be judged safe.
+
+    ``expires_at`` is deliberately ignored. An expired binding grants
+    nothing today, but it is a standing row an admin can extend without
+    anything re-checking the SSO mappings that point at the group — so
+    for a guard, a lapsed route to ``super_admin`` is still a route.
+    Refusing an odd configuration is the cheap direction to be wrong in.
+    """
+    rows = (await session.execute(
+        select(RoleBindingORM.role_name).where(
+            RoleBindingORM.subject_type == "group",
+            RoleBindingORM.subject_id == group_id,
+        )
+    )).scalars().all()
+    return {r for r in rows if r}
+
+
 async def _validate_group_membership_target(
-    session: AsyncSession, *, target_group_id: str,
+    session: AsyncSession,
+    *,
+    target_group_id: str,
+    provider_id: Optional[str] = None,
 ) -> None:
+    """Hold a group-membership mapping to the same bar as a role mapping.
+
+    A ``role_binding`` mapping is refused when it names a role we never
+    auto-grant, and again when a platform-admin role comes from a
+    provider that cannot prove who anyone is. A ``group_membership``
+    mapping was checked for none of that — it asked whether the group
+    existed and whether it was flagged protected, and never asked what
+    the group actually *grants*.
+
+    That left the whole guard walkable: point an IdP group at an
+    internal group that holds a global ``super_admin`` binding, and
+    whoever the IdP puts in that group becomes platform admin on their
+    next login. The ``is_protected`` flag did not help — it is read in
+    four places and written in none, so every group reachable through
+    the API has it false.
+
+    The refusal is stated in terms of what the group grants rather than
+    what it is called, because that is the property that matters and the
+    only one an operator cannot accidentally leave unset.
+    """
     if not target_group_id:
         raise MappingValidationError("target_group_id is required for group_membership targets")
     result = await session.execute(
@@ -208,6 +257,22 @@ async def _validate_group_membership_target(
         raise MappingValidationError(
             f"group {target_group_id!r} is marked protected; SSO group "
             f"mappings may not auto-add members to it."
+        )
+
+    granted = await roles_granted_by_group(session, target_group_id)
+    forbidden = sorted(granted & FORBIDDEN_AUTO_ROLES)
+    if forbidden:
+        raise ForbiddenSsoRoleError(
+            f"group '{group.name}' grants {', '.join(forbidden)}, which IdP "
+            "groups may not auto-grant — mapping into it would hand that "
+            "role to whoever your IdP puts in the source group. Grant it "
+            "via the standard admin role-binding flow instead."
+        )
+    # A platform-admin role reached through a group is the same grant as
+    # one named directly, so it answers to the same assurance rule.
+    for role_name in sorted(granted & PLATFORM_ADMIN_ROLES):
+        await _validate_provider_assurance(
+            session, provider_id=provider_id, role_name=role_name,
         )
 
 
@@ -255,7 +320,7 @@ async def create_group_membership_mapping(
 ) -> IdpGroupRoleMappingORM:
     """Create a mapping IdP group -> internal Group membership."""
     await _validate_group_membership_target(
-        session, target_group_id=target_group_id,
+        session, target_group_id=target_group_id, provider_id=provider_id,
     )
     row = IdpGroupRoleMappingORM(
         provider_id=provider_id,

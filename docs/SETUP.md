@@ -246,7 +246,7 @@ All environment variables with their defaults. Set these in `.env.dev` (dev work
 | `JWT_SECRET_KEY_PREVIOUS` | *(empty)* | Retired keys, comma-separated, accepted for verification only. Set during a rotation so live sessions survive it. |
 | `AUTH_ENVIRONMENT_ID` | *(empty)* | Names this deployment (`dev`/`uat`). Scopes session cookie names and the JWT issuer so two environments open in one browser cannot evict each other's session. |
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
-| `JWT_EXPIRY_MINUTES` | `60` | Token lifetime |
+| `JWT_EXPIRY_MINUTES` | `15` | Access-token lifetime, and therefore the revocation latency — permission claims ride in the token, so a role change or forced sign-out reaches a live session only at its next rotation. Startup refuses anything above 15 in prod |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | Bootstrap admin email |
 | `ADMIN_PASSWORD` | `admin123` | Bootstrap admin password (from `.env.example`) |
 

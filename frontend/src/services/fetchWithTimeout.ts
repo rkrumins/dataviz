@@ -272,7 +272,14 @@ async function attemptRefresh(): Promise<{
         if (
           detail?.error === 'sso_reauth_required'
           && typeof detail.login_url === 'string'
+          // `startsWith('/')` alone accepts `//evil.com`, which is a
+          // protocol-relative URL and leaves the origin. The other three
+          // redirect guards in this codebase (`PortalLogin`, and
+          // `_safe_next` on the backend) all pair the two checks; this
+          // one was the odd one out.
           && detail.login_url.startsWith('/')
+          && !detail.login_url.startsWith('//')
+          && !detail.login_url.includes('\\')
         ) {
           // Wipe the cached user DTO before the bounce. The IdP
           // re-auth may resolve to a different account, and we

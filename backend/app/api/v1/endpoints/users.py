@@ -473,30 +473,32 @@ async def _revoke_my_every_session(
 ) -> None:
     """Kill the CALLER's sessions — all three halves.
 
-    ``revoke_subject_sessions`` tombstones the ``sid``s that are live
-    right now; ``revoke_sessions_from_now`` stamps the cutoff that stops
-    a refresh minting a fresh, untombstoned one. Neither is sufficient
-    alone — the first expires with the access token, and the second only
-    bites at the next rotation.
+    The two durable halves live in
+    ``revocation_service.revoke_every_session_for_user`` (tombstone the
+    live ``sid``s, then stamp the cutoff that stops the next rotation
+    minting a fresh one) and are shared with the admin and
+    password-reset paths, which need exactly those two and must not
+    touch the caller's cookies.
 
-    And neither clears the caller's cookies, which is the third half and
-    the one that kept getting forgotten. Leaving them behind hands the
-    browser a full set of session cookies for a session that no longer
-    exists: the SPA keeps believing it is signed in, the login page
-    offers "You're already signed in as …", and reloading re-reads the
-    same cookies and says it again. Both self-service callers — sign out
-    everywhere, and change password — shipped that bug independently.
+    The third half is clearing the caller's cookies, and it is the one
+    that kept getting forgotten. Leaving them behind hands the browser a
+    full set of session cookies for a session that no longer exists: the
+    SPA keeps believing it is signed in, the login page offers "You're
+    already signed in as …", and reloading re-reads the same cookies and
+    says it again. Both self-service callers — sign out everywhere, and
+    change password — shipped that bug independently.
 
     ``response`` and ``request`` are REQUIRED rather than optional so a
     third caller cannot repeat it. Revoking somebody else's sessions is a
-    different operation with a different helper
-    (``revoke_subject_sessions``), and it must not touch the caller's
-    cookies at all.
+    different operation and calls
+    ``revoke_every_session_for_user`` directly — it must not touch the
+    caller's cookies at all.
     """
-    from backend.app.services.revocation_service import revoke_subject_sessions
+    from backend.app.services.revocation_service import (
+        revoke_every_session_for_user,
+    )
 
-    await user_repo.revoke_sessions_from_now(session, user_id)
-    await revoke_subject_sessions("user", user_id, session=session, reason=reason)
+    await revoke_every_session_for_user(user_id, session=session, reason=reason)
     clear_session_cookies(response, request)
 
 
@@ -738,6 +740,19 @@ async def suspend_user(
 
     await user_repo.update_user_status(session, user_id, "suspended")
 
+    # ``validate_session`` re-reads ``status`` per request, so a
+    # suspension already bites on the next call. Revoke anyway, for the
+    # same reason ``change_role`` does: it stamps the refresh cutoff, so
+    # the suspension survives a reactivation without silently handing
+    # back every session the account held beforehand, and it leaves the
+    # ``sid`` index clean rather than stale.
+    from backend.app.services.revocation_service import (
+        revoke_every_session_for_user,
+    )
+    await revoke_every_session_for_user(
+        user_id, session=session, reason="user_suspended",
+    )
+
     await user_repo.create_outbox_event(
         session,
         event_type="user.suspended",
@@ -793,9 +808,53 @@ async def admin_reset_password(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Giving a password to an SSO-only account is a posture change, not
+    # a reset — it removes the disabled-password sentinel that keeps the
+    # user on the IdP path, and with it the org's conditional access and
+    # MFA. Legitimate when an org is retiring SSO, so it is a switch
+    # rather than a refusal; it just has to be asked for.
+    converting_sso_only = not is_password_set(user.password_hash)
+    if converting_sso_only and not body.allow_sso_only_override:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "sso_only_account",
+                "message": (
+                    f"{user.email} signs in through an identity provider and "
+                    "has no password. Setting one lets them sign in around "
+                    "the IdP; pass allowSsoOnlyOverride to do it deliberately."
+                ),
+            },
+        )
+
     _check_password_strength(body.new_password)
     hashed = hash_password(body.new_password)
     await user_repo.update_password(session, user_id, hashed)
+
+    if converting_sso_only:
+        logger.warning(
+            "Admin %s gave a password to SSO-only user %s", admin.id, user_id,
+        )
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.local_login_enabled",
+            payload={
+                "user_id": user_id, "actor": admin.id,
+                "reason": "admin_reset_password_override",
+            },
+        )
+
+    # Same reasoning as the self-service reset: an admin resetting
+    # somebody's password is usually responding to a compromise, and a
+    # reset that leaves the attacker's session live has not remediated
+    # anything. Cookies are deliberately untouched — the caller here is
+    # the admin, not the subject.
+    from backend.app.services.revocation_service import (
+        revoke_every_session_for_user,
+    )
+    await revoke_every_session_for_user(
+        user_id, session=session, reason="password_reset_by_admin",
+    )
 
     await user_repo.create_outbox_event(
         session,

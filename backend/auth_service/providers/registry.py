@@ -47,6 +47,12 @@ class ProviderConfigSnapshot:
     linking_policy: str             # 'strict' | 'allow_verified' | 'manual_only' | 'disabled'
     button_label: Optional[str]
     button_icon: Optional[str]
+    #: 'draft' | 'live'. A draft is configured but not published. The
+    #: public catalog already filters on it; authentication did not,
+    #: which made "not published" mean "not advertised" rather than
+    #: "not usable". Defaulted so a caller that predates the field
+    #: (tests, the env boot-seeder) keeps behaving as before.
+    lifecycle: str = "live"
 
 
 class ProviderConfigLoader(Protocol):
@@ -70,6 +76,21 @@ class ProviderNotFound(LookupError):
 class ProviderDisabled(ProviderNotFound):
     """The provider exists but its ``enabled`` flag is False. Treated
     as "not found" externally to avoid an enumeration oracle."""
+
+
+class ProviderNotPublished(ProviderNotFound):
+    """The provider exists and is enabled, but is still a draft.
+
+    ``lifecycle`` was honoured by the public catalog and by nothing
+    else, so a draft — created by ``POST /admin/idp-providers``, which
+    defaults ``enabled`` to True — was fully live at
+    ``/auth/{slug}/login`` and its callback for anyone who guessed the
+    slug, JIT provisioning included. Rehearsing a draft is what the
+    dry-run flow is for, and that path opts in explicitly.
+
+    Subclasses ``ProviderNotFound`` so routes keep answering 404 and the
+    draft's existence stays private.
+    """
 
 
 # ── Factory protocol ─────────────────────────────────────────────────
@@ -117,23 +138,48 @@ class ProviderRegistry:
 
     # ── Public API ──
 
-    async def get(self, provider_id: str) -> IdentityProvider:
-        """Return the materialised provider for ``provider_id``. Raises
-        :class:`ProviderNotFound` when the row is missing or disabled."""
+    @staticmethod
+    def _assert_usable(snap: ProviderConfigSnapshot, *, allow_draft: bool) -> None:
+        """Both gates on whether a row may authenticate anybody.
+
+        ``enabled`` was always checked here. ``lifecycle`` was not, which
+        is how an unpublished draft came to be reachable at
+        ``/auth/{slug}/login``. They belong together: each is an operator
+        saying "not this one, not yet".
+        """
+        if not snap.enabled:
+            raise ProviderDisabled(snap.id)
+        if snap.lifecycle != "live" and not allow_draft:
+            raise ProviderNotPublished(snap.id)
+
+    async def get(
+        self, provider_id: str, *, allow_draft: bool = False,
+    ) -> IdentityProvider:
+        """Return the materialised provider for ``provider_id``.
+
+        Raises :class:`ProviderNotFound` when the row is missing,
+        disabled, or still a draft. ``allow_draft`` is for the dry-run
+        rehearsal, which exists precisely to exercise an unpublished
+        provider and is gated by its own admin-minted cookie.
+        """
         entry = self._cache.get(provider_id)
         if entry is not None and entry.expires_at > self._now():
+            # Cached instances are re-checked rather than trusted: a
+            # provider unpublished during the 60s TTL must stop
+            # authenticating now, not a minute from now.
+            self._assert_usable(entry.snapshot, allow_draft=allow_draft)
             return entry.instance
         async with self._lock:
             # Re-check after acquiring the lock to avoid duplicate
             # loads under contention.
             entry = self._cache.get(provider_id)
             if entry is not None and entry.expires_at > self._now():
+                self._assert_usable(entry.snapshot, allow_draft=allow_draft)
                 return entry.instance
             snap = await self._loader.get_by_id(provider_id)
             if snap is None:
                 raise ProviderNotFound(provider_id)
-            if not snap.enabled:
-                raise ProviderDisabled(provider_id)
+            self._assert_usable(snap, allow_draft=allow_draft)
             instance = self._build(snap)
             self._cache[provider_id] = _CacheEntry(
                 snapshot=snap,
@@ -143,17 +189,27 @@ class ProviderRegistry:
             self._slug_index[snap.slug] = snap.id
             return instance
 
-    async def get_snapshot(self, provider_id: str) -> ProviderConfigSnapshot:
+    async def get_snapshot(
+        self, provider_id: str, *, allow_draft: bool = False,
+    ) -> ProviderConfigSnapshot:
         """Return the cached snapshot — useful when callers need the
         slug, display name, or linking policy without spinning up a
         provider instance (e.g. the login-page provider listing)."""
-        await self.get(provider_id)  # populates cache + raises if missing
+        # populates cache + raises if missing / disabled / unpublished
+        await self.get(provider_id, allow_draft=allow_draft)
         return self._cache[provider_id].snapshot
 
-    async def resolve_slug(self, slug: str) -> str:
+    async def resolve_slug(self, slug: str, *, allow_draft: bool = False) -> str:
         """Convert a URL slug to the canonical provider_id. The slug
         index is populated lazily on first ``get()``; on cache miss
-        we round-trip the loader so URLs work after a fresh restart."""
+        we round-trip the loader so URLs work after a fresh restart.
+
+        Refuses a disabled or draft row on the uncached path. The
+        authoritative gate is ``get()`` — the slug index short-circuits
+        this method, and every caller resolves then gets — but checking
+        here too means a lookup never hands back the id of a row that
+        may not authenticate anyone.
+        """
         cached_id = self._slug_index.get(slug)
         if cached_id is not None:
             return cached_id
@@ -164,8 +220,7 @@ class ProviderRegistry:
             snap = await self._loader.get_by_slug(slug)
             if snap is None:
                 raise ProviderNotFound(slug)
-            if not snap.enabled:
-                raise ProviderDisabled(slug)
+            self._assert_usable(snap, allow_draft=allow_draft)
             instance = self._build(snap)
             self._cache[snap.id] = _CacheEntry(
                 snapshot=snap, instance=instance,
