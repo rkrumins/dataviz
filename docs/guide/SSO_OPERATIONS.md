@@ -252,7 +252,8 @@ cannot.
 
 Usually this is the feature working. That connection re-checks with your gateway
 every time it renews a session, so anyone your portal has signed out is signed
-out here too, within about fifteen minutes. Before treating it as a fault, ask
+out here too, within one access-token lifetime — a few minutes on the default
+setting. Before treating it as a fault, ask
 whether the portal considers those people signed in.
 
 If the gateway itself is down, sessions are *not* dropped straight away — they

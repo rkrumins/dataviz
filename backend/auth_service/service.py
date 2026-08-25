@@ -1237,7 +1237,11 @@ class LocalIdentityService:
         that created it — the gap every other kind has, and the reason
         single logout is hard for them. It runs on every rotation, which
         at a 15-minute access lifetime is one back-channel call per
-        active session per 15 minutes.
+        active session per access-token lifetime — five minutes on the
+        default ``JWT_EXPIRY_MINUTES``, longer where an operator has
+        raised it. Deliberately not stated as a fixed number anywhere
+        user-facing: it is deployment configuration, and the grace
+        window is sized against it.
 
         Three outcomes, and keeping them apart is the whole design:
 

@@ -271,8 +271,9 @@ afterwards, see *Running Single Sign-On* → **Why a sign-in failed**.
 ### Keeping sessions in step
 
 By default, {brand} re-checks with your gateway each time it renews someone's
-session — roughly every fifteen minutes. That is what makes signing out of your
-portal sign them out here too.
+session, which happens as often as your access tokens expire — a few minutes on
+the default setting. That is what makes signing out of your portal sign them out
+here too.
 
 If the gateway stops answering, sign-ins are not dropped immediately: existing
 sessions keep working for a grace period, measured from the last time the gateway

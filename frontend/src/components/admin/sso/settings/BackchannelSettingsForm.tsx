@@ -434,7 +434,7 @@ export function BackchannelSettingsForm({
 
                 <Toggle
                     label="Re-check with the provider on every session renewal"
-                    hint="Ends the session here when the enterprise session ends there, instead of letting it run on for the rest of its own lifetime. Costs one call per user every 15 minutes."
+                    hint="Ends the session here when the enterprise session ends there, instead of letting it run on for the rest of its own lifetime. Costs one call per signed-in person each time their session renews."
                     checked={value.liveness_on_refresh !== false}
                     onChange={v => set('liveness_on_refresh', v)}
                 />
