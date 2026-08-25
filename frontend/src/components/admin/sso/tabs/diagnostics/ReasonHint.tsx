@@ -71,19 +71,6 @@ const REASONS: Record<string, Reason> = {
             + 'is possible and quietly disables the daily '
             + 're-authentication ceiling for everyone on this connection.',
     },
-    backchannel_payload_invalid: {
-        what: 'The signed identity the browser brought back did not '
-            + 'verify — wrong key, expired, or not what it claims to be.',
-        next: 'Check the signing key on the connection against the one '
-            + 'their gateway signs with, and that the two clocks agree.',
-    },
-    backchannel_unsigned_refused: {
-        what: 'An unverifiable identity was offered by a browser, and '
-            + 'this connection has not been configured to accept those.',
-        next: 'Ask their gateway to sign its response. Accepting unsigned '
-            + 'identities is possible and means anyone who can open a '
-            + 'browser console can sign in as anyone.',
-    },
     backchannel_failed: {
         what: 'The back-channel sign-in failed for a reason we have not '
             + 'catalogued.',

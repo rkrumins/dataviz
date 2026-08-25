@@ -159,15 +159,6 @@ describe('defaults', () => {
         expect(toggle(/require an authentication time/i).checked).toBe(true)
     })
 
-    it('leaves the gateway call on our server', () => {
-        // The default that matters most here. Server-side means the
-        // identity arrives from the gateway; browser-side means it
-        // arrives from whoever is sitting at the browser, and is only
-        // sound with a signature over it.
-        renderForm({})
-        expect(toggle(/browser make this call/i).checked).toBe(false)
-    })
-
     it('respects an explicit false rather than treating it as unset', async () => {
         renderForm({ liveness_on_refresh: false, require_auth_time: false })
         expect(toggle(/re-check with the provider/i).checked).toBe(false)

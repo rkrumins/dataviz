@@ -350,6 +350,11 @@ def _public_config(snap) -> dict:
         # enforce it. Keeping the configuration while publishing none of
         # it is the point: turning the trigger off must not cost an
         # operator their integration.
+        #
+        # Read off the raw settings rather than the provider's typed
+        # view, and deliberately not mirrored onto the dataclass: this
+        # is the only reader, and a parsed copy that nothing consults is
+        # a second source of truth waiting to disagree with this one.
         if settings.get("authenticate_enabled") is False:
             return {}
         if not str(settings.get("authenticate_url") or "").strip():
@@ -1873,26 +1878,16 @@ async def backchannel_handle_login(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "Not a back-channel provider",
         )
-    if not (
-        provider.settings.authenticate_token_path
-        or provider.settings.gateway_via_browser
-    ):
+    if not provider.settings.authenticate_token_path:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            "This provider reads its session from the request, not from "
-            "the browser",
+            "This provider reads its session from the request, not the "
+            "sign-in trigger's response",
         )
     snap = await _provider_snapshot(slug)
 
     try:
-        if provider.settings.gateway_via_browser:
-            # The browser called the gateway itself and is handing us
-            # its answer. Unlike the handle above there is nothing to
-            # redeem — so this path verifies a signature, or is a row
-            # whose operator ticked a box accepting that it cannot.
-            identity = provider.identity_from_browser_response(body.handle)
-        else:
-            identity = await provider.fetch_identity(body.handle)
+        identity = await provider.fetch_identity(body.handle)
     except BackchannelError as exc:
         # Same split as the redirect flow: the code is audited, the
         # message is logged, and neither reaches the caller.
