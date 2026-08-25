@@ -201,7 +201,7 @@ that cookie and, from our server rather than their browser, make up to two calls
 
 ```mermaid
 flowchart LR
-  B[Person's browser] -->|arrives with the session cookie| A[{brand}]
+  B[Their browser] -->|arrives with the session cookie| A[{brand}]
   A -->|1. redeem the cookie| G[Your gateway]
   G -->|a token| A
   A -->|2. exchange the token| U[Your user endpoint]
