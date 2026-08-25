@@ -163,6 +163,12 @@ export async function runAuthenticateTrigger(
  *  run first. Same call, two callers, one implementation — the
  *  alternative was an admin rehearsal that failed for a correctly
  *  configured gateway and gave no reason why. */
+/** How long the browser waits on the provider's own authenticate (and
+ *  translate) endpoints. Generous — a Negotiate round trip can involve a
+ *  KDC — but bounded, so a dead endpoint fails the attempt instead of
+ *  leaving the login page silently stuck. */
+export const AUTHENTICATE_TIMEOUT_MS = 10_000
+
 export async function runAuthenticateCall(cfg: {
     url?: string
     method?: string
@@ -174,14 +180,30 @@ export async function runAuthenticateCall(cfg: {
     const headers = (cfg.headers ?? {}) as Record<string, string>
     const tokenPath = cfg.tokenPath || ''
 
-    const res = await fetch(url, {
-        method,
-        headers,
-        // The whole point. Without it the browser neither sends the
-        // provider's existing cookies nor offers to answer a Negotiate
-        // challenge from the OS.
-        credentials: 'include',
-    })
+    // Raw fetch on purpose (cross-origin, no CSRF, no refresh-on-401) —
+    // but that also means no timeout unless we bring one. A hung
+    // corporate endpoint must not hang the silent sign-in forever.
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
+    let res: Response
+    try {
+        res = await fetch(url, {
+            method,
+            headers,
+            // The whole point. Without it the browser neither sends the
+            // provider's existing cookies nor offers to answer a Negotiate
+            // challenge from the OS.
+            credentials: 'include',
+            signal: abort.signal,
+        })
+    } catch (err) {
+        if (abort.signal.aborted) {
+            throw new Error('The sign-in service did not answer in time.')
+        }
+        throw err
+    } finally {
+        clearTimeout(timer)
+    }
     if (!res.ok) {
         throw new Error(`The sign-in service answered ${res.status}.`)
     }

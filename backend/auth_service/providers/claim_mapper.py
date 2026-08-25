@@ -43,6 +43,7 @@ Custom providers identically.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from .base import ProviderIdentity
@@ -313,13 +314,39 @@ def split_display_name(display_name: str) -> tuple[str, str]:
     return parts[0], parts[1].strip() if len(parts) > 1 else ""
 
 
-def _to_int(v: Any) -> int | None:
-    if v is None:
+def _to_epoch(v: Any) -> int | None:
+    """Coerce an authentication-instant claim to epoch seconds.
+
+    IdPs disagree about the shape: OIDC sends epoch seconds, but the
+    gateway kinds routinely answer with epoch *milliseconds* or an
+    ISO-8601 timestamp (``lastLogin``). A value that parses under none
+    of these readings is None — the caller decides whether that is
+    fatal. Milliseconds are recognised by magnitude: 10^12 seconds is
+    the year 33658, so any number that large is a millisecond count.
+    """
+    if v is None or isinstance(v, bool):
         return None
-    try:
-        return int(v)
-    except (TypeError, ValueError):
+    if isinstance(v, (int, float)):
+        seconds = float(v)
+    elif isinstance(v, str):
+        text = v.strip()
+        if not text:
+            return None
+        try:
+            seconds = float(text)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+    else:
         return None
+    if seconds >= 1e12:
+        seconds /= 1000.0
+    return int(seconds)
 
 
 # ── Public surface ───────────────────────────────────────────────────
@@ -448,7 +475,9 @@ def apply_claim_mapping(
         )
 
     groups = _to_groups(_first_non_empty(claims, mapping.get("groups") or []))
-    auth_time = _to_int(_first_non_empty(claims, mapping.get("auth_time") or []))
+    auth_time = _to_epoch(
+        _first_non_empty(claims, mapping.get("auth_time") or [])
+    )
 
     email_verified_raw = _first_non_empty(
         claims, mapping.get("email_verified") or []

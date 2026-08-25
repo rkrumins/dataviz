@@ -142,6 +142,27 @@ describe('the authenticate call', () => {
         }))).rejects.toThrow(/token/)
     })
 
+    it('gives up on an endpoint that never answers', async () => {
+        // The raw fetch here has no wrapper-supplied timeout, so it
+        // brings its own. Without one, a hung corporate endpoint left
+        // the silent sign-in spinning forever with no error and no form.
+        vi.useFakeTimers()
+        try {
+            global.fetch = vi.fn().mockImplementation(
+                (_url, init: RequestInit) => new Promise((_resolve, reject) => {
+                    init.signal?.addEventListener('abort', () =>
+                        reject(new DOMException('aborted', 'AbortError')))
+                }),
+            )
+            const attempt = runAuthenticateTrigger(provider())
+            const outcome = expect(attempt).rejects.toThrow(/did not answer/)
+            await vi.advanceTimersByTimeAsync(10_000)
+            await outcome
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('does not inspect the handle it returns', async () => {
         // It is opaque. The server redeems it against the provider's own
         // gateway, which is the only party that can say what it means —

@@ -1378,11 +1378,20 @@ class LocalIdentityService:
             return
 
         settings = provider.settings
-        raw = (
-            ambient_headers.get(settings.token_source_key)
-            if settings.token_source == "header"
-            else ambient_cookies.get(settings.token_source_key)
-        )
+        if settings.token_source == "header":
+            # Header names are case-insensitive on the wire, and the dict
+            # the refresh route hands us has been through Starlette, which
+            # lower-cases them. The operator's spelling (``X-Corp-Session``)
+            # must keep matching, or every refresh reads "absent" and
+            # revokes a healthy family.
+            wanted = settings.token_source_key.lower()
+            raw = next(
+                (v for k, v in ambient_headers.items()
+                 if k.lower() == wanted),
+                None,
+            )
+        else:
+            raw = ambient_cookies.get(settings.token_source_key)
 
         if not raw:
             await self._end_session_upstream(

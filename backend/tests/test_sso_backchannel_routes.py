@@ -299,3 +299,67 @@ async def test_the_admin_view_redacts_the_credential_headers(
     # read back what they configured.
     assert row["settings"]["gatewayUrl" if "gatewayUrl" in row["settings"]
                             else "gateway_url"]
+
+
+# ── rehearsing a draft ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_draft_row_can_be_rehearsed_through_the_redirect_flow(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The wizard's Rehearse step mints ``nx_dryrun`` and opens this URL
+    while the row is still a draft — rehearsal is the step that gates
+    publishing, so it MUST work on drafts.
+
+    The regression: the flow looked its snapshot up without the request,
+    so the dry-run cookie was never seen, the draft was refused, and the
+    wizard could not get past its own hard gate for this kind.
+    """
+    from backend.auth_service.core.tokens import create_dryrun_token
+
+    _stub_gateway(monkeypatch)
+    row = await _make_provider(db_session, lifecycle="draft")
+
+    resp = await test_client.get(
+        "/api/v1/auth/corp-gateway/login?next=/dashboard",
+        cookies={
+            "corp_session": "ambient-xyz",
+            "nx_dryrun": create_dryrun_token(
+                admin_id="u-admin", provider_id=row.id,
+            ),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 200, resp.text
+    assert "nx_access" not in resp.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_a_draft_row_can_be_rehearsed_through_the_handle_flow(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """Same regression, other entry point: the handle shape rehearses by
+    POSTing here with the dry-run cookie, and must get the JSON verdict
+    rather than a 404 for a draft it is entitled to see."""
+    from backend.auth_service.core.tokens import create_dryrun_token
+
+    _stub_gateway(monkeypatch)
+    row = await _make_provider(
+        db_session, lifecycle="draft",
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_token_path="token",
+    )
+
+    resp = await test_client.post(
+        "/api/v1/auth/corp-gateway/backchannel",
+        json={"handle": "handle-abc"},
+        cookies={
+            "nx_dryrun": create_dryrun_token(
+                admin_id="u-admin", provider_id=row.id,
+            ),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("dryRun") is True
+    assert "nx_access" not in resp.headers.get("set-cookie", "")

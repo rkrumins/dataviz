@@ -1941,7 +1941,7 @@ async def _backchannel_login_flow(
     themselves*. There is nothing to defend, and a state cookie would
     only add a failure mode.
     """
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
     svc = _identity_service(request)
     _fail = _sso_failure_handler(
         svc, slug=slug, snap=snap, log_label="Back-channel login",
@@ -2026,7 +2026,7 @@ async def backchannel_handle_login(
             "This provider reads its session from the request, not the "
             "sign-in trigger's response",
         )
-    snap = await _provider_snapshot(slug)
+    snap = await _provider_snapshot(slug, request=request)
 
     try:
         identity = await provider.fetch_identity(body.handle)

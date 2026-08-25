@@ -239,6 +239,41 @@ async def test_the_idp_callback_surface_still_accepts_a_foreign_origin(
     )
 
 
+async def test_backchannel_signin_is_csrf_exempt(test_client: AsyncClient):
+    """``/{slug}/backchannel`` is posted by our own login page *before*
+    any session exists, so there is no ``nx_csrf`` cookie to
+    double-submit. What authenticates the call is the handle in the
+    body, which is redeemed against the provider's own gateway.
+
+    The regression: the route was left off the exemption list, so every
+    first sign-in through the handle shape answered 403 ``csrf_failed``
+    — surfaced to the user as "signing in with that session did not
+    work" with nothing an operator could fix.
+    """
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+    test_client.headers.pop(CSRF_HEADER_NAME, None)
+    resp = await test_client.post(
+        "/api/v1/auth/some-slug/backchannel", json={"handle": "opaque"},
+    )
+    assert resp.status_code != 403 or (
+        resp.json().get("detail", {}).get("error") != "csrf_failed"
+    )
+
+
+async def test_the_backchannel_exemption_is_anchored(
+    test_client: AsyncClient,
+):
+    """Only the exact segment is exempt — a longer path that merely
+    starts the same way keeps the check."""
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+    test_client.headers.pop(CSRF_HEADER_NAME, None)
+    resp = await test_client.post(
+        "/api/v1/auth/some-slug/backchannel/extra", json={},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "csrf_failed"
+
+
 async def test_our_own_host_is_allowed_under_either_scheme(
     test_client: AsyncClient,
 ):

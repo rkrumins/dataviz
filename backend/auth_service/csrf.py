@@ -83,12 +83,18 @@ _DEFAULT_EXEMPT_PATHS = (
 #   * /mock — same pre-session situation on the dev-login page. Already
 #     hard-gated by ``AUTH_CUSTOM_PROVIDER_ENABLED`` plus the ENV prod guard,
 #     so it 404s in production regardless.
+#   * /backchannel — posted from our own login page by a user who is not
+#     logged in yet, so no ``nx_csrf`` cookie exists to submit. Authenticated
+#     by the handle it carries, which is redeemed against the provider's own
+#     gateway — an invented one does not survive that call. Login-CSRF here
+#     mints a session as the *attacker's* corporate identity — the same
+#     accepted class as /browser-profile.
 #
 # Anchored at both ends and limited to a single slug segment on purpose: this
 # must not grow into a prefix match that quietly exempts a real state-changing
 # route. Anything genuinely driven by our own JS keeps the check.
 _EXEMPT_PATTERNS: tuple[Pattern[str], ...] = (
-    re.compile(r"^/api/v1/auth/[^/]+/(acs|sls|browser-profile|mock)$"),
+    re.compile(r"^/api/v1/auth/[^/]+/(acs|sls|browser-profile|mock|backchannel)$"),
 )
 
 
