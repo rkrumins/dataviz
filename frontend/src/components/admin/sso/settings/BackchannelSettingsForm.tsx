@@ -16,6 +16,7 @@
  * allowlist would be circular anyway ("the URL you typed is
  * permitted" is not a control).
  */
+import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { Field, FieldGrid, TextAreaField, TextField } from './ui'
 
@@ -25,55 +26,55 @@ export type SendAs = 'cookie' | 'header' | 'body'
 export interface BackchannelSettings {
     exchange_mode?: 'server' | 'browser'
     token_source?: AmbientSource
-    token_source_key?: string
+    token_source_key?: string | null
 
     // Browser mode: the translate call the sign-in page itself makes.
     // Published to the browser, like the trigger family.
-    browser_exchange_url?: string
+    browser_exchange_url?: string | null
     browser_exchange_method?: 'GET' | 'POST'
     browser_exchange_headers?: Record<string, string>
-    browser_exchange_token_path?: string
+    browser_exchange_token_path?: string | null
 
     // The browser-side sign-in trigger. Published to the sign-in page —
     // unlike everything below, which stays on the server.
     authenticate_enabled?: boolean
-    authenticate_url?: string
+    authenticate_url?: string | null
     authenticate_method?: 'POST' | 'GET'
     authenticate_headers?: Record<string, string>
-    authenticate_token_path?: string
+    authenticate_token_path?: string | null
 
-    gateway_url?: string
+    gateway_url?: string | null
     gateway_method?: 'POST' | 'GET'
     gateway_send_as?: SendAs
-    gateway_token_header?: string
-    gateway_token_prefix?: string
-    gateway_body_field?: string
-    gateway_cookie_name?: string
+    gateway_token_header?: string | null
+    gateway_token_prefix?: string | null
+    gateway_body_field?: string | null
+    gateway_cookie_name?: string | null
     gateway_send_ambient_cookie?: boolean
     gateway_headers?: Record<string, string>
-    gateway_token_path?: string
+    gateway_token_path?: string | null
 
-    exchange_url?: string
+    exchange_url?: string | null
     exchange_method?: 'POST' | 'GET'
     exchange_send_as?: 'body' | 'header'
-    exchange_body_field?: string
-    exchange_token_header?: string
-    exchange_token_prefix?: string
+    exchange_body_field?: string | null
+    exchange_token_header?: string | null
+    exchange_token_prefix?: string | null
     exchange_headers?: Record<string, string>
-    exchange_claims_path?: string
+    exchange_claims_path?: string | null
 
     claims_format?: 'json' | 'jwt'
-    jwks_url?: string
-    jwt_issuer?: string
-    jwt_audience?: string
+    jwks_url?: string | null
+    jwt_issuer?: string | null
+    jwt_audience?: string | null
 
-    timeout_seconds?: number
-    max_response_bytes?: number
+    timeout_seconds?: number | null
+    max_response_bytes?: number | null
     require_auth_time?: boolean
     trust_gateway_email?: boolean
     liveness_on_refresh?: boolean
-    liveness_grace_seconds?: number
-    liveness_url?: string
+    liveness_grace_seconds?: number | null
+    liveness_url?: string | null
     [k: string]: unknown
 }
 
@@ -137,23 +138,57 @@ const SEND_AS_LABELS: Record<SendAs, string> = {
 }
 
 /** Headers are arbitrary key/value pairs we cannot model as fields, so
- *  they are edited as JSON. Invalid JSON leaves the stored value alone
+ *  they are edited as JSON. Invalid JSON reverts to the stored value
  *  rather than clearing it — a half-typed object is not an instruction
- *  to delete the headers. */
+ *  to delete the headers.
+ *
+ *  Controlled: an outside change to the settings (the Advanced JSON
+ *  editor, a reset) shows up here, instead of the textarea keeping
+ *  whatever it rendered first. A draft the operator is mid-typing wins
+ *  until blur.
+ *
+ *  A redacted value — the API replaces a saved secret dict with a
+ *  masked string — renders as a "Configured" panel with an explicit
+ *  Replace affordance. It used to render the mask itself inside the
+ *  textarea, which read as data loss and invited saving it back. */
 function HeaderMapField({
     label, hint, value, onChange,
 }: {
     label: string
     hint?: React.ReactNode
-    value: Record<string, string> | undefined
+    value: Record<string, string> | string | undefined
     onChange: (next: Record<string, string>) => void
 }) {
-    const text = JSON.stringify(value ?? {}, null, 2)
+    const [draft, setDraft] = useState<string | null>(null)
+    const [replacing, setReplacing] = useState(false)
+    const redacted = typeof value === 'string'
+    const canonical = JSON.stringify(redacted ? {} : (value ?? {}), null, 2)
+
+    if (redacted && !replacing) {
+        return (
+            <Field label={label} hint={hint}>
+                <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl border-2 border-black/[0.10] dark:border-white/[0.12] bg-canvas-elevated">
+                    <span className="text-sm text-ink-muted">
+                        Configured — hidden after saving.
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => { setReplacing(true); setDraft('{\n  \n}') }}
+                        className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline shrink-0"
+                    >
+                        Replace
+                    </button>
+                </div>
+            </Field>
+        )
+    }
+
     return (
         <Field label={label} hint={hint}>
             <TextAreaField
                 rows={4}
-                defaultValue={text}
+                value={draft ?? canonical}
+                onChange={e => setDraft(e.target.value)}
                 onBlur={e => {
                     try {
                         const parsed = JSON.parse(e.target.value || '{}')
@@ -162,8 +197,9 @@ function HeaderMapField({
                             onChange(parsed as Record<string, string>)
                         }
                     } catch {
-                        /* keep what is stored; see the note above */
+                        /* revert to what is stored; see the note above */
                     }
+                    setDraft(null)
                 }}
                 placeholder={'{\n  "X-App-Id": "your-app-id"\n}'}
             />
@@ -212,6 +248,20 @@ export function BackchannelSettingsForm({
     const set = <K extends keyof BackchannelSettings>(
         k: K, v: BackchannelSettings[K],
     ) => onChange({ ...value, [k]: v })
+    // '' -> null. The save path drops empty strings as "unchanged" (so a
+    // redaction mask can never be written back), which made clearing a
+    // field a silent no-op — the old value survived every save. null
+    // survives to the server, which reads it as "remove the key", and
+    // the default comes back.
+    const clearable = (e: React.ChangeEvent<HTMLInputElement>) =>
+        (e.target.value === '' ? null : e.target.value) as never
+    // Same for the numeric fields, which also used to save NaN when the
+    // box was cleared.
+    const numeric = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.value === '') return null as never
+        const n = Number(e.target.value)
+        return (Number.isFinite(n) ? n : null) as never
+    }
 
     return (
         <div className="space-y-6">
@@ -263,7 +313,7 @@ export function BackchannelSettingsForm({
                     >
                         <TextField
                             value={value.token_source_key ?? ''}
-                            onChange={e => set('token_source_key', e.target.value)}
+                            onChange={e => set('token_source_key', clearable(e))}
                             placeholder={source === 'header' ? 'X-Corp-Session' : 'CORPSESSION'}
                         />
                     </Field>
@@ -291,7 +341,7 @@ export function BackchannelSettingsForm({
                 >
                     <TextField
                         value={value.authenticate_url ?? ''}
-                        onChange={e => set('authenticate_url', e.target.value)}
+                        onChange={e => set('authenticate_url', clearable(e))}
                         placeholder="https://sso.corp.example/authenticate"
                     />
                 </Field>
@@ -320,7 +370,7 @@ export function BackchannelSettingsForm({
                             >
                                 <TextField
                                     value={value.authenticate_token_path ?? ''}
-                                    onChange={e => set('authenticate_token_path', e.target.value)}
+                                    onChange={e => set('authenticate_token_path', clearable(e))}
                                     placeholder="token"
                                 />
                             </Field>
@@ -365,7 +415,7 @@ export function BackchannelSettingsForm({
                 >
                     <TextField
                         value={value.gateway_url ?? ''}
-                        onChange={e => set('gateway_url', e.target.value)}
+                        onChange={e => set('gateway_url', clearable(e))}
                         placeholder="https://sso-gateway.corp.internal/token"
                     />
                 </Field>
@@ -398,14 +448,14 @@ export function BackchannelSettingsForm({
                         <Field label="Header name" required>
                             <TextField
                                 value={value.gateway_token_header ?? ''}
-                                onChange={e => set('gateway_token_header', e.target.value)}
+                                onChange={e => set('gateway_token_header', clearable(e))}
                                 placeholder="Authorization"
                             />
                         </Field>
                         <Field label={<>Value prefix <span className="font-normal text-ink-muted">(optional)</span></>}>
                             <TextField
                                 value={value.gateway_token_prefix ?? ''}
-                                onChange={e => set('gateway_token_prefix', e.target.value)}
+                                onChange={e => set('gateway_token_prefix', clearable(e))}
                                 placeholder="Bearer "
                             />
                         </Field>
@@ -415,7 +465,7 @@ export function BackchannelSettingsForm({
                     <Field label="Body field name" required>
                         <TextField
                             value={value.gateway_body_field ?? ''}
-                            onChange={e => set('gateway_body_field', e.target.value)}
+                            onChange={e => set('gateway_body_field', clearable(e))}
                             placeholder="sessionId"
                         />
                     </Field>
@@ -427,7 +477,7 @@ export function BackchannelSettingsForm({
                     >
                         <TextField
                             value={value.gateway_cookie_name ?? ''}
-                            onChange={e => set('gateway_cookie_name', e.target.value)}
+                            onChange={e => set('gateway_cookie_name', clearable(e))}
                             placeholder={value.token_source_key || 'CORPSESSION'}
                         />
                     </Field>
@@ -441,7 +491,7 @@ export function BackchannelSettingsForm({
                     >
                         <TextField
                             value={value.gateway_token_path ?? ''}
-                            onChange={e => set('gateway_token_path', e.target.value)}
+                            onChange={e => set('gateway_token_path', clearable(e))}
                             placeholder="access_token"
                         />
                     </Field>
@@ -478,7 +528,7 @@ export function BackchannelSettingsForm({
                 >
                     <TextField
                         value={value.exchange_url ?? ''}
-                        onChange={e => set('exchange_url', e.target.value)}
+                        onChange={e => set('exchange_url', clearable(e))}
                         placeholder="https://sso-gateway.corp.internal/userinfo"
                     />
                 </Field>
@@ -511,7 +561,7 @@ export function BackchannelSettingsForm({
                             <Field label="Body field name" required>
                                 <TextField
                                     value={value.exchange_body_field ?? ''}
-                                    onChange={e => set('exchange_body_field', e.target.value)}
+                                    onChange={e => set('exchange_body_field', clearable(e))}
                                     placeholder="token"
                                 />
                             </Field>
@@ -520,14 +570,14 @@ export function BackchannelSettingsForm({
                                 <Field label="Header name" required>
                                     <TextField
                                         value={value.exchange_token_header ?? ''}
-                                        onChange={e => set('exchange_token_header', e.target.value)}
+                                        onChange={e => set('exchange_token_header', clearable(e))}
                                         placeholder="Authorization"
                                     />
                                 </Field>
                                 <Field label={<>Value prefix <span className="font-normal text-ink-muted">(optional)</span></>}>
                                     <TextField
                                         value={value.exchange_token_prefix ?? ''}
-                                        onChange={e => set('exchange_token_prefix', e.target.value)}
+                                        onChange={e => set('exchange_token_prefix', clearable(e))}
                                         placeholder="Bearer "
                                     />
                                 </Field>
@@ -548,7 +598,7 @@ export function BackchannelSettingsForm({
                 >
                     <TextField
                         value={value.exchange_claims_path ?? ''}
-                        onChange={e => set('exchange_claims_path', e.target.value)}
+                        onChange={e => set('exchange_claims_path', clearable(e))}
                         placeholder="data.user"
                     />
                 </Field>
@@ -575,7 +625,7 @@ export function BackchannelSettingsForm({
                         >
                             <TextField
                                 value={value.jwks_url ?? ''}
-                                onChange={e => set('jwks_url', e.target.value)}
+                                onChange={e => set('jwks_url', clearable(e))}
                                 placeholder="https://sso-gateway.corp.internal/.well-known/jwks.json"
                             />
                         </Field>
@@ -587,7 +637,7 @@ export function BackchannelSettingsForm({
                                 >
                                     <TextField
                                         value={value.jwt_issuer ?? ''}
-                                        onChange={e => set('jwt_issuer', e.target.value)}
+                                        onChange={e => set('jwt_issuer', clearable(e))}
                                         placeholder="https://sso.corporate.com"
                                     />
                                 </Field>
@@ -597,7 +647,7 @@ export function BackchannelSettingsForm({
                                 >
                                     <TextField
                                         value={value.jwt_audience ?? ''}
-                                        onChange={e => set('jwt_audience', e.target.value)}
+                                        onChange={e => set('jwt_audience', clearable(e))}
                                         placeholder="dataviz"
                                     />
                                 </Field>
@@ -625,7 +675,7 @@ export function BackchannelSettingsForm({
                 <Field label="Translate URL" required>
                     <TextField
                         value={value.browser_exchange_url ?? ''}
-                        onChange={e => set('browser_exchange_url', e.target.value)}
+                        onChange={e => set('browser_exchange_url', clearable(e))}
                         placeholder="https://sso.corporate.com/auth-service/translate"
                     />
                 </Field>
@@ -646,7 +696,7 @@ export function BackchannelSettingsForm({
                     >
                         <TextField
                             value={value.browser_exchange_token_path ?? ''}
-                            onChange={e => set('browser_exchange_token_path', e.target.value)}
+                            onChange={e => set('browser_exchange_token_path', clearable(e))}
                             placeholder="token"
                         />
                     </Field>
@@ -676,7 +726,7 @@ export function BackchannelSettingsForm({
                 >
                     <TextField
                         value={value.jwks_url ?? ''}
-                        onChange={e => set('jwks_url', e.target.value)}
+                        onChange={e => set('jwks_url', clearable(e))}
                         placeholder="https://sso.corporate.com/.well-known/jwks.json"
                     />
                 </Field>
@@ -687,7 +737,7 @@ export function BackchannelSettingsForm({
                     >
                         <TextField
                             value={value.jwt_issuer ?? ''}
-                            onChange={e => set('jwt_issuer', e.target.value)}
+                            onChange={e => set('jwt_issuer', clearable(e))}
                             placeholder="https://sso.corporate.com"
                         />
                     </Field>
@@ -697,7 +747,7 @@ export function BackchannelSettingsForm({
                     >
                         <TextField
                             value={value.jwt_audience ?? ''}
-                            onChange={e => set('jwt_audience', e.target.value)}
+                            onChange={e => set('jwt_audience', clearable(e))}
                             placeholder="dataviz"
                         />
                     </Field>
@@ -714,8 +764,9 @@ export function BackchannelSettingsForm({
                             type="number"
                             min={1}
                             mono={false}
-                            value={String(value.timeout_seconds ?? 5)}
-                            onChange={e => set('timeout_seconds', Number(e.target.value))}
+                            value={value.timeout_seconds == null ? '' : String(value.timeout_seconds)}
+                            placeholder="5"
+                            onChange={e => set('timeout_seconds', numeric(e))}
                         />
                     </Field>
                     <Field
@@ -726,8 +777,9 @@ export function BackchannelSettingsForm({
                             type="number"
                             min={1}
                             mono={false}
-                            value={String(value.max_response_bytes ?? 262144)}
-                            onChange={e => set('max_response_bytes', Number(e.target.value))}
+                            value={value.max_response_bytes == null ? '' : String(value.max_response_bytes)}
+                            placeholder="262144"
+                            onChange={e => set('max_response_bytes', numeric(e))}
                         />
                     </Field>
                     {mode === 'server' && (
@@ -739,8 +791,9 @@ export function BackchannelSettingsForm({
                             type="number"
                             min={0}
                             mono={false}
-                            value={String(value.liveness_grace_seconds ?? 900)}
-                            onChange={e => set('liveness_grace_seconds', Number(e.target.value))}
+                            value={value.liveness_grace_seconds == null ? '' : String(value.liveness_grace_seconds)}
+                            placeholder="900"
+                            onChange={e => set('liveness_grace_seconds', numeric(e))}
                         />
                     </Field>
                     )}
@@ -760,7 +813,7 @@ export function BackchannelSettingsForm({
                         >
                             <TextField
                                 value={value.liveness_url ?? ''}
-                                onChange={e => set('liveness_url', e.target.value)}
+                                onChange={e => set('liveness_url', clearable(e))}
                                 placeholder="https://sso-gateway.corp.internal/validate"
                             />
                         </Field>

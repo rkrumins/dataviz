@@ -264,17 +264,37 @@ in the contract document below.
 Ask them for:
 
 - **The cookie's name**, and confirmation it is set on a domain {brand} shares.
-  If it is not, this cannot work — no configuration fixes a cookie the browser
-  never sends us.
+  If it is not, all is not lost — switch the connection's exchange to **the
+  browser**: the sign-in page makes the translate call itself (the user's
+  browser holds the cookie ours never sees) and hands over the signed token it
+  answers with. That shape requires their **JWKS URL**, because a token the
+  browser delivers is verified against their published keys, always.
 - **The endpoint that redeems it**, and where in its reply the token sits.
 - **The endpoint that returns the user**, if that is a second call — some
   gateways answer with the person's details straight away, and then you leave
   the second endpoint blank.
-- **Any headers the calls need** — an application id, a key. They go in the
-  connection's settings and are never sent to anyone's browser.
+- **Whether the details arrive as a signed token (JWT).** Some translate
+  endpoints answer with a JWT — bare in the body, or under a field — whose
+  payload is the user object. Say so on the connection and the claims are read
+  from the payload; give it their JWKS URL as well and the signature is
+  verified too.
+- **Any headers the server's calls need** — an application id, a key. They go
+  in the connection's settings and are never sent to anyone's browser. (The
+  trigger's and the browser exchange's headers are the exception, and the form
+  says so where you type them: those calls are made *by* the browser, so their
+  headers are public.)
 - **Whether their reply includes an authentication time.** Without one there is
   no way to tell how long ago somebody actually signed in, and the daily
   re-authentication ceiling stops applying to them.
+- **A validate-only endpoint, if they have one.** The session re-check calls it
+  instead of the redeem endpoint (the connection's **Re-check URL**), so
+  renewals stop minting a token apiece.
+
+One more default worth knowing: corporate gateways rarely send an
+`email_verified` claim, so the connection treats their addresses as verified —
+that is what lets people land on their existing account, matched by email. An
+explicit `false` from the gateway is always respected, and the toggle is in the
+connection's Behaviour section.
 
 ### Allowing the host first
 
@@ -329,6 +349,16 @@ actually answered rather than the last time we tried. So a brief outage is
 invisible, and a long one still ends sessions rather than extending them
 indefinitely. Both the re-check and the grace period are settings on the
 connection.
+
+And when the corporate session itself expires — they tend to live an hour or
+four — nobody is dumped on a login form. The app notices at the next renewal
+and silently re-runs the browser's part of the sign-in: the trigger, the
+translate call on a browser-exchange connection, and the sign-in itself, all
+behind the scenes. The user keeps working; the only way they find out is if the
+corporate side actually refuses, in which case the login page opens with the
+reason and tries again on its own a minute later. Browser-exchange connections
+have no server re-check at all — the translate token's own expiry plays that
+part, with the same silent recovery behind it.
 
 ---
 

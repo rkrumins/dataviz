@@ -304,3 +304,57 @@ describe('editing', () => {
         expect(headerCalls).toHaveLength(0)
     })
 })
+
+
+describe('clearing a field actually clears it', () => {
+    it("an emptied text field writes null, because '' is dropped by the save path", async () => {
+        const onChange = renderForm({ exchange_url: 'https://old.example/userinfo' })
+        const input = screen.getByPlaceholderText(/userinfo/)
+        await userEvent.clear(input)
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ exchange_url: null }),
+        )
+    })
+
+    it('an emptied numeric field writes null, never NaN', async () => {
+        const onChange = renderForm({ timeout_seconds: 5 })
+        const input = screen.getByPlaceholderText('5')
+        await userEvent.clear(input)
+        const last = onChange.mock.calls.at(-1)![0] as BackchannelSettings
+        expect(last.timeout_seconds).toBeNull()
+        expect(Number.isNaN(last.timeout_seconds)).toBe(false)
+    })
+})
+
+
+describe('redacted headers', () => {
+    it('render as a Configured panel with a Replace affordance, not the mask', () => {
+        renderForm({
+            gateway_url: 'https://gw.corp.internal/redeem',
+            gateway_headers: '********' as never,
+        })
+        expect(screen.getByText(/hidden after saving/)).toBeInTheDocument()
+        expect(screen.getByText('Replace')).toBeInTheDocument()
+        // The mask itself must not be shown as if it were the stored
+        // value — that read as data loss, and saving it back was only
+        // prevented server-side.
+        expect(screen.queryByDisplayValue(/\*{8}/)).not.toBeInTheDocument()
+    })
+
+    it('Replace opens an empty editor and a valid map is written through', async () => {
+        const onChange = renderForm({
+            gateway_url: 'https://gw.corp.internal/redeem',
+            gateway_headers: '********' as never,
+        })
+        await userEvent.click(screen.getByText('Replace'))
+        const editor = screen.getAllByPlaceholderText(/X-App-Id/)[0]
+        await userEvent.clear(editor)
+        await userEvent.type(
+            editor, '{{"X-App-Id": "app-2"}', { skipClick: true },
+        )
+        await userEvent.tab()
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ gateway_headers: { 'X-App-Id': 'app-2' } }),
+        )
+    })
+})

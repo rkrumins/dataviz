@@ -107,6 +107,46 @@ published to any browser.
   and are readable by anyone who opens the sign-in page. An application
   identifier is fine. A credential is not.
 
+### When the cookie never reaches us: the browser-side exchange
+
+Everything above assumes your session cookie is scoped to a parent
+domain the application shares, so it arrives on requests to us and our
+server can present it to your redeem endpoint. If you scope the cookie
+to your SSO host alone, no configuration on our side can change what a
+browser will send where — so the application supports a second shape:
+**the user's browser calls your translate endpoint itself** (its cookie
+jar holds what ours never sees) and hands the application the token you
+answer with.
+
+That changes what we need from you:
+
+- **CORS with credentials on the translate endpoint too**, same rules
+  as the authenticate call above: echo the exact origin, answer
+  `Access-Control-Allow-Credentials: true`, exempt the preflight from
+  authentication. Headers configured for this call are public, exactly
+  like the trigger's.
+- **The answer must be a signed JWT** — bare in the body or at a field
+  we are told about — **with `exp`**, signed with an RSA or EC key
+  published at a **JWKS URL** we can fetch. A token the browser delivers
+  is only as good as its signature: this is the one shape where the
+  application verifies one, and it refuses the connection outright
+  without a key set. Symmetric algorithms are refused — the key set is
+  public.
+- **Expect each token to sign in at most once.** The application burns
+  the `jti` (or the token's own hash) on first use, so keep tokens
+  short-lived and mint one per call rather than caching an answer.
+- **Third-party cookie policy applies.** The browser attaches your
+  cookie to a cross-site `fetch` only where its `SameSite` attribute
+  (`None; Secure`) and the browser's third-party-cookie posture allow
+  it. On locked-down browser fleets, verify this before choosing the
+  shape.
+
+The re-check described in §3 does not run in this shape — the server
+never holds your session, so there is nothing it could re-present.
+The token's own `exp` bounds the application session instead: when it
+passes, the user's browser silently repeats the exchange, and your
+endpoint answering 401 there is what actually signs them out.
+
 ---
 
 ## 3. Status codes — the part that matters most

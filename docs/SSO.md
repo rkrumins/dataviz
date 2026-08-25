@@ -137,7 +137,7 @@ re-auth paths) live in the [SSO Integration Guide §5](/docs/sso-integration).
 | `oidc` | Authorization Code + PKCE + JWKS verify | Entra ID, Auth0, Ping, Keycloak, Okta-OIDC |
 | `saml2` | python3-saml strict mode + replay cache | ADFS, OneLogin, Okta-SAML, PingFederate |
 | `custom_profile` | profile handed over via cookie / browser storage / proxy header | internal deployments where a corporate portal or auth proxy already authenticated the user |
-| `backchannel` | an opaque handle redeemed server-to-server against the provider's own endpoints | internal gateways with no OIDC or SAML underneath, including Kerberos-fronted ones. Hand `docs/SSO_BACKCHANNEL_CONTRACT.md` to the team that owns the gateway |
+| `backchannel` | an opaque handle redeemed against the provider's own endpoints — server-to-server when the cookie is on a shared domain, or exchanged by the browser (with mandatory JWT verification) when it is not; the answer may be JSON or a JWT | internal gateways with no OIDC or SAML underneath, including Kerberos-fronted ones. Hand `docs/SSO_BACKCHANNEL_CONTRACT.md` to the team that owns the gateway |
 | `custom` | HS256-signed cookie envelope (dev/demo only) | local development, CI smoke, demo videos |
 
 Every provider is one row in `idp_providers`. The runtime
