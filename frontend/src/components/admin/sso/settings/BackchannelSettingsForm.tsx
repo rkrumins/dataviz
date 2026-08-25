@@ -62,6 +62,7 @@ export interface BackchannelSettings {
     timeout_seconds?: number
     max_response_bytes?: number
     require_auth_time?: boolean
+    trust_gateway_email?: boolean
     liveness_on_refresh?: boolean
     liveness_grace_seconds?: number
     [k: string]: unknown
@@ -99,6 +100,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     timeout_seconds: 5,
     max_response_bytes: 262144,
     require_auth_time: true,
+    trust_gateway_email: true,
     liveness_on_refresh: true,
     liveness_grace_seconds: 900,
 }
@@ -613,6 +615,12 @@ export function BackchannelSettingsForm({
                     hint="Without one there is no way to tell how long ago someone actually signed in, and the daily re-authentication ceiling stops applying to them."
                     checked={value.require_auth_time !== false}
                     onChange={v => set('require_auth_time', v)}
+                />
+                <Toggle
+                    label="Treat the gateway's email addresses as verified"
+                    hint="Applies only when their reply carries no email_verified claim at all — corporate gateways rarely send one, and without this the linking policy refuses to attach the sign-in to an existing account with the same address. An explicit false from the gateway is always respected."
+                    checked={value.trust_gateway_email !== false}
+                    onChange={v => set('trust_gateway_email', v)}
                 />
             </section>
         </div>

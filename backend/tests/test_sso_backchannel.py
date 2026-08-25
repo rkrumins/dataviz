@@ -480,3 +480,55 @@ def test_settings_survive_the_round_trip_from_a_row():
     assert s.require_auth_time is False
     assert s.claim_mapping_override == {"email": ["mail"]}
     assert s.linking_policy == "allow_verified"
+
+
+# ── trusting the gateway's email addresses ───────────────────────────
+#
+# The linking-by-email step this kind exists for is gated on
+# email_verified, which corporate gateways rarely send. The toggle says
+# absence counts as verified; anything the gateway actually says wins.
+
+@pytest.mark.asyncio
+async def test_an_absent_email_verified_counts_as_verified_by_default(
+    monkeypatch,
+):
+    _routes(monkeypatch, _happy)   # CLAIMS carries no email_verified
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_trust_toggle_turns_that_off(monkeypatch):
+    _routes(monkeypatch, _happy)
+    identity = await _provider(
+        trust_gateway_email=False,
+    ).fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_false_from_the_gateway_still_wins(monkeypatch):
+    """The toggle covers absence, never contradiction: a gateway that
+    says an address is unverified is believed."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={**CLAIMS, "email_verified": False})
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_true_needs_no_toggle(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={**CLAIMS, "email_verified": True})
+
+    _routes(monkeypatch, handler)
+    identity = await _provider(
+        trust_gateway_email=False,
+    ).fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is True

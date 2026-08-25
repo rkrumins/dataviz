@@ -62,14 +62,19 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 import jwt as pyjwt
 
 from .base import ProviderCredentials, ProviderIdentity
-from .claim_mapper import apply_claim_mapping, ClaimMappingError, resolve_path
+from .claim_mapper import (
+    apply_claim_mapping,
+    ClaimMappingError,
+    resolve_path,
+    resolved_sources,
+)
 from .outbound import (
     BlockedOutboundRequest,
     MAX_JSON_BYTES,
@@ -258,6 +263,12 @@ class BackchannelSettings:
     timeout_seconds: float = 5.0
     max_response_bytes: int = MAX_JSON_BYTES
     require_auth_time: bool = True
+    #: When the gateway sends no ``email_verified`` claim at all, count
+    #: the address as verified. Corporate gateways rarely send one, and
+    #: an absent claim normalises to False — which refuses the
+    #: auto-link-by-email this kind exists to make. An explicit
+    #: ``false`` from the gateway is still respected.
+    trust_gateway_email: bool = True
 
     # Liveness re-check on each token rotation.
     liveness_on_refresh: bool = True
@@ -337,6 +348,7 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
         require_auth_time=_as_bool(s.get("require_auth_time", True)),
+        trust_gateway_email=_as_bool(s.get("trust_gateway_email", True)),
         liveness_on_refresh=_as_bool(s.get("liveness_on_refresh", True)),
         liveness_grace_seconds=_as_int(s.get("liveness_grace_seconds"), 900),
         claim_mapping_override=snap.claim_mapping or {},
@@ -805,6 +817,23 @@ class BackchannelProvider:
             raise BackchannelError(
                 str(exc), code="backchannel_claims_unmappable",
             ) from exc
+
+        if self._s.trust_gateway_email and resolved_sources(
+            flat, kind="backchannel",
+            override=self._s.claim_mapping_override,
+        )["email_verified"] is None:
+            # No candidate claim resolved at all. The gateway answered
+            # for this person over TLS on this very request — a stronger
+            # statement than most IdPs' email_verified claim — but
+            # corporate gateways rarely send one, and absence normalises
+            # to False, which refuses the auto-link-by-email this kind
+            # exists to make. Absence counts as verified while the
+            # toggle is on. An explicit ``false`` resolves, so it never
+            # reaches this branch and still wins.
+            identity = replace(
+                identity,
+                raw_claims={**identity.raw_claims, "email_verified": True},
+            )
 
         if self._s.require_auth_time and not getattr(identity, "auth_time", None):
             # Without one, ``complete_sso_login`` falls back to "now"
