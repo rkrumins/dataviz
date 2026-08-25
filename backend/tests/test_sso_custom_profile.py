@@ -16,6 +16,7 @@ Three layers:
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import re
 import time
@@ -37,6 +38,7 @@ from backend.auth_service.providers.claim_mapper import (
 )
 from backend.auth_service.providers.custom_profile import (
     CustomProfileConfigError,
+    _MemoryJtiCache,
     CustomProfileError,
     CustomProfileProvider,
     CustomProfileSettings,
@@ -66,19 +68,34 @@ def _settings(**over) -> CustomProfileSettings:
     return CustomProfileSettings(**base)
 
 
+_JTI_SEQ = itertools.count()
+
+
 def _jwt(claims: dict, *, secret: str = SECRET, ttl: int = 300,
          iat_offset: int = 0, alg: str = "HS256", key=None) -> str:
+    """A signed payload.
+
+    ``jti`` is minted per call and unique, because it is now required and
+    single-use: a portal must issue a fresh payload per sign-in. Pass
+    ``jti`` explicitly in *claims* to pin it (replay tests) or to omit it
+    (the missing-claim test).
+    """
     now = int(time.time())
-    payload = {"iat": now + iat_offset, "exp": now + ttl, **claims}
+    payload = {
+        "iat": now + iat_offset,
+        "exp": now + ttl,
+        "jti": f"jti-{next(_JTI_SEQ)}",
+        **claims,
+    }
     return pyjwt.encode(payload, key or secret, algorithm=alg)
 
 
 # ── Signature + freshness ────────────────────────────────────────────
 
 
-def test_signed_payload_maps_to_identity():
+async def test_signed_payload_maps_to_identity():
     provider = CustomProfileProvider(_settings())
-    identity = provider.fetch_identity(_jwt({
+    identity = await provider.fetch_identity(_jwt({
         "sub": "S-1-5-21-1001",
         "emailAddress": "Alice.Doe@CORP.example",
         "firstName": "Alice",
@@ -94,29 +111,29 @@ def test_signed_payload_maps_to_identity():
     assert identity.groups == ("Eng-All", "DataViz-Admins")
 
 
-def test_tampered_signature_is_rejected():
+async def test_tampered_signature_is_rejected():
     provider = CustomProfileProvider(_settings())
     token = _jwt({"sub": "u1", "email": "a@corp.example"})
     with pytest.raises(CustomProfileError) as exc:
-        provider.fetch_identity(token[:-2] + ("aa" if token[-2:] != "aa" else "bb"))
+        await provider.fetch_identity(token[:-2] + ("aa" if token[-2:] != "aa" else "bb"))
     assert "payload_invalid" in str(exc.value)
 
 
-def test_payload_signed_with_wrong_secret_is_rejected():
+async def test_payload_signed_with_wrong_secret_is_rejected():
     provider = CustomProfileProvider(_settings())
     with pytest.raises(CustomProfileError):
-        provider.fetch_identity(_jwt({"sub": "u1", "email": "a@corp.example"},
+        await provider.fetch_identity(_jwt({"sub": "u1", "email": "a@corp.example"},
                                      secret="w" * 48))
 
 
-def test_expired_payload_is_rejected():
+async def test_expired_payload_is_rejected():
     provider = CustomProfileProvider(_settings())
     with pytest.raises(CustomProfileError) as exc:
-        provider.fetch_identity(_jwt({"sub": "u", "email": "a@corp.example"}, ttl=-10))
+        await provider.fetch_identity(_jwt({"sub": "u", "email": "a@corp.example"}, ttl=-10))
     assert str(exc.value) == "payload_expired"
 
 
-def test_payload_without_exp_is_rejected():
+async def test_payload_without_exp_is_rejected():
     """``exp`` is required — a portal must not mint an eternal profile."""
     provider = CustomProfileProvider(_settings())
     token = pyjwt.encode(
@@ -124,46 +141,46 @@ def test_payload_without_exp_is_rejected():
         SECRET, algorithm="HS256",
     )
     with pytest.raises(CustomProfileError):
-        provider.fetch_identity(token)
+        await provider.fetch_identity(token)
 
 
-def test_stale_iat_is_rejected_even_when_exp_is_valid():
+async def test_stale_iat_is_rejected_even_when_exp_is_valid():
     """A long-lived ``exp`` must not extend the useful life of a leaked
     payload past ``max_age_seconds``."""
     provider = CustomProfileProvider(_settings(max_age_seconds=60))
     with pytest.raises(CustomProfileError) as exc:
-        provider.fetch_identity(
+        await provider.fetch_identity(
             _jwt({"sub": "u", "email": "a@corp.example"}, ttl=86400, iat_offset=-600)
         )
     assert str(exc.value) == "payload_stale"
 
 
-def test_max_age_zero_disables_the_freshness_check():
+async def test_max_age_zero_disables_the_freshness_check():
     provider = CustomProfileProvider(_settings(max_age_seconds=0))
-    identity = provider.fetch_identity(
+    identity = await provider.fetch_identity(
         _jwt({"sub": "u", "email": "a@corp.example"}, ttl=86400, iat_offset=-600)
     )
     assert identity.external_id == "u"
 
 
-def test_issuer_and_audience_are_enforced_when_configured():
+async def test_issuer_and_audience_are_enforced_when_configured():
     provider = CustomProfileProvider(
         _settings(issuer="https://portal.corp", audience="dataviz")
     )
-    ok = provider.fetch_identity(_jwt({
+    ok = await provider.fetch_identity(_jwt({
         "sub": "u", "email": "a@corp.example",
         "iss": "https://portal.corp", "aud": "dataviz",
     }))
     assert ok.external_id == "u"
 
     with pytest.raises(CustomProfileError):
-        provider.fetch_identity(_jwt({
+        await provider.fetch_identity(_jwt({
             "sub": "u", "email": "a@corp.example",
             "iss": "https://evil.corp", "aud": "dataviz",
         }))
 
 
-def test_rs256_payload_verifies_against_the_configured_public_key():
+async def test_rs256_payload_verifies_against_the_configured_public_key():
     crypto = pytest.importorskip("cryptography")  # noqa: F841
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -182,7 +199,7 @@ def test_rs256_payload_verifies_against_the_configured_public_key():
     provider = CustomProfileProvider(
         _settings(signing_alg="RS256", shared_secret="", public_key=public_pem)
     )
-    identity = provider.fetch_identity(_jwt(
+    identity = await provider.fetch_identity(_jwt(
         {"sub": "rs-1", "email": "rs@corp.example"},
         alg="RS256", key=private_pem,
     ))
@@ -192,7 +209,7 @@ def test_rs256_payload_verifies_against_the_configured_public_key():
 # ── Transport encodings ──────────────────────────────────────────────
 
 
-def test_base64url_cookie_payload_is_decoded():
+async def test_base64url_cookie_payload_is_decoded():
     """Cookies can't carry raw JSON, so portals base64url it — including
     with the padding stripped."""
     settings = _settings(
@@ -203,42 +220,43 @@ def test_base64url_cookie_payload_is_decoded():
         json.dumps({"userId": "u9", "mail": "dee@corp.example",
                     "givenName": "Dee"}).encode()
     ).decode().rstrip("=")
-    identity = CustomProfileProvider(settings).fetch_identity(raw)
+    identity = await CustomProfileProvider(settings).fetch_identity(raw)
     assert (identity.external_id, identity.email) == ("u9", "dee@corp.example")
     assert identity.first_name == "Dee"
 
 
-def test_url_encoded_cookie_payload_is_decoded():
+async def test_url_encoded_cookie_payload_is_decoded():
     settings = _settings(
         source="cookie", source_key="corp_profile",
         payload_format="json", trust_unsigned=True, encoding="url",
     )
     raw = urllib.parse.quote(json.dumps({"sub": "u2", "email": "e@corp.example"}))
-    assert CustomProfileProvider(settings).fetch_identity(raw).external_id == "u2"
+    identity = await CustomProfileProvider(settings).fetch_identity(raw)
+    assert identity.external_id == "u2"
 
 
-def test_undecodable_base64_is_rejected():
+async def test_undecodable_base64_is_rejected():
     settings = _settings(
         payload_format="json", trust_unsigned=True, encoding="base64url",
     )
     with pytest.raises(CustomProfileError):
-        CustomProfileProvider(settings).fetch_identity("!!!not-base64!!!")
+        await CustomProfileProvider(settings).fetch_identity("!!!not-base64!!!")
 
 
-def test_empty_payload_is_rejected():
+async def test_empty_payload_is_rejected():
     with pytest.raises(CustomProfileError) as exc:
-        CustomProfileProvider(_settings()).fetch_identity("   ")
+        await CustomProfileProvider(_settings()).fetch_identity("   ")
     assert str(exc.value) == "payload_missing"
 
 
 # ── Nested payloads + required fields ────────────────────────────────
 
 
-def test_nested_profile_container_is_hoisted():
+async def test_nested_profile_container_is_hoisted():
     """``{"user": {...}}`` maps without the operator writing dotted
     paths."""
     provider = CustomProfileProvider(_settings())
-    identity = provider.fetch_identity(_jwt({
+    identity = await provider.fetch_identity(_jwt({
         "sub": "u1",
         "user": {"emailAddress": "bob@corp.example",
                  "firstName": "Bob", "lastName": "Ray"},
@@ -247,19 +265,19 @@ def test_nested_profile_container_is_hoisted():
     assert (identity.first_name, identity.last_name) == ("Bob", "Ray")
 
 
-def test_top_level_keys_win_over_nested_ones():
+async def test_top_level_keys_win_over_nested_ones():
     provider = CustomProfileProvider(_settings())
-    identity = provider.fetch_identity(_jwt({
+    identity = await provider.fetch_identity(_jwt({
         "sub": "u1", "email": "top@corp.example",
         "profile": {"email": "nested@corp.example"},
     }))
     assert identity.email == "top@corp.example"
 
 
-def test_missing_email_is_rejected():
+async def test_missing_email_is_rejected():
     provider = CustomProfileProvider(_settings())
     with pytest.raises(CustomProfileError) as exc:
-        provider.fetch_identity(_jwt({"sub": "u1", "firstName": "NoEmail"}))
+        await provider.fetch_identity(_jwt({"sub": "u1", "firstName": "NoEmail"}))
     assert "resolve email" in str(exc.value)
 
 
@@ -272,24 +290,24 @@ def test_unsigned_json_requires_explicit_opt_in():
     assert "trust_unsigned" in str(exc.value)
 
 
-def test_unsigned_json_is_accepted_once_opted_in():
+async def test_unsigned_json_is_accepted_once_opted_in():
     settings = _settings(payload_format="json", trust_unsigned=True)
     validate_settings(settings)
-    identity = CustomProfileProvider(settings).fetch_identity(
+    identity = await CustomProfileProvider(settings).fetch_identity(
         json.dumps({"sub": "u3", "email": "c@corp.example", "fullName": "Cara Lee"})
     )
     assert identity.external_id == "u3"
     assert (identity.first_name, identity.last_name) == ("Cara", "Lee")
 
 
-def test_provider_refuses_unsigned_payload_even_if_the_builder_was_skipped():
+async def test_provider_refuses_unsigned_payload_even_if_the_builder_was_skipped():
     """Defence in depth: a hand-constructed provider that never went
     through ``validate_settings`` still won't accept unsigned input."""
     provider = CustomProfileProvider(
         _settings(payload_format="json", trust_unsigned=False)
     )
     with pytest.raises(CustomProfileError) as exc:
-        provider.fetch_identity(json.dumps({"sub": "u", "email": "a@corp.example"}))
+        await provider.fetch_identity(json.dumps({"sub": "u", "email": "a@corp.example"}))
     assert str(exc.value) == "unsigned_not_permitted"
 
 
@@ -630,3 +648,176 @@ async def test_header_login_emits_its_own_audit_event(
     assert resp.status_code == 302
     assert resp.headers["location"] == "/dashboard"
     assert "user.sso_header_accepted" in [e[0] for e in sso_events]
+
+
+# ── Replay, freshness, and the claims that make them possible ────────
+#
+# A signature proves the PORTAL minted this payload. It says nothing
+# about who is presenting it. Before this, a copied payload — lifted
+# from a shared machine, a proxy log, a browser extension reading
+# localStorage — was a working credential for its whole lifetime, and it
+# produced a legitimately minted session of the copier's own: nothing to
+# revoke, and no signal it had happened.
+
+async def test_a_payload_works_exactly_once():
+    """The headline property. Same bytes, presented twice."""
+    provider = CustomProfileProvider(_settings())
+    raw = _jwt({"sub": "u1", "email": "ana@corp.example"})
+
+    first = await provider.fetch_identity(raw)
+    assert first.external_id == "u1"
+
+    with pytest.raises(CustomProfileError) as exc:
+        await provider.fetch_identity(raw)
+    assert str(exc.value) == "payload_replayed"
+
+
+async def test_a_replay_is_refused_across_provider_rebuilds():
+    """``ProviderRegistry`` rebuilds the provider every 60s. A cache that
+    lives on the provider forgets every id on each rebuild, well inside
+    the payload's own TTL — which is precisely how the SAML replay cache
+    managed to look real and enforce nothing."""
+    shared = _MemoryJtiCache()
+    raw = _jwt({"sub": "u1", "email": "ana@corp.example"})
+
+    assert await CustomProfileProvider(
+        _settings(), replay_cache=shared,
+    ).fetch_identity(raw)
+
+    with pytest.raises(CustomProfileError) as exc:
+        await CustomProfileProvider(
+            _settings(), replay_cache=shared,
+        ).fetch_identity(raw)
+    assert str(exc.value) == "payload_replayed"
+
+
+async def test_distinct_payloads_are_both_accepted():
+    """Guards the guard: if every payload were refused, the replay tests
+    above would pass for the wrong reason."""
+    provider = CustomProfileProvider(_settings())
+    assert await provider.fetch_identity(_jwt({"sub": "u1", "email": "a@c.example"}))
+    assert await provider.fetch_identity(_jwt({"sub": "u2", "email": "b@c.example"}))
+
+
+async def test_a_payload_without_jti_is_refused():
+    """Single-use is not optional: without an id there is nothing to
+    burn, so the payload would be replayable for its whole lifetime."""
+    provider = CustomProfileProvider(_settings())
+    raw = _jwt({"sub": "u1", "email": "ana@corp.example", "jti": None})
+    # pyjwt drops a None claim, so this really is a payload with no jti.
+    with pytest.raises(CustomProfileError) as exc:
+        await provider.fetch_identity(raw)
+    assert "jti" in str(exc.value)
+
+
+async def test_a_payload_without_iat_is_refused():
+    """THE BYPASS. ``require`` listed only ``exp`` and the age check read
+    ``if issued is not None``, so a payload with a far-future ``exp`` and
+    no ``iat`` skipped freshness entirely — the opposite of what
+    SSO.md:622 promises."""
+    now = int(time.time())
+    raw = pyjwt.encode(
+        {"exp": now + 31_536_000, "jti": "no-iat-1",
+         "sub": "u1", "email": "ana@corp.example"},
+        SECRET, algorithm="HS256",
+    )
+    with pytest.raises(CustomProfileError) as exc:
+        await CustomProfileProvider(_settings()).fetch_identity(raw)
+    assert "iat" in str(exc.value)
+
+
+async def test_a_future_dated_payload_is_refused():
+    """Beyond freshness: ``iat`` feeds the 24h SSO re-auth ceiling by
+    default (claim_mapper's auth_time candidates end in "iat"), so a
+    future-dated payload yields a negative session age and never trips
+    that ceiling."""
+    provider = CustomProfileProvider(_settings())
+    raw = _jwt({"sub": "u1", "email": "ana@corp.example"}, iat_offset=3600)
+    with pytest.raises(CustomProfileError) as exc:
+        await provider.fetch_identity(raw)
+    assert str(exc.value) == "payload_future_iat"
+
+
+async def test_small_clock_skew_is_tolerated():
+    """A freshness bound must not become a support ticket about NTP.
+
+    pyjwt applies ZERO tolerance by default, so before the explicit
+    leeway a portal one second ahead of us failed every single login.
+    """
+    provider = CustomProfileProvider(_settings())
+    raw = _jwt({"sub": "u1", "email": "ana@corp.example"}, iat_offset=30)
+    assert await provider.fetch_identity(raw)
+
+
+# ── Production refuses a signed provider with no shared store ────────
+#
+# Same stance, and the same reason, as the SAML replay cache: the
+# in-process fallback silently LOOKS like replay protection. Four
+# workers per container across N replicas each hold their own dict, and
+# the registry rebuilds the provider every 60s — so a copied payload
+# only has to land on a worker that has not seen it, or on the same
+# worker a minute later.
+
+def _snapshot(**settings):
+    base = {
+        "source": "cookie", "source_key": "corp_profile",
+        "shared_secret": SECRET,
+    }
+    base.update(settings)
+    return ProviderConfigSnapshot(
+        id="idp_x", slug="corp-portal", display_name="Corp",
+        kind="custom_profile", enabled=True, priority=1,
+        settings=base, claim_mapping={}, linking_policy="strict",
+        button_label=None, button_icon=None,
+    )
+
+
+def test_production_refuses_a_signed_provider_without_a_shared_cache():
+    from backend.app.main import profile_builder_with_replay_cache
+
+    def _base(snap, replay_cache=None):  # pragma: no cover - must not run
+        raise AssertionError("the guard should have refused first")
+
+    build = profile_builder_with_replay_cache(_base, None, True)
+    with pytest.raises(RuntimeError) as err:
+        build(_snapshot())
+    assert "corp-portal" in str(err.value)
+
+
+def test_production_allows_an_unsigned_provider_without_a_cache():
+    """Unsigned rows have no ``jti`` to burn, and they are already an
+    explicit operator-acknowledged escape hatch. Refusing them HERE
+    would be refusing them on a technicality rather than on merit."""
+    from backend.app.main import profile_builder_with_replay_cache
+
+    build = profile_builder_with_replay_cache(
+        lambda s, replay_cache=None: "provider", None, True,
+    )
+    assert build(_snapshot(payload_format="json", trust_unsigned=True)) == "provider"
+
+
+def test_a_shared_cache_is_handed_to_the_provider():
+    from backend.app.main import profile_builder_with_replay_cache
+
+    seen = {}
+
+    def _base(snap, replay_cache=None):
+        seen["cache"] = replay_cache
+        return "provider"
+
+    cache = object()
+    for is_prod in (True, False):
+        seen.clear()
+        assert profile_builder_with_replay_cache(_base, cache, is_prod)(
+            _snapshot(),
+        ) == "provider"
+        assert seen["cache"] is cache
+
+
+def test_a_dev_deployment_without_a_shared_cache_still_builds():
+    from backend.app.main import profile_builder_with_replay_cache
+
+    build = profile_builder_with_replay_cache(
+        lambda s, replay_cache=None: "provider", None, False,
+    )
+    assert build(_snapshot()) == "provider"

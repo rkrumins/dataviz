@@ -1394,28 +1394,52 @@ have it. The `delete_provider` endpoint is gated by it.
 The auth surface defends against these threats. Out-of-scope
 attacks at the bottom of the section.
 
+Several rows below are marked with what was **previously** wrong. Two of
+them once asserted controls this code did not actually implement — SAML
+assertion replay and `system:admin` via group mapping. What was found,
+what changed, and which test pins each one is written up in
+`docs/security/REMEDIATION_REPORT.md` in the repository.
+
+Deliberately a path and not a link: this page is served in-app, and the
+security write-ups under `docs/security/` are repository-only — they
+enumerate exploitable defects with reproduction detail, which does not
+belong on a surface every signed-in user can open. A markdown link here
+would also 404 in-app, since those files are not registered docs routes.
+
 ### 10.1 In scope
 
 | Threat | Defense | Location |
 |--------|---------|----------|
 | Cookie theft via XSS | HttpOnly on `nx_access`/`nx_refresh` | `cookies.py:set_session_cookies` |
-| CSRF on writes | double-submit (`nx_csrf` + `X-CSRF-Token`) | `csrf.py` + `fetchWithTimeout.ts` |
-| Refresh token replay | per-`jti` revocation + family kill on reuse | `refresh.py:check_and_record_rotation` |
-| Open redirect on post-login bounce | `_safe_next` only accepts same-site relative paths | `api/router.py:_safe_next` |
+| CSRF on writes | double-submit **bound to the session `sid`** by HMAC, so a cookie planted by a sibling subdomain does not satisfy it | `csrf.py:mint_csrf_token` |
+| CSRF on the pre-session endpoints (login, logout, refresh, reset) | Origin/Referer allowlist — they have no cookie to double-submit | `csrf.py:_origin_is_allowed` |
+| Refresh token replay | per-`jti` revocation + family kill on reuse, outside a 30s grace window | `refresh.py:check_and_record_rotation` |
+| Session outliving its usefulness | 12h idle + 7d absolute ceiling on EVERY session, from the server's record | `service.py:_refresh_within_session` |
+| Access token surviving sign-out | logout tombstones the `sid`, not just the refresh family | `service.py:logout` |
+| Session surviving a password reset | both reset paths + suspend call `revoke_every_session_for_user` | `revocation_service.py` |
+| Open redirect on post-login bounce | `_safe_next` rejects scheme, host, `//`, backslash, control characters and their encoded forms | `api/router.py:_safe_next` |
 | OIDC state mismatch (CSRF for callback) | `hmac.compare_digest(flow.state, callback.state)` | `api/router.py:oidc_callback` |
 | OIDC ID-token forgery | JWKS verify + `iss`, `aud`, `exp`, `nonce`, `at_hash` (Authlib) | `providers/oidc.py:_verify_id_token` |
 | OIDC JWKS rotation desync | refetch on `kid` miss once before failing | same |
 | SAML signature forgery | python3-saml strict mode + `wantAssertionsSigned` | `providers/saml2.py:_settings_dict` |
-| SAML assertion replay | Redis-backed cache keyed by assertion id, TTL = NotOnOrAfter | `providers/saml2.py:fetch_identity` |
+| Unsolicited / unmatched SAML response | AuthnRequest `ID` captured at leg 1, carried in the signed flow cookie, and passed to `process_response` so `InResponseTo` is actually compared. **The library skips that check silently when no id is supplied**, which is what it had been doing. | `providers/saml2.py:build_authorization` |
+| Unsigned IdP-initiated logout | the SLO path builds its settings with `wantMessagesSigned` — it cannot be on globally, since ID-style IdPs sign the assertion and not the Response, but a `LogoutRequest` has no assertion to carry a signature instead | `providers/saml2.py:process_slo` |
+| Flow begun at one provider completing at another | state tokens carry `pid`, compared at the callback. One `nx_oidc`/`nx_saml` cookie name serves every slug, so nothing else distinguished them | `api/router.py:_flow_belongs_to` |
+| SAML assertion replay | shared store keyed by assertion id (`SET NX EX`, TTL = NotOnOrAfter), injected by `app/main.py`; prod refuses to serve SAML without one. **Was claimed here and not wired** — every provider fell back to a per-worker dict that the 60s registry rebuild discarded. | `revocation_service.SharedSamlReplayCache` |
 | Signature wrapping (XSW) on SAML | strict-mode XML parsing in python3-saml | library |
 | Account takeover via email collision | `linking_policy` matrix, default `strict` | `service.py:complete_sso_login` |
-| `system:admin` granted via group | per-mapping write-time refusal + reconcile-time skip | `idp_group_mapping_repo.FORBIDDEN_AUTO_ROLE` |
+| `system:admin` granted via group | write-time refusal + reconcile-time skip, for BOTH mapping kinds. **The `group_membership` kind was unguarded** — it never asked what the target group grants, and `is_protected` has no write path, so an IdP group pointed at a group holding `super_admin` handed out platform admin. | `idp_group_mapping_repo.roles_granted_by_group` |
 | Operator self-lockout via posture toggle | `_admins_without_sso_identity` check | `admin_sso_config.update_config` |
 | Stale permissions after admin change | `claims_resolver` re-runs on every `/refresh` | `service.refresh` |
 | 24h SSO drift | `auth_time` ceiling check on `/refresh` | same |
 | Stolen mock-IdP cookie (custom) | HS256 signature + short TTL + ENV/feature gate | `core/tokens.create_mock_identity_token` |
 | Encrypted IdP secret at rest | Fernet via `CREDENTIAL_ENCRYPTION_KEY` | `idp_provider_repo.encrypt_settings` |
-| Signing-key absence/weakness | fail-fast at import (≥32 chars required) | `core/config._resolve_secret` |
+| Unpublished provider used to sign in | registry refuses a non-`live` row next to where it refuses a disabled one; the dry-run opts in via its admin-minted cookie | `providers/registry.py:_assert_usable` |
+| SSRF via admin-supplied IdP metadata URLs | scheme + resolved-address allowlist, redirects off, body capped | `providers/outbound.py` |
+| SSO-only account converted to a local one | reset refuses; the admin override is explicit and audited | `endpoints/auth.py:reset_password` |
+| Signing-key absence/weakness | fail-fast at import (≥32 chars, published placeholders denylisted) | `core/config._resolve_secret` |
+| Algorithm downgrade | `JWT_ALGORITHM` allowlisted to the HMAC family at startup — `none` used to clear the boot check | `core/config.assert_signing_secret` |
+| Reserved claims overridden at mint | `extra` cannot set `sub`/`aud`/`iss`/`exp` — `aud` is what keeps a refresh token from being replayed as an access token | `core/tokens._safe_extra` |
 | Audit completeness | every state change emits an outbox event | grep `create_outbox_event` |
 
 ### 10.2 Out of scope (defended elsewhere or deferred)
@@ -1443,15 +1467,41 @@ attacks at the bottom of the section.
   session. Counters resolve through the central Redis resolver so they
   are shared across replicas; an unreachable store degrades to
   per-worker counting rather than failing requests.
-* **MFA** — not implemented. See `SSO.md §4` for the deferred
-  pattern.
+* **MFA** — not implemented here, and deliberately so: the corporate
+  IdP is the MFA authority. What that requires is that a federated user
+  cannot step around the IdP, which is now enforced rather than assumed.
+  An SSO-only account carries the disabled-password sentinel, and both
+  password-reset paths refuse to remove it — the admin endpoint has an
+  explicit `allowSsoOnlyOverride` for an org genuinely retiring SSO, and
+  using it emits `user.local_login_enabled`.
+
+  The residual is real and worth stating: where `allow_local_login` is
+  on, an account that has a password can use it, and nothing in this
+  application asks for a second factor. See `SSO.md §4` for the deferred
+  in-app pattern.
 * **SCIM provisioning** — same; manual `admin_user_identities`
   endpoints cover the small-scale need.
 * **HSM / KMS for signing keys** — HS256 with a fail-fast env
   secret is fine in-process; KMS for RS256/ES256 + JWKS rotation
   is a deferred phase.
 * **Per-session activity log** — `auth_audit_log` carries event
-  shapes; a fuller `user_session_log` is a future polish.
+  shapes; a fuller `user_session_log` is a future polish. `refresh_tokens`
+  already holds enough to build a "your active devices" view with
+  per-session revoke; what it lacks is an IP/user-agent column captured
+  at mint.
+
+* **IdP-initiated SLO propagation** — `/{slug}/sls` ends the presenting
+  browser's session and nothing else. The `NameID`/`SessionIndex` are
+  never resolved to a user, so a logout at the IdP does not reach that
+  user's other devices. The message signature IS now required; what is
+  missing is the fan-out.
+
+* **Per-provider email-domain binding** — `idp_providers.email_domains`
+  drives home-realm-discovery routing only. Nothing checks that an
+  asserted address belongs to the asserting provider's domains, so a
+  contractor IdP can assert a staff address; `linking_policy` and
+  `email_verified` decide whether that reaches an existing account, and
+  JIT provisioning creates one if it does not exist.
 * **Sandboxing the custom IdP** — gated by env + ENV
   ≠ `prod`/`production`; we rely on operators not flipping the
   flag in prod (the config module refuses to start if they do).
@@ -1503,14 +1553,23 @@ it becomes useful: a tab restored after the token died still needs to
 read *when* it died, and that tab is precisely the one that should
 refresh immediately instead of firing a request it knows will 401.
 
-`nx_csrf` and `nx_access_exp` are the only two **not** suffixed with
-`AUTH_ENVIRONMENT_ID` — both are read from JS by name, and a
-per-environment name would have to be discovered at runtime before the
-first write or the first scheduled renewal. Neither is signature-bearing,
-so sharing the name across environments is harmless. Every cookie that
-does carry a signature is scoped, `nx_dryrun` included;
-`test_every_signed_cookie_is_scoped` asserts the property rather than a
-list, because the list is what let `nx_dryrun` slip through.
+**Every** cookie is suffixed with `AUTH_ENVIRONMENT_ID`, `nx_csrf` and
+`nx_access_exp` included — see
+[MULTI_ENVIRONMENT_SESSIONS.md §2](MULTI_ENVIRONMENT_SESSIONS.md), which
+records why the original "harmless to share, they carry no signature"
+reasoning did not hold. It was about deletion, not about the values:
+`clear_session_cookies` evicts across the shared parent domain, so
+signing out of one instance disarmed a sibling's writes while leaving
+its session live. The client learns the suffix from `environment_id` on
+`GET /auth/me`. `test_every_signed_cookie_is_scoped` asserts the
+property rather than a list, because a list is what let `nx_dryrun`
+slip through.
+
+`nx_csrf` is no longer an unbound random value. It is
+`<nonce>.<HMAC(nonce + sid)>` under the signing key ring, so a cookie
+planted by a sibling subdomain — the cookie-tossing case that plain
+double-submit cannot see — fails the check. Verification runs against
+the whole ring so a key rotation does not 403 every write in flight.
 
 ### 11.2 Endpoints (Phases 0–4)
 
@@ -1608,6 +1667,10 @@ by `source_event_id` UNIQUE.
 | `SAML_*` (legacy) | (none) | env-only seed for `default-saml2` provider |
 | `REDIS_URL` | `redis://localhost:6379/0` | revocation set + replay cache |
 | `RBAC_REVOCATION_TTL_SECONDS` | derived: access TTL + 60s | sid TTL in Redis. Derived from `JWT_EXPIRY_MINUTES` rather than set beside it — the two drifted, and a tombstone shorter than the token means revocation silently stops taking effect. Startup refuses an override below the access TTL. |
+| `SESSION_IDLE_MAX_HOURS` | `12` | How long a session may go unused before the next rotation is refused, measured from the previous rotation. `0` disables. Before this existed the only idle bound was the 7-day refresh TTL, which rotation reset on every use — so an active-once-a-week session never lapsed |
+| `SESSION_ABSOLUTE_MAX_HOURS` | `168` | Ceiling on one sign-in, measured from the family's FIRST mint so rotation cannot extend it. `0` disables. Applies to local sessions too, which the 24h SSO ceiling never did — `auth_time` is NULL for them |
+| `ALLOWED_HOSTS` | *(empty)* | Comma-separated hostnames this deployment answers to. Matters for SAML: python3-saml validates `Destination`/`Recipient` against the URL built from `Host`/`X-Forwarded-Host`, and neither nginx nor gunicorn filters the latter. Empty = accept whatever the request claims |
+| `REFRESH_ADOPT_RECORDLESS` | `false` | Accept a signed refresh token with no server-side row, once, and write the row. The migration ramp for allow-by-record; **defaulted to `true` for far longer than the one refresh lifetime it needed**, during which allow-by-record was not actually in force |
 | `REFRESH_ROTATION_GRACE_SECONDS` | `30` | how long a re-presented refresh token is read as a concurrent refresh rather than a stolen chain. `0` = strict rotation |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | peers whose `X-Forwarded-For` is trusted. Must name the proxy (or `*`) behind an ingress, or every caller is recorded as the proxy |
 | `RATELIMIT_STORAGE_URI` | (none → resolver) | Override for rate-limit counter storage. Unset, counters resolve through the central Redis resolver on the STREAMS role — the same path revocation takes — so they follow whatever each environment configures, including production's Memorystore coordinates. A defaulted (unconfigured) endpoint means in-process memory |

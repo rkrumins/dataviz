@@ -779,6 +779,41 @@ async def reconcile_sso_targets(
                     user_id, m.target_group_id, m.id,
                 )
                 continue
+            # What the group GRANTS, not what it is called. A group
+            # holding a global ``super_admin`` binding confers exactly
+            # the role the branch below refuses to name directly, so
+            # reaching it through a membership mapping has to be refused
+            # too — otherwise the guard is a formality with a documented
+            # way around it.
+            #
+            # Checked here as well as at write time for the reason the
+            # comment above ``provider_assurance`` gives: the mapping is
+            # standing configuration and the group's bindings can change
+            # after it was written. Write-time validation cannot see
+            # that happen; this can.
+            granted = await idp_group_mapping_repo.roles_granted_by_group(
+                session, m.target_group_id,
+            )
+            forbidden = granted & FORBIDDEN_AUTO_ROLES
+            if forbidden:
+                logger.warning(
+                    "Refusing to auto-add %s to group %s: it grants %s "
+                    "(mapping=%s)",
+                    user_id, m.target_group_id, sorted(forbidden), m.id,
+                )
+                continue
+            if (
+                granted & PLATFORM_ADMIN_ROLES
+                and not assurance_at_least(provider_assurance, VERIFIED)
+            ):
+                logger.warning(
+                    "Refusing to auto-add %s to group %s: it grants platform "
+                    "admin %s and provider %s has assurance '%s' (mapping=%s)",
+                    user_id, m.target_group_id,
+                    sorted(granted & PLATFORM_ADMIN_ROLES), provider_id,
+                    provider_assurance, m.id,
+                )
+                continue
             group_target_ids.add(m.target_group_id)
         else:
             if m.role_name in FORBIDDEN_AUTO_ROLES:

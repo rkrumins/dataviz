@@ -53,8 +53,17 @@ services:
     image: falkordb/falkordb:v4.18.11
     restart: unless-stopped
     ports:
-      - "${FALKORDB_PORT:-6379}:6379"
-      - "${FALKORDB_UI_PORT:-3000}:3000"       # FalkorDB Browser UI
+      # Loopback-bound by default. FalkorDB has no authentication and
+      # its Browser UI on :3000 has none either, so a default install on
+      # a VM published an unauthenticated read-write graph database and
+      # an admin console to the internet. docs/DEPLOYMENT.md told
+      # operators to change this by hand; a hardening step that has to
+      # be remembered is one that gets missed.
+      #
+      # Set FALKORDB_BIND=0.0.0.0 deliberately if something off-host
+      # genuinely needs to reach it.
+      - "${FALKORDB_BIND:-127.0.0.1}:${FALKORDB_PORT:-6379}:6379"
+      - "${FALKORDB_BIND:-127.0.0.1}:${FALKORDB_UI_PORT:-3000}:3000"
     environment:
       # CACHE_SIZE is the per-graph COMPILED-QUERY-PLAN cache. The label-
       # bucket read path issues many distinct parameterized Cypher shapes
@@ -112,7 +121,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6380}:6379"
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6380}:6379"
     volumes:
       - redis_data:/data
     command: >
@@ -145,7 +154,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be set in .env}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -192,7 +201,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile.controlplane
     ports:
-      - "${CONTROLPLANE_PORT:-8091}:8091"
+      # Internal service. Its auth is a shared bearer token that is a
+      # no-op when unset, so it must not be reachable off-host.
+      - "${CONTROLPLANE_BIND:-127.0.0.1}:${CONTROLPLANE_PORT:-8091}:8091"
     environment:
       # Profiling capture — this tier writes snapshots too (see the
       # x-profiling-capture anchor for why it is shared).
@@ -279,7 +290,11 @@ services:
       context: .
       dockerfile: backend/Dockerfile.viz
     ports:
-      - "${VIZ_PORT:-8000}:8000"
+      # The frontend container proxies /api to this over the compose
+      # network, so nothing outside the host needs the port. Publishing
+      # it also bypassed nginx — and with it the security headers and
+      # the X-Forwarded-For the rate limiter keys on.
+      - "${VIZ_BIND:-127.0.0.1}:${VIZ_PORT:-8000}:8000"
     environment:
       # Profiling capture — this tier writes snapshots too (see the
       # x-profiling-capture anchor for why it is shared).
@@ -289,7 +304,12 @@ services:
       # X-Forwarded-For nginx sets — putting every user in one
       # rate-limit bucket keyed on the proxy. Only the compose network
       # can reach this port.
-      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-*}"
+      # Narrowed from "*". The compose network is always inside one of
+      # the RFC1918 ranges, so this still trusts nginx while refusing a
+      # spoofed X-Forwarded-For from anything that reaches the port
+      # directly — which decides both the per-IP rate-limit bucket and
+      # the client address recorded in the audit log.
+      FORWARDED_ALLOW_IPS: "${FORWARDED_ALLOW_IPS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.1}"
       # Shared rate-limit storage. Without it each of the 4 gunicorn
       # workers keeps its own in-memory counters.
       RATELIMIT_STORAGE_URI: "${RATELIMIT_STORAGE_URI:-redis://redis:6379/1}"
@@ -312,7 +332,12 @@ services:
       # Auth — fail fast if secrets aren't set
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      JWT_EXPIRY_MINUTES: "${JWT_EXPIRY_MINUTES:-60}"
+      # 15, not 60. Permissions ride in the access token, so a role or
+      # revocation change does not reach a live session until its next
+      # rotation, and every tombstone has to be held in Redis for the
+      # whole window. The k8s configmap has always used 15; this file
+      # had drifted to 60 and the release notes claimed otherwise.
+      JWT_EXPIRY_MINUTES: "${JWT_EXPIRY_MINUTES:-15}"
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@synodic.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in .env}
 

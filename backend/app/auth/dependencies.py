@@ -82,13 +82,57 @@ def _flag(name: str, default: bool = True) -> bool:
     return raw.strip().lower() not in ("false", "0", "no", "off")
 
 
+#: Every kill-switch that gates a real authorization check, so startup
+#: can say what state they are in rather than leaving it to a grep.
+#:
+#: These are not feature flags. ``RBAC_ENFORCE_VIEWS`` guards nineteen
+#: checks in ``endpoints/views.py``, including the ``can_read_view``
+#: object-level test, and the routes it guards take
+#: ``get_optional_user`` — which never 401s. Turned off, the flag is not
+#: "less strict"; it is the only authorization on that surface, gone,
+#: at runtime, with no redeploy and nothing in the audit log.
+RBAC_ENFORCEMENT_FLAGS = (
+    "RBAC_ENFORCE_VIEWS",
+    "RBAC_ENFORCE_WORKSPACES",
+)
+
+
 def rbac_flag(name: str) -> bool:
     """Read a kill-switch at request time.
 
     Reads the env var on every call so tests can flip a flag mid-run
-    via ``monkeypatch.setenv`` without touching module state.
+    via ``monkeypatch.setenv`` without touching module state. That is
+    also what makes an accidental production value take effect
+    instantly, which is why ``assert_rbac_enforcement_intact`` runs at
+    startup.
     """
     return _flag(name)
+
+
+def assert_rbac_enforcement_intact() -> None:
+    """Refuse to serve production with authorization switched off.
+
+    The switches exist for fast rollback if new enforcement causes an
+    incident, and that is a real need — so they are not being removed.
+    But an emergency lever left down is indistinguishable from one
+    nobody pulled, and nothing anywhere reported the difference. Now the
+    process will not start.
+    """
+    disabled = [n for n in RBAC_ENFORCEMENT_FLAGS if not _flag(n)]
+    if not disabled:
+        return
+    if os.getenv("ENV", "dev").strip().lower() in ("prod", "production"):
+        raise RuntimeError(
+            f"RBAC enforcement is disabled ({', '.join(disabled)}) and ENV is "
+            "production. These are emergency rollback levers, not settings — "
+            "with them off, the surfaces they guard have no authorization at "
+            "all. Unset them, or set ENV appropriately for a non-production "
+            "deployment."
+        )
+    logger.warning(
+        "RBAC enforcement DISABLED for: %s. The surfaces these guard have no "
+        "authorization while this holds.", ", ".join(disabled),
+    )
 
 
 def _identity_service(request: Request) -> IdentityService:
@@ -198,6 +242,46 @@ async def get_optional_user(request: Request) -> User | None:
     return await _identity_service(request).validate_session(read_access_cookie(request))
 
 
+async def assert_session_alive_or_503(
+    claims: "PermissionClaims", *, permission: str, user_id: str,
+) -> None:
+    """Confirm the session is not revoked, refusing if we cannot tell.
+
+    The second, opt-in revocation probe. ``get_current_user`` already
+    checks the tombstone on every authenticated request, but it does so
+    FAIL-OPEN: if the backend is unreachable it logs and honours the JWT,
+    because the token TTL is still a floor and a Redis blip must not sign
+    the whole platform out.
+
+    For a sensitive route that trade is the wrong way round. "I cannot
+    confirm this session is still alive" should not read as "carry on"
+    when the thing being authorised is platform administration, so here
+    an unreachable backend is a 503 rather than a pass.
+
+    Extracted so ``require_admin`` can run it too. It gates
+    ``system:admin`` — which is in ``_FAIL_CLOSED_PERMISSIONS`` — but it
+    never ran this probe, so its call sites (admin users, announcements,
+    ontologies, groups, stats-admin) were fail-OPEN despite being the
+    most sensitive surface in the product.
+    """
+    try:
+        if claims.sid and await get_revocation_service().is_revoked(claims.sid):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session revoked",
+            )
+    except RevocationBackendError as exc:
+        logger.warning(
+            "Revocation backend unavailable on fail-closed path "
+            "(perm=%s user=%s): %s",
+            permission, user_id, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authorization temporarily unavailable",
+        )
+
+
 async def require_admin(
     request: Request,
     user: User = Depends(get_current_user),
@@ -221,6 +305,11 @@ async def require_admin(
     state: if you don't have the claim, you don't have admin.
     """
     claims = await get_permission_claims(request)
+    # Before the permission test, not after: a revoked session must not
+    # reach an admin route even to be told it lacks the claim.
+    await assert_session_alive_or_503(
+        claims, permission="system:admin", user_id=user.id,
+    )
     if has_permission(claims, "system:admin"):
         return user
     raise HTTPException(
@@ -566,22 +655,9 @@ def requires(
         # be reached if we can't confirm the session is alive), so
         # we run a second, opt-in revocation probe here.
         if fail_closed:
-            try:
-                if claims.sid and await get_revocation_service().is_revoked(claims.sid):
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Session revoked",
-                    )
-            except RevocationBackendError as exc:
-                logger.warning(
-                    "Revocation backend unavailable on fail-closed path "
-                    "(perm=%s user=%s): %s",
-                    permission, user.id, exc,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Authorization temporarily unavailable",
-                )
+            await assert_session_alive_or_503(
+                claims, permission=permission, user_id=user.id,
+            )
 
         # Resolve workspace id from the path, if scoped.
         workspace_id: Optional[str] = None

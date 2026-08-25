@@ -107,3 +107,169 @@ async def test_signup_endpoint_is_csrf_exempt(test_client: AsyncClient, signup_e
         },
     )
     assert resp.status_code != 403
+
+
+# ── Session binding + Origin (added with the CSRF hardening) ─────────
+#
+# The conftest client's access cookie carries no ``sid``, so these drive
+# the middleware's two new checks through real requests rather than
+# relying on that fallback path.
+
+async def test_a_cross_origin_write_is_refused(test_client: AsyncClient):
+    """Second, independent defence.
+
+    Double-submit assumes the attacker cannot write our cookie; Origin
+    assumes they cannot forge the header, which browsers guarantee. The
+    second matters most in the configuration that removes the first's
+    backstop — ``AUTH_COOKIE_SAMESITE=none``, which a split-origin
+    deployment would plausibly set.
+    """
+    resp = await test_client.post(
+        _ANY_PROTECTED_POST, json={},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "csrf_failed"
+
+
+async def test_a_same_origin_write_is_allowed(test_client: AsyncClient):
+    resp = await test_client.post(
+        _ANY_PROTECTED_POST, json={},
+        headers={"Origin": "http://testserver"},
+    )
+    assert resp.status_code != 403
+
+
+async def test_a_configured_cors_origin_is_allowed(
+    test_client: AsyncClient, monkeypatch,
+):
+    """The allowlist is read from CORS_ALLOWED_ORIGINS.
+
+    Read per request rather than cached, because the CORS middleware and
+    this check disagreeing would produce a request the browser permits
+    and the server refuses.
+    """
+    monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "https://app.corp.example")
+    resp = await test_client.post(
+        _ANY_PROTECTED_POST, json={},
+        headers={"Origin": "https://app.corp.example"},
+    )
+    assert resp.status_code != 403
+
+
+async def test_a_request_with_no_origin_or_referer_is_allowed(
+    test_client: AsyncClient,
+):
+    """Non-browser clients send neither, and CSRF needs a browser.
+
+    The smoke script and any server-to-server caller land here; refusing
+    them would break those without closing anything, since the attack
+    requires a browser and browsers always send Origin on a cross-site
+    write.
+    """
+    resp = await test_client.post(_ANY_PROTECTED_POST, json={})
+    assert resp.status_code != 403
+
+
+async def test_a_cross_origin_referer_is_refused_when_origin_is_absent(
+    test_client: AsyncClient,
+):
+    resp = await test_client.post(
+        _ANY_PROTECTED_POST, json={},
+        headers={"Referer": "https://evil.example/attack.html"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_login_csrf_is_refused_even_though_login_skips_double_submit(
+    test_client: AsyncClient,
+):
+    """The endpoints double-submit cannot protect are the point.
+
+    ``/auth/login`` has no ``nx_csrf`` cookie to compare — there is no
+    session yet — so it has always been exempt. That left login-CSRF
+    open: a third-party page POSTs the attacker's credentials, the
+    victim's browser is silently signed into an account the attacker
+    controls, and everything the victim then does happens in it.
+
+    Origin needs no cookie, so it covers precisely this gap.
+    """
+    resp = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "a@b.com", "password": "x"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["error"] == "csrf_failed"
+
+
+async def test_logout_csrf_is_refused(test_client: AsyncClient):
+    resp = await test_client.post(
+        "/api/v1/auth/logout", headers={"Origin": "https://evil.example"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_cross_site_refresh_is_refused(test_client: AsyncClient):
+    """Rotating somebody else's family from a third-party page."""
+    resp = await test_client.post(
+        "/api/v1/auth/refresh", headers={"Origin": "https://evil.example"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_the_idp_callback_surface_still_accepts_a_foreign_origin(
+    test_client: AsyncClient,
+):
+    """``/acs`` is a cross-site top-level POST from the IdP.
+
+    A foreign Origin here is the correct case, not an attack — refusing
+    it would break every SP-initiated SAML login. What authenticates it
+    is the XML signature over the assertion plus the RelayState echoed
+    from the signed flow cookie, not anything CSRF can see.
+    """
+    resp = await test_client.post(
+        "/api/v1/auth/some-slug/acs",
+        data={"SAMLResponse": "x", "RelayState": "y"},
+        headers={"Origin": "https://idp.corp.example"},
+    )
+    # Whatever it answers, it must not be the CSRF refusal.
+    assert resp.status_code != 403 or (
+        resp.json().get("detail", {}).get("error") != "csrf_failed"
+    )
+
+
+async def test_our_own_host_is_allowed_under_either_scheme(
+    test_client: AsyncClient,
+):
+    """TLS terminates upstream, so the app sees http and has to infer
+    the client's scheme from a header some deployments do not set.
+    Pinning the comparison to the inferred scheme would 403 every write
+    on any such deployment — a large availability risk for a small
+    security one, since an http origin on our own host is either us
+    behind a proxy we mis-read or a downgrade that HSTS already answers.
+    """
+    for origin in ("http://testserver", "https://testserver"):
+        resp = await test_client.post(
+            _ANY_PROTECTED_POST, json={}, headers={"Origin": origin},
+        )
+        assert resp.status_code != 403, f"{origin} was refused"
+
+
+async def test_a_different_host_is_still_refused_under_either_scheme(
+    test_client: AsyncClient,
+):
+    """Tolerating the scheme must not tolerate the host."""
+    for origin in ("http://evil.example", "https://evil.example"):
+        resp = await test_client.post(
+            _ANY_PROTECTED_POST, json={}, headers={"Origin": origin},
+        )
+        assert resp.status_code == 403, f"{origin} was allowed"
+
+
+async def test_origin_null_is_refused(test_client: AsyncClient):
+    """Sandboxed iframes and data: URLs send this. It is not our origin."""
+    resp = await test_client.post(
+        _ANY_PROTECTED_POST, json={}, headers={"Origin": "null"},
+    )
+    assert resp.status_code == 403

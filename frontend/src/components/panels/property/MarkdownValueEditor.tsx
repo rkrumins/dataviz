@@ -32,7 +32,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { markdownComponents } from '@/components/docs/MarkdownComponents'
+import { userContentMarkdownComponents } from '@/components/docs/MarkdownComponents'
 
 // Lazy so TipTap (ProseMirror) code-splits out of the main bundle.
 const RichMarkdownEditor = lazy(() => import('./RichMarkdownEditor'))
@@ -161,7 +161,7 @@ export function MarkdownValueModal({
     <div className="h-full overflow-auto custom-scrollbar rounded-xl bg-black/5 dark:bg-white/[0.03] border border-white/10 px-4 py-3">
       {deferredDraft.trim() ? (
         <div className="prose-synodic max-w-none text-sm break-words [&_pre]:overflow-x-auto">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{deferredDraft}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={userContentMarkdownComponents}>{deferredDraft}</ReactMarkdown>
         </div>
       ) : (
         <p className="text-sm text-ink-muted italic">Nothing to preview yet.</p>

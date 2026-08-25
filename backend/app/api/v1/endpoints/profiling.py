@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
@@ -67,6 +68,27 @@ _DEFAULT_WINDOW = "30d"
 #: Rows per page on the listing endpoints. All three were unbounded before.
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
+
+#: Everything outside this becomes "_" in the CSV download's filename.
+#:
+#: ``scope_id`` reaches the filename straight from the query string:
+#: ``_scope_for`` resolves and authorises an id only when
+#: ``scope == "source"``, so for ``workspace`` and ``provider`` it is
+#: arbitrary caller-supplied text that was interpolated into a response
+#: HEADER. Two things that bought an attacker, both confirmed by running
+#: them rather than reasoned about:
+#:
+#:   id='x";filename="setup.exe'  ->  attachment; filename="profiling-
+#:       workspace-x";filename="setup.exe-raw.csv"
+#:     The quoted string closes early and a SECOND filename parameter
+#:     follows, so what the browser saves is attacker-chosen.
+#:   id='ws_1\r\nX-Injected: 1' ->  a raw CRLF inside the header value,
+#:     i.e. response splitting anywhere the server does not reject it.
+#:
+#: An allowlist rather than an escape or a blocklist: a filename has no
+#: business containing anything else, and this way a character nobody
+#: thought about is inert by default instead of newly dangerous.
+_FILENAME_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def _resolve_window(
@@ -362,7 +384,10 @@ async def export_csv(
             [bucket] + [s["points"][i]["v"] for s in built["series"]]
         )
 
-    name = f"profiling-{scope}-{scope_id or 'all'}-{resolved_grain}.csv"
+    stem = _FILENAME_UNSAFE.sub(
+        "_", f"profiling-{scope}-{scope_id or 'all'}-{resolved_grain}",
+    )
+    name = f"{stem}.csv"
     return Response(
         content=buffer.getvalue(),
         media_type="text/csv",

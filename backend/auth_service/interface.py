@@ -103,8 +103,20 @@ class IdentityService(Protocol):
         """
         ...
 
-    async def logout(self, refresh_token: Optional[str]) -> None:
-        """Revoke the refresh token and its rotation family. Idempotent."""
+    async def logout(
+        self,
+        refresh_token: Optional[str],
+        access_token: Optional[str] = None,
+    ) -> None:
+        """End the session: revoke the refresh family AND tombstone the
+        access token's ``sid`` so the token already in the caller's
+        hands stops being honoured. Idempotent.
+
+        ``access_token`` is optional only so a caller with no access
+        cookie (an already-expired session signing out) still works —
+        not because it is safe to omit. Omitting it when one is present
+        leaves the access token live until it expires.
+        """
         ...
 
     async def refresh(self, refresh_token: str) -> tuple[User, SessionTokens]:

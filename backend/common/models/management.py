@@ -5,7 +5,7 @@ Covers: graph connections, ontology configs, assignment rule sets, saved views.
 import json
 from typing import List, Optional, Dict, Any
 from urllib.parse import urlparse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 
 
@@ -1504,6 +1504,41 @@ class PhysicalGraphStatsResponse(BaseModel):
 # Announcement Models (global banners)
 # ============================================
 
+#: Schemes an announcement CTA may use. The banner renders the URL
+#: straight into an ``href`` shown to every signed-in user, so a
+#: ``javascript:`` or ``data:`` CTA would turn "edit an announcement"
+#: into stored XSS against the whole platform. Writing announcements is
+#: admin-only, which bounds who can try it -- not what it would do.
+_CTA_URL_SCHEMES = ("http://", "https://")
+
+
+def _validated_cta_url(value: Optional[str]) -> Optional[str]:
+    """Absolute http(s), or a site-relative path. Nothing else.
+
+    Rejected rather than sanitised: there is no safe reading of a
+    ``javascript:`` CTA to recover, and a silent rewrite would hide the
+    mistake from the admin who made it. The client applies the same rule
+    again at render time -- this is the authoritative half, that one
+    also covers rows written before this existed.
+    """
+    if value is None:
+        return None
+    url = value.strip()
+    if not url:
+        return None
+    if url.lower().startswith(_CTA_URL_SCHEMES):
+        return url
+    # Site-relative, but not protocol-relative ("//evil.com" inherits the
+    # page scheme and leaves the origin) and not a backslash variant,
+    # which browsers normalise to "/" in the relative-slash state.
+    if url.startswith("/") and not url.startswith("//") and "\\" not in url:
+        return url
+    raise ValueError(
+        "ctaUrl must be an http(s) URL or a site-relative path starting "
+        f"with '/'; got {value!r}"
+    )
+
+
 class AnnouncementCreateRequest(BaseModel):
     title: str
     message: str
@@ -1512,6 +1547,11 @@ class AnnouncementCreateRequest(BaseModel):
     snooze_duration_minutes: int = Field(default=0, alias="snoozeDurationMinutes")  # 0 = no snooze
     cta_text: Optional[str] = Field(None, alias="ctaText")
     cta_url: Optional[str] = Field(None, alias="ctaUrl")
+
+    @field_validator("cta_url")
+    @classmethod
+    def _check_cta_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validated_cta_url(value)
 
     class Config:
         populate_by_name = True
@@ -1525,6 +1565,11 @@ class AnnouncementUpdateRequest(BaseModel):
     snooze_duration_minutes: Optional[int] = Field(None, alias="snoozeDurationMinutes")
     cta_text: Optional[str] = Field(None, alias="ctaText")
     cta_url: Optional[str] = Field(None, alias="ctaUrl")
+
+    @field_validator("cta_url")
+    @classmethod
+    def _check_cta_url(cls, value: Optional[str]) -> Optional[str]:
+        return _validated_cta_url(value)
 
     class Config:
         populate_by_name = True

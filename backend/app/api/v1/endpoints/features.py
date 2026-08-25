@@ -10,7 +10,7 @@ import json
 import time
 from collections import defaultdict
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config.features import (
@@ -448,7 +448,7 @@ async def deprecate_definition(
 @router.get("/{key}/history")
 async def get_feature_history(
     key: str,
-    limit: int = 20,
+    limit: int = Query(20, ge=1, le=500),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Everything that has happened to one flag, newest first.

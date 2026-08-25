@@ -155,7 +155,17 @@ activemq-data/
 *.sage.py
 
 # Environments
+#
+# ``.env`` alone matched only the bare name, so ``.env.dev`` and
+# ``.env.backup-dev`` were tracked — while ``.env.dev`` carried a header
+# claiming it was gitignored and encouraging operators to copy it
+# forward. Both shipped ``ADMIN_PASSWORD``, which the first-run
+# bootstrap consumes. The ``.example`` files stay tracked on purpose;
+# they are the templates.
 .env
+.env.*
+!.env.example
+!.env.prod.example
 # Landing-site branding defaults are public (no secrets) and must ship so the
 # index.html %VITE_BRAND_*% tokens resolve in a fresh build.
 !landing/.env

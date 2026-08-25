@@ -41,6 +41,31 @@ const FAILURE_THRESHOLD = 2
  *  refetch wave hitting a stalled backend) — verify with ONE probe. */
 let probePending = false
 
+// Handles for the two deferred probes below. Kept so they can be
+// CANCELLED, which they previously could not be: `reportFailure`
+// scheduled a 250ms probe and, on a first failure, a further 2s one,
+// and neither had an owner. In the app that is merely untidy — the
+// store is a singleton and `navigator` always exists in a browser. In
+// the test runner it is a fault: a file that provokes one request
+// failure leaves a live timer behind, and it fires inside whichever
+// file happens to be running 250ms later, or after the environment has
+// been torn down, where `navigator.onLine` throws a bare
+// ReferenceError that vitest reports as an unhandled error against an
+// innocent test file.
+let probeTimer: ReturnType<typeof setTimeout> | null = null
+let followUpTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Cancel any deferred health probe. Idempotent.
+ *
+ *  Called from the global test teardown so no test file can leak a
+ *  timer into the next one. Safe to call in the app too — the next
+ *  `reportFailure` simply schedules a new probe. */
+export function cancelHealthProbes(): void {
+  if (probeTimer !== null) { clearTimeout(probeTimer); probeTimer = null }
+  if (followUpTimer !== null) { clearTimeout(followUpTimer); followUpTimer = null }
+  probePending = false
+}
+
 function classifyError(err: unknown): { reason: HealthReason; detail: string } {
   if (!navigator.onLine) {
     return { reason: 'network-offline', detail: 'Your device appears to be offline.' }
@@ -94,7 +119,14 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
   consecutiveFailures: 0,
 
   poll: async () => {
-    // Fast path: browser says we're offline
+    // Fast path: browser says we're offline.
+    //
+    // The `typeof` guard is not about browsers — every browser has a
+    // navigator. It is about a deferred probe outliving the environment
+    // that scheduled it, where reading `.onLine` throws a bare
+    // ReferenceError with no stack pointing anywhere useful.
+    // `cancelHealthProbes` is the actual fix; this is the seatbelt.
+    if (typeof navigator === 'undefined') return
     if (!navigator.onLine) {
       applyFailure(get, set, 'network-offline', 'Your device appears to be offline.')
       return
@@ -156,15 +188,19 @@ export const useHealthStore = create<HealthState>()((set, get) => ({
     // it toward the banner threshold (see module docstring).
     if (probePending) return
     probePending = true
-    setTimeout(() => {
+    probeTimer = setTimeout(() => {
       probePending = false
+      probeTimer = null
       void (async () => {
         await get().poll()
         const s = get()
         // First failed verification on a quiet page: confirm or deny
         // quickly rather than waiting for the banner's next tick.
         if (s.status !== 'unreachable' && s.consecutiveFailures === 1) {
-          setTimeout(() => void get().poll(), 2_000)
+          followUpTimer = setTimeout(() => {
+            followUpTimer = null
+            void get().poll()
+          }, 2_000)
         }
       })()
     }, 250)
