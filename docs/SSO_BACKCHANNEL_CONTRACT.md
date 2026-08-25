@@ -76,6 +76,11 @@ You may answer either way:
 | sets a session cookie | our backend reads it off the next request and starts leg 1 |
 | answers with a handle in its JSON | the browser hands it to our backend, which starts leg 1 |
 
+The operator can switch this call off without unpicking the
+configuration, so "turn it off and see" is available to them during an
+incident on your side. While it is off, nothing about the call is
+published to any browser.
+
 ### What this call requires of you
 
 - **CORS, in full.** The application's page is on a different origin

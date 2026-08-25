@@ -190,6 +190,32 @@ describe('the sign-in trigger', () => {
         expect(screen.getByText(/never a credential/i)).toBeInTheDocument()
     })
 
+    it('can be turned off without losing what is configured', () => {
+        // Clearing the URL would also stop the call, and would cost the
+        // operator their integration. During an incident that is the
+        // difference between a switch and a retype.
+        const onChange = renderForm({
+            authenticate_url: 'https://sso.corp.example/authenticate',
+        })
+        const toggles = screen.getAllByRole('checkbox') as HTMLInputElement[]
+        const trigger = toggles[0]
+        expect(trigger.checked).toBe(true)
+
+        trigger.click()
+        const next = onChange.mock.calls.at(-1)![0]
+        expect(next.authenticate_enabled).toBe(false)
+        expect(next.authenticate_url).toBe('https://sso.corp.example/authenticate')
+    })
+
+    it('shows it as off when it is off', () => {
+        renderForm({
+            authenticate_url: 'https://sso.corp.example/authenticate',
+            authenticate_enabled: false,
+        })
+        const toggles = screen.getAllByRole('checkbox') as HTMLInputElement[]
+        expect(toggles[0].checked).toBe(false)
+    })
+
     it('offers the token path only once there is a call to read from', () => {
         const { rerender } = render(
             <BackchannelSettingsForm value={{}} onChange={vi.fn()} />,

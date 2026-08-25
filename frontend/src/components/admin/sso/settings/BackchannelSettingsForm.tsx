@@ -16,6 +16,7 @@
  * allowlist would be circular anyway ("the URL you typed is
  * permitted" is not a control).
  */
+import { cn } from '@/lib/utils'
 import { Field, FieldGrid, TextAreaField, TextField } from './ui'
 
 export type AmbientSource = 'cookie' | 'header'
@@ -27,6 +28,7 @@ export interface BackchannelSettings {
 
     // The browser-side sign-in trigger. Published to the sign-in page —
     // unlike everything below, which stays on the server.
+    authenticate_enabled?: boolean
     authenticate_url?: string
     authenticate_method?: 'POST' | 'GET'
     authenticate_headers?: Record<string, string>
@@ -62,6 +64,7 @@ export interface BackchannelSettings {
 export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     token_source: 'cookie',
     token_source_key: '',
+    authenticate_enabled: true,
     authenticate_url: '',
     authenticate_method: 'POST',
     authenticate_headers: {},
@@ -242,6 +245,12 @@ export function BackchannelSettingsForm({
                 </Field>
                 {hasTrigger && (
                     <>
+                        <Toggle
+                            label="Run this call when people sign in"
+                            hint="Turn it off to stop the call without losing what you have configured here — during an incident, or to check that the ordinary sign-in form still works. While it is off, nothing about this section reaches anyone's browser."
+                            checked={value.authenticate_enabled !== false}
+                            onChange={v => set('authenticate_enabled', v)}
+                        />
                         <FieldGrid>
                             <Field label="Method">
                                 <select
@@ -265,7 +274,10 @@ export function BackchannelSettingsForm({
                             </Field>
                         </FieldGrid>
 
-                        <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                        <div className={cn(
+                            "p-3 rounded-xl border border-amber-500/30 bg-amber-500/5",
+                            value.authenticate_enabled === false && "opacity-50",
+                        )}>
                             <p className="text-[11px] text-amber-300 leading-relaxed">
                                 <strong>These headers are sent from the
                                 user&rsquo;s browser and are readable by

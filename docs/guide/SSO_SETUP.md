@@ -243,6 +243,11 @@ endpoint to call. Two things to know before you do:
   press. If it fails — an off-network laptop, a browser that has not
   been told to answer for that host — the ordinary sign-in form is still
   there, and pressing the button will say what went wrong.
+- There is a **switch** on the section. Turning it off stops the call
+  without losing what you configured, which is what you want during an
+  incident on their side, or to check that people can still get in the
+  ordinary way. While it is off, nothing about the section reaches
+  anyone&rsquo;s browser.
 - **The headers on that section are public.** They are sent from the
   user&rsquo;s browser and readable by anyone who opens the sign-in
   page. They are *not* the same as the header fields on the two steps

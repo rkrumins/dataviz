@@ -218,6 +218,50 @@ async def test_a_trigger_publishes_exactly_four_keys_and_no_others(
 
 
 @pytest.mark.asyncio
+async def test_turning_the_trigger_off_publishes_nothing(
+    test_client, db_session, registry,
+):
+    """The off switch, enforced where it has to be.
+
+    A browser that is told nothing makes no call, so publishing nothing
+    IS the switch — there is no client-side flag to respect or forget to
+    respect.
+    """
+    await _make_provider(
+        db_session,
+        authenticate_enabled=False,
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_headers={"X-App-Id": "app-1"},
+    )
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-gateway")
+    assert entry.get("config") in (None, {})
+    assert "sso.corp.example" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_turning_it_off_does_not_lose_the_configuration(
+    test_client, db_session, registry,
+):
+    """Which is the whole reason it is a switch rather than clearing the
+    URL. An operator turning the trigger off during an incident should
+    not have to retype their integration to turn it back on."""
+    await _make_provider(
+        db_session,
+        authenticate_enabled=False,
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_headers={"X-App-Id": "app-1"},
+    )
+
+    resp = await test_client.get("/api/v1/admin/idp-providers")
+    row = next(p for p in resp.json() if p["slug"] == "corp-gateway")
+    settings = row["settings"]
+    stored = settings.get("authenticateUrl") or settings.get("authenticate_url")
+    assert stored == "https://sso.corp.example/authenticate"
+
+
+@pytest.mark.asyncio
 async def test_the_gateway_credentials_never_reach_the_browser(
     test_client, db_session, registry,
 ):

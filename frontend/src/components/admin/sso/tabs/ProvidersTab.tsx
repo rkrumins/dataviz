@@ -11,6 +11,7 @@ import {
     type IdpHealth,
     type IdpProvider,
 } from '@/services/ssoAdminService'
+import { runAuthenticateCall } from '@/services/authService'
 import { SsoFirstRunHero } from '../SsoFirstRunHero'
 import { IdpProviderCard } from '../IdpProviderCard'
 import { IdpConnectionWizard } from '../IdpConnectionWizard'
@@ -98,6 +99,49 @@ export function ProvidersTab({
         }
     }
 
+    /** Run a connection's sign-in trigger, or nothing if it has none.
+     *  Returns the handle it answered with, or null when it worked by
+     *  setting a cookie — and null, too, when there is no trigger at
+     *  all, which is the ordinary case. */
+    async function runTriggerFor(p: IdpProvider): Promise<string | null> {
+        const st = (p.settings ?? {}) as Record<string, unknown>
+        if (p.kind !== 'backchannel') return null
+        if (st.authenticate_enabled === false) return null
+        if (!String(st.authenticate_url ?? '').trim()) return null
+        return runAuthenticateCall({
+            url: String(st.authenticate_url),
+            method: String(st.authenticate_method ?? 'POST'),
+            headers: (st.authenticate_headers ?? {}) as Record<string, string>,
+            tokenPath: String(st.authenticate_token_path ?? ''),
+        })
+    }
+
+    /** Complete a rehearsal for the handle shape, which has no cookie
+     *  for an opened tab to carry. Returns a line to show the operator —
+     *  the dry-run's own verdict, not an error. */
+    async function rehearseWithHandle(
+        p: IdpProvider, handle: string,
+    ): Promise<string> {
+        const res = await fetch(
+            `/api/v1/auth/${encodeURIComponent(p.slug)}/backchannel`,
+            {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ handle }),
+            },
+        )
+        const body = await res.json().catch(() => null)
+        if (!res.ok) {
+            return `Rehearsal failed: ${body?.detail?.error ?? res.status}`
+        }
+        const outcome = body?.outcome
+        if (!outcome) return 'Rehearsal completed, but reported nothing.'
+        return `Rehearsal: would sign in as ${
+            outcome.email ?? outcome.externalId ?? 'an unnamed identity'
+        } (${outcome.action ?? 'no action recorded'}).`
+    }
+
     async function dryRun(p: IdpProvider) {
         if (!confirm(
             `Sign in to ${p.slug} with your own account at that IdP.\n\n` +
@@ -108,9 +152,28 @@ export function ProvidersTab({
         setBusy(true)
         try {
             const { loginUrl } = await ssoAdminService.startDryRun(p.id)
+
+            // A connection whose sign-in starts with a call to the
+            // provider has no session until that call is made, and a new
+            // tab does not make it. Rehearsing one without this opened a
+            // tab that failed for a correctly configured gateway, with
+            // nothing to say which part was wrong.
+            const handle = await runTriggerFor(p)
+            if (handle !== null) {
+                // The provider answered with a handle rather than setting
+                // a cookie, so there is nothing for the opened tab to
+                // carry. Rehearse it here instead — the same dry-run,
+                // reported inline rather than in a page we cannot see.
+                setError(await rehearseWithHandle(p, handle))
+                return
+            }
+
             window.open(loginUrl, '_blank', 'noopener')
         } catch (err) {
-            setError((err as Error).message)
+            setError(
+                `Could not start the sign-in for ${p.displayName}: `
+                + (err as Error).message,
+            )
         } finally {
             setBusy(false)
         }

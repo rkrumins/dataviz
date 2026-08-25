@@ -178,6 +178,11 @@ class BackchannelSettings:
     # needs a Service Ticket from the workstation's OS credential store,
     # reachable only through SSPI or GSS-API — by the user's browser, on
     # the user's machine. We hold no ticket for them.
+    #: Off switch that keeps the configuration. Clearing the URL would
+    #: also work and would lose it — an operator turning the trigger off
+    #: during an incident, or to check that the ordinary form still
+    #: works, should not have to retype their integration afterwards.
+    authenticate_enabled: bool = True
     authenticate_url: str = ""
     authenticate_method: str = "POST"
     #: PUBLISHED TO THE BROWSER. See ``validate_settings``.
@@ -253,6 +258,7 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         provider_slug=snap.slug,
         token_source=str(s.get("token_source") or "cookie").strip(),
         token_source_key=str(s.get("token_source_key") or "").strip(),
+        authenticate_enabled=_as_bool(s.get("authenticate_enabled", True)),
         authenticate_url=str(s.get("authenticate_url") or "").strip(),
         authenticate_method=str(
             s.get("authenticate_method") or "POST"

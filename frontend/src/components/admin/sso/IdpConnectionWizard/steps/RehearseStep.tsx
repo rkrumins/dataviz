@@ -19,6 +19,7 @@ import { useState } from 'react'
 import { FlaskConical, Loader2, Check, ExternalLink, RefreshCw } from 'lucide-react'
 import { StepColumn, StepHero, StepBlock, Hint } from '@/components/admin/InviteWizard/ui'
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
+import { runAuthenticateCall } from '@/services/authService'
 
 export function RehearseStep({
     provider, rehearsed, onRehearsed, onCreateDraft, saving,
@@ -43,6 +44,38 @@ export function RehearseStep({
             const row = provider ?? await onCreateDraft()
             if (!row) return
             const { loginUrl } = await ssoAdminService.startDryRun(row.id)
+
+            // A connection whose sign-in starts with a call to the
+            // provider has no session until that call is made, and the
+            // tab we are about to open does not make it. Without this,
+            // rehearsing a correctly configured gateway failed with
+            // nothing to say which part was wrong.
+            const st = (row.settings ?? {}) as Record<string, unknown>
+            if (
+                row.kind === 'backchannel'
+                && st.authenticate_enabled !== false
+                && String(st.authenticate_url ?? '').trim()
+            ) {
+                const handle = await runAuthenticateCall({
+                    url: String(st.authenticate_url),
+                    method: String(st.authenticate_method ?? 'POST'),
+                    headers: (st.authenticate_headers ?? {}) as Record<string, string>,
+                    tokenPath: String(st.authenticate_token_path ?? ''),
+                })
+                if (handle !== null) {
+                    // The provider answered with a handle rather than
+                    // setting a cookie, so the opened tab would carry
+                    // nothing. Say so plainly instead of opening it.
+                    setError(
+                        'This connection returns its session to the page '
+                        + 'rather than as a cookie, so it is rehearsed from '
+                        + 'the sign-in page rather than here. Publish it as '
+                        + 'a draft and sign in through it.',
+                    )
+                    return
+                }
+            }
+
             window.open(loginUrl, '_blank', 'noopener')
             // The result lands in the opened tab. We cannot observe it from
             // here, so the operator confirms — which is honest about what

@@ -345,6 +345,13 @@ def _public_config(snap) -> dict:
     settings = snap.settings or {}
 
     if snap.kind == "backchannel":
+        # Disabled means the browser is told nothing, so it makes no
+        # call — the whole switch, enforced in the one place that can
+        # enforce it. Keeping the configuration while publishing none of
+        # it is the point: turning the trigger off must not cost an
+        # operator their integration.
+        if settings.get("authenticate_enabled") is False:
+            return {}
         if not str(settings.get("authenticate_url") or "").strip():
             return {}
         return {

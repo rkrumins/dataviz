@@ -146,10 +146,33 @@ export function needsAuthenticateFirst(p: SsoProviderSummary): boolean {
 export async function runAuthenticateTrigger(
     p: SsoProviderSummary,
 ): Promise<string | null> {
-    const url = p.config?.authenticateUrl as string
-    const method = (p.config?.authenticateMethod as string) || 'POST'
-    const headers = (p.config?.authenticateHeaders ?? {}) as Record<string, string>
-    const tokenPath = (p.config?.authenticateTokenPath as string) || ''
+    return runAuthenticateCall({
+        url: p.config?.authenticateUrl as string,
+        method: p.config?.authenticateMethod as string,
+        headers: p.config?.authenticateHeaders,
+        tokenPath: p.config?.authenticateTokenPath as string,
+    })
+}
+
+/** The same call, from a provider's raw settings rather than its public
+ *  config.
+ *
+ *  The admin surfaces hold the settings blob, not the sign-in page's
+ *  view of it, and they need this too: rehearsing a connection opens a
+ *  tab that would arrive with no session at all unless the trigger has
+ *  run first. Same call, two callers, one implementation — the
+ *  alternative was an admin rehearsal that failed for a correctly
+ *  configured gateway and gave no reason why. */
+export async function runAuthenticateCall(cfg: {
+    url?: string
+    method?: string
+    headers?: Record<string, string>
+    tokenPath?: string
+}): Promise<string | null> {
+    const url = cfg.url as string
+    const method = cfg.method || 'POST'
+    const headers = (cfg.headers ?? {}) as Record<string, string>
+    const tokenPath = cfg.tokenPath || ''
 
     const res = await fetch(url, {
         method,
