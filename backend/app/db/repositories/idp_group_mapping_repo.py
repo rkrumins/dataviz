@@ -381,6 +381,34 @@ async def list_mappings(
     return list(result.scalars().all())
 
 
+async def list_active_for_provider(
+    session: AsyncSession,
+    *,
+    provider_id: Optional[str],
+) -> list[IdpGroupRoleMappingORM]:
+    """Every mapping the acting provider governs: its own rows plus the
+    NULL-provider wildcards (``provider_id=None`` returns wildcards
+    only, matching ``list_active_for_groups``).
+
+    This is the reconciler's REVOCATION scope. Granted rows carry no
+    provider of their own, so "no longer asserted" can only be judged
+    against the mappings this provider could have granted through —
+    otherwise logging in through provider B reads provider A's grants
+    as stale and strips them.
+    """
+    if provider_id is not None:
+        where = or_(
+            IdpGroupRoleMappingORM.provider_id == provider_id,
+            IdpGroupRoleMappingORM.provider_id.is_(None),
+        )
+    else:
+        where = IdpGroupRoleMappingORM.provider_id.is_(None)
+    result = await session.execute(
+        select(IdpGroupRoleMappingORM).where(where)
+    )
+    return list(result.scalars().all())
+
+
 async def list_active_for_groups(
     session: AsyncSession,
     *,

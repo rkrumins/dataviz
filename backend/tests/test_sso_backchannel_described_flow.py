@@ -341,3 +341,56 @@ async def test_signing_in_again_after_expiry_lands_on_the_same_profile(
         ),
     )).scalar_one()
     assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_groups_claim_lands_as_sso_memberships(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The described flow's last mile: the JWT's ``groups`` list, mapped
+    to an internal group, puts the person IN that group — rows marked
+    ``source='sso'`` so the directory keeps governing them — and the
+    workspaces that group is bound to follow from ordinary RBAC."""
+    from sqlalchemy import select
+
+    from backend.app.db.models import GroupMemberORM, UserORM
+    from backend.app.db.repositories import group_repo, idp_group_mapping_repo
+    from backend.app.main import app
+    from backend.app.services.permission_service import reconcile_sso_targets
+
+    # The conftest service leaves the reconciler unwired; production
+    # (app/main.py) wires exactly this function. Install it so the login
+    # below exercises the real groups→membership path.
+    monkeypatch.setattr(
+        app.state.identity_service, "_sso_role_reconciler",
+        reconcile_sso_targets,
+    )
+
+    _stub(monkeypatch)
+    row = await _make(db_session)
+    team = await group_repo.create_group(
+        db_session, name="Engineering", description="",
+    )
+    await idp_group_mapping_repo.create_group_membership_mapping(
+        db_session, idp_group="engineering", target_group_id=team.id,
+        provider_id=row.id,
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        "/api/v1/auth/corp-gateway/login?next=/dashboard",
+        cookies={"CORPSESSION": "session-abc"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302, resp.text
+
+    user = (await db_session.execute(
+        select(UserORM).where(UserORM.email == "ada.lovelace@corporate.com")
+    )).scalar_one()
+    member = (await db_session.execute(
+        select(GroupMemberORM).where(
+            GroupMemberORM.user_id == user.id,
+            GroupMemberORM.group_id == team.id,
+        )
+    )).scalar_one()
+    assert member.source == "sso"
