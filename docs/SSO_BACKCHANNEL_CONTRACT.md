@@ -135,6 +135,10 @@ That changes what we need from you:
 - **Expect each token to sign in at most once.** The application burns
   the `jti` (or the token's own hash) on first use, so keep tokens
   short-lived and mint one per call rather than caching an answer.
+- **If the signing key serves more than one audience, include an `aud`
+  claim** and tell the operator its value — they pin it on the
+  connection, and a token minted for one of your other consumers stops
+  being presentable here.
 - **Third-party cookie policy applies.** The browser attaches your
   cookie to a cross-site `fetch` only where its `SameSite` attribute
   (`None; Secure`) and the browser's third-party-cookie posture allow
