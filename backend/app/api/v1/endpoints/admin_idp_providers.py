@@ -656,6 +656,80 @@ async def delete_provider(
     return None
 
 
+class EndSessionsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    dry_run: bool = Field(default=False, alias="dryRun")
+
+
+class EndSessionsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    provider_id: str = Field(alias="providerId")
+    users_affected: int = Field(alias="usersAffected")
+    tokens_revoked: int = Field(alias="tokensRevoked")
+    dry_run: bool = Field(alias="dryRun")
+
+
+@router.post("/{provider_id}/end-sessions", response_model=EndSessionsResponse,
+             response_model_by_alias=True)
+async def end_provider_sessions(
+    provider_id: str,
+    body: EndSessionsRequest = Body(default=EndSessionsRequest()),
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """End every session minted through this connection.
+
+    The deliberate lever the disable switch does not pull: turning a
+    connection off stops new sign-ins (and, for a back-channel row, its
+    liveness re-checks — "an operator action about future logins"), but
+    the people already signed in keep their sessions until the ceilings
+    fire. This ends them now — refresh families revoked at the row,
+    live access tokens tombstoned — while password sessions the same
+    people hold elsewhere survive untouched.
+
+    Works whatever ``enabled``/``lifecycle`` say, because the designed
+    order is "turn it off, then end its sessions" — and it must also
+    work for a row disabled long ago. ``dryRun`` answers the count a
+    confirm dialog shows; under concurrent sign-ins it can drift from
+    the real sweep, whose response carries the actual numbers.
+    """
+    row = await idp_provider_repo.get_provider(session, provider_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
+
+    from backend.app.db.repositories import refresh_token_repo
+    from backend.app.services.revocation_service import (
+        revoke_provider_sessions,
+    )
+
+    if body.dry_run:
+        users = await refresh_token_repo.count_active_provider_users(
+            session, provider_id=provider_id,
+        )
+        return EndSessionsResponse(
+            provider_id=provider_id, users_affected=users,
+            tokens_revoked=0, dry_run=True,
+        )
+
+    outcome = await revoke_provider_sessions(
+        provider_id, session=session,
+        reason=f"provider_sessions_ended:{row.slug}",
+    )
+    await user_repo.create_outbox_event(
+        session, event_type="idp.provider.sessions_ended",
+        payload={
+            "provider_id": provider_id, "slug": row.slug,
+            "actor_id": admin.id,
+            "users_affected": outcome["users"],
+            "tokens_revoked": outcome["tokens"],
+        },
+    )
+    return EndSessionsResponse(
+        provider_id=provider_id, users_affected=outcome["users"],
+        tokens_revoked=outcome["tokens"], dry_run=False,
+    )
+
+
 @router.post("/{provider_id}/test")
 async def test_provider_mapping(
     provider_id: str,

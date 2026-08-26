@@ -239,3 +239,70 @@ async def update_config(
         version=int(row.version or 1),
         updated_at=row.updated_at or "",
     )
+
+
+class EndSsoSessionsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    dry_run: bool = Field(default=False, alias="dryRun")
+
+
+class EndSsoSessionsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    users_affected: int = Field(alias="usersAffected")
+    tokens_revoked: int = Field(alias="tokensRevoked")
+    dry_run: bool = Field(alias="dryRun")
+
+
+@router.post("/end-sso-sessions", response_model=EndSsoSessionsResponse,
+             response_model_by_alias=True)
+async def end_sso_sessions(
+    body: Optional[EndSsoSessionsRequest] = None,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """End every session minted through any SSO provider.
+
+    The companion the master switch never had: turning ``ssoEnabled``
+    off stops new SSO sign-ins, while the people already signed in keep
+    rotating until their ceilings fire — up to 24 hours. This ends them
+    now, sweeping every refresh row that names an IdP; password
+    sessions are untouched (their rows carry no provider), so the
+    "switch back to local accounts" story starts immediately.
+
+    Deliberately callable whatever ``ssoEnabled`` currently says — the
+    switch is usually already off by the time an operator reaches for
+    this. ``dryRun`` answers the confirm dialog's count.
+    """
+    body = body or EndSsoSessionsRequest()
+
+    from backend.app.db.repositories import refresh_token_repo
+    from backend.app.services.revocation_service import (
+        revoke_provider_sessions,
+    )
+
+    if body.dry_run:
+        users = await refresh_token_repo.count_active_provider_users(
+            session, provider_id=None,
+        )
+        return EndSsoSessionsResponse(
+            users_affected=users, tokens_revoked=0, dry_run=True,
+        )
+
+    outcome = await revoke_provider_sessions(
+        None, session=session, reason="sso_disabled_all",
+    )
+    try:
+        await user_repo.create_outbox_event(
+            session, event_type="auth.config.sso_sessions_ended",
+            payload={
+                "actor_id": admin.id,
+                "users_affected": outcome["users"],
+                "tokens_revoked": outcome["tokens"],
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return EndSsoSessionsResponse(
+        users_affected=outcome["users"], tokens_revoked=outcome["tokens"],
+        dry_run=False,
+    )

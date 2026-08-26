@@ -81,6 +81,82 @@ async def purge_expired(session: AsyncSession, *, batch: int = 5_000) -> int:
     return len(doomed)
 
 
+def _provider_predicate(provider_id: Optional[str]):
+    """Rows minted by one IdP row — or by any IdP at all when
+    ``provider_id`` is None, which is the master-switch sweep. Local
+    password sessions leave the column NULL and are never matched."""
+    if provider_id is None:
+        return RefreshTokenORM.idp_provider_id.is_not(None)
+    return RefreshTokenORM.idp_provider_id == provider_id
+
+
+async def count_active_provider_users(
+    session: AsyncSession, *, provider_id: Optional[str],
+) -> int:
+    """Distinct users currently holding a live refresh token minted by
+    this provider (None = any SSO provider). "Live" means presentable:
+    not revoked, not consumed, not expired. This is the number a
+    confirm dialog shows before ``revoke_provider_tokens`` — it can
+    drift slightly from the real sweep under concurrent logins, which
+    is fine for a count and stated where it is served."""
+    return (
+        await session.execute(
+            select(func.count(func.distinct(RefreshTokenORM.user_id))).where(
+                _provider_predicate(provider_id),
+                RefreshTokenORM.revoked_at.is_(None),
+                RefreshTokenORM.consumed_at.is_(None),
+                RefreshTokenORM.expires_at > _now_iso(),
+            )
+        )
+    ).scalar_one()
+
+
+async def revoke_provider_tokens(
+    session: AsyncSession, *, provider_id: Optional[str],
+) -> tuple[set[str], int]:
+    """Stamp ``revoked_at`` on every un-revoked refresh row minted by
+    this provider (None = every SSO row), and report who was touched.
+
+    Multi-pass for the same reason ``revoke_family`` is: a rotation in
+    flight when the sweep starts can commit its successor after a
+    pass's scan has moved past it, and that successor carries the same
+    ``idp_provider_id``. The loop exits as soon as a pass marks
+    nothing; the pass bound is a backstop, not an expectation.
+
+    Deliberately no consumed/expiry filter on the UPDATE — marking an
+    already-dead row revoked can only ever cause a refusal, and the
+    belt-and-braces matches ``revoke_family``.
+
+    Returns ``(distinct user_ids touched, rows marked)``.
+    """
+    users: set[str] = set()
+    rows_marked = 0
+    for _ in range(_REVOKE_FAMILY_PASSES):
+        touched = (
+            await session.execute(
+                select(func.distinct(RefreshTokenORM.user_id)).where(
+                    _provider_predicate(provider_id),
+                    RefreshTokenORM.revoked_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        users.update(u for u in touched if u)
+        result = await session.execute(
+            update(RefreshTokenORM)
+            .where(
+                _provider_predicate(provider_id),
+                RefreshTokenORM.revoked_at.is_(None),
+            )
+            .values(revoked_at=_now_iso())
+        )
+        marked = int(result.rowcount or 0)
+        rows_marked += marked
+        if marked == 0:
+            break
+    await session.flush()
+    return users, rows_marked
+
+
 class SQLAlchemyRefreshStore:
     """Implements ``RefreshStore`` against the management DB."""
 
