@@ -29,7 +29,7 @@ import os
 import re
 import socket
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -49,7 +49,17 @@ _PROD_ENV_VALUES = {"prod", "production"}
 
 
 class OutboundError(RuntimeError):
-    """An outbound request that did not produce a usable response."""
+    """An outbound request that did not produce a usable response.
+
+    ``reason`` is a short machine-readable token (``"not_an_image"``,
+    ``"too_many_redirects"``…) for the surfaces that report a refusal to
+    an operator — the rehearsal verdict, chiefly. The message remains
+    the human half; the token is stable where the wording is not.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class BlockedOutboundRequest(OutboundError):
@@ -71,7 +81,10 @@ class OutboundStatusError(OutboundError):
     """
 
     def __init__(self, url: str, status_code: int) -> None:
-        super().__init__(f"{url!r} answered HTTP {status_code}.")
+        super().__init__(
+            f"{url!r} answered HTTP {status_code}.",
+            reason=f"http_{status_code}",
+        )
         self.status_code = status_code
 
 
@@ -178,16 +191,18 @@ def assert_fetchable(
     if scheme not in ("http", "https"):
         raise BlockedOutboundRequest(
             f"{scheme or 'relative'!r} is not a fetchable scheme; "
-            "IdP metadata must be served over https."
+            "IdP metadata must be served over https.",
+            reason="unsupported_scheme",
         )
     if scheme == "http" and _is_prod():
         raise BlockedOutboundRequest(
             "refusing to fetch IdP metadata over plain http in production — "
-            "the document decides which keys verify your users' tokens."
+            "the document decides which keys verify your users' tokens.",
+            reason="plain_http_in_production",
         )
     host = parts.hostname
     if not host:
-        raise BlockedOutboundRequest(f"no host in {url!r}")
+        raise BlockedOutboundRequest(f"no host in {url!r}", reason="no_host")
 
     try:
         resolved = socket.getaddrinfo(
@@ -218,13 +233,15 @@ def assert_fetchable(
             raise BlockedOutboundRequest(
                 f"{host!r} resolves to {ip}, which is a loopback, "
                 "link-local, or otherwise non-routable address. No "
-                "allowlist entry permits this."
+                "allowlist entry permits this.",
+                reason="unroutable_address",
             )
         if not _address_is_reachable(ip) and not permitted:
             raise BlockedOutboundRequest(
                 f"{host!r} resolves to {ip}, which is inside this "
                 "deployment's own network, and "
-                f"{host_port_key(url)!r} is not in the allowlist."
+                f"{host_port_key(url)!r} is not in the allowlist.",
+                reason="private_address_not_allowlisted",
             )
 
 
@@ -347,11 +364,20 @@ async def request_json(
 MAX_AVATAR_BYTES = 256 * 1024
 
 #: The content types an avatar fetch will accept, parameter-stripped and
-#: case-folded. Anything else — HTML, JSON, SVG (scriptable) — is not an
-#: image we are willing to re-serve.
+#: case-folded: raster images only. ``image/jpg`` is not a registered
+#: type, but enough photo hosts serve it that refusing the alias only
+#: punishes their users. Anything else — HTML, JSON, SVG (scriptable) —
+#: is not an image we are willing to re-serve.
 _AVATAR_IMAGE_TYPES = frozenset({
-    "image/png", "image/jpeg", "image/gif", "image/webp",
+    "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp",
+    "image/avif",
 })
+
+#: Redirect hops an avatar fetch will follow. Photo services routinely
+#: 302 to a CDN (Gravatar, Google, GitHub all do), so unlike the
+#: metadata calls a bounded, re-checked follow is the difference between
+#: "works" and "silently never stores".
+_MAX_AVATAR_REDIRECTS = 3
 
 
 async def fetch_image(
@@ -364,43 +390,58 @@ async def fetch_image(
     """GET one image with :func:`request_json`'s guards, returning
     ``(bytes, content_type)``.
 
-    Same posture as every outbound call here: destination pre-checked,
-    redirects refused, the body capped while streaming. The one addition
-    is the content-type allowlist — the bytes are stored and re-served
-    from our own origin, so a reply that is not a raster image is a
-    refusal, not a passthrough.
+    Same posture as every outbound call here — destination pre-checked,
+    the body capped while streaming — with two image-specific turns:
+    redirects are followed up to :data:`_MAX_AVATAR_REDIRECTS` hops,
+    with :func:`assert_fetchable` re-run on **every** hop so a 302
+    cannot route past the pre-flight check; and the content-type must be
+    a raster image, because the bytes are stored and re-served from our
+    own origin, so a reply that is not one is a refusal, not a
+    passthrough.
     """
-    assert_fetchable(url, allow_hosts=allow_hosts)
-
+    current = url
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
     ) as client:
-        async with client.stream("GET", url) as resp:
-            if 300 <= resp.status_code < 400:
-                raise BlockedOutboundRequest(
-                    f"{url!r} answered {resp.status_code} with a redirect; "
-                    "redirects are refused because they are how a "
-                    "pre-flight address check gets bypassed."
-                )
-            if resp.status_code >= 400:
-                raise OutboundStatusError(url, resp.status_code)
-            content_type = (
-                resp.headers.get("content-type") or ""
-            ).split(";")[0].strip().lower()
-            if content_type not in _AVATAR_IMAGE_TYPES:
-                raise BlockedOutboundRequest(
-                    f"{url!r} answered with content-type "
-                    f"{content_type or 'unknown'!r}, which is not an "
-                    "image type this fetch accepts."
-                )
-            body = bytearray()
-            async for chunk in resp.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > max_bytes:
+        for _hop in range(_MAX_AVATAR_REDIRECTS + 1):
+            assert_fetchable(current, allow_hosts=allow_hosts)
+            async with client.stream("GET", current) as resp:
+                if 300 <= resp.status_code < 400:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise BlockedOutboundRequest(
+                            f"{current!r} answered {resp.status_code} "
+                            "with no Location header.",
+                            reason="redirect_without_location",
+                        )
+                    current = urljoin(current, location)
+                    continue
+                if resp.status_code >= 400:
+                    raise OutboundStatusError(current, resp.status_code)
+                content_type = (
+                    resp.headers.get("content-type") or ""
+                ).split(";")[0].strip().lower()
+                if content_type not in _AVATAR_IMAGE_TYPES:
                     raise BlockedOutboundRequest(
-                        f"{url!r} exceeded the {max_bytes}-byte image cap."
+                        f"{current!r} answered with content-type "
+                        f"{content_type or 'unknown'!r}, which is not a "
+                        "raster image type this fetch accepts.",
+                        reason="not_an_image",
                     )
-    return bytes(body), content_type
+                body = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > max_bytes:
+                        raise BlockedOutboundRequest(
+                            f"{current!r} exceeded the {max_bytes}-byte "
+                            "image cap.",
+                            reason="too_large",
+                        )
+                return bytes(body), content_type
+    raise BlockedOutboundRequest(
+        f"{url!r} redirected more than {_MAX_AVATAR_REDIRECTS} times.",
+        reason="too_many_redirects",
+    )
 
 
 async def fetch_jwks(

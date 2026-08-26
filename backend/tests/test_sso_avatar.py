@@ -8,8 +8,9 @@ pins that pipeline:
 
 * the claim maps (``picture`` et al.) only while the connection's
   ``map_avatar`` toggle is on;
-* the fetch runs through the outbound guard — image types only, size
-  capped, redirects refused, private destinations allowlisted;
+* the fetch runs through the outbound guard — raster image types only,
+  size capped, redirects followed at most three hops with the address
+  re-checked on every hop, private destinations allowlisted;
 * a fetch failure is a log line, never a failed login;
 * the bytes are fetched once per URL — an unchanged claim skips the
   round trip, a changed one refreshes the image;
@@ -250,10 +251,12 @@ async def test_the_fetch_caps_the_size_while_streaming(monkeypatch):
         await outbound.fetch_image(AVATAR_URL, timeout=5.0, max_bytes=8)
 
 
-@pytest.mark.asyncio
-async def test_the_fetch_refuses_redirects(monkeypatch):
+def _redirecting(monkeypatch, dispatch):
+    seen: list[httpx.Request] = []
+
     def _dispatch(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(302, headers={"Location": "http://10.0.0.1/x"})
+        seen.append(request)
+        return dispatch(request)
 
     monkeypatch.setattr(
         outbound.httpx, "AsyncClient",
@@ -261,8 +264,77 @@ async def test_the_fetch_refuses_redirects(monkeypatch):
             transport=httpx.MockTransport(_dispatch), **kw,
         ),
     )
-    with pytest.raises(outbound.BlockedOutboundRequest, match="redirect"):
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_chain_is_followed_and_rechecked(monkeypatch):
+    # Photo hosts 302 to their CDN as a matter of course; refusing every
+    # redirect meant "silently never stores" for most external avatars.
+    # A relative Location exercises the resolve-against-current-URL path.
+    def _dispatch(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/cdn/ada-real.png":
+            return httpx.Response(
+                200, content=PNG, headers={"Content-Type": "image/png"},
+            )
+        return httpx.Response(302, headers={"Location": "/cdn/ada-real.png"})
+
+    seen = _redirecting(monkeypatch, _dispatch)
+    body, content_type = await outbound.fetch_image(AVATAR_URL, timeout=5.0)
+    assert (body, content_type) == (PNG, "image/png")
+    assert [r.url.path for r in seen] == [
+        "/avatars/ada.png", "/cdn/ada-real.png",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_to_a_private_address_is_refused(monkeypatch):
+    # The SSRF property the old refuse-all-redirects rule protected,
+    # asserted directly: the hop is address-checked BEFORE it is
+    # requested, so a 302 cannot route past the pre-flight check.
+    seen = _redirecting(
+        monkeypatch,
+        lambda request: httpx.Response(
+            302, headers={"Location": "http://10.0.0.1/x"},
+        ),
+    )
+    with pytest.raises(outbound.BlockedOutboundRequest) as exc:
         await outbound.fetch_image(AVATAR_URL, timeout=5.0)
+    assert exc.value.reason == "private_address_not_allowlisted"
+    assert [r.url.path for r in seen] == ["/avatars/ada.png"]
+
+
+@pytest.mark.asyncio
+async def test_more_than_three_hops_is_refused(monkeypatch):
+    seen = _redirecting(
+        monkeypatch,
+        lambda request: httpx.Response(
+            302, headers={"Location": "/avatars/again.png"},
+        ),
+    )
+    with pytest.raises(outbound.BlockedOutboundRequest) as exc:
+        await outbound.fetch_image(AVATAR_URL, timeout=5.0)
+    assert exc.value.reason == "too_many_redirects"
+    # The original request plus exactly three followed hops.
+    assert len(seen) == 4
+
+
+@pytest.mark.parametrize("content_type", ["image/avif", "image/jpg"])
+@pytest.mark.asyncio
+async def test_avif_and_the_jpg_alias_are_accepted(monkeypatch, content_type):
+    _routes(monkeypatch, content_type=content_type)
+    body, served_as = await outbound.fetch_image(AVATAR_URL, timeout=5.0)
+    assert (body, served_as) == (PNG, content_type)
+
+
+@pytest.mark.asyncio
+async def test_svg_is_refused_and_the_reason_names_it(monkeypatch):
+    # Rasters only, by owner decision: SVG can script, and no sandbox on
+    # the serving side makes accepting it worth the class of bug.
+    _routes(monkeypatch, content_type="image/svg+xml")
+    with pytest.raises(outbound.BlockedOutboundRequest, match="svg") as exc:
+        await outbound.fetch_image(AVATAR_URL, timeout=5.0)
+    assert exc.value.reason == "not_an_image"
 
 
 @pytest.mark.asyncio
@@ -281,6 +353,8 @@ async def test_a_user_with_no_image_serves_a_cacheable_404(test_client):
     resp = await test_client.get(f"/api/v1/users/{_ME}/avatar")
     assert resp.status_code == 404
     assert "max-age" in resp.headers.get("cache-control", "")
+    assert resp.headers.get("x-content-type-options") == "nosniff"
+    assert resp.headers.get("content-security-policy") == "sandbox"
 
 
 @pytest.mark.asyncio
@@ -301,6 +375,9 @@ async def test_the_stored_image_is_served_with_an_etag(
     assert resp.headers["content-type"].startswith("image/png")
     etag = resp.headers["etag"]
     assert "max-age" in resp.headers["cache-control"]
+    # Third-party bytes on our origin: no sniffing, sandboxed as a page.
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["content-security-policy"] == "sandbox"
 
     # The alias the signed-in person can always use for themselves.
     me = await test_client.get("/api/v1/users/me/avatar")
@@ -310,3 +387,4 @@ async def test_the_stored_image_is_served_with_an_etag(
         f"/api/v1/users/{_ME}/avatar", headers={"If-None-Match": etag},
     )
     assert again.status_code == 304
+    assert again.headers.get("content-security-policy") == "sandbox"

@@ -318,9 +318,16 @@ async def get_user_avatar(
         user_id = current_user.id
     user = await user_repo.get_user_by_id(session, user_id)
     image_b64 = getattr(user, "avatar_image", None) if user else None
+    # The bytes came from a third party. Only raster types are ever
+    # stored, but a served image endpoint must not depend on that: no
+    # sniffing, and a document context gets an empty sandbox.
+    guard = {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
+    }
     absent = Response(
         status_code=404,
-        headers={"Cache-Control": "private, max-age=60"},
+        headers={"Cache-Control": "private, max-age=60", **guard},
     )
     if not image_b64:
         return absent
@@ -329,7 +336,7 @@ async def get_user_avatar(
     except (ValueError, TypeError):
         return absent
     etag = f'"{hashlib.sha256(content).hexdigest()[:32]}"'
-    cache = {"ETag": etag, "Cache-Control": "private, max-age=300"}
+    cache = {"ETag": etag, "Cache-Control": "private, max-age=300", **guard}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=cache)
     return Response(
