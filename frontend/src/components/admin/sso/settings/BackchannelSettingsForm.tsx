@@ -1024,7 +1024,7 @@ export function BackchannelSettingsForm({
                 />
                 <Toggle
                     label="Map their avatar from the claims"
-                    hint="Off by default. On, the server fetches the picture at the mapped avatar URL during sign-in and re-serves it from here — the image host must be on the internal-hosts allowlist when it is private, and browsers never load it directly. While on, the avatar is a provider-managed profile field; turning it off stops asserting it, and any stored image remains until the identity is unlinked or the person picks their own."
+                    hint="Off by default. On, the server fetches the picture at the mapped avatar URL during sign-in and re-serves it from here — browsers never load it directly. The image host must be listed first: an external site under Settings → Avatar image hosts, a private one on the internal-hosts allowlist. While on, the avatar is a provider-managed profile field; turning it off stops asserting it, and any stored image remains until the identity is unlinked or the person picks their own."
                     checked={value.map_avatar === true}
                     onChange={v => set('map_avatar', v)}
                 />

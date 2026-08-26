@@ -987,15 +987,34 @@ async def lifespan(_app: FastAPI):
     async def _fetch_avatar_image(url: str) -> tuple[bytes, str]:
         """Download a provider-asserted profile picture, guarded.
 
-        Same allowlist the back-channel legs use: a private image host
-        needs an operator's entry, and the outbound module supplies the
-        redirect ban, the streaming size cap and the image-type check.
+        The destination must be listed: an external image host needs an
+        entry on the avatar image hosts list (Settings tab), a private
+        one an entry on the internal-gateways list — either list admits
+        it, and with both silent on a host the fetch is refused by name.
+        The outbound module supplies the bounded, re-checked redirect
+        follow, the streaming size cap and the raster-type check.
         """
         from backend.auth_service.providers.outbound import fetch_image
 
+        gateway_keys = await _allowed_backchannel_hosts()
+        try:
+            async with get_async_session() as session:
+                avatar_keys = await backchannel_host_repo.allowed_host_keys(
+                    session, purpose="avatar",
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Fails closed, like the gateway list: an unreadable list
+            # refuses external hosts rather than opening the door.
+            logger.warning(
+                "Avatar host allowlist unreadable (%s); refusing external "
+                "avatar hosts until it can be read.", exc,
+            )
+            avatar_keys = frozenset()
+        permitted = gateway_keys | avatar_keys
         return await fetch_image(
             url, timeout=5.0,
-            allow_hosts=await _allowed_backchannel_hosts(),
+            allow_hosts=permitted,
+            require_hosts=permitted,
         )
 
     _app.state.identity_service = LocalIdentityService(

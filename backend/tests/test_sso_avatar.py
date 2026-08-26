@@ -343,6 +343,56 @@ async def test_the_fetch_refuses_unroutable_destinations():
         await outbound.fetch_image("http://127.0.0.1/avatar.png", timeout=5.0)
 
 
+# ── the avatar host allowlist (require_hosts) ────────────────────────
+#
+# The owner-chosen posture: external avatar hosts are OFF until listed.
+# ``require_hosts`` inverts the usual allowlist meaning — every hop must
+# be on it, public hosts included — and an empty set refuses everything.
+
+@pytest.mark.asyncio
+async def test_an_unlisted_external_host_is_refused_by_name(monkeypatch):
+    seen = _routes(monkeypatch)
+    with pytest.raises(outbound.BlockedOutboundRequest) as exc:
+        await outbound.fetch_image(
+            AVATAR_URL, timeout=5.0, require_hosts=frozenset(),
+        )
+    assert exc.value.reason == "host_not_allowlisted"
+    # The message is the operator's breadcrumb: it names what to add.
+    assert "sso.corporate.com" in str(exc.value)
+    # Refused before any request is made.
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_listed_host_fetches(monkeypatch):
+    _routes(monkeypatch)
+    body, content_type = await outbound.fetch_image(
+        AVATAR_URL, timeout=5.0,
+        require_hosts=frozenset({"sso.corporate.com:443"}),
+    )
+    assert (body, content_type) == (PNG, "image/png")
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_off_the_list_is_refused(monkeypatch):
+    # Listing one host must not let its redirect walk to a second one:
+    # the requirement holds for every hop in the chain.
+    seen = _redirecting(
+        monkeypatch,
+        lambda request: httpx.Response(
+            302, headers={"Location": "https://cdn.elsewhere.example/x"},
+        ),
+    )
+    with pytest.raises(outbound.BlockedOutboundRequest) as exc:
+        await outbound.fetch_image(
+            AVATAR_URL, timeout=5.0,
+            require_hosts=frozenset({"sso.corporate.com:443"}),
+        )
+    assert exc.value.reason == "host_not_allowlisted"
+    assert "cdn.elsewhere.example" in str(exc.value)
+    assert [r.url.path for r in seen] == ["/avatars/ada.png"]
+
+
 # ── serving ──────────────────────────────────────────────────────────
 
 _ME = "usr_test000000"

@@ -75,8 +75,14 @@ export interface BackchannelSettings {
 /** One permitted internal destination for a back-channel provider.
  *  Platform-level rather than per-provider: a per-provider allowlist
  *  would be circular. Managed under ``system:sso:hosts:manage``. */
+/** Which outbound flow a host entry serves: 'gateway' rows unlock
+ *  internal destinations for the back-channel legs; 'avatar' rows name
+ *  the external image hosts in-app avatars may be fetched from. */
+export type HostPurpose = 'gateway' | 'avatar'
+
 export interface BackchannelHost {
     id: string
+    purpose?: HostPurpose
     host: string
     port: number
     note?: string | null
@@ -457,25 +463,31 @@ export const ssoAdminService = {
         )
     },
 
-    // ── Back-channel host allowlist ──────────────────────────────────
+    // ── Outbound host allowlists ─────────────────────────────────────
     //
-    // Which internal addresses a back-channel provider may call. Gated
-    // server-side on ``system:sso:hosts:manage`` rather than
-    // ``system:admin``, so these three can 403 for someone who can edit
-    // every other thing on this page — the UI has to say so rather than
-    // showing an empty list.
+    // Two lists on one route, told apart by ?purpose=: 'gateway'
+    // (default — which internal addresses a back-channel provider may
+    // call) and 'avatar' (which external image hosts in-app avatars may
+    // be fetched from). Gated server-side on
+    // ``system:sso:hosts:manage`` rather than ``system:admin``, so
+    // these three can 403 for someone who can edit every other thing on
+    // this page — the UI has to say so rather than showing an empty
+    // list.
 
-    listBackchannelHosts(): Promise<BackchannelHost[]> {
+    listBackchannelHosts(purpose?: HostPurpose): Promise<BackchannelHost[]> {
         return request<BackchannelHost[]>(
-            `${ADMIN}/idp-providers/backchannel-hosts`,
+            `${ADMIN}/idp-providers/backchannel-hosts${
+                purpose ? `?purpose=${purpose}` : ''}`,
         )
     },
 
     addBackchannelHost(
         body: { host: string; port?: number; note?: string },
+        purpose?: HostPurpose,
     ): Promise<BackchannelHost> {
         return request<BackchannelHost>(
-            `${ADMIN}/idp-providers/backchannel-hosts`,
+            `${ADMIN}/idp-providers/backchannel-hosts${
+                purpose ? `?purpose=${purpose}` : ''}`,
             { method: 'POST', body: JSON.stringify(body) },
         )
     },

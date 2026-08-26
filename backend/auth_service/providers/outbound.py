@@ -386,6 +386,7 @@ async def fetch_image(
     timeout: float,
     max_bytes: int = MAX_AVATAR_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
+    require_hosts: frozenset[str] | set[str] | None = None,
 ) -> tuple[bytes, str]:
     """GET one image with :func:`request_json`'s guards, returning
     ``(bytes, content_type)``.
@@ -398,12 +399,30 @@ async def fetch_image(
     a raster image, because the bytes are stored and re-served from our
     own origin, so a reply that is not one is a refusal, not a
     passthrough.
+
+    ``require_hosts`` is the avatar allowlist, and it inverts the
+    default posture: when it is not ``None``, EVERY hop's ``host:port``
+    must appear in it — public hosts included — or the fetch is refused.
+    ``allow_hosts`` keeps its usual meaning (which entries may resolve
+    private). An empty ``require_hosts`` set therefore refuses every
+    destination: the list is the on-switch.
     """
     current = url
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
     ) as client:
         for _hop in range(_MAX_AVATAR_REDIRECTS + 1):
+            if require_hosts is not None:
+                key = host_port_key(current)
+                if key not in {
+                    str(entry).strip().lower() for entry in require_hosts
+                }:
+                    raise BlockedOutboundRequest(
+                        f"{key.rsplit(':', 1)[0]!r} is not on the avatar "
+                        "image hosts list, so this image will not be "
+                        f"fetched. Add {key!r} to the list to allow it.",
+                        reason="host_not_allowlisted",
+                    )
             assert_fetchable(current, allow_hosts=allow_hosts)
             async with client.stream("GET", current) as resp:
                 if 300 <= resp.status_code < 400:
