@@ -251,21 +251,49 @@ def _to_email(v: Any) -> str:
 
 
 def _to_groups(v: Any) -> tuple[str, ...]:
-    """Normalise group claim shapes. Accepts list-of-strings, single
-    string, comma-separated string. Filters out blanks; preserves
-    input order."""
+    """Normalise group claim shapes. Filters out blanks; preserves
+    input order.
+
+    Accepted shapes, matching what enterprise directories actually
+    release:
+
+    * list/tuple — strings kept (stripped); numeric ids stringified
+      (many directories key groups by number). Booleans and everything
+      else are dropped, not stringified: ``"True"`` is not a group.
+      Items are never split further — a list is already delimited, so a
+      DN item keeps its commas.
+    * a string containing ``=`` — ONE group. LDAP DNs
+      (``CN=Data Analysts,OU=Groups,DC=corp``) are the commonest group
+      shape here, and splitting one on its commas shreds a single name
+      into unmappable fragments.
+    * any other string — split on commas or semicolons.
+    * a bare numeric id — a one-group tuple.
+    """
     if v is None:
         return ()
     if isinstance(v, str):
-        if "," in v:
-            return tuple(g.strip() for g in v.split(",") if g.strip())
-        v = v.strip()
-        return (v,) if v else ()
+        s = v.strip()
+        if not s:
+            return ()
+        if "=" in s:
+            return (s,)
+        if "," in s or ";" in s:
+            return tuple(g.strip() for g in re.split(r"[;,]", s) if g.strip())
+        return (s,)
+    if isinstance(v, bool):
+        # Checked before int — bool is an int subclass.
+        return ()
+    if isinstance(v, int):
+        return (str(v),)
     if isinstance(v, (list, tuple)):
         out: list[str] = []
         for item in v:
             if isinstance(item, str) and item.strip():
                 out.append(item.strip())
+            elif isinstance(item, bool):
+                continue
+            elif isinstance(item, int):
+                out.append(str(item))
         return tuple(out)
     return ()
 

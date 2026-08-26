@@ -581,3 +581,38 @@ async def test_a_sign_in_never_uses_the_validate_endpoint(monkeypatch):
         liveness_url="https://gw.corp.example/validate",
     ).fetch_identity("ambient-xyz")
     assert [r.url.path for r in seen] == ["/redeem", "/userinfo"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_top_level_key_does_not_shadow_the_nested_value(
+    monkeypatch,
+):
+    """Real gateways emit a vestigial top-level ``groups: []`` beside
+    ``profile.groups`` carrying the real list. Present-but-empty must
+    not shadow populated — it silently turned group mapping off."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            "groups": [],
+            "profile": {**CLAIMS, "groups": ["eng", "analytics"]},
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.groups == ("eng", "analytics")
+
+
+@pytest.mark.asyncio
+async def test_a_populated_top_level_key_still_wins_over_nested(monkeypatch):
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            **CLAIMS, "groups": ["real"],
+            "profile": {"groups": ["shadowed"]},
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.groups == ("real",)

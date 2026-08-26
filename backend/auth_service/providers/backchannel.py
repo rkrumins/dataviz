@@ -125,6 +125,38 @@ _JWKS_TTL_SECONDS = 300.0
 _NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile",
                       "data", "result", "attributes")
 
+#: Top-level values a populated nested one may overwrite during the
+#: hoist. Membership is by equality, so ``0`` and ``False`` — values a
+#: gateway can mean — are NOT emptyish.
+_EMPTYISH = (None, "", [], {})
+
+
+def hoist_nested_containers(claims: dict) -> dict:
+    """One level of container nesting flattened, so mappings can say
+    ``firstName`` instead of ``profile.firstName``.
+
+    A top-level key wins over a hoisted one — except when its value is
+    emptyish (``None``, ``""``, ``[]``, ``{}``) and the nested one is
+    not. Real gateways emit exactly that shape: a vestigial top-level
+    ``groups: []`` beside ``profile.groups`` carrying the real list,
+    and "present but empty shadows populated" silently turned group
+    mapping off.
+
+    Exported because the admin preview must run the very same hoist —
+    a preview that skipped it disagreed with the sign-in it was
+    supposed to predict.
+    """
+    flat = {**claims}
+    for container in _NESTED_CONTAINERS:
+        nested = claims.get(container)
+        if isinstance(nested, dict):
+            for k, v in nested.items():
+                if k not in flat:
+                    flat[k] = v
+                elif flat[k] in _EMPTYISH and v not in _EMPTYISH:
+                    flat[k] = v
+    return flat
+
 #: Async callable returning the ``host:port`` entries an operator has
 #: permitted. Injected rather than imported so ``auth_service`` keeps
 #: importing nothing from ``backend.app.*``; ``app/main.py`` binds it.
@@ -921,12 +953,7 @@ class BackchannelProvider:
         return self._identity_from(claims)
 
     def _identity_from(self, claims: dict) -> ProviderIdentity:
-        flat = {**claims}
-        for container in _NESTED_CONTAINERS:
-            nested = claims.get(container)
-            if isinstance(nested, dict):
-                for k, v in nested.items():
-                    flat.setdefault(k, v)
+        flat = hoist_nested_containers(claims)
 
         try:
             identity = apply_claim_mapping(

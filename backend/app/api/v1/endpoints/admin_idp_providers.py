@@ -786,6 +786,15 @@ def _resolve_preview(
     """Shared body of the two preview routes: resolve, and say where each
     field came from. One implementation so the saved and unsaved paths
     cannot answer the same question differently."""
+    if kind == "backchannel":
+        # The very hoist the real sign-in runs. Without it a nested
+        # gateway payload previewed as unmappable while the sign-in
+        # mapped it fine — the preview lied in the pessimistic
+        # direction, which teaches operators to ignore it.
+        from backend.auth_service.providers.backchannel import (
+            hoist_nested_containers,
+        )
+        claims = hoist_nested_containers(claims)
     try:
         identity = apply_claim_mapping(
             claims, kind=kind, provider_slug=slug, override=override,

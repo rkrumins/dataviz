@@ -1092,8 +1092,10 @@ class LocalIdentityService:
             # Reconcile group->target (role_binding | group_membership)
             # against what the IdP currently asserts. Additive for
             # present groups; soft-revoke for groups removed since the
-            # last login. Same transaction so a failure here rolls
-            # back the whole login.
+            # last login. A failure is logged and the login proceeds —
+            # a mapping hiccup must not lock the org out — and the
+            # refresh-time reconcile retries it within one access-token
+            # lifetime.
             reconcile_result: dict | None = None
             if self._sso_role_reconciler is not None:
                 try:
