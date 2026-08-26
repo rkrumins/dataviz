@@ -295,6 +295,69 @@ export interface UserSummary {
     matchedOn?: string[] | null
 }
 
+/** What a back-channel rehearsal reports — the dry-run envelope from
+ *  ``preview_sso_login``, snake_case as the server writes it. */
+export interface RehearsalOutcome {
+    action?: string
+    reason?: string
+    deny_reasons?: string[]
+    email?: string
+    external_id?: string
+    user_email?: string
+    groups?: string[]
+    reconcile?: {
+        matched?: {
+            idp_group?: string
+            target_type?: string
+            role_name?: string | null
+            group_id?: string | null
+            scope_type?: string | null
+            scope_id?: string | null
+        }[]
+        unmatched_groups?: string[]
+    }
+}
+
+/** The rehearsal's group story, as lines an operator can read.
+ *
+ *  The whole point of rehearsing is answering "what would this sign-in
+ *  DO" — and the outcome's groups and matched mappings are exactly the
+ *  part operators are debugging when access doesn't appear. Discarding
+ *  them made the rehearsal say only who, never what.
+ */
+export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
+    const lines: string[] = []
+    const groups = outcome.groups ?? []
+    lines.push(
+        groups.length
+            ? `Groups asserted: ${groups.join(', ')}.`
+            : 'The claims carried no groups.',
+    )
+    const matched = outcome.reconcile?.matched ?? []
+    if (matched.length) {
+        const described = matched.map((m) =>
+            m.target_type === 'group_membership'
+                ? `${m.idp_group} → group membership`
+                : `${m.idp_group} → ${m.role_name ?? 'role'}${
+                    m.scope_type === 'workspace' && m.scope_id
+                        ? ` in workspace ${m.scope_id}`
+                        : ''
+                }`,
+        )
+        lines.push(`Mappings that would apply: ${described.join('; ')}.`)
+    } else if (groups.length) {
+        lines.push('No group mapping matched — nothing would be granted.')
+    }
+    const unmatched = outcome.reconcile?.unmatched_groups ?? []
+    if (unmatched.length && matched.length) {
+        lines.push(`Groups matching no mapping: ${unmatched.join(', ')}.`)
+    }
+    if (outcome.action === 'rejected' && outcome.deny_reasons?.length) {
+        lines.push(`Refused because: ${outcome.deny_reasons.join(', ')}.`)
+    }
+    return lines
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
     const res = await fetchWithTimeout(url, {
         ...init,
@@ -416,7 +479,7 @@ export const ssoAdminService = {
      *  verdict of a rehearsal is a result, not an error. */
     async rehearseBackchannel(
         slug: string, body: { handle?: string; assertion?: string },
-    ): Promise<{ ok: boolean; line: string }> {
+    ): Promise<{ ok: boolean; line: string; outcome?: RehearsalOutcome }> {
         const res = await fetchWithTimeout(
             `/api/v1/auth/${encodeURIComponent(slug)}/backchannel`,
             {
@@ -436,15 +499,18 @@ export const ssoAdminService = {
                 }`,
             }
         }
-        const outcome = payload?.outcome
+        const outcome = payload?.outcome as RehearsalOutcome | undefined
         if (!outcome) {
             return { ok: true, line: 'Rehearsal completed, but reported nothing.' }
         }
         return {
             ok: true,
+            // The envelope is snake_case — reading ``externalId`` here
+            // used to make a subject with no email an "unnamed identity".
             line: `Rehearsal: would sign in as ${
-                outcome.email ?? outcome.externalId ?? 'an unnamed identity'
+                outcome.email ?? outcome.external_id ?? 'an unnamed identity'
             } (${outcome.action ?? 'no action recorded'}).`,
+            outcome,
         }
     },
 

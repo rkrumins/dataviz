@@ -18,7 +18,11 @@
 import { useState } from 'react'
 import { FlaskConical, Loader2, Check, ExternalLink, RefreshCw } from 'lucide-react'
 import { StepColumn, StepHero, StepBlock, Hint } from '@/components/admin/InviteWizard/ui'
-import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
+import {
+    ssoAdminService,
+    summarizeRehearsalOutcome,
+    type IdpProvider,
+} from '@/services/ssoAdminService'
 import {
     runAuthenticateCall,
     runBrowserExchangeCall,
@@ -41,8 +45,9 @@ export function RehearseStep({
     const [starting, setStarting] = useState(false)
     const [error, setError] = useState<string | null>(null)
     // Inline rehearsals (handle and browser shapes) report here rather
-    // than in a tab we cannot see.
-    const [verdict, setVerdict] = useState<string | null>(null)
+    // than in a tab we cannot see. First line is who; the rest is the
+    // group story — what this sign-in would actually grant.
+    const [verdict, setVerdict] = useState<string[] | null>(null)
 
     async function start() {
         setStarting(true)
@@ -93,7 +98,11 @@ export function RehearseStep({
                     row.slug, { assertion },
                 )
                 if (!res.ok) { setError(res.line); return }
-                setVerdict(res.line)
+                setVerdict([
+                    res.line,
+                    ...(res.outcome
+                        ? summarizeRehearsalOutcome(res.outcome) : []),
+                ])
                 onRehearsed()
                 return
             }
@@ -106,7 +115,11 @@ export function RehearseStep({
                     row.slug, { handle },
                 )
                 if (!res.ok) { setError(res.line); return }
-                setVerdict(res.line)
+                setVerdict([
+                    res.line,
+                    ...(res.outcome
+                        ? summarizeRehearsalOutcome(res.outcome) : []),
+                ])
                 onRehearsed()
                 return
             }
@@ -172,7 +185,11 @@ export function RehearseStep({
                     <div className="mt-3 flex items-start gap-2 p-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 text-sm text-emerald-300">
                         <Check className="w-4 h-4 mt-0.5 shrink-0" />
                         <div>
-                            <p>{verdict ?? 'Rehearsal started in a new tab.'}</p>
+                            {verdict ? (
+                                verdict.map((line) => <p key={line}>{line}</p>)
+                            ) : (
+                                <p>Rehearsal started in a new tab.</p>
+                            )}
                             <p className="mt-1 text-[11px] text-ink-muted">
                                 {verdict
                                     ? "If that isn't who you expected, go back and adjust the mapping — this connection is still invisible to everyone else."

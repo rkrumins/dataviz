@@ -902,7 +902,17 @@ function ManageMembersModal({
                                                 : initialsOf(member.userId)}
                                         </div>
                                         <div className="min-w-0 flex-1">
-                                            <p className="text-sm text-ink truncate">{name}</p>
+                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                <p className="text-sm text-ink truncate">{name}</p>
+                                                {member.source === 'sso' && (
+                                                    <span
+                                                        title="Added by the identity provider through a group mapping. Removing them by hand only lasts until their next sign-in — remove the mapping, or the group in the directory, instead."
+                                                        className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                                                    >
+                                                        SSO
+                                                    </span>
+                                                )}
+                                            </div>
                                             {user?.email && (
                                                 <div className="flex items-center gap-1 mt-0.5">
                                                     <Mail className="w-3 h-3 text-ink-muted shrink-0" />

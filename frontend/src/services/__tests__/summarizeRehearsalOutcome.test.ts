@@ -1,0 +1,76 @@
+/**
+ * The rehearsal's group story, rendered.
+ *
+ * A rehearsal that says only WHO would sign in answers half the
+ * question an operator is there to ask — the other half is what the
+ * sign-in would grant, which is exactly the part being debugged when
+ * "groups don't work". These lines are that half.
+ */
+import { describe, expect, it } from 'vitest'
+import { summarizeRehearsalOutcome } from '../ssoAdminService'
+
+describe('summarizeRehearsalOutcome', () => {
+    it('names the groups and the mappings they would fire', () => {
+        const lines = summarizeRehearsalOutcome({
+            action: 'provision_new',
+            groups: ['eng', 'analysts'],
+            reconcile: {
+                matched: [
+                    {
+                        idp_group: 'eng', target_type: 'role_binding',
+                        role_name: 'workspace_member',
+                        scope_type: 'workspace', scope_id: 'ws_1',
+                    },
+                    {
+                        idp_group: 'analysts',
+                        target_type: 'group_membership', group_id: 'grp_9',
+                    },
+                ],
+                unmatched_groups: [],
+            },
+        })
+        expect(lines[0]).toBe('Groups asserted: eng, analysts.')
+        expect(lines[1]).toContain(
+            'eng → workspace_member in workspace ws_1',
+        )
+        expect(lines[1]).toContain('analysts → group membership')
+    })
+
+    it('says plainly when groups match nothing', () => {
+        const lines = summarizeRehearsalOutcome({
+            groups: ['mystery'],
+            reconcile: { matched: [], unmatched_groups: ['mystery'] },
+        })
+        expect(lines).toContain(
+            'No group mapping matched — nothing would be granted.',
+        )
+    })
+
+    it('lists the leftover groups beside the matches', () => {
+        const lines = summarizeRehearsalOutcome({
+            groups: ['eng', 'mystery'],
+            reconcile: {
+                matched: [{
+                    idp_group: 'eng', target_type: 'group_membership',
+                    group_id: 'g1',
+                }],
+                unmatched_groups: ['mystery'],
+            },
+        })
+        expect(lines.join(' ')).toContain('Groups matching no mapping: mystery.')
+    })
+
+    it('says when the claims carried no groups at all', () => {
+        expect(summarizeRehearsalOutcome({ groups: [] })[0])
+            .toBe('The claims carried no groups.')
+    })
+
+    it('surfaces the refusal reasons on a rejected rehearsal', () => {
+        const lines = summarizeRehearsalOutcome({
+            action: 'rejected',
+            deny_reasons: ['strict_existing_sso'],
+            groups: [],
+        })
+        expect(lines.join(' ')).toContain('Refused because: strict_existing_sso.')
+    })
+})

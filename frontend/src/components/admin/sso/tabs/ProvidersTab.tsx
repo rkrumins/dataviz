@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { FlaskConical, X } from 'lucide-react'
 import {
     ssoAdminService,
+    summarizeRehearsalOutcome,
     type IdpHealth,
     type IdpProvider,
 } from '@/services/ssoAdminService'
@@ -218,6 +219,21 @@ export function ProvidersTab({
             // nothing to say which part was wrong.
             const handle = await runTriggerFor(p)
 
+            // Verdicts render the group story too — who, and what would
+            // be granted — since that is what an operator rehearsing a
+            // mapping is actually debugging.
+            const report = (verdict: {
+                ok: boolean
+                line: string
+                outcome?: Parameters<typeof summarizeRehearsalOutcome>[0]
+            }) => {
+                const text = verdict.outcome
+                    ? [verdict.line,
+                       ...summarizeRehearsalOutcome(verdict.outcome)].join('\n')
+                    : verdict.line
+                ;(verdict.ok ? setNotice : setError)(text)
+            }
+
             if (p.kind === 'backchannel'
                 && String(st.exchange_mode ?? 'server') === 'browser') {
                 // Browser-mode rows: make the very call the sign-in page
@@ -229,10 +245,9 @@ export function ProvidersTab({
                     headers: (st.browser_exchange_headers ?? {}) as Record<string, string>,
                     tokenPath: String(st.browser_exchange_token_path ?? ''),
                 })
-                const verdict = await ssoAdminService.rehearseBackchannel(
+                report(await ssoAdminService.rehearseBackchannel(
                     p.slug, { assertion },
-                )
-                ;(verdict.ok ? setNotice : setError)(verdict.line)
+                ))
                 return
             }
 
@@ -241,10 +256,9 @@ export function ProvidersTab({
                 // a cookie, so there is nothing for the opened tab to
                 // carry. Rehearse it here instead — the same dry-run,
                 // reported inline rather than in a page we cannot see.
-                const verdict = await ssoAdminService.rehearseBackchannel(
+                report(await ssoAdminService.rehearseBackchannel(
                     p.slug, { handle },
-                )
-                ;(verdict.ok ? setNotice : setError)(verdict.line)
+                ))
                 return
             }
 
@@ -290,7 +304,7 @@ export function ProvidersTab({
                     className="flex items-start gap-2 px-3 py-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06]"
                 >
                     <FlaskConical className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
-                    <p className="text-xs text-ink flex-1 min-w-0">{notice}</p>
+                    <p className="text-xs text-ink flex-1 min-w-0 whitespace-pre-line">{notice}</p>
                     <button
                         type="button"
                         aria-label="Dismiss notice"

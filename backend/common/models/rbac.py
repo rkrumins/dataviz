@@ -83,6 +83,10 @@ class GroupMemberResponse(BaseModel):
     group_id: str = Field(alias="groupId")
     added_at: str = Field(alias="addedAt")
     added_by: Optional[str] = Field(default=None, alias="addedBy")
+    #: "local" (an admin added them) or "sso" (the directory did, via a
+    #: group mapping — the row is re-judged at every SSO login/refresh,
+    #: so removing it by hand only lasts until the next one).
+    source: str = "local"
 
 
 class GroupMemberAddRequest(BaseModel):
