@@ -6,15 +6,15 @@ import { useAuthStore } from '@/store/auth'
 import {
     authService,
     leavesForIdp,
-    needsAuthenticateFirst,
-    needsBrowserExchange,
     needsBrowserPayload,
     readBrowserProfile,
-    runAuthenticateTrigger,
-    runBrowserExchange,
     type LoginContext,
     type SsoProviderSummary,
 } from '@/services/authService'
+import {
+    gatewaySignInBody,
+    isGatewayProvider,
+} from '@/services/gatewayFlow'
 import {
     autoPortalAlreadyTried,
     markAutoPortalTried,
@@ -544,43 +544,9 @@ function AlreadySignedIn({ email }: { email: string }) {
     )
 }
 
-/** True for a provider the browser has to drive: a sign-in trigger to
- *  run, a browser-side exchange to make, or both. Everything else
- *  starts with a plain navigation. */
-function isGatewayProvider(p: SsoProviderSummary): boolean {
-    return needsAuthenticateFirst(p) || needsBrowserExchange(p)
-}
-
-/** Run the browser's half of a back-channel sign-in and return the body
- *  to post to `/auth/{slug}/backchannel`.
- *
- *  The browser's half cannot move to our server, and that is not a
- *  preference. Where the enterprise uses Kerberos the provider answers
- *  `401 WWW-Authenticate: Negotiate`, and answering it needs a Service
- *  Ticket from the workstation's OS credential store — reachable through
- *  SSPI or GSS-API, by this browser, on this machine. And where the
- *  corporate cookie is scoped to the SSO host alone, only this browser's
- *  cookie jar can present it to the translate endpoint.
- *
- *  Three bodies come back, matching the three configurations: an
- *  `assertion` from the browser exchange, a `handle` the trigger
- *  answered with, or `{}` — the trigger set a cookie on a shared domain
- *  and the server reads it off the POST itself. Throws when a call
- *  failed, so the caller can say which step.
- */
-async function gatewaySignInBody(
-    p: SsoProviderSummary,
-): Promise<{ handle?: string; assertion?: string }> {
-    if (needsBrowserExchange(p)) {
-        // The trigger (when present) exists to establish the corporate
-        // session; the exchange then spends it. Browser-mode rows never
-        // configure the handle shape, so its return is not consulted.
-        if (needsAuthenticateFirst(p)) await runAuthenticateTrigger(p)
-        return { assertion: await runBrowserExchange(p) }
-    }
-    const handle = await runAuthenticateTrigger(p)
-    return handle ? { handle } : {}
-}
+// ``isGatewayProvider`` and ``gatewaySignInBody`` used to live here;
+// they now come from ``services/gatewayFlow`` so the silent recovery
+// and self-service identity linking run the same composition.
 
 
 // The silent-attempt sentinel lives with the recovery machinery now: a
@@ -981,10 +947,22 @@ export function LoginPage() {
                     )}
 
                     {/* ── SSO ──────────────────────────────────────────── */}
-                    {/* Each link is a top-level GET so the IdP redirect
-                        flow works. The backend returns 404 for any
-                        provider that isn't configured. */}
+                    {/* A redirect provider gets a top-level GET so the IdP
+                        flow works. A gateway provider's sign-in starts
+                        with calls only this browser can make — the same
+                        navigation would land it on a dead route — so its
+                        CTA is a button running the browser half. */}
                     {routed && (
+                        isGatewayProvider(routed) ? (
+                            <button
+                                type="button"
+                                onClick={() => { void gatewaySignIn(routed) }}
+                                className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
+                            >
+                                {ssoLabel(routed)}
+                                <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                            </button>
+                        ) : (
                         <a
                             href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
                             className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
@@ -995,6 +973,7 @@ export function LoginPage() {
                             {ssoLabel(routed)}
                             <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
                         </a>
+                        )
                     )}
 
                     {/* Escape hatches out of the email-first flow. Offered

@@ -29,14 +29,11 @@
 import { fetchWithTimeout } from './fetchWithTimeout'
 import {
     loginWithBackchannel,
-    needsAuthenticateFirst,
-    needsBrowserExchange,
-    runAuthenticateTrigger,
-    runBrowserExchange,
     type AuthUser,
     type LoginContext,
     type SsoProviderSummary,
 } from './authService'
+import { gatewaySignInBody, isGatewayProvider } from './gatewayFlow'
 
 export type SilentReauthResult =
     | 'recovered' | 'failed' | 'not-applicable' | 'gone'
@@ -216,7 +213,7 @@ export async function attemptSilentReauth(
         return 'gone'
     }
     if (provider.kind !== 'backchannel') return 'not-applicable'
-    if (!needsAuthenticateFirst(provider) && !needsBrowserExchange(provider)) {
+    if (!isGatewayProvider(provider)) {
         // No browser half is published — a plain ambient row whose
         // corporate session may well still be alive. The server-leg
         // navigation covers that case; nothing here would add to it.
@@ -224,16 +221,9 @@ export async function attemptSilentReauth(
     }
 
     try {
-        let body: { handle?: string; assertion?: string } = {}
-        if (needsBrowserExchange(provider)) {
-            if (needsAuthenticateFirst(provider)) {
-                await runAuthenticateTrigger(provider)
-            }
-            body = { assertion: await runBrowserExchange(provider) }
-        } else {
-            const handle = await runAuthenticateTrigger(provider)
-            body = handle ? { handle } : {}
-        }
+        // The same composition the sign-in page runs — trigger, then
+        // exchange or handle — so recovery cannot drift from sign-in.
+        const body = await gatewaySignInBody(provider)
         const { user } = await loginWithBackchannel(provider.slug, body, {
             skipAuthRefresh: true,
         })

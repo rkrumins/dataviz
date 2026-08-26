@@ -22,10 +22,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LoginPage } from './LoginPage'
 
 const {
-    loginContext, runAuthenticateTrigger, runBrowserExchange,
-    storeLoginWithBackchannel, navigate, lastDenialRef,
+    loginContext, resolveEmailDomain, runAuthenticateTrigger,
+    runBrowserExchange, storeLoginWithBackchannel, navigate, lastDenialRef,
 } = vi.hoisted(() => ({
     loginContext: vi.fn(),
+    resolveEmailDomain: vi.fn(),
     runAuthenticateTrigger: vi.fn(),
     runBrowserExchange: vi.fn(),
     storeLoginWithBackchannel: vi.fn(),
@@ -46,7 +47,9 @@ vi.mock('@/services/authService', async () => {
     )
     return {
         ...actual,
-        authService: { ...actual.authService, loginContext },
+        authService: {
+            ...actual.authService, loginContext, resolveEmailDomain,
+        },
         runAuthenticateTrigger,
         runBrowserExchange,
     }
@@ -105,6 +108,7 @@ beforeEach(() => {
     loginContext.mockResolvedValue({
         allowLocalLogin: true, emailFirstLogin: false, providers: [GATEWAY],
     })
+    resolveEmailDomain.mockResolvedValue({ provider: null })
     runAuthenticateTrigger.mockResolvedValue(null)
     runBrowserExchange.mockResolvedValue('assertion-jwt')
     storeLoginWithBackchannel.mockResolvedValue(true)
@@ -379,5 +383,39 @@ describe('a refused link', () => {
         await waitFor(() => expect(storeLoginWithBackchannel).toHaveBeenCalled())
         await new Promise((r) => setTimeout(r, 20))
         expect(screen.queryByText(/already exists/i)).not.toBeInTheDocument()
+    })
+})
+
+// ── the email-first CTA ──────────────────────────────────────────────
+
+describe('the routed CTA for a gateway provider', () => {
+    it('is a button running the browser half, never a dead link', async () => {
+        // The anchor the redirect kinds get navigates to
+        // /auth/{slug}/login — a route a gateway provider cannot serve
+        // without the browser's calls having run first.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: true,
+            providers: [GATEWAY],
+        })
+        resolveEmailDomain.mockResolvedValue({ provider: GATEWAY })
+        renderLogin()
+
+        await userEvent.type(
+            await screen.findByLabelText(/^email$/i), 'ada@corp.example',
+        )
+        const cta = await screen.findByText(/continue with corporate gateway/i)
+        expect(cta.closest('a')).toBeNull()
+
+        await userEvent.click(cta)
+        await waitFor(() => {
+            expect(storeLoginWithBackchannel)
+                .toHaveBeenCalledWith('corp-gateway', {})
+        })
+        await waitFor(() => {
+            expect(navigate).toHaveBeenCalledWith('/', { replace: true })
+        })
     })
 })
