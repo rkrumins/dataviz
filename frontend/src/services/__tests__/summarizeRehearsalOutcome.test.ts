@@ -184,3 +184,17 @@ describe('the avatar line', () => {
         })[0]).toBe('The claims carried no groups.')
     })
 })
+
+describe('the tls trust line', () => {
+    it('points a tls trust failure at the ca bundle', () => {
+        const line = summarizeRehearsalOutcome({
+            groups: [],
+            avatar: {
+                url: 'https://photos.corp.example/a.png',
+                fetched: false, reason: 'tls_verify_failed',
+            },
+        })[0]
+        expect(line).toContain('would NOT arrive')
+        expect(line).toContain('SSO_OUTBOUND_TLS_CA_CERTS')
+    })
+})

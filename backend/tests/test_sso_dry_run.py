@@ -459,3 +459,43 @@ async def test_a_deployment_with_no_fetcher_says_so(db_session):
         "url": "https://avatars.example.com/dry.png",
         "fetched": False, "reason": "fetch_unavailable",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_certificate_verify_failure_is_named_as_a_trust_problem(
+    db_session,
+):
+    """httpx wraps the ssl failure in a ConnectError with no ``.reason``
+    — without the mapping the operator reads a generic fetch_failed and
+    learns nothing about trust."""
+    import httpx
+
+    async def fetcher(url):
+        raise httpx.ConnectError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "unable to get local issuer certificate (_ssl.c:1006)",
+        )
+
+    provider = await _provider(db_session, slug="dry-av-tls")
+    outcome = await _svc(db_session, avatar_fetcher=fetcher).preview_sso_login(
+        _identity(avatar_url="https://photos.corp.example/a.png"),
+        provider_id=provider.id,
+    )
+    assert outcome["avatar"]["fetched"] is False
+    assert outcome["avatar"]["reason"] == "tls_verify_failed"
+    assert "unable to get local issuer certificate" in outcome["avatar"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_connection_failure_stays_generic(db_session):
+    import httpx
+
+    async def fetcher(url):
+        raise httpx.ConnectError("connection refused")
+
+    provider = await _provider(db_session, slug="dry-av-refused")
+    outcome = await _svc(db_session, avatar_fetcher=fetcher).preview_sso_login(
+        _identity(avatar_url="https://photos.corp.example/a.png"),
+        provider_id=provider.id,
+    )
+    assert outcome["avatar"]["reason"] == "fetch_failed"

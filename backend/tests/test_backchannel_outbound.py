@@ -418,3 +418,33 @@ async def test_the_client_is_constructed_with_the_resolved_verify(monkeypatch):
     monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS")
     await request_json(URL, method="GET", timeout=2.0)
     assert captured["verify"] is True
+
+
+# ── naming a TLS trust failure ───────────────────────────────────────
+
+from backend.auth_service.providers.outbound import is_tls_verification_failure
+
+
+def test_a_wrapped_ssl_verification_error_is_recognised():
+    inner = _ssl.SSLCertVerificationError(1, "certificate verify failed")
+    try:
+        try:
+            raise inner
+        except _ssl.SSLCertVerificationError as caught:
+            raise httpx.ConnectError("boom") from caught
+    except httpx.ConnectError as wrapped:
+        assert is_tls_verification_failure(wrapped) is True
+
+
+def test_a_message_only_form_is_recognised():
+    assert is_tls_verification_failure(
+        httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate "
+                           "verify failed: unable to get local issuer "
+                           "certificate"),
+    ) is True
+
+
+def test_an_unrelated_error_is_not():
+    assert is_tls_verification_failure(
+        httpx.ConnectError("connection refused"),
+    ) is False

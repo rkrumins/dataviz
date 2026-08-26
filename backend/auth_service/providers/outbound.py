@@ -539,6 +539,30 @@ async def fetch_image(
     )
 
 
+def is_tls_verification_failure(exc: BaseException) -> bool:
+    """True when *exc* is (or wraps) a TLS certificate-verification
+    failure.
+
+    httpx surfaces these as ``ConnectError`` with no ``.reason`` of the
+    kind :class:`OutboundError` carries — only the ssl error's text —
+    so the cause chain is walked first and the message match is the
+    fallback, not the mechanism. Lets the rehearsal name a trust
+    problem as a trust problem instead of a generic fetch failure.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    msg = str(exc).lower()
+    return (
+        "certificate_verify_failed" in msg
+        or "certificate verify failed" in msg
+    )
+
+
 async def fetch_jwks(
     url: str,
     *,

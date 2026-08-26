@@ -724,6 +724,11 @@ def _dryrun_response(slug: str, outcome: dict) -> Response:
                     "AVIF)",
                 "too_many_redirects":
                     "the URL redirects more than three times",
+                "tls_verify_failed":
+                    "the host's TLS answer does not validate against "
+                    "this deployment's trust — mount your corporate CA "
+                    "bundle and point SSO_OUTBOUND_TLS_CA_CERTS at it "
+                    "(see the deployment guide)",
                 "fetch_unavailable":
                     "this deployment has no avatar fetcher wired",
             }.get(reason)

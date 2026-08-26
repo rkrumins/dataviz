@@ -372,7 +372,11 @@ function avatarLine(
               + 'WebP or AVIF)'
             : a.reason === 'too_many_redirects'
                 ? 'the URL redirects more than three times'
-                : a.detail || a.reason || 'the fetch failed'
+                : a.reason === 'tls_verify_failed'
+                    ? "the host's TLS does not validate against this "
+                      + "deployment's trust — mount your corporate CA "
+                      + 'bundle and point SSO_OUTBOUND_TLS_CA_CERTS at it'
+                    : a.detail || a.reason || 'the fetch failed'
     return `Their picture would NOT arrive: ${why}.`
 }
 

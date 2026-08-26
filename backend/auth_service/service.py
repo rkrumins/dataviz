@@ -1486,10 +1486,18 @@ class LocalIdentityService:
         try:
             body, content_type = await self._avatar_fetcher(url)
         except Exception as exc:  # noqa: BLE001
+            from .providers.outbound import is_tls_verification_failure
+
+            reason = getattr(exc, "reason", None)
+            if reason is None and is_tls_verification_failure(exc):
+                # httpx wraps the ssl failure in a ConnectError with no
+                # ``.reason``; without this the operator reads a generic
+                # fetch_failed and learns nothing about trust.
+                reason = "tls_verify_failed"
             return {
                 "url": url,
                 "fetched": False,
-                "reason": getattr(exc, "reason", None) or "fetch_failed",
+                "reason": reason or "fetch_failed",
                 "detail": str(exc),
             }
         return {
