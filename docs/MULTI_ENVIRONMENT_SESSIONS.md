@@ -330,6 +330,7 @@ easy to hit on `.local` hostnames that have no certificate.
 | `AUTH_COOKIE_DOMAIN` | *(unset — host-only)* | Set only to deliberately share a session across subdomains. |
 | `AUTH_COOKIE_SAMESITE` | `lax` | `strict` breaks the SSO redirect handshake. |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | Re-auth ceiling for SSO sessions; local password sessions are exempt. |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (none) | PEM CA bundle every outbound SSO call verifies against — set it when gateways/IdPs sit behind a corporate CA. |
 
 ---
 

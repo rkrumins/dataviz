@@ -1668,6 +1668,7 @@ by `source_event_id` UNIQUE.
 | `AUTH_COOKIE_DOMAIN` | (none) | cookie `Domain` |
 | `AUTH_COOKIE_SAMESITE` | `lax` | cookie `SameSite` |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | 24h re-auth |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (none — system trust store) | Trust anchor for every outbound SSO call: OIDC discovery/token/JWKS, SAML metadata, gateway redeem/exchange/liveness, avatar fetches. PEM bundle path; `file:` URIs tolerated. An unloadable path logs ERROR and falls back to the system store — corporate-CA hosts keep failing until fixed |
 | `ENV` | `dev` | prod-guard on custom IdP + .env auto-load |
 | `AUTH_CUSTOM_PROVIDER_ENABLED` | `false` | dev IdP gate |
 | `CREDENTIAL_ENCRYPTION_KEY` | (none) | Fernet for provider settings + connection creds |

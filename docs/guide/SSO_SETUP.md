@@ -389,6 +389,27 @@ Some addresses are refused whatever is on the list — loopback, and the address
 cloud providers use to hand out credentials. Nothing in the admin UI can unlock
 those.
 
+### Trusting your gateway's TLS
+
+Gateways inside a corporate network usually serve TLS whose trust anchor is the
+company's own certificate authority — which this deployment does not trust out
+of the box, so every call fails with *certificate verify failed* and the
+rehearsal names it (`tls_verify_failed`).
+
+The fix is deployment-level, once, for every connection at the same time: hand
+the deployment your corporate CA bundle — one PEM file containing the issuing
+chain — and point the `SSO_OUTBOUND_TLS_CA_CERTS` environment variable at it.
+Every outbound SSO call verifies against it from the next request: the gateway
+legs, the session re-check, JWKS and OIDC discovery, SAML metadata imports, and
+avatar fetches. How to mount the file per deployment shape (docker-compose,
+Kubernetes, a bare host) is in the deployment guide.
+
+The per-connection **Skip TLS verification** toggle, in the connection's
+Behaviour section, is the warned last resort: it accepts *any* TLS answer on
+that connection's calls, drops the connection's rating to Unverified unless its
+replies are signed tokens checked against a pasted key or shared secret, and an
+Unverified connection cannot grant platform admin roles. Prefer the bundle.
+
 ### Setting it up
 
 The five-step flow is the same, with the differences you would expect:
