@@ -320,6 +320,13 @@ export async function runBrowserExchangeCall(cfg: {
             throw new Error('The sign-in service did not return JSON.')
         }
         token = resolvePath(body, path)
+        if (token !== null && typeof token === 'object' && !Array.isArray(token)) {
+            // A bare-JSON gateway can nest the claims object itself at
+            // the path. The assertion POST carries a string, so hand
+            // the object over as JSON — the trust-unsigned posture is
+            // what reads it; a verifying row refuses it server-side.
+            token = JSON.stringify(token)
+        }
     } else {
         token = (await res.text()).trim()
         // A translate endpoint answering JSON with a blank path is a

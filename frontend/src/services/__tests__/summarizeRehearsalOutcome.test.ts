@@ -74,3 +74,44 @@ describe('summarizeRehearsalOutcome', () => {
         expect(lines.join(' ')).toContain('Refused because: strict_existing_sso.')
     })
 })
+
+describe('the verification line', () => {
+    it('names the material a signed token verified against', () => {
+        expect(summarizeRehearsalOutcome({
+            groups: [],
+            verification: { shape: 'jwt', verified: true, material: 'public_key' },
+        })[0]).toBe(
+            'The reply was a signed token, verified against your pasted public key.',
+        )
+        expect(summarizeRehearsalOutcome({
+            groups: [],
+            verification: { shape: 'jwt', verified: true, material: 'shared_secret' },
+        })[0]).toContain('the shared secret')
+        expect(summarizeRehearsalOutcome({
+            groups: [],
+            verification: { shape: 'jwt', verified: true, material: 'jwks' },
+        })[0]).toContain('published keys (JWKS)')
+    })
+
+    it('says which unverified case arrived, and the rating it costs', () => {
+        const json = summarizeRehearsalOutcome({
+            groups: [],
+            verification: { shape: 'json', verified: false, material: 'none' },
+        })[0]
+        expect(json).toContain('unsigned JSON')
+        expect(json).toContain('rated Unverified')
+
+        const jwt = summarizeRehearsalOutcome({
+            groups: [],
+            verification: { shape: 'jwt', verified: false, material: 'none' },
+        })[0]
+        expect(jwt).toContain('WITHOUT verification')
+        expect(jwt).toContain('rated Unverified')
+    })
+
+    it('stays silent when the outcome carries no verdict', () => {
+        // Handle and server rehearsals judged nothing browser-borne.
+        expect(summarizeRehearsalOutcome({ groups: [] })[0])
+            .toBe('The claims carried no groups.')
+    })
+})

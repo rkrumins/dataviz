@@ -221,3 +221,24 @@ describe('a refused backchannel sign-in', () => {
         expect((err as BackchannelLoginError).email).toBeUndefined()
     })
 })
+
+describe('the translate call with a nested JSON reply', () => {
+    it('hands an object at the token path over as JSON', async () => {
+        // A bare-JSON gateway can nest the claims object itself at the
+        // path. The assertion POST carries a string; the trust-unsigned
+        // posture reads it, and a verifying row refuses it server-side.
+        const { runBrowserExchangeCall } = await import('@/services/authService')
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({
+                data: { sub: 'emp-1', email: 'ada@corp.example' },
+            }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+        )
+
+        const token = await runBrowserExchangeCall({
+            url: 'https://sso.corporate.com/translate', tokenPath: 'data',
+        })
+        expect(JSON.parse(token)).toEqual({
+            sub: 'emp-1', email: 'ada@corp.example',
+        })
+    })
+})

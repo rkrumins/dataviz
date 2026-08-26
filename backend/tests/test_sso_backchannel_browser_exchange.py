@@ -924,3 +924,100 @@ async def test_a_rehearsal_is_not_audited_as_an_acceptance(
     assert resp.json().get("dryRun") is True
     kinds = [k for k, _ in sso_events]
     assert "user.sso_unsigned_accepted" not in kinds
+
+
+# ── the rehearsal names the case it saw ──────────────────────────────
+#
+# A gateway whose reply shape varies by environment makes the operator's
+# first question "which case is THIS deployment?" — so the dry-run
+# outcome says what arrived and what judged it.
+
+async def _rehearse(test_client, db_session, row, body):
+    from backend.auth_service.core.tokens import create_dryrun_token
+
+    return await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json=body,
+        cookies={"nx_dryrun": create_dryrun_token(
+            admin_id="u-admin", provider_id=row.id,
+        )},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_rehearsal_reports_a_jwks_verified_token(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    _routes(monkeypatch)
+    row = await _make_row(db_session)
+    resp = await _rehearse(
+        test_client, db_session, row, {"assertion": _assertion()},
+    )
+    assert resp.status_code == 200, resp.text
+    verification = resp.json()["outcome"]["verification"]
+    assert verification == {
+        "shape": "jwt", "verified": True, "material": "jwks",
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_rehearsal_reports_the_shared_secret_case(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    row = await _make_row(
+        db_session, jwks_url="", jwt_shared_secret=_SECRET,
+    )
+    resp = await _rehearse(
+        test_client, db_session, row, {"assertion": _hs_assertion()},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["outcome"]["verification"] == {
+        "shape": "jwt", "verified": True, "material": "shared_secret",
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_rehearsal_reports_an_unsigned_json_reply(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    import json as _json
+
+    row = await _make_row(db_session, jwks_url="", trust_unsigned=True)
+    resp = await _rehearse(
+        test_client, db_session, row,
+        {"assertion": _json.dumps({**CLAIMS, "jti": "v-1"})},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["outcome"]["verification"] == {
+        "shape": "json", "verified": False, "material": "none",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_handle_rehearsal_carries_no_verification_verdict(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The handle is redeemed server-side — there is no browser-borne
+    assertion to have judged, so no verdict is invented for it."""
+    def _gw(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=dict(CLAIMS))
+
+    def _make(**kwargs):
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(_gw), **kwargs,
+        )
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _make)
+    row = await _make_row(
+        db_session,
+        exchange_mode="server", browser_exchange_url="", jwks_url="",
+        token_source_key="", gateway_url="https://gw.corp.example/redeem",
+        gateway_send_as="body", gateway_body_field="token",
+        authenticate_url="https://sso.corporate.com/authenticate",
+        authenticate_token_path="token",
+    )
+    resp = await _rehearse(
+        test_client, db_session, row, {"handle": "handle-abc"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert "verification" not in resp.json()["outcome"]

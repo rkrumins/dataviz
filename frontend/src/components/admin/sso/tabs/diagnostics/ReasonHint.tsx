@@ -72,12 +72,16 @@ const REASONS: Record<string, Reason> = {
             + 're-authentication ceiling for everyone on this connection.',
     },
     backchannel_jwt_invalid: {
-        what: 'The reply carried a signed token we could not accept — '
-            + 'undecodable, wrong signature, unknown key, or an issuer '
-            + 'or audience that does not match the pins.',
-        next: 'Compare the connection’s JWKS URL and issuer/audience '
-            + 'pins against what their team publishes. The server log '
-            + 'names the exact refusal under this reference.',
+        what: 'The reply could not be accepted as a signed token — '
+            + 'undecodable, wrong signature or algorithm, unknown key, '
+            + 'an issuer or audience that does not match the pins, or '
+            + 'not a signed token at all while the connection is '
+            + 'configured to verify one.',
+        next: 'Compare the connection’s verification material — the '
+            + 'JWKS URL, pasted public key, or shared secret — against '
+            + 'what their team actually signs with, and rehearse to see '
+            + 'which shape their reply is. The server log names the '
+            + 'exact refusal under this reference.',
     },
     backchannel_jwt_expired: {
         what: 'The signed token in their reply had already expired.',

@@ -468,6 +468,27 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
     )
 
 
+def assertion_verification(s: BackchannelSettings, assertion: str) -> dict:
+    """How this row judged an ACCEPTED browser assertion — for the
+    rehearsal verdict, so an operator sees which case their gateway is:
+    a signed token verified against which material, or a reply trusted
+    unverified. Lives beside the code that does the judging so the
+    verdict cannot drift from the branch that actually ran.
+    """
+    if s.trust_unsigned:
+        return {
+            "shape": "json" if assertion.strip().startswith("{") else "jwt",
+            "verified": False,
+            "material": "none",
+        }
+    material = (
+        "jwks" if s.jwks_url
+        else "public_key" if s.jwt_public_key
+        else "shared_secret"
+    )
+    return {"shape": "jwt", "verified": True, "material": material}
+
+
 def validate_settings(s: BackchannelSettings) -> None:
     """Refuse a row that would not work, or would work by accident."""
     if s.exchange_mode not in VALID_EXCHANGE_MODES:

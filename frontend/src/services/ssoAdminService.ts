@@ -316,6 +316,35 @@ export interface RehearsalOutcome {
         }[]
         unmatched_groups?: string[]
     }
+    /** Browser-assertion rehearsals only: which case the gateway's
+     *  reply turned out to be, and what judged it. Absent for handle
+     *  and server rehearsals. */
+    verification?: {
+        shape?: 'jwt' | 'json'
+        verified?: boolean
+        material?: 'jwks' | 'public_key' | 'shared_secret' | 'none'
+    }
+}
+
+/** The verification verdict as one operator-readable line, or null when
+ *  the outcome carries none (handle/server rehearsals). */
+function verificationLine(
+    v: NonNullable<RehearsalOutcome['verification']>,
+): string {
+    if (v.verified) {
+        const material = v.material === 'public_key'
+            ? 'your pasted public key'
+            : v.material === 'shared_secret'
+                ? 'the shared secret'
+                : "the connection's published keys (JWKS)"
+        return `The reply was a signed token, verified against ${material}.`
+    }
+    return v.shape === 'json'
+        ? 'The reply was unsigned JSON, accepted only because Trust '
+          + 'unsigned is on — this connection is rated Unverified.'
+        : 'The reply was a signed token accepted WITHOUT verification '
+          + 'because Trust unsigned is on — this connection is rated '
+          + 'Unverified.'
 }
 
 /** The rehearsal's group story, as lines an operator can read.
@@ -327,6 +356,12 @@ export interface RehearsalOutcome {
  */
 export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
     const lines: string[] = []
+    if (outcome.verification) {
+        // First, because it answers the question a varying gateway
+        // makes operators ask: which case did we just see, and was it
+        // verified?
+        lines.push(verificationLine(outcome.verification))
+    }
     const groups = outcome.groups ?? []
     lines.push(
         groups.length

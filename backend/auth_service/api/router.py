@@ -119,6 +119,7 @@ from ..providers.backchannel import (
     BackchannelConfigError,
     BackchannelError,
     BackchannelProvider,
+    assertion_verification,
 )
 from ..providers.custom_profile import (
     BROWSER_STORAGE_SOURCES,
@@ -731,6 +732,7 @@ async def _dry_run_or_none(
     request: Request, *, svc, snap, slug: str, identity,
     clear_flow: Optional[Callable[[Response], None]] = None,
     as_json: bool = False,
+    extra: Optional[dict] = None,
 ) -> Optional[Response]:
     """If this flow is a rehearsal, render the outcome and stop.
 
@@ -751,6 +753,10 @@ async def _dry_run_or_none(
     outcome = await svc.preview_sso_login(
         identity, provider_id=snap.id, linking_policy=snap.linking_policy,
     )
+    if extra:
+        # Flow-specific facts the preview cannot know — e.g. which
+        # verification material judged a browser assertion.
+        outcome = {**outcome, **extra}
     resp: Response = (
         JSONResponse({"dryRun": True, "outcome": outcome}) if as_json
         else _dryrun_response(slug, outcome)
@@ -2154,6 +2160,16 @@ async def backchannel_handle_login(
     rehearsal = await _dry_run_or_none(
         request, svc=_identity_service(request), snap=snap, slug=slug,
         identity=identity, as_json=True,
+        # Which case the gateway turned out to be — a signed token
+        # verified against which material, or a reply trusted
+        # unverified. The verdict an operator rehearses FOR, when the
+        # reply shape varies by environment.
+        extra=(
+            {"verification": assertion_verification(
+                provider.settings, body.assertion,
+            )}
+            if body.assertion is not None else None
+        ),
     )
     if rehearsal is not None:
         return rehearsal
