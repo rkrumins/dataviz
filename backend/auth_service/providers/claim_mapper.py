@@ -90,6 +90,10 @@ DEFAULT_SAML: dict[str, Any] = {
     "display_name":   [
         "name", "displayName",
         "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+        # The SAML-native full-name attributes: Shibboleth/eduPerson
+        # release cn as urn:oid:2.5.4.3, ADFS offers the MS claim URI.
+        "cn", "commonName", "urn:oid:2.5.4.3",
+        "http://schemas.microsoft.com/identity/claims/displayname",
     ],
     "groups":         [
         "groups", "memberOf", "Groups",
@@ -108,7 +112,10 @@ DEFAULT_CUSTOM: dict[str, Any] = {
     "email_verified": ["email_verified"],
     "first_name":     ["first_name"],
     "last_name":      ["last_name"],
-    "display_name":   ["display_name"],
+    # The grab-bag the other custom-ish kinds carry: a custom IdP that
+    # releases only "name" or "fullName" deserves the split too.
+    "display_name":   ["display_name", "displayName", "fullName",
+                       "full_name", "name"],
     "groups":         ["groups"],
     "auth_time":      ["auth_time"],
     "avatar_url":     [],
@@ -177,9 +184,20 @@ _PATH_SEGMENT = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
 
 def _resolve(claims: Any, path: str) -> Any:
     """Walk a dotted/indexed path through *claims*. Returns ``None``
-    if any segment is missing or has the wrong shape."""
+    if any segment is missing or has the wrong shape.
+
+    An exact-match top-level key wins before any walking: SAML
+    attribute names and OID URNs — ``urn:oid:2.5.4.3``,
+    ``http://schemas.xmlsoap.org/...`` — contain dots that are part of
+    the NAME, not a path, and without this rule they could never
+    resolve at all (which quietly deadened every URI candidate in the
+    SAML defaults)."""
     if not isinstance(path, str) or not path:
         return None
+    if isinstance(claims, dict) and path in claims:
+        v = claims[path]
+        if v is not None:
+            return v
     cur: Any = claims
     pos = 0
     while pos < len(path):
@@ -351,6 +369,11 @@ def split_display_name(display_name: str) -> tuple[str, str]:
         family, _, given = text.partition(",")
         if family.strip() and given.strip():
             return given.strip(), family.strip()
+    # A comma that did NOT split the name is punctuation — "Alice Doe,"
+    # must not store a surname of "Doe,".
+    text = text.strip(",").strip()
+    if not text:
+        return "", ""
     parts = text.split(None, 1)
     return parts[0], parts[1].strip() if len(parts) > 1 else ""
 
@@ -557,6 +580,7 @@ def apply_claim_mapping(
         auth_time=auth_time,
         attributes=extras,
         names_derived_from=names_derived_from,
+        display_name=display_name or None,
         avatar_url=avatar_url or None,
     )
 

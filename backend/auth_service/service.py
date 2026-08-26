@@ -1096,6 +1096,54 @@ class LocalIdentityService:
                         orm.id, provider_id, exc,
                     )
 
+            # Derived (split) names are a guess, so they are never owned
+            # and the re-sync above never writes them — which left anyone
+            # who existed BEFORE this connection (an invite, a local
+            # signup, an older JIT row) blank-named forever: every login
+            # re-derived the split and threw it away. Seed instead of
+            # syncing: written only while the row has no name at all, so
+            # nothing a person typed is ever overwritten, and no
+            # ownership is claimed — the fields stay theirs to edit.
+            #
+            # The IdP's exact full-name string also seeds the display
+            # override (once, while blank): the split is a guess about
+            # word order, and "Doe, Alice" reconstructed as "Alice Doe"
+            # is not what the directory said.
+            if identity.names_derived_from is not None:
+                try:
+                    row_first = (orm.first_name or "").strip()
+                    row_last = (orm.last_name or "").strip()
+                    id_first = (identity.first_name or "").strip()
+                    id_last = (identity.last_name or "").strip()
+                    seed: dict = {}
+                    if not row_first and not row_last:
+                        if id_first:
+                            seed["first_name"] = id_first
+                        if id_last:
+                            seed["last_name"] = id_last
+                    names_from_this_split = bool(seed) or (
+                        (row_first, row_last) == (id_first, id_last)
+                    )
+                    if (
+                        identity.display_name
+                        and names_from_this_split
+                        and not (
+                            getattr(orm, "display_name", "") or ""
+                        ).strip()
+                        and identity.display_name.strip()
+                        != f"{id_first} {id_last}".strip()
+                    ):
+                        seed["display_name"] = identity.display_name.strip()
+                    if seed:
+                        await self._user_repo.update_identity(
+                            session, orm.id, **seed,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Derived-name seed failed (user=%s, provider=%s): %s",
+                        orm.id, provider_id, exc,
+                    )
+
             # Persist the IdP-asserted groups + attributes on the user
             # row so the admin UI / /me can surface the latest snapshot.
             # Best-effort: failures here MUST NOT block login.

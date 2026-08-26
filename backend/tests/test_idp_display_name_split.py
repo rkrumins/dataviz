@@ -40,8 +40,10 @@ from backend.common.identity_provenance import asserted_fields
     ("Doe,Alice", "Alice", "Doe"),
     ("  van der Berg ,  Jan  ", "Jan", "van der Berg"),
     # A trailing comma is punctuation, not a structure — fall through to
-    # the whitespace rule rather than reading an empty given name.
-    ("Alice Doe,", "Alice", "Doe,"),
+    # the whitespace rule, and the comma itself is stripped rather than
+    # stored in the surname.
+    ("Alice Doe,", "Alice", "Doe"),
+    (",Alice Doe", "Alice", "Doe"),
     # Particles belong with the family name, which falls out of splitting
     # once rather than on every space.
     ("Maria del Carmen García", "Maria", "del Carmen García"),
@@ -66,6 +68,33 @@ def test_full_name_only_still_produces_a_name():
     )
     assert (identity.first_name, identity.last_name) == ("Alice", "Doe")
     assert identity.names_derived_from == "name"
+    # The exact string the IdP released rides along — the split is a
+    # guess about word order, and downstream wants the original too.
+    assert identity.display_name == "Alice Doe"
+
+
+def test_a_custom_kind_splits_the_grab_bag_names_too():
+    """DEFAULT_CUSTOM used to carry a single display_name candidate, so
+    a custom IdP releasing only ``name`` produced no name at all."""
+    for key in ("name", "fullName", "displayName"):
+        identity = apply_claim_mapping(
+            {"external_id": "u1", "email": "a@corp.example",
+             key: "Alice Doe"},
+            kind="custom", provider_slug="corp",
+        )
+        assert (identity.first_name, identity.last_name) == ("Alice", "Doe"), key
+
+
+def test_saml_splits_the_directory_native_full_name():
+    """Shibboleth/eduPerson release cn as urn:oid:2.5.4.3 and nothing
+    friendlier — the default candidates must reach it."""
+    identity = apply_claim_mapping(
+        {"__name_id__": "u1", "email": "a@corp.example",
+         "urn:oid:2.5.4.3": "Doe, Alice"},
+        kind="saml2", provider_slug="shib",
+    )
+    assert (identity.first_name, identity.last_name) == ("Alice", "Doe")
+    assert identity.display_name == "Doe, Alice"
 
 
 def test_the_idp_naming_the_halves_is_not_a_derivation():

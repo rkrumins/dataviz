@@ -811,6 +811,7 @@ def _resolve_preview(
             "groups": list(identity.groups),
             "auth_time": identity.auth_time,
             "avatar_url": identity.avatar_url,
+            "display_name": identity.display_name,
             "attributes": identity.attributes,
         },
         "resolvedFrom": resolved_sources(claims, kind=kind, override=override),

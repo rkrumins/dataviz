@@ -399,6 +399,73 @@ async def test_a_field_the_idp_omits_is_neither_owned_nor_blanked(
     assert owned == frozenset({"first_name"})
 
 
+async def test_a_derived_name_seeds_a_blank_profile(sso_provider, db_session):
+    """The gap this closes: derived names are unowned, so the ownership
+    re-sync skipped them — an account that existed blank-named stayed
+    blank forever while every login re-derived the split and threw it
+    away."""
+    svc = _svc(db_session)
+    user, _ = await svc.complete_sso_login(
+        _identity(first_name="", last_name=""),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert ((row.first_name or ""), (row.last_name or "")) == ("", "")
+
+    await svc.complete_sso_login(
+        _identity(first_name="Alice", last_name="Doe",
+                  names_derived_from="name", display_name="Doe, Alice"),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert (row.first_name, row.last_name) == ("Alice", "Doe")
+    # The IdP's exact string lands in the display override, so
+    # "Doe, Alice" shows as the directory wrote it, not as our
+    # reconstruction "Alice Doe".
+    assert row.display_name == "Doe, Alice"
+    # Seeded, never owned: the fields stay the person's to edit.
+    owned, _ = user_repo.idp_ownership(row)
+    assert "first_name" not in owned and "last_name" not in owned
+
+
+async def test_the_seed_never_overwrites_a_typed_name(
+    sso_provider, db_session,
+):
+    """Seeding fills a vacuum; it must not fight a person's edit."""
+    svc = _svc(db_session)
+    user, _ = await svc.complete_sso_login(
+        _identity(first_name="", last_name=""),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    await user_repo.update_identity(
+        db_session, user.id, first_name="Chosen", last_name="Name",
+    )
+    await svc.complete_sso_login(
+        _identity(first_name="Alice", last_name="Doe",
+                  names_derived_from="name", display_name="Doe, Alice"),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert (row.first_name, row.last_name) == ("Chosen", "Name")
+    assert not (row.display_name or "").strip()
+
+
+async def test_jit_provisioning_keeps_the_directory_string(
+    sso_provider, db_session,
+):
+    """A fresh account from a full-name-only IdP shows the name the
+    directory wrote, with the split halves seeded beside it."""
+    svc = _svc(db_session)
+    user, _ = await svc.complete_sso_login(
+        _identity(first_name="Alice", last_name="Doe",
+                  names_derived_from="cn", display_name="Doe, Alice"),
+        provider_id=sso_provider.id, linking_policy="strict",
+    )
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert (row.first_name, row.last_name) == ("Alice", "Doe")
+    assert row.display_name == "Doe, Alice"
+
+
 async def test_display_name_survives_a_directory_rename(
     sso_provider, db_session,
 ):
