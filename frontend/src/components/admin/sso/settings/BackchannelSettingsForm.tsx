@@ -84,6 +84,7 @@ export interface BackchannelSettings {
 
     timeout_seconds?: number | null
     max_response_bytes?: number | null
+    tls_verify?: boolean
     require_auth_time?: boolean
     map_avatar?: boolean
     trust_gateway_email?: boolean
@@ -134,6 +135,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     jwt_audience: '',
     timeout_seconds: 5,
     max_response_bytes: 262144,
+    tls_verify: true,
     require_auth_time: true,
     map_avatar: false,
     trust_gateway_email: true,
@@ -976,6 +978,26 @@ export function BackchannelSettingsForm({
                     </Field>
                     )}
                 </FieldGrid>
+
+                <DangerToggle
+                    title="Skip TLS verification for this connection"
+                    checked={value.tls_verify === false}
+                    onChange={v => set('tls_verify', (!v) as never)}
+                >
+                    Every server-side call this connection makes — the
+                    gateway, the exchange, the session re-check, a JWKS
+                    fetch — will accept <strong>any</strong> TLS answer.
+                    Anyone between this server and your gateway can then
+                    answer as the gateway and <strong>forge sign-ins as
+                    any user</strong>. The connection is rated{' '}
+                    <strong>Unverified</strong> unless its replies are
+                    signed tokens checked against a pasted key or shared
+                    secret, and an Unverified connection cannot grant
+                    platform admin roles. If the gateway&rsquo;s TLS is
+                    signed by your corporate CA, mount that CA bundle and
+                    point <code>SSO_OUTBOUND_TLS_CA_CERTS</code> at it
+                    instead — that is the supported path.
+                </DangerToggle>
 
                 {mode === 'server' ? (
                     <>
