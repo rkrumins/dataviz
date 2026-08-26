@@ -23,13 +23,16 @@ import { LoginPage } from './LoginPage'
 
 const {
     loginContext, runAuthenticateTrigger, runBrowserExchange,
-    storeLoginWithBackchannel, navigate,
+    storeLoginWithBackchannel, navigate, lastDenialRef,
 } = vi.hoisted(() => ({
     loginContext: vi.fn(),
     runAuthenticateTrigger: vi.fn(),
     runBrowserExchange: vi.fn(),
     storeLoginWithBackchannel: vi.fn(),
     navigate: vi.fn(),
+    // What useAuthStore.getState().lastSsoDenial answers — the page
+    // reads it after a refused sign-in to decide on the modal.
+    lastDenialRef: { current: null as unknown },
 }))
 
 vi.mock('react-router-dom', async () => {
@@ -60,7 +63,11 @@ vi.mock('@/store/auth', () => ({
             }
             return selector ? selector(state) : state
         },
-        { getState: () => ({ error: null }) },
+        {
+            getState: () => ({
+                error: null, lastSsoDenial: lastDenialRef.current,
+            }),
+        },
     ),
 }))
 vi.mock('@/store/branding', () => ({
@@ -89,6 +96,7 @@ let assign: ReturnType<typeof vi.fn>
 beforeEach(() => {
     vi.clearAllMocks()
     window.sessionStorage.clear()
+    lastDenialRef.current = null
     assign = vi.fn()
     Object.defineProperty(window, 'location', {
         configurable: true,
@@ -299,5 +307,77 @@ describe('the glyph', () => {
         const { container } = renderLogin()
         await screen.findByRole('button', { name: /Corporate Gateway/i })
         expect(container.querySelector('.lucide-external-link')).toBeNull()
+    })
+})
+
+// ── the collision, explained ─────────────────────────────────────────
+
+describe('a refused link', () => {
+    beforeEach(() => {
+        // Spend the silent attempt so the button is what is under test.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        storeLoginWithBackchannel.mockResolvedValue(false)
+    })
+
+    it('opens the collision modal with the rule the server named', async () => {
+        lastDenialRef.current = {
+            code: 'unsafe_auto_link', email: 'ada@corp.example',
+            reasons: ['strict_existing_sso'],
+        }
+        renderLogin()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /Corporate Gateway/i }),
+        )
+
+        expect(await screen.findByText(/already exists/i)).toBeInTheDocument()
+        expect(screen.getByText(/already has another sign-in method linked/i))
+            .toBeInTheDocument()
+        // The modal carries the message alone — no competing banner.
+        expect(screen.queryByText(/could not sign in with/i))
+            .not.toBeInTheDocument()
+        expect(navigate).not.toHaveBeenCalled()
+    })
+
+    it('points at the administrator when self-service cannot fix it', async () => {
+        lastDenialRef.current = {
+            code: 'unsafe_auto_link', email: 'ada@corp.example',
+            reasons: ['existing_status:suspended'],
+        }
+        renderLogin()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /Corporate Gateway/i }),
+        )
+
+        expect(await screen.findByText(/not active right now/i))
+            .toBeInTheDocument()
+        expect(screen.queryByRole('link', { name: /identities/i }))
+            .not.toBeInTheDocument()
+    })
+
+    it('keeps the generic line for a refusal that is not a collision', async () => {
+        lastDenialRef.current = { code: 'sso_disabled' }
+        renderLogin()
+        await userEvent.click(
+            await screen.findByRole('button', { name: /Corporate Gateway/i }),
+        )
+
+        expect(await screen.findByText(/could not sign in with corporate gateway/i))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/already exists/i)).not.toBeInTheDocument()
+    })
+
+    it('never opens the modal from the silent attempt', async () => {
+        // Nobody asked; a modal about an account they did not try to use
+        // is an ambush. The button tells them when they press it.
+        window.sessionStorage.clear()
+        lastDenialRef.current = {
+            code: 'unsafe_auto_link', email: 'ada@corp.example', reasons: [],
+        }
+        renderLogin()
+        await waitFor(() => expect(storeLoginWithBackchannel).toHaveBeenCalled())
+        await new Promise((r) => setTimeout(r, 20))
+        expect(screen.queryByText(/already exists/i)).not.toBeInTheDocument()
     })
 })

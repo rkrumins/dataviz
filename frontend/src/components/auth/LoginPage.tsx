@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useCallback, useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink, X } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
@@ -133,11 +133,15 @@ function SsoButtons({
     providers,
     failed,
     onPortalError,
+    onGatewaySignIn,
     showDivider = true,
 }: {
     providers: SsoProviderSummary[] | null
     failed: boolean
     onPortalError: (message: string) => void
+    /** The gateway flow lives with the page, not here: its refusals
+     *  open the collision modal, whose state the page owns. */
+    onGatewaySignIn: (p: SsoProviderSummary) => Promise<void>
     /** "Or sign in with" only makes sense when there is something above
      *  to be an alternative *to*. On an SSO-only deployment with a single
      *  provider these buttons are the whole page. */
@@ -145,30 +149,13 @@ function SsoButtons({
 }) {
     const navigate = useNavigate()
     const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
-    const loginWithBackchannel = useAuthStore((s) => s.loginWithBackchannel)
     const [busySlug, setBusySlug] = useState<string | null>(null)
 
     async function signInViaGateway(p: SsoProviderSummary) {
         onPortalError('')
         setBusySlug(p.slug)
         try {
-            const body = await gatewaySignInBody(p)
-            if (await loginWithBackchannel(p.slug, body)) {
-                navigate('/', { replace: true })
-            } else {
-                onPortalError(`Could not sign in with ${p.displayName}.`)
-            }
-        } catch (err) {
-            // Say which step failed rather than navigating into a
-            // sign-in that was never going to work. The likeliest causes
-            // are a CORS rejection and a workstation whose browser has
-            // not been told to answer Negotiate for that host, and
-            // neither produces anything useful further down the flow.
-            onPortalError(
-                err instanceof Error
-                    ? `Could not reach ${p.displayName}. ${err.message}`
-                    : `Could not reach ${p.displayName}.`,
-            )
+            await onGatewaySignIn(p)
         } finally {
             setBusySlug(null)
         }
@@ -330,11 +317,59 @@ function SsoButtons({
 }
 
 
+/** Why the link was refused, in the user's terms. The reasons are the
+ *  backend's ``_link_deny_reasons`` vocabulary; several can hold at
+ *  once, so this speaks to the most blocking one. An empty list — the
+ *  redirect flow carries none — gets the neutral sentence. */
+function collisionWhy(reasons: string[]): string {
+    if (
+        reasons.some((r) => r.startsWith('existing_status:'))
+        || reasons.includes('existing_deleted')
+    ) {
+        return 'That account is not active right now, so nothing can be '
+            + 'linked to it.'
+    }
+    if (reasons.includes('policy:disabled')) {
+        return 'This connection is not allowed to attach itself to '
+            + 'existing accounts.'
+    }
+    if (reasons.includes('policy:manual_only')) {
+        return 'This connection never links accounts by itself — you make '
+            + 'the link from your own account.'
+    }
+    if (reasons.includes('strict_existing_sso')) {
+        return 'Your account already has another sign-in method linked, '
+            + 'and this connection only links accounts that have none.'
+    }
+    if (reasons.includes('email_unverified')) {
+        return "Your identity provider hasn't verified the email address, "
+            + "so we won't link automatically."
+    }
+    return "We didn't link your company sign-in to it automatically."
+}
+
+/** True when signing in with a password and self-linking cannot fix it —
+ *  the account is inactive, or policy forbids the link entirely. The
+ *  modal then points at the administrator instead of a recovery path
+ *  that dead-ends. */
+function collisionNeedsAdmin(reasons: string[]): boolean {
+    return reasons.some((r) => r.startsWith('existing_status:'))
+        || reasons.includes('existing_deleted')
+        || reasons.includes('policy:disabled')
+}
+
 /** Collision modal — rendered when the SSO callback redirects with
- *  ``?error_code=unsafe_auto_link&email=...``. Guides the user through
+ *  ``?error_code=unsafe_auto_link&email=...``, or when a fetch-based
+ *  gateway sign-in is refused the same way. Guides the user through
  *  the link-by-password recovery path instead of the cryptic
- *  ``sso_error=1`` page. */
-function CollisionModal({ email, onClose }: { email: string; onClose: () => void }) {
+ *  ``sso_error=1`` page, and says *which* rule refused the link when
+ *  the server told us. */
+function CollisionModal({ email, reasons, onClose }: {
+    email: string
+    reasons: string[]
+    onClose: () => void
+}) {
+    const needsAdmin = collisionNeedsAdmin(reasons)
     return (
         <>
         <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/60" />
@@ -352,22 +387,28 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
                             An account for <span className="font-mono">{email}</span> already exists
                         </h2>
                         <p className="mt-2 text-sm text-ink-secondary">
-                            We won't auto-link your SSO identity to it because your
-                            IdP hasn't verified the email address. Sign in with your
-                            password below, then open{' '}
-                            <Link
-                                to="/me/identities"
-                                className="text-accent-lineage font-semibold hover:underline"
-                            >
-                                Identities
-                            </Link>
-                            {' '}from the user menu to link your SSO provider securely.
+                            {collisionWhy(reasons)}
+                            {needsAdmin ? (
+                                ' Ask your administrator how to proceed.'
+                            ) : (
+                                <>
+                                    {' '}Sign in with your password below, then open{' '}
+                                    <Link
+                                        to="/me/identities"
+                                        className="text-accent-lineage font-semibold hover:underline"
+                                    >
+                                        Identities
+                                    </Link>
+                                    {' '}from the user menu to link your company
+                                    sign-in securely.
+                                </>
+                            )}
                         </p>
                         <button
                             onClick={onClose}
                             className="mt-4 px-4 py-2 rounded-lg bg-accent-lineage text-white text-sm font-medium hover:brightness-110"
                         >
-                            Sign in with password
+                            {needsAdmin ? 'Close' : 'Sign in with password'}
                         </button>
                     </div>
                 </div>
@@ -649,14 +690,20 @@ export function LoginPage() {
     }, [providers, isAuthenticated, loginWithBrowserProfile,
         loginWithBackchannel, navigate])
 
-    // Read ``?error_code=...&email=...`` from the SSO failure redirect
-    // path. The collision modal is the most user-actionable case; other
-    // codes fall through to a generic inline error.
+    // The collision modal's one state, fed from BOTH arrival paths: the
+    // redirect flow's ``?error_code=unsafe_auto_link&email=...`` (which
+    // carries no reasons) and a refused fetch-based gateway sign-in
+    // (whose 401 detail does).
     const errorCode = params.get('error_code')
     const collisionEmail = params.get('email')
-    const [showCollision, setShowCollision] = useState(
-        errorCode === 'unsafe_auto_link' && Boolean(collisionEmail),
-    )
+    const [collision, setCollision] = useState<{
+        email: string
+        reasons: string[]
+    } | null>(() => (
+        errorCode === 'unsafe_auto_link' && collisionEmail
+            ? { email: collisionEmail, reasons: [] }
+            : null
+    ))
     // ``sso_error=1`` is set on every SSO failure; ``ref`` correlates it to
     // the audit event. The collision case has its own modal, so this banner
     // covers everything else — which is the majority.
@@ -668,6 +715,43 @@ export function LoginPage() {
             setEmail(collisionEmail)
         }
     }, [errorCode, collisionEmail])
+
+    // The gateway sign-in flow, owned by the page because its refusal
+    // can open the collision modal. Errors are shown, not thrown — the
+    // buttons only manage their own busy state.
+    const gatewaySignIn = useCallback(async (p: SsoProviderSummary) => {
+        try {
+            const body = await gatewaySignInBody(p)
+            if (await loginWithBackchannel(p.slug, body)) {
+                navigate('/', { replace: true })
+                return
+            }
+            const denial = useAuthStore.getState().lastSsoDenial
+            if (denial?.code === 'unsafe_auto_link' && denial.email) {
+                // The account exists and the link was refused — that has
+                // a recovery path, and the modal walks it. Pre-fill the
+                // form with the address the server named.
+                setEmail(denial.email)
+                setCollision({
+                    email: denial.email,
+                    reasons: denial.reasons ?? [],
+                })
+                return
+            }
+            setPortalError(`Could not sign in with ${p.displayName}.`)
+        } catch (err) {
+            // Say which step failed rather than navigating into a
+            // sign-in that was never going to work. The likeliest causes
+            // are a CORS rejection and a workstation whose browser has
+            // not been told to answer Negotiate for that host, and
+            // neither produces anything useful further down the flow.
+            setPortalError(
+                err instanceof Error
+                    ? `Could not reach ${p.displayName}. ${err.message}`
+                    : `Could not reach ${p.displayName}.`,
+            )
+        }
+    }, [loginWithBackchannel, navigate])
 
     useEffect(() => {
         clearError()
@@ -739,10 +823,11 @@ export function LoginPage() {
 
     return (
         <div className="relative min-h-screen w-full flex items-center justify-center overflow-hidden bg-canvas font-sans">
-            {showCollision && collisionEmail && (
+            {collision && (
                 <CollisionModal
-                    email={collisionEmail}
-                    onClose={() => setShowCollision(false)}
+                    email={collision.email}
+                    reasons={collision.reasons}
+                    onClose={() => setCollision(null)}
                 />
             )}
             {/* Animated Background Elements */}
@@ -944,6 +1029,7 @@ export function LoginPage() {
                             providers={providers}
                             failed={contextFailed}
                             onPortalError={setPortalError}
+                            onGatewaySignIn={gatewaySignIn}
                             showDivider={showEmailField}
                         />
                     )}

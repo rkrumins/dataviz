@@ -18,7 +18,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+    BackchannelLoginError,
     leavesForIdp,
+    loginWithBackchannel,
     needsAuthenticateFirst,
     runAuthenticateTrigger,
     type SsoProviderSummary,
@@ -172,5 +174,50 @@ describe('the authenticate call', () => {
         expect(await runAuthenticateTrigger(provider({
             config: { ...provider().config, authenticateTokenPath: 'token' },
         }))).toBe('····not-a-jwt····')
+    })
+})
+
+// ── the refusal, typed ───────────────────────────────────────────────
+
+describe('a refused backchannel sign-in', () => {
+    it('carries the code, email and reasons off the 401 detail', async () => {
+        // The bare Error this used to throw discarded the server's
+        // structured refusal, so the page could only shrug at a
+        // collision it had everything needed to explain.
+        global.fetch = vi.fn().mockResolvedValue(new Response(
+            JSON.stringify({
+                detail: {
+                    error: 'unsafe_auto_link', email: 'ada@corp.example',
+                    reasons: ['policy:manual_only'],
+                },
+            }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } },
+        ))
+
+        const err = await loginWithBackchannel(
+            'corp-gateway', {}, { skipAuthRefresh: true },
+        ).then(() => null, (e: unknown) => e)
+
+        expect(err).toBeInstanceOf(BackchannelLoginError)
+        const typed = err as BackchannelLoginError
+        expect(typed.code).toBe('unsafe_auto_link')
+        expect(typed.email).toBe('ada@corp.example')
+        expect(typed.reasons).toEqual(['policy:manual_only'])
+        // Generic message for surfaces that only render text.
+        expect(typed.message).toMatch(/did not work/i)
+    })
+
+    it('degrades to the status code when the body is not the envelope', async () => {
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response('bad gateway', { status: 502 }),
+        )
+
+        const err = await loginWithBackchannel(
+            'corp-gateway', {}, { skipAuthRefresh: true },
+        ).then(() => null, (e: unknown) => e)
+
+        expect(err).toBeInstanceOf(BackchannelLoginError)
+        expect((err as BackchannelLoginError).code).toBe('http_502')
+        expect((err as BackchannelLoginError).email).toBeUndefined()
     })
 })

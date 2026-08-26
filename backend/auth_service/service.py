@@ -939,7 +939,10 @@ class LocalIdentityService:
                          "existing_status": orm.status if orm else None,
                          "existing_has_identity": decision.has_existing_identity},
                     )
-                raise SSOAuthError(decision.error or "sso_rejected")
+                raise SSOAuthError(
+                    decision.error or "sso_rejected",
+                    deny_reasons=decision.deny_reasons,
+                )
 
             if decision.action == "sign_in_existing":
                 await self._user_identity_repo.touch_last_login(

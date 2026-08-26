@@ -17,6 +17,7 @@
 import { create } from 'zustand'
 import {
     authService,
+    BackchannelLoginError,
     loginWithBackchannel,
     type AuthUser,
     type PermissionClaims,
@@ -221,6 +222,11 @@ interface AuthState {
     loginWithBackchannel: (
         providerSlug: string, body: { handle?: string; assertion?: string },
     ) => Promise<boolean>
+    /** The last structured SSO refusal, so the sign-in page can explain
+     *  it. ``unsafe_auto_link`` suppresses the generic ``error`` — the
+     *  collision modal carries that case, and a second banner saying
+     *  "did not work" underneath it would just compete. */
+    lastSsoDenial: { code: string; email?: string; reasons?: string[] } | null
     signup: (req: SignUpRequest) => Promise<{
         ok: boolean
         message: string
@@ -274,6 +280,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     permissionsStatus: 'unknown',
     error: null,
     isLoading: false,
+    lastSsoDenial: null,
 
     bootstrap: async () => {
         // Idempotent: skip if already resolved or in flight.
@@ -389,7 +396,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     loginWithBackchannel: async (providerSlug, body) => {
-        set({ error: null, isLoading: true })
+        set({ error: null, lastSsoDenial: null, isLoading: true })
         resetClaimRecovery()
         resetSessionLostLatch()
         try {
@@ -400,11 +407,21 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             void useNavCatalogueStore.getState().hydrate()
             return true
         } catch (err: unknown) {
+            const denial = err instanceof BackchannelLoginError
+                ? { code: err.code, email: err.email, reasons: err.reasons }
+                : null
             const message = err instanceof Error
                 ? err.message
                 : 'Gateway sign-in failed'
             clearUserCache()
-            set({ ..._unauthenticated, error: message, isLoading: false })
+            set({
+                ..._unauthenticated,
+                // The collision modal owns unsafe_auto_link; a generic
+                // banner under it would compete with the explanation.
+                error: denial?.code === 'unsafe_auto_link' ? null : message,
+                lastSsoDenial: denial,
+                isLoading: false,
+            })
             return false
         }
     },

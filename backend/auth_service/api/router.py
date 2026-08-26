@@ -2175,7 +2175,12 @@ async def backchannel_handle_login(
         logger.info("Back-channel login rejected (slug=%s): %s", slug, exc)
         detail: dict = {"error": str(exc)}
         if str(exc) == "unsafe_auto_link":
+            # The caller proved control of this email at the IdP — the
+            # address and the rule that refused the link are theirs to
+            # see, and the sign-in page needs both to explain.
             detail["email"] = identity.email
+            if exc.deny_reasons:
+                detail["reasons"] = list(exc.deny_reasons)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=detail,
         )
@@ -2248,7 +2253,10 @@ async def custom_profile_browser_login(
         logger.info("Custom profile login rejected (slug=%s): %s", slug, exc)
         detail: dict = {"error": str(exc)}
         if str(exc) == "unsafe_auto_link":
+            # Same disclosure rule as the back-channel route above.
             detail["email"] = identity.email
+            if exc.deny_reasons:
+                detail["reasons"] = list(exc.deny_reasons)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=detail,
         )

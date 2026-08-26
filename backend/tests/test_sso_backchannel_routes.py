@@ -30,7 +30,9 @@ CLAIMS = {
 }
 
 
-async def _make_provider(db_session, *, lifecycle="live", **over):
+async def _make_provider(
+    db_session, *, lifecycle="live", linking_policy="strict", **over,
+):
     settings = {
         "token_source": "cookie", "token_source_key": "corp_session",
         "gateway_url": "https://gw.corp.example/redeem",
@@ -43,7 +45,7 @@ async def _make_provider(db_session, *, lifecycle="live", **over):
     row = await idp_provider_repo.create_provider(
         db_session, slug="corp-gateway", display_name="Corporate Gateway",
         kind="backchannel", settings=settings, claim_mapping={},
-        linking_policy="strict",
+        linking_policy=linking_policy,
     )
     if lifecycle == "live":
         await idp_provider_repo.publish_provider(db_session, row.id)
@@ -363,3 +365,36 @@ async def test_a_draft_row_can_be_rehearsed_through_the_handle_flow(
     body = resp.json()
     assert body.get("dryRun") is True
     assert "nx_access" not in resp.headers.get("set-cookie", "")
+
+
+# ── the collision the sign-in page has to explain ────────────────────
+
+@pytest.mark.asyncio
+async def test_a_refused_link_names_its_reasons_to_the_owner(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """``unsafe_auto_link`` used to reach the browser as a bare code, so
+    the page could only shrug. The caller has just proved control of the
+    colliding email at the IdP — the rule that refused the link is theirs
+    to see, and the collision modal renders it."""
+    from backend.app.db.models import UserORM
+
+    _stub_gateway(monkeypatch)
+    await _make_provider(db_session, linking_policy="manual_only")
+    db_session.add(UserORM(
+        id="usr_alice", email="alice@corp.example", password_hash="x",
+        first_name="Alice", last_name="Anders", status="active",
+        created_at="2024-01-01T00:00:00Z", updated_at="2024-01-01T00:00:00Z",
+    ))
+    await db_session.commit()
+
+    resp = await test_client.post(
+        "/api/v1/auth/corp-gateway/backchannel",
+        json={},
+        cookies={"corp_session": "ambient-xyz"},
+    )
+    assert resp.status_code == 401, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "unsafe_auto_link"
+    assert detail["email"] == "alice@corp.example"
+    assert detail["reasons"] == ["policy:manual_only"]

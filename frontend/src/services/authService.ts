@@ -338,11 +338,35 @@ export async function runBrowserExchangeCall(cfg: {
     return token
 }
 
+/** A back-channel sign-in the server refused, with the structure it
+ *  refused it in. ``code`` is the backend's error vocabulary; for
+ *  ``unsafe_auto_link`` the colliding ``email`` and the ``reasons``
+ *  that refused the link ride along, so the sign-in page can explain
+ *  the collision instead of shrugging. The message stays generic — it
+ *  is what generic error surfaces render. */
+export class BackchannelLoginError extends Error {
+    code: string
+    email?: string
+    reasons?: string[]
+
+    constructor(
+        code: string, opts: { email?: string; reasons?: string[] } = {},
+    ) {
+        super('Signing in with that session did not work.')
+        this.name = 'BackchannelLoginError'
+        this.code = code
+        this.email = opts.email
+        this.reasons = opts.reasons
+    }
+}
+
 /** Complete a back-channel sign-in. The body picks the shape: a handle
  *  from the trigger, an assertion from the browser exchange, or nothing
  *  at all — the server-mode JSON entry that reads the ambient cookie
  *  off this very request. Returns the session payload so callers can
- *  hydrate state without a second round trip. */
+ *  hydrate state without a second round trip; a refusal throws
+ *  {@link BackchannelLoginError} carrying the server's structured
+ *  detail. */
 export async function loginWithBackchannel(
     slug: string,
     body: { handle?: string; assertion?: string },
@@ -359,7 +383,24 @@ export async function loginWithBackchannel(
         },
     )
     if (!res.ok) {
-        throw new Error('Signing in with that session did not work.')
+        let detail: {
+            error?: string; email?: string; reasons?: string[]
+        } | null = null
+        try {
+            const parsed = (await res.json()) as { detail?: typeof detail }
+            detail = parsed?.detail ?? null
+        } catch {
+            // Not a JSON body — the code below still says which layer.
+        }
+        throw new BackchannelLoginError(
+            detail?.error ?? `http_${res.status}`,
+            {
+                email: detail?.email,
+                reasons: Array.isArray(detail?.reasons)
+                    ? detail.reasons.map(String)
+                    : undefined,
+            },
+        )
     }
     return res.json() as Promise<SessionResponse>
 }

@@ -185,9 +185,18 @@ class InvalidRefreshToken(AuthError):
 
 class SSOAuthError(AuthError):
     """SSO login could not be completed — e.g. the IdP subject's email
-    collides with an existing account and auto-linking is unsafe. The
-    route maps this to a generic failure; the reason is audited, not
-    shown to the browser."""
+    collides with an existing account and auto-linking is unsafe.
+
+    The route maps this to a generic failure and the full story is
+    audited. ``deny_reasons`` is the one deliberate exception: for
+    ``unsafe_auto_link`` the fetch-based routes surface it so the
+    sign-in page can say which rule refused the link — disclosure to
+    someone who has just proved control of the colliding email at the
+    IdP, not to an anonymous caller."""
+
+    def __init__(self, code: str, *, deny_reasons: tuple[str, ...] = ()):
+        super().__init__(code)
+        self.deny_reasons = deny_reasons
 
 
 class SsoReauthRequired(AuthError):
