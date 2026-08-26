@@ -401,8 +401,11 @@ from.
   miss from the feature being off, an unknown domain, a disabled provider,
   or malformed input all return the same empty body. Rate limited like
   `/login`, and CSRF-exempt because it is called before any session exists.
-* Additive: an address that matches nothing falls through to the password
-  form and the button row, so a wrong domain mapping cannot strand anyone.
+* Additive: submitting an address that matches nothing says so on the
+  page ("We don't recognise that email's domain") and reveals the
+  password form and the full button row, so a wrong or missing domain
+  mapping cannot strand anyone. While typing, a miss stays silent — only
+  the submit speaks.
 
 ### 1.15 IdP health
 

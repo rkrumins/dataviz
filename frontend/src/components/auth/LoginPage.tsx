@@ -743,7 +743,8 @@ export function LoginPage() {
     }, [clearError])
 
     // Debounced so it fires once the address looks finished, not on every
-    // keystroke. A miss is silent by design — see /auth/resolve.
+    // keystroke. A miss HERE is silent — it fires mid-typing. The submit
+    // path speaks on a miss instead (see handleSubmit).
     //
     // Gated on the posture: without this it fired on every deployment,
     // including the ~99% with email-first off, where the endpoint can only
@@ -797,24 +798,7 @@ export function LoginPage() {
     const portalHasAffordance = showPasswordForm
         || (visibleProviders?.length ?? 0) > 0 || routed != null
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault()
-        if (showPasswordForm) {
-            if (!email || !password || isLoading) return
-            const ok = await login(email, password)
-            if (ok) navigate('/', { replace: true })
-            return
-        }
-        // Email-first renders no password field, so the guard above
-        // turned every Enter press into a silent no-op. Route the
-        // address instead — what the debounced resolve does, forced
-        // now. A miss stays silent by design (see /auth/resolve); the
-        // "enter your work email" hint is already on screen.
-        if (isLoading || !email.includes('@')) return
-        const target = routed ?? await authService.resolveEmailDomain(email)
-            .then((r) => r.provider ?? null)
-            .catch(() => null)
-        if (!target) return
+    const routeTo = (target: SsoProviderSummary) => {
         if (isGatewayProvider(target)) {
             void gatewaySignIn(target)
             return
@@ -823,6 +807,47 @@ export function LoginPage() {
             `/api/v1/auth/${encodeURIComponent(target.slug)}/login`
             + `?next=${encodeURIComponent('/dashboard')}`,
         )
+    }
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault()
+        if (showPasswordForm) {
+            if (isLoading || !email) return
+            if (!password) {
+                // Enter with only the email typed. When the domain
+                // routes to a connection — possible here only under
+                // email-first with the password form revealed — go via
+                // SSO: opening the password field must not cost the
+                // Enter-routes behavior.
+                if (routed) routeTo(routed)
+                return
+            }
+            const ok = await login(email, password)
+            if (ok) navigate('/', { replace: true })
+            return
+        }
+        // Email-first renders no password field, so the guard above
+        // turned every Enter press into a silent no-op. Route the
+        // address instead — what the debounced resolve does, forced now.
+        if (isLoading || !email.includes('@')) return
+        const target = routed ?? await authService.resolveEmailDomain(email)
+            .then((r) => r.provider ?? null)
+            .catch(() => null)
+        if (!target) {
+            // A miss used to be a silent return — and with the password
+            // form and button row both tucked behind disclosures under
+            // email-first, Enter did nothing at all. Say what happened
+            // and reveal every way in. (A domain routes only when the
+            // connection lists it under Email domains.)
+            setPortalError(
+                "We don't recognise that email's domain. Choose how to "
+                + 'sign in below.',
+            )
+            if (allowLocal) setForcePassword(true)
+            setShowAllProviders(true)
+            return
+        }
+        routeTo(target)
     }
 
     // Avoid flashing the form to a user whose cookie is still being
