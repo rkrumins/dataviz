@@ -17,11 +17,13 @@
  * domains, this being the only way in) surface on the row *before* the
  * click, rather than as a 409 afterwards.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+    useCallback, useEffect, useMemo, useState, type ReactNode,
+} from 'react'
 import { motion } from 'framer-motion'
 import {
-    AlertTriangle, Check, ChevronDown, DoorOpen, Loader2, Mail,
-    ShieldCheck, UserPlus,
+    AlertTriangle, Check, ChevronDown, DoorOpen, Loader2, LogOut, Mail,
+    ShieldCheck, UserPlus, X,
 } from 'lucide-react'
 
 import {
@@ -59,7 +61,9 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                 summary:
                     'The master switch for every connection at once. Off, and the ' +
                     'sign-in page shows no company buttons — but nothing is deleted, ' +
-                    'and turning it back on restores every connection as it was.',
+                    'and turning it back on restores every connection as it was. ' +
+                    'People already signed in stay signed in until their sessions ' +
+                    'expire, unless you sign them out when turning this off.',
                 technical:
                     '/auth/providers returns [] and every /auth/{slug}/* route ' +
                     'returns 404. Provider rows keep their settings.',
@@ -130,8 +134,14 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
     const [cfg, setCfg] = useState<AuthConfig | null>(null)
     const [providers, setProviders] = useState<IdpProvider[]>(seeded ?? [])
     const [error, setError] = useState<string | null>(null)
+    const [notice, setNotice] = useState<string | null>(null)
     const [pending, setPending] = useState<keyof AuthConfig | null>(null)
     const [confirming, setConfirming] = useState<keyof AuthConfig | null>(null)
+    // The ssoEnabled confirm carries a number: how many people are signed
+    // in through a connection right now, and whether to sign them out
+    // too. ``null`` = count unavailable (the confirm happens anyway).
+    const [ssoOffCount, setSsoOffCount] = useState<number | null>(null)
+    const [ssoOffSignOut, setSsoOffSignOut] = useState(false)
 
     const refresh = useCallback(async () => {
         try {
@@ -158,19 +168,54 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         () => riskChecks(cfg, providers), [cfg, providers],
     )
 
-    async function apply(field: keyof AuthConfig, value: boolean) {
-        if (!cfg) return
+    async function apply(field: keyof AuthConfig, value: boolean): Promise<boolean> {
+        if (!cfg) return false
         setPending(field)
         try {
             setCfg(await ssoAdminService.updateAuthConfig({
                 [field]: value, expectedVersion: cfg.version,
             } as never))
             setError(null)
+            return true
         } catch (err) {
             setError((err as Error).message)
+            return false
         } finally {
             setPending(null)
             setConfirming(null)
+        }
+    }
+
+    /** Best-effort count for the ssoEnabled confirm. Losing the number
+     *  must not lose the confirm. */
+    async function loadSsoOffCount() {
+        setSsoOffCount(null)
+        setSsoOffSignOut(false)
+        try {
+            const dry = await ssoAdminService.endSsoSessions({ dryRun: true })
+            setSsoOffCount(dry.usersAffected)
+        } catch {
+            setSsoOffCount(null)
+        }
+    }
+
+    async function confirmSsoOff() {
+        const signOut = ssoOffSignOut
+        const ok = await apply('ssoEnabled', false)
+        if (!ok || !signOut) return
+        try {
+            const ended = await ssoAdminService.endSsoSessions()
+            setNotice(
+                `Signed out ${ended.usersAffected} ${
+                    ended.usersAffected === 1 ? 'person' : 'people'
+                } who had signed in through a connection.`,
+            )
+        } catch (err) {
+            // The switch DID flip — say so, and say what didn't happen.
+            setError(
+                'Single sign-on is off, but signing its users out failed: '
+                + (err as Error).message,
+            )
         }
     }
 
@@ -189,6 +234,23 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         <div className="grid xl:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
             <div className="min-w-0 space-y-6">
             {error && <ErrorBanner message={error} />}
+            {notice && (
+                <div
+                    role="status"
+                    className="flex items-start gap-2 px-3 py-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06]"
+                >
+                    <Check className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
+                    <p className="text-xs text-ink flex-1 min-w-0">{notice}</p>
+                    <button
+                        type="button"
+                        aria-label="Dismiss notice"
+                        onClick={() => setNotice(null)}
+                        className="shrink-0 text-ink-muted hover:text-ink"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                    </button>
+                </div>
+            )}
 
             {GROUPS.map((group, gi) => (
                 <motion.section
@@ -211,17 +273,44 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                 pending={pending === s.field}
                                 disabled={pending !== null || cfg === null}
                                 confirming={confirming === s.field}
+                                confirmExtra={
+                                    s.field === 'ssoEnabled' ? (
+                                        <SignOutSsoUsersChoice
+                                            count={ssoOffCount}
+                                            checked={ssoOffSignOut}
+                                            onChange={setSsoOffSignOut}
+                                        />
+                                    ) : undefined
+                                }
                                 onRequest={next => {
-                                    if (s.confirmOff && !next) setConfirming(s.field)
-                                    else void apply(s.field, next)
+                                    if (s.confirmOff && !next) {
+                                        setConfirming(s.field)
+                                        if (s.field === 'ssoEnabled') {
+                                            void loadSsoOffCount()
+                                        }
+                                    } else void apply(s.field, next)
                                 }}
-                                onConfirm={() => void apply(s.field, false)}
+                                onConfirm={() => {
+                                    if (s.field === 'ssoEnabled') void confirmSsoOff()
+                                    else void apply(s.field, false)
+                                }}
                                 onCancel={() => setConfirming(null)}
                             />
                         ))}
                     </div>
                 </motion.section>
             ))}
+
+            {/* Sessions outlive the switch, so the switch alone is not the
+                whole act of turning SSO off. This is the second half,
+                standing alone for the operator who declined it at confirm
+                time (or turned SSO off before the offer existed). */}
+            {cfg !== null && !cfg.ssoEnabled && (
+                <EndSsoSessionsCard
+                    onDone={line => { setNotice(line); setError(null) }}
+                    onError={msg => setError(msg)}
+                />
+            )}
 
             {/* Not one of the four switches, but the same kind of decision:
                 a platform-wide posture that decides what sign-in can
@@ -264,7 +353,7 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
 }
 
 function SwitchRow({
-    def, value, risk, pending, disabled, confirming,
+    def, value, risk, pending, disabled, confirming, confirmExtra,
     onRequest, onConfirm, onCancel,
 }: {
     def: SwitchDef
@@ -273,6 +362,9 @@ function SwitchRow({
     pending: boolean
     disabled: boolean
     confirming: boolean
+    /** Extra content for the confirm block — a choice that rides along
+     *  with the "turn it off", like the sign-everyone-out checkbox. */
+    confirmExtra?: ReactNode
     onRequest: (next: boolean) => void
     onConfirm: () => void
     onCancel: () => void
@@ -367,6 +459,7 @@ function SwitchRow({
                                 Turn <strong>{def.label}</strong> off?
                                 {risk?.tone === 'danger' && ` ${risk.message}`}
                             </p>
+                            {confirmExtra}
                             <div className="mt-2 flex gap-2">
                                 <button
                                     onClick={onConfirm}
@@ -389,6 +482,139 @@ function SwitchRow({
                 {value && !pending && !confirming && (
                     <Check className="w-4 h-4 mt-1 shrink-0 text-emerald-500/60" />
                 )}
+            </div>
+        </div>
+    )
+}
+
+/** The sign-everyone-out choice inside the ssoEnabled confirm. A count
+ *  of 0 renders as a statement — there is nobody to offer to sign out. */
+function SignOutSsoUsersChoice({
+    count, checked, onChange,
+}: {
+    count: number | null
+    checked: boolean
+    onChange: (next: boolean) => void
+}) {
+    if (count === 0) {
+        return (
+            <p className="mt-2 text-xs text-ink-secondary">
+                Nobody is signed in through a connection right now.
+            </p>
+        )
+    }
+    return (
+        <label className="mt-2 flex items-center gap-2 text-xs text-ink">
+            <input
+                type="checkbox"
+                checked={checked}
+                onChange={e => onChange(e.target.checked)}
+            />
+            {count === null
+                ? 'Also sign out everyone who signed in through a connection'
+                : `Also sign out the ${count} ${
+                    count === 1 ? 'person' : 'people'
+                } signed in through a connection`}
+        </label>
+    )
+}
+
+/** Standalone sign-out for sessions that outlived the master switch.
+ *  Two steps on purpose: the first click only fetches the count, and the
+ *  irreversible act is behind a second click that carries the number. */
+function EndSsoSessionsCard({
+    onDone, onError,
+}: {
+    onDone: (line: string) => void
+    onError: (msg: string) => void
+}) {
+    const [count, setCount] = useState<number | null>(null)
+    const [asked, setAsked] = useState(false)
+    const [busy, setBusy] = useState(false)
+
+    async function askCount() {
+        setBusy(true)
+        try {
+            const dry = await ssoAdminService.endSsoSessions({ dryRun: true })
+            setCount(dry.usersAffected)
+            setAsked(true)
+        } catch (err) {
+            onError((err as Error).message)
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    async function end() {
+        setBusy(true)
+        try {
+            const ended = await ssoAdminService.endSsoSessions()
+            onDone(
+                `Signed out ${ended.usersAffected} ${
+                    ended.usersAffected === 1 ? 'person' : 'people'
+                } who had signed in through a connection.`,
+            )
+            setAsked(false)
+        } catch (err) {
+            onError((err as Error).message)
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    return (
+        <div className="rounded-xl border border-glass-border bg-canvas-elevated p-4">
+            <div className="flex items-start gap-3.5">
+                <LogOut className="w-4 h-4 mt-0.5 shrink-0 text-ink-muted" />
+                <div className="min-w-0 flex-1">
+                    <span className="text-sm font-semibold text-ink">
+                        Sessions that outlived the switch
+                    </span>
+                    <p className="mt-1 text-xs text-ink-secondary leading-relaxed">
+                        Turning single sign-on off stops new sign-ins, but people
+                        already signed in through a connection keep their sessions
+                        until those expire. Password sessions are never touched.
+                    </p>
+                    {!asked ? (
+                        <button
+                            type="button"
+                            onClick={() => void askCount()}
+                            disabled={busy}
+                            className="mt-2 px-3 py-1.5 rounded-lg border border-glass-border text-xs font-medium text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                        >
+                            Sign them out now…
+                        </button>
+                    ) : count === 0 ? (
+                        <p className="mt-2 text-xs text-ink-secondary">
+                            Nobody is still signed in through a connection.
+                        </p>
+                    ) : (
+                        <div className="mt-2">
+                            <p className="text-xs text-ink">
+                                This signs out {count}{' '}
+                                {count === 1 ? 'person' : 'people'} now.
+                            </p>
+                            <div className="mt-2 flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => void end()}
+                                    disabled={busy}
+                                    className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
+                                >
+                                    Sign out {count} {count === 1 ? 'person' : 'people'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setAsked(false)}
+                                    disabled={busy}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5"
+                                >
+                                    Never mind
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
             </div>
         </div>
     )

@@ -242,6 +242,17 @@ export interface AuthConfigPatch {
     expectedVersion?: number
 }
 
+/** Outcome of an end-sessions call. With ``dryRun`` nothing was written
+ *  and ``usersAffected`` is the count a confirm dialog shows; without it
+ *  the numbers are what actually happened. */
+export interface EndSessionsResult {
+    /** Absent on the platform-wide sweep. */
+    providerId?: string
+    usersAffected: number
+    tokensRevoked: number
+    dryRun: boolean
+}
+
 
 // ── Phase 4: user lookup + search response shapes ───────────────────
 
@@ -367,6 +378,23 @@ export const ssoAdminService = {
         return request<IdpProvider>(
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}/publish`,
             { method: 'POST' },
+        )
+    },
+
+    /** End every session this connection minted — or, with ``dryRun``,
+     *  just count who that would sign out. Password sessions are never
+     *  touched, so "switch back to local accounts" starts immediately.
+     *  Works whether the row is enabled or not: the usual moment for
+     *  this is right after turning it off. */
+    endProviderSessions(
+        id: string, opts?: { dryRun?: boolean },
+    ): Promise<EndSessionsResult> {
+        return request<EndSessionsResult>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/end-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
         )
     },
 
@@ -547,6 +575,20 @@ export const ssoAdminService = {
         return request<AuthConfig>(`${ADMIN}/sso/config`, {
             method: 'PATCH', body: JSON.stringify(patch),
         })
+    },
+
+    /** The master-switch companion to ``endProviderSessions``: end every
+     *  session minted through any connection at once. Deliberately
+     *  callable with ``ssoEnabled`` already off — that is when an
+     *  operator reaches for it. */
+    endSsoSessions(opts?: { dryRun?: boolean }): Promise<EndSessionsResult> {
+        return request<EndSessionsResult>(
+            `${ADMIN}/sso/config/end-sso-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
+        )
     },
 
     // ── Phase 4: user lookup + search ────────────────────────────────

@@ -33,9 +33,9 @@ function provider(over: Partial<IdpProvider> = {}): IdpProvider {
 
 describe('the combination nobody can see from one row', () => {
     it('calls out that both doors are shut', () => {
-        // The server refuses to turn passwords off while an admin has no
-        // SSO identity — but it cannot refuse this, because you get here by
-        // turning SSO off *afterwards*. Only the combination is wrong.
+        // The server refuses this combination whether it arrives in one
+        // PATCH or two — but the state can exist anyway (a seed, a direct
+        // DB edit), so the page still has to be able to say it.
         const p = describePosture(
             cfg({ ssoEnabled: false, allowLocalLogin: false }), [provider()],
         )
@@ -49,6 +49,15 @@ describe('the combination nobody can see from one row', () => {
             .toBe('warn')
         expect(describePosture(cfg({ allowLocalLogin: false }), [provider()]).tone)
             .toBe('ok')
+    })
+
+    it('says that sessions outlive the master switch', () => {
+        // The switch stops new sign-ins; it does not end the sessions the
+        // connections already minted. The posture card has to say so, or
+        // "SSO is off" reads as more than it is.
+        const p = describePosture(cfg({ ssoEnabled: false }), [provider()])
+        expect(p.notes.join(' '))
+            .toMatch(/stay signed in until their sessions expire/i)
     })
 })
 

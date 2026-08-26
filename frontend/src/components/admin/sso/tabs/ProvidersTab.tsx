@@ -46,6 +46,15 @@ export function ProvidersTab({
     const [editingId, setEditingId] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
     const [loaded, setLoaded] = useState(false)
+    // Turning a connection OFF gets a confirm with a number in it: how
+    // many people are signed in through it right now, and whether to
+    // sign them out too. ``count === null`` means the count could not be
+    // read — the confirm still happens, just numberless.
+    const [disabling, setDisabling] = useState<{
+        provider: IdpProvider
+        count: number | null
+        signOut: boolean
+    } | null>(null)
 
     const refresh = useCallback(async () => {
         try {
@@ -81,9 +90,28 @@ export function ProvidersTab({
     const editing = rows.find(p => p.id === editingId) ?? null
 
     async function toggleEnabled(p: IdpProvider) {
+        if (p.enabled) {
+            // Disabling stops new sign-ins but the sessions it already
+            // minted keep rotating until they expire — so ask, with the
+            // count, and offer to end them now. The count is best-effort.
+            setBusy(true)
+            let count: number | null = null
+            try {
+                const dry = await ssoAdminService.endProviderSessions(
+                    p.id, { dryRun: true },
+                )
+                count = dry.usersAffected
+            } catch {
+                count = null
+            } finally {
+                setBusy(false)
+            }
+            setDisabling({ provider: p, count, signOut: false })
+            return
+        }
         setBusy(true)
         try {
-            await ssoAdminService.updateProvider(p.id, { enabled: !p.enabled })
+            await ssoAdminService.updateProvider(p.id, { enabled: true })
             await refresh()
             onChanged?.()
         } catch (err) {
@@ -91,6 +119,53 @@ export function ProvidersTab({
         } finally {
             setBusy(false)
         }
+    }
+
+    async function confirmDisable() {
+        if (!disabling) return
+        const { provider: p, signOut } = disabling
+        setBusy(true)
+        try {
+            await ssoAdminService.updateProvider(p.id, { enabled: false })
+        } catch (err) {
+            setError((err as Error).message)
+            setBusy(false)
+            return
+        }
+        let ended: { usersAffected: number } | null = null
+        let endFailure: string | null = null
+        if (signOut) {
+            try {
+                ended = await ssoAdminService.endProviderSessions(p.id)
+            } catch (err) {
+                endFailure = (err as Error).message
+            }
+        }
+        setDisabling(null)
+        // refresh() clears the error banner on success, so the outcome
+        // message has to land after it, not before.
+        await refresh()
+        onChanged?.()
+        if (endFailure !== null) {
+            // The switch DID flip — say so, and say what didn't happen.
+            setError(
+                `${p.displayName} is off, but signing its users out `
+                + `failed: ${endFailure}`,
+            )
+        } else if (ended !== null) {
+            setNotice(
+                `${p.displayName} is off. Signed out `
+                + `${ended.usersAffected} ${
+                    ended.usersAffected === 1 ? 'person' : 'people'
+                } who had signed in through it.`,
+            )
+        } else {
+            setNotice(
+                `${p.displayName} is off. People already signed in through `
+                + 'it keep their sessions until those expire.',
+            )
+        }
+        setBusy(false)
     }
 
     async function publish(p: IdpProvider) {
@@ -218,12 +293,71 @@ export function ProvidersTab({
                     <p className="text-xs text-ink flex-1 min-w-0">{notice}</p>
                     <button
                         type="button"
-                        aria-label="Dismiss rehearsal result"
+                        aria-label="Dismiss notice"
                         onClick={() => setNotice(null)}
                         className="shrink-0 text-ink-muted hover:text-ink"
                     >
                         <X className="w-3.5 h-3.5" />
                     </button>
+                </div>
+            )}
+
+            {disabling && (
+                <div
+                    role="alertdialog"
+                    aria-label={`Turn off ${disabling.provider.displayName}?`}
+                    className="px-3 py-3 rounded-xl border border-red-500/30 bg-red-500/[0.05] space-y-2"
+                >
+                    <p className="text-xs text-ink leading-relaxed">
+                        Turn off <strong>{disabling.provider.displayName}</strong>?
+                        {' '}New sign-ins through it stop immediately.{' '}
+                        {disabling.count === null
+                            ? 'People already signed in through it keep their sessions until those expire.'
+                            : disabling.count === 0
+                                ? 'Nobody is currently signed in through it.'
+                                : `${disabling.count} ${
+                                    disabling.count === 1
+                                        ? 'person keeps their session'
+                                        : 'people keep their sessions'
+                                } until those expire.`}
+                    </p>
+                    {(disabling.count === null || disabling.count > 0) && (
+                        <label className="flex items-center gap-2 text-xs text-ink">
+                            <input
+                                type="checkbox"
+                                checked={disabling.signOut}
+                                onChange={e => {
+                                    const signOut = e.target.checked
+                                    setDisabling(d => d && { ...d, signOut })
+                                }}
+                            />
+                            {disabling.count === null
+                                ? 'Also sign those people out now'
+                                : `Also sign ${
+                                    disabling.count === 1
+                                        ? 'that person'
+                                        : `those ${disabling.count} people`
+                                } out now`}
+                        </label>
+                    )}
+                    <div className="flex gap-2 pt-1">
+                        <button
+                            type="button"
+                            onClick={() => void confirmDisable()}
+                            disabled={busy}
+                            className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
+                        >
+                            Turn it off
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setDisabling(null)}
+                            disabled={busy}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5"
+                        >
+                            Keep it on
+                        </button>
+                    </div>
                 </div>
             )}
 
