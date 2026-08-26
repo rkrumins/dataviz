@@ -69,7 +69,6 @@ function forwardingRow(): IdpProvider {
 
 beforeEach(() => {
     vi.clearAllMocks()
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     svc.listProviders.mockResolvedValue([forwardingRow()])
     svc.providerStatus.mockResolvedValue({ providers: [] })
     svc.startDryRun.mockResolvedValue({ loginUrl: 'https://app/login?dry=1' })
@@ -88,6 +87,13 @@ describe('rehearsing a forwarding browser-mode row', () => {
             await screen.findByRole('button', { name: 'rehearse corp' }),
         )
 
+        // The ask now happens in the tab's own confirm idiom, not a
+        // browser confirm() — same dialog family as disable and publish.
+        const dialog = await screen.findByRole('alertdialog')
+        expect(dialog).toHaveTextContent(/nothing will be written/i)
+        expect(svc.startDryRun).not.toHaveBeenCalled()
+        await user.click(screen.getByRole('button', { name: /^rehearse$/i }))
+
         await waitFor(() => {
             expect(svc.rehearseBackchannel)
                 .toHaveBeenCalledWith('corp', { assertion: 'assertion-jwt' })
@@ -103,5 +109,19 @@ describe('rehearsing a forwarding browser-mode row', () => {
             token: 'corp-handle',
         }))
         expect(await screen.findByText(/would sign in as/i)).toBeInTheDocument()
+    })
+
+    it('walks away on Cancel without touching the IdP', async () => {
+        const user = userEvent.setup()
+        render(<ProvidersTab />)
+        await user.click(
+            await screen.findByRole('button', { name: 'rehearse corp' }),
+        )
+        await screen.findByRole('alertdialog')
+
+        await user.click(screen.getByRole('button', { name: /cancel/i }))
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+        expect(svc.startDryRun).not.toHaveBeenCalled()
+        expect(trigger).not.toHaveBeenCalled()
     })
 })

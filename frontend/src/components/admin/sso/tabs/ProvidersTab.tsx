@@ -70,6 +70,11 @@ export function ProvidersTab({
         count: number | null
         signOut: boolean
     } | null>(null)
+    // Publish and rehearse ask in the same breath as disable does — one
+    // inline confirm idiom for every consequential action, instead of a
+    // browser confirm() for one and an unguarded click for the other.
+    const [publishing, setPublishing] = useState<IdpProvider | null>(null)
+    const [rehearsing, setRehearsing] = useState<IdpProvider | null>(null)
 
     const refresh = useCallback(async () => {
         try {
@@ -133,6 +138,8 @@ export function ProvidersTab({
                 setBusy(false)
                 setPending(null)
             }
+            setPublishing(null)
+            setRehearsing(null)
             setDisabling({ provider: p, count, signOut: false })
             return
         }
@@ -233,12 +240,6 @@ export function ProvidersTab({
     }
 
     async function dryRun(p: IdpProvider) {
-        if (!confirm(
-            `Sign in to ${p.slug} with your own account at that IdP.\n\n` +
-            'Nothing will be written and no session will be created — you ' +
-            'stay signed in here, and a new tab reports what would have ' +
-            'happened.',
-        )) return
         setBusy(true)
         setPending({ id: p.id, action: 'rehearse' })
         setNotice(null)
@@ -425,6 +426,83 @@ export function ProvidersTab({
                 </div>
             )}
 
+            {publishing && (
+                <div
+                    role="alertdialog"
+                    aria-label={`Publish ${publishing.displayName}?`}
+                    className="px-3 py-3 rounded-xl border border-emerald-500/30 bg-emerald-500/[0.05] space-y-2"
+                >
+                    <p className="text-xs text-ink leading-relaxed">
+                        Publish <strong>{publishing.displayName}</strong>?
+                        {' '}It goes in front of everyone on the sign-in
+                        page, immediately.{' '}
+                        {publishing.lastAssertionAt
+                            ? 'It has been rehearsed — a sign-in has already completed against this configuration.'
+                            : 'It has never been rehearsed — nothing has confirmed a sign-in against this configuration yet.'}
+                    </p>
+                    <div className="flex gap-2 pt-1">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const p = publishing
+                                setPublishing(null)
+                                void publish(p)
+                            }}
+                            disabled={busy}
+                            className="px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-xs font-medium hover:brightness-110 disabled:opacity-50"
+                        >
+                            Publish it
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setPublishing(null)}
+                            disabled={busy}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5"
+                        >
+                            Not yet
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {rehearsing && (
+                <div
+                    role="alertdialog"
+                    aria-label={`Rehearse ${rehearsing.displayName}?`}
+                    className="px-3 py-3 rounded-xl border border-glass-border bg-canvas-elevated space-y-2"
+                >
+                    <p className="text-xs text-ink leading-relaxed">
+                        Sign in to <strong>{rehearsing.slug}</strong> with
+                        your own account at that IdP. Nothing will be
+                        written and no session will be created — you stay
+                        signed in here, and what would have happened is
+                        reported on this page or in a new tab.
+                    </p>
+                    <div className="flex gap-2 pt-1">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const p = rehearsing
+                                setRehearsing(null)
+                                void dryRun(p)
+                            }}
+                            disabled={busy}
+                            className="px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-xs font-medium hover:brightness-110 disabled:opacity-50"
+                        >
+                            Rehearse
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setRehearsing(null)}
+                            disabled={busy}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5"
+                        >
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            )}
+
             {filter === 'drafts' && (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.05]">
                     <FlaskConical className="w-3.5 h-3.5 shrink-0 text-amber-500" />
@@ -457,8 +535,16 @@ export function ProvidersTab({
                         pending={pending?.id === p.id ? pending.action : null}
                         index={i}
                         onEdit={() => setEditingId(p.id)}
-                        onRehearse={() => { void dryRun(p) }}
-                        onPublish={() => { void publish(p) }}
+                        onRehearse={() => {
+                            setDisabling(null)
+                            setPublishing(null)
+                            setRehearsing(p)
+                        }}
+                        onPublish={() => {
+                            setDisabling(null)
+                            setRehearsing(null)
+                            setPublishing(p)
+                        }}
                         onToggleEnabled={() => { void toggleEnabled(p) }}
                         // Deleting now lives in the editor's danger zone,
                         // behind a type-to-confirm, rather than one browser
