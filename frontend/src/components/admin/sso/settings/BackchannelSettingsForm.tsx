@@ -18,7 +18,7 @@
  */
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
-import { Field, FieldGrid, TextAreaField, TextField } from './ui'
+import { Field, FieldGrid, SecretField, TextAreaField, TextField } from './ui'
 
 export type AmbientSource = 'cookie' | 'header'
 export type SendAs = 'cookie' | 'header' | 'body'
@@ -64,7 +64,12 @@ export interface BackchannelSettings {
     exchange_claims_path?: string | null
 
     claims_format?: 'json' | 'jwt'
+    // Verification material — at most one of the three. The secret is
+    // redacted to '********' once saved; the PEM public key is not a
+    // secret and round-trips readable.
     jwks_url?: string | null
+    jwt_public_key?: string | null
+    jwt_shared_secret?: string | null
     jwt_issuer?: string | null
     jwt_audience?: string | null
 
@@ -110,6 +115,8 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     exchange_claims_path: '',
     claims_format: 'json',
     jwks_url: '',
+    jwt_public_key: '',
+    jwt_shared_secret: '',
     jwt_issuer: '',
     jwt_audience: '',
     timeout_seconds: 5,
@@ -230,6 +237,154 @@ function Toggle({
                 </span>
             </span>
         </label>
+    )
+}
+
+type VerifyChoice = 'none' | 'jwks' | 'public_key' | 'shared_secret'
+
+/** Which verification material is populated on the row. Populated
+ *  fields always win over a not-yet-typed local choice, so the chooser
+ *  can never disagree with what the server will actually use. A saved
+ *  secret arrives as the redaction mask, which counts as populated. */
+function populatedVerifyChoice(value: BackchannelSettings): VerifyChoice | null {
+    if ((value.jwt_shared_secret ?? '') !== '') return 'shared_secret'
+    if ((value.jwt_public_key ?? '').trim()) return 'public_key'
+    if ((value.jwks_url ?? '').trim()) return 'jwks'
+    return null
+}
+
+/** One way to judge the token, chosen from what the gateway can offer:
+ *  their published keys, a pasted public key when they sign but publish
+ *  none, or a shared secret for symmetric gateways. Server mode may
+ *  also choose none — the TLS call it made is its own authentication —
+ *  which browser mode must not, because the token arrives from the
+ *  user's browser there. */
+function VerifyMaterialChooser({
+    value, set, onChange, allowNone,
+}: {
+    value: BackchannelSettings
+    set: <K extends keyof BackchannelSettings>(
+        k: K, v: BackchannelSettings[K],
+    ) => void
+    onChange: (next: BackchannelSettings) => void
+    allowNone: boolean
+}) {
+    const populated = populatedVerifyChoice(value)
+    const [chosen, setChosen] = useState<VerifyChoice>(
+        populated ?? (allowNone ? 'none' : 'jwks'),
+    )
+    const choice = populated ?? chosen
+
+    const switchTo = (next: VerifyChoice) => {
+        setChosen(next)
+        // Null out the other materials in one update: the server merge
+        // deletes null keys, so abandoned material cannot linger and
+        // win the populated-field derivation on the next open.
+        const cleared: BackchannelSettings = { ...value }
+        if (next !== 'jwks') cleared.jwks_url = null
+        if (next !== 'public_key') cleared.jwt_public_key = null
+        if (next !== 'shared_secret') cleared.jwt_shared_secret = null
+        onChange(cleared)
+    }
+
+    return (
+        <>
+            <Field
+                label={allowNone ? 'Signature check' : 'Verify the token with'}
+                required={!allowNone}
+                hint={allowNone
+                    ? 'None accepts the token on the strength of the TLS call that fetched it, exactly like the JSON shape.'
+                    : 'A token the browser delivers is only as good as its signature, so one of these is required.'}
+            >
+                <select
+                    className={selectCls}
+                    value={choice}
+                    onChange={e => switchTo(e.target.value as VerifyChoice)}
+                >
+                    {allowNone && (
+                        <option value="none">None — trust the TLS answer</option>
+                    )}
+                    <option value="jwks">Their published keys (JWKS URL)</option>
+                    <option value="public_key">A pasted public key (PEM)</option>
+                    <option value="shared_secret">A shared secret (HS256)</option>
+                </select>
+            </Field>
+
+            {choice === 'jwks' && (
+                <Field
+                    label="JWKS URL"
+                    required
+                    hint="Their published signing keys. Internal hosts need an allowlist entry."
+                >
+                    <TextField
+                        value={value.jwks_url ?? ''}
+                        onChange={e => set(
+                            'jwks_url',
+                            (e.target.value === '' ? null : e.target.value) as never,
+                        )}
+                        placeholder="https://sso.corporate.com/.well-known/jwks.json"
+                    />
+                </Field>
+            )}
+            {choice === 'public_key' && (
+                <Field
+                    label="Public key (PEM)"
+                    required
+                    hint="For a gateway that signs its tokens but publishes no key set — paste the PEM public key their team hands you. Same trust as a JWKS; asymmetric algorithms only."
+                >
+                    <TextAreaField
+                        rows={4}
+                        value={value.jwt_public_key ?? ''}
+                        onChange={e => set(
+                            'jwt_public_key',
+                            (e.target.value === '' ? null : e.target.value) as never,
+                        )}
+                        placeholder={'-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----'}
+                    />
+                </Field>
+            )}
+            {choice === 'shared_secret' && (
+                <SecretField
+                    label="Shared secret"
+                    required
+                    hint="The gateway signs with this same secret — HS256, pinned to exactly that algorithm. Stored encrypted and never shown again once saved."
+                    value={value.jwt_shared_secret ?? ''}
+                    onChange={v => set('jwt_shared_secret', v as never)}
+                    placeholder="the signing secret their team hands you"
+                />
+            )}
+
+            {choice !== 'none' && (
+                <FieldGrid>
+                    <Field
+                        label={<>Issuer pin <span className="font-normal text-ink-muted">(optional)</span></>}
+                        hint={<>Refuse tokens whose <code>iss</code> differs.</>}
+                    >
+                        <TextField
+                            value={value.jwt_issuer ?? ''}
+                            onChange={e => set(
+                                'jwt_issuer',
+                                (e.target.value === '' ? null : e.target.value) as never,
+                            )}
+                            placeholder="https://sso.corporate.com"
+                        />
+                    </Field>
+                    <Field
+                        label={<>Audience pin <span className="font-normal text-ink-muted">(optional)</span></>}
+                        hint={<>Refuse tokens whose <code>aud</code> differs.</>}
+                    >
+                        <TextField
+                            value={value.jwt_audience ?? ''}
+                            onChange={e => set(
+                                'jwt_audience',
+                                (e.target.value === '' ? null : e.target.value) as never,
+                            )}
+                            placeholder="dataviz"
+                        />
+                    </Field>
+                </FieldGrid>
+            )}
+        </>
     )
 }
 
@@ -618,42 +773,12 @@ export function BackchannelSettingsForm({
                 </Field>
 
                 {(value.claims_format ?? 'json') === 'jwt' && (
-                    <>
-                        <Field
-                            label={<>JWKS URL <span className="font-normal text-ink-muted">(optional)</span></>}
-                            hint="Set it to verify the token's signature against their published keys — the URL needs an allowlist entry if it is internal. Blank accepts the token on the strength of the TLS call that fetched it, exactly like the JSON shape."
-                        >
-                            <TextField
-                                value={value.jwks_url ?? ''}
-                                onChange={e => set('jwks_url', clearable(e))}
-                                placeholder="https://sso-gateway.corp.internal/.well-known/jwks.json"
-                            />
-                        </Field>
-                        {Boolean((value.jwks_url ?? '').trim()) && (
-                            <FieldGrid>
-                                <Field
-                                    label={<>Issuer pin <span className="font-normal text-ink-muted">(optional)</span></>}
-                                    hint={<>Refuse tokens whose <code>iss</code> differs.</>}
-                                >
-                                    <TextField
-                                        value={value.jwt_issuer ?? ''}
-                                        onChange={e => set('jwt_issuer', clearable(e))}
-                                        placeholder="https://sso.corporate.com"
-                                    />
-                                </Field>
-                                <Field
-                                    label={<>Audience pin <span className="font-normal text-ink-muted">(optional)</span></>}
-                                    hint={<>Refuse tokens whose <code>aud</code> differs.</>}
-                                >
-                                    <TextField
-                                        value={value.jwt_audience ?? ''}
-                                        onChange={e => set('jwt_audience', clearable(e))}
-                                        placeholder="dataviz"
-                                    />
-                                </Field>
-                            </FieldGrid>
-                        )}
-                    </>
+                    <VerifyMaterialChooser
+                        value={value}
+                        set={set}
+                        onChange={onChange}
+                        allowNone
+                    />
                 )}
             </section>
             )}
@@ -719,39 +844,12 @@ export function BackchannelSettingsForm({
                 <h4 className="text-xs font-semibold text-ink">
                     Verifying what comes back
                 </h4>
-                <Field
-                    label="JWKS URL"
-                    required
-                    hint="Their published signing keys. Required in this mode — a token the browser delivers is only as good as its signature. Internal hosts need an allowlist entry."
-                >
-                    <TextField
-                        value={value.jwks_url ?? ''}
-                        onChange={e => set('jwks_url', clearable(e))}
-                        placeholder="https://sso.corporate.com/.well-known/jwks.json"
-                    />
-                </Field>
-                <FieldGrid>
-                    <Field
-                        label={<>Issuer pin <span className="font-normal text-ink-muted">(optional)</span></>}
-                        hint={<>Refuse tokens whose <code>iss</code> differs.</>}
-                    >
-                        <TextField
-                            value={value.jwt_issuer ?? ''}
-                            onChange={e => set('jwt_issuer', clearable(e))}
-                            placeholder="https://sso.corporate.com"
-                        />
-                    </Field>
-                    <Field
-                        label={<>Audience pin <span className="font-normal text-ink-muted">(optional)</span></>}
-                        hint={<>Refuse tokens whose <code>aud</code> differs.</>}
-                    >
-                        <TextField
-                            value={value.jwt_audience ?? ''}
-                            onChange={e => set('jwt_audience', clearable(e))}
-                            placeholder="dataviz"
-                        />
-                    </Field>
-                </FieldGrid>
+                <VerifyMaterialChooser
+                    value={value}
+                    set={set}
+                    onChange={onChange}
+                    allowNone={false}
+                />
             </section>
             )}
 

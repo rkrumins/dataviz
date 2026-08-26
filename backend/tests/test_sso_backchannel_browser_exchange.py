@@ -8,8 +8,9 @@ browser runs the translate call — its cookie jar does what ours cannot
 Everything the server topology gets from "we made the call" is
 reconstructed and pinned in this file:
 
-* the signature says the gateway minted it — ``jwks_url`` is refused
-  absent, and a wrong signature is refused present;
+* the signature says the gateway minted it — verification material is
+  required (a JWKS URL, a pasted public key, or a shared secret), and a
+  wrong signature is refused whichever kind is configured;
 * ``exp`` bounds the assertion AND the session it mints — ``idp_exp``
   rides inside our own signed refresh token, survives rotation, and
   ends the session the moment the corporate token would have expired;
@@ -195,11 +196,178 @@ async def test_no_refusal_quotes_the_assertion(monkeypatch):
     assert bad.split(".")[1] not in str(err.value)
 
 
+# ── the other verification materials ─────────────────────────────────
+#
+# Corporate gateways that sign but publish no JWKS hand their team a
+# public key instead; symmetric ones hand a secret. Same trust, same
+# strictness — the MATERIAL decides the algorithm list, so neither
+# RS→HS nor HS→RS confusion is expressible.
+
+from cryptography.hazmat.primitives import serialization
+
+_SECRET = "corp-shared-verify-0123456789abcdef"
+
+
+def _pem(key=None) -> str:
+    return (key or _KEY).public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+
+
+def _hs_assertion(*, secret=_SECRET, exp_in=600, jti="jti-hs-1", **extra) -> str:
+    payload = {**CLAIMS, "exp": int(time.time()) + exp_in, **extra}
+    if jti is not None:
+        payload["jti"] = jti
+    return pyjwt.encode(payload, secret, algorithm="HS256")
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_public_key_verifies_like_a_jwks():
+    # No _routes() on purpose: nothing may be fetched — the key is in
+    # the row. An outbound call here would crash on the missing stub.
+    exp = int(time.time()) + 600
+    identity = await BackchannelProvider(
+        _settings(jwks_url="", jwt_public_key=_pem()),
+    ).identity_from_assertion(_assertion(exp_in=600))
+    assert identity.email == "ada.lovelace@corporate.com"
+    assert abs(identity.upstream_expires_at - exp) <= 2
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_pasted_key_refuses_the_assertion():
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(jwks_url="", jwt_public_key=_pem(_OTHER_KEY)),
+        ).identity_from_assertion(_assertion())
+    assert err.value.code == "backchannel_jwt_invalid"
+
+
+@pytest.mark.asyncio
+async def test_a_garbage_paste_is_a_refusal_not_a_crash():
+    """An operator's bad paste raises InvalidKeyError, which is NOT an
+    InvalidTokenError — without the broader catch it was a 500."""
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(jwks_url="", jwt_public_key="not a pem at all"),
+        ).identity_from_assertion(_assertion())
+    assert err.value.code == "backchannel_jwt_invalid"
+
+
+@pytest.mark.asyncio
+async def test_an_hs_header_never_meets_public_material():
+    """The classic confusion: HMAC the token with the PEM text everyone
+    can read. PyJWT refuses to MINT such a token, so the forgery is
+    hand-rolled the way an attacker would — and refused at the header
+    check, before any key is touched."""
+    import base64
+    import hashlib
+    import hmac
+    import json as _json
+
+    def _b64(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    head = _b64(_json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    body = _b64(_json.dumps(
+        {**CLAIMS, "exp": int(time.time()) + 600, "jti": "jti-x"},
+    ).encode())
+    sig = _b64(hmac.new(
+        _pem().encode(), f"{head}.{body}".encode(), hashlib.sha256,
+    ).digest())
+    forged = f"{head}.{body}.{sig}"
+
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(jwks_url="", jwt_public_key=_pem()),
+        ).identity_from_assertion(forged)
+    assert err.value.code == "backchannel_jwt_invalid"
+    assert "jwt_alg_refused" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_a_shared_secret_verifies_hs256():
+    identity = await BackchannelProvider(
+        _settings(jwks_url="", jwt_shared_secret=_SECRET),
+    ).identity_from_assertion(_hs_assertion())
+    assert identity.external_id == "emp-1"
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_secret_is_refused():
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(jwks_url="", jwt_shared_secret=_SECRET),
+        ).identity_from_assertion(_hs_assertion(secret="some-other-secret"))
+    assert err.value.code == "backchannel_jwt_invalid"
+
+
+@pytest.mark.asyncio
+async def test_an_rs_header_never_meets_the_shared_secret():
+    """The other confusion direction: the secret pins the list to HS256
+    exactly, so an asymmetric header is refused outright."""
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(jwks_url="", jwt_shared_secret=_SECRET),
+        ).identity_from_assertion(_assertion())
+    assert err.value.code == "backchannel_jwt_invalid"
+    assert "jwt_alg_refused" in str(err.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("material", ["public_key", "shared_secret"])
+async def test_exp_stays_required_with_pasted_material(material):
+    if material == "public_key":
+        s = _settings(jwks_url="", jwt_public_key=_pem())
+        token = pyjwt.encode({**CLAIMS, "jti": "j"}, _KEY, algorithm="RS256")
+    else:
+        s = _settings(jwks_url="", jwt_shared_secret=_SECRET)
+        token = pyjwt.encode({**CLAIMS, "jti": "j"}, _SECRET, algorithm="HS256")
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(s).identity_from_assertion(token)
+    assert err.value.code == "backchannel_jwt_invalid"
+
+
+@pytest.mark.asyncio
+async def test_pins_apply_to_pasted_material_too():
+    s = _settings(
+        jwks_url="", jwt_shared_secret=_SECRET,
+        jwt_issuer="https://sso.corporate.com",
+    )
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(s).identity_from_assertion(
+            _hs_assertion(iss="https://evil.example"),
+        )
+    assert err.value.code == "backchannel_jwt_invalid"
+
+    identity = await BackchannelProvider(s).identity_from_assertion(
+        _hs_assertion(iss="https://sso.corporate.com", jti="jti-hs-2"),
+    )
+    assert identity.external_id == "emp-1"
+
+
+@pytest.mark.asyncio
+async def test_the_burn_applies_whatever_the_material():
+    provider = BackchannelProvider(
+        _settings(jwks_url="", jwt_shared_secret=_SECRET),
+    )
+    token = _hs_assertion(jti="jti-burn")
+    await provider.identity_from_assertion(token)
+    with pytest.raises(BackchannelError) as err:
+        await provider.identity_from_assertion(token)
+    assert err.value.code == "backchannel_replayed"
+
+
 # ── configuration refusals ───────────────────────────────────────────
 
 @pytest.mark.parametrize("over,needle", [
     (dict(browser_exchange_url=""), "browser_exchange_url"),
+    # No verification material at all. The message still names jwks_url
+    # first — it is the choice most gateways can offer.
     (dict(jwks_url=""), "jwks_url"),
+    (dict(jwks_url="", jwt_public_key="PEM", jwt_shared_secret="s"),
+     "exactly one"),
+    (dict(jwt_public_key="PEM"), "exactly one"),  # jwks stays from base
     (dict(browser_exchange_method="DELETE"), "browser_exchange_method"),
     (dict(authenticate_url="https://sso/x",
           authenticate_token_path="token"), "authenticate_token_path"),
@@ -208,6 +376,14 @@ async def test_no_refusal_quotes_the_assertion(monkeypatch):
 def test_impossible_browser_mode_rows_are_refused(over, needle):
     with pytest.raises(BackchannelConfigError, match=needle):
         validate_settings(_settings(**over))
+
+
+@pytest.mark.parametrize("over", [
+    dict(jwks_url="", jwt_public_key="-----BEGIN PUBLIC KEY-----"),
+    dict(jwks_url="", jwt_shared_secret="s3cr3t"),
+])
+def test_each_material_alone_makes_a_valid_browser_row(over):
+    validate_settings(_settings(**over))
 
 
 def test_browser_mode_needs_no_server_leg():
@@ -514,6 +690,26 @@ async def test_browser_rows_publish_exactly_their_public_family(
     assert "s3cr3t" not in body
     assert "als0-s3cret" not in body
     assert "jwks" not in body.lower()
+
+
+@pytest.mark.asyncio
+async def test_the_pasted_materials_never_reach_the_browser(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The shared secret is a signing key; the PEM is not secret but is
+    still a server-side fact. Neither belongs on the sign-in page."""
+    _routes(monkeypatch)
+    await _make_row(
+        db_session, jwks_url="",
+        jwt_shared_secret="hs-verify-material-x9y8z7",
+    )
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    body = resp.text
+    assert "hs-verify-material-x9y8z7" not in body
+    assert "jwt_shared_secret" not in body
+    assert "jwtSharedSecret" not in body
+    assert "jwt_public_key" not in body
 
 
 @pytest.mark.asyncio

@@ -106,11 +106,13 @@ VALID_CLAIMS_FORMATS = frozenset({"json", "jwt"})
 #: Where the exchange runs.
 VALID_EXCHANGE_MODES = frozenset({"server", "browser"})
 
-#: Signature algorithms accepted when a JWKS is configured. Asymmetric
-#: only, spelled out rather than derived: HS* would let anyone holding
-#: the (public!) JWKS document mint tokens, and ``none`` is refused by
-#: never being on a list. Symmetric gateways belong on ``custom_profile``,
-#: which owns a shared secret properly.
+#: Signature algorithms accepted with PUBLIC verification material — a
+#: JWKS or a pasted PEM public key. Asymmetric only, spelled out rather
+#: than derived: HS* would let anyone holding the (public!) key material
+#: mint tokens, and ``none`` is refused by never being on a list. A
+#: symmetric gateway configures ``jwt_shared_secret`` instead, which
+#: pins the algorithm list to exactly ``HS256`` — the material decides
+#: the list, so neither confusion direction is expressible.
 _JWT_ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512",
                    "PS256", "PS384", "PS512")
 
@@ -307,13 +309,22 @@ class BackchannelSettings:
     #: path is blank — including a bare ``application/jwt`` body) is a
     #: compact JWT whose *payload* is the user object.
     claims_format: str = "json"
-    #: Optional with ``claims_format="jwt"``: verify the token's
-    #: signature against this key set. Blank decodes without verifying,
-    #: which carries exactly the trust the JSON shape already has — the
-    #: bytes came over TLS from the endpoint we called. Fetched through
-    #: the guarded outbound layer, so an internal JWKS host needs an
-    #: allowlist entry like every other internal destination.
+    #: Verification material, at most one of the three. ``jwks_url``
+    #: fetches the gateway's published key set (through the guarded
+    #: outbound layer, so an internal JWKS host needs an allowlist entry
+    #: like every other internal destination). ``jwt_public_key`` is the
+    #: same trust for a gateway that signs but publishes no key set: the
+    #: operator pastes the PEM public key. ``jwt_shared_secret`` is for
+    #: symmetric gateways: HS256, pinned to exactly that algorithm, the
+    #: way ``custom_profile`` holds its shared secret. In server mode
+    #: all three are optional — blank decodes without verifying, which
+    #: carries exactly the trust the JSON shape already has (the bytes
+    #: came over TLS from the endpoint we called). In browser mode ONE
+    #: of them is required: the token arrives from the user's browser,
+    #: and is only as good as its signature.
     jwks_url: str = ""
+    jwt_public_key: str = ""
+    jwt_shared_secret: str = ""
     #: Optional pins, applied only when verifying.
     jwt_issuer: str = ""
     jwt_audience: str = ""
@@ -417,6 +428,10 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         exchange_claims_path=str(s.get("exchange_claims_path") or "").strip(),
         claims_format=str(s.get("claims_format") or "json").strip().lower(),
         jwks_url=str(s.get("jwks_url") or "").strip(),
+        # Key material verbatim (no strip) — custom_profile parity: PEM
+        # bodies and secrets are not ours to normalise.
+        jwt_public_key=str(s.get("jwt_public_key") or ""),
+        jwt_shared_secret=str(s.get("jwt_shared_secret") or ""),
         jwt_issuer=str(s.get("jwt_issuer") or "").strip(),
         jwt_audience=str(s.get("jwt_audience") or "").strip(),
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
@@ -453,11 +468,20 @@ def validate_settings(s: BackchannelSettings) -> None:
             f"claims_format must be one of {sorted(VALID_CLAIMS_FORMATS)}, "
             f"got '{s.claims_format}'"
         )
-    if (s.jwt_issuer or s.jwt_audience) and not s.jwks_url:
+    materials = [m for m in (s.jwks_url, s.jwt_public_key,
+                             s.jwt_shared_secret) if m]
+    if len(materials) > 1:
+        raise BackchannelConfigError(
+            "configure exactly one of jwks_url / jwt_public_key / "
+            "jwt_shared_secret — with two keys, which one verified a "
+            "given token would be an accident"
+        )
+    if (s.jwt_issuer or s.jwt_audience) and not materials:
         raise BackchannelConfigError(
             "jwt_issuer / jwt_audience are verification pins and need "
-            "jwks_url — without a verified signature they would pin "
-            "nothing"
+            "verification material (jwks_url, jwt_public_key or "
+            "jwt_shared_secret) — without a verified signature they "
+            "would pin nothing"
         )
     if s.timeout_seconds <= 0:
         raise BackchannelConfigError("timeout_seconds must be > 0")
@@ -513,11 +537,16 @@ def validate_settings(s: BackchannelSettings) -> None:
             send_as=s.exchange_send_as, header=s.exchange_token_header,
             body_field=s.exchange_body_field,
         )
-    if s.jwks_url and s.claims_format != "jwt":
-        raise BackchannelConfigError(
-            "jwks_url only applies with claims_format='jwt' — there is "
-            "no signature to verify on a JSON user object"
-        )
+    if s.claims_format != "jwt":
+        for name, value in (("jwks_url", s.jwks_url),
+                            ("jwt_public_key", s.jwt_public_key),
+                            ("jwt_shared_secret", s.jwt_shared_secret)):
+            if value:
+                raise BackchannelConfigError(
+                    f"{name} only applies with claims_format='jwt' — "
+                    "there is no signature to verify on a JSON user "
+                    "object"
+                )
 
 
 def _validate_browser_mode(s: BackchannelSettings) -> None:
@@ -534,14 +563,16 @@ def _validate_browser_mode(s: BackchannelSettings) -> None:
             f"browser_exchange_method must be one of "
             f"{sorted(VALID_METHODS)}, got '{s.browser_exchange_method}'"
         )
-    if not s.jwks_url:
+    if not (s.jwks_url or s.jwt_public_key or s.jwt_shared_secret):
         # Not optional here, unlike the server shape: a token the
         # BROWSER delivers is written by whoever sits at it unless a
         # signature says otherwise. TLS authenticated nothing to us —
-        # we were not on the call.
+        # we were not on the call. (Exactly-one is enforced upstream;
+        # this insists on at-least-one.)
         raise BackchannelConfigError(
-            "jwks_url is required in browser mode — a browser-delivered "
-            "token is only as good as its signature"
+            "browser mode needs verification material — jwks_url, "
+            "jwt_public_key or jwt_shared_secret — because a "
+            "browser-delivered token is only as good as its signature"
         )
     if s.authenticate_token_path:
         raise BackchannelConfigError(
@@ -813,13 +844,17 @@ class BackchannelProvider:
         return await self._decode_claims_jwt(material.strip())
 
     async def _decode_claims_jwt(self, token: str) -> dict:
-        """Decode — and, when a JWKS is configured, verify — the claims
-        JWT. Error messages name failure classes, never token material:
-        they reach an operator's logs, and the token is the identity."""
-        if not self._s.jwks_url:
+        """Decode — and, when verification material is configured,
+        verify — the claims JWT. Error messages name failure classes,
+        never token material: they reach an operator's logs, and the
+        token is the identity."""
+        s = self._s
+        if not (s.jwks_url or s.jwt_public_key or s.jwt_shared_secret):
             # Unverified decode is a deliberate trust statement, not a
             # shortcut: the bytes arrived over TLS from the endpoint we
             # just called, exactly like the JSON shape they replace.
+            # (Unreachable in browser mode — validation demands
+            # material there.)
             try:
                 return pyjwt.decode(
                     token, options={"verify_signature": False},
@@ -837,34 +872,49 @@ class BackchannelProvider:
                 f"jwt_undecodable:{type(exc).__name__}",
                 code="backchannel_jwt_invalid",
             ) from exc
+        # The MATERIAL decides the algorithm list, checked before any
+        # key is touched — so an HS-stamped header can never meet public
+        # key material (the classic confusion), and an RS-stamped one
+        # can never meet the shared secret. ``none`` is refused by never
+        # being on either list.
+        allowed = ("HS256",) if s.jwt_shared_secret else _JWT_ALGORITHMS
         alg = str(header.get("alg") or "")
-        if alg not in _JWT_ALGORITHMS:
-            # HS* would let anyone holding the public JWKS mint tokens;
-            # ``none`` is refused by never being on the list.
+        if alg not in allowed:
             raise BackchannelError(
                 f"jwt_alg_refused:{alg or 'absent'}",
                 code="backchannel_jwt_invalid",
             )
-        key = await self._verification_key(header.get("kid"))
+        if s.jwt_shared_secret:
+            key: Any = s.jwt_shared_secret
+        elif s.jwt_public_key:
+            # PEM text straight to pyjwt, custom_profile parity — a key
+            # that does not parse refuses below as jwt_refused.
+            key = s.jwt_public_key
+        else:
+            key = await self._verification_key(header.get("kid"))
 
         options: dict[str, Any] = {"require": ["exp"]}
         kwargs: dict[str, Any] = {}
-        if self._s.jwt_audience:
-            kwargs["audience"] = self._s.jwt_audience
+        if s.jwt_audience:
+            kwargs["audience"] = s.jwt_audience
         else:
             options["verify_aud"] = False
-        if self._s.jwt_issuer:
-            kwargs["issuer"] = self._s.jwt_issuer
+        if s.jwt_issuer:
+            kwargs["issuer"] = s.jwt_issuer
         try:
             return pyjwt.decode(
-                token, key=key, algorithms=list(_JWT_ALGORITHMS),
+                token, key=key, algorithms=list(allowed),
                 options=options, **kwargs,
             )
         except pyjwt.ExpiredSignatureError as exc:
             raise BackchannelError(
                 "jwt_expired", code="backchannel_jwt_expired",
             ) from exc
-        except pyjwt.InvalidTokenError as exc:
+        except pyjwt.PyJWTError as exc:
+            # PyJWTError rather than InvalidTokenError: a pasted PEM
+            # that does not parse raises InvalidKeyError, which is NOT
+            # an InvalidTokenError — and an operator's bad paste must be
+            # a legible refusal, not a 500.
             raise BackchannelError(
                 f"jwt_refused:{type(exc).__name__}",
                 code="backchannel_jwt_invalid",

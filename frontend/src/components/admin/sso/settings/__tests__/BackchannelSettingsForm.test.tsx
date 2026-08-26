@@ -358,3 +358,91 @@ describe('redacted headers', () => {
         )
     })
 })
+
+describe('the verification chooser', () => {
+    const browserJwt = (over: BackchannelSettings = {}): BackchannelSettings => ({
+        exchange_mode: 'browser',
+        browser_exchange_url: 'https://sso.corporate.com/translate',
+        ...over,
+    })
+
+    it('defaults browser mode to a required JWKS URL', () => {
+        renderForm(browserJwt())
+        expect(screen.getByText('Verify the token with')).toBeInTheDocument()
+        expect(screen.getByText('JWKS URL')).toBeInTheDocument()
+        expect(
+            screen.queryByText('Public key (PEM)'),
+        ).not.toBeInTheDocument()
+    })
+
+    it('offers a pasted public key for gateways that publish no JWKS', async () => {
+        const onChange = vi.fn()
+        render(
+            <BackchannelSettingsForm value={browserJwt()} onChange={onChange} />,
+        )
+        await userEvent.selectOptions(
+            screen.getByRole('combobox', { name: /verify the token with/i }),
+            'public_key',
+        )
+        // Switching nulls the other materials so nothing lingers to win
+        // the populated-field derivation on the next open.
+        const next = onChange.mock.calls.at(-1)![0]
+        expect(next.jwks_url).toBeNull()
+        expect(next.jwt_shared_secret).toBeNull()
+    })
+
+    it('renders the PEM textarea once a key is populated', () => {
+        renderForm(browserJwt({ jwt_public_key: '-----BEGIN PUBLIC KEY-----' }))
+        expect(screen.getByText('Public key (PEM)')).toBeInTheDocument()
+        expect(screen.queryByText('JWKS URL')).not.toBeInTheDocument()
+    })
+
+    it('renders the secret through SecretField, mask never shown', () => {
+        renderForm(browserJwt({ jwt_shared_secret: '********' }))
+        // The redaction pattern: a saved secret shows as configured with
+        // a Rotate affordance, not as a prefilled password box.
+        expect(screen.getByText(/configured/i)).toBeInTheDocument()
+        expect(screen.getByText('Rotate')).toBeInTheDocument()
+        expect(screen.queryByDisplayValue('********')).not.toBeInTheDocument()
+    })
+
+    it('a populated field wins over any local choice', () => {
+        // The chooser derives from what is stored — it cannot claim JWKS
+        // while a secret is what the server would actually use.
+        renderForm(browserJwt({ jwt_shared_secret: '********' }))
+        expect(
+            (screen.getByRole('combobox', {
+                name: /verify the token with/i,
+            }) as HTMLSelectElement).value,
+        ).toBe('shared_secret')
+    })
+
+    it('server mode offers none-by-default with the TLS hint', () => {
+        renderForm({ exchange_mode: 'server', claims_format: 'jwt' })
+        const select = screen.getByRole('combobox', {
+            name: /signature check/i,
+        }) as HTMLSelectElement
+        expect(select.value).toBe('none')
+        expect(
+            screen.getByText(/strength of the TLS call/i),
+        ).toBeInTheDocument()
+        // No pins while nothing verifies — they would pin nothing.
+        expect(screen.queryByText(/issuer pin/i)).not.toBeInTheDocument()
+    })
+
+    it('browser mode never offers the none option', () => {
+        renderForm(browserJwt())
+        const select = screen.getByRole('combobox', {
+            name: /verify the token with/i,
+        })
+        const values = Array.from(select.querySelectorAll('option'))
+            .map(o => o.getAttribute('value'))
+        expect(values).not.toContain('none')
+    })
+
+    it('shows the pins for every material choice', () => {
+        renderForm(browserJwt({ jwt_public_key: 'PEM' }))
+        expect(screen.getByText(/issuer pin/i)).toBeInTheDocument()
+        expect(screen.getByText(/audience pin/i)).toBeInTheDocument()
+    })
+})

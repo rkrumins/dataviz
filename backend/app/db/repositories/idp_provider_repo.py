@@ -51,6 +51,9 @@ _SECRET_FIELDS = frozenset({
     "idp_x509_cert",   # not strictly secret but redacted to discourage tampering
     "sp_x509_cert",
     "shared_secret",   # custom_profile HS256 signing key
+    "jwt_shared_secret",  # backchannel HS256 verification key
+    # NOT jwt_public_key: a PEM public key is not a secret, and hiding
+    # it would only stop operators comparing what they pasted.
     # Whole dicts, not individual keys inside them: a backchannel row
     # puts whatever its gateway wants into these — an app id, a client
     # secret, an API key — and we cannot know which of an operator's

@@ -235,9 +235,11 @@ async def test_a_token_without_exp_is_refused_when_verifying(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_symmetric_algorithms_are_refused(monkeypatch):
-    """The JWKS is public. An HS256 token 'verified' against material an
-    attacker can also read is not verified at all, so the algorithm
-    list never contains a symmetric entry."""
+    """With PUBLIC verification material — a JWKS, a pasted key — an
+    HS256 token 'verified' against material an attacker can also read
+    is not verified at all, so those algorithm lists never contain a
+    symmetric entry. Symmetric verification exists, but only through
+    ``jwt_shared_secret``, which pins the list to HS256 alone."""
     hs_token = pyjwt.encode(
         {**CLAIMS, "exp": int(time.time()) + 600},
         "the-jwks-is-public-so-this-verifies-nothing", algorithm="HS256",
@@ -249,6 +251,70 @@ async def test_symmetric_algorithms_are_refused(monkeypatch):
             _verified_settings(),
         ).fetch_identity("ambient-xyz")
     assert err.value.code == "backchannel_jwt_invalid"
+
+
+# ── the pasted materials, server mode ────────────────────────────────
+#
+# The same gateway can be verified without publishing a JWKS: its team
+# hands over the public key, or — for a symmetric signer — the secret.
+
+from cryptography.hazmat.primitives import serialization
+
+_HS_SECRET = "corp-hs-secret-0123456789abcdef"
+
+
+def _pem(key=None) -> str:
+    return (key or _KEY).public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_public_key_verifies_in_server_mode(monkeypatch):
+    seen = _routes(monkeypatch, _serving(_token()))
+    identity = await BackchannelProvider(
+        _settings(jwt_public_key=_pem()),
+    ).fetch_identity("ambient-xyz")
+    assert identity.external_id == "emp-1"
+    # Only the gateway was called — the key came from the row.
+    assert [r.url.path for r in seen] == ["/translate"]
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_key_refuses_a_wrong_signature(monkeypatch):
+    _routes(monkeypatch, _serving(_token(key=_OTHER_KEY)))
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(jwt_public_key=_pem()),
+        ).fetch_identity("ambient-xyz")
+    assert err.value.code == "backchannel_jwt_invalid"
+
+
+@pytest.mark.asyncio
+async def test_a_shared_secret_verifies_hs256_in_server_mode(monkeypatch):
+    hs_token = pyjwt.encode(
+        {**CLAIMS, "exp": int(time.time()) + 600}, _HS_SECRET,
+        algorithm="HS256",
+    )
+    _routes(monkeypatch, _serving(hs_token))
+    identity = await BackchannelProvider(
+        _settings(jwt_shared_secret=_HS_SECRET),
+    ).fetch_identity("ambient-xyz")
+    assert identity.external_id == "emp-1"
+
+
+@pytest.mark.asyncio
+async def test_the_shared_secret_pins_the_algorithm(monkeypatch):
+    """An RS-stamped token against the secret is refused at the header
+    check — the material decides the list, in both directions."""
+    _routes(monkeypatch, _serving(_token()))
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(jwt_shared_secret=_HS_SECRET),
+        ).fetch_identity("ambient-xyz")
+    assert err.value.code == "backchannel_jwt_invalid"
+    assert "jwt_alg_refused" in str(err.value)
 
 
 @pytest.mark.asyncio
@@ -352,9 +418,21 @@ async def test_no_refusal_quotes_the_token(monkeypatch):
 @pytest.mark.parametrize("over,needle", [
     (dict(claims_format="xml"), "claims_format"),
     (dict(claims_format="json", jwks_url=JWKS), "jwks_url"),
+    (dict(claims_format="json", jwt_public_key="PEM"), "jwt_public_key"),
+    (dict(claims_format="json", jwt_shared_secret="s"), "jwt_shared_secret"),
     (dict(jwks_url="", jwt_issuer="https://sso"), "jwt_issuer"),
     (dict(jwks_url="", jwt_audience="dataviz"), "jwt_audience"),
+    (dict(jwks_url=JWKS, jwt_public_key="PEM"), "exactly one"),
+    (dict(jwt_public_key="PEM", jwt_shared_secret="s"), "exactly one"),
 ])
 def test_impossible_jwt_combinations_are_refused(over, needle):
     with pytest.raises(BackchannelConfigError, match=needle):
         validate_settings(_settings(**over))
+
+
+@pytest.mark.parametrize("over", [
+    dict(jwt_public_key="PEM", jwt_issuer="https://sso"),
+    dict(jwt_shared_secret="s", jwt_audience="dataviz"),
+])
+def test_pins_are_satisfied_by_any_verification_material(over):
+    validate_settings(_settings(**over))
