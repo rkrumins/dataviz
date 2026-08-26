@@ -68,10 +68,13 @@ the group does nothing at all.
 A rule granting a platform-admin role only works from a **verified** connection,
 and that is re-checked on **every sign-in** — not once when you wrote the rule.
 
-So turning on *Trust unsigned payloads*, or switching a corporate portal to read
-a proxy header, downgrades the connection's assurance and stops its
-platform-admin rules granting from the very next login. The rule stays on the
-page looking exactly as it did.
+So turning on *Trust unsigned payloads* (a corporate portal), *Trust
+unverified sign-ins* (a gateway connection's browser exchange), or switching a
+portal to read a proxy header, downgrades the connection's assurance and stops
+its platform-admin rules granting from the very next login. The rule stays on
+the page looking exactly as it did. Both unsigned postures also record every
+accepted login as `user.sso_unsigned_accepted`, so the audit trail shows
+exactly which sign-ins rode the reduced trust.
 
 The Access mapping tab marks a rule in this state, so you are not left guessing.
 But if somebody reports losing admin access shortly after a connection was
@@ -133,9 +136,13 @@ stored, so it always reflects reality.
 
 | Level | Means | Can grant platform admin |
 |---|---|---|
-| **Verified** | The identity was proved against the provider itself — either a signature checked against a key we hold, or an answer the provider gave us directly when we asked it | Yes |
+| **Verified** | The identity was proved against the provider itself — either a signature checked against a key we hold (their JWKS, a pasted public key, or a shared secret), or an answer the provider gave us directly when we asked it | Yes |
 | **Asserted** | A trusted network position vouched for it — sound if your proxy strips inbound copies of the header, a full bypass if it does not | No |
-| **Unverified** | We cannot tell a genuine claim from a forged one | No |
+| **Unverified** | We cannot tell a genuine claim from a forged one — an unsigned portal payload, or a gateway connection running *Trust unverified sign-ins* | No |
+
+For a gateway connection's browser exchange, the rehearsal verdict states
+which reply shape arrived (a signed token or bare JSON) and what judged it —
+the quickest way to see which rating a deployment's gateway earns.
 
 ---
 

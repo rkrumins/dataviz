@@ -2080,10 +2080,15 @@ async def backchannel_handle_login(
     survive that call — nothing the browser says reaches the claim
     mapper. An *assertion* IS read, which is exactly what
     ``custom_profile`` warns about — so it is held to that bar and
-    higher: signature verification against the connection's JWKS is
-    mandatory (``validate_settings`` refuses browser mode without one),
-    ``exp`` is required, and the replay burn makes it single-use. A
-    forged one fails verification; a captured one is spent.
+    higher: signature verification against the row's material (its
+    JWKS, a pasted public key, or a shared secret) is mandatory —
+    ``validate_settings`` refuses browser mode without one — with
+    ``exp`` required and the replay burn making it single-use. A forged
+    one fails verification; a captured one is spent. The one exception
+    is the explicit ``trust_unsigned`` opt-in, which accepts either
+    reply shape unverified: the row is rated ``unverified`` (the
+    assurance gates keep platform-admin mappings away from it), the
+    burn still applies, and every real acceptance is audited.
 
     Each shape is refused unless the row actually configures it, so the
     endpoint cannot be used to hand a credential to a provider whose

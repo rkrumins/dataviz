@@ -125,13 +125,43 @@ That changes what we need from you:
   `Access-Control-Allow-Credentials: true`, exempt the preflight from
   authentication. Headers configured for this call are public, exactly
   like the trigger's.
-- **The answer must be a signed JWT** — bare in the body or at a field
-  we are told about — **with `exp`**, signed with an RSA or EC key
-  published at a **JWKS URL** we can fetch. A token the browser delivers
-  is only as good as its signature: this is the one shape where the
-  application verifies one, and it refuses the connection outright
-  without a key set. Symmetric algorithms are refused — the key set is
-  public.
+- **The answer should be a signed JWT** — bare in the body or at a
+  field we are told about — **with `exp`**. A token the browser
+  delivers is only as good as its signature, so the operator configures
+  exactly one way to judge it, and the connection commits to that
+  posture:
+
+  | Posture | You provide | Accepts | Refuses | Rating |
+  |---|---|---|---|---|
+  | **JWKS URL** | A key-set endpoint we can fetch | An asymmetrically signed JWT (RS/ES/PS) | HS-signed tokens, bare JSON, wrong keys | Verified |
+  | **Pasted public key** | Your PEM public key, handed to the operator — for gateways that sign but publish no key set | Same as JWKS | Same as JWKS | Verified |
+  | **Shared secret** | The HS256 signing secret, handed to the operator | An HS256-signed JWT, exactly that algorithm | Asymmetric-header tokens, bare JSON, wrong secrets | Verified |
+  | **Trust unsigned** | Nothing | BOTH shapes — an unverified JWT *and* a bare JSON claims object | Undecodable replies | **Unverified** |
+
+  Example signed reply (compact JWS, truncated):
+
+  ```
+  eyJhbGciOiJSUzI1NiIsImtpZCI6ImNvcnAtMjAyNiJ9.eyJzdWIiOiJlbXAtMSIsImVtYWlsIjoi…
+  ```
+
+  Example bare-JSON reply (only the Trust-unsigned posture accepts it):
+
+  ```json
+  {"sub": "emp-1", "email": "ada@corp.example", "firstName": "Ada",
+   "groups": ["engineering"], "auth_time": 1756200000}
+  ```
+
+  **A verifying posture never falls back.** A row configured with any
+  key material refuses a reply that is not a signed token — accepting
+  bare JSON there would let anyone skip the signature by not signing.
+  If your reply shape varies by environment, either make every
+  environment sign, give each environment its own connection row with
+  the matching posture, or run Trust unsigned — the one posture that
+  accepts both shapes — and accept the Unverified rating (the
+  connection can no longer grant platform-admin roles, and every login
+  through it is audited as `user.sso_unsigned_accepted`). The
+  operator's rehearsal states which case your reply was and what
+  judged it.
 - **Expect each token to sign in at most once.** The application burns
   the `jti` (or the token's own hash) on first use, so keep tokens
   short-lived and mint one per call rather than caching an answer.

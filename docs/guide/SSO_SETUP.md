@@ -268,9 +268,30 @@ Ask them for:
 - **The cookie's name**, and confirmation it is set on a domain {brand} shares.
   If it is not, all is not lost — switch the connection's exchange to **the
   browser**: the sign-in page makes the translate call itself (the user's
-  browser holds the cookie ours never sees) and hands over the signed token it
-  answers with. That shape requires their **JWKS URL**, because a token the
-  browser delivers is verified against their published keys, always.
+  browser holds the cookie ours never sees) and hands over the reply. That
+  shape requires **one way to judge the reply**, because a token the browser
+  delivers is only as good as its signature. Any one of these works:
+  - their **JWKS URL** — the usual choice when they publish keys;
+  - their **public key, pasted in (PEM)** — ask for it when they sign the
+    token but publish no key set;
+  - a **shared secret** — for gateways that sign symmetrically (HS256);
+  - or, as a last resort, **Trust unverified sign-ins** — for a translate
+    endpoint that returns plain JSON claims with no signature at all. The
+    connection is then rated **Unverified** (it cannot grant platform-admin
+    roles, and every login through it is audited), and it is the one posture
+    that accepts *both* a token and plain JSON on the same row.
+
+  To see the difference: a signed reply is a compact token
+  (`eyJhbGciOi…` — three dot-separated parts), while an unsigned reply is
+  the claims object itself (`{"sub": "emp-1", "email": "ada@corp.example", …}`).
+  The rehearsal tells you which one your gateway answered and how it was
+  judged.
+
+  **If the reply varies by environment** — signed in production, plain JSON
+  in a test deployment — pick per environment: each deployment configures its
+  own connection row, so give each row the posture matching what *that*
+  environment's gateway actually returns. Or ask them to sign everywhere, or
+  run Trust unverified and accept the rating.
 - **The endpoint that redeems it**, and where in its reply the token sits.
 - **The endpoint that returns the user**, if that is a second call — some
   gateways answer with the person's details straight away, and then you leave
