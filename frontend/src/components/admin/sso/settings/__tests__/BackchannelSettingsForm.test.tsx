@@ -583,3 +583,35 @@ describe('forwarding the trigger token into the translate body', () => {
         ).toBeInTheDocument()
     })
 })
+
+describe('the auto sign-in switch', () => {
+    const autoToggle = () => screen.getByRole('checkbox', {
+        name: /sign people in automatically/i,
+    }) as HTMLInputElement
+
+    it('defaults to on, in the form and in the seed settings', () => {
+        renderForm({})
+        expect(autoToggle().checked).toBe(true)
+        expect(DEFAULT_BACKCHANNEL_SETTINGS.auto_signin).toBe(true)
+    })
+
+    it('respects an explicit false rather than treating it as unset', () => {
+        renderForm({ auto_signin: false })
+        expect(autoToggle().checked).toBe(false)
+    })
+
+    it('writes the bit through the ordinary setter', async () => {
+        const onChange = renderForm({})
+        await userEvent.click(autoToggle())
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ auto_signin: false }),
+        )
+    })
+
+    it('says it governs the sign-in page only', () => {
+        renderForm({})
+        expect(
+            screen.getByText(/mid-session renewals.*unaffected/i),
+        ).toBeInTheDocument()
+    })
+})

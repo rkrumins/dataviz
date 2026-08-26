@@ -220,6 +220,64 @@ async def test_a_trigger_publishes_exactly_four_keys_and_no_others(
 
 
 @pytest.mark.asyncio
+async def test_auto_signin_off_is_published_beside_the_trigger(
+    test_client, db_session, registry,
+):
+    """The login page's silent-attempt opt-out travels with the trigger
+    it governs. Off is the exception, so off is what gets stated."""
+    await _make_provider(
+        db_session,
+        auto_signin=False,
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_method="POST",
+        authenticate_headers={"X-App-Id": "app-1"},
+    )
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-gateway")
+    config = entry.get("config") or {}
+    assert set(config) == {
+        "authenticateUrl", "authenticateMethod", "authenticateHeaders",
+        "autoSignIn",
+    }
+    assert config["autoSignIn"] is False
+
+
+@pytest.mark.asyncio
+async def test_auto_signin_on_or_absent_publishes_nothing_extra(
+    test_client, db_session, registry,
+):
+    """Absence means on — the original behaviour — so an explicit True
+    must not grow the published family either."""
+    await _make_provider(
+        db_session,
+        auto_signin=True,
+        authenticate_url="https://sso.corp.example/authenticate",
+        authenticate_method="POST",
+        authenticate_headers={"X-App-Id": "app-1"},
+    )
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-gateway")
+    assert set(entry.get("config") or {}) == {
+        "authenticateUrl", "authenticateMethod", "authenticateHeaders",
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_signin_off_on_a_plain_row_stays_unpublished(
+    test_client, db_session, registry,
+):
+    """A row with no browser-driven flow publishes nothing the sign-in
+    page could act on — the flag alone would be a dangling fact."""
+    await _make_provider(db_session, auto_signin=False)
+
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-gateway")
+    assert entry.get("config") in (None, {})
+
+
+@pytest.mark.asyncio
 async def test_turning_the_trigger_off_publishes_nothing(
     test_client, db_session, registry,
 ):

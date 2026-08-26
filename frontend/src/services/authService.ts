@@ -88,6 +88,9 @@ export interface SsoProviderSummary {
         browserExchangeHeaders?: Record<string, string>
         browserExchangeTokenPath?: string
         browserExchangeBodyField?: string
+        /** Published only when the operator turned the login page's
+         *  silent sign-in attempt off. Absence means on. */
+        autoSignIn?: boolean
         sourceKey?: string
     }
 }

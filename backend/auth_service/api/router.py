@@ -340,6 +340,7 @@ _BACKCHANNEL_PUBLIC_FIELDS = {
     "browser_exchange_headers": "browserExchangeHeaders",
     "browser_exchange_token_path": "browserExchangeTokenPath",
     "browser_exchange_body_field": "browserExchangeBodyField",
+    "auto_signin": "autoSignIn",
 }
 
 _BACKCHANNEL_TRIGGER_FIELDS = (
@@ -408,6 +409,16 @@ def _public_config(snap) -> dict:
                 for key in _BACKCHANNEL_BROWSER_EXCHANGE_FIELDS
                 if settings.get(key) not in (None, "", {})
             })
+
+        # The login page's silent-attempt opt-out. Published only when
+        # the operator explicitly turned it off — absence means on, the
+        # original behaviour — and only when the row published a
+        # browser-driven flow at all, so rows the sign-in page cannot
+        # act on stay byte-identical. Like ``authenticate_enabled``, a
+        # blob key with no dataclass mirror: the server never consults
+        # it; only the browser does.
+        if out and settings.get("auto_signin") is False:
+            out[_BACKCHANNEL_PUBLIC_FIELDS["auto_signin"]] = False
         return out
 
     if snap.kind != "custom_profile":

@@ -106,6 +106,13 @@ if (broadcastChannel) {
  *  same circular-dependency reason as the reload above. */
 async function signOutLocal(): Promise<void> {
     try {
+        // The sign-out was deliberate — somebody pressed it in another
+        // tab. This tab's login page must not undo it with its silent
+        // attempt, so spend the auto-attempt sentinel here too. (A
+        // genuine session LOSS never comes through this channel; those
+        // tabs keep their silent recovery.)
+        const reauth = await import('@/services/backchannelReauth')
+        reauth.markAutoPortalTried()
         const mod = await import('@/store/auth')
         mod.useAuthStore.getState().handleSessionLost()
     } catch {

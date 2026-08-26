@@ -274,6 +274,25 @@ describe('silent sign-in', () => {
         expect(runAuthenticateTrigger).not.toHaveBeenCalled()
     })
 
+    it('does not fire when the connection says not to', async () => {
+        // The operator's opt-out: autoSignIn: false is published only
+        // when explicitly off. The button stays — the connection still
+        // works, it just waits to be asked.
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: false,
+            providers: [{
+                ...GATEWAY,
+                config: { ...GATEWAY.config, autoSignIn: false },
+            }],
+        })
+        renderLogin()
+        expect(await screen.findByRole('button', {
+            name: /corporate gateway/i,
+        })).toBeInTheDocument()
+        await new Promise((r) => setTimeout(r, 20))
+        expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+    })
+
     it('a refused silent attempt explains itself outside the form', async () => {
         // The server said no (not a transport failure). The real store
         // writes its generic banner; the page must move that into an

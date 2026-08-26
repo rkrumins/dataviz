@@ -624,7 +624,10 @@ export function LoginPage() {
         if (isAuthenticated || autoPortalAlreadyTried()) return
 
         const candidates = providers.filter(
-            (p) => needsBrowserPayload(p) || isGatewayProvider(p),
+            (p) => (needsBrowserPayload(p) || isGatewayProvider(p))
+                // The operator's opt-out: the connection still works,
+                // but only when somebody presses its button.
+                && p.config?.autoSignIn !== false,
         )
         if (candidates.length !== 1) return
         const candidate = candidates[0]

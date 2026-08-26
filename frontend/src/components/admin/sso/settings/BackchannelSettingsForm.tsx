@@ -41,6 +41,9 @@ export interface BackchannelSettings {
     // The browser-side sign-in trigger. Published to the sign-in page —
     // unlike everything below, which stays on the server.
     authenticate_enabled?: boolean
+    // Login-page silent attempt. Off is published to the browser as
+    // autoSignIn: false; absence means on.
+    auto_signin?: boolean
     authenticate_url?: string | null
     authenticate_method?: 'POST' | 'GET'
     authenticate_headers?: Record<string, string>
@@ -99,6 +102,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     browser_exchange_token_path: '',
     browser_exchange_body_field: '',
     authenticate_enabled: true,
+    auto_signin: true,
     authenticate_url: '',
     authenticate_method: 'POST',
     authenticate_headers: {},
@@ -1009,6 +1013,12 @@ export function BackchannelSettingsForm({
                     hint="Applies only when their reply carries no email_verified claim at all — corporate gateways rarely send one, and without this the linking policy refuses to attach the sign-in to an existing account with the same address. An explicit false from the gateway is always respected."
                     checked={value.trust_gateway_email !== false}
                     onChange={v => set('trust_gateway_email', v)}
+                />
+                <Toggle
+                    label="Sign people in automatically"
+                    hint="Applies to the sign-in page only: on, the page attempts this connection silently when it is the one that can; off, it waits for the button. Signing out always requires a fresh click in that tab either way, and mid-session renewals — the re-certification ceiling included — are unaffected."
+                    checked={value.auto_signin !== false}
+                    onChange={v => set('auto_signin', v)}
                 />
             </section>
         </div>

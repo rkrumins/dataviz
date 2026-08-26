@@ -55,6 +55,27 @@ describe('a tab that receives the announcement', () => {
         expect(bus).toBeDefined()
     })
 
+    it('spends the auto-attempt sentinel too — the sign-out was deliberate', async () => {
+        // Without this, a gateway deployment's login page in THIS tab
+        // silently signs the same corporate user straight back in,
+        // undoing a sign-out somebody just performed next door.
+        window.sessionStorage.clear()
+        vi.doMock('@/store/auth', () => ({
+            useAuthStore: { getState: () => ({ handleSessionLost }) },
+        }))
+        await import('./permissionChangeBus')
+
+        const channel = new BroadcastChannel('rbac-permissions')
+        try {
+            channel.postMessage({ kind: 'signed-out' })
+            await vi.waitFor(() => expect(
+                window.sessionStorage.getItem('nx_portal_autologin_tried'),
+            ).not.toBeNull())
+        } finally {
+            channel.close()
+        }
+    })
+
     it('ignores messages it does not recognise', async () => {
         // The channel is shared with the permission-change traffic, so
         // the kind tag is what keeps an unrelated message from signing
@@ -94,5 +115,26 @@ describe('the tab that signs out', () => {
         // And the local transition still happened — the announcement is
         // an addition to sign-out, not a replacement for it.
         expect(useAuthStore.getState().isAuthenticated).toBe(false)
+    })
+
+    it('spends the auto-attempt sentinel, so sign-out sticks', async () => {
+        // Logged out and immediately signed back in by the login page's
+        // silent attempt is a sign-out that did not happen. The sentinel
+        // makes this tab's login page wait for the button.
+        window.sessionStorage.clear()
+        vi.doMock('@/store/permissionChangeBus', () => ({
+            notifySignedOut,
+            notifyPermissionsChanged: vi.fn(),
+            PERMISSIONS_CHANGED_EVENT: 'permissions:changed',
+        }))
+        vi.doMock('@/services/authService', () => ({
+            authService: { logout: vi.fn(async () => undefined) },
+        }))
+        const { useAuthStore } = await import('./auth')
+
+        await useAuthStore.getState().logout()
+
+        expect(window.sessionStorage.getItem('nx_portal_autologin_tried'))
+            .not.toBeNull()
     })
 })

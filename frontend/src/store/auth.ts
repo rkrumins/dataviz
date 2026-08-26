@@ -36,6 +36,9 @@ import {
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
+// Static on purpose, and cycle-free: backchannelReauth reaches this
+// store only through a dynamic import.
+import { markAutoPortalTried } from '@/services/backchannelReauth'
 
 export type { PermissionClaims }
 
@@ -458,6 +461,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     logout: async () => {
+        // Signing out is a statement of intent, and the login page's
+        // silent attempt would override it within a render — logged out,
+        // then immediately signed back in by the corporate session that
+        // is still alive upstream. Spend the auto-attempt sentinel first
+        // so this tab lands on a page that waits for the button.
+        markAutoPortalTried()
         // Best-effort: call /logout so the server can revoke the refresh
         // family. Even if it fails (network down, etc.) we still clear
         // local state — the user is logging out either way.
