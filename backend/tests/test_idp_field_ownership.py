@@ -380,3 +380,129 @@ async def test_most_recent_provider_wins(db_session):
     assert row.first_name == "FromOkta"
     _owned, provider_id = user_repo.idp_ownership(row)
     assert provider_id == okta.id
+
+
+# ── Unlink releases the lock ─────────────────────────────────────────
+#
+# The snapshot's contract is "re-asserted at every sign-in". Unlinking
+# ends the sign-ins, so a lock that survived the unlink was a field
+# nobody could edit and nothing would ever refresh — the worst of both.
+# Scoped to the managing provider: unlinking B must not release A's lock.
+
+async def test_clearing_is_scoped_to_the_managing_provider(
+    test_client: AsyncClient, db_session,
+):
+    await _mark_managed(db_session, ["first_name"], provider_id="idp_okta")
+
+    assert not await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_entra",
+    )
+    row = await user_repo.get_user_by_id(db_session, _ME)
+    assert managed_fields(json.loads(row.metadata_)) == {"first_name"}
+
+    assert await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_okta",
+    )
+    row = await user_repo.get_user_by_id(db_session, _ME)
+    assert managed_fields(json.loads(row.metadata_)) == frozenset()
+
+
+async def test_clearing_without_a_snapshot_is_a_quiet_no(
+    test_client: AsyncClient, db_session,
+):
+    assert not await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_okta",
+    )
+
+
+async def test_self_service_unlink_hands_the_name_back(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="own-unlink", display_name="Owner", kind="oidc",
+        settings={},
+    )
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=_ME, provider_id=provider.id, external_id="e-9",
+    )
+    await _mark_managed(db_session, ["first_name"], provider_id=provider.id)
+    await db_session.commit()
+
+    locked = await test_client.patch(
+        "/api/v1/users/me", json={"firstName": "Nope"},
+    )
+    assert locked.status_code == 409
+
+    gone = await test_client.delete(f"/api/v1/me/identities/{ident.id}")
+    assert gone.status_code == 204, gone.text
+
+    freed = await test_client.patch(
+        "/api/v1/users/me", json={"firstName": "Mine Again"},
+    )
+    assert freed.status_code == 200, freed.text
+
+
+async def test_unlinking_a_bystander_leaves_the_lock_alone(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+
+    owner = await idp_provider_repo.create_provider(
+        db_session, slug="lock-owner", display_name="Owner", kind="oidc",
+        settings={},
+    )
+    bystander = await idp_provider_repo.create_provider(
+        db_session, slug="bystander", display_name="Other", kind="oidc",
+        settings={},
+    )
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=_ME, provider_id=bystander.id, external_id="e-8",
+    )
+    await _mark_managed(db_session, ["first_name"], provider_id=owner.id)
+    await db_session.commit()
+
+    gone = await test_client.delete(f"/api/v1/me/identities/{ident.id}")
+    assert gone.status_code == 204, gone.text
+
+    still_locked = await test_client.patch(
+        "/api/v1/users/me", json={"firstName": "Nope"},
+    )
+    assert still_locked.status_code == 409
+
+
+async def test_admin_unlink_releases_it_too(
+    test_client: AsyncClient, db_session,
+):
+    from backend.app.db.repositories import idp_provider_repo, user_identity_repo
+    from backend.auth_service.core.password import disabled_password_hash
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="admin-unlink", display_name="Owner", kind="oidc",
+        settings={},
+    )
+    user = await user_repo.create_sso_user(
+        db_session, email="locked@x.com", first_name="Locked",
+        last_name="Name", password_hash=disabled_password_hash(),
+    )
+    ident = await user_identity_repo.create_identity(
+        db_session, user_id=user.id, provider_id=provider.id,
+        external_id="e-7",
+    )
+    meta = json.loads(user.metadata_ or "{}")
+    user.metadata_ = json.dumps(merge_into_metadata(
+        meta, build_snapshot(
+            fields=["first_name"], provider_id=provider.id,
+            at="2026-07-28T00:00:00Z",
+        ),
+    ))
+    await db_session.commit()
+
+    gone = await test_client.delete(
+        f"/api/v1/admin/users/{user.id}/identities/{ident.id}",
+    )
+    assert gone.status_code == 204, gone.text
+
+    row = await user_repo.get_user_by_id(db_session, user.id)
+    assert managed_fields(json.loads(row.metadata_)) == frozenset()

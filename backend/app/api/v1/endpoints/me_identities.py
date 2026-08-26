@@ -129,6 +129,12 @@ async def unlink_identity(
             status.HTTP_409_CONFLICT,
             detail={"error": "last_authenticator", "message": str(exc)},
         )
+    # With the link gone this provider will never re-assert the profile
+    # fields it owned, so the name-lock it held is released. Scoped: a
+    # lock held by a different provider stays.
+    await user_repo.clear_idp_managed_snapshot(
+        session, current.id, provider_id=identity.provider_id,
+    )
     await user_repo.create_outbox_event(
         session, event_type="user.identity.unlinked",
         payload={"user_id": current.id, "identity_id": identity_id,

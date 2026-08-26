@@ -165,6 +165,38 @@ async def disable_password(
     return user
 
 
+async def clear_idp_managed_snapshot(
+    session: AsyncSession, user_id: str, *, provider_id: str,
+) -> bool:
+    """Release the profile name-lock IF this provider is the one holding it.
+
+    Called when an identity is unlinked. The snapshot's meaning is "this
+    provider re-asserts these fields at every sign-in" — with the link
+    gone there is no next sign-in, so a snapshot left behind is a
+    permanently read-only name that nothing will ever re-sync. Scoped to
+    the managing provider on purpose: unlinking connection B must not
+    release a lock connection A holds.
+
+    Returns True when a snapshot was dropped.
+    """
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return False
+    try:
+        meta = json.loads(user.metadata_ or "{}")
+        if not isinstance(meta, dict):
+            return False
+    except (ValueError, TypeError):
+        return False
+    if _managing_provider_id(meta) != provider_id:
+        return False
+    meta.pop(_IDP_MANAGED_KEY, None)
+    user.metadata_ = json.dumps(meta, default=str)
+    user.updated_at = _now()
+    await session.flush()
+    return True
+
+
 async def set_user_idp_metadata(
     session: AsyncSession,
     *,
