@@ -11,8 +11,10 @@ The PATCH endpoint guards against operator self-lockout:
 
   * Refuses ``allowLocalLogin=false`` when any active admin lacks an
     SSO identity (HTTP 409 with the offending admin list).
-  * Refuses ``ssoEnabled=false`` AND ``allowLocalLogin=false`` together
-    (there'd be no way to log in).
+  * Refuses any change that would leave ``ssoEnabled`` AND
+    ``allowLocalLogin`` both false. The patch is merged with the stored
+    row before the check, so the combination is unreachable whether it
+    arrives in one PATCH or as two sequential ones in either order.
 """
 from __future__ import annotations
 
@@ -163,8 +165,11 @@ async def update_config(
       * If the patch sets ``allowLocalLogin=false``, every active
         admin must have at least one SSO identity. Otherwise we
         return 409 ``would_lock_out_admin`` with the offending list.
-      * Setting both ``ssoEnabled=false`` AND ``allowLocalLogin=false``
-        in one transaction is rejected (no way in).
+      * Any patch whose RESULT would have both ``ssoEnabled`` and
+        ``allowLocalLogin`` false is rejected (no way in). The check
+        runs against the merged target state, so turning the second
+        switch off in a later PATCH hits the same 409 as setting both
+        at once.
     """
     snap = await app_auth_config_repo.get_snapshot(session)
     target_sso = body.sso_enabled if body.sso_enabled is not None else snap.sso_enabled

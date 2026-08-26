@@ -144,18 +144,20 @@ change them.
 
 | Switch | On | Off |
 |---|---|---|
-| **Single sign-on** | Connections appear on the sign-in page | No company buttons at all. Nothing is deleted; turning it back on restores every connection as it was |
+| **Single sign-on** | Connections appear on the sign-in page | No company buttons at all. Nothing is deleted; turning it back on restores every connection as it was. People already signed in through a connection stay signed in until their sessions expire — the confirm offers to sign them out now, with the count, and the same action stands alone on the page once the switch is off |
 | **Passwords** | Email and password still work | SSO is the only way in. Refused if it would lock out an admin who has no SSO identity |
 | **Create accounts automatically** | An account appears the first time somebody signs in through a connection | They must already exist here. An unknown person is turned away with `jit_disabled` |
 | **Ask for an email first** | One field, routed to the connection owning that domain | A button per connection |
 
-### The combination nothing warns you about
+### The combination the server refuses
 
-Turning **Single sign-on** off while **Passwords** is already off locks everyone
-out. Neither switch can warn you on its own — you reach the state by turning the
-second one off, and the server cannot refuse it the way it refuses the
-lock-out-an-admin case. Existing sessions keep working until they expire, so
-there is a window to put one back.
+Turning **Single sign-on** off while **Passwords** is already off would lock
+everyone out, so the server refuses it with the same 409 it uses for the
+lock-out-an-admin case — whichever switch you turn off second, and whether you
+flip both in one save or one at a time. Should a deployment reach that state
+anyway (a seeded database, a direct edit), the posture sentence at the top of
+the page turns red and says nobody can sign in; existing sessions keep working
+until they expire, so there is a window to put one back.
 
 ### Create accounts automatically
 
