@@ -211,11 +211,15 @@ async def test_an_unchanged_url_skips_the_refetch_and_a_changed_one_refreshes(
 
 
 @pytest.mark.asyncio
-async def test_a_rehearsal_fetches_nothing(
+async def test_a_rehearsal_fetches_but_stores_nothing(
     test_client, db_session, registry, sso_events, monkeypatch,
 ):
-    """The dry-run promises to write nothing — downloading and storing
-    an image would be a write with a network round trip on top."""
+    """The dry-run still promises to WRITE nothing — but it now makes
+    the same avatar GET a real sign-in would, so the verdict can say
+    whether the picture would arrive instead of leaving a refused fetch
+    as one server log line. Fetch yes, store no."""
+    from sqlalchemy import select
+
     from backend.auth_service.core.tokens import create_dryrun_token
 
     seen = _routes(monkeypatch)
@@ -230,9 +234,20 @@ async def test_a_rehearsal_fetches_nothing(
         )},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json().get("dryRun") is True
-    assert calls == []
-    assert not [r for r in seen if r.url.path.startswith("/avatars/")]
+    body = resp.json()
+    assert body.get("dryRun") is True
+    assert calls == [AVATAR_URL]
+    assert len([r for r in seen if r.url.path.startswith("/avatars/")]) == 1
+    assert body["outcome"]["avatar"] == {
+        "url": AVATAR_URL, "fetched": True,
+        "content_type": "image/png", "size": len(PNG),
+    }
+    # Stores nothing: the rehearsal provisioned no account, so there is
+    # nowhere the image could have landed.
+    db_session.expire_all()
+    assert (await db_session.execute(
+        select(UserORM).where(UserORM.email == "ada.lovelace@corporate.com"),
+    )).scalar_one_or_none() is None
 
 
 # ── the outbound guard ───────────────────────────────────────────────

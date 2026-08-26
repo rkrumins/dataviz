@@ -1395,6 +1395,14 @@ class LocalIdentityService:
         transaction — would exercise the writers, and the audit helper
         there commits a session of its own, which would make "writes
         nothing" untrue in exactly the case an operator is trusting it.
+
+        One read-only side effect is deliberate: when the claims carry
+        an avatar URL, the rehearsal performs the same guarded GET a
+        real sign-in would (storing nothing), so the verdict can say
+        whether the picture would arrive — and name the rule that
+        refused it when it would not. That is the only surface an
+        operator has for a fetch that otherwise fails as one server log
+        line.
         """
         auth_time = getattr(identity, "auth_time", None)
         outcome: dict = {
@@ -1451,7 +1459,43 @@ class LocalIdentityService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Dry-run role preview failed: %s", exc)
 
+        # After the session block on purpose: the avatar leg can wait on
+        # a slow host, and a rehearsal must not hold a DB connection
+        # while it does.
+        outcome["avatar"] = await self._preview_avatar(
+            getattr(identity, "avatar_url", None),
+        )
+
         return outcome
+
+    async def _preview_avatar(self, avatar_url) -> dict:
+        """The avatar leg of a rehearsal: the fetch, storing nothing.
+
+        Returns a dict the verdict renderer pattern-matches: no URL
+        resolved (``{"url": None}``), fetched (content type and size),
+        or refused — with the fetch guard's machine-readable ``reason``
+        so the operator is told which rule fired (host not on the
+        avatar list, not a raster image, too many redirects, …).
+        """
+        url = avatar_url.strip() if isinstance(avatar_url, str) else None
+        if not url:
+            return {"url": None}
+        if self._avatar_fetcher is None:
+            return {"url": url, "fetched": False,
+                    "reason": "fetch_unavailable"}
+        try:
+            body, content_type = await self._avatar_fetcher(url)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "url": url,
+                "fetched": False,
+                "reason": getattr(exc, "reason", None) or "fetch_failed",
+                "detail": str(exc),
+            }
+        return {
+            "url": url, "fetched": True,
+            "content_type": content_type, "size": len(body),
+        }
 
     @staticmethod
     def _link_deny_reasons(

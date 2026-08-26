@@ -692,6 +692,45 @@ def _dryrun_response(slug: str, outcome: dict) -> Response:
             "re-certification will measure from each sign-in",
         )
 
+    # The avatar leg gets a verdict line in every state — silence is how
+    # this feature failed before: a refused fetch was one server log
+    # line, and the operator's only symptom was a 404 on the image.
+    avatar_fact = outcome.get("avatar") or {}
+    if avatar_fact:
+        if avatar_fact.get("url") is None:
+            row(
+                "Profile picture",
+                "no avatar URL resolved from the claims — either none "
+                "was sent, or avatar mapping is off for this connection",
+            )
+        elif avatar_fact.get("fetched"):
+            size_kib = max(1, round((avatar_fact.get("size") or 0) / 1024))
+            row(
+                "Profile picture",
+                f"would arrive — {avatar_fact.get('content_type', 'image')}, "
+                f"{size_kib} KiB from {avatar_fact['url']}. A real sign-in "
+                "would store it",
+            )
+        else:
+            reason = str(avatar_fact.get("reason") or "fetch_failed")
+            hint = {
+                "host_not_allowlisted":
+                    "add the host under Settings → Avatar image hosts",
+                "not_an_image":
+                    "supply a raster image URL (PNG, JPEG, GIF, WebP or "
+                    "AVIF)",
+                "too_many_redirects":
+                    "the URL redirects more than three times",
+                "fetch_unavailable":
+                    "this deployment has no avatar fetcher wired",
+            }.get(reason)
+            text = f"would NOT arrive ({reason})"
+            if hint:
+                text += f" — {hint}"
+            if avatar_fact.get("detail"):
+                text += f". {avatar_fact['detail']}"
+            row("Profile picture", text)
+
     if outcome.get("reason"):
         row("Refused because", outcome["reason"])
     for reason in outcome.get("deny_reasons") or []:
