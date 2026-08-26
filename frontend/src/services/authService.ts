@@ -71,11 +71,11 @@ export interface SsoProviderSummary {
      *  payload lives in browser storage and the client has to read it.
      *
      *  ``backchannel``: the four ``authenticate*`` keys when a sign-in
-     *  trigger is configured, and the four ``browserExchange*`` keys
-     *  when the row's exchange runs in the browser — that is the
-     *  translate call the browser itself must make, so its shape is
-     *  public by design. The server whitelists all of these by name —
-     *  the settings blob they come from also holds the server-side
+     *  trigger is configured, and the ``browserExchange*`` keys when
+     *  the row's exchange runs in the browser — that is the translate
+     *  call the browser itself must make, so its shape is public by
+     *  design. The server whitelists all of these by name — the
+     *  settings blob they come from also holds the server-side
      *  endpoint URLs and their credentials, none of which appear here. */
     config?: {
         source?: string
@@ -87,6 +87,7 @@ export interface SsoProviderSummary {
         browserExchangeMethod?: string
         browserExchangeHeaders?: Record<string, string>
         browserExchangeTokenPath?: string
+        browserExchangeBodyField?: string
         sourceKey?: string
     }
 }
@@ -266,15 +267,23 @@ export function needsBrowserExchange(p: SsoProviderSummary): boolean {
  *  corporate cookie rides along, and a timeout of our own. The token is
  *  read from `browserExchangeTokenPath`, or the whole body when the
  *  path is blank — the bare `application/jwt` shape. Nothing here
- *  decodes it; the server verifies it against the connection's JWKS. */
+ *  decodes it; the server verifies it against the connection's JWKS.
+ *
+ *  ``token`` is the sign-in trigger's answer: when the row names a
+ *  `browserExchangeBodyField`, it is POSTed back to the translate
+ *  endpoint as `{"<field>": token}` — some gateways require the token
+ *  they issued in the request body, not just the cookie. */
 export async function runBrowserExchange(
     p: SsoProviderSummary,
+    token?: string | null,
 ): Promise<string> {
     return runBrowserExchangeCall({
         url: p.config?.browserExchangeUrl as string,
         method: p.config?.browserExchangeMethod as string,
         headers: p.config?.browserExchangeHeaders,
         tokenPath: p.config?.browserExchangeTokenPath as string,
+        bodyField: p.config?.browserExchangeBodyField,
+        token,
     })
 }
 
@@ -287,16 +296,39 @@ export async function runBrowserExchangeCall(cfg: {
     method?: string
     headers?: Record<string, string>
     tokenPath?: string
+    bodyField?: string
+    token?: string | null
 }): Promise<string> {
+    const bodyField = cfg.bodyField || ''
+    const headers = new Headers(cfg.headers ?? {})
+    let body: string | undefined
+    if (bodyField) {
+        if (typeof cfg.token !== 'string' || !cfg.token) {
+            // Refused before the fetch: a request we know is incomplete
+            // would only earn the gateway's opaque refusal.
+            throw new Error(
+                "This connection forwards the sign-in call's token in "
+                + 'the translate request, but no token was produced — '
+                + 'the sign-in trigger may be switched off or '
+                + 'misconfigured.',
+            )
+        }
+        body = JSON.stringify({ [bodyField]: cfg.token })
+        // An operator's explicit Content-Type header wins.
+        if (!headers.has('content-type')) {
+            headers.set('content-type', 'application/json')
+        }
+    }
     const abort = new AbortController()
     const timer = setTimeout(() => abort.abort(), AUTHENTICATE_TIMEOUT_MS)
     let res: Response
     try {
         res = await fetch(cfg.url as string, {
             method: cfg.method || 'GET',
-            headers: cfg.headers ?? {},
+            headers,
             credentials: 'include',
             signal: abort.signal,
+            ...(body !== undefined ? { body } : {}),
         })
     } catch (err) {
         if (abort.signal.aborted) {

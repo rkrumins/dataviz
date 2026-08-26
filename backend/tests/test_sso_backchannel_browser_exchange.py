@@ -369,8 +369,20 @@ async def test_the_burn_applies_whatever_the_material():
      "exactly one"),
     (dict(jwt_public_key="PEM"), "exactly one"),  # jwks stays from base
     (dict(browser_exchange_method="DELETE"), "browser_exchange_method"),
+    # A token path with nothing forwarding it is dead configuration —
+    # the refusal names the body field that would give it a purpose.
     (dict(authenticate_url="https://sso/x",
           authenticate_token_path="token"), "authenticate_token_path"),
+    # The forwarding shape, each leg missing: no trigger to answer with
+    # a token, no path to read it from, a GET that would drop the body.
+    (dict(browser_exchange_method="POST",
+          browser_exchange_body_field="token"), "authenticate_url"),
+    (dict(browser_exchange_method="POST",
+          browser_exchange_body_field="token",
+          authenticate_url="https://sso/x"), "authenticate_token_path"),
+    (dict(browser_exchange_body_field="token",
+          authenticate_url="https://sso/x",
+          authenticate_token_path="token"), "never be sent"),
     (dict(liveness_url="https://gw/validate"), "liveness_url"),
 ])
 def test_impossible_browser_mode_rows_are_refused(over, needle):
@@ -390,6 +402,27 @@ def test_browser_mode_needs_no_server_leg():
     """The whole point: no gateway_url, no token_source_key, and the row
     still builds."""
     validate_settings(_settings())
+
+
+def test_the_forwarding_shape_makes_a_valid_browser_row():
+    """The pairing that unblocks gateways whose translate endpoint
+    requires the trigger's token POSTed back in a JSON body."""
+    validate_settings(_settings(
+        browser_exchange_method="POST",
+        browser_exchange_body_field="token",
+        authenticate_url="https://sso.corporate.com/authenticate",
+        authenticate_token_path="token",
+    ))
+
+
+def test_the_body_field_survives_the_snapshot_stripped():
+    provider = build_backchannel_provider(_snap(
+        browser_exchange_method="POST",
+        browser_exchange_body_field=" token ",
+        authenticate_url="https://sso.corporate.com/authenticate",
+        authenticate_token_path="token",
+    ))
+    assert provider.settings.browser_exchange_body_field == "token"
 
 
 # ── the session is bounded by the corporate token ────────────────────
@@ -673,10 +706,10 @@ async def test_a_dry_run_verifies_without_writing(
 async def test_browser_rows_publish_exactly_their_public_family(
     test_client, db_session, registry, sso_events, monkeypatch,
 ):
-    """Four browserExchange aliases — plus the trigger family when one
-    is configured — and not one server-side fact. Checked by iterating
-    the stored settings, so the next secret someone adds cannot leak by
-    default."""
+    """The browserExchange alias family — plus the trigger family when
+    one is configured — and not one server-side fact. Checked by
+    iterating the stored settings, so the next secret someone adds
+    cannot leak by default."""
     _routes(monkeypatch)
     await _make_row(db_session)
 
@@ -727,6 +760,59 @@ async def test_server_rows_publish_none_of_the_browser_family(
     resp = await test_client.get("/api/v1/auth/providers")
     entry = next(p for p in resp.json() if p["slug"] == "corp-browser")
     assert "browserExchange" not in str(entry.get("config", {}))
+
+
+@pytest.mark.asyncio
+async def test_a_forwarding_row_publishes_the_body_field_and_the_trigger(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The sign-in page cannot build the POST without the field name, so
+    it is public — beside the trigger family that produces the token it
+    forwards. The server-side secrets stay put."""
+    _routes(monkeypatch)
+    await _make_row(
+        db_session,
+        browser_exchange_method="POST",
+        browser_exchange_body_field="token",
+        authenticate_url="https://sso.corporate.com/authenticate",
+        authenticate_method="POST",
+        authenticate_token_path="token",
+    )
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-browser")
+    assert set(entry.get("config", {})) == {
+        "browserExchangeUrl", "browserExchangeMethod",
+        "browserExchangeHeaders", "browserExchangeBodyField",
+        "authenticateUrl", "authenticateMethod", "authenticateTokenPath",
+    }
+    assert entry["config"]["browserExchangeBodyField"] == "token"
+    body = resp.text
+    assert "s3cr3t" not in body
+    assert "als0-s3cret" not in body
+
+
+@pytest.mark.asyncio
+async def test_the_trigger_switch_still_hides_the_trigger_not_the_body_field(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """Switching the trigger off unpublishes the trigger family, as
+    ever. The body field stays published: with no trigger to produce a
+    token, the sign-in page then refuses with a message naming the real
+    problem instead of earning the gateway's opaque refusal."""
+    _routes(monkeypatch)
+    await _make_row(
+        db_session,
+        browser_exchange_method="POST",
+        browser_exchange_body_field="token",
+        authenticate_enabled=False,
+        authenticate_url="https://sso.corporate.com/authenticate",
+        authenticate_token_path="token",
+    )
+    resp = await test_client.get("/api/v1/auth/providers")
+    entry = next(p for p in resp.json() if p["slug"] == "corp-browser")
+    config = entry.get("config", {})
+    assert config.get("browserExchangeBodyField") == "token"
+    assert not any(k.startswith("authenticate") for k in config)
 
 
 # ── trust_unsigned: both shapes, no verification, unverified rating ──

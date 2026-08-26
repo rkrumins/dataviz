@@ -339,6 +339,7 @@ _BACKCHANNEL_PUBLIC_FIELDS = {
     "browser_exchange_method": "browserExchangeMethod",
     "browser_exchange_headers": "browserExchangeHeaders",
     "browser_exchange_token_path": "browserExchangeTokenPath",
+    "browser_exchange_body_field": "browserExchangeBodyField",
 }
 
 _BACKCHANNEL_TRIGGER_FIELDS = (
@@ -348,6 +349,7 @@ _BACKCHANNEL_TRIGGER_FIELDS = (
 _BACKCHANNEL_BROWSER_EXCHANGE_FIELDS = (
     "browser_exchange_url", "browser_exchange_method",
     "browser_exchange_headers", "browser_exchange_token_path",
+    "browser_exchange_body_field",
 )
 
 
@@ -362,9 +364,10 @@ def _public_config(snap) -> dict:
     ``backchannel`` publishes nothing at all unless a sign-in trigger is
     configured. When one is, the browser cannot make the call without
     the URL, the method and the headers, so those are published — and
-    they are the only four keys that ever are. ``gateway_url``,
-    ``exchange_url``, ``gateway_headers``, ``exchange_headers`` and
-    ``token_source_key`` are server-side facts and stay that way.
+    the whitelist above holds the only keys that ever are.
+    ``gateway_url``, ``exchange_url``, ``gateway_headers``,
+    ``exchange_headers`` and ``token_source_key`` are server-side facts
+    and stay that way.
     """
     settings = snap.settings or {}
 

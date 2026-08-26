@@ -262,7 +262,9 @@ class BackchannelSettings:
     authenticate_headers: dict = field(default_factory=dict)
     #: Where the token sits in the trigger's OWN response, when it
     #: answers with one rather than setting a cookie. Blank means the
-    #: call exists only to establish the cookie.
+    #: call exists only to establish the cookie. In browser mode the
+    #: value found here is what ``browser_exchange_body_field`` forwards
+    #: to the translate call.
     authenticate_token_path: str = ""
 
     # Leg 1: ambient token -> gateway token.
@@ -302,6 +304,13 @@ class BackchannelSettings:
     #: Where the JWT sits in the translate response. Blank means the
     #: response body IS the token.
     browser_exchange_token_path: str = ""
+    #: PUBLISHED TO THE BROWSER. Name of the JSON field the browser's
+    #: translate POST carries the sign-in trigger's token under. Blank —
+    #: the default and the original shape — sends no body: the corporate
+    #: cookie alone authenticates the call. Non-blank pairs with
+    #: ``authenticate_token_path``: the token the trigger answered with
+    #: is the value.
+    browser_exchange_body_field: str = ""
 
     # Leg 2: gateway token -> claims. Blank URL skips it.
     exchange_url: str = ""
@@ -438,6 +447,9 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         browser_exchange_headers=_as_dict(s.get("browser_exchange_headers")),
         browser_exchange_token_path=str(
             s.get("browser_exchange_token_path") or ""
+        ).strip(),
+        browser_exchange_body_field=str(
+            s.get("browser_exchange_body_field") or ""
         ).strip(),
         exchange_url=str(s.get("exchange_url") or "").strip(),
         exchange_method=str(s.get("exchange_method") or "POST").strip().upper(),
@@ -634,12 +646,33 @@ def _validate_browser_mode(s: BackchannelSettings) -> None:
             "trust_unsigned is the explicit opt-out, at the price of an "
             "unverified rating"
         )
-    if s.authenticate_token_path:
+    if s.browser_exchange_body_field:
+        if not s.authenticate_url:
+            raise BackchannelConfigError(
+                "browser_exchange_body_field forwards the sign-in "
+                "trigger's token, and no trigger is configured — set "
+                "authenticate_url (and authenticate_token_path) so "
+                "there is a token to forward"
+            )
+        if not s.authenticate_token_path:
+            raise BackchannelConfigError(
+                "browser_exchange_body_field needs "
+                "authenticate_token_path — it names where the trigger's "
+                "response carries the token this field would forward"
+            )
+        if s.browser_exchange_method != "POST":
+            raise BackchannelConfigError(
+                "browser_exchange_body_field cannot be combined with a "
+                "GET browser_exchange_method; the body would never be "
+                "sent"
+            )
+    elif s.authenticate_token_path:
         raise BackchannelConfigError(
-            "authenticate_token_path is the handle shape, which redeems "
-            "at the gateway; in browser mode the trigger exists only to "
-            "establish the corporate session, and the translate call "
-            "carries it from there"
+            "authenticate_token_path does nothing in browser mode on "
+            "its own — the trigger's answer is only consulted when "
+            "browser_exchange_body_field names the JSON field the "
+            "translate call forwards it in; set that, or clear this "
+            "path"
         )
     if s.liveness_url:
         raise BackchannelConfigError(

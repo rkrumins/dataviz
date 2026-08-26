@@ -536,3 +536,50 @@ describe('trusting it unverified', () => {
         expect(screen.getByText(/rates it/i)).toBeInTheDocument()
     })
 })
+
+describe('forwarding the trigger token into the translate body', () => {
+    const browserRow = (over: BackchannelSettings = {}): BackchannelSettings => ({
+        exchange_mode: 'browser',
+        browser_exchange_url: 'https://sso.corporate.com/translate',
+        ...over,
+    })
+    const label = /send the sign-in call.s token in the body/i
+
+    it('offers the body field in browser mode, and typing reports it', async () => {
+        const onChange = renderForm(browserRow())
+        const input = screen.getByRole('textbox', { name: label })
+        await userEvent.type(input, 't')
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ browser_exchange_body_field: 't' }),
+        )
+    })
+
+    it("an emptied body field writes null, because '' is dropped by the save path", async () => {
+        const onChange = renderForm(
+            browserRow({ browser_exchange_body_field: 'token' }),
+        )
+        await userEvent.clear(screen.getByRole('textbox', { name: label }))
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ browser_exchange_body_field: null }),
+        )
+    })
+
+    it('does not appear in server mode, where the server leg owns the body', () => {
+        renderForm({ exchange_mode: 'server' })
+        expect(screen.queryByRole('textbox', { name: label }))
+            .not.toBeInTheDocument()
+    })
+
+    it('says what pairs with it: the trigger token path and POST', () => {
+        renderForm(browserRow({
+            authenticate_url: 'https://sso.corporate.com/authenticate',
+        }))
+        expect(
+            screen.getByText(/name that json field here; it needs the trigger/i),
+        ).toBeInTheDocument()
+        // And the trigger's own hint points forward at it in this mode.
+        expect(
+            screen.getByText(/forwarded to the translate call/i),
+        ).toBeInTheDocument()
+    })
+})

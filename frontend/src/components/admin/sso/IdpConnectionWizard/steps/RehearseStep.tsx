@@ -93,6 +93,8 @@ export function RehearseStep({
                     method: String(st.browser_exchange_method ?? 'GET'),
                     headers: (st.browser_exchange_headers ?? {}) as Record<string, string>,
                     tokenPath: String(st.browser_exchange_token_path ?? ''),
+                    bodyField: String(st.browser_exchange_body_field ?? ''),
+                    token: handle,
                 })
                 const res = await ssoAdminService.rehearseBackchannel(
                     row.slug, { assertion },

@@ -244,6 +244,8 @@ export function ProvidersTab({
                     method: String(st.browser_exchange_method ?? 'GET'),
                     headers: (st.browser_exchange_headers ?? {}) as Record<string, string>,
                     tokenPath: String(st.browser_exchange_token_path ?? ''),
+                    bodyField: String(st.browser_exchange_body_field ?? ''),
+                    token: handle,
                 })
                 report(await ssoAdminService.rehearseBackchannel(
                     p.slug, { assertion },

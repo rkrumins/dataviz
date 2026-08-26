@@ -168,6 +168,9 @@ describe('silent sign-in', () => {
             )
         })
         expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+        // Nothing ran before the exchange, so there is no token to
+        // forward into it either.
+        expect(runBrowserExchange.mock.calls[0][1]).toBeNull()
         await waitFor(() => expect(navigate).toHaveBeenCalledWith('/', { replace: true }))
     })
 
@@ -182,6 +185,7 @@ describe('silent sign-in', () => {
                 },
             }],
         })
+        runAuthenticateTrigger.mockResolvedValue('corp-handle')
         renderLogin()
         await waitFor(() => {
             expect(storeLoginWithBackchannel).toHaveBeenCalledWith(
@@ -191,6 +195,11 @@ describe('silent sign-in', () => {
         expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
         expect(runAuthenticateTrigger.mock.invocationCallOrder[0])
             .toBeLessThan(runBrowserExchange.mock.invocationCallOrder[0])
+        // The trigger's answer rides into the exchange — the forwarding
+        // rows depend on exactly this hand-off.
+        expect(runBrowserExchange).toHaveBeenCalledWith(
+            expect.objectContaining({ slug: 'corp-gateway' }), 'corp-handle',
+        )
     })
 
     it('tries once per tab, however many times the page renders', async () => {

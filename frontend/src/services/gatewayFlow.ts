@@ -50,11 +50,15 @@ export async function gatewaySignInBody(
     p: SsoProviderSummary,
 ): Promise<{ handle?: string; assertion?: string }> {
     if (needsBrowserExchange(p)) {
-        // The trigger (when present) exists to establish the corporate
-        // session; the exchange then spends it. Browser-mode rows never
-        // configure the handle shape, so its return is not consulted.
-        if (needsAuthenticateFirst(p)) await runAuthenticateTrigger(p)
-        return { assertion: await runBrowserExchange(p) }
+        // The trigger (when present) establishes the corporate session.
+        // When the row names a body field, the token the trigger
+        // answered with is also forwarded into the translate POST —
+        // some gateways require it in the body; otherwise the cookie
+        // alone carries the session and the answer goes unused.
+        const token = needsAuthenticateFirst(p)
+            ? await runAuthenticateTrigger(p)
+            : null
+        return { assertion: await runBrowserExchange(p, token) }
     }
     const handle = await runAuthenticateTrigger(p)
     return handle ? { handle } : {}

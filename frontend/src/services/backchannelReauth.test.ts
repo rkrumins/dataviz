@@ -108,9 +108,14 @@ describe('recovery', () => {
                 browserExchangeUrl: 'https://sso.corporate.com/translate',
             },
         }])
+        // The trigger's answer rides into the exchange, so a row that
+        // forwards it in the translate body recovers silently too.
+        runAuthenticateTrigger.mockResolvedValue('corp-handle')
         expect(await attemptSilentReauth('corp-gateway')).toBe('recovered')
         expect(runAuthenticateTrigger).toHaveBeenCalledTimes(1)
-        expect(runBrowserExchange).toHaveBeenCalledTimes(1)
+        expect(runBrowserExchange).toHaveBeenCalledWith(
+            expect.objectContaining({ slug: 'corp-gateway' }), 'corp-handle',
+        )
         expect(loginWithBackchannel).toHaveBeenCalledWith(
             'corp-gateway', { assertion: 'assertion-jwt' },
             { skipAuthRefresh: true },

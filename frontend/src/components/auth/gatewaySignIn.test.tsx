@@ -242,3 +242,71 @@ describe('the translate call with a nested JSON reply', () => {
         })
     })
 })
+
+describe('the translate call forwarding the trigger token', () => {
+    // Some gateways require the token the authenticate call answered
+    // with in the translate request's body — without it they refuse
+    // with "no request body is set". The row names the JSON field; the
+    // trigger's answer is the value.
+    const jwt = 'eyJ.header.payload'
+
+    async function call(over: Record<string, unknown> = {}) {
+        const { runBrowserExchangeCall } = await import('@/services/authService')
+        return runBrowserExchangeCall({
+            url: 'https://sso.corporate.com/translate',
+            method: 'POST',
+            bodyField: 'token',
+            token: 'corp-handle',
+            ...over,
+        })
+    }
+
+    it('POSTs the token back as JSON under the named field', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(jwt, { status: 200 }),
+        )
+        global.fetch = fetchMock
+
+        expect(await call()).toBe(jwt)
+        const [, init] = fetchMock.mock.calls[0]
+        expect(init.body).toBe(JSON.stringify({ token: 'corp-handle' }))
+        expect(new Headers(init.headers).get('content-type'))
+            .toBe('application/json')
+        expect(init.credentials).toBe('include')
+    })
+
+    it('never overrides an operator’s explicit Content-Type', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(jwt, { status: 200 }),
+        )
+        global.fetch = fetchMock
+
+        await call({ headers: { 'Content-Type': 'application/xyz' } })
+        expect(new Headers(fetchMock.mock.calls[0][1].headers)
+            .get('content-type')).toBe('application/xyz')
+    })
+
+    it('sends no body at all when no field is named', async () => {
+        // The original cookie-only shape must stay byte-identical.
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(jwt, { status: 200 }),
+        )
+        global.fetch = fetchMock
+
+        await call({ bodyField: undefined, token: undefined })
+        expect(fetchMock.mock.calls[0][1].body).toBeUndefined()
+    })
+
+    it('refuses before calling out when the trigger produced no token', async () => {
+        // A switched-off or cookie-only trigger leaves nothing to
+        // forward; the gateway would answer with an opaque refusal, so
+        // the mismatch is named here instead.
+        const fetchMock = vi.fn()
+        global.fetch = fetchMock
+
+        await expect(call({ token: null })).rejects.toThrow(
+            /no token was produced/,
+        )
+        expect(fetchMock).not.toHaveBeenCalled()
+    })
+})

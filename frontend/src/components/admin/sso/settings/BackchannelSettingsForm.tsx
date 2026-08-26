@@ -36,6 +36,7 @@ export interface BackchannelSettings {
     browser_exchange_method?: 'GET' | 'POST'
     browser_exchange_headers?: Record<string, string>
     browser_exchange_token_path?: string | null
+    browser_exchange_body_field?: string | null
 
     // The browser-side sign-in trigger. Published to the sign-in page —
     // unlike everything below, which stays on the server.
@@ -96,6 +97,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     browser_exchange_method: 'GET',
     browser_exchange_headers: {},
     browser_exchange_token_path: '',
+    browser_exchange_body_field: '',
     authenticate_enabled: true,
     authenticate_url: '',
     authenticate_method: 'POST',
@@ -573,7 +575,9 @@ export function BackchannelSettingsForm({
                             </Field>
                             <Field
                                 label={<>Token is at <span className="font-normal text-ink-muted">(optional)</span></>}
-                                hint="Only if this call answers with the session token itself. Leave blank when it works by setting a cookie."
+                                hint={mode === 'browser'
+                                    ? 'Where the token sits in this call’s reply — it is forwarded to the translate call when a body field is named below.'
+                                    : 'Only if this call answers with the session token itself. Leave blank when it works by setting a cookie.'}
                             >
                                 <TextField
                                     value={value.authenticate_token_path ?? ''}
@@ -879,6 +883,23 @@ export function BackchannelSettingsForm({
                         />
                     </Field>
                 </FieldGrid>
+                <Field
+                    label={<>Send the sign-in call&rsquo;s token in the body <span className="font-normal text-ink-muted">(optional)</span></>}
+                    hint={<>Some translate endpoints require the token the
+                        sign-in call answered with, POSTed back as
+                        JSON — <code>{'{"token": "…"}'}</code>. Name that
+                        JSON field here; it needs the trigger&rsquo;s{' '}
+                        <em>Token is at</em> path filled in and the method
+                        above set to POST. Leave blank when the corporate
+                        cookie alone is enough. Switching the trigger off
+                        breaks sign-in for this shape.</>}
+                >
+                    <TextField
+                        value={value.browser_exchange_body_field ?? ''}
+                        onChange={e => set('browser_exchange_body_field', clearable(e))}
+                        placeholder="token"
+                    />
+                </Field>
                 <div className="rounded-xl border-2 border-amber-500/30 bg-amber-500/[0.06] p-3 space-y-3">
                     <p className="text-[11px] leading-relaxed text-amber-800 dark:text-amber-200">
                         These headers are sent from the user&rsquo;s browser
