@@ -304,3 +304,344 @@ describe('editing', () => {
         expect(headerCalls).toHaveLength(0)
     })
 })
+
+
+describe('clearing a field actually clears it', () => {
+    it("an emptied text field writes null, because '' is dropped by the save path", async () => {
+        const onChange = renderForm({ exchange_url: 'https://old.example/userinfo' })
+        const input = screen.getByPlaceholderText(/userinfo/)
+        await userEvent.clear(input)
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ exchange_url: null }),
+        )
+    })
+
+    it('an emptied numeric field writes null, never NaN', async () => {
+        const onChange = renderForm({ timeout_seconds: 5 })
+        const input = screen.getByPlaceholderText('5')
+        await userEvent.clear(input)
+        const last = onChange.mock.calls.at(-1)![0] as BackchannelSettings
+        expect(last.timeout_seconds).toBeNull()
+        expect(Number.isNaN(last.timeout_seconds)).toBe(false)
+    })
+})
+
+
+describe('redacted headers', () => {
+    it('render as a Configured panel with a Replace affordance, not the mask', () => {
+        renderForm({
+            gateway_url: 'https://gw.corp.internal/redeem',
+            gateway_headers: '********' as never,
+        })
+        expect(screen.getByText(/hidden after saving/)).toBeInTheDocument()
+        expect(screen.getByText('Replace')).toBeInTheDocument()
+        // The mask itself must not be shown as if it were the stored
+        // value — that read as data loss, and saving it back was only
+        // prevented server-side.
+        expect(screen.queryByDisplayValue(/\*{8}/)).not.toBeInTheDocument()
+    })
+
+    it('Replace opens an empty editor and a valid map is written through', async () => {
+        const onChange = renderForm({
+            gateway_url: 'https://gw.corp.internal/redeem',
+            gateway_headers: '********' as never,
+        })
+        await userEvent.click(screen.getByText('Replace'))
+        const editor = screen.getAllByPlaceholderText(/X-App-Id/)[0]
+        await userEvent.clear(editor)
+        await userEvent.type(
+            editor, '{{"X-App-Id": "app-2"}', { skipClick: true },
+        )
+        await userEvent.tab()
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ gateway_headers: { 'X-App-Id': 'app-2' } }),
+        )
+    })
+})
+
+describe('the verification chooser', () => {
+    const browserJwt = (over: BackchannelSettings = {}): BackchannelSettings => ({
+        exchange_mode: 'browser',
+        browser_exchange_url: 'https://sso.corporate.com/translate',
+        ...over,
+    })
+
+    it('defaults browser mode to a required JWKS URL', () => {
+        renderForm(browserJwt())
+        expect(screen.getByText('Verify the token with')).toBeInTheDocument()
+        expect(screen.getByText('JWKS URL')).toBeInTheDocument()
+        expect(
+            screen.queryByText('Public key (PEM)'),
+        ).not.toBeInTheDocument()
+    })
+
+    it('offers a pasted public key for gateways that publish no JWKS', async () => {
+        const onChange = vi.fn()
+        render(
+            <BackchannelSettingsForm value={browserJwt()} onChange={onChange} />,
+        )
+        await userEvent.selectOptions(
+            screen.getByRole('combobox', { name: /verify the token with/i }),
+            'public_key',
+        )
+        // Switching nulls the other materials so nothing lingers to win
+        // the populated-field derivation on the next open.
+        const next = onChange.mock.calls.at(-1)![0]
+        expect(next.jwks_url).toBeNull()
+        expect(next.jwt_shared_secret).toBeNull()
+    })
+
+    it('renders the PEM textarea once a key is populated', () => {
+        renderForm(browserJwt({ jwt_public_key: '-----BEGIN PUBLIC KEY-----' }))
+        expect(screen.getByText('Public key (PEM)')).toBeInTheDocument()
+        expect(screen.queryByText('JWKS URL')).not.toBeInTheDocument()
+    })
+
+    it('renders the secret through SecretField, mask never shown', () => {
+        renderForm(browserJwt({ jwt_shared_secret: '********' }))
+        // The redaction pattern: a saved secret shows as configured with
+        // a Rotate affordance, not as a prefilled password box.
+        expect(screen.getByText(/configured/i)).toBeInTheDocument()
+        expect(screen.getByText('Rotate')).toBeInTheDocument()
+        expect(screen.queryByDisplayValue('********')).not.toBeInTheDocument()
+    })
+
+    it('a populated field wins over any local choice', () => {
+        // The chooser derives from what is stored — it cannot claim JWKS
+        // while a secret is what the server would actually use.
+        renderForm(browserJwt({ jwt_shared_secret: '********' }))
+        expect(
+            (screen.getByRole('combobox', {
+                name: /verify the token with/i,
+            }) as HTMLSelectElement).value,
+        ).toBe('shared_secret')
+    })
+
+    it('server mode offers none-by-default with the TLS hint', () => {
+        renderForm({ exchange_mode: 'server', claims_format: 'jwt' })
+        const select = screen.getByRole('combobox', {
+            name: /signature check/i,
+        }) as HTMLSelectElement
+        expect(select.value).toBe('none')
+        expect(
+            screen.getByText(/strength of the TLS call/i),
+        ).toBeInTheDocument()
+        // No pins while nothing verifies — they would pin nothing.
+        expect(screen.queryByText(/issuer pin/i)).not.toBeInTheDocument()
+    })
+
+    it('browser mode never offers the none option', () => {
+        renderForm(browserJwt())
+        const select = screen.getByRole('combobox', {
+            name: /verify the token with/i,
+        })
+        const values = Array.from(select.querySelectorAll('option'))
+            .map(o => o.getAttribute('value'))
+        expect(values).not.toContain('none')
+    })
+
+    it('shows the pins for every material choice', () => {
+        renderForm(browserJwt({ jwt_public_key: 'PEM' }))
+        expect(screen.getByText(/issuer pin/i)).toBeInTheDocument()
+        expect(screen.getByText(/audience pin/i)).toBeInTheDocument()
+    })
+})
+
+describe('trusting it unverified', () => {
+    const browserJwt = (over: BackchannelSettings = {}): BackchannelSettings => ({
+        exchange_mode: 'browser',
+        browser_exchange_url: 'https://sso.corporate.com/translate',
+        ...over,
+    })
+
+    it('is offered only in browser mode', () => {
+        renderForm({ exchange_mode: 'server', claims_format: 'jwt' })
+        const select = screen.getByRole('combobox', {
+            name: /signature check/i,
+        })
+        const values = Array.from(select.querySelectorAll('option'))
+            .map(o => o.getAttribute('value'))
+        expect(values).not.toContain('unsigned')
+    })
+
+    it('choosing it reveals the danger toggle without flipping it', async () => {
+        const onChange = vi.fn()
+        render(
+            <BackchannelSettingsForm value={browserJwt()} onChange={onChange} />,
+        )
+        await userEvent.selectOptions(
+            screen.getByRole('combobox', { name: /verify the token with/i }),
+            'unsigned',
+        )
+        // The chooser clears materials and pins; the danger bit itself
+        // stays untouched (undefined here) — only the toggle may set it.
+        const next = onChange.mock.calls.at(-1)![0]
+        expect(next.jwks_url).toBeNull()
+        expect(next.jwt_issuer).toBeNull()
+        expect(next.trust_unsigned).not.toBe(true)
+        expect(screen.getByText('Trust unverified sign-ins')).toBeInTheDocument()
+    })
+
+    it('the toggle owns the bit', async () => {
+        const onChange = vi.fn()
+        render(
+            <BackchannelSettingsForm
+                value={browserJwt({ trust_unsigned: false, jwks_url: '' })}
+                onChange={onChange}
+            />,
+        )
+        // Row already in the unsigned choice (nothing populated, but
+        // trust_unsigned=false keeps the chooser on its local state) —
+        // select unsigned first, then tick.
+        await userEvent.selectOptions(
+            screen.getByRole('combobox', { name: /verify the token with/i }),
+            'unsigned',
+        )
+        await userEvent.click(screen.getByRole('checkbox', {
+            name: /trust unverified sign-ins/i,
+        }))
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ trust_unsigned: true }),
+        )
+    })
+
+    it('says the full price in the warning copy', () => {
+        renderForm(browserJwt({ trust_unsigned: true }))
+        expect(screen.getByText(/no verification at all/i)).toBeInTheDocument()
+        expect(
+            screen.getByText(/any user,\s*including an administrator/i),
+        ).toBeInTheDocument()
+        expect(screen.getByText(/user\.sso_unsigned_accepted/)).toBeInTheDocument()
+        expect(
+            screen.getByText(/ineligible to grant platform admin/i),
+        ).toBeInTheDocument()
+        expect(
+            screen.getByText(/reply shape varies by environment/i),
+        ).toBeInTheDocument()
+        // Pins are hidden — they would pin nothing.
+        expect(screen.queryByText(/issuer pin/i)).not.toBeInTheDocument()
+    })
+
+    it('a stored trust_unsigned row derives the unsigned choice', () => {
+        renderForm(browserJwt({ trust_unsigned: true }))
+        expect(
+            (screen.getByRole('combobox', {
+                name: /verify the token with/i,
+            }) as HTMLSelectElement).value,
+        ).toBe('unsigned')
+    })
+
+    it('names the assurance cost beside the chooser', () => {
+        renderForm(browserJwt())
+        expect(screen.getByText(/rates it/i)).toBeInTheDocument()
+    })
+})
+
+describe('forwarding the trigger token into the translate body', () => {
+    const browserRow = (over: BackchannelSettings = {}): BackchannelSettings => ({
+        exchange_mode: 'browser',
+        browser_exchange_url: 'https://sso.corporate.com/translate',
+        ...over,
+    })
+    const label = /send the sign-in call.s token in the body/i
+
+    it('offers the body field in browser mode, and typing reports it', async () => {
+        const onChange = renderForm(browserRow())
+        const input = screen.getByRole('textbox', { name: label })
+        await userEvent.type(input, 't')
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ browser_exchange_body_field: 't' }),
+        )
+    })
+
+    it("an emptied body field writes null, because '' is dropped by the save path", async () => {
+        const onChange = renderForm(
+            browserRow({ browser_exchange_body_field: 'token' }),
+        )
+        await userEvent.clear(screen.getByRole('textbox', { name: label }))
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ browser_exchange_body_field: null }),
+        )
+    })
+
+    it('does not appear in server mode, where the server leg owns the body', () => {
+        renderForm({ exchange_mode: 'server' })
+        expect(screen.queryByRole('textbox', { name: label }))
+            .not.toBeInTheDocument()
+    })
+
+    it('says what pairs with it: the trigger token path and POST', () => {
+        renderForm(browserRow({
+            authenticate_url: 'https://sso.corporate.com/authenticate',
+        }))
+        expect(
+            screen.getByText(/name that json field here; it needs the trigger/i),
+        ).toBeInTheDocument()
+        // And the trigger's own hint points forward at it in this mode.
+        expect(
+            screen.getByText(/forwarded to the translate call/i),
+        ).toBeInTheDocument()
+    })
+})
+
+describe('the auto sign-in switch', () => {
+    const autoToggle = () => screen.getByRole('checkbox', {
+        name: /sign people in automatically/i,
+    }) as HTMLInputElement
+
+    it('defaults to on, in the form and in the seed settings', () => {
+        renderForm({})
+        expect(autoToggle().checked).toBe(true)
+        expect(DEFAULT_BACKCHANNEL_SETTINGS.auto_signin).toBe(true)
+    })
+
+    it('respects an explicit false rather than treating it as unset', () => {
+        renderForm({ auto_signin: false })
+        expect(autoToggle().checked).toBe(false)
+    })
+
+    it('writes the bit through the ordinary setter', async () => {
+        const onChange = renderForm({})
+        await userEvent.click(autoToggle())
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ auto_signin: false }),
+        )
+    })
+
+    it('says it governs the sign-in page only', () => {
+        renderForm({})
+        expect(
+            screen.getByText(/mid-session renewals.*unaffected/i),
+        ).toBeInTheDocument()
+    })
+})
+
+describe('the avatar mapping switch', () => {
+    const avatarToggle = () => screen.getByRole('checkbox', {
+        name: /map their avatar from the claims/i,
+    }) as HTMLInputElement
+
+    it('defaults to OFF — participation is a choice, not a surprise', () => {
+        renderForm({})
+        expect(avatarToggle().checked).toBe(false)
+        expect(DEFAULT_BACKCHANNEL_SETTINGS.map_avatar).toBe(false)
+    })
+
+    it('writes the bit through the ordinary setter', async () => {
+        const onChange = renderForm({})
+        await userEvent.click(avatarToggle())
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ map_avatar: true }),
+        )
+    })
+
+    it('names the allowlist requirement and the ownership consequence', () => {
+        renderForm({})
+        expect(
+            screen.getByText(/internal-hosts allowlist/i),
+        ).toBeInTheDocument()
+        expect(
+            screen.getByText(/provider-managed profile field/i),
+        ).toBeInTheDocument()
+    })
+})

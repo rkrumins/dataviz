@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
+from backend.common.display_name import resolve_display_name
 from backend.app.db.models import GroupORM, UserORM, WorkspaceORM
 from backend.app.db.repositories import binding_repo, group_repo, role_repo, user_repo
 from backend.app.services.permission_service import simulate_for_user
@@ -54,11 +55,17 @@ async def _hydrate_subject(
         user_orm = row.scalar_one_or_none()
         if user_orm is None:
             return WorkspaceMemberSubject(type=subject_type, id=subject_id)
-        full_name = f"{user_orm.first_name} {user_orm.last_name}".strip()
+        # The chosen display name wins over the reconstructed halves —
+        # rebuilding "first last" here ignored the override column and,
+        # for a full-name-only IdP, rendered a raw user id in the UI.
+        shown = resolve_display_name(
+            user_orm.display_name, user_orm.first_name,
+            user_orm.last_name,
+        )
         return WorkspaceMemberSubject(
             type="user",
             id=subject_id,
-            display_name=full_name or None,
+            display_name=shown or user_orm.email or None,
             secondary=user_orm.email,
         )
 

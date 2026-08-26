@@ -107,6 +107,104 @@ published to any browser.
   and are readable by anyone who opens the sign-in page. An application
   identifier is fine. A credential is not.
 
+### When the cookie never reaches us: the browser-side exchange
+
+Everything above assumes your session cookie is scoped to a parent
+domain the application shares, so it arrives on requests to us and our
+server can present it to your redeem endpoint. If you scope the cookie
+to your SSO host alone, no configuration on our side can change what a
+browser will send where — so the application supports a second shape:
+**the user's browser calls your translate endpoint itself** (its cookie
+jar holds what ours never sees) and hands the application the token you
+answer with.
+
+That changes what we need from you:
+
+- **CORS with credentials on the translate endpoint too**, same rules
+  as the authenticate call above: echo the exact origin, answer
+  `Access-Control-Allow-Credentials: true`, exempt the preflight from
+  authentication. Headers configured for this call are public, exactly
+  like the trigger's.
+- **If your translate endpoint requires the authenticate call's token
+  in its request body** — the refusal usually reads "no request body is
+  set" — the operator names the JSON field and the sign-in page
+  forwards it. Your authenticate call answers with the token in its
+  JSON:
+
+  ```json
+  {"token": "eyJhbGciOiJSUzI1NiJ9…", "sessionId": "…"}
+  ```
+
+  and the browser then calls `POST /translate` with
+  `Content-Type: application/json` and the body:
+
+  ```json
+  {"token": "eyJhbGciOiJSUzI1NiJ9…"}
+  ```
+
+  Two consequences on your side: the authenticate call must answer with
+  the token in its JSON (a cookie alone is not forwardable), and the
+  POST with a JSON content type makes the request non-simple, so your
+  CORS preflight must also allow the `Content-Type` header
+  (`Access-Control-Allow-Headers`). Switching the sign-in trigger off
+  disables this whole sign-in shape — there is then no token to
+  forward, and the page says so instead of making the call.
+- **The answer should be a signed JWT** — bare in the body or at a
+  field we are told about — **with `exp`**. A token the browser
+  delivers is only as good as its signature, so the operator configures
+  exactly one way to judge it, and the connection commits to that
+  posture:
+
+  | Posture | You provide | Accepts | Refuses | Rating |
+  |---|---|---|---|---|
+  | **JWKS URL** | A key-set endpoint we can fetch | An asymmetrically signed JWT (RS/ES/PS) | HS-signed tokens, bare JSON, wrong keys | Verified |
+  | **Pasted public key** | Your PEM public key, handed to the operator — for gateways that sign but publish no key set | Same as JWKS | Same as JWKS | Verified |
+  | **Shared secret** | The HS256 signing secret, handed to the operator | An HS256-signed JWT, exactly that algorithm | Asymmetric-header tokens, bare JSON, wrong secrets | Verified |
+  | **Trust unsigned** | Nothing | BOTH shapes — an unverified JWT *and* a bare JSON claims object | Undecodable replies | **Unverified** |
+
+  Example signed reply (compact JWS, truncated):
+
+  ```
+  eyJhbGciOiJSUzI1NiIsImtpZCI6ImNvcnAtMjAyNiJ9.eyJzdWIiOiJlbXAtMSIsImVtYWlsIjoi…
+  ```
+
+  Example bare-JSON reply (only the Trust-unsigned posture accepts it):
+
+  ```json
+  {"sub": "emp-1", "email": "ada@corp.example", "firstName": "Ada",
+   "groups": ["engineering"], "auth_time": 1756200000}
+  ```
+
+  **A verifying posture never falls back.** A row configured with any
+  key material refuses a reply that is not a signed token — accepting
+  bare JSON there would let anyone skip the signature by not signing.
+  If your reply shape varies by environment, either make every
+  environment sign, give each environment its own connection row with
+  the matching posture, or run Trust unsigned — the one posture that
+  accepts both shapes — and accept the Unverified rating (the
+  connection can no longer grant platform-admin roles, and every login
+  through it is audited as `user.sso_unsigned_accepted`). The
+  operator's rehearsal states which case your reply was and what
+  judged it.
+- **Expect each token to sign in at most once.** The application burns
+  the `jti` (or the token's own hash) on first use, so keep tokens
+  short-lived and mint one per call rather than caching an answer.
+- **If the signing key serves more than one audience, include an `aud`
+  claim** and tell the operator its value — they pin it on the
+  connection, and a token minted for one of your other consumers stops
+  being presentable here.
+- **Third-party cookie policy applies.** The browser attaches your
+  cookie to a cross-site `fetch` only where its `SameSite` attribute
+  (`None; Secure`) and the browser's third-party-cookie posture allow
+  it. On locked-down browser fleets, verify this before choosing the
+  shape.
+
+The re-check described in §3 does not run in this shape — the server
+never holds your session, so there is nothing it could re-present.
+The token's own `exp` bounds the application session instead: when it
+passes, the user's browser silently repeats the exchange, and your
+endpoint answering 401 there is what actually signs them out.
+
 ---
 
 ## 3. Status codes — the part that matters most
@@ -183,7 +281,8 @@ Content-Type: application/json
   "firstName": "Ada",
   "lastName": "Lovelace",
   "groups": ["engineering", "staff"],
-  "auth_time": 1700000000
+  "auth_time": 1700000000,
+  "picture": "https://photos.internal.example/emp-100482.jpg"
 }
 ```
 
@@ -197,13 +296,27 @@ What the application needs:
 | given / family name | no | a directory of blank names is how a bad mapping is discovered, late |
 | groups | no | drives roles and workspace access when mapped |
 | **authentication instant** | strongly | see below |
+| profile picture URL | no | see below |
 
 **The authentication instant** is the moment the person actually signed
 in — not the moment you answered us. Without it the application cannot
 tell how long ago that was, and a daily re-authentication ceiling stops
 applying to everyone on this connection. If your reply carries no such
 field, say so explicitly rather than letting a "close enough" timestamp
-be mapped to it.
+be mapped to it. (An operator can turn the requirement off; the
+rehearsal verdict then states that the ceiling will measure from each
+sign-in instead of from your authentication.)
+
+**The profile picture** is a URL (`picture`, `avatarUrl`, `photoUrl`
+and similar names map by default), and it is opt-in per connection.
+When the operator turns the avatar mapping on, the application's
+SERVER fetches the image at sign-in — image content types only, size
+capped, redirects refused — and re-serves it from its own origin;
+browsers never load your URL directly, so nothing about your photo
+host reaches end users' machines. A private photo host must be added
+to the same internal-hosts allowlist as the endpoints above. The image
+refreshes when the URL in your claims changes, so serve a new URL (a
+content hash, a version) when the photo changes.
 
 ---
 
@@ -228,12 +341,21 @@ Of your endpoints:
 
 What the application never does:
 
-- **Parse either token.** Both are opaque, including when they are
-  visibly JWTs. Nothing is decoded, and no claim inside them is read.
-  The user's identity comes only from leg 2's reply.
+- **Parse a credential.** The session handle, and a token that exists
+  only to be presented to the next leg, are opaque — nothing is decoded
+  and no claim inside them is read, even when they are visibly JWTs.
+  The one thing that may be decoded is the *answer itself*: if the
+  user's details arrive as a signed token rather than a JSON object
+  (the operator marks the connection accordingly), the application
+  reads that token's payload — from the same TLS response the JSON
+  shape would have used. If you publish a JWKS, the operator can point
+  the connection at it and the signature is verified as well, with
+  optional issuer and audience pins; symmetric algorithms are refused
+  there, so publish RSA or EC keys.
 - **Keep the token.** It exists for the duration of one request and is
   discarded — never cached, never written to a database, never returned
   to a browser. Its own validity period is therefore irrelevant to us.
+  (Published JWKS material is cached briefly; it is public keys.)
 - **Send anything from this exchange to the browser.** Neither token,
   nor your endpoint URLs, nor any header configured for legs 1 and 2.
 
@@ -248,7 +370,11 @@ renewal interval, plus one full exchange per sign-in.
 
 If you have an endpoint that *validates* a handle without minting a new
 token, say so — it is cheaper for this purpose and we would rather call
-that one.
+that one. The operator points the connection's **Re-check URL** at it;
+the re-check then makes the same call there instead of the redeem
+endpoint. It must speak the same protocol: 401/403 for "this session is
+over", success with a JSON body (an empty object is fine) for "still
+live", anything else read as an outage.
 
 ---
 

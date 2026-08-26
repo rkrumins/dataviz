@@ -95,12 +95,27 @@ can drift away from it. Leave the row empty and the field stays theirs to edit.
 **Full / display name** is never taken this way, whatever you map: it is the one
 name a person can always choose for themselves.
 
+**Avatar** maps a profile-picture URL (`picture`, `avatarUrl`, `photoUrl` and
+similar names resolve by default on a gateway connection), and it only
+participates while the connection's **Map their avatar from the claims** toggle
+— in the Behaviour section, off by default — is on. With it on, our server
+fetches the image during sign-in and serves it from here; browsers never load
+the corporate URL directly, so member lists cannot leak viewers to your photo
+host. A private photo host needs an internal-hosts allowlist entry, exactly
+like the gateway endpoints. While the connection supplies a picture it is
+IdP-managed like the names: shown everywhere, re-applied at every sign-in,
+and the person's own picker says so instead of offering a change that would
+not survive. The image refreshes whenever the URL in the claims changes, and
+unlinking the identity clears it.
+
 #### If your IdP only sends one name
 
 Plenty do — Entra's `name`, a portal's `fullName` — with no separate given and
-family name. Nothing to configure: when both name rows would otherwise be empty,
-we split the full name and the rows say **split from `name`** rather than showing
-you an empty field.
+family name. Nothing to configure: `name`, `displayName`, `fullName` and
+`full_name` all resolve as the full name by default (SAML connections also read
+`cn` and its OID), and when both name rows would otherwise be empty, we split
+the full name and the rows say **split from `name`** rather than showing you an
+empty field.
 
 Splitting is a guess. `Doe, Alice` is read as *Alice Doe* — the comma marks the
 family name first, as Active Directory writes it — and everything else divides at
@@ -111,6 +126,13 @@ in the first name rather than being cut somewhere arbitrary.
 Because it is a guess, a split name is **not** marked IdP-managed: it fills the
 profile in and stays the person's to correct. Map a claim of its own — even a
 custom one — and the connection owns the field properly.
+
+The fill-in is not only for brand-new accounts. An account that already exists
+with both name rows blank picks the split up at its next sign-in, and the
+string your directory actually sent — `Doe, Alice`, comma and all — lands in
+**Full / display name** so nothing the IdP said is lost to the guess. Both
+stay the person's to edit, and a name somebody has already typed is never
+overwritten.
 
 > **Note:** *Where the sample came from matters.* Until someone signs in, the
 > preview runs against a worked example of your vendor's payload — good enough to
@@ -141,9 +163,11 @@ nobody but you can see it.
 ### Give people roles automatically
 
 **Admin → SSO → Access mapping.** Each rule reads as a sentence — *anyone in
-`engineering` from Corporate Entra gets Editor in Analytics* — and rules are
-re-evaluated on every sign-in and every session refresh, so your directory stays
-the source of truth.
+`engineering` from Corporate Entra gets Editor in Analytics*. Rules are
+re-evaluated on every sign-in and every session refresh, so a rule you change
+here applies to active sessions within minutes. The group list itself is read
+from your directory at sign-in — a change made there lands at that person's
+next full sign-in, within 24 hours at the latest.
 
 There is more to this than fits here: what a rule can grant, why removing
 somebody from a group does not always remove their access, and what platform-
@@ -253,6 +277,14 @@ endpoint to call. Two things to know before you do:
   page. They are *not* the same as the header fields on the two steps
   below, which stay on our server. Put an application identifier there;
   never a credential.
+- **When the exchange runs in the browser, the trigger&rsquo;s answer
+  can be forwarded.** Some translate endpoints require the token the
+  trigger answered with, POSTed back in a JSON body. Fill in the
+  trigger&rsquo;s *Token is at* path and name the body field in the
+  browser-exchange section, and the sign-in page carries it across.
+  Note that the switch above then switches off this whole sign-in
+  shape — with the trigger off there is no token to forward, and the
+  page says so rather than making a call the gateway would refuse.
 
 Your identity team will need to allow {brand}&rsquo;s exact origin for
 credentialed cross-origin calls, and your desktop team will need
@@ -264,17 +296,67 @@ in the contract document below.
 Ask them for:
 
 - **The cookie's name**, and confirmation it is set on a domain {brand} shares.
-  If it is not, this cannot work — no configuration fixes a cookie the browser
-  never sends us.
+  If it is not, all is not lost — switch the connection's exchange to **the
+  browser**: the sign-in page makes the translate call itself (the user's
+  browser holds the cookie ours never sees) and hands over the reply. That
+  shape requires **one way to judge the reply**, because a token the browser
+  delivers is only as good as its signature. Any one of these works:
+  - their **JWKS URL** — the usual choice when they publish keys;
+  - their **public key, pasted in (PEM)** — ask for it when they sign the
+    token but publish no key set;
+  - a **shared secret** — for gateways that sign symmetrically (HS256);
+  - or, as a last resort, **Trust unverified sign-ins** — for a translate
+    endpoint that returns plain JSON claims with no signature at all. The
+    connection is then rated **Unverified** (it cannot grant platform-admin
+    roles, and every login through it is audited), and it is the one posture
+    that accepts *both* a token and plain JSON on the same row.
+
+  To see the difference: a signed reply is a compact token
+  (`eyJhbGciOi…` — three dot-separated parts), while an unsigned reply is
+  the claims object itself (`{"sub": "emp-1", "email": "ada@corp.example", …}`).
+  The rehearsal tells you which one your gateway answered and how it was
+  judged.
+
+  **If the reply varies by environment** — signed in production, plain JSON
+  in a test deployment — pick per environment: each deployment configures its
+  own connection row, so give each row the posture matching what *that*
+  environment's gateway actually returns. Or ask them to sign everywhere, or
+  run Trust unverified and accept the rating.
+
+  **If their translate endpoint wants the sign-in call's token in its body**
+  — the refusal usually reads "no request body is set" — ask where the token
+  sits in the authenticate reply and what the body field is called. The
+  authenticate call answers, say, `{"token": "eyJ…", "sessionId": "…"}`; the
+  translate call then expects `POST` with the body `{"token": "eyJ…"}`. Put
+  the reply path in the trigger's *Token is at* field and the field name in
+  the browser-exchange section's body field, set the translate method to
+  POST, and the sign-in page forwards it.
 - **The endpoint that redeems it**, and where in its reply the token sits.
 - **The endpoint that returns the user**, if that is a second call — some
   gateways answer with the person's details straight away, and then you leave
   the second endpoint blank.
-- **Any headers the calls need** — an application id, a key. They go in the
-  connection's settings and are never sent to anyone's browser.
+- **Whether the details arrive as a signed token (JWT).** Some translate
+  endpoints answer with a JWT — bare in the body, or under a field — whose
+  payload is the user object. Say so on the connection and the claims are read
+  from the payload; give it their JWKS URL as well and the signature is
+  verified too.
+- **Any headers the server's calls need** — an application id, a key. They go
+  in the connection's settings and are never sent to anyone's browser. (The
+  trigger's and the browser exchange's headers are the exception, and the form
+  says so where you type them: those calls are made *by* the browser, so their
+  headers are public.)
 - **Whether their reply includes an authentication time.** Without one there is
   no way to tell how long ago somebody actually signed in, and the daily
   re-authentication ceiling stops applying to them.
+- **A validate-only endpoint, if they have one.** The session re-check calls it
+  instead of the redeem endpoint (the connection's **Re-check URL**), so
+  renewals stop minting a token apiece.
+
+One more default worth knowing: corporate gateways rarely send an
+`email_verified` claim, so the connection treats their addresses as verified —
+that is what lets people land on their existing account, matched by email. An
+explicit `false` from the gateway is always respected, and the toggle is in the
+connection's Behaviour section.
 
 ### Allowing the host first
 
@@ -329,6 +411,30 @@ actually answered rather than the last time we tried. So a brief outage is
 invisible, and a long one still ends sessions rather than extending them
 indefinitely. Both the re-check and the grace period are settings on the
 connection.
+
+And when the corporate session itself expires — they tend to live an hour or
+four — nobody is dumped on a login form. The app notices at the next renewal
+and silently re-runs the browser's part of the sign-in: the trigger, the
+translate call on a browser-exchange connection, and the sign-in itself, all
+behind the scenes. The user keeps working; the only way they find out is if the
+corporate side actually refuses, in which case the login page opens with the
+reason and tries again on its own a minute later. Browser-exchange connections
+have no server re-check at all — the translate token's own expiry plays that
+part, with the same silent recovery behind it.
+
+### Who presses the button
+
+By default the sign-in page attempts a gateway connection silently — nobody
+should press a button to spend a session their machine already holds. **Sign
+people in automatically**, in the connection's Behaviour section, turns that
+off: the page then waits for the button, and nothing else changes — the
+mid-session renewals above, the re-certification ceiling included, keep
+working either way.
+
+Signing out always sticks, whatever the toggle says: the tab that signed out
+(and every sibling tab) lands on a page that waits for a click, rather than
+being signed straight back in by a corporate session that is still alive
+upstream.
 
 ---
 

@@ -15,12 +15,13 @@ imports from ``backend.auth_service.*`` (enforced by
 """
 from __future__ import annotations
 
+import base64
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import jwt as pyjwt
 
@@ -206,6 +207,9 @@ class LocalIdentityService:
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
+        avatar_fetcher: Optional[
+            Callable[[str], Awaitable[tuple[bytes, str]]]
+        ] = None,
     ):
         self._session_factory = session_factory
         self._user_repo = user_repo
@@ -226,6 +230,10 @@ class LocalIdentityService:
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
         self._session_revoker = session_revoker
+        # (url) -> (bytes, content_type). Injected by app startup, which
+        # binds the outbound guard and the operator's host allowlist —
+        # auth_service may not import backend.app.* itself.
+        self._avatar_fetcher = avatar_fetcher
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
         # ``app_auth_config``. When ``None`` (legacy test wiring), the
@@ -495,6 +503,10 @@ class LocalIdentityService:
             user_id=claims.sub,
             family_id=claims.family_id,
             auth_time=claims.auth_time,
+            # Family-invariant, like auth_time: the upstream credential's
+            # expiry does not move because we rotated, and dropping it
+            # here would make rotation a way to shed the ceiling.
+            idp_exp=claims.idp_exp,
         )
 
         claims_extra: dict = {}
@@ -571,6 +583,7 @@ class LocalIdentityService:
                     user_id=claims.sub,
                     family_id=claims.family_id,
                     auth_time=auth_time,
+                    idp_exp=claims.idp_exp,
                     jti=outcome.successor.successor_jti,
                     expires_at_epoch=outcome.successor.successor_exp,
                     mint_ms=outcome.successor.successor_mint_ms,
@@ -693,6 +706,43 @@ class LocalIdentityService:
                         "provider_slug": provider_slug,
                         "auth_time": auth_time,
                         "elapsed_seconds": sso_age,
+                    }),
+                )
+
+            # ── Upstream credential ceiling ──────────────────────────
+            # ``idp_exp`` is the corporate token's own expiry, captured
+            # at sign-in by the browser-exchange back-channel shape —
+            # the topology where the server never sees the corporate
+            # session and so can never re-ask about it. It is signed
+            # into our refresh token and propagated unchanged, so
+            # rotation cannot extend it. Past it, the session ends the
+            # way a failed liveness check ends one: the reauth envelope
+            # names the provider, and the sign-in page silently re-runs
+            # the browser flow against the corporate IdP.
+            #
+            # From the claim rather than a server record — unlike
+            # ``auth_time`` above — because our own signature covers it:
+            # nobody holding the cookie can edit it without failing
+            # verification, and it exists only for tokens this
+            # deployment minted with it.
+            if claims.idp_exp is not None and int(time.time()) > claims.idp_exp:
+                provider_slug = await self._latest_identity_slug(session, orm.id)
+                logger.info(
+                    "Upstream credential expired (user=%s, slug=%s, "
+                    "idp_exp=%d)",
+                    orm.id, provider_slug, claims.idp_exp,
+                )
+                raise _RefreshRejected(
+                    SsoReauthRequired(
+                        _build_reauth_url(provider_slug, next_path="/"),
+                        provider=provider_slug or "sso",
+                    ),
+                    kill_sessions_for=orm.id,
+                    audit=("user.sso_session_ended_upstream", {
+                        "user_id": orm.id,
+                        "provider_slug": provider_slug,
+                        "reason": "upstream_token_expired",
+                        "idp_exp": claims.idp_exp,
                     }),
                 )
 
@@ -856,9 +906,11 @@ class LocalIdentityService:
             logger.warning(
                 "IdP provider_id=%s released no usable auth_time; the SSO "
                 "re-auth ceiling will measure from this login instead of "
-                "from the IdP authentication. The authorize request already "
-                "sends max_age, which obliges a compliant OIDC provider to "
-                "return auth_time — check the provider's claim mapping.",
+                "from the IdP authentication. For OIDC the authorize "
+                "request sends max_age, which obliges a compliant provider "
+                "to return auth_time; for the gateway and profile kinds, "
+                "point auth_time at the right claim in the connection's "
+                "claim mapping.",
                 provider_id,
             )
 
@@ -897,7 +949,10 @@ class LocalIdentityService:
                          "existing_status": orm.status if orm else None,
                          "existing_has_identity": decision.has_existing_identity},
                     )
-                raise SSOAuthError(decision.error or "sso_rejected")
+                raise SSOAuthError(
+                    decision.error or "sso_rejected",
+                    deny_reasons=decision.deny_reasons,
+                )
 
             if decision.action == "sign_in_existing":
                 await self._user_identity_repo.touch_last_login(
@@ -982,9 +1037,48 @@ class LocalIdentityService:
             #
             # Best-effort, like the metadata write below: a profile that
             # failed to re-sync must not cost somebody their sign-in.
+            #
+            # The provider-supplied avatar first, because whether it is
+            # OWNED depends on whether the bytes actually landed: a URL
+            # nothing could download must not lock anyone out of picking
+            # their own picture. Fetched through the injected outbound
+            # guard, refetched only when the asserted URL changed, and
+            # never a login blocker.
+            avatar_asserted = False
+            avatar_url = getattr(identity, "avatar_url", None)
+            if avatar_url and self._avatar_fetcher is not None:
+                scheme = urlsplit(avatar_url).scheme.lower()
+                if scheme not in ("http", "https"):
+                    logger.warning(
+                        "Avatar URL for user=%s has scheme %r; skipped.",
+                        orm.id, scheme,
+                    )
+                elif (
+                    getattr(orm, "avatar_source_url", None) == avatar_url
+                    and getattr(orm, "avatar_image", None)
+                ):
+                    # Unchanged source, image in hand: nothing to fetch.
+                    avatar_asserted = True
+                else:
+                    try:
+                        img, ctype = await self._avatar_fetcher(avatar_url)
+                        await self._user_repo.set_user_avatar_image(
+                            session, orm.id,
+                            image_b64=base64.b64encode(img).decode("ascii"),
+                            content_type=ctype,
+                            source_url=avatar_url,
+                        )
+                        avatar_asserted = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Avatar fetch failed (user=%s, provider=%s): %s",
+                            orm.id, provider_id, exc,
+                        )
+
             owned = asserted_fields(
                 first_name=identity.first_name, last_name=identity.last_name,
                 derived=identity.names_derived_from is not None,
+                avatar_url=avatar_url if avatar_asserted else None,
             )
             if owned:
                 try:
@@ -999,6 +1093,54 @@ class LocalIdentityService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "IdP profile re-sync failed (user=%s, provider=%s): %s",
+                        orm.id, provider_id, exc,
+                    )
+
+            # Derived (split) names are a guess, so they are never owned
+            # and the re-sync above never writes them — which left anyone
+            # who existed BEFORE this connection (an invite, a local
+            # signup, an older JIT row) blank-named forever: every login
+            # re-derived the split and threw it away. Seed instead of
+            # syncing: written only while the row has no name at all, so
+            # nothing a person typed is ever overwritten, and no
+            # ownership is claimed — the fields stay theirs to edit.
+            #
+            # The IdP's exact full-name string also seeds the display
+            # override (once, while blank): the split is a guess about
+            # word order, and "Doe, Alice" reconstructed as "Alice Doe"
+            # is not what the directory said.
+            if identity.names_derived_from is not None:
+                try:
+                    row_first = (orm.first_name or "").strip()
+                    row_last = (orm.last_name or "").strip()
+                    id_first = (identity.first_name or "").strip()
+                    id_last = (identity.last_name or "").strip()
+                    seed: dict = {}
+                    if not row_first and not row_last:
+                        if id_first:
+                            seed["first_name"] = id_first
+                        if id_last:
+                            seed["last_name"] = id_last
+                    names_from_this_split = bool(seed) or (
+                        (row_first, row_last) == (id_first, id_last)
+                    )
+                    if (
+                        identity.display_name
+                        and names_from_this_split
+                        and not (
+                            getattr(orm, "display_name", "") or ""
+                        ).strip()
+                        and identity.display_name.strip()
+                        != f"{id_first} {id_last}".strip()
+                    ):
+                        seed["display_name"] = identity.display_name.strip()
+                    if seed:
+                        await self._user_repo.update_identity(
+                            session, orm.id, **seed,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Derived-name seed failed (user=%s, provider=%s): %s",
                         orm.id, provider_id, exc,
                     )
 
@@ -1047,8 +1189,10 @@ class LocalIdentityService:
             # Reconcile group->target (role_binding | group_membership)
             # against what the IdP currently asserts. Additive for
             # present groups; soft-revoke for groups removed since the
-            # last login. Same transaction so a failure here rolls
-            # back the whole login.
+            # last login. A failure is logged and the login proceeds —
+            # a mapping hiccup must not lock the org out — and the
+            # refresh-time reconcile retries it within one access-token
+            # lifetime.
             reconcile_result: dict | None = None
             if self._sso_role_reconciler is not None:
                 try:
@@ -1134,6 +1278,7 @@ class LocalIdentityService:
             refresh_token = await self._mint_recorded_refresh(
                 session, user_id=orm.id, family_id=None, auth_time=auth_time,
                 idp_provider_id=provider_id,
+                idp_exp=getattr(identity, "upstream_expires_at", None),
             )
 
         user = _orm_to_user(orm, role=_primary_role(roles))
@@ -1251,6 +1396,7 @@ class LocalIdentityService:
         there commits a session of its own, which would make "writes
         nothing" untrue in exactly the case an operator is trusting it.
         """
+        auth_time = getattr(identity, "auth_time", None)
         outcome: dict = {
             "email": identity.email,
             "external_id": identity.external_id,
@@ -1260,6 +1406,15 @@ class LocalIdentityService:
             "attributes": dict(getattr(identity, "attributes", {}) or {}),
             "email_verified": _claims_email_verified(identity.raw_claims),
             "linking_policy": linking_policy,
+            # Whether the claims carried a usable authentication time.
+            # Absent means the ceiling measures from each sign-in (see
+            # the fallback in ``complete_sso_login``) — a fact worth
+            # stating on the verdict, since the row that reaches a
+            # successful rehearsal without one has the requirement off.
+            "auth_time": {
+                "present": isinstance(auth_time, int) and auth_time > 0,
+                "ceiling_hours": SSO_SESSION_MAX_AGE_SECONDS // 3600,
+            },
         }
 
         cfg = await self._auth_config_provider.get()
@@ -1378,11 +1533,20 @@ class LocalIdentityService:
             return
 
         settings = provider.settings
-        raw = (
-            ambient_headers.get(settings.token_source_key)
-            if settings.token_source == "header"
-            else ambient_cookies.get(settings.token_source_key)
-        )
+        if settings.token_source == "header":
+            # Header names are case-insensitive on the wire, and the dict
+            # the refresh route hands us has been through Starlette, which
+            # lower-cases them. The operator's spelling (``X-Corp-Session``)
+            # must keep matching, or every refresh reads "absent" and
+            # revokes a healthy family.
+            wanted = settings.token_source_key.lower()
+            raw = next(
+                (v for k, v in ambient_headers.items()
+                 if k.lower() == wanted),
+                None,
+            )
+        else:
+            raw = ambient_cookies.get(settings.token_source_key)
 
         if not raw:
             await self._end_session_upstream(
@@ -1454,6 +1618,12 @@ class LocalIdentityService:
         if not isinstance(provider, BackchannelProvider):
             return None
         if not provider.settings.liveness_on_refresh:
+            return None
+        if provider.settings.exchange_mode == "browser":
+            # The corporate session never reaches this server in browser
+            # mode, so there is nothing on the request to re-confirm.
+            # The session is bounded instead by ``idp_exp`` — the
+            # corporate token's own expiry, checked on every refresh.
             return None
         if not provider.settings.token_source_key:
             # Nothing on the request carries the upstream session, so
@@ -1629,6 +1799,7 @@ class LocalIdentityService:
         family_id: Optional[str],
         auth_time: Optional[int],
         idp_provider_id: Optional[str] = None,
+        idp_exp: Optional[int] = None,
     ) -> str:
         """Mint a refresh token and write the row that makes it usable.
 
@@ -1645,6 +1816,7 @@ class LocalIdentityService:
         """
         token, claims = create_refresh_token(
             user_id=user_id, family_id=family_id, auth_time=auth_time,
+            idp_exp=idp_exp,
         )
         store = self._refresh_store_factory(session)
         await store.record_mint(

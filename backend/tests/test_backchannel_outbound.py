@@ -231,3 +231,101 @@ async def test_the_destination_is_checked_before_the_request_is_made(monkeypatch
     with pytest.raises(BlockedOutboundRequest):
         await request_json("https://169.254.169.254/x", timeout=2.0)
     assert sent == []
+
+
+# ── accept_jwt: the one widened refusal ──────────────────────────────
+
+_JWS = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJlbXAtMSJ9.c2ln"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_jwt_body_passes_when_the_caller_expects_one(monkeypatch):
+    """A token-translation endpoint that answers with the token as the
+    whole body — text/plain, not JSON. The caller says it expects that
+    shape; nothing else about the transport rules changes."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(
+            200, content=_JWS.encode(),
+            headers={"content-type": "application/jwt"},
+        )),
+    )
+    got = await request_json(URL, timeout=2.0, accept_jwt=True)
+    assert got == _JWS
+
+
+@pytest.mark.asyncio
+async def test_a_bare_jwt_body_is_still_refused_without_the_flag(monkeypatch):
+    """The default stays strict: a caller that expects JSON gets the
+    same refusal it always did, whatever the body looks like."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, content=_JWS.encode())),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="valid JSON"):
+        await request_json(URL, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_accept_jwt_does_not_admit_arbitrary_text(monkeypatch):
+    """The flag widens the refusal for exactly one shape. HTML — an SSO
+    portal's login page, say — is still an error, not a token."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, content=b"<html>hi</html>")),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="valid JSON"):
+        await request_json(URL, timeout=2.0, accept_jwt=True)
+
+
+@pytest.mark.asyncio
+async def test_a_json_wrapped_jwt_needs_no_flag(monkeypatch):
+    """`{"access_token": "<jws>"}` is just JSON with a string in it; the
+    caller resolves a path to it. The flag exists only for the bare-body
+    shape."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, json={"access_token": _JWS})),
+    )
+    got = await request_json(URL, timeout=2.0)
+    assert got == {"access_token": _JWS}
+
+
+# ── fetch_jwks: the key set, guarded like everything else ────────────
+
+@pytest.mark.asyncio
+async def test_fetch_jwks_returns_the_document(monkeypatch):
+    def handler(request):
+        assert request.method == "GET"
+        return httpx.Response(200, json={"keys": [{"kid": "a", "kty": "RSA"}]})
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _mock_client(handler))
+    doc = await outbound.fetch_jwks(URL, timeout=2.0)
+    assert doc["keys"][0]["kid"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_fetch_jwks_refuses_a_non_jwks_answer(monkeypatch):
+    """An object without a `keys` array is not a key set, whatever else
+    it is. Refusing here beats handing PyJWT a shape it half-tolerates."""
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: httpx.Response(200, json={"nope": True})),
+    )
+    with pytest.raises(BlockedOutboundRequest, match="JWKS"):
+        await outbound.fetch_jwks(URL, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_jwks_goes_through_the_destination_guard(monkeypatch):
+    """The key set decides which signatures verify. This is the fetch
+    PyJWKClient would have made unguarded — the reason fetch_jwks
+    exists is that it must not be."""
+    sent = []
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        _mock_client(lambda r: sent.append(r) or httpx.Response(200, json={"keys": []})),
+    )
+    with pytest.raises(BlockedOutboundRequest):
+        await outbound.fetch_jwks("https://169.254.169.254/jwks", timeout=2.0)
+    assert sent == []

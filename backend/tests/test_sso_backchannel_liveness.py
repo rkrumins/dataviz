@@ -324,6 +324,30 @@ async def test_the_provider_reads_the_token_from_a_header_when_configured(
     assert probe.calls == 1
 
 
+@pytest.mark.asyncio
+async def test_the_header_lookup_survives_starlette_lower_casing(registry):
+    """The refresh route hands the service ``dict(request.headers)``,
+    and Starlette lower-cases every key in it. The operator typed
+    ``X-Corp-Session``. Header names are case-insensitive on the wire,
+    so those must match — the regression was a case-sensitive ``.get``
+    that read every refresh as "the corporate session is gone" and
+    revoked a perfectly healthy family once per access lifetime.
+    """
+    registry.providers[PROVIDER_ID] = probe = _Probe(
+        token_source="header", token_source_key="X-Corp-Session",
+    )
+    store = InMemoryRefreshStore()
+    token, _ = await _mint(store, checked_at=int(time.time()))
+
+    user, _tokens = await _service(store).refresh(
+        token,
+        ambient_cookies={},
+        ambient_headers={"x-corp-session": "ambient-xyz"},   # as Starlette
+    )
+    assert probe.calls == 1
+    assert user.id == "usr_1"
+
+
 # ── who is NOT probed ────────────────────────────────────────────────
 
 @pytest.mark.asyncio

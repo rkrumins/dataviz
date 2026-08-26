@@ -192,6 +192,7 @@ async def list_members(
             group_id=m.group_id,
             added_at=m.added_at,
             added_by=m.added_by,
+            source=getattr(m, "source", None) or "local",
         )
         for m in members
     ]
@@ -248,6 +249,7 @@ async def add_member(
         group_id=member.group_id,
         added_at=member.added_at,
         added_by=member.added_by,
+        source=getattr(member, "source", None) or "local",
     )
 
 

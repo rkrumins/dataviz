@@ -441,8 +441,12 @@ const ENTERPRISE_GATEWAY: VendorPreset = {
             detail: 'Optional — if the first call already returns the user, leave it blank and we will skip a round trip.',
         },
         {
+            title: 'Say who redeems the session, and how the answer arrives',
+            detail: 'If the cookie is scoped to the SSO host alone, switch the exchange to the browser and give us their JWKS URL — a browser-delivered token is verified against it. If their reply is a signed token (JWT) rather than a plain user object, say so and the claims are read from its payload. And if their translate endpoint wants the sign-in call\'s token POSTed back as JSON — the authenticate reply carries {"token": "eyJ…"} and translate expects that same field as its body — name the field in the browser-exchange section and it is forwarded.',
+        },
+        {
             title: 'Allow the gateway host',
-            detail: 'These endpoints are internal, so they are unreachable until someone with the SSO hosts permission adds the host to the allowlist.',
+            detail: 'These endpoints are internal, so they are unreachable until someone with the SSO hosts permission adds the host to the allowlist. The JWKS URL needs an entry too when it is internal.',
         },
     ],
     weight: 95,

@@ -49,8 +49,8 @@ change the things about your own account that used to need an administrator:
 
 | Setting | Notes |
 |---|---|
-| **Name** | First and last, plus an optional **display name** if you'd rather be shown as something else. Leave the display name blank to go back to *First Last*. |
-| **Avatar** | Stored on the account, so it follows you to a new browser. |
+| **Name** | First and last, plus an optional **display name** if you'd rather be shown as something else. Leave the display name blank to go back to *First Last*. The last name is optional too — a single name like *Prince* saves fine. |
+| **Avatar** | Stored on the account, so it follows you to a new browser. When your SSO connection supplies a picture, that image is what everyone sees and the picker says so — it is re-applied at every sign-in, and it clears if the identity is unlinked, after which your own pick (or initials) returns. |
 | **Password** | Asks for your current one. Changing it **signs you out everywhere, including the device you're on** — so a password change is also how you end a session you think somebody else has. |
 | **Sign out everywhere** | The same revocation without changing your password. |
 | **Recent activity** | Password changes, resets, and session revocations on your account, and whether an administrator did them. History starts when your deployment was upgraded, so it will not show anything older than that. |

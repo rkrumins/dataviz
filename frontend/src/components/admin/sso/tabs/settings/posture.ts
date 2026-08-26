@@ -52,9 +52,11 @@ export function describePosture(
     }
 
     // The genuinely dangerous corner, and it is invisible on any single
-    // row: both doors shut. The server refuses the combination that would
-    // strand an admin, but it cannot refuse this one — it is reachable by
-    // turning SSO off *after* local login is already off.
+    // row: both doors shut. The server refuses this combination outright —
+    // one PATCH or two, the stored row is merged in first, so turning SSO
+    // off after local login is already off hits the same 409. Still
+    // described here, because the state can exist anyway (a seed, a direct
+    // DB edit) and "nobody can sign in" matters more than how it happened.
     if (!cfg.ssoEnabled && !cfg.allowLocalLogin) {
         return {
             tone: 'danger',
@@ -74,6 +76,9 @@ export function describePosture(
             notes: [
                 'Connections keep their configuration — turning single sign-on ' +
                 'back on restores them exactly as they were.',
+                'People who signed in through a connection stay signed in ' +
+                'until their sessions expire, unless you end those sessions ' +
+                'from this page.',
                 ...notes,
             ],
         }

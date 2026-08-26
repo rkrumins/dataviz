@@ -739,19 +739,25 @@ async def reset_password(
             detail="Invalid or expired reset token.",
         )
 
-    # 2. An SSO-only account stays SSO-only.
+    # 2. An SSO-only account stays SSO-only — unless an administrator
+    # granted this exact token.
     #
     # Such an account carries the disabled-password sentinel, and that
     # sentinel is the only thing keeping the user on the IdP path — where
-    # the organisation's conditional access and MFA are. Redeeming a
-    # reset token here would remove it permanently and silently, turning
-    # a federated identity into one that signs in around the IdP.
+    # the organisation's conditional access and MFA are. Redeeming an
+    # ordinary reset token here would remove it permanently and silently,
+    # turning a federated identity into one that signs in around the IdP.
+    # The person redeeming a token is not the person who should be making
+    # that call.
     #
-    # Refused outright rather than gated, because the person redeeming
-    # the token is not the person who should be making that call. The
-    # admin endpoint has an explicit, audited override for the case where
-    # an org is genuinely retiring SSO.
-    if not is_password_set(user.password_hash):
+    # An admin-minted token (the ``admin_ok:`` hash prefix) is the
+    # deliberate exception: "give this person a password" is decided on
+    # the admin Users screen — the JIT-provisioned account whose SSO
+    # connection is being turned off — and both the mint and the
+    # conversion are audited. Ordinary forgot-password never mints a
+    # token at all, so this gate is defence in depth, not the main door.
+    converting_sso_only = not is_password_set(user.password_hash)
+    if converting_sso_only and not user_repo.reset_token_admin_granted(user):
         logger.warning(
             "Refused password reset for SSO-only user %s", user.id,
         )
@@ -784,6 +790,19 @@ async def reset_password(
     await revoke_every_session_for_user(
         user.id, session=session, reason="password_reset",
     )
+
+    if converting_sso_only:
+        # The account just gained a way in that bypasses the IdP. That
+        # is exactly what the admin granted, and exactly the kind of
+        # change an auditor asks about later.
+        await user_repo.create_outbox_event(
+            session,
+            event_type="user.local_login_enabled",
+            payload={
+                "user_id": user.id,
+                "reason": "admin_reset_token_redeemed",
+            },
+        )
 
     await user_repo.create_outbox_event(
         session,

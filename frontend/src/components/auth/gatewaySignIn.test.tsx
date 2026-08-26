@@ -15,13 +15,12 @@
  * host, must land on a working form with a reason — never in a loop, and
  * never mid-navigation to a sign-in that was never going to work.
  */
-import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+    BackchannelLoginError,
     leavesForIdp,
+    loginWithBackchannel,
     needsAuthenticateFirst,
     runAuthenticateTrigger,
     type SsoProviderSummary,
@@ -142,6 +141,27 @@ describe('the authenticate call', () => {
         }))).rejects.toThrow(/token/)
     })
 
+    it('gives up on an endpoint that never answers', async () => {
+        // The raw fetch here has no wrapper-supplied timeout, so it
+        // brings its own. Without one, a hung corporate endpoint left
+        // the silent sign-in spinning forever with no error and no form.
+        vi.useFakeTimers()
+        try {
+            global.fetch = vi.fn().mockImplementation(
+                (_url, init: RequestInit) => new Promise((_resolve, reject) => {
+                    init.signal?.addEventListener('abort', () =>
+                        reject(new DOMException('aborted', 'AbortError')))
+                }),
+            )
+            const attempt = runAuthenticateTrigger(provider())
+            const outcome = expect(attempt).rejects.toThrow(/did not answer/)
+            await vi.advanceTimersByTimeAsync(10_000)
+            await outcome
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
     it('does not inspect the handle it returns', async () => {
         // It is opaque. The server redeems it against the provider's own
         // gateway, which is the only party that can say what it means —
@@ -154,5 +174,139 @@ describe('the authenticate call', () => {
         expect(await runAuthenticateTrigger(provider({
             config: { ...provider().config, authenticateTokenPath: 'token' },
         }))).toBe('····not-a-jwt····')
+    })
+})
+
+// ── the refusal, typed ───────────────────────────────────────────────
+
+describe('a refused backchannel sign-in', () => {
+    it('carries the code, email and reasons off the 401 detail', async () => {
+        // The bare Error this used to throw discarded the server's
+        // structured refusal, so the page could only shrug at a
+        // collision it had everything needed to explain.
+        global.fetch = vi.fn().mockResolvedValue(new Response(
+            JSON.stringify({
+                detail: {
+                    error: 'unsafe_auto_link', email: 'ada@corp.example',
+                    reasons: ['policy:manual_only'],
+                },
+            }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } },
+        ))
+
+        const err = await loginWithBackchannel(
+            'corp-gateway', {}, { skipAuthRefresh: true },
+        ).then(() => null, (e: unknown) => e)
+
+        expect(err).toBeInstanceOf(BackchannelLoginError)
+        const typed = err as BackchannelLoginError
+        expect(typed.code).toBe('unsafe_auto_link')
+        expect(typed.email).toBe('ada@corp.example')
+        expect(typed.reasons).toEqual(['policy:manual_only'])
+        // Generic message for surfaces that only render text.
+        expect(typed.message).toMatch(/did not work/i)
+    })
+
+    it('degrades to the status code when the body is not the envelope', async () => {
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response('bad gateway', { status: 502 }),
+        )
+
+        const err = await loginWithBackchannel(
+            'corp-gateway', {}, { skipAuthRefresh: true },
+        ).then(() => null, (e: unknown) => e)
+
+        expect(err).toBeInstanceOf(BackchannelLoginError)
+        expect((err as BackchannelLoginError).code).toBe('http_502')
+        expect((err as BackchannelLoginError).email).toBeUndefined()
+    })
+})
+
+describe('the translate call with a nested JSON reply', () => {
+    it('hands an object at the token path over as JSON', async () => {
+        // A bare-JSON gateway can nest the claims object itself at the
+        // path. The assertion POST carries a string; the trust-unsigned
+        // posture reads it, and a verifying row refuses it server-side.
+        const { runBrowserExchangeCall } = await import('@/services/authService')
+        global.fetch = vi.fn().mockResolvedValue(
+            new Response(JSON.stringify({
+                data: { sub: 'emp-1', email: 'ada@corp.example' },
+            }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+        )
+
+        const token = await runBrowserExchangeCall({
+            url: 'https://sso.corporate.com/translate', tokenPath: 'data',
+        })
+        expect(JSON.parse(token)).toEqual({
+            sub: 'emp-1', email: 'ada@corp.example',
+        })
+    })
+})
+
+describe('the translate call forwarding the trigger token', () => {
+    // Some gateways require the token the authenticate call answered
+    // with in the translate request's body — without it they refuse
+    // with "no request body is set". The row names the JSON field; the
+    // trigger's answer is the value.
+    const jwt = 'eyJ.header.payload'
+
+    async function call(over: Record<string, unknown> = {}) {
+        const { runBrowserExchangeCall } = await import('@/services/authService')
+        return runBrowserExchangeCall({
+            url: 'https://sso.corporate.com/translate',
+            method: 'POST',
+            bodyField: 'token',
+            token: 'corp-handle',
+            ...over,
+        })
+    }
+
+    it('POSTs the token back as JSON under the named field', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(jwt, { status: 200 }),
+        )
+        global.fetch = fetchMock
+
+        expect(await call()).toBe(jwt)
+        const [, init] = fetchMock.mock.calls[0]
+        expect(init.body).toBe(JSON.stringify({ token: 'corp-handle' }))
+        expect(new Headers(init.headers).get('content-type'))
+            .toBe('application/json')
+        expect(init.credentials).toBe('include')
+    })
+
+    it('never overrides an operator’s explicit Content-Type', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(jwt, { status: 200 }),
+        )
+        global.fetch = fetchMock
+
+        await call({ headers: { 'Content-Type': 'application/xyz' } })
+        expect(new Headers(fetchMock.mock.calls[0][1].headers)
+            .get('content-type')).toBe('application/xyz')
+    })
+
+    it('sends no body at all when no field is named', async () => {
+        // The original cookie-only shape must stay byte-identical.
+        const fetchMock = vi.fn().mockResolvedValue(
+            new Response(jwt, { status: 200 }),
+        )
+        global.fetch = fetchMock
+
+        await call({ bodyField: undefined, token: undefined })
+        expect(fetchMock.mock.calls[0][1].body).toBeUndefined()
+    })
+
+    it('refuses before calling out when the trigger produced no token', async () => {
+        // A switched-off or cookie-only trigger leaves nothing to
+        // forward; the gateway would answer with an opaque refusal, so
+        // the mismatch is named here instead.
+        const fetchMock = vi.fn()
+        global.fetch = fetchMock
+
+        await expect(call({ token: null })).rejects.toThrow(
+            /no token was produced/,
+        )
+        expect(fetchMock).not.toHaveBeenCalled()
     })
 })

@@ -14,6 +14,8 @@ Admin:
     POST  /api/v1/admin/users/{user_id}/reset-password
     POST  /api/v1/admin/users/{user_id}/generate-reset-token
 """
+import base64
+import hashlib
 import json
 import logging
 import re
@@ -234,12 +236,22 @@ async def update_my_identity(
         updates["first_name"] = body.first_name.strip()
     if body.last_name is not None and body.last_name.strip():
         updates["last_name"] = body.last_name.strip()
+    if body.display_name is not None:
+        updates["display_name"] = body.display_name
+    if body.avatar_id is not None:
+        updates["avatar_id"] = body.avatar_id
 
-    # Refuse rather than drop. Quietly ignoring a field the user typed
-    # into is how a form comes to feel broken — and the UI already
-    # renders these as read-only, so reaching this branch means
-    # something bypassed it.
-    refused = sorted(set(updates) & owned)
+    # Refuse rather than drop — checked against the COMPLETE update set,
+    # so a managed avatar is refused the same way a managed name is.
+    # Quietly ignoring a field the user typed into is how a form comes
+    # to feel broken — and the UI already renders these as read-only, so
+    # reaching this branch means something bypassed it.
+    # ``display_name`` is never in MANAGEABLE_FIELDS, so it can never be
+    # refused; the wire key and the provenance name differ for avatars.
+    _provenance_name = {"avatar_id": "avatar"}
+    refused = sorted(
+        {_provenance_name.get(k, k) for k in updates} & owned
+    )
     if refused:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -247,17 +259,14 @@ async def update_my_identity(
                 "error": "idp_managed_field",
                 "fields": refused,
                 "message": (
-                    "Your identity provider manages your name. It is "
-                    "re-applied every time you sign in, so a change made "
-                    "here would not survive. Set a display name instead, "
-                    "or ask your provider's administrator to update it."
+                    "Your identity provider manages part of your profile. "
+                    "It is re-applied every time you sign in, so a change "
+                    "made here would not survive. Set a display name "
+                    "instead, or ask your provider's administrator to "
+                    "update it."
                 ),
             },
         )
-    if body.display_name is not None:
-        updates["display_name"] = body.display_name
-    if body.avatar_id is not None:
-        updates["avatar_id"] = body.avatar_id
     if not updates:
         return await _public_response(session, user)
 
@@ -286,6 +295,48 @@ async def update_my_identity(
 
     refreshed = await user_repo.get_user_by_id(session, current_user.id)
     return await _public_response(session, refreshed)
+
+
+@router.get("/{user_id}/avatar")
+async def get_user_avatar(
+    user_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The provider-supplied profile picture, served from our origin.
+
+    The bytes were fetched server-side at SSO login (the CSP forbids
+    hotlinking a remote image), so this is the only URL an ``<img>`` can
+    load them from. Any signed-in user may fetch any user's avatar — it
+    renders on member lists — and the response is cacheable per-browser:
+    a strong ETag plus a short private max-age keeps a member list from
+    refetching every face on every render, on the 404 side too, where
+    most users live.
+    """
+    if user_id == "me":
+        user_id = current_user.id
+    user = await user_repo.get_user_by_id(session, user_id)
+    image_b64 = getattr(user, "avatar_image", None) if user else None
+    absent = Response(
+        status_code=404,
+        headers={"Cache-Control": "private, max-age=60"},
+    )
+    if not image_b64:
+        return absent
+    try:
+        content = base64.b64decode(image_b64)
+    except (ValueError, TypeError):
+        return absent
+    etag = f'"{hashlib.sha256(content).hexdigest()[:32]}"'
+    cache = {"ETag": etag, "Cache-Control": "private, max-age=300"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=cache)
+    return Response(
+        content=content,
+        media_type=getattr(user, "avatar_image_type", None) or "image/png",
+        headers=cache,
+    )
 
 
 @router.post("/me/password", status_code=status.HTTP_200_OK)
@@ -883,7 +934,11 @@ async def generate_reset_token(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    raw_token, expires_at = await user_repo.create_reset_token(session, user_id)
+    # admin_granted: this mint is the audited decision that the account
+    # may have a password — redeeming it converts even an SSO-only row.
+    raw_token, expires_at = await user_repo.create_reset_token(
+        session, user_id, admin_granted=True,
+    )
 
     await user_repo.create_outbox_event(
         session,
@@ -2005,7 +2060,11 @@ async def _provision_user(
     setup_token: Optional[str] = None
     setup_expires: Optional[str] = None
     if credential == "setup_link":
-        setup_token, setup_expires = await user_repo.create_reset_token(session, user.id)
+        # admin_granted: the setup link is how an admin-created account
+        # gets its first password, including one created without any.
+        setup_token, setup_expires = await user_repo.create_reset_token(
+            session, user.id, admin_granted=True,
+        )
 
     await user_repo.create_outbox_event(
         session,

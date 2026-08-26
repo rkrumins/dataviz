@@ -480,3 +480,139 @@ def test_settings_survive_the_round_trip_from_a_row():
     assert s.require_auth_time is False
     assert s.claim_mapping_override == {"email": ["mail"]}
     assert s.linking_policy == "allow_verified"
+
+
+# ── trusting the gateway's email addresses ───────────────────────────
+#
+# The linking-by-email step this kind exists for is gated on
+# email_verified, which corporate gateways rarely send. The toggle says
+# absence counts as verified; anything the gateway actually says wins.
+
+@pytest.mark.asyncio
+async def test_an_absent_email_verified_counts_as_verified_by_default(
+    monkeypatch,
+):
+    _routes(monkeypatch, _happy)   # CLAIMS carries no email_verified
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_trust_toggle_turns_that_off(monkeypatch):
+    _routes(monkeypatch, _happy)
+    identity = await _provider(
+        trust_gateway_email=False,
+    ).fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_false_from_the_gateway_still_wins(monkeypatch):
+    """The toggle covers absence, never contradiction: a gateway that
+    says an address is unverified is believed."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={**CLAIMS, "email_verified": False})
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_true_needs_no_toggle(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={**CLAIMS, "email_verified": True})
+
+    _routes(monkeypatch, handler)
+    identity = await _provider(
+        trust_gateway_email=False,
+    ).fetch_identity("ambient-xyz")
+    assert identity.raw_claims["email_verified"] is True
+
+
+# ── the validate-only re-check endpoint ──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_liveness_prefers_the_validate_endpoint_when_configured(
+    monkeypatch,
+):
+    """The contract asks gateway teams for a cheaper validate-only
+    endpoint. The moment an operator configures it, renewals stop
+    minting a token apiece — same call, aimed there."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"active": True})
+
+    seen = _routes(monkeypatch, handler)
+    await _provider(
+        liveness_url="https://gw.corp.example/validate",
+    ).confirm_still_authenticated("ambient-xyz")
+    assert [r.url.path for r in seen] == ["/validate"]
+
+
+@pytest.mark.asyncio
+async def test_liveness_falls_back_to_the_gateway_without_one(monkeypatch):
+    seen = _routes(monkeypatch, _happy)
+    await _provider().confirm_still_authenticated("ambient-xyz")
+    assert [r.url.path for r in seen] == ["/redeem"]
+
+
+@pytest.mark.asyncio
+async def test_the_validate_endpoint_speaks_the_same_status_protocol(
+    monkeypatch,
+):
+    """Its 401 is as authoritative as the gateway's — otherwise moving
+    the re-check would quietly stop it ever ending a session."""
+    _routes(monkeypatch, lambda r: httpx.Response(401))
+    with pytest.raises(SessionRevokedUpstream):
+        await _provider(
+            liveness_url="https://gw.corp.example/validate",
+        ).confirm_still_authenticated("ambient-xyz")
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_never_uses_the_validate_endpoint(monkeypatch):
+    """It exists for the re-check only; the login still redeems."""
+    seen = _routes(monkeypatch, _happy)
+    await _provider(
+        liveness_url="https://gw.corp.example/validate",
+    ).fetch_identity("ambient-xyz")
+    assert [r.url.path for r in seen] == ["/redeem", "/userinfo"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_top_level_key_does_not_shadow_the_nested_value(
+    monkeypatch,
+):
+    """Real gateways emit a vestigial top-level ``groups: []`` beside
+    ``profile.groups`` carrying the real list. Present-but-empty must
+    not shadow populated — it silently turned group mapping off."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            "groups": [],
+            "profile": {**CLAIMS, "groups": ["eng", "analytics"]},
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.groups == ("eng", "analytics")
+
+
+@pytest.mark.asyncio
+async def test_a_populated_top_level_key_still_wins_over_nested(monkeypatch):
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            **CLAIMS, "groups": ["real"],
+            "profile": {"groups": ["shadowed"]},
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.groups == ("real",)

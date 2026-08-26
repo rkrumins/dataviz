@@ -33,6 +33,7 @@ from backend.app.auth.dependencies import (
     get_permission_claims,
 )
 from backend.app.db.engine import get_db_session
+from backend.common.display_name import resolve_display_name
 from backend.app.db.models import GroupORM, UserORM, ViewORM
 from backend.app.db.repositories import grant_repo, group_repo, user_repo
 from backend.app.db.repositories import notification_repo, view_activity_repo
@@ -138,11 +139,17 @@ async def _hydrate_subject(
         user_orm = row.scalar_one_or_none()
         if user_orm is None:
             return ViewGrantSubject(type=subject_type, id=subject_id)
-        full_name = f"{user_orm.first_name} {user_orm.last_name}".strip()
+        # Same rule as the workspace-member rows: the chosen display
+        # name wins, and an all-blank profile falls to the email rather
+        # than to a raw id.
+        shown = resolve_display_name(
+            user_orm.display_name, user_orm.first_name,
+            user_orm.last_name,
+        )
         return ViewGrantSubject(
             type="user",
             id=subject_id,
-            display_name=full_name or None,
+            display_name=shown or user_orm.email or None,
             secondary=user_orm.email,
         )
 

@@ -24,9 +24,13 @@ flowchart LR
 
 Three properties of that loop matter more than any individual setting.
 
-**It runs constantly.** Not just at sign-in — on every session refresh too, which
-happens every few minutes while somebody has the app open. A change in your
-directory reaches {brand} without anybody touching this page.
+**It runs constantly — over the groups from their last sign-in.** Every session
+refresh (a few minutes apart while somebody has the app open) re-evaluates the
+rules on this page, so a rule you change here applies to active sessions within
+minutes. The group list itself is read from your directory at sign-in: a change
+made *there* — somebody added to or removed from a group — lands at that
+person's next full sign-in, within 24 hours at the latest, because no session
+outlives the daily re-authentication ceiling.
 
 **It is a union.** Somebody in three mapped groups gets everything all three
 grant. There is no ordering, no precedence, and no way for a narrower group to
@@ -64,10 +68,13 @@ the group does nothing at all.
 A rule granting a platform-admin role only works from a **verified** connection,
 and that is re-checked on **every sign-in** — not once when you wrote the rule.
 
-So turning on *Trust unsigned payloads*, or switching a corporate portal to read
-a proxy header, downgrades the connection's assurance and stops its
-platform-admin rules granting from the very next login. The rule stays on the
-page looking exactly as it did.
+So turning on *Trust unsigned payloads* (a corporate portal), *Trust
+unverified sign-ins* (a gateway connection's browser exchange), or switching a
+portal to read a proxy header, downgrades the connection's assurance and stops
+its platform-admin rules granting from the very next login. The rule stays on
+the page looking exactly as it did. Both unsigned postures also record every
+accepted login as `user.sso_unsigned_accepted`, so the audit trail shows
+exactly which sign-ins rode the reduced trust.
 
 The Access mapping tab marks a rule in this state, so you are not left guessing.
 But if somebody reports losing admin access shortly after a connection was
@@ -129,9 +136,20 @@ stored, so it always reflects reality.
 
 | Level | Means | Can grant platform admin |
 |---|---|---|
-| **Verified** | The identity was proved against the provider itself — either a signature checked against a key we hold, or an answer the provider gave us directly when we asked it | Yes |
+| **Verified** | The identity was proved against the provider itself — either a signature checked against a key we hold (their JWKS, a pasted public key, or a shared secret), or an answer the provider gave us directly when we asked it | Yes |
 | **Asserted** | A trusted network position vouched for it — sound if your proxy strips inbound copies of the header, a full bypass if it does not | No |
-| **Unverified** | We cannot tell a genuine claim from a forged one | No |
+| **Unverified** | We cannot tell a genuine claim from a forged one — an unsigned portal payload, or a gateway connection running *Trust unverified sign-ins* | No |
+
+For a gateway connection's browser exchange, the rehearsal verdict states
+which reply shape arrived (a signed token or bare JSON) and what judged it —
+the quickest way to see which rating a deployment's gateway earns.
+
+The verdict also says when the claims carried **no authentication time**. A
+sign-in can only get that far on a connection whose *Require an
+authentication time* toggle is off, and the line spells out the cost: the
+re-certification ceiling (24 hours by default, `SSO_SESSION_MAX_AGE_HOURS`)
+then measures from each sign-in instead of from the moment the person
+actually authenticated at the IdP.
 
 ---
 
@@ -144,18 +162,20 @@ change them.
 
 | Switch | On | Off |
 |---|---|---|
-| **Single sign-on** | Connections appear on the sign-in page | No company buttons at all. Nothing is deleted; turning it back on restores every connection as it was |
+| **Single sign-on** | Connections appear on the sign-in page | No company buttons at all. Nothing is deleted; turning it back on restores every connection as it was. People already signed in through a connection stay signed in until their sessions expire — the confirm offers to sign them out now, with the count, and the same action stands alone on the page once the switch is off |
 | **Passwords** | Email and password still work | SSO is the only way in. Refused if it would lock out an admin who has no SSO identity |
 | **Create accounts automatically** | An account appears the first time somebody signs in through a connection | They must already exist here. An unknown person is turned away with `jit_disabled` |
 | **Ask for an email first** | One field, routed to the connection owning that domain | A button per connection |
 
-### The combination nothing warns you about
+### The combination the server refuses
 
-Turning **Single sign-on** off while **Passwords** is already off locks everyone
-out. Neither switch can warn you on its own — you reach the state by turning the
-second one off, and the server cannot refuse it the way it refuses the
-lock-out-an-admin case. Existing sessions keep working until they expire, so
-there is a window to put one back.
+Turning **Single sign-on** off while **Passwords** is already off would lock
+everyone out, so the server refuses it with the same 409 it uses for the
+lock-out-an-admin case — whichever switch you turn off second, and whether you
+flip both in one save or one at a time. Should a deployment reach that state
+anyway (a seeded database, a direct edit), the posture sentence at the top of
+the page turns red and says nobody can sign in; existing sessions keep working
+until they expire, so there is a window to put one back.
 
 ### Create accounts automatically
 
@@ -237,16 +257,22 @@ real assertion, and see what actually arrived.
 These make calls out to your own network, so they fail in ways the other kinds
 cannot.
 
+The code names the failure class; the audit row's summary carries the
+specifics (which URL, which path, which status).
+
 | Code | What happened | What to do |
 |---|---|---|
-| `ambient_token_missing_from_cookie` | The request arrived without your portal's session cookie | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
-| `backchannel_rejected:idp_rejected:401` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
-| `backchannel_rejected:idp_blocked:…` | We refused to make the call | Almost always the host allowlist — Settings → *Internal gateways SSO may call*. Check the host **and the port** |
-| `backchannel_rejected:idp_unreachable:…` | The gateway did not answer in time | Network or an outage on their side. Existing sessions ride out a short one; see below |
-| `backchannel_rejected:idp_status:5xx` | The gateway answered with an error | Theirs to investigate — quote them the status |
-| `backchannel_rejected:gateway_token_absent_at:…` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
-| `backchannel_rejected:claims_absent_at:…` | Same, for the user details | Same fix |
-| `backchannel_rejected:auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+| `backchannel_no_session` | The request arrived without your portal's session cookie (or header) | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
+| `backchannel_idp_rejected:401` / `:403` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
+| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. Existing sessions ride out a short outage; see below |
+| `backchannel_token_absent` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
+| `backchannel_claims_absent` | Same, for the user details | Same fix |
+| `backchannel_claims_unmappable` | The details arrived, but the claim mapping could not produce an identity from them | Open the connection's **Claim mapping**, load the last assertion, and see which required field (subject, email) has no source |
+| `backchannel_auth_time_absent` | Their reply carried no authentication time | Ask them to include one. Turning the requirement off is possible and quietly disables the daily re-authentication ceiling for everyone on that connection |
+| `backchannel_jwt_invalid` | Their reply carried a signed token we could not accept — undecodable, wrong signature, unknown key, or an issuer/audience that fails the pins | Compare the connection's JWKS URL and pins against what their team publishes; the audit summary names the exact refusal |
+| `backchannel_jwt_expired` | The signed token in their reply had already expired | Clock skew or a cached answer on their side |
+| `backchannel_replayed` | A browser-delivered sign-in token was presented twice | Once is a harmless double submit; a pattern is replayed captured tokens — treat as an incident |
+| `backchannel_failed` | None of the above — an unclassified failure, including a connection whose stored settings no longer build | Read the audit summary; if it names a setting, fix the row and save it (saving re-validates) |
 
 ### "People on the gateway connection keep getting signed out"
 
@@ -257,19 +283,73 @@ setting. Before treating it as a fault, ask
 whether the portal considers those people signed in.
 
 If the gateway itself is down, sessions are *not* dropped straight away — they
-keep working for the connection's grace period, measured from the last time the
-gateway actually answered rather than the last time we tried. A brief outage is
-invisible. A long one ends sessions rather than extending them indefinitely,
-which is deliberate: an outage should spend that allowance down, not renew it.
+keep working for the connection's grace period (15 minutes unless the
+connection sets otherwise), measured from the last time the gateway actually
+answered rather than the last time we tried. A brief outage is invisible. A
+long one ends sessions rather than extending them indefinitely, which is
+deliberate: an outage should spend that allowance down, not renew it.
 
 ---
+
+## Reading a connection's card
+
+Every connection on the Providers tab is one card, and the card leads with
+the only two questions that matter: can people use this, and is it about to
+break. Every control on it explains itself when you hover.
+
+**The state chip** says which of three states the connection is in:
+
+* **Draft — not visible to anyone.** Still being set up; nothing on the
+  sign-in page yet. Once a rehearsal has completed against it the chip adds
+  **rehearsed ✓** — the difference between "configured" and "proven".
+* **Live.** Published and enabled: on the sign-in page, accepting sign-ins.
+  Live cards also show **Last sign-in** so a connection nobody has used in
+  weeks reads differently from one that carried somebody in an hour ago.
+* **Off — sign-ins refused.** The switch is off. This wins over everything
+  else: a published connection that is switched off says *Off*, not *Live*.
+  Configuration, mappings and linked identities are all kept — turn it back
+  on and it is exactly as it was.
+
+**The switch** turns the connection on and off. Turning one **off** asks
+first and says how many people are signed in through it right now, with the
+offer to sign them out in the same step (see
+[Turning a connection off](#turning-a-connection-off)). Turning one **on**
+is immediate — it strands nobody.
+
+**Publish** exists only on drafts, and it asks first too: the confirm names
+the consequence — in front of everyone on the sign-in page — and says
+whether a rehearsal has ever completed against this configuration, which is
+the one fact worth weighing at that moment.
+
+**The flask** rehearses a sign-in: you sign in as yourself at that IdP,
+nothing is written, no session is created, and the card reports who would
+have signed in and what they would have been granted. **The pencil** opens
+the connection's settings. **The bin** opens the same settings at the danger
+zone — deletion asks you to type the slug, never one click from the list.
+
+**The shield** is the assurance level ([Assurance](#assurance)); hovering it
+gives the level's meaning in plain words plus the server's reason for this
+row.
+
+**The health line** is the "about to break" answer: certificate days
+remaining on a SAML connection, or **No certificate to check** where there
+is genuinely nothing to probe (a gateway connection, for instance) — which
+is a different fact from **Not checked yet**, the muted line you see before
+the first background sweep. If the health read itself failed, the line says
+**Health unavailable right now** rather than pretending the connection was
+never checked; hovering shows the full detail and when the last check ran.
+
+One banner overrides all of it: when the platform's SSO master switch is
+off, the tab says so at the top — no connection signs anyone in, whatever
+the individual cards say.
 
 ## Worked scenarios
 
 ### Somebody is leaving
 
-1. Remove them from the directory groups. Their SSO-granted access disappears
-   within a few minutes — no action needed here.
+1. Remove them from the directory groups. That lands at their next full
+   sign-in — within 24 hours at the latest — so on its own it is tidy-up,
+   not prompt offboarding. Step 3 is the part that is immediate.
 2. **Check what is left.** Diagnostics → find them. Anything an administrator
    granted by hand is still there and will stay there.
 3. **Suspend the account.** This is the part that actually ends access, whatever
@@ -281,6 +361,31 @@ which is deliberate: an outage should spend that allowance down, not renew it.
 
 Removing the connection itself is not an offboarding tool: it turns off a route
 for everyone, and grants already made stay made.
+
+### Turning a connection off
+
+Disabling a connection (the switch on its card) removes it from the sign-in
+page and 404s its routes immediately — but that is only half of "off":
+
+* **Sessions it minted keep going.** They rotate until their ceilings fire, up
+  to 24 hours. The disable confirm shows how many people that is and offers to
+  sign them out in the same step; password sessions are never touched, so
+  anyone with a local account can sign straight back in that way. The
+  platform-wide equivalent lives on the Settings tab once the master switch is
+  off ("Sessions that outlived the switch").
+* **The liveness probe stops too.** A disabled gateway connection is no longer
+  re-checked upstream on refresh, so its surviving sessions are *more* durable
+  than they were while it was on — deliberate (a disable must not read as a
+  mass sign-out you didn't ask for), and exactly why the sign-out offer exists
+  as the explicit lever.
+* **A signed-in user whose connection vanished** is caught at their next
+  renewal: the silent recovery finds the connection gone from the catalog and
+  lands them on the sign-in page with "This sign-in method is no longer
+  available. Ask your administrator how to sign in now." — not on a dead URL.
+* **Nothing is deleted.** Configuration, mappings and linked identities all
+  survive; re-enabling restores the connection exactly as it was. If people
+  need a way in meanwhile, the admin Users screen can grant reset tokens that
+  give even SSO-only accounts a password.
 
 ### Adding a second identity provider
 

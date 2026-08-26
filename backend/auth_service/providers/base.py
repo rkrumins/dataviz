@@ -68,6 +68,27 @@ class ProviderIdentity:
     #: ``identity_provenance`` declines to hand the IdP ownership of a
     #: field we inferred, and the mapping preview says which it is.
     names_derived_from: Optional[str] = None
+    #: The full-name string the IdP released, exactly as it released it
+    #: (the value the ``display_name`` mapping resolved) — ``None`` when
+    #: no candidate resolved. Kept beside the split halves because the
+    #: split is a guess about word order: "Doe, Alice" reconstructed as
+    #: "Alice Doe" is not what the directory said. Seeds the profile's
+    #: display-name override once, when names were derived and the
+    #: override is blank; never owned, always the person's to change.
+    display_name: Optional[str] = None
+    #: Profile-picture URL asserted by the IdP, when the connection maps
+    #: one. Consumed by the login-time fetch (the server downloads and
+    #: re-serves the image same-origin); never rendered directly — the
+    #: app's CSP forbids remote images, deliberately.
+    avatar_url: Optional[str] = None
+    #: When the UPSTREAM credential behind this login expires (epoch
+    #: seconds), for providers whose server cannot re-ask later — the
+    #: browser-exchange back-channel shape, where the corporate token's
+    #: own ``exp`` is the only expiry signal we will ever hold. Carried
+    #: into the refresh token so the session cannot rotate past it.
+    #: ``None`` everywhere else, and nothing downstream then bounds the
+    #: session by it.
+    upstream_expires_at: Optional[int] = None
 
 
 @runtime_checkable

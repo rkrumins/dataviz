@@ -201,3 +201,46 @@ def test_resolved_sources_reports_none_when_nothing_matches():
         {"sub": "u-1"}, kind="oidc", override={"email": ["nope"]},
     )
     assert out["email"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_backchannel_preview_hoists_like_the_sign_in_does(test_client):
+    """The gateway kinds hoist one level of container nesting at sign-in.
+    A preview that skipped the hoist called a nested payload unmappable
+    while the real sign-in mapped it fine — lying in the pessimistic
+    direction, which teaches operators to ignore the preview."""
+    resp = await test_client.post(PREVIEW, json={
+        "kind": "backchannel",
+        "claims": {
+            "groups": [],
+            "profile": {
+                "sub": "emp-1", "email": "ada@corp.example",
+                "firstName": "Ada", "lastName": "Lovelace",
+                "groups": ["eng", "analytics"],
+            },
+        },
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["resolved"]["email"] == "ada@corp.example"
+    # Both halves of the fix: the empty top-level list does not shadow,
+    # and provenance reports against the same hoisted view.
+    assert body["resolved"]["groups"] == ["eng", "analytics"]
+    assert body["resolvedFrom"]["groups"] == "groups"
+
+
+@pytest.mark.asyncio
+async def test_the_preview_reports_the_avatar_like_the_login_maps_it(
+    test_client,
+):
+    """Preview parity for the avatar claim: the same candidates, and the
+    same provenance reporting, as the sign-in itself."""
+    resp = await test_client.post(PREVIEW, json={
+        "kind": "backchannel",
+        "claims": {"sub": "u-1", "email": "a@corp.example",
+                   "picture": "https://sso.corp.example/a.png"},
+    })
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["resolved"]["avatar_url"] == "https://sso.corp.example/a.png"
+    assert body["resolvedFrom"]["avatar_url"] == "picture"

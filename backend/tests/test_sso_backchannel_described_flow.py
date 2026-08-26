@@ -230,3 +230,167 @@ async def test_the_daily_re_auth_ceiling_applies_to_this_kind_too(
     )
     assert refreshed.status_code == 401
     assert refreshed.json()["detail"]["error"] == "sso_reauth_required"
+
+
+@pytest.mark.asyncio
+async def test_the_flow_works_when_the_gateway_answers_with_a_jwt(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The described corporate translate shape, verbatim: the session
+    cookie goes out, a JWT comes back as the whole body, and its payload
+    — not a JSON envelope — is the identity that lands on the profile."""
+    import jwt as pyjwt
+
+    token = pyjwt.encode(IDENTITY, "unverified-decode", algorithm="HS256")
+
+    def _dispatch(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=token.encode(),
+            headers={"content-type": "application/jwt"},
+        )
+
+    monkeypatch.setattr(
+        outbound.httpx, "AsyncClient",
+        lambda **kw: _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(_dispatch), **kw,
+        ),
+    )
+    await _make(db_session, claims_format="jwt")
+
+    resp = await test_client.get(
+        "/api/v1/auth/corp-gateway/login?next=/dashboard",
+        cookies={"CORPSESSION": "session-abc"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302, resp.text
+    assert "nx_access" in resp.cookies
+
+    from sqlalchemy import select
+    from backend.app.db.models import UserORM
+    row = (await db_session.execute(
+        select(UserORM).where(UserORM.email == "ada.lovelace@corporate.com"),
+    )).scalar_one()
+    assert row.first_name == "Ada"
+
+
+@pytest.mark.asyncio
+async def test_the_reauth_envelope_carries_what_the_recovery_needs(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The silent re-initiation keys on two fields: the provider slug —
+    to find the trigger and re-run the browser's half — and a same-origin
+    login_url as the fallback. An envelope missing either downgrades the
+    behind-the-scenes recovery to a visible bounce."""
+    _stub(monkeypatch)
+    await _make(db_session)
+
+    signin = await test_client.get(
+        "/api/v1/auth/corp-gateway/login",
+        cookies={"CORPSESSION": "session-abc"},
+        follow_redirects=False,
+    )
+    jar = {k: v for k, v in signin.cookies.items()}
+
+    refreshed = await test_client.post("/api/v1/auth/refresh", cookies=jar)
+    assert refreshed.status_code == 401
+    detail = refreshed.json()["detail"]
+    assert detail["error"] == "sso_reauth_required"
+    assert detail["provider"] == "corp-gateway"
+    assert detail["login_url"].startswith("/api/v1/auth/corp-gateway/login")
+
+
+@pytest.mark.asyncio
+async def test_signing_in_again_after_expiry_lands_on_the_same_profile(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The round trip the silent recovery automates, proven at the HTTP
+    layer: expire upstream, get thrown out, present a fresh corporate
+    session through the JSON entry point — the one the recovery posts to
+    — and come back as the same person, not a duplicate."""
+    from sqlalchemy import func, select
+    from backend.app.db.models import UserORM
+
+    _stub(monkeypatch)
+    await _make(db_session)
+
+    first = await test_client.get(
+        "/api/v1/auth/corp-gateway/login",
+        cookies={"CORPSESSION": "session-abc"},
+        follow_redirects=False,
+    )
+    jar = {k: v for k, v in first.cookies.items()}
+
+    # Upstream ends; the next rotation throws the session out.
+    expired = await test_client.post("/api/v1/auth/refresh", cookies=jar)
+    assert expired.status_code == 401
+
+    # The recovery's leg: a fresh corporate session, the empty-body JSON
+    # entry point, no navigation.
+    again = await test_client.post(
+        "/api/v1/auth/corp-gateway/backchannel",
+        json={},
+        cookies={"CORPSESSION": "session-def"},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["user"]["email"] == "ada.lovelace@corporate.com"
+    assert "nx_access" in again.headers.get("set-cookie", "")
+
+    count = (await db_session.execute(
+        select(func.count()).select_from(UserORM).where(
+            UserORM.email == "ada.lovelace@corporate.com",
+        ),
+    )).scalar_one()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_groups_claim_lands_as_sso_memberships(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The described flow's last mile: the JWT's ``groups`` list, mapped
+    to an internal group, puts the person IN that group — rows marked
+    ``source='sso'`` so the directory keeps governing them — and the
+    workspaces that group is bound to follow from ordinary RBAC."""
+    from sqlalchemy import select
+
+    from backend.app.db.models import GroupMemberORM, UserORM
+    from backend.app.db.repositories import group_repo, idp_group_mapping_repo
+    from backend.app.main import app
+    from backend.app.services.permission_service import reconcile_sso_targets
+
+    # The conftest service leaves the reconciler unwired; production
+    # (app/main.py) wires exactly this function. Install it so the login
+    # below exercises the real groups→membership path.
+    monkeypatch.setattr(
+        app.state.identity_service, "_sso_role_reconciler",
+        reconcile_sso_targets,
+    )
+
+    _stub(monkeypatch)
+    row = await _make(db_session)
+    team = await group_repo.create_group(
+        db_session, name="Engineering", description="",
+    )
+    await idp_group_mapping_repo.create_group_membership_mapping(
+        db_session, idp_group="engineering", target_group_id=team.id,
+        provider_id=row.id,
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        "/api/v1/auth/corp-gateway/login?next=/dashboard",
+        cookies={"CORPSESSION": "session-abc"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302, resp.text
+
+    user = (await db_session.execute(
+        select(UserORM).where(UserORM.email == "ada.lovelace@corporate.com")
+    )).scalar_one()
+    member = (await db_session.execute(
+        select(GroupMemberORM).where(
+            GroupMemberORM.user_id == user.id,
+            GroupMemberORM.group_id == team.id,
+        )
+    )).scalar_one()
+    assert member.source == "sso"

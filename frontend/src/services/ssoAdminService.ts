@@ -183,6 +183,10 @@ export interface TestMappingResult {
         last_name: string
         groups: string[]
         auth_time: number | null
+        /** The full-name string as the IdP released it; absent on older
+         *  servers. */
+        display_name?: string | null
+        avatar_url?: string | null
         attributes: Record<string, unknown>
     }
     /**
@@ -242,6 +246,17 @@ export interface AuthConfigPatch {
     expectedVersion?: number
 }
 
+/** Outcome of an end-sessions call. With ``dryRun`` nothing was written
+ *  and ``usersAffected`` is the count a confirm dialog shows; without it
+ *  the numbers are what actually happened. */
+export interface EndSessionsResult {
+    /** Absent on the platform-wide sweep. */
+    providerId?: string
+    usersAffected: number
+    tokensRevoked: number
+    dryRun: boolean
+}
+
 
 // ── Phase 4: user lookup + search response shapes ───────────────────
 
@@ -282,6 +297,118 @@ export interface UserSummary {
     identities: UserIdentityRef[]
     attributes: UserAttributeRef[]
     matchedOn?: string[] | null
+}
+
+/** What a back-channel rehearsal reports — the dry-run envelope from
+ *  ``preview_sso_login``, snake_case as the server writes it. */
+export interface RehearsalOutcome {
+    action?: string
+    reason?: string
+    deny_reasons?: string[]
+    email?: string
+    external_id?: string
+    user_email?: string
+    groups?: string[]
+    reconcile?: {
+        matched?: {
+            idp_group?: string
+            target_type?: string
+            role_name?: string | null
+            group_id?: string | null
+            scope_type?: string | null
+            scope_id?: string | null
+        }[]
+        unmatched_groups?: string[]
+    }
+    /** Browser-assertion rehearsals only: which case the gateway's
+     *  reply turned out to be, and what judged it. Absent for handle
+     *  and server rehearsals. */
+    verification?: {
+        shape?: 'jwt' | 'json'
+        verified?: boolean
+        material?: 'jwks' | 'public_key' | 'shared_secret' | 'none'
+    }
+    /** Whether the claims carried a usable authentication time, and the
+     *  re-certification ceiling measured against it. Absent from older
+     *  servers — absent means say nothing. */
+    auth_time?: { present?: boolean; ceiling_hours?: number }
+}
+
+/** The verification verdict as one operator-readable line, or null when
+ *  the outcome carries none (handle/server rehearsals). */
+function verificationLine(
+    v: NonNullable<RehearsalOutcome['verification']>,
+): string {
+    if (v.verified) {
+        const material = v.material === 'public_key'
+            ? 'your pasted public key'
+            : v.material === 'shared_secret'
+                ? 'the shared secret'
+                : "the connection's published keys (JWKS)"
+        return `The reply was a signed token, verified against ${material}.`
+    }
+    return v.shape === 'json'
+        ? 'The reply was unsigned JSON, accepted only because Trust '
+          + 'unsigned is on — this connection is rated Unverified.'
+        : 'The reply was a signed token accepted WITHOUT verification '
+          + 'because Trust unsigned is on — this connection is rated '
+          + 'Unverified.'
+}
+
+/** The rehearsal's group story, as lines an operator can read.
+ *
+ *  The whole point of rehearsing is answering "what would this sign-in
+ *  DO" — and the outcome's groups and matched mappings are exactly the
+ *  part operators are debugging when access doesn't appear. Discarding
+ *  them made the rehearsal say only who, never what.
+ */
+export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
+    const lines: string[] = []
+    if (outcome.verification) {
+        // First, because it answers the question a varying gateway
+        // makes operators ask: which case did we just see, and was it
+        // verified?
+        lines.push(verificationLine(outcome.verification))
+    }
+    if (outcome.auth_time?.present === false) {
+        // Only a requirement-off row reaches a verdict without one —
+        // and then the ceiling quietly measures from each sign-in.
+        lines.push(
+            'The claims carried no authentication time — the '
+            + `${outcome.auth_time.ceiling_hours ?? 24}-hour `
+            + 're-certification will measure from each sign-in instead '
+            + 'of from the IdP.',
+        )
+    }
+    const groups = outcome.groups ?? []
+    lines.push(
+        groups.length
+            ? `Groups asserted: ${groups.join(', ')}.`
+            : 'The claims carried no groups.',
+    )
+    const matched = outcome.reconcile?.matched ?? []
+    if (matched.length) {
+        const described = matched.map((m) =>
+            m.target_type === 'group_membership'
+                ? `${m.idp_group} → group membership`
+                : `${m.idp_group} → ${m.role_name ?? 'role'}${
+                    m.scope_type === 'workspace' && m.scope_id
+                        ? ` in workspace ${m.scope_id}`
+                        : ''
+                }`,
+        )
+        lines.push(`Mappings that would apply: ${described.join('; ')}.`)
+    } else if (groups.length) {
+        lines.push('No group mapping matched — nothing would be granted.')
+    }
+    const unmatched = outcome.reconcile?.unmatched_groups ?? []
+    if (unmatched.length && matched.length) {
+        lines.push(`Groups matching no mapping: ${unmatched.join(', ')}.`)
+    }
+    if (outcome.action === 'rejected' && outcome.deny_reasons?.length) {
+        lines.push(`Refused because: ${outcome.deny_reasons.join(', ')}.`)
+    }
+    return lines
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -370,6 +497,23 @@ export const ssoAdminService = {
         )
     },
 
+    /** End every session this connection minted — or, with ``dryRun``,
+     *  just count who that would sign out. Password sessions are never
+     *  touched, so "switch back to local accounts" starts immediately.
+     *  Works whether the row is enabled or not: the usual moment for
+     *  this is right after turning it off. */
+    endProviderSessions(
+        id: string, opts?: { dryRun?: boolean },
+    ): Promise<EndSessionsResult> {
+        return request<EndSessionsResult>(
+            `${ADMIN}/idp-providers/${encodeURIComponent(id)}/end-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
+        )
+    },
+
     /** Begin a rehearsal sign-in. Sets the marker cookie and returns the
      *  IdP login URL to open; the callback reports the would-be outcome
      *  and writes nothing. */
@@ -378,6 +522,49 @@ export const ssoAdminService = {
             `${ADMIN}/idp-providers/${encodeURIComponent(id)}/dry-run/start`,
             { method: 'POST' },
         )
+    },
+
+    /** Complete a back-channel rehearsal inline — the shapes that have
+     *  nothing for an opened tab to carry (a handle, a browser-mode
+     *  assertion). Call after ``startDryRun`` so the marker cookie rides
+     *  along; the server answers the would-be outcome and writes
+     *  nothing. Returns a line to show the operator either way — the
+     *  verdict of a rehearsal is a result, not an error. */
+    async rehearseBackchannel(
+        slug: string, body: { handle?: string; assertion?: string },
+    ): Promise<{ ok: boolean; line: string; outcome?: RehearsalOutcome }> {
+        const res = await fetchWithTimeout(
+            `/api/v1/auth/${encodeURIComponent(slug)}/backchannel`,
+            {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                skipAuthRefresh: true,
+            },
+        )
+        const payload = await res.json().catch(() => null)
+        if (!res.ok) {
+            return {
+                ok: false,
+                line: `Rehearsal failed: ${
+                    payload?.detail?.error ?? res.status
+                }`,
+            }
+        }
+        const outcome = payload?.outcome as RehearsalOutcome | undefined
+        if (!outcome) {
+            return { ok: true, line: 'Rehearsal completed, but reported nothing.' }
+        }
+        return {
+            ok: true,
+            // The envelope is snake_case — reading ``externalId`` here
+            // used to make a subject with no email an "unnamed identity".
+            line: `Rehearsal: would sign in as ${
+                outcome.email ?? outcome.external_id ?? 'an unnamed identity'
+            } (${outcome.action ?? 'no action recorded'}).`,
+            outcome,
+        }
     },
 
     /** The most recent assertion a provider sent, for mapping against
@@ -507,6 +694,20 @@ export const ssoAdminService = {
         return request<AuthConfig>(`${ADMIN}/sso/config`, {
             method: 'PATCH', body: JSON.stringify(patch),
         })
+    },
+
+    /** The master-switch companion to ``endProviderSessions``: end every
+     *  session minted through any connection at once. Deliberately
+     *  callable with ``ssoEnabled`` already off — that is when an
+     *  operator reaches for it. */
+    endSsoSessions(opts?: { dryRun?: boolean }): Promise<EndSessionsResult> {
+        return request<EndSessionsResult>(
+            `${ADMIN}/sso/config/end-sso-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
+        )
     },
 
     // ── Phase 4: user lookup + search ────────────────────────────────

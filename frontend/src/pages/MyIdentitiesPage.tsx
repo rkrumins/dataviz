@@ -32,9 +32,12 @@ import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import {
     authService,
+    loginWithBackchannel,
     type SsoProviderSummary,
     type UserIdentity,
 } from '@/services/authService'
+import { gatewaySignInBody, isGatewayProvider } from '@/services/gatewayFlow'
+import { useAuthStore } from '@/store/auth'
 
 export function MyIdentitiesPage() {
     useDocumentTitle('Connected identities')
@@ -75,12 +78,33 @@ function IdentitiesContent() {
      *  the server refuses, so the UI should not offer it either. */
     const signInMethods = identities.length + (passwordSet ? 1 : 0)
 
-    async function handleLink(slug: string) {
+    async function handleLink(p: SsoProviderSummary) {
         setBusy(true)
         setError(null)
         try {
-            const { loginUrl } = await authService.startIdentityLink(slug)
-            window.location.href = loginUrl
+            const { loginUrl } = await authService.startIdentityLink(p.slug)
+            if (!isGatewayProvider(p)) {
+                window.location.href = loginUrl
+                return
+            }
+            // A gateway row's sign-in starts with calls only this browser
+            // can make — the trigger, the translate exchange — so the
+            // navigation that serves the redirect kinds lands it on a
+            // dead route. Run the browser half here instead; the
+            // link-intent cookie startIdentityLink just set rides on the
+            // POST, and the server links rather than signing in fresh.
+            const body = await gatewaySignInBody(p)
+            await loginWithBackchannel(p.slug, body)
+            await refresh()
+            showToast('success', `${p.displayName} linked`)
+            // The link can change what SSO-governed groups grant; pick
+            // the new claims up now rather than at the next rotation.
+            try {
+                await useAuthStore.getState().refreshPermissions()
+            } catch {
+                // best-effort — the linked row is already showing
+            }
+            setBusy(false)
         } catch (err) {
             setError((err as Error).message)
             setBusy(false)
@@ -222,7 +246,7 @@ function IdentitiesContent() {
                                 </div>
                                 <button
                                     disabled={busy}
-                                    onClick={() => handleLink(p.slug)}
+                                    onClick={() => handleLink(p)}
                                     className="shrink-0 px-3 py-1.5 rounded-lg bg-accent-lineage text-white text-xs font-semibold hover:brightness-110 transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
                                 >
                                     <Link2 className="w-3.5 h-3.5" />

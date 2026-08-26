@@ -165,6 +165,71 @@ async def disable_password(
     return user
 
 
+async def clear_idp_managed_snapshot(
+    session: AsyncSession, user_id: str, *, provider_id: str,
+) -> bool:
+    """Release the profile name-lock IF this provider is the one holding it.
+
+    Called when an identity is unlinked. The snapshot's meaning is "this
+    provider re-asserts these fields at every sign-in" — with the link
+    gone there is no next sign-in, so a snapshot left behind is a
+    permanently read-only name that nothing will ever re-sync. Scoped to
+    the managing provider on purpose: unlinking connection B must not
+    release a lock connection A holds.
+
+    Returns True when a snapshot was dropped.
+    """
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return False
+    try:
+        meta = json.loads(user.metadata_ or "{}")
+        if not isinstance(meta, dict):
+            return False
+    except (ValueError, TypeError):
+        return False
+    if _managing_provider_id(meta) != provider_id:
+        return False
+    snapshot = meta.get(_IDP_MANAGED_KEY) or {}
+    managed = snapshot.get("fields") if isinstance(snapshot, dict) else None
+    meta.pop(_IDP_MANAGED_KEY, None)
+    if isinstance(managed, list) and "avatar" in managed:
+        # The picture was the provider's assertion; with the link gone
+        # nothing will ever refresh it, and a stale face is worse than
+        # the initials fallback.
+        user.avatar_image = None
+        user.avatar_image_type = None
+        user.avatar_source_url = None
+    user.metadata_ = json.dumps(meta, default=str)
+    user.updated_at = _now()
+    await session.flush()
+    return True
+
+
+async def set_user_avatar_image(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    image_b64: str,
+    content_type: str,
+    source_url: str,
+) -> bool:
+    """Store a provider-supplied avatar, replacing whatever was there.
+
+    Mutates the mapped instance (the ``update_identity`` convention) so
+    a same-session re-read is fresh.
+    """
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return False
+    user.avatar_image = image_b64
+    user.avatar_image_type = content_type
+    user.avatar_source_url = source_url
+    user.updated_at = _now()
+    await session.flush()
+    return True
+
+
 async def set_user_idp_metadata(
     session: AsyncSession,
     *,
@@ -630,26 +695,52 @@ async def create_reset_token(
     session: AsyncSession,
     user_id: str,
     expiry_hours: int = 1,
+    *,
+    admin_granted: bool = False,
 ) -> tuple[str, str]:
-    """Generate a reset token, store its hash, and return (raw_token, expires_at)."""
+    """Generate a reset token, store its hash, and return (raw_token, expires_at).
+
+    ``admin_granted`` stores the hash with an ``admin_ok:`` prefix —
+    sentinel-in-column like ``__requested__``, no migration. The prefix
+    is authority that travels with the credential: redeeming such a
+    token may convert an SSO-only account into one with a password,
+    which a token minted any other way may not do. Only the admin
+    endpoints pass it; both mints are audited.
+    """
     user = await get_user_by_id(session, user_id)
     if user is None:
         raise ValueError("User not found")
     raw_token = secrets.token_urlsafe(32)
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=expiry_hours)).isoformat()
-    user.reset_token_hash = _hash_token(raw_token)
+    prefix = "admin_ok:" if admin_granted else ""
+    user.reset_token_hash = prefix + _hash_token(raw_token)
     user.reset_token_expires_at = expires_at
     user.updated_at = _now()
     await session.flush()
     return raw_token, expires_at
 
 
+def reset_token_admin_granted(user: UserORM) -> bool:
+    """Whether the reset token stored on this row was admin-minted — the
+    only kind allowed to convert an SSO-only account. Read AFTER
+    ``verify_reset_token`` matched, so it never stands in for validity."""
+    return bool(user.reset_token_hash) \
+        and user.reset_token_hash.startswith("admin_ok:")
+
+
 async def verify_reset_token(session: AsyncSession, token: str) -> Optional[UserORM]:
-    """Find the user matching a reset token (if valid and not expired)."""
+    """Find the user matching a reset token (if valid and not expired).
+
+    Matches the bare hash and the ``admin_ok:``-prefixed one. The prefix
+    exists only server-side — the raw token is hashed before comparing,
+    so a caller cannot smuggle the prefix in through the token itself.
+    """
     token_hash = _hash_token(token)
     result = await session.execute(
         select(UserORM).where(
-            UserORM.reset_token_hash == token_hash,
+            UserORM.reset_token_hash.in_(
+                (token_hash, "admin_ok:" + token_hash),
+            ),
             UserORM.deleted_at.is_(None),
         )
     )

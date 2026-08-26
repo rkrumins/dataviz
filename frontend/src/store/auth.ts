@@ -17,6 +17,8 @@
 import { create } from 'zustand'
 import {
     authService,
+    BackchannelLoginError,
+    loginWithBackchannel,
     type AuthUser,
     type PermissionClaims,
     type SignUpRequest,
@@ -34,6 +36,9 @@ import {
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
+// Static on purpose, and cycle-free: backchannelReauth reaches this
+// store only through a dynamic import.
+import { markAutoPortalTried } from '@/services/backchannelReauth'
 
 export type { PermissionClaims }
 
@@ -212,6 +217,19 @@ interface AuthState {
     loginWithBrowserProfile: (
         providerSlug: string, payload: string,
     ) => Promise<boolean>
+    /** Complete a back-channel login — a handle from the sign-in
+     *  trigger, an assertion from the browser exchange, or an empty
+     *  body for the ambient-cookie shape. Same post-login hydration as
+     *  the other logins; skipping it left the user cache, permissions
+     *  and the session-lost latch stale after a gateway sign-in. */
+    loginWithBackchannel: (
+        providerSlug: string, body: { handle?: string; assertion?: string },
+    ) => Promise<boolean>
+    /** The last structured SSO refusal, so the sign-in page can explain
+     *  it. ``unsafe_auto_link`` suppresses the generic ``error`` — the
+     *  collision modal carries that case, and a second banner saying
+     *  "did not work" underneath it would just compete. */
+    lastSsoDenial: { code: string; email?: string; reasons?: string[] } | null
     signup: (req: SignUpRequest) => Promise<{
         ok: boolean
         message: string
@@ -265,6 +283,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     permissionsStatus: 'unknown',
     error: null,
     isLoading: false,
+    lastSsoDenial: null,
 
     bootstrap: async () => {
         // Idempotent: skip if already resolved or in flight.
@@ -379,6 +398,37 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         }
     },
 
+    loginWithBackchannel: async (providerSlug, body) => {
+        set({ error: null, lastSsoDenial: null, isLoading: true })
+        resetClaimRecovery()
+        resetSessionLostLatch()
+        try {
+            const { user } = await loginWithBackchannel(providerSlug, body)
+            set({ ..._authenticated(user), error: null, isLoading: false })
+            writeUserCache(user)
+            await hydratePermissions(set)
+            void useNavCatalogueStore.getState().hydrate()
+            return true
+        } catch (err: unknown) {
+            const denial = err instanceof BackchannelLoginError
+                ? { code: err.code, email: err.email, reasons: err.reasons }
+                : null
+            const message = err instanceof Error
+                ? err.message
+                : 'Gateway sign-in failed'
+            clearUserCache()
+            set({
+                ..._unauthenticated,
+                // The collision modal owns unsafe_auto_link; a generic
+                // banner under it would compete with the explanation.
+                error: denial?.code === 'unsafe_auto_link' ? null : message,
+                lastSsoDenial: denial,
+                isLoading: false,
+            })
+            return false
+        }
+    },
+
     signup: async (req) => {
         set({ error: null, isLoading: true })
         try {
@@ -411,6 +461,12 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     },
 
     logout: async () => {
+        // Signing out is a statement of intent, and the login page's
+        // silent attempt would override it within a render — logged out,
+        // then immediately signed back in by the corporate session that
+        // is still alive upstream. Spend the auto-attempt sentinel first
+        // so this tab lands on a page that waits for the button.
+        markAutoPortalTried()
         // Best-effort: call /logout so the server can revoke the refresh
         // family. Even if it fails (network down, etc.) we still clear
         // local state — the user is logging out either way.

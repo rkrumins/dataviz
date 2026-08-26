@@ -266,7 +266,7 @@ async function attemptRefresh(): Promise<{
     if (res.status === 401) {
       try {
         const body = (await res.clone().json()) as {
-          detail?: { error?: string; login_url?: string }
+          detail?: { error?: string; provider?: string; login_url?: string }
         }
         const detail = body?.detail
         if (
@@ -281,6 +281,45 @@ async function attemptRefresh(): Promise<{
           && !detail.login_url.startsWith('//')
           && !detail.login_url.includes('\\')
         ) {
+          // A back-channel provider can be re-entered without leaving
+          // the page: the browser re-runs its half of the sign-in — the
+          // trigger, the translate call — and posts the result. We are
+          // inside the in-flight dedupe and the cross-tab lock here, so
+          // this runs once however many tabs and requests hit the 401.
+          // 'recovered' reads as a successful refresh: the caller
+          // retries the original request and nobody notices. 'failed'
+          // reads as expired — one clean sign-out, with the reason
+          // latched for the login page. 'gone' means the provider is no
+          // longer in the catalog, so the login_url below is a dead
+          // route: navigate to the login PAGE instead, which can read
+          // the latched reason and explain. 'not-applicable' (an OIDC
+          // or SAML session, or a row with no browser half) keeps the
+          // navigation below.
+          try {
+            const mod = await import('./backchannelReauth')
+            const result = await mod.attemptSilentReauth(detail.provider)
+            if (result === 'recovered') {
+              return { outcome: 'ok', retryAfterMs: null }
+            }
+            if (result === 'failed') {
+              return { outcome: 'expired', retryAfterMs: null }
+            }
+            if (result === 'gone') {
+              try {
+                const cacheMod = await import('@/store/userCache')
+                cacheMod.clearUserCache()
+              } catch {
+                // ignore — the bounce still happens
+              }
+              if (typeof window !== 'undefined') {
+                window.location.href = LOGIN_PATH
+              }
+              return { outcome: 'reauth', retryAfterMs: null }
+            }
+          } catch {
+            // The recovery module failing to load or throwing is not a
+            // verdict — fall through to the navigation.
+          }
           // Wipe the cached user DTO before the bounce. The IdP
           // re-auth may resolve to a different account, and we
           // don't want a stale cache seeding the next /auth/me.

@@ -140,6 +140,7 @@ export function IdpConnectionWizard({
                     {w.step === 'rehearse' && (
                         <RehearseStep
                             provider={w.provider}
+                            kind={w.preset?.kind}
                             rehearsed={w.rehearsed}
                             onRehearsed={() => w.setRehearsed(true)}
                             onCreateDraft={w.createDraft}

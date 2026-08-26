@@ -61,9 +61,19 @@ describe('every provider kind an operator can pick is documented', () => {
     })
 
     it('operations explains the failures only this kind can produce', async () => {
+        // In the vocabulary the implementation actually emits. The first
+        // version of this table was written against a draft format
+        // (`backchannel_rejected:…`) that the code never shipped, so an
+        // operator searching the audit log for the documented string
+        // found nothing — the exact failure documentation exists to
+        // prevent.
         const text = (await getGuideEntry('sso-operations')!.importFn()).default
-        expect(text).toMatch(/ambient_token_missing_from_cookie/)
-        expect(text).toMatch(/backchannel_rejected/)
+        expect(text).toMatch(/backchannel_no_session/)
+        expect(text).toMatch(/backchannel_idp_rejected/)
+        expect(text).toMatch(/backchannel_unavailable/)
+        expect(text).toMatch(/backchannel_claims_unmappable/)
+        expect(text).not.toMatch(/ambient_token_missing_from_cookie/)
+        expect(text).not.toMatch(/backchannel_rejected:/)
     })
 
     it('operations says the re-check signing people out is the feature', async () => {
