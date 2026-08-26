@@ -95,6 +95,19 @@ can drift away from it. Leave the row empty and the field stays theirs to edit.
 **Full / display name** is never taken this way, whatever you map: it is the one
 name a person can always choose for themselves.
 
+**Avatar** maps a profile-picture URL (`picture`, `avatarUrl`, `photoUrl` and
+similar names resolve by default on a gateway connection), and it only
+participates while the connection's **Map their avatar from the claims** toggle
+— in the Behaviour section, off by default — is on. With it on, our server
+fetches the image during sign-in and serves it from here; browsers never load
+the corporate URL directly, so member lists cannot leak viewers to your photo
+host. A private photo host needs an internal-hosts allowlist entry, exactly
+like the gateway endpoints. While the connection supplies a picture it is
+IdP-managed like the names: shown everywhere, re-applied at every sign-in,
+and the person's own picker says so instead of offering a change that would
+not survive. The image refreshes whenever the URL in the claims changes, and
+unlinking the identity clears it.
+
 #### If your IdP only sends one name
 
 Plenty do — Entra's `name`, a portal's `fullName` — with no separate given and
@@ -399,6 +412,20 @@ corporate side actually refuses, in which case the login page opens with the
 reason and tries again on its own a minute later. Browser-exchange connections
 have no server re-check at all — the translate token's own expiry plays that
 part, with the same silent recovery behind it.
+
+### Who presses the button
+
+By default the sign-in page attempts a gateway connection silently — nobody
+should press a button to spend a session their machine already holds. **Sign
+people in automatically**, in the connection's Behaviour section, turns that
+off: the page then waits for the button, and nothing else changes — the
+mid-session renewals above, the re-certification ceiling included, keep
+working either way.
+
+Signing out always sticks, whatever the toggle says: the tab that signed out
+(and every sibling tab) lands on a page that waits for a click, rather than
+being signed straight back in by a corporate session that is still alive
+upstream.
 
 ---
 

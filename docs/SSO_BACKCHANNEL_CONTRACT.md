@@ -281,7 +281,8 @@ Content-Type: application/json
   "firstName": "Ada",
   "lastName": "Lovelace",
   "groups": ["engineering", "staff"],
-  "auth_time": 1700000000
+  "auth_time": 1700000000,
+  "picture": "https://photos.internal.example/emp-100482.jpg"
 }
 ```
 
@@ -295,13 +296,27 @@ What the application needs:
 | given / family name | no | a directory of blank names is how a bad mapping is discovered, late |
 | groups | no | drives roles and workspace access when mapped |
 | **authentication instant** | strongly | see below |
+| profile picture URL | no | see below |
 
 **The authentication instant** is the moment the person actually signed
 in — not the moment you answered us. Without it the application cannot
 tell how long ago that was, and a daily re-authentication ceiling stops
 applying to everyone on this connection. If your reply carries no such
 field, say so explicitly rather than letting a "close enough" timestamp
-be mapped to it.
+be mapped to it. (An operator can turn the requirement off; the
+rehearsal verdict then states that the ceiling will measure from each
+sign-in instead of from your authentication.)
+
+**The profile picture** is a URL (`picture`, `avatarUrl`, `photoUrl`
+and similar names map by default), and it is opt-in per connection.
+When the operator turns the avatar mapping on, the application's
+SERVER fetches the image at sign-in — image content types only, size
+capped, redirects refused — and re-serves it from its own origin;
+browsers never load your URL directly, so nothing about your photo
+host reaches end users' machines. A private photo host must be added
+to the same internal-hosts allowlist as the endpoints above. The image
+refreshes when the URL in your claims changes, so serve a new URL (a
+content hash, a version) when the photo changes.
 
 ---
 

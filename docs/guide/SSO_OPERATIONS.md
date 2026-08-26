@@ -144,6 +144,13 @@ For a gateway connection's browser exchange, the rehearsal verdict states
 which reply shape arrived (a signed token or bare JSON) and what judged it —
 the quickest way to see which rating a deployment's gateway earns.
 
+The verdict also says when the claims carried **no authentication time**. A
+sign-in can only get that far on a connection whose *Require an
+authentication time* toggle is off, and the line spells out the cost: the
+re-certification ceiling (24 hours by default, `SSO_SESSION_MAX_AGE_HOURS`)
+then measures from each sign-in instead of from the moment the person
+actually authenticated at the IdP.
+
 ---
 
 ## Who can sign in, and how
