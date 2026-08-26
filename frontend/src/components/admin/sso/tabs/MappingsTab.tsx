@@ -142,7 +142,7 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
                     icon={RefreshCw}
                     tone="info"
                     title="Your directory decides who gets what"
-                    blurb="Re-evaluated on every sign-in and every session refresh. Add someone to a group in your identity provider and their access appears here; remove them and it disappears within a few minutes, without anybody touching this page."
+                    blurb="Change a mapping here and it applies to active sessions within minutes — every session refresh re-evaluates. Changes made in your directory (someone added to or removed from a group) are picked up at their next full sign-in, within 24 hours at the latest."
                 >
                     <p className="text-[11px] text-ink-muted leading-relaxed">
                         Access granted this way cannot be edited by hand here — the

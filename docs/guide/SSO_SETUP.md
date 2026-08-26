@@ -141,9 +141,11 @@ nobody but you can see it.
 ### Give people roles automatically
 
 **Admin → SSO → Access mapping.** Each rule reads as a sentence — *anyone in
-`engineering` from Corporate Entra gets Editor in Analytics* — and rules are
-re-evaluated on every sign-in and every session refresh, so your directory stays
-the source of truth.
+`engineering` from Corporate Entra gets Editor in Analytics*. Rules are
+re-evaluated on every sign-in and every session refresh, so a rule you change
+here applies to active sessions within minutes. The group list itself is read
+from your directory at sign-in — a change made there lands at that person's
+next full sign-in, within 24 hours at the latest.
 
 There is more to this than fits here: what a rule can grant, why removing
 somebody from a group does not always remove their access, and what platform-

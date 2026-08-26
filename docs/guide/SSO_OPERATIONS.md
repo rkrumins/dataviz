@@ -24,9 +24,13 @@ flowchart LR
 
 Three properties of that loop matter more than any individual setting.
 
-**It runs constantly.** Not just at sign-in — on every session refresh too, which
-happens every few minutes while somebody has the app open. A change in your
-directory reaches {brand} without anybody touching this page.
+**It runs constantly — over the groups from their last sign-in.** Every session
+refresh (a few minutes apart while somebody has the app open) re-evaluates the
+rules on this page, so a rule you change here applies to active sessions within
+minutes. The group list itself is read from your directory at sign-in: a change
+made *there* — somebody added to or removed from a group — lands at that
+person's next full sign-in, within 24 hours at the latest, because no session
+outlives the daily re-authentication ceiling.
 
 **It is a union.** Somebody in three mapped groups gets everything all three
 grant. There is no ordering, no precedence, and no way for a narrower group to
@@ -277,8 +281,9 @@ deliberate: an outage should spend that allowance down, not renew it.
 
 ### Somebody is leaving
 
-1. Remove them from the directory groups. Their SSO-granted access disappears
-   within a few minutes — no action needed here.
+1. Remove them from the directory groups. That lands at their next full
+   sign-in — within 24 hours at the latest — so on its own it is tidy-up,
+   not prompt offboarding. Step 3 is the part that is immediate.
 2. **Check what is left.** Diagnostics → find them. Anything an administrator
    granted by hand is still there and will stay there.
 3. **Suspend the account.** This is the part that actually ends access, whatever
@@ -290,6 +295,31 @@ deliberate: an outage should spend that allowance down, not renew it.
 
 Removing the connection itself is not an offboarding tool: it turns off a route
 for everyone, and grants already made stay made.
+
+### Turning a connection off
+
+Disabling a connection (the switch on its card) removes it from the sign-in
+page and 404s its routes immediately — but that is only half of "off":
+
+* **Sessions it minted keep going.** They rotate until their ceilings fire, up
+  to 24 hours. The disable confirm shows how many people that is and offers to
+  sign them out in the same step; password sessions are never touched, so
+  anyone with a local account can sign straight back in that way. The
+  platform-wide equivalent lives on the Settings tab once the master switch is
+  off ("Sessions that outlived the switch").
+* **The liveness probe stops too.** A disabled gateway connection is no longer
+  re-checked upstream on refresh, so its surviving sessions are *more* durable
+  than they were while it was on — deliberate (a disable must not read as a
+  mass sign-out you didn't ask for), and exactly why the sign-out offer exists
+  as the explicit lever.
+* **A signed-in user whose connection vanished** is caught at their next
+  renewal: the silent recovery finds the connection gone from the catalog and
+  lands them on the sign-in page with "This sign-in method is no longer
+  available. Ask your administrator how to sign in now." — not on a dead URL.
+* **Nothing is deleted.** Configuration, mappings and linked identities all
+  survive; re-enabling restores the connection exactly as it was. If people
+  need a way in meanwhile, the admin Users screen can grant reset tokens that
+  give even SSO-only accounts a password.
 
 ### Adding a second identity provider
 
