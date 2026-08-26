@@ -327,3 +327,49 @@ async def test_list_providers_ordered_by_priority(db_session):
     listing = await idp_provider_repo.list_providers(db_session)
     slugs = [r.slug for r in listing]
     assert slugs.index("prio-hi") < slugs.index("prio-lo")
+
+
+@pytest.mark.asyncio
+async def test_list_for_users_batches_a_page(db_session):
+    """The admin user list resolves a whole page's identities in ONE
+    query — per-row lookups would be fifty queries per page."""
+    p1 = await idp_provider_repo.create_provider(
+        db_session, slug="batch-a", display_name="A", kind="oidc",
+        settings={},
+    )
+    p2 = await idp_provider_repo.create_provider(
+        db_session, slug="batch-b", display_name="B", kind="saml2",
+        settings={},
+    )
+    both = await user_repo.create_sso_user(
+        db_session, email="both@batch.example", first_name="B",
+        last_name="L", password_hash=disabled_password_hash(),
+    )
+    one = await user_repo.create_sso_user(
+        db_session, email="one@batch.example", first_name="O",
+        last_name="L", password_hash=disabled_password_hash(),
+    )
+    none = await user_repo.create_sso_user(
+        db_session, email="none@batch.example", first_name="N",
+        last_name="L", password_hash=disabled_password_hash(),
+    )
+    for uid, pid, ext in [
+        (both.id, p1.id, "e1"), (both.id, p2.id, "e2"), (one.id, p1.id, "e3"),
+    ]:
+        await user_identity_repo.create_identity(
+            db_session, user_id=uid, provider_id=pid, external_id=ext,
+            email_at_link=None,
+        )
+    await db_session.commit()
+
+    grouped = await user_identity_repo.list_for_users(
+        db_session, [both.id, one.id, none.id],
+    )
+    assert sorted(i.provider.slug for i in grouped[both.id]) == [
+        "batch-a", "batch-b",
+    ]
+    assert [i.provider.slug for i in grouped[one.id]] == ["batch-a"]
+    # No identities = no key; and ``.provider`` was eager-loaded (no
+    # MissingGreenlet on access above).
+    assert none.id not in grouped
+    assert await user_identity_repo.list_for_users(db_session, []) == {}

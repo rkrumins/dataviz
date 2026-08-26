@@ -47,12 +47,13 @@ from backend.auth_service.cookies import clear_session_cookies
 from backend.auth_service.core.tokens import invite_expiry
 from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import user_repo
+from backend.app.db.repositories import user_identity_repo, user_repo
 from backend.common.display_name import resolve_display_name
 from backend.common.models.auth import (
     AccountActivityItem,
     AdminCreateUserRequest,
     AdminCreateUserResponse,
+    AdminUserIdentityRef,
     AdminUserResponse,
     AdminResetPasswordRequest,
     ChangeMyPasswordRequest,
@@ -105,10 +106,29 @@ async def _public_response(session: AsyncSession, user) -> UserPublicResponse:
     )
 
 
-async def _admin_response(session: AsyncSession, user) -> AdminUserResponse:
+def _identity_ref(row) -> AdminUserIdentityRef:
+    return AdminUserIdentityRef(
+        providerId=row.provider_id,
+        slug=row.provider.slug if row.provider else row.provider_id,
+        displayName=(
+            row.provider.display_name if row.provider else row.provider_id
+        ),
+        kind=row.provider.kind if row.provider else "unknown",
+        lastLoginAt=row.last_login_at,
+    )
+
+
+async def _admin_response(
+    session: AsyncSession, user, *, identities=None,
+) -> AdminUserResponse:
     roles = await user_repo.get_user_roles(session, user.id)
     role = roles[0] if roles else "user"
     has_reset = await user_repo.has_pending_reset(session, user.id)
+    # ``identities=None`` means "not batched by the caller" — fetch this
+    # one user's rows rather than reporting an SSO account as local. The
+    # list endpoint batches; the single-user paths pay one small query.
+    if identities is None:
+        identities = await user_identity_repo.list_for_user(session, user.id)
     return AdminUserResponse(
         id=user.id,
         email=user.email,
@@ -123,6 +143,9 @@ async def _admin_response(session: AsyncSession, user) -> AdminUserResponse:
         updatedAt=user.updated_at,
         resetRequested=has_reset,
         mustChangePassword=bool(user.must_change_password),
+        hasPassword=is_password_set(user.password_hash),
+        signupSource=getattr(user, "signup_source", None),
+        identities=[_identity_ref(row) for row in identities],
     )
 
 
@@ -574,7 +597,14 @@ async def list_users(
     session: AsyncSession = Depends(get_db_session),
 ):
     users = await user_repo.list_users(session, status=status_filter, limit=limit, offset=offset)
-    return [await _admin_response(session, u) for u in users]
+    # One query for the whole page's identities, not one per row.
+    linked = await user_identity_repo.list_for_users(
+        session, [u.id for u in users],
+    )
+    return [
+        await _admin_response(session, u, identities=linked.get(u.id, []))
+        for u in users
+    ]
 
 
 @admin_router.post("/{user_id}/approve", status_code=status.HTTP_200_OK)

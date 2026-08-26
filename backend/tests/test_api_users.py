@@ -46,6 +46,85 @@ async def test_list_users_with_pagination(test_client: AsyncClient):
     assert isinstance(resp.json(), list)
 
 
+async def test_list_users_reports_sign_in_methods(test_client, db_session):
+    """Each row says how the account signs in: a usable password, the
+    linked IdPs (slug + display name + kind), and where the account came
+    from — so the admin table can tell local from SSO at a glance."""
+    from backend.app.db.repositories import (
+        idp_provider_repo, user_identity_repo, user_repo,
+    )
+    from backend.auth_service.core.password import disabled_password_hash
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="corp-entra", display_name="Corporate Entra",
+        kind="oidc", settings={},
+    )
+    sso_user = await user_repo.create_sso_user(
+        db_session, email="sso.only@example.com", first_name="S",
+        last_name="O", password_hash=disabled_password_hash(),
+    )
+    await user_identity_repo.create_identity(
+        db_session, user_id=sso_user.id, provider_id=provider.id,
+        external_id="ext-sso", email_at_link=sso_user.email,
+    )
+    local_user = await user_repo.create_user(
+        db_session, email="local@example.com",
+        password_hash="argon2-placeholder", first_name="L", last_name="U",
+        status="active",
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/admin/users?limit=200")
+    assert resp.status_code == 200
+    rows = {u["email"]: u for u in resp.json()}
+
+    sso_row = rows["sso.only@example.com"]
+    assert sso_row["hasPassword"] is False
+    assert [i["slug"] for i in sso_row["identities"]] == ["corp-entra"]
+    assert sso_row["identities"][0]["displayName"] == "Corporate Entra"
+    assert sso_row["identities"][0]["kind"] == "oidc"
+    assert sso_row["identities"][0]["providerId"] == provider.id
+
+    local_row = rows["local@example.com"]
+    assert local_row["hasPassword"] is True
+    assert local_row["identities"] == []
+    assert local_user.id == local_row["id"]
+
+
+async def test_update_user_noop_response_carries_sign_in_fields(
+    test_client, db_session,
+):
+    """Pins the per-user fallback in ``_admin_response``: a path that did
+    NOT batch identities must still report them rather than describing an
+    SSO account as local."""
+    from backend.app.db.repositories import (
+        idp_provider_repo, user_identity_repo, user_repo,
+    )
+    from backend.auth_service.core.password import disabled_password_hash
+
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="corp-okta", display_name="Corp Okta",
+        kind="oidc", settings={},
+    )
+    user = await user_repo.create_sso_user(
+        db_session, email="patched@example.com", first_name="P",
+        last_name="U", password_hash=disabled_password_hash(),
+    )
+    await user_identity_repo.create_identity(
+        db_session, user_id=user.id, provider_id=provider.id,
+        external_id="ext-patch", email_at_link=user.email,
+    )
+    await db_session.commit()
+
+    resp = await test_client.patch(
+        f"/api/v1/admin/users/{user.id}", json={"firstName": "Patched"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["hasPassword"] is False
+    assert [i["slug"] for i in body["identities"]] == ["corp-okta"]
+
+
 # ── POST /admin/users/{user_id}/approve ───────────────────────────────
 
 async def test_approve_user_not_found(test_client: AsyncClient):
