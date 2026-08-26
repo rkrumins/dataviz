@@ -28,10 +28,13 @@ import logging
 import os
 import re
 import socket
+import ssl
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+
+from backend.common.adapters.redis_tls import _normalize_cert_path
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,71 @@ class OutboundStatusError(OutboundError):
 
 def _is_prod() -> bool:
     return os.getenv("ENV", "dev").strip().lower() in _PROD_ENV_VALUES
+
+
+#: Deployment-level trust anchor for outbound SSO TLS: a PEM bundle
+#: path (``file:`` URIs tolerated, like the ``REDIS_*_TLS_CA_CERTS``
+#: family). Read at CALL time, like :func:`_is_prod`, so tests
+#: (``monkeypatch.setenv``) and restartless reconfigures take effect on
+#: the next request.
+SSO_OUTBOUND_TLS_CA_CERTS_ENV = "SSO_OUTBOUND_TLS_CA_CERTS"
+
+#: One ``ssl.SSLContext`` per bundle path. Building one re-reads the
+#: PEM from disk; a login burst should not pay that per call. Failures
+#: are deliberately NOT cached: a bundle that appears later (a Secret
+#: mounted after boot) starts working on the next call, and until then
+#: every call logs.
+_SSL_CONTEXT_CACHE: dict[str, ssl.SSLContext] = {}
+
+
+def _bundle_context(raw: str) -> ssl.SSLContext | None:
+    path = _normalize_cert_path(raw)
+    if not path:
+        return None
+    ctx = _SSL_CONTEXT_CACHE.get(path)
+    if ctx is not None:
+        return ctx
+    try:
+        ctx = ssl.create_default_context(cafile=path)
+    except (OSError, ssl.SSLError) as exc:
+        logger.error(
+            "%s names %r, which cannot be loaded (%s). Outbound TLS "
+            "verification stays on the SYSTEM trust store — hosts signed "
+            "by your corporate CA keep failing, with this line saying "
+            "why, until the path names a readable PEM bundle.",
+            SSO_OUTBOUND_TLS_CA_CERTS_ENV, path, exc,
+        )
+        return None
+    _SSL_CONTEXT_CACHE[path] = ctx
+    return ctx
+
+
+def resolve_outbound_verify(
+    override: bool | str | ssl.SSLContext | None = None,
+) -> bool | ssl.SSLContext:
+    """The ``verify=`` value for one outbound TLS connection.
+
+    Precedence: an explicit per-call *override* (``False`` is
+    meaningful — the back-channel per-connection escape hatch; a str is
+    treated as a bundle path), then the deployment bundle named by
+    :data:`SSO_OUTBOUND_TLS_CA_CERTS_ENV`, then ``True`` — full
+    verification against the system trust store.
+
+    A bundle path that cannot be loaded FAILS CLOSED to ``True``: a
+    typo must not take down every login, and ``True`` is the strictest
+    posture — the only consequence is that corporate-CA hosts keep
+    failing exactly as before, now with an ERROR log naming the fix.
+    Returns a context rather than the path because httpx deprecates
+    ``verify=<str>``.
+    """
+    if override is not None:
+        if isinstance(override, str):
+            return _bundle_context(override) or True
+        return override
+    configured = os.getenv(SSO_OUTBOUND_TLS_CA_CERTS_ENV, "").strip()
+    if not configured:
+        return True
+    return _bundle_context(configured) or True
 
 
 def _unwrap(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
@@ -245,7 +313,10 @@ def assert_fetchable(
             )
 
 
-async def fetch_metadata(url: str, *, timeout: float) -> httpx.Response:
+async def fetch_metadata(
+    url: str, *, timeout: float,
+    verify: bool | str | ssl.SSLContext | None = None,
+) -> httpx.Response:
     """GET *url* once, with redirects off and the body bounded.
 
     Redirects are disabled rather than followed-and-rechecked: a 302 to
@@ -255,6 +326,7 @@ async def fetch_metadata(url: str, *, timeout: float) -> httpx.Response:
     assert_fetchable(url)
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
     ) as client:
         resp = await client.get(url)
         resp.raise_for_status()
@@ -283,6 +355,7 @@ async def request_json(
     max_bytes: int = MAX_JSON_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
     accept_jwt: bool = False,
+    verify: bool | str | ssl.SSLContext | None = None,
 ) -> Any:
     """Make one guarded credentialed request and return the parsed JSON.
 
@@ -321,6 +394,7 @@ async def request_json(
 
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
     ) as client:
         async with client.stream(
             method.upper(), url,
@@ -387,6 +461,7 @@ async def fetch_image(
     max_bytes: int = MAX_AVATAR_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
     require_hosts: frozenset[str] | set[str] | None = None,
+    verify: bool | str | ssl.SSLContext | None = None,
 ) -> tuple[bytes, str]:
     """GET one image with :func:`request_json`'s guards, returning
     ``(bytes, content_type)``.
@@ -410,6 +485,7 @@ async def fetch_image(
     current = url
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
     ) as client:
         for _hop in range(_MAX_AVATAR_REDIRECTS + 1):
             if require_hosts is not None:
@@ -469,6 +545,7 @@ async def fetch_jwks(
     timeout: float,
     max_bytes: int = MAX_JSON_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
+    verify: bool | str | ssl.SSLContext | None = None,
 ) -> dict:
     """GET a JWKS document through the same guards as every other call.
 
@@ -480,7 +557,7 @@ async def fetch_jwks(
     """
     doc = await request_json(
         url, method="GET", timeout=timeout, max_bytes=max_bytes,
-        allow_hosts=allow_hosts,
+        allow_hosts=allow_hosts, verify=verify,
     )
     if not isinstance(doc, dict) or not isinstance(doc.get("keys"), list):
         raise BlockedOutboundRequest(
