@@ -883,7 +883,11 @@ async def generate_reset_token(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    raw_token, expires_at = await user_repo.create_reset_token(session, user_id)
+    # admin_granted: this mint is the audited decision that the account
+    # may have a password — redeeming it converts even an SSO-only row.
+    raw_token, expires_at = await user_repo.create_reset_token(
+        session, user_id, admin_granted=True,
+    )
 
     await user_repo.create_outbox_event(
         session,
@@ -2005,7 +2009,11 @@ async def _provision_user(
     setup_token: Optional[str] = None
     setup_expires: Optional[str] = None
     if credential == "setup_link":
-        setup_token, setup_expires = await user_repo.create_reset_token(session, user.id)
+        # admin_granted: the setup link is how an admin-created account
+        # gets its first password, including one created without any.
+        setup_token, setup_expires = await user_repo.create_reset_token(
+            session, user.id, admin_granted=True,
+        )
 
     await user_repo.create_outbox_event(
         session,

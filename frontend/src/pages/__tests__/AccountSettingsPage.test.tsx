@@ -45,7 +45,7 @@ vi.mock('@/services/accountService', () => ({
 }))
 
 vi.mock('@/services/authService', () => ({
-    authService: { listMyIdentities: vi.fn() },
+    authService: { listMyIdentities: vi.fn(), forgotPassword: vi.fn() },
 }))
 
 const showToast = vi.fn()
@@ -143,6 +143,37 @@ describe('AccountSettingsPage', () => {
 
         // Proves the value reached the page rather than the default.
         expect(await screen.findByText(/no password on this account/i)).toBeInTheDocument()
+    })
+
+    it('lets an SSO-only account ask for a password, and confirms', async () => {
+        // The request is the forgot-password flow: no token is minted —
+        // the account is flagged and an administrator grants a link
+        // deliberately. The confirmation has to say the admin is the
+        // next step, or the person sits waiting for an email that only
+        // an admin can cause.
+        vi.mocked(authService.listMyIdentities).mockResolvedValue({
+            passwordSet: false,
+            identities: [{
+                id: 'idn_1',
+                provider: { id: 'p1', slug: 'okta', displayName: 'Okta', kind: 'oidc' },
+                externalId: 'x', createdAt: '',
+            }],
+        })
+        vi.mocked(authService.forgotPassword).mockResolvedValue({ message: 'ok' })
+        const user = userEvent.setup()
+        renderPage()
+
+        await user.click(
+            await screen.findByRole('button', { name: /request a password/i }),
+        )
+
+        expect(authService.forgotPassword)
+            .toHaveBeenCalledWith('alice@example.com')
+        expect(await screen.findByRole('status'))
+            .toHaveTextContent(/administrator will see it/i)
+        expect(
+            screen.queryByRole('button', { name: /request a password/i }),
+        ).not.toBeInTheDocument()
     })
 
     it('keeps the password form out of the way until it is asked for', async () => {
