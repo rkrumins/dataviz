@@ -338,6 +338,42 @@ export interface RehearsalOutcome {
      *  re-certification ceiling measured against it. Absent from older
      *  servers — absent means say nothing. */
     auth_time?: { present?: boolean; ceiling_hours?: number }
+    /** The avatar leg: the rehearsal makes the same guarded image GET a
+     *  real sign-in would (storing nothing) and reports the verdict.
+     *  Absent from older servers — absent means say nothing. */
+    avatar?: {
+        url?: string | null
+        fetched?: boolean
+        content_type?: string
+        size?: number
+        reason?: string
+        detail?: string
+    }
+}
+
+/** The avatar verdict as one operator-readable line, or null for the
+ *  no-URL case on a connection that maps no avatar — a fact worth a
+ *  line only when someone expected a picture, which the caller cannot
+ *  know; the rehearsal page itself prints it, this summary stays
+ *  quiet. */
+function avatarLine(
+    a: NonNullable<RehearsalOutcome['avatar']>,
+): string | null {
+    if (!a.url) return null
+    if (a.fetched) {
+        const kib = Math.max(1, Math.round((a.size ?? 0) / 1024))
+        return `Their picture would arrive (${a.content_type ?? 'image'}, `
+            + `${kib} KiB) — a real sign-in stores and shows it.`
+    }
+    const why = a.reason === 'host_not_allowlisted'
+        ? 'its host is not on the avatar image hosts list (Settings tab)'
+        : a.reason === 'not_an_image'
+            ? 'the URL does not serve a raster image (PNG, JPEG, GIF, '
+              + 'WebP or AVIF)'
+            : a.reason === 'too_many_redirects'
+                ? 'the URL redirects more than three times'
+                : a.detail || a.reason || 'the fetch failed'
+    return `Their picture would NOT arrive: ${why}.`
 }
 
 /** The verification verdict as one operator-readable line, or null when
@@ -385,6 +421,10 @@ export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
             + 're-certification will measure from each sign-in instead '
             + 'of from the IdP.',
         )
+    }
+    if (outcome.avatar) {
+        const line = avatarLine(outcome.avatar)
+        if (line) lines.push(line)
     }
     const groups = outcome.groups ?? []
     lines.push(

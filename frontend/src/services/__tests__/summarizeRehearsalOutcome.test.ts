@@ -135,3 +135,52 @@ describe('the authentication-time line', () => {
             .toBe('The claims carried no groups.')
     })
 })
+
+describe('the avatar line', () => {
+    it('reports an arriving picture with its type and size', () => {
+        const line = summarizeRehearsalOutcome({
+            groups: [],
+            avatar: {
+                url: 'https://avatars.example.com/a.png',
+                fetched: true, content_type: 'image/png', size: 40960,
+            },
+        })[0]
+        expect(line).toContain('would arrive')
+        expect(line).toContain('image/png')
+        expect(line).toContain('40 KiB')
+    })
+
+    it('names the allowlist when that is what refused it', () => {
+        const line = summarizeRehearsalOutcome({
+            groups: [],
+            avatar: {
+                url: 'https://elsewhere.example/x.png',
+                fetched: false, reason: 'host_not_allowlisted',
+            },
+        })[0]
+        expect(line).toContain('would NOT arrive')
+        expect(line).toContain('avatar image hosts list')
+    })
+
+    it('asks for a raster when the reply was not an image', () => {
+        const line = summarizeRehearsalOutcome({
+            groups: [],
+            avatar: {
+                url: 'https://elsewhere.example/logo.svg',
+                fetched: false, reason: 'not_an_image',
+            },
+        })[0]
+        expect(line).toContain('raster image')
+    })
+
+    it('stays silent with no avatar block, and for a no-URL verdict', () => {
+        // Absent block: older server. url:null: a connection that maps
+        // no avatar — the rehearsal page prints that; this summary,
+        // rendered in a small notice, does not.
+        expect(summarizeRehearsalOutcome({ groups: [] })[0])
+            .toBe('The claims carried no groups.')
+        expect(summarizeRehearsalOutcome({
+            groups: [], avatar: { url: null },
+        })[0]).toBe('The claims carried no groups.')
+    })
+})
