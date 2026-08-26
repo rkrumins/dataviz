@@ -24,6 +24,7 @@ import { LoginPage } from './LoginPage'
 const {
     loginContext, resolveEmailDomain, runAuthenticateTrigger,
     runBrowserExchange, storeLoginWithBackchannel, navigate, lastDenialRef,
+    errorRef,
 } = vi.hoisted(() => ({
     loginContext: vi.fn(),
     resolveEmailDomain: vi.fn(),
@@ -34,6 +35,10 @@ const {
     // What useAuthStore.getState().lastSsoDenial answers — the page
     // reads it after a refused sign-in to decide on the modal.
     lastDenialRef: { current: null as unknown },
+    // The store's error, observable: a refused loginWithBackchannel
+    // writes it in the real store, and the page must be seen NOT to
+    // leave it on screen for an attempt nobody asked for.
+    errorRef: { current: null as string | null },
 }))
 
 vi.mock('react-router-dom', async () => {
@@ -61,7 +66,9 @@ vi.mock('@/store/auth', () => ({
             const state = {
                 login: vi.fn(), loginWithBrowserProfile: vi.fn(),
                 loginWithBackchannel: storeLoginWithBackchannel,
-                error: null, clearError: vi.fn(), isLoading: false,
+                error: errorRef.current,
+                clearError: () => { errorRef.current = null },
+                isLoading: false,
                 isAuthenticated: false, status: 'unauthenticated',
             }
             return selector ? selector(state) : state
@@ -100,6 +107,7 @@ beforeEach(() => {
     vi.clearAllMocks()
     window.sessionStorage.clear()
     lastDenialRef.current = null
+    errorRef.current = null
     assign = vi.fn()
     Object.defineProperty(window, 'location', {
         configurable: true,
@@ -264,6 +272,131 @@ describe('silent sign-in', () => {
         renderLogin()
         await screen.findByLabelText(/password/i)
         expect(runAuthenticateTrigger).not.toHaveBeenCalled()
+    })
+
+    it('a refused silent attempt explains itself outside the form', async () => {
+        // The server said no (not a transport failure). The real store
+        // writes its generic banner; the page must move that into an
+        // attributed notice beside the retry, not leave an unexplained
+        // red error over a form nobody touched.
+        storeLoginWithBackchannel.mockImplementation(async () => {
+            errorRef.current = 'Signing in with that session did not work.'
+            return false
+        })
+        renderLogin()
+        expect(await screen.findByText(
+            /signing in with your corporate gateway session did not work/i,
+        )).toBeInTheDocument()
+        expect(screen.getByText(/try signing in again/i)).toBeInTheDocument()
+        // The unattributed store banner was cleared, not left to stick.
+        expect(errorRef.current).toBeNull()
+        expect(
+            screen.queryByText('Signing in with that session did not work.'),
+        ).not.toBeInTheDocument()
+        // And the ordinary form is still there.
+        expect(screen.getByLabelText(/password/i)).toBeInTheDocument()
+    })
+
+    it('a failed recovery with nothing to press offers a retry', async () => {
+        // Local login off, catalog empty (the connection was disabled or
+        // the read failed): the old copy ended "Try again below." with
+        // literally nothing below it.
+        loginContext.mockResolvedValue({
+            allowLocalLogin: false, emailFirstLogin: false, providers: [],
+        })
+        window.sessionStorage.setItem('nx_bc_reauth_failed', JSON.stringify({
+            at: Date.now(), reason: 'Your session there has ended.',
+        }))
+        renderLogin()
+        expect(await screen.findByText(/could not be renewed automatically/i))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/try signing in again/i))
+            .not.toBeInTheDocument()
+        expect(
+            await screen.findByRole('button', { name: /^retry$/i }),
+        ).toBeInTheDocument()
+    })
+})
+
+// ── email-first must not hide the only working door ──────────────────
+
+describe('email-first with a gateway connection', () => {
+    beforeEach(() => {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: true,
+            providers: [GATEWAY],
+        })
+    })
+
+    it('still offers the gateway button', async () => {
+        // Its sign-in is a button on this very page — there is no
+        // redirect for email-first to hide. After a failed silent
+        // attempt this button is the recovery.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        renderLogin()
+        expect(await screen.findByRole('button', {
+            name: /corporate gateway/i,
+        })).toBeInTheDocument()
+        // Every provider is already visible, so there is nothing for
+        // the disclosure to disclose.
+        expect(screen.queryByText(/other ways to sign in/i))
+            .not.toBeInTheDocument()
+    })
+
+    it('keeps redirect providers tucked away, with the disclosure', async () => {
+        loginContext.mockResolvedValue({
+            allowLocalLogin: true, emailFirstLogin: true,
+            providers: [GATEWAY, OIDC],
+        })
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        renderLogin()
+        expect(await screen.findByRole('button', {
+            name: /corporate gateway/i,
+        })).toBeInTheDocument()
+        expect(screen.queryByText(/entra/i)).not.toBeInTheDocument()
+        expect(screen.getByText(/other ways to sign in/i)).toBeInTheDocument()
+    })
+
+    it('a refused silent attempt leaves a button, not a dead page', async () => {
+        // The reported incognito state: error text, no button, no
+        // response. All three fixed at once.
+        storeLoginWithBackchannel.mockImplementation(async () => {
+            errorRef.current = 'Signing in with that session did not work.'
+            return false
+        })
+        renderLogin()
+        expect(await screen.findByText(
+            /signing in with your corporate gateway session did not work/i,
+        )).toBeInTheDocument()
+        expect(await screen.findByRole('button', {
+            name: /corporate gateway/i,
+        })).toBeInTheDocument()
+        expect(
+            screen.queryByText('Signing in with that session did not work.'),
+        ).not.toBeInTheDocument()
+    })
+
+    it('Enter runs the routed gateway sign-in instead of doing nothing', async () => {
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        resolveEmailDomain.mockResolvedValue({ provider: GATEWAY })
+        renderLogin()
+        const emailInput = await screen.findByLabelText(/^email$/i)
+        // {enter} submits before the 400 ms debounce has routed — the
+        // handler resolves the address itself rather than swallowing
+        // the keystroke.
+        await userEvent.type(emailInput, 'ada@corp.example{enter}')
+        await waitFor(() => {
+            expect(storeLoginWithBackchannel).toHaveBeenCalled()
+        })
+        expect(navigate).not.toHaveBeenCalledWith(
+            expect.stringContaining('login'), expect.anything(),
+        )
     })
 })
 

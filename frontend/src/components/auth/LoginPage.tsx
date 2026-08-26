@@ -580,10 +580,11 @@ export function LoginPage() {
     const [portalError, setPortalError] = useState<string | null>(() => {
         const failure = readReauthFailure()
         if (!failure) return null
+        // The "what next" half is appended at render time, where the
+        // page knows whether there is actually anything below to press.
         return (
             'Your corporate sign-in could not be renewed automatically.'
             + (failure.reason ? ` ${failure.reason}` : '')
-            + ' Try again below.'
         )
     })
     // Escape hatch out of the email-first flow. Never shown when local
@@ -639,7 +640,17 @@ export function LoginPage() {
             void gatewaySignInBody(candidate)
                 .then((body) => loginWithBackchannel(candidate.slug, body))
                 .then((ok) => {
-                    if (ok) navigate('/', { replace: true })
+                    if (ok) { navigate('/', { replace: true }); return }
+                    // A server refusal lands in the store's error — the
+                    // form's banner — for an attempt nobody asked for.
+                    // Move it beside the button that retries it, with
+                    // the attribution the bare message lacks. The "what
+                    // next" suffix is appended at render time.
+                    clearError()
+                    setPortalError(
+                        `Signing in with your ${candidate.displayName} `
+                        + 'session did not work.',
+                    )
                 })
                 .catch(() => { /* fall through to the form */ })
             return
@@ -651,10 +662,15 @@ export function LoginPage() {
         autoAttempted.current = true
         markAutoPortalTried()
         void loginWithBrowserProfile(candidate.slug, payload).then((ok) => {
-            if (ok) navigate('/', { replace: true })
+            if (ok) { navigate('/', { replace: true }); return }
+            clearError()
+            setPortalError(
+                `Signing in with your ${candidate.displayName} session `
+                + 'did not work.',
+            )
         })
     }, [providers, isAuthenticated, loginWithBrowserProfile,
-        loginWithBackchannel, navigate])
+        loginWithBackchannel, navigate, clearError])
 
     // The collision modal's one state, fed from BOTH arrival paths: the
     // redirect flow's ``?error_code=unsafe_auto_link&email=...`` (which
@@ -762,13 +778,48 @@ export function LoginPage() {
     // the topology disclosure it exists to remove.
     const leadWithEmail = emailFirst
     const showEmailField = showPasswordForm || leadWithEmail
-    const showProviderRow = !leadWithEmail || showAllProviders
+    // Gateway connections stay visible even under email-first: their
+    // sign-in is a button on this very page (no redirect to hide), and
+    // after a failed silent attempt that button is the recovery — an
+    // error with nothing to press strands exactly the person the error
+    // is about. Redirect providers keep the email-first tucking.
+    const gatewayProviders = (providers ?? []).filter(isGatewayProvider)
+    const visibleProviders = leadWithEmail && !showAllProviders
+        ? (providers === null ? null : gatewayProviders)
+        : providers
+    const hiddenProviderCount =
+        (providers?.length ?? 0) - (visibleProviders?.length ?? 0)
+    const showProviderRow =
+        !leadWithEmail || showAllProviders || gatewayProviders.length > 0
+    const portalHasAffordance = showPasswordForm
+        || (visibleProviders?.length ?? 0) > 0 || routed != null
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
-        if (!email || !password || isLoading) return
-        const ok = await login(email, password)
-        if (ok) navigate('/', { replace: true })
+        if (showPasswordForm) {
+            if (!email || !password || isLoading) return
+            const ok = await login(email, password)
+            if (ok) navigate('/', { replace: true })
+            return
+        }
+        // Email-first renders no password field, so the guard above
+        // turned every Enter press into a silent no-op. Route the
+        // address instead — what the debounced resolve does, forced
+        // now. A miss stays silent by design (see /auth/resolve); the
+        // "enter your work email" hint is already on screen.
+        if (isLoading || !email.includes('@')) return
+        const target = routed ?? await authService.resolveEmailDomain(email)
+            .then((r) => r.provider ?? null)
+            .catch(() => null)
+        if (!target) return
+        if (isGatewayProvider(target)) {
+            void gatewaySignIn(target)
+            return
+        }
+        window.location.assign(
+            `/api/v1/auth/${encodeURIComponent(target.slug)}/login`
+            + `?next=${encodeURIComponent('/dashboard')}`,
+        )
     }
 
     // Avoid flashing the form to a user whose cookie is still being
@@ -991,7 +1042,7 @@ export function LoginPage() {
                                     Use a password instead
                                 </button>
                             )}
-                            {!showAllProviders && (providers?.length ?? 0) > 0 && (
+                            {!showAllProviders && hiddenProviderCount > 0 && (
                                 <button
                                     type="button"
                                     onClick={() => setShowAllProviders(true)}
@@ -1005,7 +1056,7 @@ export function LoginPage() {
 
                     {showProviderRow && (
                         <SsoButtons
-                            providers={providers}
+                            providers={visibleProviders}
                             failed={contextFailed}
                             onPortalError={setPortalError}
                             onGatewaySignIn={gatewaySignIn}
@@ -1016,7 +1067,26 @@ export function LoginPage() {
                     {portalError && (
                         <div className="mt-4 flex items-start gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 text-sm">
                             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                            <p>{portalError}</p>
+                            <div>
+                                <p>
+                                    {portalError}
+                                    {portalHasAffordance
+                                        && ' Try signing in again.'}
+                                </p>
+                                {/* An error that says what to do next must
+                                    have a next. With no form, no button and
+                                    no routed provider on the page, offer
+                                    the one thing that can change that. */}
+                                {!portalHasAffordance && (
+                                    <button
+                                        type="button"
+                                        onClick={() => window.location.reload()}
+                                        className="mt-2 text-xs font-semibold text-accent-lineage hover:underline"
+                                    >
+                                        Retry
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     )}
 
