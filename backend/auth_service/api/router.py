@@ -68,11 +68,13 @@ from ..cookies import (
     read_oidc_cookie,
     read_refresh_cookie,
     read_saml_cookie,
+    set_csrf_cookie,
     set_mock_identity_cookie,
     set_oidc_cookie,
     set_saml_cookie,
     set_session_cookies,
 )
+from ..csrf import mint_csrf_token, verify_csrf_token
 # Module, not names: the key ring resolves on first access so this
 # module stays importable without a signing secret.
 from ..core import config as jwt_config
@@ -84,6 +86,7 @@ from ..core.config import (
     COOKIE_SAMESITE,
     COOKIE_SECURE,
     JWT_ISSUER,
+    JWT_REFRESH_EXPIRY_DAYS,
     RATELIMIT_LOGIN_PER_ACCOUNT,
     RATELIMIT_LOGIN_PER_IP,
     RATELIMIT_REFRESH_PER_SESSION,
@@ -1200,12 +1203,38 @@ async def refresh(request: Request, response: Response):
 # ── GET /auth/me ──────────────────────────────────────────────────────
 
 
+def _heal_csrf_cookie(request: Request, response: Response) -> None:
+    """Re-mint ``nx_csrf`` when a valid session presents none, or one
+    that does not verify for this session's ``sid``.
+
+    Nothing else mints this cookie outside a rotation, so a reload —
+    all GETs — used to change nothing and every write kept failing
+    "CSRF token missing or invalid" until something POST-shaped
+    happened to run. A VALID cookie is left strictly alone: rotation
+    stays the refresh path's job, and gratuitously re-minting here
+    would widen the header/cookie skew window the client already
+    races.
+    """
+    presented = request.cookies.get(CSRF_COOKIE_NAME)
+    try:
+        sid = decode_token(read_access_cookie(request) or "").get("sid")
+    except Exception:  # noqa: BLE001 — unreadable token; same fallback as the middleware
+        sid = None
+    if presented and verify_csrf_token(presented, sid):
+        return
+    set_csrf_cookie(
+        response,
+        mint_csrf_token(sid),
+        max_age_seconds=JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60,
+    )
+
+
 @router.get(
     "/me",
     response_model=SessionResponse,
     response_model_by_alias=True,
 )
-async def me(request: Request):
+async def me(request: Request, response: Response):
     svc = _identity_service(request)
     user = await svc.validate_session(read_access_cookie(request))
     if user is None:
@@ -1218,6 +1247,9 @@ async def me(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
+    # The bootstrap GET is where a lost CSRF cookie gets healed — the
+    # one moment we know the session is valid before any write happens.
+    _heal_csrf_cookie(request, response)
     return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
 
 

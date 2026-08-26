@@ -290,6 +290,34 @@ def _warn_if_oversized(token: str) -> None:
     )
 
 
+def set_csrf_cookie(
+    response: Response, csrf_token: str, *, max_age_seconds: int,
+) -> None:
+    """Set only ``nx_csrf`` (environment-scoped), with the exact
+    attributes ``set_session_cookies`` gives it.
+
+    CSRF lifetime follows the REFRESH cookie, not the access cookie: if
+    the two matched, a user whose access cookie just expired would lose
+    the CSRF cookie at the same moment — the next write would 403 on
+    CSRF before the 401-triggered silent refresh could run, forcing a
+    re-login every ``JWT_EXPIRY_MINUTES``. Callers pass the refresh
+    max-age for that reason.
+
+    Exists on its own so ``GET /auth/me`` can heal a session that has
+    lost this one cookie (a sibling deployment's sign-out evicts it
+    across the shared parent domain) without re-minting the whole
+    session.
+    """
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=csrf_token,
+        max_age=max_age_seconds,
+        httponly=False,
+        path="/",
+        **_common_kwargs(),
+    )
+
+
 def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
     """Attach the four session cookies to *response*. Called by /login and /refresh."""
     common = _common_kwargs()
@@ -310,20 +338,10 @@ def set_session_cookies(response: Response, tokens: SessionTokens) -> None:
         path=REFRESH_COOKIE_PATH,
         **common,
     )
-    # CSRF lifetime follows the refresh cookie, NOT the access cookie.
-    # If the two matched, a user whose access cookie just expired would
-    # lose the CSRF cookie at the same moment — the next write would
-    # 403 on CSRF before the 401-triggered silent refresh could run,
-    # forcing a re-login every ``JWT_EXPIRY_MINUTES``. While refresh is
-    # still valid we want every state-changing request to be able to
-    # mint the double-submit header.
-    response.set_cookie(
-        key=CSRF_COOKIE_NAME,
-        value=tokens.csrf_token,
-        max_age=tokens.refresh_max_age_seconds,
-        httponly=False,
-        path="/",
-        **common,
+    # Why the refresh lifetime: see ``set_csrf_cookie``.
+    set_csrf_cookie(
+        response, tokens.csrf_token,
+        max_age_seconds=tokens.refresh_max_age_seconds,
     )
     # Same reasoning as the CSRF cookie above, for a different reason:
     # this one has to OUTLIVE the access cookie it describes. A tab that
