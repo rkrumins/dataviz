@@ -39,7 +39,7 @@ from backend.app.db.repositories.connection_repo import (
 logger = logging.getLogger(__name__)
 
 
-VALID_KINDS = {"oidc", "saml2", "custom", "custom_profile"}
+VALID_KINDS = {"oidc", "saml2", "custom", "custom_profile", "backchannel"}
 VALID_LINKING_POLICIES = {"strict", "allow_verified", "manual_only", "disabled"}
 
 # Fields whose values must never be sent to the UI. The set is
@@ -51,6 +51,16 @@ _SECRET_FIELDS = frozenset({
     "idp_x509_cert",   # not strictly secret but redacted to discourage tampering
     "sp_x509_cert",
     "shared_secret",   # custom_profile HS256 signing key
+    "jwt_shared_secret",  # backchannel HS256 verification key
+    # NOT jwt_public_key: a PEM public key is not a secret, and hiding
+    # it would only stop operators comparing what they pasted.
+    # Whole dicts, not individual keys inside them: a backchannel row
+    # puts whatever its gateway wants into these — an app id, a client
+    # secret, an API key — and we cannot know which of an operator's
+    # own header names is the sensitive one. Redacting the container is
+    # the only rule that holds for a shape we do not control.
+    "gateway_headers",
+    "exchange_headers",
 })
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")

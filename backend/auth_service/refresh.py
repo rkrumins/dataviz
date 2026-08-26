@@ -60,6 +60,19 @@ class RefreshRecord:
     successor_jti: Optional[str] = None
     revoked_at_iso: Optional[str] = None
 
+    #: Which IdP row minted this session; None for local logins. Here
+    #: for the same reason ``auth_time`` is: the refresh path needs it
+    #: before it trusts anything in the token, and a claim the token can
+    #: omit is not a fact about the session. Read by the back-channel
+    #: liveness check — including to know when NOT to probe, so a local
+    #: or OIDC session is never asked about.
+    idp_provider_id: Optional[str] = None
+
+    #: Epoch seconds of the last SUCCESSFUL upstream liveness
+    #: confirmation. The anchor an outage grace window is measured from,
+    #: so it advances only on a real answer.
+    idp_checked_at: Optional[int] = None
+
     @property
     def is_active(self) -> bool:
         return self.consumed_at_iso is None and self.revoked_at_iso is None
@@ -122,11 +135,14 @@ class RefreshStore(Protocol):
         mint_ms: int,
         expires_at_iso: str,
         revoked_at_iso: Optional[str] = None,
+        idp_provider_id: Optional[str] = None,
+        idp_checked_at: Optional[int] = None,
     ) -> bool: ...
     async def get_record(self, jti: str) -> Optional[RefreshRecord]: ...
     async def consume(self, jti: str, *, successor_jti: str) -> bool: ...
     async def revoke_family(self, family_id: str) -> bool: ...
     async def is_family_revoked(self, family_id: str) -> bool: ...
+    async def touch_idp_check(self, jti: str, *, checked_at: int) -> bool: ...
     async def family_started_ms(self, family_id: str) -> Optional[int]: ...
 
 
@@ -260,6 +276,12 @@ async def check_and_record_rotation(
             auth_time=record.auth_time,
             mint_ms=successor_mint_ms,
             expires_at_iso=_iso(successor_exp),
+            # Same reasoning, and the same direction of failure if it
+            # were dropped: a successor with no provider is a session
+            # the liveness check would stop probing, so a rotation
+            # would be a way to shed the check rather than pass it.
+            idp_provider_id=record.idp_provider_id,
+            idp_checked_at=record.idp_checked_at,
         )
         return RotationOutcome("claimed", record=record)
 

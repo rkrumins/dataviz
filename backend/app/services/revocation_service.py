@@ -673,6 +673,28 @@ class SharedSamlReplayCache:
 #: the two trust domains cannot burn each other's ids.
 _PROFILE_JTI_PREFIX = "idp:jti:"
 
+#: Browser-delivered back-channel assertion keyspace. Its own prefix for
+#: the same reason as the two above: these ids come from a third trust
+#: domain (a corporate translate endpoint), and sharing a keyspace would
+#: let one provider's id burn another's.
+_BACKCHANNEL_JTI_PREFIX = "bc:jti:"
+
+
+def get_backchannel_replay_cache() -> Optional["SharedSamlReplayCache"]:
+    """Replay cache for browser-delivered back-channel assertions.
+
+    Same store, same record semantics, same meaning for ``None``: no
+    shared backend, so single-use cannot be enforced across workers and
+    production must refuse to serve the rows that need it rather than
+    pretend.
+    """
+    backend = getattr(get_revocation_service(), "_backend", None)
+    if backend is None or isinstance(
+        backend, (InMemoryBackend, UnavailableBackend),
+    ):
+        return None
+    return SharedSamlReplayCache(backend, namespace=_BACKCHANNEL_JTI_PREFIX)
+
 
 def get_profile_replay_cache() -> Optional["SharedSamlReplayCache"]:
     """Replay cache for ``custom_profile`` payload ids, or None.
@@ -743,6 +765,49 @@ async def revoke_every_session_for_user(
 
     await user_repo.revoke_sessions_from_now(session, user_id)
     await revoke_subject_sessions("user", user_id, session=session, reason=reason)
+
+
+async def revoke_provider_sessions(
+    provider_id: Optional[str], *, session, reason: str,
+) -> dict:
+    """End every session minted through one identity provider — or, when
+    ``provider_id`` is None, through any SSO provider at all (the master
+    switch's sweep).
+
+    Two halves, the same pairing the liveness path uses when it ends a
+    session: the refresh families die at the row
+    (``revoke_provider_tokens`` — allow-by-record makes the row the
+    token's licence, so the next rotation is refused ``family_revoked``),
+    and the live access tokens die at the ``sid``
+    (``revoke_all_user_sessions``).
+
+    ``sessions_valid_from`` is deliberately NOT stamped: that cutoff
+    kills every family a user holds, including their password sessions
+    in another browser — the opposite of "end what this provider
+    minted". A password session caught by the sid tombstone silently
+    re-mints an access token on its next refresh, because its family
+    row is untouched.
+
+    Best-effort per user, matching ``revoke_role_sessions``. Returns
+    ``{"users": <distinct users touched>, "tokens": <rows marked>}`` so
+    the caller can audit the blast radius.
+    """
+    from backend.app.db.repositories import refresh_token_repo
+
+    user_ids, rows_marked = await refresh_token_repo.revoke_provider_tokens(
+        session, provider_id=provider_id,
+    )
+    svc = get_revocation_service()
+    for uid in user_ids:
+        try:
+            await svc.revoke_all_user_sessions(uid)
+            await _emit_session_revoked(session, user_id=uid, reason=reason)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "revoke_provider_sessions(%s, user=%s) failed: %s",
+                provider_id, uid, exc,
+            )
+    return {"users": len(user_ids), "tokens": rows_marked}
 
 
 async def revoke_role_sessions(

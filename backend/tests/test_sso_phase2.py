@@ -54,12 +54,16 @@ def test_extract_groups_missing_returns_empty():
     assert out.groups == ()
 
 
-def test_extract_groups_skips_non_strings():
+def test_extract_groups_keeps_numeric_ids_and_skips_the_rest():
+    # Numeric ids are real group keys in plenty of directories, so they
+    # stringify rather than vanish. Blanks and booleans are still not
+    # groups. (Ints used to be dropped; that silently unmapped every
+    # directory that keys groups by number.)
     out = apply_claim_mapping(
-        _claims(groups=["ok", 123, "", "  ", "Eng"]),
+        _claims(groups=["ok", 123, "", "  ", True, "Eng"]),
         kind="oidc", provider_slug="t",
     )
-    assert out.groups == ("ok", "Eng")
+    assert out.groups == ("ok", "123", "Eng")
 
 
 def test_extract_auth_time_int_and_string():

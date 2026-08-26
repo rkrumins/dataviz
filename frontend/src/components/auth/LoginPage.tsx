@@ -1,15 +1,25 @@
-import { useState, useEffect, useRef } from 'react'
+import { useCallback, useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Lock, AtSign, ChevronRight, AlertCircle, ShieldCheck, ExternalLink, X } from 'lucide-react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import {
     authService,
+    leavesForIdp,
     needsBrowserPayload,
     readBrowserProfile,
     type LoginContext,
     type SsoProviderSummary,
 } from '@/services/authService'
+import {
+    gatewaySignInBody,
+    isGatewayProvider,
+} from '@/services/gatewayFlow'
+import {
+    autoPortalAlreadyTried,
+    markAutoPortalTried,
+    readReauthFailure,
+} from '@/services/backchannelReauth'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
@@ -123,11 +133,15 @@ function SsoButtons({
     providers,
     failed,
     onPortalError,
+    onGatewaySignIn,
     showDivider = true,
 }: {
     providers: SsoProviderSummary[] | null
     failed: boolean
     onPortalError: (message: string) => void
+    /** The gateway flow lives with the page, not here: its refusals
+     *  open the collision modal, whose state the page owns. */
+    onGatewaySignIn: (p: SsoProviderSummary) => Promise<void>
     /** "Or sign in with" only makes sense when there is something above
      *  to be an alternative *to*. On an SSO-only deployment with a single
      *  provider these buttons are the whole page. */
@@ -136,6 +150,16 @@ function SsoButtons({
     const navigate = useNavigate()
     const loginWithBrowserProfile = useAuthStore((s) => s.loginWithBrowserProfile)
     const [busySlug, setBusySlug] = useState<string | null>(null)
+
+    async function signInViaGateway(p: SsoProviderSummary) {
+        onPortalError('')
+        setBusySlug(p.slug)
+        try {
+            await onGatewaySignIn(p)
+        } finally {
+            setBusySlug(null)
+        }
+    }
 
     // ``custom_profile`` providers backed by browser storage can't use a
     // top-level GET — only JS can read the key. Read it, post it, then
@@ -206,7 +230,28 @@ function SsoButtons({
                 </p>
             )}
             {(providers ?? []).map((p) => (
-                needsBrowserPayload(p) ? (
+                isGatewayProvider(p) ? (
+                    <button
+                        key={p.id}
+                        type="button"
+                        disabled={busySlug === p.slug}
+                        onClick={() => { void signInViaGateway(p) }}
+                        className={cn(
+                            SSO_BUTTON,
+                            busySlug === p.slug && "opacity-70 cursor-not-allowed",
+                        )}
+                    >
+                        <span className="absolute left-3 flex items-center">
+                            <SsoMark p={p} />
+                        </span>
+                        <span className="px-12 truncate">{ssoLabel(p)}</span>
+                        <span className="absolute right-3.5 flex items-center">
+                            {busySlug === p.slug
+                                ? <div className="w-3.5 h-3.5 border-2 border-ink-muted/30 border-t-ink rounded-full animate-spin" />
+                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
+                        </span>
+                    </button>
+                ) : needsBrowserPayload(p) ? (
                     <button
                         key={p.id}
                         type="button"
@@ -240,11 +285,18 @@ function SsoButtons({
                             <SsoMark p={p} />
                         </span>
                         <span className="px-12 truncate">{ssoLabel(p)}</span>
-                        {/* ExternalLink rather than a chevron: this one
-                            leaves the page for the IdP, and saying so is
-                            worth more than a consistent glyph. */}
+                        {/* ExternalLink rather than a chevron when the
+                            button really does hand off to another site,
+                            and saying so is worth more than a consistent
+                            glyph. It only does for OIDC and SAML — a
+                            back-channel provider and a cookie-sourced
+                            corporate portal both resolve server-side and
+                            land the user straight back, so promising a
+                            hand-off there was simply false. */}
                         <span className="absolute right-3.5 flex items-center">
-                            <ExternalLink className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-0.5" />
+                            {leavesForIdp(p)
+                                ? <ExternalLink className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:-translate-y-px group-hover:translate-x-0.5" />
+                                : <ChevronRight className="w-4 h-4 text-ink-muted transition-transform duration-200 group-hover:translate-x-0.5" />}
                         </span>
                     </a>
                 )
@@ -265,11 +317,59 @@ function SsoButtons({
 }
 
 
+/** Why the link was refused, in the user's terms. The reasons are the
+ *  backend's ``_link_deny_reasons`` vocabulary; several can hold at
+ *  once, so this speaks to the most blocking one. An empty list — the
+ *  redirect flow carries none — gets the neutral sentence. */
+function collisionWhy(reasons: string[]): string {
+    if (
+        reasons.some((r) => r.startsWith('existing_status:'))
+        || reasons.includes('existing_deleted')
+    ) {
+        return 'That account is not active right now, so nothing can be '
+            + 'linked to it.'
+    }
+    if (reasons.includes('policy:disabled')) {
+        return 'This connection is not allowed to attach itself to '
+            + 'existing accounts.'
+    }
+    if (reasons.includes('policy:manual_only')) {
+        return 'This connection never links accounts by itself — you make '
+            + 'the link from your own account.'
+    }
+    if (reasons.includes('strict_existing_sso')) {
+        return 'Your account already has another sign-in method linked, '
+            + 'and this connection only links accounts that have none.'
+    }
+    if (reasons.includes('email_unverified')) {
+        return "Your identity provider hasn't verified the email address, "
+            + "so we won't link automatically."
+    }
+    return "We didn't link your company sign-in to it automatically."
+}
+
+/** True when signing in with a password and self-linking cannot fix it —
+ *  the account is inactive, or policy forbids the link entirely. The
+ *  modal then points at the administrator instead of a recovery path
+ *  that dead-ends. */
+function collisionNeedsAdmin(reasons: string[]): boolean {
+    return reasons.some((r) => r.startsWith('existing_status:'))
+        || reasons.includes('existing_deleted')
+        || reasons.includes('policy:disabled')
+}
+
 /** Collision modal — rendered when the SSO callback redirects with
- *  ``?error_code=unsafe_auto_link&email=...``. Guides the user through
+ *  ``?error_code=unsafe_auto_link&email=...``, or when a fetch-based
+ *  gateway sign-in is refused the same way. Guides the user through
  *  the link-by-password recovery path instead of the cryptic
- *  ``sso_error=1`` page. */
-function CollisionModal({ email, onClose }: { email: string; onClose: () => void }) {
+ *  ``sso_error=1`` page, and says *which* rule refused the link when
+ *  the server told us. */
+function CollisionModal({ email, reasons, onClose }: {
+    email: string
+    reasons: string[]
+    onClose: () => void
+}) {
+    const needsAdmin = collisionNeedsAdmin(reasons)
     return (
         <>
         <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/60" />
@@ -287,22 +387,28 @@ function CollisionModal({ email, onClose }: { email: string; onClose: () => void
                             An account for <span className="font-mono">{email}</span> already exists
                         </h2>
                         <p className="mt-2 text-sm text-ink-secondary">
-                            We won't auto-link your SSO identity to it because your
-                            IdP hasn't verified the email address. Sign in with your
-                            password below, then open{' '}
-                            <Link
-                                to="/me/identities"
-                                className="text-accent-lineage font-semibold hover:underline"
-                            >
-                                Identities
-                            </Link>
-                            {' '}from the user menu to link your SSO provider securely.
+                            {collisionWhy(reasons)}
+                            {needsAdmin ? (
+                                ' Ask your administrator how to proceed.'
+                            ) : (
+                                <>
+                                    {' '}Sign in with your password below, then open{' '}
+                                    <Link
+                                        to="/me/identities"
+                                        className="text-accent-lineage font-semibold hover:underline"
+                                    >
+                                        Identities
+                                    </Link>
+                                    {' '}from the user menu to link your company
+                                    sign-in securely.
+                                </>
+                            )}
                         </p>
                         <button
                             onClick={onClose}
                             className="mt-4 px-4 py-2 rounded-lg bg-accent-lineage text-white text-sm font-medium hover:brightness-110"
                         >
-                            Sign in with password
+                            {needsAdmin ? 'Close' : 'Sign in with password'}
                         </button>
                     </div>
                 </div>
@@ -438,26 +544,16 @@ function AlreadySignedIn({ email }: { email: string }) {
     )
 }
 
-/** Session-scoped guard so a rejected auto-attempt can't relaunch on
- *  every render or on a bounce back to /login. A fresh tab retries. */
-const AUTO_PORTAL_SENTINEL = 'nx_portal_autologin_tried'
+// ``isGatewayProvider`` and ``gatewaySignInBody`` used to live here;
+// they now come from ``services/gatewayFlow`` so the silent recovery
+// and self-service identity linking run the same composition.
 
-function autoPortalAlreadyTried(): boolean {
-    try {
-        return window.sessionStorage.getItem(AUTO_PORTAL_SENTINEL) === '1'
-    } catch {
-        return false
-    }
-}
 
-function markAutoPortalTried() {
-    try {
-        window.sessionStorage.setItem(AUTO_PORTAL_SENTINEL, '1')
-    } catch {
-        // Storage unavailable — the worst case is one retry per render
-        // cycle guarded by the in-flight ref below.
-    }
-}
+// The silent-attempt sentinel lives with the recovery machinery now: a
+// successful behind-the-scenes re-sign-in clears it, a failed one holds
+// it, and the cooldown replaces the old once-per-tab-forever boolean —
+// which meant the second corporate-session expiry of the day parked
+// every long-lived tab on this form for good.
 
 export function LoginPage() {
     const signupEnabled = useFeature('signupEnabled')
@@ -469,7 +565,7 @@ export function LoginPage() {
 
     const {
         login, error, clearError, isLoading, isAuthenticated, status, user,
-        loginWithBrowserProfile,
+        loginWithBrowserProfile, loginWithBackchannel,
     } = useAuthStore()
 
     // The page's shape is a function of the platform posture, not a fixed
@@ -477,7 +573,20 @@ export function LoginPage() {
     const [context, setContext] = useState<LoginContext | null>(null)
     const [contextFailed, setContextFailed] = useState(false)
     const [routed, setRouted] = useState<SsoProviderSummary | null>(null)
-    const [portalError, setPortalError] = useState<string | null>(null)
+    // Landed here because a silent re-sign-in just failed? Say so from
+    // the first paint — the user was working, their corporate session
+    // expired, and the automatic recovery could not renew it. Without a
+    // reason this page reads as a random logout.
+    const [portalError, setPortalError] = useState<string | null>(() => {
+        const failure = readReauthFailure()
+        if (!failure) return null
+        // The "what next" half is appended at render time, where the
+        // page knows whether there is actually anything below to press.
+        return (
+            'Your corporate sign-in could not be renewed automatically.'
+            + (failure.reason ? ` ${failure.reason}` : '')
+        )
+    })
     // Escape hatch out of the email-first flow. Never shown when local
     // login is off — there would be nothing to escape to.
     const [forcePassword, setForcePassword] = useState(false)
@@ -495,36 +604,91 @@ export function LoginPage() {
 
     const providers = context?.providers ?? null
 
-    // Silent portal sign-in: on an internal deployment the corporate
-    // portal has already written the profile, so the login form is a
-    // speed bump. Attempt it once per tab when exactly one storage-
-    // backed provider is configured and its key is present. A rejection
-    // falls through to the normal form rather than looping.
+    // Silent sign-in: on an internal deployment the user is already
+    // authenticated — by the corporate portal, or by the workstation
+    // itself via Kerberos — so the login form is a speed bump in front
+    // of a door that is already open. Attempt it once per tab when
+    // exactly one provider can do it. A rejection falls through to the
+    // normal form rather than looping.
+    //
+    // Two shapes qualify, and they differ in where the credential is:
+    // a storage-backed corporate portal has already written a payload
+    // we can read, while a back-channel provider has nothing written
+    // anywhere and we have to make the call that creates it. The second
+    // is why this runs for every client of the app rather than only for
+    // someone who deliberately clicks: nobody should have to press a
+    // button to use a session their machine already holds.
     const autoAttempted = useRef(false)
     useEffect(() => {
         if (providers === null || autoAttempted.current) return
         if (isAuthenticated || autoPortalAlreadyTried()) return
 
-        const candidates = providers.filter(needsBrowserPayload)
+        const candidates = providers.filter(
+            (p) => (needsBrowserPayload(p) || isGatewayProvider(p))
+                // The operator's opt-out: the connection still works,
+                // but only when somebody presses its button.
+                && p.config?.autoSignIn !== false,
+        )
         if (candidates.length !== 1) return
-        const payload = readBrowserProfile(candidates[0])
+        const candidate = candidates[0]
+
+        if (isGatewayProvider(candidate)) {
+            autoAttempted.current = true
+            markAutoPortalTried()
+            // Silent: a failure here is expected on a machine outside
+            // the domain, or one whose browser has not been told to
+            // answer Negotiate for that host. Those users have a normal
+            // form in front of them and a button that will tell them
+            // what went wrong if they press it.
+            void gatewaySignInBody(candidate)
+                .then((body) => loginWithBackchannel(candidate.slug, body))
+                .then((ok) => {
+                    if (ok) { navigate('/', { replace: true }); return }
+                    // A server refusal lands in the store's error — the
+                    // form's banner — for an attempt nobody asked for.
+                    // Move it beside the button that retries it, with
+                    // the attribution the bare message lacks. The "what
+                    // next" suffix is appended at render time.
+                    clearError()
+                    setPortalError(
+                        `Signing in with your ${candidate.displayName} `
+                        + 'session did not work.',
+                    )
+                })
+                .catch(() => { /* fall through to the form */ })
+            return
+        }
+
+        const payload = readBrowserProfile(candidate)
         if (!payload) return
 
         autoAttempted.current = true
         markAutoPortalTried()
-        void loginWithBrowserProfile(candidates[0].slug, payload).then((ok) => {
-            if (ok) navigate('/', { replace: true })
+        void loginWithBrowserProfile(candidate.slug, payload).then((ok) => {
+            if (ok) { navigate('/', { replace: true }); return }
+            clearError()
+            setPortalError(
+                `Signing in with your ${candidate.displayName} session `
+                + 'did not work.',
+            )
         })
-    }, [providers, isAuthenticated, loginWithBrowserProfile, navigate])
+    }, [providers, isAuthenticated, loginWithBrowserProfile,
+        loginWithBackchannel, navigate, clearError])
 
-    // Read ``?error_code=...&email=...`` from the SSO failure redirect
-    // path. The collision modal is the most user-actionable case; other
-    // codes fall through to a generic inline error.
+    // The collision modal's one state, fed from BOTH arrival paths: the
+    // redirect flow's ``?error_code=unsafe_auto_link&email=...`` (which
+    // carries no reasons) and a refused fetch-based gateway sign-in
+    // (whose 401 detail does).
     const errorCode = params.get('error_code')
     const collisionEmail = params.get('email')
-    const [showCollision, setShowCollision] = useState(
-        errorCode === 'unsafe_auto_link' && Boolean(collisionEmail),
-    )
+    const [collision, setCollision] = useState<{
+        email: string
+        reasons: string[]
+    } | null>(() => (
+        errorCode === 'unsafe_auto_link' && collisionEmail
+            ? { email: collisionEmail, reasons: [] }
+            : null
+    ))
     // ``sso_error=1`` is set on every SSO failure; ``ref`` correlates it to
     // the audit event. The collision case has its own modal, so this banner
     // covers everything else — which is the majority.
@@ -536,6 +700,43 @@ export function LoginPage() {
             setEmail(collisionEmail)
         }
     }, [errorCode, collisionEmail])
+
+    // The gateway sign-in flow, owned by the page because its refusal
+    // can open the collision modal. Errors are shown, not thrown — the
+    // buttons only manage their own busy state.
+    const gatewaySignIn = useCallback(async (p: SsoProviderSummary) => {
+        try {
+            const body = await gatewaySignInBody(p)
+            if (await loginWithBackchannel(p.slug, body)) {
+                navigate('/', { replace: true })
+                return
+            }
+            const denial = useAuthStore.getState().lastSsoDenial
+            if (denial?.code === 'unsafe_auto_link' && denial.email) {
+                // The account exists and the link was refused — that has
+                // a recovery path, and the modal walks it. Pre-fill the
+                // form with the address the server named.
+                setEmail(denial.email)
+                setCollision({
+                    email: denial.email,
+                    reasons: denial.reasons ?? [],
+                })
+                return
+            }
+            setPortalError(`Could not sign in with ${p.displayName}.`)
+        } catch (err) {
+            // Say which step failed rather than navigating into a
+            // sign-in that was never going to work. The likeliest causes
+            // are a CORS rejection and a workstation whose browser has
+            // not been told to answer Negotiate for that host, and
+            // neither produces anything useful further down the flow.
+            setPortalError(
+                err instanceof Error
+                    ? `Could not reach ${p.displayName}. ${err.message}`
+                    : `Could not reach ${p.displayName}.`,
+            )
+        }
+    }, [loginWithBackchannel, navigate])
 
     useEffect(() => {
         clearError()
@@ -580,13 +781,48 @@ export function LoginPage() {
     // the topology disclosure it exists to remove.
     const leadWithEmail = emailFirst
     const showEmailField = showPasswordForm || leadWithEmail
-    const showProviderRow = !leadWithEmail || showAllProviders
+    // Gateway connections stay visible even under email-first: their
+    // sign-in is a button on this very page (no redirect to hide), and
+    // after a failed silent attempt that button is the recovery — an
+    // error with nothing to press strands exactly the person the error
+    // is about. Redirect providers keep the email-first tucking.
+    const gatewayProviders = (providers ?? []).filter(isGatewayProvider)
+    const visibleProviders = leadWithEmail && !showAllProviders
+        ? (providers === null ? null : gatewayProviders)
+        : providers
+    const hiddenProviderCount =
+        (providers?.length ?? 0) - (visibleProviders?.length ?? 0)
+    const showProviderRow =
+        !leadWithEmail || showAllProviders || gatewayProviders.length > 0
+    const portalHasAffordance = showPasswordForm
+        || (visibleProviders?.length ?? 0) > 0 || routed != null
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
-        if (!email || !password || isLoading) return
-        const ok = await login(email, password)
-        if (ok) navigate('/', { replace: true })
+        if (showPasswordForm) {
+            if (!email || !password || isLoading) return
+            const ok = await login(email, password)
+            if (ok) navigate('/', { replace: true })
+            return
+        }
+        // Email-first renders no password field, so the guard above
+        // turned every Enter press into a silent no-op. Route the
+        // address instead — what the debounced resolve does, forced
+        // now. A miss stays silent by design (see /auth/resolve); the
+        // "enter your work email" hint is already on screen.
+        if (isLoading || !email.includes('@')) return
+        const target = routed ?? await authService.resolveEmailDomain(email)
+            .then((r) => r.provider ?? null)
+            .catch(() => null)
+        if (!target) return
+        if (isGatewayProvider(target)) {
+            void gatewaySignIn(target)
+            return
+        }
+        window.location.assign(
+            `/api/v1/auth/${encodeURIComponent(target.slug)}/login`
+            + `?next=${encodeURIComponent('/dashboard')}`,
+        )
     }
 
     // Avoid flashing the form to a user whose cookie is still being
@@ -607,10 +843,11 @@ export function LoginPage() {
 
     return (
         <div className="relative min-h-screen w-full flex items-center justify-center overflow-hidden bg-canvas font-sans">
-            {showCollision && collisionEmail && (
+            {collision && (
                 <CollisionModal
-                    email={collisionEmail}
-                    onClose={() => setShowCollision(false)}
+                    email={collision.email}
+                    reasons={collision.reasons}
+                    onClose={() => setCollision(null)}
                 />
             )}
             {/* Animated Background Elements */}
@@ -764,10 +1001,22 @@ export function LoginPage() {
                     )}
 
                     {/* ── SSO ──────────────────────────────────────────── */}
-                    {/* Each link is a top-level GET so the IdP redirect
-                        flow works. The backend returns 404 for any
-                        provider that isn't configured. */}
+                    {/* A redirect provider gets a top-level GET so the IdP
+                        flow works. A gateway provider's sign-in starts
+                        with calls only this browser can make — the same
+                        navigation would land it on a dead route — so its
+                        CTA is a button running the browser half. */}
                     {routed && (
+                        isGatewayProvider(routed) ? (
+                            <button
+                                type="button"
+                                onClick={() => { void gatewaySignIn(routed) }}
+                                className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
+                            >
+                                {ssoLabel(routed)}
+                                <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
+                            </button>
+                        ) : (
                         <a
                             href={`/api/v1/auth/${encodeURIComponent(routed.slug)}/login?next=${encodeURIComponent('/dashboard')}`}
                             className="group mt-4 flex items-center justify-center gap-2 w-full h-12 rounded-xl bg-accent-lineage text-white text-sm font-semibold shadow-sm shadow-accent-lineage/25 hover:brightness-110 hover:shadow-md hover:shadow-accent-lineage/30 hover:-translate-y-px active:translate-y-0 transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50"
@@ -778,6 +1027,7 @@ export function LoginPage() {
                             {ssoLabel(routed)}
                             <ChevronRight className="w-4 h-4 transition-transform duration-200 group-hover:translate-x-0.5" />
                         </a>
+                        )
                     )}
 
                     {/* Escape hatches out of the email-first flow. Offered
@@ -795,7 +1045,7 @@ export function LoginPage() {
                                     Use a password instead
                                 </button>
                             )}
-                            {!showAllProviders && (providers?.length ?? 0) > 0 && (
+                            {!showAllProviders && hiddenProviderCount > 0 && (
                                 <button
                                     type="button"
                                     onClick={() => setShowAllProviders(true)}
@@ -809,9 +1059,10 @@ export function LoginPage() {
 
                     {showProviderRow && (
                         <SsoButtons
-                            providers={providers}
+                            providers={visibleProviders}
                             failed={contextFailed}
                             onPortalError={setPortalError}
+                            onGatewaySignIn={gatewaySignIn}
                             showDivider={showEmailField}
                         />
                     )}
@@ -819,7 +1070,26 @@ export function LoginPage() {
                     {portalError && (
                         <div className="mt-4 flex items-start gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-300 text-sm">
                             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                            <p>{portalError}</p>
+                            <div>
+                                <p>
+                                    {portalError}
+                                    {portalHasAffordance
+                                        && ' Try signing in again.'}
+                                </p>
+                                {/* An error that says what to do next must
+                                    have a next. With no form, no button and
+                                    no routed provider on the page, offer
+                                    the one thing that can change that. */}
+                                {!portalHasAffordance && (
+                                    <button
+                                        type="button"
+                                        onClick={() => window.location.reload()}
+                                        className="mt-2 text-xs font-semibold text-accent-lineage hover:underline"
+                                    >
+                                        Retry
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     )}
 

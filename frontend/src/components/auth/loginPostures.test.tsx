@@ -166,6 +166,35 @@ describe('email-first', () => {
         expect(screen.queryByText(/Continue with Okta/)).not.toBeInTheDocument()
     })
 
+    it('hides redirect providers but shows a gateway connection as a button', async () => {
+        // A gateway provider's sign-in is a button on this page rather
+        // than a redirect, and after a failed silent attempt it is the
+        // only recovery — email-first must not hide the working door.
+        // The redirect kinds stay tucked behind the disclosure.
+        posture({
+            emailFirstLogin: true,
+            providers: [ENTRA, {
+                id: 'idp_9', slug: 'corp-gateway',
+                displayName: 'Corporate Gateway', kind: 'backchannel',
+                priority: 50,
+                config: {
+                    authenticateUrl: 'https://sso.corporate.com/authenticate',
+                },
+            }],
+        })
+        // Spend the silent attempt so the button is what is under test.
+        window.sessionStorage.setItem(
+            'nx_portal_autologin_tried', String(Date.now()),
+        )
+        renderLogin()
+
+        expect(await screen.findByText(/Continue with Corporate Gateway/))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/Continue with Corporate Entra/))
+            .not.toBeInTheDocument()
+        expect(screen.getByText(/other ways to sign in/i)).toBeInTheDocument()
+    })
+
     it('routes a known domain to its provider', async () => {
         const user = userEvent.setup()
         posture({ emailFirstLogin: true, providers: [ENTRA, OKTA] })

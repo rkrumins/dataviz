@@ -37,7 +37,7 @@ import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
-import { avatarGradient, initialsOf } from '@/lib/avatar'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
 import { ROLE_NAMES } from '@/lib/roleNames'
@@ -181,9 +181,10 @@ function SortHeader({
 
 // ── Subject avatar ───────────────────────────────────────────────────
 
-function SubjectAvatar({ type, displayName, size = 'md' }: {
+function SubjectAvatar({ type, displayName, userId, size = 'md' }: {
     type: SubjectType
     displayName: string
+    userId?: string
     size?: 'sm' | 'md'
 }) {
     const dims = size === 'sm' ? 'w-7 h-7 text-[10px]' : 'w-9 h-9 text-[11px]'
@@ -198,13 +199,12 @@ function SubjectAvatar({ type, displayName, size = 'md' }: {
         )
     }
     return (
-        <div className={cn(
-            dims,
-            'rounded-full bg-gradient-to-br flex items-center justify-center font-bold text-white shrink-0 shadow-sm',
-            avatarGradient(displayName),
-        )}>
-            {initialsOf(displayName)}
-        </div>
+        <UserAvatar
+            userId={userId}
+            name={displayName}
+            shape="gradient"
+            className={cn(dims, 'font-bold shadow-sm')}
+        />
     )
 }
 
@@ -540,7 +540,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                         {/* Subject */}
                                         <td className="px-5 py-4">
                                             <div className="flex items-center gap-3">
-                                                <SubjectAvatar type={m.subject.type as SubjectType} displayName={name} />
+                                                <SubjectAvatar type={m.subject.type as SubjectType} displayName={name} userId={m.subject.id} />
                                                 <div className="min-w-0">
                                                     <div className="flex items-center gap-2">
                                                         <p className="text-sm font-semibold text-ink truncate">{name}</p>
@@ -873,7 +873,7 @@ function AddMemberModal({
                                                 : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
                                         )}
                                     >
-                                        <SubjectAvatar type={subjectType} displayName={label} size="sm" />
+                                        <SubjectAvatar type={subjectType} displayName={label} userId={id} size="sm" />
                                         <div className="min-w-0 flex-1">
                                             <p className={cn('text-sm truncate', isSelected ? 'font-semibold text-accent-lineage' : 'text-ink')}>
                                                 {label}
@@ -1150,12 +1150,12 @@ function PendingRequestsPanel({
                     const v = roleVisualFor(req.requestedRole)
                     return (
                         <div key={req.id} className="px-5 py-3.5 flex items-start gap-3">
-                            <div className={cn(
-                                'w-9 h-9 rounded-full bg-gradient-to-br flex items-center justify-center text-xs font-bold text-white shrink-0',
-                                avatarGradient(req.requester.displayName ?? req.requester.id),
-                            )}>
-                                {initialsOf(req.requester.displayName ?? req.requester.email ?? req.requester.id)}
-                            </div>
+                            <UserAvatar
+                                userId={req.requester.id}
+                                name={req.requester.displayName ?? req.requester.email ?? req.requester.id}
+                                shape="gradient"
+                                className="w-9 h-9 text-xs font-bold"
+                            />
                             <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap">
                                     <p className="text-sm font-semibold text-ink truncate">

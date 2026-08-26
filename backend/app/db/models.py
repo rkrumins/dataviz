@@ -1631,6 +1631,14 @@ class UserORM(Base):
     # Chosen avatar illustration. Was a browser-local preference, so it
     # reset on a new machine and nobody else ever saw it.
     avatar_id = Column(Text, nullable=True)
+    # Provider-supplied profile picture, fetched server-side at SSO
+    # login (the CSP forbids hotlinking a remote URL) and re-served from
+    # our own origin. ``avatar_source_url`` remembers where the bytes
+    # came from, so an unchanged claim skips the refetch and a changed
+    # one refreshes the image.
+    avatar_image = Column(Text, nullable=True)          # base64 bytes
+    avatar_image_type = Column(Text, nullable=True)     # e.g. image/png
+    avatar_source_url = Column(Text, nullable=True)
     # ISO instant before which refresh tokens are refused. Revoking
     # sessions only tombstones access-token ``sid``s, and ``refresh()``
     # mints a fresh ``sid`` rather than reusing one — so without this
@@ -1738,7 +1746,8 @@ class IdpProviderORM(Base):
         UniqueConstraint("slug", name="uq_idp_providers_slug"),
         Index("idx_idp_providers_kind_enabled", "kind", "enabled"),
         CheckConstraint(
-            "kind IN ('oidc', 'saml2', 'custom', 'custom_profile')",
+            "kind IN ('oidc', 'saml2', 'custom', 'custom_profile', "
+            "'backchannel')",
             name="ck_idp_providers_kind",
         ),
         CheckConstraint(
@@ -1753,6 +1762,62 @@ class IdpProviderORM(Base):
 
     def __repr__(self) -> str:
         return f"<IdpProvider id={self.id!r} slug={self.slug!r} kind={self.kind!r}>"
+
+
+# ------------------------------------------------------------------ #
+# sso_backchannel_hosts  (which internal addresses SSO may reach)      #
+# ------------------------------------------------------------------ #
+
+
+class SsoBackchannelHostORM(Base):
+    """Internal hosts a ``backchannel`` provider is permitted to call.
+
+    ``assert_fetchable`` refuses every private address, which is right
+    for IdP metadata — that is published on the public internet — and
+    wrong for a back-channel identity gateway, which is on RFC1918 by
+    definition. This table is the exception, and it is a table rather
+    than a per-provider setting because a per-provider allowlist would
+    be circular: "the URL you typed is permitted" is not a control.
+
+    Why a row per entry rather than a JSON column: the security
+    argument for letting operators edit this at all rests on it being
+    attributable and revocable, so ``created_by`` and a delete that
+    takes effect on the next request are load-bearing, not decoration.
+
+    ``port`` is never implicit. Permitting a gateway on 443 must not
+    also permit whatever answers on 6379 on the same box, so the pair
+    is the key.
+
+    What an entry cannot do: reach loopback, link-local (cloud
+    metadata), multicast or reserved space. Those are refused in
+    ``providers/outbound.py`` regardless of what is stored here.
+    """
+
+    __tablename__ = "sso_backchannel_hosts"
+
+    id = Column(
+        Text, primary_key=True,
+        default=lambda: f"bch_{uuid.uuid4().hex[:12]}",
+    )
+    #: Lowercased, trailing root dot stripped — normalised by the repo so
+    #: one destination is one row rather than three spellings.
+    host = Column(Text, nullable=False)
+    port = Column(Integer, nullable=False, default=443)
+    #: Free text: which gateway this is, who asked for it. Operators
+    #: come back to this list months later.
+    note = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    created_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("host", "port", name="uq_sso_backchannel_host_port"),
+        CheckConstraint(
+            "port > 0 AND port <= 65535", name="ck_sso_backchannel_port",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SsoBackchannelHost {self.host}:{self.port}>"
 
 
 # ------------------------------------------------------------------ #
@@ -2811,6 +2876,24 @@ class RefreshTokenORM(Base):
     # replaces the ``family-revoked:<id>`` sentinel row, whose expiry had
     # to be hand-sized to outlive every token it guarded.
     revoked_at = Column(Text, nullable=True)
+
+    # Which IdP row minted this session; NULL for local password logins.
+    # Held here for the same reason ``auth_time`` above is: the refresh
+    # path needs it BEFORE it trusts anything in the token, and a claim
+    # the token can simply omit is not a fact about the session.
+    #
+    # Read by the ``backchannel`` liveness check, which re-confirms the
+    # upstream session on each rotation and needs to know which provider
+    # to ask — and, just as importantly, needs to know when NOT to ask,
+    # so a local or OIDC session is never probed.
+    idp_provider_id = Column(Text, nullable=True)
+
+    # Epoch seconds of the last SUCCESSFUL upstream liveness
+    # confirmation. Advanced only on a real answer, never on a timeout:
+    # it is the anchor the grace window is measured from, so letting a
+    # failed probe move it would make an outage renew the very
+    # permission it should be spending down.
+    idp_checked_at = Column(Integer, nullable=True)
 
     __table_args__ = (
         Index("idx_refresh_tokens_family", "family_id"),

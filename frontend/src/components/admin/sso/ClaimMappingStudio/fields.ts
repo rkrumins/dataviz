@@ -67,6 +67,10 @@ export const FIELDS: MappingField[] = [
         key: 'auth_time', label: 'Auth time',
         hint: 'Epoch seconds. Drives the 24h SSO re-authentication ceiling.',
     },
+    {
+        key: 'avatar_url', label: 'Avatar', managed: true,
+        hint: 'A profile-picture URL. Fetched by the server at sign-in and re-served from here — participates only while the connection’s "Map their avatar" toggle is on.',
+    },
 ]
 
 export const FIELD_LABELS: Record<string, string> = Object.fromEntries(

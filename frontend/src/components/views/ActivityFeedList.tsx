@@ -41,6 +41,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import type { ViewActivityAction, ViewActivityEntry } from '@/services/viewApiService'
 
 interface ActionMeta {
@@ -196,12 +197,19 @@ function ActivityRow({ row, index }: { row: Row; index: number }) {
             >
                 {/* Avatar + the action badge that sits on it */}
                 <span className="relative shrink-0">
-                    <span className={cn(
-                        'w-9 h-9 rounded-full flex items-center justify-center text-[11px] font-bold',
-                        avatarTint(entry.actor ?? who),
-                    )}>
-                        {initials(who)}
-                    </span>
+                    <UserAvatar
+                        userId={entry.actor !== 'anonymous' ? entry.actor : undefined}
+                        name={who}
+                        className="w-9 h-9 text-[11px] font-bold"
+                        fallback={(
+                            <span className={cn(
+                                'flex h-full w-full items-center justify-center rounded-full',
+                                avatarTint(entry.actor ?? who),
+                            )}>
+                                {initials(who)}
+                            </span>
+                        )}
+                    />
                     <span className={cn(
                         'absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center ring-2 ring-canvas-elevated',
                         meta.tint,

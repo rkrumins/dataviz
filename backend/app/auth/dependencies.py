@@ -66,6 +66,10 @@ _FAIL_CLOSED_PERMISSIONS = frozenset({
     "system:groups:manage",
     "system:workspaces:create",
     "workspace:admin",
+    # Editing the back-channel host allowlist decides where this service
+    # may send requests on the internal network. "I cannot confirm this
+    # session is still alive" must not read as "carry on" for that.
+    "system:sso:hosts:manage",
 })
 
 

@@ -81,6 +81,82 @@ async def purge_expired(session: AsyncSession, *, batch: int = 5_000) -> int:
     return len(doomed)
 
 
+def _provider_predicate(provider_id: Optional[str]):
+    """Rows minted by one IdP row — or by any IdP at all when
+    ``provider_id`` is None, which is the master-switch sweep. Local
+    password sessions leave the column NULL and are never matched."""
+    if provider_id is None:
+        return RefreshTokenORM.idp_provider_id.is_not(None)
+    return RefreshTokenORM.idp_provider_id == provider_id
+
+
+async def count_active_provider_users(
+    session: AsyncSession, *, provider_id: Optional[str],
+) -> int:
+    """Distinct users currently holding a live refresh token minted by
+    this provider (None = any SSO provider). "Live" means presentable:
+    not revoked, not consumed, not expired. This is the number a
+    confirm dialog shows before ``revoke_provider_tokens`` — it can
+    drift slightly from the real sweep under concurrent logins, which
+    is fine for a count and stated where it is served."""
+    return (
+        await session.execute(
+            select(func.count(func.distinct(RefreshTokenORM.user_id))).where(
+                _provider_predicate(provider_id),
+                RefreshTokenORM.revoked_at.is_(None),
+                RefreshTokenORM.consumed_at.is_(None),
+                RefreshTokenORM.expires_at > _now_iso(),
+            )
+        )
+    ).scalar_one()
+
+
+async def revoke_provider_tokens(
+    session: AsyncSession, *, provider_id: Optional[str],
+) -> tuple[set[str], int]:
+    """Stamp ``revoked_at`` on every un-revoked refresh row minted by
+    this provider (None = every SSO row), and report who was touched.
+
+    Multi-pass for the same reason ``revoke_family`` is: a rotation in
+    flight when the sweep starts can commit its successor after a
+    pass's scan has moved past it, and that successor carries the same
+    ``idp_provider_id``. The loop exits as soon as a pass marks
+    nothing; the pass bound is a backstop, not an expectation.
+
+    Deliberately no consumed/expiry filter on the UPDATE — marking an
+    already-dead row revoked can only ever cause a refusal, and the
+    belt-and-braces matches ``revoke_family``.
+
+    Returns ``(distinct user_ids touched, rows marked)``.
+    """
+    users: set[str] = set()
+    rows_marked = 0
+    for _ in range(_REVOKE_FAMILY_PASSES):
+        touched = (
+            await session.execute(
+                select(func.distinct(RefreshTokenORM.user_id)).where(
+                    _provider_predicate(provider_id),
+                    RefreshTokenORM.revoked_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        users.update(u for u in touched if u)
+        result = await session.execute(
+            update(RefreshTokenORM)
+            .where(
+                _provider_predicate(provider_id),
+                RefreshTokenORM.revoked_at.is_(None),
+            )
+            .values(revoked_at=_now_iso())
+        )
+        marked = int(result.rowcount or 0)
+        rows_marked += marked
+        if marked == 0:
+            break
+    await session.flush()
+    return users, rows_marked
+
+
 class SQLAlchemyRefreshStore:
     """Implements ``RefreshStore`` against the management DB."""
 
@@ -97,6 +173,8 @@ class SQLAlchemyRefreshStore:
         mint_ms: int,
         expires_at_iso: str,
         revoked_at_iso: Optional[str] = None,
+        idp_provider_id: Optional[str] = None,
+        idp_checked_at: Optional[int] = None,
     ) -> bool:
         """Write the row that makes a freshly minted token usable.
 
@@ -121,6 +199,8 @@ class SQLAlchemyRefreshStore:
                         expires_at=expires_at_iso,
                         created_at=_now_iso(),
                         revoked_at=revoked_at_iso,
+                        idp_provider_id=idp_provider_id,
+                        idp_checked_at=idp_checked_at,
                     )
                 )
             return True
@@ -146,7 +226,25 @@ class SQLAlchemyRefreshStore:
             consumed_at_iso=row.consumed_at,
             successor_jti=row.successor_jti,
             revoked_at_iso=row.revoked_at,
+            idp_provider_id=row.idp_provider_id,
+            idp_checked_at=row.idp_checked_at,
         )
+
+    async def touch_idp_check(self, jti: str, *, checked_at: int) -> bool:
+        """Record a SUCCESSFUL upstream liveness confirmation.
+
+        Never called on a failure. The value is the anchor the outage
+        grace window measures from, so advancing it when the gateway did
+        not answer would let an outage renew the very allowance it
+        should be spending down — the session would ride out an
+        indefinite outage one grace window at a time.
+        """
+        result = await self._session.execute(
+            update(RefreshTokenORM)
+            .where(RefreshTokenORM.jti == jti)
+            .values(idp_checked_at=int(checked_at))
+        )
+        return bool(result.rowcount)
 
     async def consume(self, jti: str, *, successor_jti: str) -> bool:
         """Rotate this token away, atomically.

@@ -119,12 +119,28 @@ class IdentityService(Protocol):
         """
         ...
 
-    async def refresh(self, refresh_token: str) -> tuple[User, SessionTokens]:
+    async def refresh(
+        self, refresh_token: str, *,
+        ambient_cookies: Optional[dict] = None,
+        ambient_headers: Optional[dict] = None,
+    ) -> tuple[User, SessionTokens]:
         """Rotate a refresh token: returns new (user, tokens).
 
         Raises ``InvalidRefreshToken`` if the token is missing/invalid/expired,
         or — critically — if the same refresh token is presented twice
         (reuse detection: revokes the entire family).
+
+        ``ambient_cookies`` / ``ambient_headers`` are the inbound request's
+        own, forwarded so a session minted by a back-channel provider can be
+        re-confirmed with its IdP on this rotation — which is what stops our
+        session outliving the upstream session that created it. Declared here
+        because the route layer passes them; both default to None, and a
+        session that needs them and is not given them is treated as having no
+        ambient token, so a caller that forgets to forward gets a re-auth
+        prompt rather than a free pass.
+
+        May also raise ``SsoReauthRequired`` — for the 24h re-auth ceiling, or
+        when the upstream IdP no longer backs this session.
         """
         ...
 
@@ -169,9 +185,18 @@ class InvalidRefreshToken(AuthError):
 
 class SSOAuthError(AuthError):
     """SSO login could not be completed — e.g. the IdP subject's email
-    collides with an existing account and auto-linking is unsafe. The
-    route maps this to a generic failure; the reason is audited, not
-    shown to the browser."""
+    collides with an existing account and auto-linking is unsafe.
+
+    The route maps this to a generic failure and the full story is
+    audited. ``deny_reasons`` is the one deliberate exception: for
+    ``unsafe_auto_link`` the fetch-based routes surface it so the
+    sign-in page can say which rule refused the link — disclosure to
+    someone who has just proved control of the colliding email at the
+    IdP, not to an anonymous caller."""
+
+    def __init__(self, code: str, *, deny_reasons: tuple[str, ...] = ()):
+        super().__init__(code)
+        self.deny_reasons = deny_reasons
 
 
 class SsoReauthRequired(AuthError):

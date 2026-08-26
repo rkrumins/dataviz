@@ -39,6 +39,9 @@ export interface GroupMemberResponse {
     groupId: string
     addedAt: string
     addedBy: string | null
+    /** "local" (an admin added them) or "sso" (the directory did, via a
+     *  group mapping). Optional so an older backend still parses. */
+    source?: string
 }
 
 

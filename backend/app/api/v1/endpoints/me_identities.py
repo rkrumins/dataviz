@@ -129,6 +129,12 @@ async def unlink_identity(
             status.HTTP_409_CONFLICT,
             detail={"error": "last_authenticator", "message": str(exc)},
         )
+    # With the link gone this provider will never re-assert the profile
+    # fields it owned, so the name-lock it held is released. Scoped: a
+    # lock held by a different provider stays.
+    await user_repo.clear_idp_managed_snapshot(
+        session, current.id, provider_id=identity.provider_id,
+    )
     await user_repo.create_outbox_event(
         session, event_type="user.identity.unlinked",
         payload={"user_id": current.id, "identity_id": identity_id,
@@ -166,7 +172,9 @@ async def start_link(
     provider = await idp_provider_repo.get_provider_by_slug(session, provider_slug)
     if provider is None or not provider.enabled:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Provider not found")
-    if provider.kind not in {"oidc", "saml2", "custom", "custom_profile"}:
+    if provider.kind not in {
+        "oidc", "saml2", "custom", "custom_profile", "backchannel",
+    }:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unsupported provider kind")
 
     token = create_link_intent_token(

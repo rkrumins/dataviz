@@ -11,8 +11,10 @@ The PATCH endpoint guards against operator self-lockout:
 
   * Refuses ``allowLocalLogin=false`` when any active admin lacks an
     SSO identity (HTTP 409 with the offending admin list).
-  * Refuses ``ssoEnabled=false`` AND ``allowLocalLogin=false`` together
-    (there'd be no way to log in).
+  * Refuses any change that would leave ``ssoEnabled`` AND
+    ``allowLocalLogin`` both false. The patch is merged with the stored
+    row before the check, so the combination is unreachable whether it
+    arrives in one PATCH or as two sequential ones in either order.
 """
 from __future__ import annotations
 
@@ -163,8 +165,11 @@ async def update_config(
       * If the patch sets ``allowLocalLogin=false``, every active
         admin must have at least one SSO identity. Otherwise we
         return 409 ``would_lock_out_admin`` with the offending list.
-      * Setting both ``ssoEnabled=false`` AND ``allowLocalLogin=false``
-        in one transaction is rejected (no way in).
+      * Any patch whose RESULT would have both ``ssoEnabled`` and
+        ``allowLocalLogin`` false is rejected (no way in). The check
+        runs against the merged target state, so turning the second
+        switch off in a later PATCH hits the same 409 as setting both
+        at once.
     """
     snap = await app_auth_config_repo.get_snapshot(session)
     target_sso = body.sso_enabled if body.sso_enabled is not None else snap.sso_enabled
@@ -238,4 +243,71 @@ async def update_config(
         allow_jit_provisioning=bool(row.allow_jit_provisioning),
         version=int(row.version or 1),
         updated_at=row.updated_at or "",
+    )
+
+
+class EndSsoSessionsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    dry_run: bool = Field(default=False, alias="dryRun")
+
+
+class EndSsoSessionsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    users_affected: int = Field(alias="usersAffected")
+    tokens_revoked: int = Field(alias="tokensRevoked")
+    dry_run: bool = Field(alias="dryRun")
+
+
+@router.post("/end-sso-sessions", response_model=EndSsoSessionsResponse,
+             response_model_by_alias=True)
+async def end_sso_sessions(
+    body: Optional[EndSsoSessionsRequest] = None,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """End every session minted through any SSO provider.
+
+    The companion the master switch never had: turning ``ssoEnabled``
+    off stops new SSO sign-ins, while the people already signed in keep
+    rotating until their ceilings fire — up to 24 hours. This ends them
+    now, sweeping every refresh row that names an IdP; password
+    sessions are untouched (their rows carry no provider), so the
+    "switch back to local accounts" story starts immediately.
+
+    Deliberately callable whatever ``ssoEnabled`` currently says — the
+    switch is usually already off by the time an operator reaches for
+    this. ``dryRun`` answers the confirm dialog's count.
+    """
+    body = body or EndSsoSessionsRequest()
+
+    from backend.app.db.repositories import refresh_token_repo
+    from backend.app.services.revocation_service import (
+        revoke_provider_sessions,
+    )
+
+    if body.dry_run:
+        users = await refresh_token_repo.count_active_provider_users(
+            session, provider_id=None,
+        )
+        return EndSsoSessionsResponse(
+            users_affected=users, tokens_revoked=0, dry_run=True,
+        )
+
+    outcome = await revoke_provider_sessions(
+        None, session=session, reason="sso_disabled_all",
+    )
+    try:
+        await user_repo.create_outbox_event(
+            session, event_type="auth.config.sso_sessions_ended",
+            payload={
+                "actor_id": admin.id,
+                "users_affected": outcome["users"],
+                "tokens_revoked": outcome["tokens"],
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return EndSsoSessionsResponse(
+        users_affected=outcome["users"], tokens_revoked=outcome["tokens"],
+        dry_run=False,
     )

@@ -30,10 +30,12 @@ from .oidc import (
 )
 from .claim_mapper import (
     ClaimMappingError,
+    DEFAULT_BACKCHANNEL,
     DEFAULT_CUSTOM,
     DEFAULT_CUSTOM_PROFILE,
     DEFAULT_OIDC,
     DEFAULT_SAML,
+    KIND_DEFAULTS,
     apply_claim_mapping,
     merge_mapping,
     resolved_sources,
@@ -74,6 +76,15 @@ from .assurance import (
     ASSURANCE_ORDER,
     assurance_for,
     at_least as assurance_at_least,
+)
+from .backchannel import (
+    BackchannelConfigError,
+    BackchannelError,
+    BackchannelProvider,
+    BackchannelSettings,
+    BackchannelUnavailable,
+    SessionRevokedUpstream,
+    build_backchannel_provider,
 )
 from .custom_profile import (
     BROWSER_STORAGE_SOURCES,
@@ -124,6 +135,7 @@ PROVIDER_BUILDERS = {
     "oidc":           build_oidc_provider,
     "custom":         build_custom_provider,
     "custom_profile": build_custom_profile_provider,
+    "backchannel":    build_backchannel_provider,
 }
 if SAML_AVAILABLE and build_saml_provider is not None:
     PROVIDER_BUILDERS["saml2"] = build_saml_provider
@@ -182,4 +194,13 @@ __all__ = [
     "DEFAULT_SAML",
     "DEFAULT_CUSTOM",
     "DEFAULT_CUSTOM_PROFILE",
+    "DEFAULT_BACKCHANNEL",
+    "KIND_DEFAULTS",
+    "BackchannelProvider",
+    "BackchannelSettings",
+    "BackchannelError",
+    "BackchannelConfigError",
+    "BackchannelUnavailable",
+    "SessionRevokedUpstream",
+    "build_backchannel_provider",
 ]

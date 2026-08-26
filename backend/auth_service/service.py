@@ -15,12 +15,13 @@ imports from ``backend.auth_service.*`` (enforced by
 """
 from __future__ import annotations
 
+import base64
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import jwt as pyjwt
 
@@ -104,6 +105,27 @@ class SsoDecision:
     email_verified: bool = False
 
 
+@dataclass(frozen=True)
+class _PendingLiveness:
+    """What an upstream liveness re-check needs, carried out of the DB
+    session scope so the outbound call happens on nobody's connection.
+
+    Mirrors ``_RefreshRejected``'s reason for existing: the work has to
+    happen once the request's transaction has closed.
+    """
+
+    #: The IdP row that minted this session. Only a ``backchannel`` row
+    #: is probed; every other kind resolves and is skipped.
+    provider_id: str
+    #: The row to stamp on a successful confirmation — the token the
+    #: user is about to start using, not the one they just spent.
+    successor_jti: str
+    #: Epoch seconds of the last successful confirmation, the anchor the
+    #: outage grace window is measured from.
+    last_checked_at: Optional[int]
+    user_id: str
+
+
 class _RefreshRejected(Exception):
     """Carries a refresh rejection out of the DB session scope.
 
@@ -185,6 +207,9 @@ class LocalIdentityService:
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
+        avatar_fetcher: Optional[
+            Callable[[str], Awaitable[tuple[bytes, str]]]
+        ] = None,
     ):
         self._session_factory = session_factory
         self._user_repo = user_repo
@@ -205,6 +230,10 @@ class LocalIdentityService:
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
         self._session_revoker = session_revoker
+        # (url) -> (bytes, content_type). Injected by app startup, which
+        # binds the outbound guard and the operator's host allowlist —
+        # auth_service may not import backend.app.* itself.
+        self._avatar_fetcher = avatar_fetcher
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
         # ``app_auth_config``. When ``None`` (legacy test wiring), the
@@ -399,7 +428,21 @@ class LocalIdentityService:
                 "stays valid until it expires",
             )
 
-    async def refresh(self, refresh_token: str) -> tuple[User, SessionTokens]:
+    async def refresh(
+        self, refresh_token: str, *,
+        ambient_cookies: Optional[dict] = None,
+        ambient_headers: Optional[dict] = None,
+    ) -> tuple[User, SessionTokens]:
+        """Rotate a refresh token.
+
+        ``ambient_cookies`` / ``ambient_headers`` are the inbound
+        request's own, forwarded so a ``backchannel`` session can be
+        re-confirmed with the enterprise IdP on every rotation. Both
+        default to None so every other caller — and every existing test
+        — is unchanged; a session that needs the check and is not given
+        them is treated as having no ambient token, which is the same
+        answer as the user having signed out upstream.
+        """
         try:
             claims = decode_refresh_token(refresh_token)
         except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError) as exc:
@@ -416,7 +459,7 @@ class LocalIdentityService:
         # frees when this scope exits. So rejections are carried out of the
         # scope by ``_RefreshRejected`` and settled once it has closed.
         try:
-            return await self._refresh_within_session(claims)
+            user, tokens, liveness = await self._refresh_within_session(claims)
         except _RefreshRejected as rejection:
             await self._revoke_family_committed(claims.family_id)
             if rejection.kill_sessions_for is not None and self._session_killer:
@@ -431,7 +474,26 @@ class LocalIdentityService:
                 await self._emit_audit(*rejection.audit)
             raise rejection.error from None
 
-    async def _refresh_within_session(self, claims) -> tuple[User, SessionTokens]:
+        # Deliberately AFTER the session scope has closed. This makes an
+        # outbound HTTP call, and holding a DB connection across one
+        # would pin a connection per in-flight refresh for the length of
+        # somebody else's network — the same reason rejections are
+        # carried out of the scope above rather than settled inside it.
+        #
+        # Rotation has already committed by this point, which is fine:
+        # refusing here revokes the family, and the successor written a
+        # moment ago belongs to that family.
+        if liveness is not None:
+            await self._settle_liveness(
+                liveness, claims,
+                ambient_cookies=ambient_cookies or {},
+                ambient_headers=ambient_headers or {},
+            )
+        return user, tokens
+
+    async def _refresh_within_session(
+        self, claims,
+    ) -> tuple[User, SessionTokens, Optional["_PendingLiveness"]]:
         # Mint the candidate successor before claiming. Its identity has
         # to be recorded in the same statement that consumes the
         # presented token, so a concurrent refresh that loses the race
@@ -441,6 +503,10 @@ class LocalIdentityService:
             user_id=claims.sub,
             family_id=claims.family_id,
             auth_time=claims.auth_time,
+            # Family-invariant, like auth_time: the upstream credential's
+            # expiry does not move because we rotated, and dropping it
+            # here would make rotation a way to shed the ceiling.
+            idp_exp=claims.idp_exp,
         )
 
         claims_extra: dict = {}
@@ -517,6 +583,7 @@ class LocalIdentityService:
                     user_id=claims.sub,
                     family_id=claims.family_id,
                     auth_time=auth_time,
+                    idp_exp=claims.idp_exp,
                     jti=outcome.successor.successor_jti,
                     expires_at_epoch=outcome.successor.successor_exp,
                     mint_ms=outcome.successor.successor_mint_ms,
@@ -642,6 +709,43 @@ class LocalIdentityService:
                     }),
                 )
 
+            # ── Upstream credential ceiling ──────────────────────────
+            # ``idp_exp`` is the corporate token's own expiry, captured
+            # at sign-in by the browser-exchange back-channel shape —
+            # the topology where the server never sees the corporate
+            # session and so can never re-ask about it. It is signed
+            # into our refresh token and propagated unchanged, so
+            # rotation cannot extend it. Past it, the session ends the
+            # way a failed liveness check ends one: the reauth envelope
+            # names the provider, and the sign-in page silently re-runs
+            # the browser flow against the corporate IdP.
+            #
+            # From the claim rather than a server record — unlike
+            # ``auth_time`` above — because our own signature covers it:
+            # nobody holding the cookie can edit it without failing
+            # verification, and it exists only for tokens this
+            # deployment minted with it.
+            if claims.idp_exp is not None and int(time.time()) > claims.idp_exp:
+                provider_slug = await self._latest_identity_slug(session, orm.id)
+                logger.info(
+                    "Upstream credential expired (user=%s, slug=%s, "
+                    "idp_exp=%d)",
+                    orm.id, provider_slug, claims.idp_exp,
+                )
+                raise _RefreshRejected(
+                    SsoReauthRequired(
+                        _build_reauth_url(provider_slug, next_path="/"),
+                        provider=provider_slug or "sso",
+                    ),
+                    kill_sessions_for=orm.id,
+                    audit=("user.sso_session_ended_upstream", {
+                        "user_id": orm.id,
+                        "provider_slug": provider_slug,
+                        "reason": "upstream_token_expired",
+                        "idp_exp": claims.idp_exp,
+                    }),
+                )
+
             # ── Continuous group->target reconciliation ──────────────
             # When mappings or groups change between the previous login
             # and this refresh, derived RoleBindings / Group memberships
@@ -681,6 +785,20 @@ class LocalIdentityService:
                         orm.id, exc,
                     )
 
+            # Captured, not acted on: the probe is an outbound HTTP call
+            # and must not run while this transaction is open.
+            pending_liveness = (
+                _PendingLiveness(
+                    provider_id=outcome.record.idp_provider_id,
+                    successor_jti=successor.jti,
+                    last_checked_at=outcome.record.idp_checked_at,
+                    user_id=orm.id,
+                )
+                if outcome.record is not None
+                and outcome.record.idp_provider_id
+                else None
+            )
+
             roles = await self._user_repo.get_user_roles(session, orm.id)
 
             if self._claims_resolver is not None:
@@ -701,7 +819,7 @@ class LocalIdentityService:
             auth_time=auth_time,
             refresh_token=successor_token,
         )
-        return user, tokens
+        return user, tokens, pending_liveness
 
     async def get_user(self, user_id: str) -> Optional[User]:
         async with self._session_factory() as session:
@@ -788,9 +906,11 @@ class LocalIdentityService:
             logger.warning(
                 "IdP provider_id=%s released no usable auth_time; the SSO "
                 "re-auth ceiling will measure from this login instead of "
-                "from the IdP authentication. The authorize request already "
-                "sends max_age, which obliges a compliant OIDC provider to "
-                "return auth_time — check the provider's claim mapping.",
+                "from the IdP authentication. For OIDC the authorize "
+                "request sends max_age, which obliges a compliant provider "
+                "to return auth_time; for the gateway and profile kinds, "
+                "point auth_time at the right claim in the connection's "
+                "claim mapping.",
                 provider_id,
             )
 
@@ -829,7 +949,10 @@ class LocalIdentityService:
                          "existing_status": orm.status if orm else None,
                          "existing_has_identity": decision.has_existing_identity},
                     )
-                raise SSOAuthError(decision.error or "sso_rejected")
+                raise SSOAuthError(
+                    decision.error or "sso_rejected",
+                    deny_reasons=decision.deny_reasons,
+                )
 
             if decision.action == "sign_in_existing":
                 await self._user_identity_repo.touch_last_login(
@@ -914,9 +1037,48 @@ class LocalIdentityService:
             #
             # Best-effort, like the metadata write below: a profile that
             # failed to re-sync must not cost somebody their sign-in.
+            #
+            # The provider-supplied avatar first, because whether it is
+            # OWNED depends on whether the bytes actually landed: a URL
+            # nothing could download must not lock anyone out of picking
+            # their own picture. Fetched through the injected outbound
+            # guard, refetched only when the asserted URL changed, and
+            # never a login blocker.
+            avatar_asserted = False
+            avatar_url = getattr(identity, "avatar_url", None)
+            if avatar_url and self._avatar_fetcher is not None:
+                scheme = urlsplit(avatar_url).scheme.lower()
+                if scheme not in ("http", "https"):
+                    logger.warning(
+                        "Avatar URL for user=%s has scheme %r; skipped.",
+                        orm.id, scheme,
+                    )
+                elif (
+                    getattr(orm, "avatar_source_url", None) == avatar_url
+                    and getattr(orm, "avatar_image", None)
+                ):
+                    # Unchanged source, image in hand: nothing to fetch.
+                    avatar_asserted = True
+                else:
+                    try:
+                        img, ctype = await self._avatar_fetcher(avatar_url)
+                        await self._user_repo.set_user_avatar_image(
+                            session, orm.id,
+                            image_b64=base64.b64encode(img).decode("ascii"),
+                            content_type=ctype,
+                            source_url=avatar_url,
+                        )
+                        avatar_asserted = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Avatar fetch failed (user=%s, provider=%s): %s",
+                            orm.id, provider_id, exc,
+                        )
+
             owned = asserted_fields(
                 first_name=identity.first_name, last_name=identity.last_name,
                 derived=identity.names_derived_from is not None,
+                avatar_url=avatar_url if avatar_asserted else None,
             )
             if owned:
                 try:
@@ -931,6 +1093,54 @@ class LocalIdentityService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "IdP profile re-sync failed (user=%s, provider=%s): %s",
+                        orm.id, provider_id, exc,
+                    )
+
+            # Derived (split) names are a guess, so they are never owned
+            # and the re-sync above never writes them — which left anyone
+            # who existed BEFORE this connection (an invite, a local
+            # signup, an older JIT row) blank-named forever: every login
+            # re-derived the split and threw it away. Seed instead of
+            # syncing: written only while the row has no name at all, so
+            # nothing a person typed is ever overwritten, and no
+            # ownership is claimed — the fields stay theirs to edit.
+            #
+            # The IdP's exact full-name string also seeds the display
+            # override (once, while blank): the split is a guess about
+            # word order, and "Doe, Alice" reconstructed as "Alice Doe"
+            # is not what the directory said.
+            if identity.names_derived_from is not None:
+                try:
+                    row_first = (orm.first_name or "").strip()
+                    row_last = (orm.last_name or "").strip()
+                    id_first = (identity.first_name or "").strip()
+                    id_last = (identity.last_name or "").strip()
+                    seed: dict = {}
+                    if not row_first and not row_last:
+                        if id_first:
+                            seed["first_name"] = id_first
+                        if id_last:
+                            seed["last_name"] = id_last
+                    names_from_this_split = bool(seed) or (
+                        (row_first, row_last) == (id_first, id_last)
+                    )
+                    if (
+                        identity.display_name
+                        and names_from_this_split
+                        and not (
+                            getattr(orm, "display_name", "") or ""
+                        ).strip()
+                        and identity.display_name.strip()
+                        != f"{id_first} {id_last}".strip()
+                    ):
+                        seed["display_name"] = identity.display_name.strip()
+                    if seed:
+                        await self._user_repo.update_identity(
+                            session, orm.id, **seed,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Derived-name seed failed (user=%s, provider=%s): %s",
                         orm.id, provider_id, exc,
                     )
 
@@ -979,8 +1189,10 @@ class LocalIdentityService:
             # Reconcile group->target (role_binding | group_membership)
             # against what the IdP currently asserts. Additive for
             # present groups; soft-revoke for groups removed since the
-            # last login. Same transaction so a failure here rolls
-            # back the whole login.
+            # last login. A failure is logged and the login proceeds —
+            # a mapping hiccup must not lock the org out — and the
+            # refresh-time reconcile retries it within one access-token
+            # lifetime.
             reconcile_result: dict | None = None
             if self._sso_role_reconciler is not None:
                 try:
@@ -1057,8 +1269,16 @@ class LocalIdentityService:
             # IdP's authentication instant, and putting it on the row is
             # what stops the 24h re-auth ceiling depending on a claim the
             # token asserts about itself.
+            # ``provider_id`` on the row, not just in the identity
+            # table: a user can hold several identities, so "which IdP
+            # did this SESSION come from" is not answerable from
+            # ``user_identities`` alone — and the back-channel liveness
+            # check has to ask exactly that, or it would probe an OIDC
+            # session against a gateway it never came from.
             refresh_token = await self._mint_recorded_refresh(
                 session, user_id=orm.id, family_id=None, auth_time=auth_time,
+                idp_provider_id=provider_id,
+                idp_exp=getattr(identity, "upstream_expires_at", None),
             )
 
         user = _orm_to_user(orm, role=_primary_role(roles))
@@ -1176,6 +1396,7 @@ class LocalIdentityService:
         there commits a session of its own, which would make "writes
         nothing" untrue in exactly the case an operator is trusting it.
         """
+        auth_time = getattr(identity, "auth_time", None)
         outcome: dict = {
             "email": identity.email,
             "external_id": identity.external_id,
@@ -1185,6 +1406,15 @@ class LocalIdentityService:
             "attributes": dict(getattr(identity, "attributes", {}) or {}),
             "email_verified": _claims_email_verified(identity.raw_claims),
             "linking_policy": linking_policy,
+            # Whether the claims carried a usable authentication time.
+            # Absent means the ceiling measures from each sign-in (see
+            # the fallback in ``complete_sso_login``) — a fact worth
+            # stating on the verdict, since the row that reaches a
+            # successful rehearsal without one has the requirement off.
+            "auth_time": {
+                "present": isinstance(auth_time, int) and auth_time > 0,
+                "ceiling_hours": SSO_SESSION_MAX_AGE_SECONDS // 3600,
+            },
         }
 
         cfg = await self._auth_config_provider.get()
@@ -1265,6 +1495,226 @@ class LocalIdentityService:
                 await session.commit()
             except Exception:  # noqa: BLE001 — best-effort by design
                 pass
+
+    async def _settle_liveness(
+        self, pending: "_PendingLiveness", claims, *,
+        ambient_cookies: dict, ambient_headers: dict,
+    ) -> None:
+        """Re-ask the IdP whether this session is still live upstream.
+
+        This is what stops our session outliving the enterprise session
+        that created it — the gap every other kind has, and the reason
+        single logout is hard for them. It runs on every rotation, so the
+        cost is one back-channel call per active session per access-token
+        lifetime — five minutes on the default ``JWT_EXPIRY_MINUTES``,
+        longer where an operator has raised it. Deliberately not stated
+        as a fixed number anywhere user-facing: it is deployment
+        configuration, and the grace window is sized against it.
+
+        Three outcomes, and keeping them apart is the whole design:
+
+        * **The ambient token is gone.** The user signed out upstream,
+          or the cookie was deleted. Costs no network call, and is the
+          most common way a session legitimately ends.
+        * **The IdP says no** (401/403). Authoritative. End the session.
+        * **The IdP did not say** — a timeout, a 5xx, a blocked
+          destination. NOT an answer, and ending sessions on one would
+          turn a gateway blip into a platform-wide logout. Allowed
+          through, but only while the last successful confirmation is
+          inside the row's grace window; past that the session ends
+          anyway, so an outage cannot extend sessions indefinitely.
+
+        Only a success advances ``idp_checked_at``. A failure that moved
+        it would let the outage renew the very allowance it is meant to
+        be spending down.
+        """
+        provider = await self._resolve_liveness_provider(pending.provider_id)
+        if provider is None:
+            return
+
+        settings = provider.settings
+        if settings.token_source == "header":
+            # Header names are case-insensitive on the wire, and the dict
+            # the refresh route hands us has been through Starlette, which
+            # lower-cases them. The operator's spelling (``X-Corp-Session``)
+            # must keep matching, or every refresh reads "absent" and
+            # revokes a healthy family.
+            wanted = settings.token_source_key.lower()
+            raw = next(
+                (v for k, v in ambient_headers.items()
+                 if k.lower() == wanted),
+                None,
+            )
+        else:
+            raw = ambient_cookies.get(settings.token_source_key)
+
+        if not raw:
+            await self._end_session_upstream(
+                pending, claims, reason="ambient_token_absent",
+            )
+            return
+
+        from .providers.backchannel import (
+            BackchannelUnavailable, SessionRevokedUpstream,
+        )
+        try:
+            await provider.confirm_still_authenticated(raw)
+        except SessionRevokedUpstream as exc:
+            await self._end_session_upstream(
+                pending, claims, reason=f"idp_rejected:{exc}",
+            )
+            return
+        except BackchannelUnavailable as exc:
+            if self._liveness_grace_expired(pending, settings):
+                logger.warning(
+                    "Back-channel IdP unreachable and the grace window has "
+                    "expired (user=%s provider=%s): %s",
+                    pending.user_id, pending.provider_id, exc,
+                )
+                await self._end_session_upstream(
+                    pending, claims, reason=f"idp_unconfirmed:{exc}",
+                )
+                return
+            logger.warning(
+                "Back-channel liveness unconfirmed for user=%s provider=%s "
+                "(%s); inside the grace window, allowing this rotation",
+                pending.user_id, pending.provider_id, exc,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — a provider bug is an outage
+            logger.warning(
+                "Back-channel liveness check raised unexpectedly "
+                "(user=%s provider=%s): %s",
+                pending.user_id, pending.provider_id, exc,
+            )
+            if self._liveness_grace_expired(pending, settings):
+                await self._end_session_upstream(
+                    pending, claims, reason="idp_unconfirmed:internal",
+                )
+            return
+
+        await self._record_liveness_check(pending.successor_jti)
+
+    async def _resolve_liveness_provider(self, provider_id: str):
+        """The ``backchannel`` provider for this session, or None.
+
+        None for every other kind — an OIDC or SAML session has no
+        ambient token to present and must never be probed. Also None
+        when the row has since been disabled or deleted: that is an
+        operator action about future logins, and inventing a new
+        revocation trigger out of it is not this method's call.
+        """
+        from .providers.backchannel import BackchannelProvider
+        from .providers.registry import get_registry, ProviderNotFound
+
+        try:
+            provider = await get_registry().get(provider_id)
+        except (ProviderNotFound, RuntimeError) as exc:
+            logger.info(
+                "Skipping liveness check; provider %s is not resolvable (%s)",
+                provider_id, exc,
+            )
+            return None
+        if not isinstance(provider, BackchannelProvider):
+            return None
+        if not provider.settings.liveness_on_refresh:
+            return None
+        if provider.settings.exchange_mode == "browser":
+            # The corporate session never reaches this server in browser
+            # mode, so there is nothing on the request to re-confirm.
+            # The session is bounded instead by ``idp_exp`` — the
+            # corporate token's own expiry, checked on every refresh.
+            return None
+        if not provider.settings.token_source_key:
+            # Nothing on the request carries the upstream session, so
+            # there is nothing to re-confirm. Without this the lookup
+            # below returned None and the code concluded the session had
+            # been revoked — revoking the refresh family and killing
+            # every live session, once per access-token lifetime, for a
+            # user who had done nothing wrong.
+            #
+            # "I have no way to check" and "I checked and the answer was
+            # no" are opposite conclusions, and only one of them is
+            # grounds for signing somebody out.
+            logger.debug(
+                "Provider %s names no ambient session source; skipping the "
+                "liveness check rather than treating it as revoked.",
+                provider.settings.provider_id,
+            )
+            return None
+        return provider
+
+    @staticmethod
+    def _liveness_grace_expired(pending: "_PendingLiveness", settings) -> bool:
+        """Whether an unconfirmed session has run out of allowance.
+
+        A row with no anchor at all has never been confirmed — treated
+        as expired, because the alternative is an unbounded allowance
+        handed to exactly the sessions we know least about.
+        """
+        if pending.last_checked_at is None:
+            return True
+        return (
+            int(time.time()) - int(pending.last_checked_at)
+            > max(0, int(settings.liveness_grace_seconds))
+        )
+
+    async def _record_liveness_check(self, jti: str) -> None:
+        """Stamp a successful confirmation, best-effort.
+
+        Best-effort on purpose: failing to WRITE the anchor must not
+        fail a refresh the IdP has just approved. The cost of losing it
+        is a shorter grace window later, which errs closed.
+        """
+        try:
+            async with self._session_factory() as session:
+                store = self._refresh_store_factory(session)
+                await store.touch_idp_check(jti, checked_at=int(time.time()))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not record liveness check for %s: %s", jti, exc)
+
+    async def _end_session_upstream(
+        self, pending: "_PendingLiveness", claims, *, reason: str,
+    ) -> None:
+        """Kill this session because the IdP no longer backs it.
+
+        Raises ``SsoReauthRequired`` — the same signal the 24h re-auth
+        ceiling already raises, so the frontend's existing handling
+        bounces the user to the provider's login with nothing new to
+        teach it.
+        """
+        await self._revoke_family_committed(claims.family_id)
+        if self._session_killer:
+            try:
+                await self._session_killer(pending.user_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "session_killer failed during liveness rejection "
+                    "(user=%s): %s", pending.user_id, exc,
+                )
+        provider_slug = "sso"
+        try:
+            async with self._session_factory() as session:
+                provider_slug = (
+                    await self._latest_identity_slug(session, pending.user_id)
+                ) or "sso"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not resolve provider slug: %s", exc)
+
+        logger.info(
+            "Back-channel session ended upstream (user=%s provider=%s): %s",
+            pending.user_id, pending.provider_id, reason,
+        )
+        await self._emit_audit("user.sso_session_ended_upstream", {
+            "user_id": pending.user_id,
+            "provider_id": pending.provider_id,
+            "provider_slug": provider_slug,
+            "reason": reason,
+        })
+        raise SsoReauthRequired(
+            _build_reauth_url(provider_slug, next_path="/"),
+            provider=provider_slug or "sso",
+        )
 
     async def _revoke_family_committed(self, family_id: str) -> None:
         """Revoke a refresh family in its own committed transaction.
@@ -1348,6 +1798,8 @@ class LocalIdentityService:
         user_id: str,
         family_id: Optional[str],
         auth_time: Optional[int],
+        idp_provider_id: Optional[str] = None,
+        idp_exp: Optional[int] = None,
     ) -> str:
         """Mint a refresh token and write the row that makes it usable.
 
@@ -1364,6 +1816,7 @@ class LocalIdentityService:
         """
         token, claims = create_refresh_token(
             user_id=user_id, family_id=family_id, auth_time=auth_time,
+            idp_exp=idp_exp,
         )
         store = self._refresh_store_factory(session)
         await store.record_mint(
@@ -1375,6 +1828,12 @@ class LocalIdentityService:
             expires_at_iso=datetime.fromtimestamp(
                 claims.exp, tz=timezone.utc,
             ).isoformat(),
+            idp_provider_id=idp_provider_id,
+            # A login IS a successful upstream confirmation, so the
+            # anchor starts here rather than at the first refresh. Left
+            # NULL for local logins, where there is no upstream to
+            # confirm and the column is never read.
+            idp_checked_at=int(time.time()) if idp_provider_id else None,
         )
         return token
 

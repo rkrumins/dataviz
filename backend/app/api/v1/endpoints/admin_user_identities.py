@@ -152,6 +152,11 @@ async def admin_unlink_identity(
         )
     except IdentityNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Identity not found")
+    # Same release as the self-service unlink: no link, no re-sync, so a
+    # name-lock this provider held would be read-only forever.
+    await user_repo.clear_idp_managed_snapshot(
+        session, user_id, provider_id=ident.provider_id,
+    )
     await user_repo.create_outbox_event(
         session, event_type="user.identity.admin_unlinked",
         payload={"user_id": user_id, "identity_id": identity_id,

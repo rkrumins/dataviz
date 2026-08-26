@@ -730,7 +730,12 @@ async def reconcile_sso_targets(
             - group_ids: ``{group_id, …}``
       3. For each branch:
             - missing in target -> soft-revoke (``expires_at=now()``
-              for bindings; delete row for memberships).
+              for bindings; delete row for memberships) — but ONLY for
+              targets the acting provider governs (reachable from one
+              of its mappings, or a NULL-provider wildcard). Existing
+              rows carry no provider, so without that scope a login
+              through provider B would read provider A's grants as
+              "no longer asserted" and strip them.
             - present in target -> reactivate (clear ``expires_at``;
               no-op for memberships).
             - target without an existing row -> insert.
@@ -755,6 +760,27 @@ async def reconcile_sso_targets(
     mappings = await idp_group_mapping_repo.list_active_for_groups(
         session, provider_id=provider_id, idp_groups=idp_groups,
     )
+
+    # The revocation scope: every target reachable from ANY of the
+    # acting provider's mappings (its own rows plus the wildcards),
+    # regardless of which idp_group. Deliberately unfiltered by the
+    # grant-path guards below — "governed" means "one of these mappings
+    # could have granted it", and expiring an out-of-band privileged
+    # row can only remove access. An empty group list still revokes,
+    # but only inside this scope.
+    governed = await idp_group_mapping_repo.list_active_for_provider(
+        session, provider_id=provider_id,
+    )
+    governed_role_keys: set[tuple[str, str | None, str]] = {
+        (m.scope_type, m.scope_id, m.role_name)
+        for m in governed
+        if m.target_type != "group_membership"
+        and m.role_name and m.scope_type
+    }
+    governed_group_ids: set[str] = {
+        m.target_group_id for m in governed
+        if m.target_type == "group_membership" and m.target_group_id
+    }
 
     # Resolved once, not per mapping. A provider whose assurance was
     # downgraded after its mappings were written (an operator flipping
@@ -851,10 +877,13 @@ async def reconcile_sso_targets(
     reactivated = 0
     created = 0
 
-    # 3a. Soft-revoke bindings the IdP no longer asserts.
+    # 3a. Soft-revoke bindings the IdP no longer asserts — within the
+    # acting provider's governed scope only (see above).
     to_expire = [
         b for k, b in existing_sso.items()
-        if k not in role_target_keys and b.expires_at is None
+        if k not in role_target_keys
+        and k in governed_role_keys
+        and b.expires_at is None
     ]
     if to_expire:
         ids = [b.id for b in to_expire]
@@ -923,8 +952,9 @@ async def reconcile_sso_targets(
     memberships_removed = 0
     memberships_added = 0
 
-    # 5a. Remove sso memberships that are no longer asserted.
-    to_remove = existing_sso_groups - group_target_ids
+    # 5a. Remove sso memberships that are no longer asserted — same
+    # governed scope as the binding branch.
+    to_remove = (existing_sso_groups & governed_group_ids) - group_target_ids
     if to_remove:
         await session.execute(
             sa_delete(GroupMemberORM).where(

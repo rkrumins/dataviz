@@ -633,3 +633,39 @@ async def test_view_access_evaluator_workspace_admin_can_hard_delete(db_session)
     assert view_access.can_hard_delete_view(ctx, view)
     assert view_access.can_change_visibility(ctx, view)
     assert view_access.can_restore_view(ctx, view)
+
+
+@pytest.mark.asyncio
+async def test_member_provenance_reaches_the_admin(test_client: AsyncClient, db_session):
+    """Who put this person in the group — an admin, or the directory?
+
+    The difference decides what removing them does: a hand-removed
+    ``source='sso'`` row is re-added at the member's next SSO login, so
+    the admin needs to see the provenance to know that removing the
+    mapping (or the directory group) is the real lever."""
+    from backend.app.db.models import GroupMemberORM
+
+    local_id = await _seed_user(db_session, user_id="usr_loc", email="loc@example.com")
+    sso_id = await _seed_user(db_session, user_id="usr_sso", email="sso@example.com")
+
+    r = await test_client.post("/api/v1/admin/groups", json={"name": "prov"})
+    assert r.status_code == 201, r.text
+    group_id = r.json()["id"]
+
+    added = await test_client.post(
+        f"/api/v1/admin/groups/{group_id}/members", json={"userId": local_id},
+    )
+    assert added.status_code == 201
+    assert added.json()["source"] == "local"
+
+    # The reconcile writes these rows; seeded directly to keep the test
+    # about the API surface.
+    db_session.add(GroupMemberORM(
+        group_id=group_id, user_id=sso_id, added_by=None, source="sso",
+    ))
+    await db_session.commit()
+
+    r = await test_client.get(f"/api/v1/admin/groups/{group_id}/members")
+    assert r.status_code == 200
+    by_user = {m["userId"]: m["source"] for m in r.json()}
+    assert by_user == {local_id: "local", sso_id: "sso"}

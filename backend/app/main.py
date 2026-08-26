@@ -345,6 +345,36 @@ def profile_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool)
     return _build
 
 
+def backchannel_builder_with_replay_cache(
+    base_builder, replay_cache, is_prod: bool,
+):
+    """Wrap the back-channel builder so it binds the shared replay cache.
+
+    Only browser-exchange rows need it: their assertion is delivered by
+    the browser and enforced single-use, and without a shared store that
+    enforcement is a process-local dict the registry throws away every
+    60 seconds. Server-mode rows never touch the cache — their tokens
+    are redeemed against the gateway, which is its own replay defence —
+    so they are served regardless, same as unsigned custom_profile rows.
+    """
+
+    def _build(snap, **kw):
+        browser = str(
+            (snap.settings or {}).get("exchange_mode") or "server"
+        ).strip().lower() == "browser"
+        if replay_cache is None and is_prod and browser:
+            raise RuntimeError(
+                f"backchannel provider {snap.slug!r} cannot be served: "
+                "the revocation store is unavailable, so a browser-"
+                "delivered assertion cannot be enforced single-use and a "
+                "copied one would be replayable for its whole lifetime. "
+                "Fix Redis/Memorystore connectivity."
+            )
+        return base_builder(snap, replay_cache=replay_cache, **kw)
+
+    return _build
+
+
 def saml_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
     """Wrap the SAML provider builder so it binds the shared replay cache.
 
@@ -633,12 +663,63 @@ async def lifespan(_app: FastAPI):
                 if row is not None else None
             )
 
+    from backend.app.db.repositories import backchannel_host_repo
+
+    async def _allowed_backchannel_hosts() -> frozenset[str]:
+        """Which internal ``host:port`` destinations SSO may reach.
+
+        Read per call, not per provider build: the registry caches
+        provider instances for 60s, and an operator removing a host
+        expects that to take effect on the next login rather than a
+        minute later. One small indexed query on a path that is already
+        about to make two outbound HTTP calls.
+
+        Fails CLOSED. If the DB read fails we return the empty set,
+        which refuses every private destination — the same state as a
+        deployment that has allowlisted nothing. The alternative,
+        raising, would take out the whole login route; the alternative
+        of retaining a previous answer would mean a removed host kept
+        working precisely when we could not confirm it had been removed.
+        """
+        try:
+            async with get_async_session() as session:
+                return await backchannel_host_repo.allowed_host_keys(session)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Back-channel host allowlist unreadable (%s); refusing "
+                "every internal destination until it can be read.", exc,
+            )
+            return frozenset()
+
+    _builders = dict(PROVIDER_BUILDERS)
+    if "backchannel" in _builders:
+        from backend.app.services.revocation_service import (
+            get_backchannel_replay_cache,
+        )
+        _base_backchannel = _builders["backchannel"]
+
+        def _backchannel_builder(snap, _base=_base_backchannel, **kw):
+            return _base(
+                snap, allowed_hosts=_allowed_backchannel_hosts, **kw,
+            )
+
+        _bc_replay = get_backchannel_replay_cache()
+        _bc_prod = _is_production()
+        if _bc_replay is None and not _bc_prod:
+            logger.warning(
+                "Back-channel assertion replay cache is process-local (no "
+                "shared revocation store). A browser-delivered assertion "
+                "could be replayed by any worker that has not seen it. "
+                "Never deploy this.",
+            )
+        _builders["backchannel"] = backchannel_builder_with_replay_cache(
+            _backchannel_builder, _bc_replay, _bc_prod,
+        )
     # SAML assertion replay defence. ``SamlProvider`` has always called a
     # replay cache; until now nothing ever handed it one, so it fell back
     # to a process-local dict that the registry then threw away every 60
     # seconds along with the provider. Bind the shared store here, where
     # the revocation backend is already resolved.
-    _builders = dict(PROVIDER_BUILDERS)
     if SAML_AVAILABLE and "saml2" in _builders:
         from backend.app.services.revocation_service import (
             get_saml_replay_cache,
@@ -892,11 +973,30 @@ async def lifespan(_app: FastAPI):
             sso_enabled=snap.sso_enabled,
             allow_local_login=snap.allow_local_login,
             allow_jit_provisioning=snap.allow_jit_provisioning,
+            # Every field the admin can toggle has to cross this seam by
+            # name. This one was forgotten, and the dataclass default
+            # (False) silently won at runtime — the admin page showed
+            # email-first ON while the login page never led with email.
+            email_first_login=snap.email_first_login,
             version=snap.version,
             updated_at=snap.updated_at,
         )
 
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
+
+    async def _fetch_avatar_image(url: str) -> tuple[bytes, str]:
+        """Download a provider-asserted profile picture, guarded.
+
+        Same allowlist the back-channel legs use: a private image host
+        needs an operator's entry, and the outbound module supplies the
+        redirect ban, the streaming size cap and the image-type check.
+        """
+        from backend.auth_service.providers.outbound import fetch_image
+
+        return await fetch_image(
+            url, timeout=5.0,
+            allow_hosts=await _allowed_backchannel_hosts(),
+        )
 
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
@@ -912,6 +1012,7 @@ async def lifespan(_app: FastAPI):
         session_killer=_kill_user_sessions,
         session_revoker=_revoke_one_session,
         auth_config_provider=_auth_config_provider,
+        avatar_fetcher=_fetch_avatar_image,
     )
     # Refuse to serve without a signing secret. This used to happen as a
     # side effect of importing the auth config, which made the secret a

@@ -37,7 +37,8 @@ import { cn } from '@/lib/utils'
 import { viewTypeLabel, viewTypeColor, viewTypeIconComponent } from '@/lib/viewUtils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useViewFacets } from '@/hooks/useViewFacets'
-import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
+import { avatarPaletteFor } from '@/lib/avatar'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { FilterDropdown, type FilterOption } from './FilterDropdown'
 
 /* ------------------------------------------------------------------ */
@@ -447,17 +448,16 @@ export function ExplorerFilterBar({
             const palette = avatarPaletteFor(opt.id)
             return (
               <div className="flex items-center gap-3 px-3 py-2">
-                <div
+                <UserAvatar
+                  userId={opt.id}
+                  name={displayName}
+                  shape="palette"
                   className={cn(
-                    'w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0',
+                    'w-8 h-8 text-[11px] font-bold',
                     'transition-all duration-150',
-                    palette.bg,
-                    palette.text,
                     isSelected && cn('ring-2 ring-offset-1 ring-offset-canvas', palette.ring),
                   )}
-                >
-                  {initialsOf(displayName)}
-                </div>
+                />
                 <div className="flex-1 min-w-0">
                   <div className={cn(
                     'text-xs truncate',

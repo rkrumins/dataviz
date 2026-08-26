@@ -40,6 +40,8 @@ class InMemoryRefreshStore:
         mint_ms: int,
         expires_at_iso: str,
         revoked_at_iso: Optional[str] = None,
+        idp_provider_id: Optional[str] = None,
+        idp_checked_at: Optional[int] = None,
     ) -> bool:
         if jti in self.records:
             return False
@@ -52,11 +54,22 @@ class InMemoryRefreshStore:
             expires_at_iso=expires_at_iso,
             created_at_iso=_now_iso(),
             revoked_at_iso=revoked_at_iso,
+            idp_provider_id=idp_provider_id,
+            idp_checked_at=idp_checked_at,
         )
         return True
 
     async def get_record(self, jti: str) -> Optional[RefreshRecord]:
         return self.records.get(jti)
+
+    async def touch_idp_check(self, jti: str, *, checked_at: int) -> bool:
+        record = self.records.get(jti)
+        if record is None:
+            return False
+        self.records[jti] = RefreshRecord(
+            **{**record.__dict__, "idp_checked_at": int(checked_at)},
+        )
+        return True
 
     async def consume(self, jti: str, *, successor_jti: str) -> bool:
         record = self.records.get(jti)

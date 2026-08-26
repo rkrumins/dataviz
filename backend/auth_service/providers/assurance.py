@@ -70,6 +70,33 @@ def assurance_for(kind: str, settings: dict | None = None) -> str:
         # claim mapper — JWKS for OIDC, the IdP x509 cert for SAML.
         return VERIFIED
 
+    if kind == "backchannel":
+        # Server mode: verified with no signature needed. The claims did
+        # not arrive from the browser at all: they came back over TLS
+        # from the provider's own endpoint, in answer to a question we
+        # asked during this login. A signature attests to a statement
+        # made at some past instant; a back-channel answer is current,
+        # so a session revoked thirty seconds ago fails now rather than
+        # at the assertion's ``exp``. (With ``claims_format="jwt"`` the
+        # answer is decoded, optionally signature-checked too — neither
+        # changes where it came from.)
+        #
+        # Browser mode: the assertion IS browser-delivered, so it earns
+        # the rating the OIDC/SAML way — signature verification against
+        # the row's material (a JWKS, a pasted public key, or a shared
+        # secret), ``exp`` required, single-use enforced. The ONE
+        # unsigned variant is the explicit ``trust_unsigned`` opt-in,
+        # which accepts browser-written claims unverified and is rated
+        # accordingly. (Server mode refuses the flag at validation, so
+        # the mode check below is belt-and-braces for out-of-band rows.)
+        if (
+            str(s.get("exchange_mode") or "server").strip().lower()
+            == "browser"
+            and _as_bool(s.get("trust_unsigned"))
+        ):
+            return UNVERIFIED
+        return VERIFIED
+
     if kind == "custom_profile":
         # An unsigned payload is unverifiable regardless of how it arrived,
         # so this check comes first: a JSON payload delivered by header is

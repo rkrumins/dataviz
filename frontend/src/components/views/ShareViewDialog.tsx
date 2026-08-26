@@ -61,7 +61,7 @@ import {
 import { useToast } from '@/components/ui/toast'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
-import { avatarGradient, initialsOf } from '@/lib/avatar'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { buildViewShareUrl } from '@/lib/viewShareLink'
 import {
     VISIBILITY_ACCENT,
@@ -693,12 +693,12 @@ export function ShareViewDialog({
                                                             className="flex items-center gap-2.5 px-3 py-2 group hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                                         >
                                                             {isUser ? (
-                                                                <div className={cn(
-                                                                    'w-8 h-8 rounded-full bg-gradient-to-br flex items-center justify-center text-[10px] font-bold text-white shrink-0',
-                                                                    avatarGradient(name),
-                                                                )}>
-                                                                    {initialsOf(name)}
-                                                                </div>
+                                                                <UserAvatar
+                                                                    userId={g.subject.id}
+                                                                    name={name}
+                                                                    shape="gradient"
+                                                                    className="w-8 h-8 text-[10px] font-bold"
+                                                                />
                                                             ) : (
                                                                 <div className="w-8 h-8 rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-600 dark:text-violet-400 shrink-0">
                                                                     <Users2 className="w-3.5 h-3.5" />
@@ -901,12 +901,12 @@ function AddGrantPicker({
                                     className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50 border-b last:border-b-0 border-glass-border"
                                 >
                                     {isUser ? (
-                                        <div className={cn(
-                                            'w-7 h-7 rounded-full bg-gradient-to-br flex items-center justify-center text-[10px] font-bold text-white shrink-0',
-                                            avatarGradient(label),
-                                        )}>
-                                            {initialsOf(label)}
-                                        </div>
+                                        <UserAvatar
+                                            userId={u!.id}
+                                            name={label}
+                                            shape="gradient"
+                                            className="w-7 h-7 text-[10px] font-bold"
+                                        />
                                     ) : (
                                         <div className="w-7 h-7 rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-600 dark:text-violet-400 shrink-0">
                                             <Users2 className="w-3.5 h-3.5" />

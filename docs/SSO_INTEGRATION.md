@@ -195,7 +195,7 @@ graph TB
         subgraph auth_service["backend/auth_service/ (isolation-locked)"]
             ASRouter[api/router.py<br/>/auth/*]
             ASCore[core/config.py<br/>core/tokens.py<br/>core/password.py]
-            ASProv[providers/<br/>oidc / saml2 / custom / local<br/>claim_mapper + registry]
+            ASProv[providers/<br/>oidc / saml2 / custom<br/>custom_profile / backchannel / local<br/>claim_mapper + registry]
             ASSvc[service.LocalIdentityService<br/>orchestrates login/refresh/SSO]
             ASCfg[app_auth_config.py<br/>posture switches accessor]
         end
@@ -357,6 +357,8 @@ Bootstrapping order (the `app.main.lifespan` entry point):
    3. `ProviderRegistry` configured with a DB-backed loader closure;
       env-bootstrap seeds `default-oidc` / `default-saml2` /
       `default-custom` rows from legacy env vars if no row exists.
+      `custom_profile` and `backchannel` have no env seed — they are
+      created through the admin UI only.
    4. `AuthConfigProvider` (Phase 4) wired as a TTL-cached closure
       over `app_auth_config_repo.get_snapshot`.
    5. `LocalIdentityService` constructed with every injected hook
@@ -1428,6 +1430,12 @@ would also 404 in-app, since those files are not registered docs routes.
 | SAML assertion replay | shared store keyed by assertion id (`SET NX EX`, TTL = NotOnOrAfter), injected by `app/main.py`; prod refuses to serve SAML without one. **Was claimed here and not wired** — every provider fell back to a per-worker dict that the 60s registry rebuild discarded. | `revocation_service.SharedSamlReplayCache` |
 | Signature wrapping (XSW) on SAML | strict-mode XML parsing in python3-saml | library |
 | Account takeover via email collision | `linking_policy` matrix, default `strict` | `service.py:complete_sso_login` |
+| Back-channel gateway impersonation | credentials are never parsed; the claims material comes only from the reply we fetched over TLS with redirects refused — decoded when the operator marks it a JWT, optionally signature-verified against a configured JWKS | `providers/backchannel.py:fetch_identity` |
+| Request forgery via an admin-typed gateway URL | resolved-address check before connecting; private addresses need an explicit `host:port` allowlist entry, and loopback / link-local are refused whatever it contains. The JWKS fetch goes through the same guard — never PyJWT's own client | `providers/outbound.py:assert_fetchable`, `fetch_jwks` |
+| Back-channel session outliving the upstream one | server mode: re-confirmed with the provider on every rotation, outages tolerated only inside a grace window anchored to the last successful answer. Browser mode: the corporate token's own `exp` is signed into our refresh token (`idp_exp`), propagated unchanged through rotation, and enforced on every refresh | `service.py:_settle_liveness`, `service.py:_refresh_within_session` |
+| Forged handle posted by a browser | redeemed against the provider's gateway rather than parsed, so an invented value does not survive leg 1 | `api/router.py:backchannel_handle_login` |
+| Forged assertion posted by a browser (browser-exchange mode) | mandatory signature verification against the row's material — its JWKS, a pasted public key, or a shared secret (`validate_settings` refuses the mode without one, except behind the explicit `trust_unsigned` opt-in, which drops assurance to `unverified` so platform-admin mappings are out of reach) — with `exp` required, the algorithm list pinned by the material, and single-use enforcement that fails closed — a copied assertion is spent by the sign-in it was copied from, and prod refuses to serve the mode without a shared replay store | `providers/backchannel.py:identity_from_assertion`, `app/main.py:backchannel_builder_with_replay_cache` |
+| Secret leak via exchange-topology flip | the browser-exchange call has its own deliberately-public field family (`browser_exchange_*`); `gateway_headers` / `exchange_headers` are never publishable under any mode, so switching a row's topology cannot expose a stored secret | `api/router.py:_public_config` |
 | `system:admin` granted via group | write-time refusal + reconcile-time skip, for BOTH mapping kinds. **The `group_membership` kind was unguarded** — it never asked what the target group grants, and `is_protected` has no write path, so an IdP group pointed at a group holding `super_admin` handed out platform admin. | `idp_group_mapping_repo.roles_granted_by_group` |
 | Operator self-lockout via posture toggle | `_admins_without_sso_identity` check | `admin_sso_config.update_config` |
 | Stale permissions after admin change | `claims_resolver` re-runs on every `/refresh` | `service.refresh` |

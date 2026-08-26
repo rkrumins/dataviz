@@ -43,6 +43,7 @@ Custom providers identically.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from .base import ProviderIdentity
@@ -60,6 +61,11 @@ DEFAULT_OIDC: dict[str, Any] = {
     "display_name":   ["name", "displayName"],
     "groups":         ["groups", "wids", "roles"],
     "auth_time":      ["auth_time"],
+    # Empty by default outside the backchannel kind: mapping a picture
+    # makes the server fetch it at login, and that participation is a
+    # per-connection choice, not a surprise. An explicit override is
+    # the opt-in for the other kinds.
+    "avatar_url":     [],
     "extras":         {},
 }
 
@@ -84,6 +90,10 @@ DEFAULT_SAML: dict[str, Any] = {
     "display_name":   [
         "name", "displayName",
         "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+        # The SAML-native full-name attributes: Shibboleth/eduPerson
+        # release cn as urn:oid:2.5.4.3, ADFS offers the MS claim URI.
+        "cn", "commonName", "urn:oid:2.5.4.3",
+        "http://schemas.microsoft.com/identity/claims/displayname",
     ],
     "groups":         [
         "groups", "memberOf", "Groups",
@@ -91,6 +101,7 @@ DEFAULT_SAML: dict[str, Any] = {
         "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
     ],
     "auth_time":      ["__authn_instant__"],
+    "avatar_url":     [],
     "extras":         {},
 }
 
@@ -101,9 +112,13 @@ DEFAULT_CUSTOM: dict[str, Any] = {
     "email_verified": ["email_verified"],
     "first_name":     ["first_name"],
     "last_name":      ["last_name"],
-    "display_name":   ["display_name"],
+    # The grab-bag the other custom-ish kinds carry: a custom IdP that
+    # releases only "name" or "fullName" deserves the split too.
+    "display_name":   ["display_name", "displayName", "fullName",
+                       "full_name", "name"],
     "groups":         ["groups"],
     "auth_time":      ["auth_time"],
+    "avatar_url":     [],
     "extras":         {},
 }
 
@@ -121,6 +136,33 @@ DEFAULT_CUSTOM_PROFILE: dict[str, Any] = {
     "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
     "groups":         ["groups", "roles", "memberOf"],
     "auth_time":      ["auth_time", "authTime", "iat"],
+    "avatar_url":     [],
+    "extras":         {},
+}
+
+
+# A back-channel gateway returns its own user object over an API, so the
+# casings are the same grab-bag a portal payload uses. The one real
+# difference is ``auth_time``: ``iat`` is NOT a candidate here, because
+# there is no token being read — an ``iat`` in the claims would be the
+# exchange response's own age, not the moment the user authenticated,
+# and silently satisfying the 24h re-auth ceiling with it would defeat
+# the ceiling.
+DEFAULT_BACKCHANNEL: dict[str, Any] = {
+    "external_id":    ["sub", "userId", "user_id", "employeeId", "uid", "email"],
+    "email":          ["email", "emailAddress", "email_address", "mail", "upn"],
+    "email_verified": ["email_verified", "emailVerified"],
+    "first_name":     ["firstName", "first_name", "givenName", "given_name"],
+    "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
+    "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
+    "groups":         ["groups", "roles", "memberOf", "groupMembership"],
+    "auth_time":      ["auth_time", "authTime", "authenticationTime",
+                       "lastLogin", "last_login"],
+    #: Candidates only; nothing is fetched unless the connection's
+    #: ``map_avatar`` toggle is on. The grab-bag matches the casings the
+    #: other fields already cover.
+    "avatar_url":     ["picture", "avatarUrl", "avatar_url", "photoUrl",
+                       "photo"],
     "extras":         {},
 }
 
@@ -130,6 +172,7 @@ KIND_DEFAULTS = {
     "saml2":          DEFAULT_SAML,
     "custom":         DEFAULT_CUSTOM,
     "custom_profile": DEFAULT_CUSTOM_PROFILE,
+    "backchannel":    DEFAULT_BACKCHANNEL,
 }
 
 
@@ -141,9 +184,20 @@ _PATH_SEGMENT = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
 
 def _resolve(claims: Any, path: str) -> Any:
     """Walk a dotted/indexed path through *claims*. Returns ``None``
-    if any segment is missing or has the wrong shape."""
+    if any segment is missing or has the wrong shape.
+
+    An exact-match top-level key wins before any walking: SAML
+    attribute names and OID URNs — ``urn:oid:2.5.4.3``,
+    ``http://schemas.xmlsoap.org/...`` — contain dots that are part of
+    the NAME, not a path, and without this rule they could never
+    resolve at all (which quietly deadened every URI candidate in the
+    SAML defaults)."""
     if not isinstance(path, str) or not path:
         return None
+    if isinstance(claims, dict) and path in claims:
+        v = claims[path]
+        if v is not None:
+            return v
     cur: Any = claims
     pos = 0
     while pos < len(path):
@@ -169,6 +223,13 @@ def _resolve(claims: Any, path: str) -> Any:
         if pos < len(path) and path[pos] == ".":
             pos += 1
     return cur
+
+
+#: Public name for the walker above. ``backchannel`` resolves operator-
+#: configured paths into arbitrary API responses with it, and reaching
+#: for the underscored name across modules would misreport it as
+#: private to this one.
+resolve_path = _resolve
 
 
 def _first_non_empty(claims: dict, paths: Iterable[str]) -> Any:
@@ -221,21 +282,49 @@ def _to_email(v: Any) -> str:
 
 
 def _to_groups(v: Any) -> tuple[str, ...]:
-    """Normalise group claim shapes. Accepts list-of-strings, single
-    string, comma-separated string. Filters out blanks; preserves
-    input order."""
+    """Normalise group claim shapes. Filters out blanks; preserves
+    input order.
+
+    Accepted shapes, matching what enterprise directories actually
+    release:
+
+    * list/tuple — strings kept (stripped); numeric ids stringified
+      (many directories key groups by number). Booleans and everything
+      else are dropped, not stringified: ``"True"`` is not a group.
+      Items are never split further — a list is already delimited, so a
+      DN item keeps its commas.
+    * a string containing ``=`` — ONE group. LDAP DNs
+      (``CN=Data Analysts,OU=Groups,DC=corp``) are the commonest group
+      shape here, and splitting one on its commas shreds a single name
+      into unmappable fragments.
+    * any other string — split on commas or semicolons.
+    * a bare numeric id — a one-group tuple.
+    """
     if v is None:
         return ()
     if isinstance(v, str):
-        if "," in v:
-            return tuple(g.strip() for g in v.split(",") if g.strip())
-        v = v.strip()
-        return (v,) if v else ()
+        s = v.strip()
+        if not s:
+            return ()
+        if "=" in s:
+            return (s,)
+        if "," in s or ";" in s:
+            return tuple(g.strip() for g in re.split(r"[;,]", s) if g.strip())
+        return (s,)
+    if isinstance(v, bool):
+        # Checked before int — bool is an int subclass.
+        return ()
+    if isinstance(v, int):
+        return (str(v),)
     if isinstance(v, (list, tuple)):
         out: list[str] = []
         for item in v:
             if isinstance(item, str) and item.strip():
                 out.append(item.strip())
+            elif isinstance(item, bool):
+                continue
+            elif isinstance(item, int):
+                out.append(str(item))
         return tuple(out)
     return ()
 
@@ -280,17 +369,48 @@ def split_display_name(display_name: str) -> tuple[str, str]:
         family, _, given = text.partition(",")
         if family.strip() and given.strip():
             return given.strip(), family.strip()
+    # A comma that did NOT split the name is punctuation — "Alice Doe,"
+    # must not store a surname of "Doe,".
+    text = text.strip(",").strip()
+    if not text:
+        return "", ""
     parts = text.split(None, 1)
     return parts[0], parts[1].strip() if len(parts) > 1 else ""
 
 
-def _to_int(v: Any) -> int | None:
-    if v is None:
+def _to_epoch(v: Any) -> int | None:
+    """Coerce an authentication-instant claim to epoch seconds.
+
+    IdPs disagree about the shape: OIDC sends epoch seconds, but the
+    gateway kinds routinely answer with epoch *milliseconds* or an
+    ISO-8601 timestamp (``lastLogin``). A value that parses under none
+    of these readings is None — the caller decides whether that is
+    fatal. Milliseconds are recognised by magnitude: 10^12 seconds is
+    the year 33658, so any number that large is a millisecond count.
+    """
+    if v is None or isinstance(v, bool):
         return None
-    try:
-        return int(v)
-    except (TypeError, ValueError):
+    if isinstance(v, (int, float)):
+        seconds = float(v)
+    elif isinstance(v, str):
+        text = v.strip()
+        if not text:
+            return None
+        try:
+            seconds = float(text)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+    else:
         return None
+    if seconds >= 1e12:
+        seconds /= 1000.0
+    return int(seconds)
 
 
 # ── Public surface ───────────────────────────────────────────────────
@@ -359,7 +479,7 @@ def resolved_sources(
         for field in (
             "external_id", "email", "email_verified",
             "first_name", "last_name", "display_name",
-            "groups", "auth_time",
+            "groups", "auth_time", "avatar_url",
         )
     }
     for name, paths in (mapping.get("extras") or {}).items():
@@ -419,7 +539,11 @@ def apply_claim_mapping(
         )
 
     groups = _to_groups(_first_non_empty(claims, mapping.get("groups") or []))
-    auth_time = _to_int(_first_non_empty(claims, mapping.get("auth_time") or []))
+    auth_time = _to_epoch(
+        _first_non_empty(claims, mapping.get("auth_time") or [])
+    )
+    raw_avatar = _first_non_empty(claims, mapping.get("avatar_url") or [])
+    avatar_url = _to_str(raw_avatar).strip() if raw_avatar is not None else ""
 
     email_verified_raw = _first_non_empty(
         claims, mapping.get("email_verified") or []
@@ -456,6 +580,8 @@ def apply_claim_mapping(
         auth_time=auth_time,
         attributes=extras,
         names_derived_from=names_derived_from,
+        display_name=display_name or None,
+        avatar_url=avatar_url or None,
     )
 
 
