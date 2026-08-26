@@ -680,6 +680,17 @@ def _dryrun_response(slug: str, outcome: dict) -> Response:
     row("Existing account", outcome.get("user_email"))
     row("Groups asserted", outcome.get("groups"))
     row("Linking policy", outcome.get("linking_policy"))
+    auth_time_fact = outcome.get("auth_time") or {}
+    if auth_time_fact.get("present") is False:
+        # Only reachable on a row whose requirement is off — with it on,
+        # the sign-in refuses before any verdict. Worth a line: the
+        # ceiling silently changes what it measures.
+        row(
+            "Authentication time",
+            f"not in the claims — the "
+            f"{auth_time_fact.get('ceiling_hours', 24)}-hour "
+            "re-certification will measure from each sign-in",
+        )
 
     if outcome.get("reason"):
         row("Refused because", outcome["reason"])

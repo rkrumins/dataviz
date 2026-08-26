@@ -115,3 +115,23 @@ describe('the verification line', () => {
             .toBe('The claims carried no groups.')
     })
 })
+
+describe('the authentication-time line', () => {
+    it('names the consequence when the claims carried none', () => {
+        const line = summarizeRehearsalOutcome({
+            groups: [],
+            auth_time: { present: false, ceiling_hours: 24 },
+        })[0]
+        expect(line).toContain('no authentication time')
+        expect(line).toContain('24-hour')
+        expect(line).toContain('measure from each sign-in')
+    })
+
+    it('says nothing when it was present, or when the server is older', () => {
+        expect(summarizeRehearsalOutcome({
+            groups: [], auth_time: { present: true, ceiling_hours: 24 },
+        })[0]).toBe('The claims carried no groups.')
+        expect(summarizeRehearsalOutcome({ groups: [] })[0])
+            .toBe('The claims carried no groups.')
+    })
+})

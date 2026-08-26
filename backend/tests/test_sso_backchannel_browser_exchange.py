@@ -698,6 +698,37 @@ async def test_a_dry_run_verifies_without_writing(
     assert resp.status_code == 200, resp.text
     assert resp.json().get("dryRun") is True
     assert "nx_access" not in resp.headers.get("set-cookie", "")
+    # The fixture claims carry auth_time, and the verdict says so.
+    outcome = resp.json().get("outcome") or {}
+    assert outcome.get("auth_time", {}).get("present") is True
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_names_the_missing_auth_time(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """A rehearsal that succeeds without an authentication time only
+    happens on a row whose requirement is off — and then the ceiling
+    silently changes what it measures. The verdict states it, so the
+    operator learns it before real users sign in."""
+    from backend.auth_service.core.tokens import create_dryrun_token
+
+    _routes(monkeypatch)
+    row = await _make_row(
+        db_session, lifecycle="draft", require_auth_time=False,
+    )
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _assertion(auth_time=None)},
+        cookies={"nx_dryrun": create_dryrun_token(
+            admin_id="u-admin", provider_id=row.id,
+        )},
+    )
+    assert resp.status_code == 200, resp.text
+    outcome = resp.json().get("outcome") or {}
+    assert outcome.get("auth_time") == {
+        "present": False, "ceiling_hours": 24,
+    }
 
 
 # ── what the browser is told ─────────────────────────────────────────

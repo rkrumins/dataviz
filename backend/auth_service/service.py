@@ -898,9 +898,11 @@ class LocalIdentityService:
             logger.warning(
                 "IdP provider_id=%s released no usable auth_time; the SSO "
                 "re-auth ceiling will measure from this login instead of "
-                "from the IdP authentication. The authorize request already "
-                "sends max_age, which obliges a compliant OIDC provider to "
-                "return auth_time — check the provider's claim mapping.",
+                "from the IdP authentication. For OIDC the authorize "
+                "request sends max_age, which obliges a compliant provider "
+                "to return auth_time; for the gateway and profile kinds, "
+                "point auth_time at the right claim in the connection's "
+                "claim mapping.",
                 provider_id,
             )
 
@@ -1299,6 +1301,7 @@ class LocalIdentityService:
         there commits a session of its own, which would make "writes
         nothing" untrue in exactly the case an operator is trusting it.
         """
+        auth_time = getattr(identity, "auth_time", None)
         outcome: dict = {
             "email": identity.email,
             "external_id": identity.external_id,
@@ -1308,6 +1311,15 @@ class LocalIdentityService:
             "attributes": dict(getattr(identity, "attributes", {}) or {}),
             "email_verified": _claims_email_verified(identity.raw_claims),
             "linking_policy": linking_policy,
+            # Whether the claims carried a usable authentication time.
+            # Absent means the ceiling measures from each sign-in (see
+            # the fallback in ``complete_sso_login``) — a fact worth
+            # stating on the verdict, since the row that reaches a
+            # successful rehearsal without one has the requirement off.
+            "auth_time": {
+                "present": isinstance(auth_time, int) and auth_time > 0,
+                "ceiling_hours": SSO_SESSION_MAX_AGE_SECONDS // 3600,
+            },
         }
 
         cfg = await self._auth_config_provider.get()

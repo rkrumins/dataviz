@@ -324,6 +324,10 @@ export interface RehearsalOutcome {
         verified?: boolean
         material?: 'jwks' | 'public_key' | 'shared_secret' | 'none'
     }
+    /** Whether the claims carried a usable authentication time, and the
+     *  re-certification ceiling measured against it. Absent from older
+     *  servers — absent means say nothing. */
+    auth_time?: { present?: boolean; ceiling_hours?: number }
 }
 
 /** The verification verdict as one operator-readable line, or null when
@@ -361,6 +365,16 @@ export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
         // makes operators ask: which case did we just see, and was it
         // verified?
         lines.push(verificationLine(outcome.verification))
+    }
+    if (outcome.auth_time?.present === false) {
+        // Only a requirement-off row reaches a verdict without one —
+        // and then the ceiling quietly measures from each sign-in.
+        lines.push(
+            'The claims carried no authentication time — the '
+            + `${outcome.auth_time.ceiling_hours ?? 24}-hour `
+            + 're-certification will measure from each sign-in instead '
+            + 'of from the IdP.',
+        )
     }
     const groups = outcome.groups ?? []
     lines.push(
