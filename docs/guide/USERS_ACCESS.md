@@ -102,6 +102,14 @@ else until it does. Supply your own `ADMIN_PASSWORD` and no prompt appears.
 Admin → Users shows a **DEFAULT PASSWORD** badge against any account still in
 that state.
 
+The same table's **Sign-in** column says how each account gets in: **Local**
+for a password account, a chip naming each linked identity provider for an
+SSO one (hover it for the last sign-in and whether SSO created the account),
+both together when an account has both, and **No sign-in** for an account
+with neither — stranded until you grant a reset token or a connection links
+it. The search box matches provider names too, so "everyone from Entra" is
+one query.
+
 ### Locked out
 
 If the only administrator forgets their password there is no way in through the

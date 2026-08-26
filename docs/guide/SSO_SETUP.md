@@ -100,13 +100,27 @@ similar names resolve by default on a gateway connection), and it only
 participates while the connection's **Map their avatar from the claims** toggle
 — in the Behaviour section, off by default — is on. With it on, our server
 fetches the image during sign-in and serves it from here; browsers never load
-the corporate URL directly, so member lists cannot leak viewers to your photo
-host. A private photo host needs an internal-hosts allowlist entry, exactly
-like the gateway endpoints. While the connection supplies a picture it is
-IdP-managed like the names: shown everywhere, re-applied at every sign-in,
-and the person's own picker says so instead of offering a change that would
-not survive. The image refreshes whenever the URL in the claims changes, and
-unlinking the identity clears it.
+the external URL directly, so member lists cannot leak viewers to your photo
+host.
+
+The image host must be listed before anything is fetched. An **external**
+host — a public CDN, an avatar service — goes on **Avatar image hosts**
+(Settings tab): that list is the on-switch, and while it is empty every
+outside host is refused by name. A **private** host inside your own network
+goes on the internal-gateways allowlist instead, exactly like the gateway
+endpoints. What gets through is raster images only — PNG, JPEG, GIF, WebP or
+AVIF, up to 256 KiB; a raster is a grid of pixels, a finished picture, so an
+SVG (drawing instructions that can carry scripts) is refused. Redirects are
+followed up to three hops, and every host in the chain must be listed. When a
+picture is not arriving, **rehearse the connection**: the verdict now carries
+an avatar line that says exactly what happened — fetched (type and size), or
+refused and by which rule, naming the host to add.
+
+While the connection supplies a picture it is IdP-managed like the names:
+shown everywhere, re-applied at every sign-in, and the person's own picker
+says so instead of offering a change that would not survive. The image
+refreshes whenever the URL in the claims changes, and unlinking the identity
+clears it.
 
 #### If your IdP only sends one name
 

@@ -437,4 +437,6 @@ should usually be zero.
 **Rehearse after changes.** The rehearsal from setup is available on every
 connection's card at any time, not just during setup. It writes nothing and
 creates no session, so there is no reason not to use it after editing a
-connection.
+connection. Its verdict also tells the avatar story — whether the mapped
+picture would arrive (type and size), or which rule refused it and, when the
+host is the problem, which host to add to the avatar image hosts list.
