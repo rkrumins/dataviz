@@ -29,7 +29,8 @@ import {
 } from 'lucide-react'
 
 import { PageContainer } from '@/components/layout/PageContainer'
-import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
+import { AvatarPickerDialog } from '@/components/layout/AvatarPickerDialog'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { accountService } from '@/services/accountService'
 import { authService, type UserIdentity } from '@/services/authService'
@@ -71,7 +72,7 @@ export function AccountShell({
 }) {
     const user = useAuthStore((s) => s.user)
     const applyProfile = useAuthStore((s) => s.applyProfile)
-    const avatar = useAvatarContent()
+    const avatarId = usePreferencesStore((s) => s.avatarId)
     const [avatarOpen, setAvatarOpen] = useState(false)
 
     const [passwordSet, setPasswordSet] = useState<boolean | null>(null)
@@ -142,17 +143,19 @@ export function AccountShell({
                                             title="Change avatar"
                                             className="relative group rounded-full focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
                                         >
-                                            {avatar ? (
-                                                <div className={cn('w-16 h-16 rounded-full flex items-center justify-center ring-4 ring-black/[0.03] dark:ring-white/[0.04]', avatar.bg)}>
-                                                    {avatar.content('w-8 h-8 text-ink')}
-                                                </div>
-                                            ) : (
-                                                <div className="w-16 h-16 rounded-full flex items-center justify-center bg-accent-lineage/15 ring-4 ring-black/[0.03] dark:ring-white/[0.04]">
-                                                    <span className="text-xl font-semibold text-accent-lineage select-none">
-                                                        {initials}
+                                            <UserAvatar
+                                                userId={user?.id}
+                                                name={[user?.firstName, user?.lastName].filter(Boolean).join(' ') || '?'}
+                                                avatarId={avatarId}
+                                                className="w-16 h-16 ring-4 ring-black/[0.03] dark:ring-white/[0.04]"
+                                                fallback={(
+                                                    <span className="flex h-full w-full items-center justify-center rounded-full bg-accent-lineage/15">
+                                                        <span className="text-xl font-semibold text-accent-lineage select-none">
+                                                            {initials}
+                                                        </span>
                                                     </span>
-                                                </div>
-                                            )}
+                                                )}
+                                            />
                                             <span className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                                                 <PencilLine className="w-4 h-4 text-white" />
                                             </span>

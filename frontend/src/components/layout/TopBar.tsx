@@ -7,7 +7,8 @@ import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
 import { NotificationBell as InviteActivityBell } from '@/components/layout/NotificationBell'
 import { NotificationBell } from '@/components/notifications/NotificationBell'
-import { AvatarPickerDialog, useAvatarContent } from '@/components/layout/AvatarPickerDialog'
+import { AvatarPickerDialog } from '@/components/layout/AvatarPickerDialog'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaStore } from '@/store/persona'
 import {
@@ -57,7 +58,6 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const location = useLocation()
   const searchPlaceholder = useSearchPlaceholder()
   const navigate = useNavigate()
-  const avatar = useAvatarContent()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
   const avatarId = usePreferencesStore((s) => s.avatarId)
   const setAvatarId = usePreferencesStore((s) => s.setAvatarId)
@@ -120,32 +120,34 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
     ? `${(user.firstName?.[0] ?? '').toUpperCase()}${(user.lastName?.[0] ?? '').toUpperCase()}`
     : '?'
 
-  /** Renders the user avatar — chosen illustration or initials fallback */
+  /** Renders the user avatar — provider image over chosen illustration
+   *  over initials, via the shared component. */
   const renderAvatar = (size: 'sm' | 'md') => {
     const dims = size === 'sm' ? 'w-8 h-8' : 'w-9 h-9'
     const iconDims = size === 'sm' ? 'w-4 h-4' : 'w-5 h-5'
     const textSize = size === 'sm' ? 'text-xs' : 'text-sm'
 
-    if (avatar) {
-      return (
-        <div className={cn(dims, 'rounded-full flex items-center justify-center', avatar.bg)}>
-          {avatar.content(cn(iconDims, 'text-ink'))}
-        </div>
-      )
-    }
-    if (user) {
+    if (!user) {
       return (
         <div className={cn(dims, 'rounded-full flex items-center justify-center bg-accent-lineage/15')}>
-          <span className={cn(textSize, 'font-semibold text-accent-lineage select-none leading-none')}>
-            {initials}
-          </span>
+          <User className={cn(iconDims, 'text-accent-lineage')} />
         </div>
       )
     }
     return (
-      <div className={cn(dims, 'rounded-full flex items-center justify-center bg-accent-lineage/15')}>
-        <User className={cn(iconDims, 'text-accent-lineage')} />
-      </div>
+      <UserAvatar
+        userId={user.id}
+        name={`${user.firstName ?? ''} ${user.lastName ?? ''}`.trim()}
+        avatarId={avatarId}
+        className={dims}
+        fallback={(
+          <span className={cn('flex h-full w-full items-center justify-center rounded-full bg-accent-lineage/15')}>
+            <span className={cn(textSize, 'font-semibold text-accent-lineage select-none leading-none')}>
+              {initials}
+            </span>
+          </span>
+        )}
+      />
     )
   }
 
