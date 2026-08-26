@@ -973,6 +973,11 @@ async def lifespan(_app: FastAPI):
             sso_enabled=snap.sso_enabled,
             allow_local_login=snap.allow_local_login,
             allow_jit_provisioning=snap.allow_jit_provisioning,
+            # Every field the admin can toggle has to cross this seam by
+            # name. This one was forgotten, and the dataclass default
+            # (False) silently won at runtime — the admin page showed
+            # email-first ON while the login page never led with email.
+            email_first_login=snap.email_first_login,
             version=snap.version,
             updated_at=snap.updated_at,
         )
