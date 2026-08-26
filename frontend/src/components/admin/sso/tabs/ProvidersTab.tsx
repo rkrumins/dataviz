@@ -5,7 +5,7 @@
  * none and the guided wizard behind "Connect a provider".
  */
 import { useCallback, useEffect, useState } from 'react'
-import { FlaskConical, X } from 'lucide-react'
+import { FlaskConical, Power, X } from 'lucide-react'
 import {
     ssoAdminService,
     summarizeRehearsalOutcome,
@@ -46,6 +46,20 @@ export function ProvidersTab({
     const [showCreate, setShowCreate] = useState(false)
     const [editingId, setEditingId] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
+    // Which card's which action is in flight — so the control actually
+    // working can show a spinner, instead of every control on every
+    // card greying out identically.
+    const [pending, setPending] = useState<{
+        id: string
+        action: 'toggle' | 'publish' | 'rehearse'
+    } | null>(null)
+    // A failed status read is a different fact from "never probed", and
+    // rendering them identically made an outage look like a fresh
+    // install.
+    const [healthUnavailable, setHealthUnavailable] = useState(false)
+    // The platform master switch. When it is off, no connection signs
+    // anyone in — whatever the cards say — so the list says so.
+    const [ssoMasterOff, setSsoMasterOff] = useState(false)
     const [loaded, setLoaded] = useState(false)
     // Turning a connection OFF gets a confirm with a number in it: how
     // many people are signed in through it right now, and whether to
@@ -74,8 +88,18 @@ export function ProvidersTab({
             setHealth(Object.fromEntries(
                 status.providers.map((h) => [h.providerId, h]),
             ))
+            setHealthUnavailable(false)
         } catch {
             setHealth({})
+            setHealthUnavailable(true)
+        }
+        // The posture read is supplementary too — the list must render
+        // without it, and absence of the banner is the safe default.
+        try {
+            const cfg = await ssoAdminService.getAuthConfig()
+            setSsoMasterOff(!cfg.ssoEnabled)
+        } catch {
+            setSsoMasterOff(false)
         }
     }, [])
 
@@ -96,6 +120,7 @@ export function ProvidersTab({
             // minted keep rotating until they expire — so ask, with the
             // count, and offer to end them now. The count is best-effort.
             setBusy(true)
+            setPending({ id: p.id, action: 'toggle' })
             let count: number | null = null
             try {
                 const dry = await ssoAdminService.endProviderSessions(
@@ -106,11 +131,13 @@ export function ProvidersTab({
                 count = null
             } finally {
                 setBusy(false)
+                setPending(null)
             }
             setDisabling({ provider: p, count, signOut: false })
             return
         }
         setBusy(true)
+        setPending({ id: p.id, action: 'toggle' })
         try {
             await ssoAdminService.updateProvider(p.id, { enabled: true })
             await refresh()
@@ -119,6 +146,7 @@ export function ProvidersTab({
             setError((err as Error).message)
         } finally {
             setBusy(false)
+            setPending(null)
         }
     }
 
@@ -126,11 +154,13 @@ export function ProvidersTab({
         if (!disabling) return
         const { provider: p, signOut } = disabling
         setBusy(true)
+        setPending({ id: p.id, action: 'toggle' })
         try {
             await ssoAdminService.updateProvider(p.id, { enabled: false })
         } catch (err) {
             setError((err as Error).message)
             setBusy(false)
+            setPending(null)
             return
         }
         let ended: { usersAffected: number } | null = null
@@ -167,10 +197,12 @@ export function ProvidersTab({
             )
         }
         setBusy(false)
+        setPending(null)
     }
 
     async function publish(p: IdpProvider) {
         setBusy(true)
+        setPending({ id: p.id, action: 'publish' })
         try {
             await ssoAdminService.publishProvider(p.id)
             await refresh()
@@ -179,6 +211,7 @@ export function ProvidersTab({
             setError((err as Error).message)
         } finally {
             setBusy(false)
+            setPending(null)
         }
     }
 
@@ -207,6 +240,7 @@ export function ProvidersTab({
             'happened.',
         )) return
         setBusy(true)
+        setPending({ id: p.id, action: 'rehearse' })
         setNotice(null)
         try {
             const { loginUrl } = await ssoAdminService.startDryRun(p.id)
@@ -272,6 +306,7 @@ export function ProvidersTab({
             )
         } finally {
             setBusy(false)
+            setPending(null)
         }
     }
 
@@ -299,6 +334,19 @@ export function ProvidersTab({
 
     return (
         <div className="space-y-4">
+            {ssoMasterOff && (
+                <div
+                    role="status"
+                    className="flex items-start gap-2 px-3 py-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.06]"
+                >
+                    <Power className="w-3.5 h-3.5 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
+                    <p className="text-xs text-ink flex-1 min-w-0">
+                        The SSO master switch is off — no connection signs
+                        anyone in right now, whatever the cards below say.
+                        Turn it back on under the Settings tab.
+                    </p>
+                </div>
+            )}
             {error && <ErrorBanner message={error} />}
             {notice && (
                 <div
@@ -404,7 +452,9 @@ export function ProvidersTab({
                         key={p.id}
                         provider={p}
                         health={health[p.id]}
+                        healthUnavailable={healthUnavailable}
                         busy={busy}
+                        pending={pending?.id === p.id ? pending.action : null}
                         index={i}
                         onEdit={() => setEditingId(p.id)}
                         onRehearse={() => { void dryRun(p) }}
