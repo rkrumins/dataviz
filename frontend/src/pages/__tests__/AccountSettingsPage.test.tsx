@@ -278,3 +278,31 @@ describe('AccountSettingsPage', () => {
         expect(navigateSpy).not.toHaveBeenCalled()
     })
 })
+
+describe('one-word names', () => {
+    it('saves with the surname left blank', async () => {
+        // "Prince" and undivided scripts land whole in the first name.
+        // Requiring a second field made Save permanently dead for them
+        // — and took the display-name escape hatch down with it, since
+        // it rides in the same patch.
+        vi.mocked(accountService.updateProfile).mockResolvedValue({
+            ...PROFILE, lastName: '', displayName: '',
+        })
+        const user = userEvent.setup()
+        renderPage()
+
+        const last = await screen.findByLabelText(/Last name/i)
+        await user.clear(last)
+        await user.type(
+            await screen.findByLabelText(/Display name/i), 'Prince',
+        )
+        const save = await screen.findByRole('button', {
+            name: /Save changes/i,
+        })
+        expect(save).toBeEnabled()
+        await user.click(save)
+        await waitFor(() => {
+            expect(accountService.updateProfile).toHaveBeenCalled()
+        })
+    })
+})

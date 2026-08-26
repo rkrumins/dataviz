@@ -164,7 +164,12 @@ function AccountSettingsContent() {
         || displayName.trim() !== ''
     ), [firstName, lastName, displayName, user])
 
-    const canSaveProfile = !!firstName.trim() && !!lastName.trim()
+    // A first name is required; a surname is not — "Prince" and
+    // undivided scripts ("山田太郎") land whole in the first name, and
+    // demanding a second field made Save permanently dead for them
+    // (taking the display-name escape hatch down with it, since it
+    // rides in the same patch).
+    const canSaveProfile = !!firstName.trim()
         && profileDirty && !savingProfile
 
     const resetProfile = () => {

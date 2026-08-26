@@ -1149,8 +1149,9 @@ export function AdminUsers() {
                                         confirmClass="bg-accent-lineage hover:brightness-110 shadow-accent-lineage/20"
                                         loading={!!actionLoading}
                                         disabled={
+                                            // A surname is optional — one-word
+                                            // names ("Prince") must stay savable.
                                             !profileFirstName.trim() ||
-                                            !profileLastName.trim() ||
                                             (profileFirstName.trim() === modal.firstName && profileLastName.trim() === modal.lastName)
                                         } />
                                 </>

@@ -183,6 +183,10 @@ export interface TestMappingResult {
         last_name: string
         groups: string[]
         auth_time: number | null
+        /** The full-name string as the IdP released it; absent on older
+         *  servers. */
+        display_name?: string | null
+        avatar_url?: string | null
         attributes: Record<string, unknown>
     }
     /**

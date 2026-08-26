@@ -417,6 +417,32 @@ describe('a full name split into halves', () => {
         expect(row('First name').queryByText(/nothing resolved/i)).toBeNull()
     })
 
+    it("shows the full name's own resolved value on its row", async () => {
+        // This row used to read "Paste a sample to see this resolve"
+        // while its winning chip sat highlighted green — the one screen
+        // an operator debugs a full-name-only IdP on, lying about the
+        // field doing all the work.
+        previewMapping.mockResolvedValue(resolved({
+            ...SPLIT,
+            resolved: {
+                external_id: 'u1', email: 'a@x.com',
+                first_name: 'Alice', last_name: 'Doe',
+                groups: [], auth_time: null, attributes: {},
+                display_name: 'Alice Doe',
+            },
+        }))
+        render(<Harness initialSample={SAMPLE} />)
+
+        await screen.findAllByText(/split from/i)
+        // The label also appears as a mapped-badge in the payload pane;
+        // the profile row is the one inside a list item.
+        const rowEl = screen.getAllByText('Full / display name')
+            .map((el) => el.closest('li'))
+            .find((el): el is HTMLLIElement => el !== null)!
+        expect(within(rowEl).getByText('Alice Doe')).toBeInTheDocument()
+        expect(within(rowEl).queryByText(/paste a sample/i)).toBeNull()
+    })
+
     it('names the claim it was split out of', async () => {
         previewMapping.mockResolvedValue(resolved(SPLIT))
         render(<Harness initialSample={SAMPLE} />)

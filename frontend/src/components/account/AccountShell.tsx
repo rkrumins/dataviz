@@ -31,6 +31,7 @@ import {
 import { PageContainer } from '@/components/layout/PageContainer'
 import { AvatarPickerDialog } from '@/components/layout/AvatarPickerDialog'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
 import { accountService } from '@/services/accountService'
 import { authService, type UserIdentity } from '@/services/authService'
@@ -93,8 +94,13 @@ export function AccountShell({
 
     useEffect(() => { void refresh() }, [refresh])
 
+    // Shared helper + displayName fallback: a full-name-only identity
+    // has blank halves, and the old concat rendered an empty circle.
     const initials = user
-        ? `${(user.firstName?.[0] ?? '').toUpperCase()}${(user.lastName?.[0] ?? '').toUpperCase()}`
+        ? initialsOf(
+            user.displayName
+            || `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim(),
+        )
         : '?'
     const roleLabel = user?.role
         ? (SYSTEM_ROLE_LABELS[user.role as SystemRole] ?? user.role)
@@ -145,7 +151,9 @@ export function AccountShell({
                                         >
                                             <UserAvatar
                                                 userId={user?.id}
-                                                name={[user?.firstName, user?.lastName].filter(Boolean).join(' ') || '?'}
+                                                name={user?.displayName
+                                                    || [user?.firstName, user?.lastName].filter(Boolean).join(' ')
+                                                    || '?'}
                                                 avatarId={avatarId}
                                                 className="w-16 h-16 ring-4 ring-black/[0.03] dark:ring-white/[0.04]"
                                                 fallback={(
