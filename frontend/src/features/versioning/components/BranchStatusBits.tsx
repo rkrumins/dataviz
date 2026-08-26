@@ -3,6 +3,7 @@
  * ownership read identically everywhere: a tone-coded status pill and a deterministic owner avatar.
  */
 import { cn } from '@/lib/utils'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { ownerInitials, ownerName, type DraftStatus, type StatusTone } from '../model/branchVocab'
 
 const PILL_TONE: Record<StatusTone, string> = {
@@ -67,14 +68,21 @@ export function OwnerAvatar({
   return (
     <span
       title={ownerName(owner, userNames)}
-      className={cn(
-        'inline-flex items-center justify-center rounded-full font-semibold text-white shrink-0 shadow-sm ring-1 ring-white/15',
-        AVATAR_SIZE[size],
-        avatarTone(owner),
-        className,
-      )}
+      className={cn('inline-flex shrink-0 rounded-full', className)}
     >
-      {ownerInitials(owner, userNames)}
+      <UserAvatar
+        userId={owner}
+        name={ownerName(owner, userNames)}
+        className={cn(AVATAR_SIZE[size], 'font-semibold shadow-sm ring-1 ring-white/15')}
+        fallback={(
+          <span className={cn(
+            'flex h-full w-full items-center justify-center rounded-full text-white',
+            avatarTone(owner),
+          )}>
+            {ownerInitials(owner, userNames)}
+          </span>
+        )}
+      />
     </span>
   )
 }

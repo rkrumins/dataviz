@@ -43,7 +43,7 @@ import {
 } from '@/services/workspaceMembersService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
 import { useToast } from '@/components/ui/toast'
-import { avatarGradient, initialsOf } from '@/lib/avatar'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -1319,12 +1319,12 @@ function ByUserTab({
                                         isSel ? 'bg-emerald-500/10' : 'hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
                                     )}
                                 >
-                                    <div className={cn(
-                                        'w-8 h-8 rounded-full bg-gradient-to-br flex items-center justify-center text-[11px] font-bold text-white shrink-0',
-                                        avatarGradient(u.displayName),
-                                    )}>
-                                        {initialsOf(u.displayName)}
-                                    </div>
+                                    <UserAvatar
+                                        userId={u.id}
+                                        name={u.displayName}
+                                        shape="gradient"
+                                        className="w-8 h-8 text-[11px] font-bold"
+                                    />
                                     <div className="min-w-0 flex-1">
                                         <p className={cn('text-sm truncate', isSel ? 'font-semibold text-emerald-700 dark:text-emerald-300' : 'text-ink')}>
                                             {u.displayName}
@@ -1653,12 +1653,12 @@ function WorkspaceMembersDetail({
                             return (
                                 <div key={m.bindingId} className="flex items-center gap-3 px-3 py-2.5 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors">
                                     {isUser ? (
-                                        <div className={cn(
-                                            'w-9 h-9 rounded-full bg-gradient-to-br flex items-center justify-center text-[11px] font-bold text-white shrink-0',
-                                            avatarGradient(name),
-                                        )}>
-                                            {initialsOf(name)}
-                                        </div>
+                                        <UserAvatar
+                                            userId={m.subject.id}
+                                            name={name}
+                                            shape="gradient"
+                                            className="w-9 h-9 text-[11px] font-bold"
+                                        />
                                     ) : (
                                         <div className="w-9 h-9 rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center shrink-0">
                                             <Users2 className="w-4 h-4 text-violet-500" />

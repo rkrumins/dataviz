@@ -36,6 +36,7 @@ import { permissionsService, type UserAccessResponse } from '@/services/permissi
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
@@ -116,10 +117,6 @@ const KPI_CARDS = [
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-function getInitials(first: string, last: string): string {
-    return `${(first || '?')[0]}${(last || '?')[0]}`.toUpperCase()
-}
-
 function formatDate(iso: string): string {
     return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
@@ -134,21 +131,6 @@ function timeAgo(iso: string): string {
     const days = Math.floor(hrs / 24)
     if (days < 30) return `${days}d ago`
     return formatDate(iso)
-}
-
-const AVATAR_COLORS = [
-    'from-indigo-500 to-violet-500',
-    'from-emerald-500 to-teal-500',
-    'from-amber-500 to-orange-500',
-    'from-rose-500 to-pink-500',
-    'from-sky-500 to-blue-500',
-    'from-fuchsia-500 to-purple-500',
-]
-
-function avatarGradient(name: string): string {
-    let hash = 0
-    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash)
-    return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]
 }
 
 // ── Sortable column header ───────────────────────────────────────────
@@ -838,12 +820,12 @@ export function AdminUsers() {
                                         <td className="px-5 py-4">
                                             <div className="flex items-center gap-3">
                                                 <div className="relative">
-                                                    <div className={cn(
-                                                        "w-9 h-9 rounded-full bg-gradient-to-br flex items-center justify-center text-[11px] font-bold text-white shrink-0 shadow-sm",
-                                                        avatarGradient(user.displayName)
-                                                    )}>
-                                                        {getInitials(user.firstName, user.lastName)}
-                                                    </div>
+                                                    <UserAvatar
+                                                        userId={user.id}
+                                                        name={user.displayName}
+                                                        shape="gradient"
+                                                        className="w-9 h-9 text-[11px] font-bold shadow-sm"
+                                                    />
                                                     {user.resetRequested && (
                                                         <div className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sky-500 border-2 border-canvas-elevated flex items-center justify-center"
                                                             title="Password reset requested">
@@ -1036,7 +1018,7 @@ export function AdminUsers() {
                                 <>
                                     <ModalHeader icon={XCircle} iconBg="bg-red-500/10 border-red-500/20" iconColor="text-red-500"
                                         title="Reject Signup" subtitle="This action cannot be undone" onClose={closeModal} />
-                                    <UserPill name={modal.name} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
                                     <div className="mb-5">
                                         <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted mb-2 block">
                                             Reason <span className="normal-case font-normal">(optional)</span>
@@ -1056,7 +1038,7 @@ export function AdminUsers() {
                                 <>
                                     <ModalHeader icon={Ban} iconBg="bg-red-500/10 border-red-500/20" iconColor="text-red-500"
                                         title="Suspend User" subtitle="User will lose access immediately" onClose={closeModal} />
-                                    <UserPill name={modal.name} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
                                     <p className="text-sm text-ink-secondary mb-5">
                                         This will prevent the user from logging in. You can reactivate them later.
                                     </p>
@@ -1078,7 +1060,7 @@ export function AdminUsers() {
                                         title="Change Organization Access"
                                         subtitle={`Current: ${roleVisualFor(modal.currentRole).label}. Workspace-specific access is managed inside each workspace.`}
                                         onClose={closeModal} />
-                                    <UserPill name={modal.name} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
                                     <div className="space-y-2 mb-5">
                                         {assignableRoles.map(r => {
                                             const RIcon = r.icon
@@ -1179,7 +1161,7 @@ export function AdminUsers() {
                                 <>
                                     <ModalHeader icon={KeyRound} iconBg="bg-sky-500/10 border-sky-500/20" iconColor="text-sky-500"
                                         title="Reset Password" subtitle="Choose a reset method" onClose={closeModal} />
-                                    <UserPill name={modal.name} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
 
                                     {/* If we have a generated token, show it */}
                                     {generatedToken ? (
@@ -1493,15 +1475,15 @@ function ModalHeader({ icon: Icon, iconBg, iconColor, title, subtitle, onClose }
     )
 }
 
-function UserPill({ name }: { name: string }) {
+function UserPill({ name, userId }: { name: string; userId?: string }) {
     return (
         <div className="flex items-center gap-3 p-3 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border mb-5">
-            <div className={cn(
-                "w-8 h-8 rounded-full bg-gradient-to-br flex items-center justify-center text-[10px] font-bold text-white",
-                avatarGradient(name)
-            )}>
-                {name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)}
-            </div>
+            <UserAvatar
+                userId={userId}
+                name={name}
+                shape="gradient"
+                className="w-8 h-8 text-[10px] font-bold"
+            />
             <p className="text-sm font-medium text-ink">{name}</p>
         </div>
     )

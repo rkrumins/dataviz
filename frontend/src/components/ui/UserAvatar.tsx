@@ -101,11 +101,15 @@ export function UserAvatar({
             )}
         >
             {base}
+            {/* The image carries no radius of its own: the wrapper's
+                overflow-hidden clips it to whatever shape the surface
+                chose — a circle by default, a rounded tile on the
+                access summary. */}
             {showImage && (
                 <img
                     src={avatarImageSrc(userId as string)}
                     alt={alt ?? ''}
-                    className="absolute inset-0 h-full w-full rounded-full object-cover"
+                    className="absolute inset-0 h-full w-full object-cover"
                     onLoad={() => rememberAvatarImage(userId as string, 'ok')}
                     onError={() => {
                         rememberAvatarImage(userId as string, 'none')

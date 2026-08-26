@@ -26,8 +26,9 @@ import { adminUserService, type AdminUserResponse } from '@/services/adminUserSe
 import { useToast } from '@/components/ui/toast'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
-import { avatarGradient, getInitials, initialsOf } from '@/lib/avatar'
+import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { usePermission } from '@/store/auth'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -893,14 +894,12 @@ function ManageMembersModal({
                                         key={member.userId}
                                         className="flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border group hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
                                     >
-                                        <div className={cn(
-                                            'w-7 h-7 rounded-full bg-gradient-to-br flex items-center justify-center text-[10px] font-bold text-white shrink-0',
-                                            avatarGradient(name),
-                                        )}>
-                                            {user
-                                                ? getInitials(user.firstName, user.lastName)
-                                                : initialsOf(member.userId)}
-                                        </div>
+                                        <UserAvatar
+                                            userId={member.userId}
+                                            name={name}
+                                            shape="gradient"
+                                            className="w-7 h-7 text-[10px] font-bold"
+                                        />
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-1.5 min-w-0">
                                                 <p className="text-sm text-ink truncate">{name}</p>
@@ -1007,12 +1006,12 @@ function ManageMembersModal({
                                             disabled={busy === u.id}
                                             className="w-full flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 border-glass-border text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors disabled:opacity-50"
                                         >
-                                            <div className={cn(
-                                                'w-7 h-7 rounded-full bg-gradient-to-br flex items-center justify-center text-[10px] font-bold text-white shrink-0',
-                                                avatarGradient(u.displayName),
-                                            )}>
-                                                {getInitials(u.firstName, u.lastName)}
-                                            </div>
+                                            <UserAvatar
+                                                userId={u.id}
+                                                name={u.displayName}
+                                                shape="gradient"
+                                                className="w-7 h-7 text-[10px] font-bold"
+                                            />
                                             <div className="min-w-0 flex-1">
                                                 <p className="text-sm text-ink truncate">{u.displayName}</p>
                                                 <p className="text-[11px] text-ink-muted truncate">{u.email}</p>
