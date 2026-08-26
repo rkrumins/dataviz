@@ -61,6 +61,7 @@ UI.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -120,6 +121,15 @@ _JWT_ALGORITHMS = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512",
 #: Kept short — key rotation must land promptly — and a kid the cache
 #: does not know forces one refetch regardless of age.
 _JWKS_TTL_SECONDS = 300.0
+
+#: Replay-burn horizon for trust_unsigned assertions, where ``exp`` is
+#: attacker-writable or absent entirely. The stores size their TTL from
+#: the exp they are handed, so an absent one would burn for ~1 second —
+#: a replay window, not a burn. Clamped to [floor, cap] regardless of
+#: what the payload claims: the floor makes the burn real, the cap
+#: stops an attacker-chosen exp growing the store unboundedly.
+_UNSIGNED_REPLAY_FLOOR_SECONDS = 900
+_UNSIGNED_REPLAY_CAP_SECONDS = 86_400
 
 #: One level of nesting hoisted so an operator maps ``firstName`` rather
 #: than ``user.firstName``. An API JSON body is exactly the shape that
@@ -325,6 +335,17 @@ class BackchannelSettings:
     jwks_url: str = ""
     jwt_public_key: str = ""
     jwt_shared_secret: str = ""
+    #: Browser-mode-only danger opt-in: accept the translate reply with
+    #: NO verification at all — an unverified compact JWT, or a bare
+    #: JSON claims object; both shapes on the same row, which is what a
+    #: gateway whose reply varies by environment needs. The price is
+    #: stated everywhere it matters: anyone who can reach the sign-in
+    #: page can post a reply, the connection's assurance drops to
+    #: ``unverified`` (so it cannot grant platform-admin roles through
+    #: group mappings), and every such login is audited. The replay
+    #: burn still applies. Contradicts verification material, and means
+    #: nothing in server mode — validation refuses both.
+    trust_unsigned: bool = False
     #: Optional pins, applied only when verifying.
     jwt_issuer: str = ""
     jwt_audience: str = ""
@@ -432,6 +453,7 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         # bodies and secrets are not ours to normalise.
         jwt_public_key=str(s.get("jwt_public_key") or ""),
         jwt_shared_secret=str(s.get("jwt_shared_secret") or ""),
+        trust_unsigned=_as_bool(s.get("trust_unsigned")),
         jwt_issuer=str(s.get("jwt_issuer") or "").strip(),
         jwt_audience=str(s.get("jwt_audience") or "").strip(),
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
@@ -475,6 +497,12 @@ def validate_settings(s: BackchannelSettings) -> None:
             "configure exactly one of jwks_url / jwt_public_key / "
             "jwt_shared_secret — with two keys, which one verified a "
             "given token would be an accident"
+        )
+    if s.trust_unsigned and materials:
+        raise BackchannelConfigError(
+            "trust_unsigned contradicts verification material — remove "
+            "one; keeping both would leave it ambiguous whether "
+            "assertions are verified"
         )
     if (s.jwt_issuer or s.jwt_audience) and not materials:
         raise BackchannelConfigError(
@@ -547,6 +575,12 @@ def validate_settings(s: BackchannelSettings) -> None:
                     "there is no signature to verify on a JSON user "
                     "object"
                 )
+    if s.trust_unsigned:
+        raise BackchannelConfigError(
+            "trust_unsigned is the browser-mode opt-in; server mode "
+            "already accepts the TLS answer without a signature, so "
+            "here the flag would state nothing"
+        )
 
 
 def _validate_browser_mode(s: BackchannelSettings) -> None:
@@ -563,16 +597,21 @@ def _validate_browser_mode(s: BackchannelSettings) -> None:
             f"browser_exchange_method must be one of "
             f"{sorted(VALID_METHODS)}, got '{s.browser_exchange_method}'"
         )
-    if not (s.jwks_url or s.jwt_public_key or s.jwt_shared_secret):
+    if not s.trust_unsigned and not (
+        s.jwks_url or s.jwt_public_key or s.jwt_shared_secret
+    ):
         # Not optional here, unlike the server shape: a token the
         # BROWSER delivers is written by whoever sits at it unless a
         # signature says otherwise. TLS authenticated nothing to us —
         # we were not on the call. (Exactly-one is enforced upstream;
-        # this insists on at-least-one.)
+        # this insists on at-least-one, or the explicit trust_unsigned
+        # opt-in that rates the row unverified.)
         raise BackchannelConfigError(
             "browser mode needs verification material — jwks_url, "
             "jwt_public_key or jwt_shared_secret — because a "
-            "browser-delivered token is only as good as its signature"
+            "browser-delivered token is only as good as its signature; "
+            "trust_unsigned is the explicit opt-out, at the price of an "
+            "unverified rating"
         )
     if s.authenticate_token_path:
         raise BackchannelConfigError(
@@ -1043,17 +1082,48 @@ class BackchannelProvider:
             )
         return identity
 
+    def _unverified_claims(self, text: str) -> dict:
+        """The trust_unsigned reading: BOTH reply shapes on one row — a
+        bare JSON claims object, or a compact JWT decoded WITHOUT
+        verification. This is what serves a gateway whose reply shape
+        varies by environment; the price (impersonation by anyone who
+        can reach the sign-in page, an unverified rating) was accepted
+        explicitly when the flag was set."""
+        if text.startswith("{"):
+            try:
+                claims = json.loads(text)
+            except ValueError as exc:
+                raise BackchannelError(
+                    f"assertion_undecodable:{type(exc).__name__}",
+                    code="backchannel_jwt_invalid",
+                ) from exc
+            if not isinstance(claims, dict):
+                raise BackchannelError(
+                    "assertion_undecodable:not_an_object",
+                    code="backchannel_jwt_invalid",
+                )
+            return claims
+        try:
+            return pyjwt.decode(text, options={"verify_signature": False})
+        except pyjwt.InvalidTokenError as exc:
+            raise BackchannelError(
+                f"jwt_undecodable:{type(exc).__name__}",
+                code="backchannel_jwt_invalid",
+            ) from exc
+
     async def identity_from_assertion(self, assertion: str) -> ProviderIdentity:
-        """Browser mode: the translate JWT, delivered by the browser.
+        """Browser mode: the translate reply, delivered by the browser.
 
         Everything the server shape gets for free from "we made the
         call" is reconstructed explicitly here, because a value the
         browser delivers is written by whoever sits at it until proven
         otherwise:
 
-        * the signature says the gateway minted it — ``jwks_url`` is
-          mandatory in this mode, so ``_decode_claims_jwt`` always
-          verifies;
+        * the signature says the gateway minted it — verification
+          material is mandatory in this mode, so ``_decode_claims_jwt``
+          always verifies. The one exception is the explicit
+          ``trust_unsigned`` opt-in, which accepts either shape
+          unverified and rates the connection ``unverified``;
         * ``exp`` bounds it, and is additionally carried into the
           session we mint so rotation cannot outlive it;
         * the replay burn makes it single-use — a captured assertion is
@@ -1063,16 +1133,57 @@ class BackchannelProvider:
             raise BackchannelError(
                 "assertion_missing", code="backchannel_no_session",
             )
-        payload = await self._decode_claims_jwt(assertion.strip())
-        exp = int(payload.get("exp") or 0)
+        text = assertion.strip()
+        now = int(time.time())
+
+        if self._s.trust_unsigned:
+            payload = self._unverified_claims(text)
+            try:
+                raw_exp = payload.get("exp")
+                exp: Optional[int] = (
+                    int(raw_exp) if raw_exp is not None else None
+                )
+            except (TypeError, ValueError):
+                # Junk exp in an unverified payload counts as absent —
+                # it proves nothing either way.
+                exp = None
+            if exp is not None and exp <= now:
+                # Not a security claim (the field is unverified) — just
+                # hygiene for legitimately stale tokens.
+                raise BackchannelError(
+                    "jwt_expired", code="backchannel_jwt_expired",
+                )
+        else:
+            if text.startswith("{"):
+                # No opportunistic verification: a verifying row commits
+                # to signed tokens. Accepting bare JSON here would let
+                # anyone bypass the signature by simply not signing —
+                # the posture that accepts both shapes is
+                # trust_unsigned, at the unverified rating.
+                raise BackchannelError(
+                    "assertion_not_a_jwt:configured_to_verify",
+                    code="backchannel_jwt_invalid",
+                )
+            payload = await self._decode_claims_jwt(text)
+            exp = int(payload.get("exp") or 0)
 
         jti = payload.get("jti")
         key = (
             str(jti) if isinstance(jti, (str, int)) and str(jti).strip()
-            else hashlib.sha256(assertion.strip().encode()).hexdigest()
+            else hashlib.sha256(text.encode()).hexdigest()
         )
+        if self._s.trust_unsigned:
+            # The stores size their TTL from this value, and here exp is
+            # attacker-writable or absent — clamp so the burn is real
+            # (floor) and the store bounded (cap).
+            burn = min(
+                max(exp or 0, now + _UNSIGNED_REPLAY_FLOOR_SECONDS),
+                now + _UNSIGNED_REPLAY_CAP_SECONDS,
+            )
+        else:
+            burn = exp  # verified decode required exp
         try:
-            fresh = await self._replay.record(key, exp)
+            fresh = await self._replay.record(key, burn)
         except Exception as exc:  # noqa: BLE001 — the store's error type
             # lives in app-land, which this package must not import.
             # "We could not check for a replay" has no floor under it,
@@ -1086,7 +1197,15 @@ class BackchannelProvider:
             )
 
         identity = self._identity_from(payload)
-        return replace(identity, upstream_expires_at=exp)
+        if self._s.trust_unsigned:
+            # An unverified exp still SHORTENS the session when present
+            # and future (idp_exp only ever shortens); absent or past,
+            # None — a 0 here would end the session at its first
+            # rotation.
+            ceiling = exp if (exp and exp > now) else None
+        else:
+            ceiling = exp
+        return replace(identity, upstream_expires_at=ceiling)
 
     # ── Liveness ─────────────────────────────────────────────────────
 

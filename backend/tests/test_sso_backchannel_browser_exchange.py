@@ -727,3 +727,200 @@ async def test_server_rows_publish_none_of_the_browser_family(
     resp = await test_client.get("/api/v1/auth/providers")
     entry = next(p for p in resp.json() if p["slug"] == "corp-browser")
     assert "browserExchange" not in str(entry.get("config", {}))
+
+
+# ── trust_unsigned: both shapes, no verification, unverified rating ──
+#
+# The explicit opt-out for gateways whose reply shape varies by
+# environment (a signed JWT here, bare JSON there) or that sign
+# nothing at all. One row accepts BOTH shapes — unverified — and the
+# assurance machinery rates it accordingly, which is what keeps
+# platform-admin mappings out of its reach.
+
+def _unsigned_settings(**over) -> BackchannelSettings:
+    return _settings(jwks_url="", trust_unsigned=True, **over)
+
+
+@pytest.mark.asyncio
+async def test_trust_unsigned_accepts_a_bare_json_reply():
+    import json as _json
+
+    identity = await BackchannelProvider(
+        _unsigned_settings(),
+    ).identity_from_assertion(_json.dumps({**CLAIMS, "jti": "u-1"}))
+    assert identity.email == "ada.lovelace@corporate.com"
+    # No exp anywhere in the reply: no ceiling, not a zero ceiling —
+    # a 0 would end the session at its first rotation.
+    assert identity.upstream_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_trust_unsigned_accepts_a_jwt_from_any_key():
+    exp = int(time.time()) + 600
+    identity = await BackchannelProvider(
+        _unsigned_settings(),
+    ).identity_from_assertion(_assertion(key=_OTHER_KEY, exp_in=600))
+    # An unverified exp still SHORTENS the session when present.
+    assert abs(identity.upstream_expires_at - exp) <= 2
+
+
+@pytest.mark.asyncio
+async def test_trust_unsigned_still_refuses_a_stale_exp():
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _unsigned_settings(),
+        ).identity_from_assertion(_assertion(exp_in=-60))
+    assert err.value.code == "backchannel_jwt_expired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("garbage", [
+    "{not json",
+    '["a", "list"]',
+    "neither.a.jwt-nor-json",
+])
+async def test_trust_unsigned_still_refuses_garbage(garbage):
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _unsigned_settings(),
+        ).identity_from_assertion(garbage)
+    assert err.value.code == "backchannel_jwt_invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("material", [
+    dict(),                                       # jwks (base)
+    dict(jwks_url="", jwt_public_key="pem"),
+    dict(jwks_url="", jwt_shared_secret="s"),
+])
+async def test_a_verifying_row_never_falls_back_to_json(material):
+    """No opportunistic verification: accepting bare JSON on a row with
+    material would let anyone bypass the signature by not signing."""
+    import json as _json
+
+    with pytest.raises(BackchannelError) as err:
+        await BackchannelProvider(
+            _settings(**material),
+        ).identity_from_assertion(_json.dumps({**CLAIMS, "jti": "u-2"}))
+    assert err.value.code == "backchannel_jwt_invalid"
+    assert "assertion_not_a_jwt" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_the_burn_holds_even_with_no_exp_at_all():
+    """The stores size their TTL from exp; an absent one used to mean a
+    ~1s burn — a replay window wearing a burn's name. The clamp makes
+    the second presentation refuse whatever the payload said."""
+    import json as _json
+
+    seen: list[tuple[str, int]] = []
+
+    class _Recorder:
+        def __init__(self):
+            self._keys: set[str] = set()
+
+        async def record(self, key, exp):
+            seen.append((key, exp))
+            if key in self._keys:
+                return False
+            self._keys.add(key)
+            return True
+
+    provider = BackchannelProvider(
+        _unsigned_settings(), replay_cache=_Recorder(),
+    )
+    reply = _json.dumps({**CLAIMS, "jti": "burn-me"})
+    await provider.identity_from_assertion(reply)
+    with pytest.raises(BackchannelError) as err:
+        await provider.identity_from_assertion(reply)
+    assert err.value.code == "backchannel_replayed"
+    # The horizon handed to the store is clamped, never 0/None.
+    now = int(time.time())
+    assert all(now + 800 < exp <= now + 86_401 for _, exp in seen)
+
+
+@pytest.mark.asyncio
+async def test_the_replay_store_still_fails_closed_unsigned():
+    class _BrokenStore:
+        async def record(self, key, exp):
+            raise RuntimeError("store down")
+
+    import json as _json
+
+    with pytest.raises(BackchannelUnavailable):
+        await BackchannelProvider(
+            _unsigned_settings(), replay_cache=_BrokenStore(),
+        ).identity_from_assertion(_json.dumps({**CLAIMS, "jti": "u-3"}))
+
+
+@pytest.mark.parametrize("over,needle", [
+    (dict(jwks_url="", trust_unsigned=True,
+          jwt_public_key="PEM"), "contradict"),
+    (dict(trust_unsigned=True), "contradict"),  # jwks stays from base
+    (dict(jwks_url="", trust_unsigned=True,
+          jwt_issuer="https://sso"), "pin"),
+])
+def test_trust_unsigned_contradictions_are_refused(over, needle):
+    with pytest.raises(BackchannelConfigError, match=needle):
+        validate_settings(_settings(**over))
+
+
+def test_trust_unsigned_alone_makes_a_valid_browser_row():
+    validate_settings(_unsigned_settings())
+
+
+def test_prod_still_demands_the_shared_store_for_unsigned_rows():
+    """The burn is the only single-use control left on this posture —
+    a per-process cache would be a replay window per worker."""
+    builder = backchannel_builder_with_replay_cache(
+        build_backchannel_provider, None, True,
+    )
+    with pytest.raises(RuntimeError, match="single-use"):
+        builder(_snap(jwks_url="", trust_unsigned=True))
+
+
+@pytest.mark.asyncio
+async def test_a_real_unsigned_login_is_audited(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """Accepting browser-written claims nobody verified is exactly the
+    kind of event an auditor greps for later — the same record the
+    unsigned custom_profile posture writes."""
+    import json as _json
+
+    await _make_row(db_session, jwks_url="", trust_unsigned=True)
+
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _json.dumps({**CLAIMS, "jti": "audit-1"})},
+    )
+    assert resp.status_code == 200, resp.text
+    kinds = [k for k, _ in sso_events]
+    assert "user.sso_unsigned_accepted" in kinds
+    payload = dict(sso_events)["user.sso_unsigned_accepted"]
+    assert payload["via"] == "browser_assertion"
+
+
+@pytest.mark.asyncio
+async def test_a_rehearsal_is_not_audited_as_an_acceptance(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """Nothing was accepted — the dry run writes nothing and signs
+    nobody in, so recording it would salt the audit trail."""
+    import json as _json
+
+    from backend.auth_service.core.tokens import create_dryrun_token
+
+    row = await _make_row(db_session, jwks_url="", trust_unsigned=True)
+
+    resp = await test_client.post(
+        "/api/v1/auth/corp-browser/backchannel",
+        json={"assertion": _json.dumps({**CLAIMS, "jti": "audit-2"})},
+        cookies={"nx_dryrun": create_dryrun_token(
+            admin_id="u-admin", provider_id=row.id,
+        )},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("dryRun") is True
+    kinds = [k for k, _ in sso_events]
+    assert "user.sso_unsigned_accepted" not in kinds

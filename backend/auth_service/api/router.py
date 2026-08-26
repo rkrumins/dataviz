@@ -2159,6 +2159,24 @@ async def backchannel_handle_login(
         return rehearsal
 
     svc = _identity_service(request)
+    if body.assertion is not None and provider.settings.trust_unsigned:
+        # The same degraded-trust record custom_profile writes: this
+        # REAL login was accepted on browser-written claims nobody
+        # verified. Rehearsals return above and are not recorded —
+        # nothing was accepted. Best-effort, like _audit_degraded_trust.
+        emit = getattr(svc, "emit_audit", None)
+        if emit is not None:
+            try:
+                await emit("user.sso_unsigned_accepted", {
+                    "provider_id": snap.id,
+                    "provider_slug": snap.slug,
+                    "source": "browser_assertion",
+                    "via": "browser_assertion",
+                })
+            except Exception as exc:  # noqa: BLE001 — audit is best-effort
+                logger.warning(
+                    "Degraded-trust audit failed (slug=%s): %s", slug, exc,
+                )
     link_intent_user_id = await _resolve_link_intent(
         request, svc, provider_id=snap.id,
     )

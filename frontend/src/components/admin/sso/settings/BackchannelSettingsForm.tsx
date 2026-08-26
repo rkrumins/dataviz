@@ -18,7 +18,9 @@
  */
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
-import { Field, FieldGrid, SecretField, TextAreaField, TextField } from './ui'
+import {
+    DangerToggle, Field, FieldGrid, SecretField, TextAreaField, TextField,
+} from './ui'
 
 export type AmbientSource = 'cookie' | 'header'
 export type SendAs = 'cookie' | 'header' | 'body'
@@ -66,10 +68,13 @@ export interface BackchannelSettings {
     claims_format?: 'json' | 'jwt'
     // Verification material — at most one of the three. The secret is
     // redacted to '********' once saved; the PEM public key is not a
-    // secret and round-trips readable.
+    // secret and round-trips readable. trust_unsigned is the browser-
+    // mode opt-out that accepts BOTH reply shapes unverified, at the
+    // Unverified rating.
     jwks_url?: string | null
     jwt_public_key?: string | null
     jwt_shared_secret?: string | null
+    trust_unsigned?: boolean
     jwt_issuer?: string | null
     jwt_audience?: string | null
 
@@ -117,6 +122,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     jwks_url: '',
     jwt_public_key: '',
     jwt_shared_secret: '',
+    trust_unsigned: false,
     jwt_issuer: '',
     jwt_audience: '',
     timeout_seconds: 5,
@@ -240,13 +246,15 @@ function Toggle({
     )
 }
 
-type VerifyChoice = 'none' | 'jwks' | 'public_key' | 'shared_secret'
+type VerifyChoice =
+    | 'none' | 'jwks' | 'public_key' | 'shared_secret' | 'unsigned'
 
 /** Which verification material is populated on the row. Populated
  *  fields always win over a not-yet-typed local choice, so the chooser
  *  can never disagree with what the server will actually use. A saved
  *  secret arrives as the redaction mask, which counts as populated. */
 function populatedVerifyChoice(value: BackchannelSettings): VerifyChoice | null {
+    if (value.trust_unsigned) return 'unsigned'
     if ((value.jwt_shared_secret ?? '') !== '') return 'shared_secret'
     if ((value.jwt_public_key ?? '').trim()) return 'public_key'
     if ((value.jwks_url ?? '').trim()) return 'jwks'
@@ -279,11 +287,19 @@ function VerifyMaterialChooser({
         setChosen(next)
         // Null out the other materials in one update: the server merge
         // deletes null keys, so abandoned material cannot linger and
-        // win the populated-field derivation on the next open.
+        // win the populated-field derivation on the next open. The
+        // danger bit clears the same way when leaving unsigned; it is
+        // never SET here — only the toggle below may do that.
         const cleared: BackchannelSettings = { ...value }
         if (next !== 'jwks') cleared.jwks_url = null
         if (next !== 'public_key') cleared.jwt_public_key = null
         if (next !== 'shared_secret') cleared.jwt_shared_secret = null
+        if (next !== 'unsigned') cleared.trust_unsigned = null as never
+        if (next === 'unsigned') {
+            // Pins would pin nothing without a verified signature.
+            cleared.jwt_issuer = null
+            cleared.jwt_audience = null
+        }
         onChange(cleared)
     }
 
@@ -307,8 +323,22 @@ function VerifyMaterialChooser({
                     <option value="jwks">Their published keys (JWKS URL)</option>
                     <option value="public_key">A pasted public key (PEM)</option>
                     <option value="shared_secret">A shared secret (HS256)</option>
+                    {!allowNone && (
+                        <option value="unsigned">
+                            Nothing — trust it unverified
+                        </option>
+                    )}
                 </select>
             </Field>
+            {!allowNone && (
+                <p className="text-[11px] text-ink-muted leading-relaxed">
+                    Their published keys, a pasted key and a shared secret
+                    all keep this connection rated <strong>Verified</strong>.
+                    Trusting unverified replies rates it{' '}
+                    <strong>Unverified</strong>, and it can no longer grant
+                    platform admin roles.
+                </p>
+            )}
 
             {choice === 'jwks' && (
                 <Field
@@ -353,8 +383,30 @@ function VerifyMaterialChooser({
                     placeholder="the signing secret their team hands you"
                 />
             )}
+            {choice === 'unsigned' && (
+                <DangerToggle
+                    title="Trust unverified sign-ins"
+                    checked={Boolean(value.trust_unsigned)}
+                    onChange={v => set('trust_unsigned', v as never)}
+                >
+                    The reply is accepted with <strong>no verification at
+                    all</strong> — a signed token&rsquo;s signature is not
+                    even checked, and a bare JSON object is accepted the
+                    same way. Anyone who can reach the sign-in page and
+                    post a reply can sign in as <strong>any user,
+                    including an administrator&rsquo;s account</strong>.
+                    Every such login is recorded as{' '}
+                    <code>user.sso_unsigned_accepted</code>, the connection
+                    is rated <strong>Unverified</strong>, and it becomes
+                    ineligible to grant platform admin roles through IdP
+                    group mappings. Prefer a signed token — this posture
+                    exists for gateways whose reply shape varies by
+                    environment, and it is the one row that accepts both
+                    shapes.
+                </DangerToggle>
+            )}
 
-            {choice !== 'none' && (
+            {choice !== 'none' && choice !== 'unsigned' && (
                 <FieldGrid>
                     <Field
                         label={<>Issuer pin <span className="font-normal text-ink-muted">(optional)</span></>}
@@ -793,9 +845,10 @@ export function BackchannelSettingsForm({
                     The corporate cookie only reaches its own host, so the
                     sign-in page calls the translate endpoint itself — the
                     browser&rsquo;s cookie jar does what ours cannot — and
-                    hands us the signed token it answers with. We verify
-                    that token&rsquo;s signature before believing a word of
-                    it, and each one signs in at most once.
+                    hands us the reply. How much that reply is worth is
+                    decided below: verified against a key, or — as an
+                    explicit last resort — trusted as-is. Either way, each
+                    reply signs in at most once.
                 </p>
                 <Field label="Translate URL" required>
                     <TextField

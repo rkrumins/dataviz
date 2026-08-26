@@ -446,3 +446,93 @@ describe('the verification chooser', () => {
         expect(screen.getByText(/audience pin/i)).toBeInTheDocument()
     })
 })
+
+describe('trusting it unverified', () => {
+    const browserJwt = (over: BackchannelSettings = {}): BackchannelSettings => ({
+        exchange_mode: 'browser',
+        browser_exchange_url: 'https://sso.corporate.com/translate',
+        ...over,
+    })
+
+    it('is offered only in browser mode', () => {
+        renderForm({ exchange_mode: 'server', claims_format: 'jwt' })
+        const select = screen.getByRole('combobox', {
+            name: /signature check/i,
+        })
+        const values = Array.from(select.querySelectorAll('option'))
+            .map(o => o.getAttribute('value'))
+        expect(values).not.toContain('unsigned')
+    })
+
+    it('choosing it reveals the danger toggle without flipping it', async () => {
+        const onChange = vi.fn()
+        render(
+            <BackchannelSettingsForm value={browserJwt()} onChange={onChange} />,
+        )
+        await userEvent.selectOptions(
+            screen.getByRole('combobox', { name: /verify the token with/i }),
+            'unsigned',
+        )
+        // The chooser clears materials and pins; the danger bit itself
+        // stays untouched (undefined here) — only the toggle may set it.
+        const next = onChange.mock.calls.at(-1)![0]
+        expect(next.jwks_url).toBeNull()
+        expect(next.jwt_issuer).toBeNull()
+        expect(next.trust_unsigned).not.toBe(true)
+        expect(screen.getByText('Trust unverified sign-ins')).toBeInTheDocument()
+    })
+
+    it('the toggle owns the bit', async () => {
+        const onChange = vi.fn()
+        render(
+            <BackchannelSettingsForm
+                value={browserJwt({ trust_unsigned: false, jwks_url: '' })}
+                onChange={onChange}
+            />,
+        )
+        // Row already in the unsigned choice (nothing populated, but
+        // trust_unsigned=false keeps the chooser on its local state) —
+        // select unsigned first, then tick.
+        await userEvent.selectOptions(
+            screen.getByRole('combobox', { name: /verify the token with/i }),
+            'unsigned',
+        )
+        await userEvent.click(screen.getByRole('checkbox', {
+            name: /trust unverified sign-ins/i,
+        }))
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ trust_unsigned: true }),
+        )
+    })
+
+    it('says the full price in the warning copy', () => {
+        renderForm(browserJwt({ trust_unsigned: true }))
+        expect(screen.getByText(/no verification at all/i)).toBeInTheDocument()
+        expect(
+            screen.getByText(/any user,\s*including an administrator/i),
+        ).toBeInTheDocument()
+        expect(screen.getByText(/user\.sso_unsigned_accepted/)).toBeInTheDocument()
+        expect(
+            screen.getByText(/ineligible to grant platform admin/i),
+        ).toBeInTheDocument()
+        expect(
+            screen.getByText(/reply shape varies by environment/i),
+        ).toBeInTheDocument()
+        // Pins are hidden — they would pin nothing.
+        expect(screen.queryByText(/issuer pin/i)).not.toBeInTheDocument()
+    })
+
+    it('a stored trust_unsigned row derives the unsigned choice', () => {
+        renderForm(browserJwt({ trust_unsigned: true }))
+        expect(
+            (screen.getByRole('combobox', {
+                name: /verify the token with/i,
+            }) as HTMLSelectElement).value,
+        ).toBe('unsigned')
+    })
+
+    it('names the assurance cost beside the chooser', () => {
+        renderForm(browserJwt())
+        expect(screen.getByText(/rates it/i)).toBeInTheDocument()
+    })
+})
