@@ -383,11 +383,10 @@ export async function loginWithBackchannel(
         },
     )
     if (!res.ok) {
-        let detail: {
-            error?: string; email?: string; reasons?: string[]
-        } | null = null
+        type DenialDetail = { error?: string; email?: string; reasons?: string[] }
+        let detail: DenialDetail | null = null
         try {
-            const parsed = (await res.json()) as { detail?: typeof detail }
+            const parsed = (await res.json()) as { detail?: DenialDetail }
             detail = parsed?.detail ?? null
         } catch {
             // Not a JSON body — the code below still says which layer.
