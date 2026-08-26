@@ -341,6 +341,68 @@ async def request_json(
         ) from exc
 
 
+#: Profile pictures fetched at SSO login. Small on purpose: this is an
+#: avatar, not an asset store, and the bytes are re-served from our own
+#: origin on every member list.
+MAX_AVATAR_BYTES = 256 * 1024
+
+#: The content types an avatar fetch will accept, parameter-stripped and
+#: case-folded. Anything else — HTML, JSON, SVG (scriptable) — is not an
+#: image we are willing to re-serve.
+_AVATAR_IMAGE_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp",
+})
+
+
+async def fetch_image(
+    url: str,
+    *,
+    timeout: float,
+    max_bytes: int = MAX_AVATAR_BYTES,
+    allow_hosts: frozenset[str] | set[str] = frozenset(),
+) -> tuple[bytes, str]:
+    """GET one image with :func:`request_json`'s guards, returning
+    ``(bytes, content_type)``.
+
+    Same posture as every outbound call here: destination pre-checked,
+    redirects refused, the body capped while streaming. The one addition
+    is the content-type allowlist — the bytes are stored and re-served
+    from our own origin, so a reply that is not a raster image is a
+    refusal, not a passthrough.
+    """
+    assert_fetchable(url, allow_hosts=allow_hosts)
+
+    async with httpx.AsyncClient(
+        timeout=timeout, follow_redirects=False,
+    ) as client:
+        async with client.stream("GET", url) as resp:
+            if 300 <= resp.status_code < 400:
+                raise BlockedOutboundRequest(
+                    f"{url!r} answered {resp.status_code} with a redirect; "
+                    "redirects are refused because they are how a "
+                    "pre-flight address check gets bypassed."
+                )
+            if resp.status_code >= 400:
+                raise OutboundStatusError(url, resp.status_code)
+            content_type = (
+                resp.headers.get("content-type") or ""
+            ).split(";")[0].strip().lower()
+            if content_type not in _AVATAR_IMAGE_TYPES:
+                raise BlockedOutboundRequest(
+                    f"{url!r} answered with content-type "
+                    f"{content_type or 'unknown'!r}, which is not an "
+                    "image type this fetch accepts."
+                )
+            body = bytearray()
+            async for chunk in resp.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise BlockedOutboundRequest(
+                        f"{url!r} exceeded the {max_bytes}-byte image cap."
+                    )
+    return bytes(body), content_type
+
+
 async def fetch_jwks(
     url: str,
     *,

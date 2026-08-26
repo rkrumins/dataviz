@@ -615,3 +615,33 @@ describe('the auto sign-in switch', () => {
         ).toBeInTheDocument()
     })
 })
+
+describe('the avatar mapping switch', () => {
+    const avatarToggle = () => screen.getByRole('checkbox', {
+        name: /map their avatar from the claims/i,
+    }) as HTMLInputElement
+
+    it('defaults to OFF — participation is a choice, not a surprise', () => {
+        renderForm({})
+        expect(avatarToggle().checked).toBe(false)
+        expect(DEFAULT_BACKCHANNEL_SETTINGS.map_avatar).toBe(false)
+    })
+
+    it('writes the bit through the ordinary setter', async () => {
+        const onChange = renderForm({})
+        await userEvent.click(avatarToggle())
+        expect(onChange).toHaveBeenLastCalledWith(
+            expect.objectContaining({ map_avatar: true }),
+        )
+    })
+
+    it('names the allowlist requirement and the ownership consequence', () => {
+        renderForm({})
+        expect(
+            screen.getByText(/internal-hosts allowlist/i),
+        ).toBeInTheDocument()
+        expect(
+            screen.getByText(/provider-managed profile field/i),
+        ).toBeInTheDocument()
+    })
+})

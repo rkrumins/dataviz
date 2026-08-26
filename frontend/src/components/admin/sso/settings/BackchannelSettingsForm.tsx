@@ -85,6 +85,7 @@ export interface BackchannelSettings {
     timeout_seconds?: number | null
     max_response_bytes?: number | null
     require_auth_time?: boolean
+    map_avatar?: boolean
     trust_gateway_email?: boolean
     liveness_on_refresh?: boolean
     liveness_grace_seconds?: number | null
@@ -134,6 +135,7 @@ export const DEFAULT_BACKCHANNEL_SETTINGS: BackchannelSettings = {
     timeout_seconds: 5,
     max_response_bytes: 262144,
     require_auth_time: true,
+    map_avatar: false,
     trust_gateway_email: true,
     liveness_on_refresh: true,
     liveness_grace_seconds: 900,
@@ -1019,6 +1021,12 @@ export function BackchannelSettingsForm({
                     hint="Applies to the sign-in page only: on, the page attempts this connection silently when it is the one that can; off, it waits for the button. Signing out always requires a fresh click in that tab either way, and mid-session renewals — the re-certification ceiling included — are unaffected."
                     checked={value.auto_signin !== false}
                     onChange={v => set('auto_signin', v)}
+                />
+                <Toggle
+                    label="Map their avatar from the claims"
+                    hint="Off by default. On, the server fetches the picture at the mapped avatar URL during sign-in and re-serves it from here — the image host must be on the internal-hosts allowlist when it is private, and browsers never load it directly. While on, the avatar is a provider-managed profile field; turning it off stops asserting it, and any stored image remains until the identity is unlinked or the person picks their own."
+                    checked={value.map_avatar === true}
+                    onChange={v => set('map_avatar', v)}
                 />
             </section>
         </div>

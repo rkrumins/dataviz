@@ -142,6 +142,77 @@ async def test_display_name_is_never_idp_owned(test_client: AsyncClient, db_sess
     assert resp.json()["displayName"] == "Ada"
 
 
+async def test_an_idp_owned_avatar_is_refused(
+    test_client: AsyncClient, db_session,
+):
+    """The regression this pins: the refusal used to be computed before
+    ``avatarId`` joined the update set, so a provider-managed avatar was
+    silently writable through the very route that refuses managed
+    names."""
+    await _mark_managed(db_session, ["avatar"])
+
+    resp = await test_client.patch(
+        "/api/v1/users/me", json={"avatarId": "cat"},
+    )
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "idp_managed_field"
+    assert detail["fields"] == ["avatar"]
+
+
+async def test_names_locked_leaves_the_avatar_editable(
+    test_client: AsyncClient, db_session,
+):
+    """Per-field, as ever: a connection that asserts names but maps no
+    picture leaves the picker alone."""
+    await _mark_managed(db_session, ["first_name", "last_name"])
+
+    resp = await test_client.patch(
+        "/api/v1/users/me", json={"avatarId": "cat"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["avatarId"] == "cat"
+
+
+def test_an_asserted_avatar_is_claimed_beside_the_names():
+    assert asserted_fields(
+        first_name="Ada", last_name="Lovelace",
+        avatar_url="https://sso.corp.example/a.png",
+    ) == ["first_name", "last_name", "avatar"]
+    # A derived (split) name zeroes only the names — an avatar is never
+    # split out of anything.
+    assert asserted_fields(
+        first_name="Ada", last_name="Lovelace", derived=True,
+        avatar_url="https://sso.corp.example/a.png",
+    ) == ["avatar"]
+
+
+async def test_unlinking_the_managing_provider_clears_the_avatar(
+    test_client: AsyncClient, db_session,
+):
+    """The picture was the provider's assertion; with the link gone
+    nothing will ever refresh it, so the initials fallback beats a
+    stale face."""
+    import base64 as _b64
+
+    await _mark_managed(db_session, ["avatar"], provider_id="idp_okta")
+    await user_repo.set_user_avatar_image(
+        db_session, _ME,
+        image_b64=_b64.b64encode(b"png-bytes").decode("ascii"),
+        content_type="image/png",
+        source_url="https://sso.corp.example/a.png",
+    )
+
+    dropped = await user_repo.clear_idp_managed_snapshot(
+        db_session, _ME, provider_id="idp_okta",
+    )
+    assert dropped is True
+    user = await user_repo.get_user_by_id(db_session, _ME)
+    assert user.avatar_image is None
+    assert user.avatar_source_url is None
+    assert managed_fields(json.loads(user.metadata_ or "{}")) == frozenset()
+
+
 async def test_ownership_is_reported_to_the_client(
     test_client: AsyncClient, db_session,
 ):

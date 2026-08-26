@@ -362,6 +362,12 @@ class BackchannelSettings:
     timeout_seconds: float = 5.0
     max_response_bytes: int = MAX_JSON_BYTES
     require_auth_time: bool = True
+    #: Whether the connection's mapped avatar claim participates at all.
+    #: Off — the default — strips ``avatar_url`` from the identity, so
+    #: nothing downstream fetches, stores or locks an image. On, the
+    #: login-time fetch downloads the picture through the outbound guard
+    #: and the avatar becomes a provider-managed profile field.
+    map_avatar: bool = False
     #: When the gateway sends no ``email_verified`` claim at all, count
     #: the address as verified. Corporate gateways rarely send one, and
     #: an absent claim normalises to False — which refuses the
@@ -471,6 +477,7 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
         require_auth_time=_as_bool(s.get("require_auth_time", True)),
+        map_avatar=_as_bool(s.get("map_avatar")),
         trust_gateway_email=_as_bool(s.get("trust_gateway_email", True)),
         liveness_on_refresh=_as_bool(s.get("liveness_on_refresh", True)),
         liveness_grace_seconds=_as_int(s.get("liveness_grace_seconds"), 900),
@@ -1109,6 +1116,12 @@ class BackchannelProvider:
             raise BackchannelError(
                 str(exc), code="backchannel_claims_unmappable",
             ) from exc
+
+        if not self._s.map_avatar and identity.avatar_url:
+            # The whole avatar pipeline — fetch, store, provider-managed
+            # lock — keys off this one field, so stripping it here is
+            # the entire off switch.
+            identity = replace(identity, avatar_url=None)
 
         if self._s.trust_gateway_email and resolved_sources(
             flat, kind="backchannel",

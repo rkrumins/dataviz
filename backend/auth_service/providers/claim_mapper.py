@@ -61,6 +61,11 @@ DEFAULT_OIDC: dict[str, Any] = {
     "display_name":   ["name", "displayName"],
     "groups":         ["groups", "wids", "roles"],
     "auth_time":      ["auth_time"],
+    # Empty by default outside the backchannel kind: mapping a picture
+    # makes the server fetch it at login, and that participation is a
+    # per-connection choice, not a surprise. An explicit override is
+    # the opt-in for the other kinds.
+    "avatar_url":     [],
     "extras":         {},
 }
 
@@ -92,6 +97,7 @@ DEFAULT_SAML: dict[str, Any] = {
         "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups",
     ],
     "auth_time":      ["__authn_instant__"],
+    "avatar_url":     [],
     "extras":         {},
 }
 
@@ -105,6 +111,7 @@ DEFAULT_CUSTOM: dict[str, Any] = {
     "display_name":   ["display_name"],
     "groups":         ["groups"],
     "auth_time":      ["auth_time"],
+    "avatar_url":     [],
     "extras":         {},
 }
 
@@ -122,6 +129,7 @@ DEFAULT_CUSTOM_PROFILE: dict[str, Any] = {
     "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
     "groups":         ["groups", "roles", "memberOf"],
     "auth_time":      ["auth_time", "authTime", "iat"],
+    "avatar_url":     [],
     "extras":         {},
 }
 
@@ -143,6 +151,11 @@ DEFAULT_BACKCHANNEL: dict[str, Any] = {
     "groups":         ["groups", "roles", "memberOf", "groupMembership"],
     "auth_time":      ["auth_time", "authTime", "authenticationTime",
                        "lastLogin", "last_login"],
+    #: Candidates only; nothing is fetched unless the connection's
+    #: ``map_avatar`` toggle is on. The grab-bag matches the casings the
+    #: other fields already cover.
+    "avatar_url":     ["picture", "avatarUrl", "avatar_url", "photoUrl",
+                       "photo"],
     "extras":         {},
 }
 
@@ -443,7 +456,7 @@ def resolved_sources(
         for field in (
             "external_id", "email", "email_verified",
             "first_name", "last_name", "display_name",
-            "groups", "auth_time",
+            "groups", "auth_time", "avatar_url",
         )
     }
     for name, paths in (mapping.get("extras") or {}).items():
@@ -506,6 +519,8 @@ def apply_claim_mapping(
     auth_time = _to_epoch(
         _first_non_empty(claims, mapping.get("auth_time") or [])
     )
+    raw_avatar = _first_non_empty(claims, mapping.get("avatar_url") or [])
+    avatar_url = _to_str(raw_avatar).strip() if raw_avatar is not None else ""
 
     email_verified_raw = _first_non_empty(
         claims, mapping.get("email_verified") or []
@@ -542,6 +557,7 @@ def apply_claim_mapping(
         auth_time=auth_time,
         attributes=extras,
         names_derived_from=names_derived_from,
+        avatar_url=avatar_url or None,
     )
 
 

@@ -68,6 +68,11 @@ class ProviderIdentity:
     #: ``identity_provenance`` declines to hand the IdP ownership of a
     #: field we inferred, and the mapping preview says which it is.
     names_derived_from: Optional[str] = None
+    #: Profile-picture URL asserted by the IdP, when the connection maps
+    #: one. Consumed by the login-time fetch (the server downloads and
+    #: re-serves the image same-origin); never rendered directly — the
+    #: app's CSP forbids remote images, deliberately.
+    avatar_url: Optional[str] = None
     #: When the UPSTREAM credential behind this login expires (epoch
     #: seconds), for providers whose server cannot re-ask later — the
     #: browser-exchange back-channel shape, where the corporate token's

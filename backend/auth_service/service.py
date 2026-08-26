@@ -15,12 +15,13 @@ imports from ``backend.auth_service.*`` (enforced by
 """
 from __future__ import annotations
 
+import base64
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import jwt as pyjwt
 
@@ -206,6 +207,9 @@ class LocalIdentityService:
         session_killer: Optional[Callable[..., Awaitable[None]]] = None,
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
+        avatar_fetcher: Optional[
+            Callable[[str], Awaitable[tuple[bytes, str]]]
+        ] = None,
     ):
         self._session_factory = session_factory
         self._user_repo = user_repo
@@ -226,6 +230,10 @@ class LocalIdentityService:
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
         self._session_revoker = session_revoker
+        # (url) -> (bytes, content_type). Injected by app startup, which
+        # binds the outbound guard and the operator's host allowlist —
+        # auth_service may not import backend.app.* itself.
+        self._avatar_fetcher = avatar_fetcher
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
         # ``app_auth_config``. When ``None`` (legacy test wiring), the
@@ -1029,9 +1037,48 @@ class LocalIdentityService:
             #
             # Best-effort, like the metadata write below: a profile that
             # failed to re-sync must not cost somebody their sign-in.
+            #
+            # The provider-supplied avatar first, because whether it is
+            # OWNED depends on whether the bytes actually landed: a URL
+            # nothing could download must not lock anyone out of picking
+            # their own picture. Fetched through the injected outbound
+            # guard, refetched only when the asserted URL changed, and
+            # never a login blocker.
+            avatar_asserted = False
+            avatar_url = getattr(identity, "avatar_url", None)
+            if avatar_url and self._avatar_fetcher is not None:
+                scheme = urlsplit(avatar_url).scheme.lower()
+                if scheme not in ("http", "https"):
+                    logger.warning(
+                        "Avatar URL for user=%s has scheme %r; skipped.",
+                        orm.id, scheme,
+                    )
+                elif (
+                    getattr(orm, "avatar_source_url", None) == avatar_url
+                    and getattr(orm, "avatar_image", None)
+                ):
+                    # Unchanged source, image in hand: nothing to fetch.
+                    avatar_asserted = True
+                else:
+                    try:
+                        img, ctype = await self._avatar_fetcher(avatar_url)
+                        await self._user_repo.set_user_avatar_image(
+                            session, orm.id,
+                            image_b64=base64.b64encode(img).decode("ascii"),
+                            content_type=ctype,
+                            source_url=avatar_url,
+                        )
+                        avatar_asserted = True
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "Avatar fetch failed (user=%s, provider=%s): %s",
+                            orm.id, provider_id, exc,
+                        )
+
             owned = asserted_fields(
                 first_name=identity.first_name, last_name=identity.last_name,
                 derived=identity.names_derived_from is not None,
+                avatar_url=avatar_url if avatar_asserted else None,
             )
             if owned:
                 try:

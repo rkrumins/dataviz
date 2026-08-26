@@ -190,8 +190,41 @@ async def clear_idp_managed_snapshot(
         return False
     if _managing_provider_id(meta) != provider_id:
         return False
+    snapshot = meta.get(_IDP_MANAGED_KEY) or {}
+    managed = snapshot.get("fields") if isinstance(snapshot, dict) else None
     meta.pop(_IDP_MANAGED_KEY, None)
+    if isinstance(managed, list) and "avatar" in managed:
+        # The picture was the provider's assertion; with the link gone
+        # nothing will ever refresh it, and a stale face is worse than
+        # the initials fallback.
+        user.avatar_image = None
+        user.avatar_image_type = None
+        user.avatar_source_url = None
     user.metadata_ = json.dumps(meta, default=str)
+    user.updated_at = _now()
+    await session.flush()
+    return True
+
+
+async def set_user_avatar_image(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    image_b64: str,
+    content_type: str,
+    source_url: str,
+) -> bool:
+    """Store a provider-supplied avatar, replacing whatever was there.
+
+    Mutates the mapped instance (the ``update_identity`` convention) so
+    a same-session re-read is fresh.
+    """
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return False
+    user.avatar_image = image_b64
+    user.avatar_image_type = content_type
+    user.avatar_source_url = source_url
     user.updated_at = _now()
     await session.flush()
     return True

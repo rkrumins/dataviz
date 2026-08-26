@@ -984,6 +984,20 @@ async def lifespan(_app: FastAPI):
 
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
 
+    async def _fetch_avatar_image(url: str) -> tuple[bytes, str]:
+        """Download a provider-asserted profile picture, guarded.
+
+        Same allowlist the back-channel legs use: a private image host
+        needs an operator's entry, and the outbound module supplies the
+        redirect ban, the streaming size cap and the image-type check.
+        """
+        from backend.auth_service.providers.outbound import fetch_image
+
+        return await fetch_image(
+            url, timeout=5.0,
+            allow_hosts=await _allowed_backchannel_hosts(),
+        )
+
     _app.state.identity_service = LocalIdentityService(
         session_factory=get_async_session,
         user_repo=user_repo,
@@ -998,6 +1012,7 @@ async def lifespan(_app: FastAPI):
         session_killer=_kill_user_sessions,
         session_revoker=_revoke_one_session,
         auth_config_provider=_auth_config_provider,
+        avatar_fetcher=_fetch_avatar_image,
     )
     # Refuse to serve without a signing secret. This used to happen as a
     # side effect of importing the auth config, which made the secret a

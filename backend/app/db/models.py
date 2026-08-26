@@ -1631,6 +1631,14 @@ class UserORM(Base):
     # Chosen avatar illustration. Was a browser-local preference, so it
     # reset on a new machine and nobody else ever saw it.
     avatar_id = Column(Text, nullable=True)
+    # Provider-supplied profile picture, fetched server-side at SSO
+    # login (the CSP forbids hotlinking a remote URL) and re-served from
+    # our own origin. ``avatar_source_url`` remembers where the bytes
+    # came from, so an unchanged claim skips the refetch and a changed
+    # one refreshes the image.
+    avatar_image = Column(Text, nullable=True)          # base64 bytes
+    avatar_image_type = Column(Text, nullable=True)     # e.g. image/png
+    avatar_source_url = Column(Text, nullable=True)
     # ISO instant before which refresh tokens are refused. Revoking
     # sessions only tombstones access-token ``sid``s, and ``refresh()``
     # mints a fresh ``sid`` rather than reusing one — so without this
