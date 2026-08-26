@@ -442,7 +442,7 @@ const ENTERPRISE_GATEWAY: VendorPreset = {
         },
         {
             title: 'Say who redeems the session, and how the answer arrives',
-            detail: 'If the cookie is scoped to the SSO host alone, switch the exchange to the browser and give us their JWKS URL — a browser-delivered token is verified against it. If their reply is a signed token (JWT) rather than a plain user object, say so and the claims are read from its payload.',
+            detail: 'If the cookie is scoped to the SSO host alone, switch the exchange to the browser and give us their JWKS URL — a browser-delivered token is verified against it. If their reply is a signed token (JWT) rather than a plain user object, say so and the claims are read from its payload. And if their translate endpoint wants the sign-in call\'s token POSTed back as JSON — the authenticate reply carries {"token": "eyJ…"} and translate expects that same field as its body — name the field in the browser-exchange section and it is forwarded.',
         },
         {
             title: 'Allow the gateway host',

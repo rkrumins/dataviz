@@ -255,6 +255,14 @@ endpoint to call. Two things to know before you do:
   page. They are *not* the same as the header fields on the two steps
   below, which stay on our server. Put an application identifier there;
   never a credential.
+- **When the exchange runs in the browser, the trigger&rsquo;s answer
+  can be forwarded.** Some translate endpoints require the token the
+  trigger answered with, POSTed back in a JSON body. Fill in the
+  trigger&rsquo;s *Token is at* path and name the body field in the
+  browser-exchange section, and the sign-in page carries it across.
+  Note that the switch above then switches off this whole sign-in
+  shape — with the trigger off there is no token to forward, and the
+  page says so rather than making a call the gateway would refuse.
 
 Your identity team will need to allow {brand}&rsquo;s exact origin for
 credentialed cross-origin calls, and your desktop team will need
@@ -292,6 +300,15 @@ Ask them for:
   own connection row, so give each row the posture matching what *that*
   environment's gateway actually returns. Or ask them to sign everywhere, or
   run Trust unverified and accept the rating.
+
+  **If their translate endpoint wants the sign-in call's token in its body**
+  — the refusal usually reads "no request body is set" — ask where the token
+  sits in the authenticate reply and what the body field is called. The
+  authenticate call answers, say, `{"token": "eyJ…", "sessionId": "…"}`; the
+  translate call then expects `POST` with the body `{"token": "eyJ…"}`. Put
+  the reply path in the trigger's *Token is at* field and the field name in
+  the browser-exchange section's body field, set the translate method to
+  POST, and the sign-in page forwards it.
 - **The endpoint that redeems it**, and where in its reply the token sits.
 - **The endpoint that returns the user**, if that is a second call — some
   gateways answer with the person's details straight away, and then you leave

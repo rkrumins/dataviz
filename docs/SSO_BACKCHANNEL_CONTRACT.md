@@ -125,6 +125,30 @@ That changes what we need from you:
   `Access-Control-Allow-Credentials: true`, exempt the preflight from
   authentication. Headers configured for this call are public, exactly
   like the trigger's.
+- **If your translate endpoint requires the authenticate call's token
+  in its request body** — the refusal usually reads "no request body is
+  set" — the operator names the JSON field and the sign-in page
+  forwards it. Your authenticate call answers with the token in its
+  JSON:
+
+  ```json
+  {"token": "eyJhbGciOiJSUzI1NiJ9…", "sessionId": "…"}
+  ```
+
+  and the browser then calls `POST /translate` with
+  `Content-Type: application/json` and the body:
+
+  ```json
+  {"token": "eyJhbGciOiJSUzI1NiJ9…"}
+  ```
+
+  Two consequences on your side: the authenticate call must answer with
+  the token in its JSON (a cookie alone is not forwardable), and the
+  POST with a JSON content type makes the request non-simple, so your
+  CORS preflight must also allow the `Content-Type` header
+  (`Access-Control-Allow-Headers`). Switching the sign-in trigger off
+  disables this whole sign-in shape — there is then no token to
+  forward, and the page says so instead of making the call.
 - **The answer should be a signed JWT** — bare in the body or at a
   field we are told about — **with `exp`**. A token the browser
   delivers is only as good as its signature, so the operator configures
