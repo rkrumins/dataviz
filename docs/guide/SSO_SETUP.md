@@ -111,9 +111,11 @@ unlinking the identity clears it.
 #### If your IdP only sends one name
 
 Plenty do — Entra's `name`, a portal's `fullName` — with no separate given and
-family name. Nothing to configure: when both name rows would otherwise be empty,
-we split the full name and the rows say **split from `name`** rather than showing
-you an empty field.
+family name. Nothing to configure: `name`, `displayName`, `fullName` and
+`full_name` all resolve as the full name by default (SAML connections also read
+`cn` and its OID), and when both name rows would otherwise be empty, we split
+the full name and the rows say **split from `name`** rather than showing you an
+empty field.
 
 Splitting is a guess. `Doe, Alice` is read as *Alice Doe* — the comma marks the
 family name first, as Active Directory writes it — and everything else divides at
@@ -124,6 +126,13 @@ in the first name rather than being cut somewhere arbitrary.
 Because it is a guess, a split name is **not** marked IdP-managed: it fills the
 profile in and stays the person's to correct. Map a claim of its own — even a
 custom one — and the connection owns the field properly.
+
+The fill-in is not only for brand-new accounts. An account that already exists
+with both name rows blank picks the split up at its next sign-in, and the
+string your directory actually sent — `Doe, Alice`, comma and all — lands in
+**Full / display name** so nothing the IdP said is lost to the guess. Both
+stay the person's to edit, and a name somebody has already typed is never
+overwritten.
 
 > **Note:** *Where the sample came from matters.* Until someone signs in, the
 > preview runs against a worked example of your vendor's payload — good enough to

@@ -291,6 +291,58 @@ deliberate: an outage should spend that allowance down, not renew it.
 
 ---
 
+## Reading a connection's card
+
+Every connection on the Providers tab is one card, and the card leads with
+the only two questions that matter: can people use this, and is it about to
+break. Every control on it explains itself when you hover.
+
+**The state chip** says which of three states the connection is in:
+
+* **Draft — not visible to anyone.** Still being set up; nothing on the
+  sign-in page yet. Once a rehearsal has completed against it the chip adds
+  **rehearsed ✓** — the difference between "configured" and "proven".
+* **Live.** Published and enabled: on the sign-in page, accepting sign-ins.
+  Live cards also show **Last sign-in** so a connection nobody has used in
+  weeks reads differently from one that carried somebody in an hour ago.
+* **Off — sign-ins refused.** The switch is off. This wins over everything
+  else: a published connection that is switched off says *Off*, not *Live*.
+  Configuration, mappings and linked identities are all kept — turn it back
+  on and it is exactly as it was.
+
+**The switch** turns the connection on and off. Turning one **off** asks
+first and says how many people are signed in through it right now, with the
+offer to sign them out in the same step (see
+[Turning a connection off](#turning-a-connection-off)). Turning one **on**
+is immediate — it strands nobody.
+
+**Publish** exists only on drafts, and it asks first too: the confirm names
+the consequence — in front of everyone on the sign-in page — and says
+whether a rehearsal has ever completed against this configuration, which is
+the one fact worth weighing at that moment.
+
+**The flask** rehearses a sign-in: you sign in as yourself at that IdP,
+nothing is written, no session is created, and the card reports who would
+have signed in and what they would have been granted. **The pencil** opens
+the connection's settings. **The bin** opens the same settings at the danger
+zone — deletion asks you to type the slug, never one click from the list.
+
+**The shield** is the assurance level ([Assurance](#assurance)); hovering it
+gives the level's meaning in plain words plus the server's reason for this
+row.
+
+**The health line** is the "about to break" answer: certificate days
+remaining on a SAML connection, or **No certificate to check** where there
+is genuinely nothing to probe (a gateway connection, for instance) — which
+is a different fact from **Not checked yet**, the muted line you see before
+the first background sweep. If the health read itself failed, the line says
+**Health unavailable right now** rather than pretending the connection was
+never checked; hovering shows the full detail and when the last check ran.
+
+One banner overrides all of it: when the platform's SSO master switch is
+off, the tab says so at the top — no connection signs anyone in, whatever
+the individual cards say.
+
 ## Worked scenarios
 
 ### Somebody is leaving
