@@ -133,11 +133,8 @@ describe('recovery', () => {
 })
 
 describe('standing aside', () => {
-    it.each([
-        ['an unknown slug', 'nobody'],
-        ['no slug at all', undefined],
-    ])('%s is not-applicable', async (_name, slug) => {
-        expect(await attemptSilentReauth(slug)).toBe('not-applicable')
+    it('no slug at all is not-applicable', async () => {
+        expect(await attemptSilentReauth(undefined)).toBe('not-applicable')
         expect(loginWithBackchannel).not.toHaveBeenCalled()
     })
 
@@ -156,6 +153,34 @@ describe('standing aside', () => {
     it('an unreachable catalog is not a verdict about the session', async () => {
         fetchWithTimeout.mockRejectedValue(new Error('offline'))
         expect(await attemptSilentReauth('corp-gateway')).toBe('not-applicable')
+    })
+})
+
+describe('a connection that no longer exists', () => {
+    // Disabled, deleted, or the master switch turned off: the catalog
+    // answers and the slug is not in it. Navigating to the provider's
+    // own login URL — the old fallback — lands on a raw 404, so this is
+    // a terminal verdict of its own, not a case of "stand aside".
+
+    it('is gone, with the reason latched for the login page', async () => {
+        contextWith([])
+        expect(await attemptSilentReauth('corp-gateway')).toBe('gone')
+        expect(readReauthFailure()?.reason).toMatch(/no longer available/i)
+        expect(loginWithBackchannel).not.toHaveBeenCalled()
+    })
+
+    it('is told apart from a catalog that merely lists others', async () => {
+        contextWith([{ ...GATEWAY, slug: 'somebody-else' }])
+        expect(await attemptSilentReauth('corp-gateway')).toBe('gone')
+    })
+
+    it('does not re-ask the catalog while the latch is fresh', async () => {
+        contextWith([])
+        await attemptSilentReauth('corp-gateway')
+        fetchWithTimeout.mockClear()
+
+        expect(await attemptSilentReauth('corp-gateway')).toBe('failed')
+        expect(fetchWithTimeout).not.toHaveBeenCalled()
     })
 })
 

@@ -289,8 +289,11 @@ async function attemptRefresh(): Promise<{
           // 'recovered' reads as a successful refresh: the caller
           // retries the original request and nobody notices. 'failed'
           // reads as expired — one clean sign-out, with the reason
-          // latched for the login page. 'not-applicable' (an OIDC or
-          // SAML session, or a row with no browser half) keeps the
+          // latched for the login page. 'gone' means the provider is no
+          // longer in the catalog, so the login_url below is a dead
+          // route: navigate to the login PAGE instead, which can read
+          // the latched reason and explain. 'not-applicable' (an OIDC
+          // or SAML session, or a row with no browser half) keeps the
           // navigation below.
           try {
             const mod = await import('./backchannelReauth')
@@ -300,6 +303,18 @@ async function attemptRefresh(): Promise<{
             }
             if (result === 'failed') {
               return { outcome: 'expired', retryAfterMs: null }
+            }
+            if (result === 'gone') {
+              try {
+                const cacheMod = await import('@/store/userCache')
+                cacheMod.clearUserCache()
+              } catch {
+                // ignore — the bounce still happens
+              }
+              if (typeof window !== 'undefined') {
+                window.location.href = LOGIN_PATH
+              }
+              return { outcome: 'reauth', retryAfterMs: null }
             }
           } catch {
             // The recovery module failing to load or throwing is not a

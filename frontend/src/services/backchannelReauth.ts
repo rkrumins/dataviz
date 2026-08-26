@@ -38,7 +38,8 @@ import {
     type SsoProviderSummary,
 } from './authService'
 
-export type SilentReauthResult = 'recovered' | 'failed' | 'not-applicable'
+export type SilentReauthResult =
+    | 'recovered' | 'failed' | 'not-applicable' | 'gone'
 
 /** How long a failed recovery suppresses the next automatic attempt —
  *  both here and on the login page's own silent sign-in. */
@@ -184,7 +185,10 @@ async function hydrateAfterRecovery(user: AuthUser | undefined): Promise<void> {
  * in cooldown) and did not produce a session; the caller signs out, and
  * the login page explains. `'not-applicable'` — this provider has no
  * browser half to run, or could not be resolved; the caller keeps its
- * existing navigation behaviour.
+ * existing navigation behaviour. `'gone'` — the catalog answered and
+ * this slug is not in it (the connection was disabled or deleted, or
+ * the master switch is off); the caller must land on the login PAGE,
+ * because the provider's own login URL is now a dead route.
  */
 export async function attemptSilentReauth(
     providerSlug: string | undefined,
@@ -200,7 +204,18 @@ export async function attemptSilentReauth(
         // the corporate session — keep the navigation fallback.
         return 'not-applicable'
     }
-    if (!provider || provider.kind !== 'backchannel') return 'not-applicable'
+    if (!provider) {
+        // The catalog answered, and the connection this session came
+        // from is not in it any more. A verdict, not an outage: latch
+        // the reason so the login page can say it, instead of the raw
+        // 404 the dead login URL used to serve.
+        markReauthFailure(
+            'This sign-in method is no longer available. '
+            + 'Ask your administrator how to sign in now.',
+        )
+        return 'gone'
+    }
+    if (provider.kind !== 'backchannel') return 'not-applicable'
     if (!needsAuthenticateFirst(provider) && !needsBrowserExchange(provider)) {
         // No browser half is published — a plain ambient row whose
         // corporate session may well still be alive. The server-leg

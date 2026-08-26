@@ -237,6 +237,20 @@ describe('the silent back-channel recovery', () => {
             .toBe('/api/v1/auth/corp-gateway/login?next=%2F&force=1')
         expect(sessionLost).toBe(0)
     })
+
+    it('lands a vanished provider on the login page, never its dead URL', async () => {
+        // The provider was disabled or deleted mid-session. Its
+        // login_url now answers raw 404 JSON — the one place the user
+        // must not end up. The login page reads the latched reason.
+        attemptSilentReauth.mockResolvedValue('gone')
+        const f = mockFetch([gatewayReauth])
+        globalThis.fetch = f as unknown as typeof fetch
+
+        await fetchWithTimeout(PROTECTED_URL)
+
+        expect(window.location.href).toBe('/login')
+        expect(sessionLost).toBe(0)
+    })
 })
 
 
