@@ -163,18 +163,6 @@ let sessionLostAt: number | null = null
 const SESSION_LOST_WINDOW_MS = 10_000
 
 /**
- * True while a CSRF-triggered repair is running.
- *
- * A page that fires several writes at once would otherwise have each of
- * them independently discover the missing cookie and independently POST
- * /auth/refresh. ``tryRefresh`` already dedupes the network call, but the
- * *retries* would still stampede, and a failed repair would be retried
- * once per request instead of once. One repair per burst is enough: the
- * cookie it re-mints is shared by all of them.
- */
-let csrfRepairInFlight = false
-
-/**
  * Clear the session-lost latch. Called from the auth store's login /
  * portal-login / auto-signin paths — a fresh session deserves a fresh
  * attempt, exactly like ``resetClaimRecovery()`` next to it.
@@ -420,24 +408,28 @@ function readScopedCookie(base: string): string | null {
  * the client's only evidence of one — the access cookie is HttpOnly — and
  * without that check an anonymous POST to /auth/login or /auth/signup
  * would fire a pointless refresh before every attempt.
+ *
+ * Concurrent callers JOIN one repair: ``tryRefresh`` dedupes into a
+ * single in-flight promise, so a burst of writes shares one
+ * /auth/refresh and every one of them proceeds only once the cookie has
+ * been re-minted. The old guard here was a boolean that made joiners
+ * SKIP instead — they went out headerless mid-repair, 403'd, and the
+ * same flag then suppressed their retry. That is the intermittent
+ * "CSRF token missing or invalid" users saw.
  */
 export async function ensureCsrfToken(): Promise<void> {
   if (
-    csrfRepairInFlight
-    || onLoginRoute()
+    onLoginRoute()
     || readScopedCookie(CSRF_COOKIE) !== null
     || readAccessExpiryMs() === null
   ) {
     return
   }
-  csrfRepairInFlight = true
   try {
     await tryRefresh()
   } catch {
     // Let the caller's own request report the failure rather than
     // inventing one here.
-  } finally {
-    csrfRepairInFlight = false
   }
 }
 
@@ -698,7 +690,10 @@ async function notifyAccessDenied(res: Response, requestPath: string): Promise<v
  * preserved.
  *
  * Factored out so both the original attempt and the post-refresh retry
- * re-read a possibly-rotated ``nx_csrf`` cookie.
+ * re-read a possibly-rotated ``nx_csrf`` cookie. Its placement INSIDE
+ * ``runOnce`` is load-bearing: every attempt — original, post-refresh,
+ * post-repair — snapshots the cookie at send time, keeping the
+ * header/cookie skew window as narrow as the runtime allows.
  */
 function buildHeaders(
   method: string,
@@ -880,8 +875,13 @@ export async function fetchWithTimeout(
       // path: it marks a call that already came from a refresh, and
       // refreshing again there would loop.
       if (body?.detail?.error === 'csrf_failed') {
-        if (!skipAuthRefresh && !csrfRepairInFlight) {
-          csrfRepairInFlight = true
+        if (!skipAuthRefresh) {
+          // One repair + one replay per failed request, structurally —
+          // no loop. A 403 landing while another repair is in flight
+          // JOINS it (``tryRefresh`` dedupes); one landing after a
+          // repair finished still gets its own. The old extra guard
+          // here suppressed the retry exactly when a repair was
+          // running — the one moment a retry was guaranteed to help.
           try {
             if ((await tryRefresh()) === 'ok') {
               // Retry with a header rebuilt from the re-minted cookie —
@@ -891,8 +891,6 @@ export async function fetchWithTimeout(
             }
           } catch {
             // Fall through to the report below.
-          } finally {
-            csrfRepairInFlight = false
           }
         }
         // Repair did not run, or did not help. Say what actually
