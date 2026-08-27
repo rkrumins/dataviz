@@ -8,12 +8,20 @@
  * Highlight / Isolate / Exclude reach the store from here, not only from
  * the Advanced rail.
  */
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useSearchStore } from '@/store/searchStore'
 import type { FindInViewState } from '@/hooks/useFindInView'
 import type { SearchHit } from '@/types/search'
+
+// The panel's "Narrow it down" suggester pulls sampled facets from the
+// live backend. These specs are about the field and the panel, not about
+// discovery, so it returns nothing.
+vi.mock('@/providers/GraphProviderContext', () => ({
+    useGraphProvider: () => ({}),
+    useGraphProviderContext: () => ({ providerVersion: 1 }),
+}))
 
 import { HeaderFindField } from '../header/HeaderSearch'
 
@@ -199,6 +207,51 @@ describe('HeaderFindField — the results panel', () => {
         // also says "Everything".
         expect(within(panel).getByRole('button', { name: /Look in everything/i }))
             .toBeInTheDocument()
+    })
+})
+
+
+describe('HeaderFindField — starting from nothing', () => {
+    beforeEach(() => { useSearchStore.getState().clear() })
+
+    it('opens on focus with nothing typed, and says what it will search', () => {
+        renderField(makeFind())
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        const panel = screen.getByRole('dialog', { name: /search results/i })
+        expect(panel.textContent).toMatch(/at any depth/i)
+        expect(panel.textContent).toMatch(/Data Landscape/)
+    })
+
+    it('offers this view\'s recent searches instead of a blank box', () => {
+        act(() => {
+            useSearchStore.getState().addRecent({
+                viewId: 'view-1',
+                predicate: { kind: 'tag', op: 'hasAny', values: ['PII'] },
+                label: 'tag:PII',
+            })
+        })
+        const find = makeFind()
+        renderField(find)
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        const panel = screen.getByRole('dialog', { name: /search results/i })
+        expect(panel.textContent).toContain('Recent in this view')
+
+        fireEvent.click(within(panel).getByText('tag:PII'))
+        expect(find.setText).toHaveBeenCalledWith('tag:PII')
+    })
+
+    it('does not offer another view\'s recent searches', () => {
+        act(() => {
+            useSearchStore.getState().addRecent({
+                viewId: 'other-view',
+                predicate: { kind: 'tag', op: 'hasAny', values: ['GDPR'] },
+                label: 'tag:GDPR',
+            })
+        })
+        renderField(makeFind())
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        const panel = screen.getByRole('dialog', { name: /search results/i })
+        expect(panel.textContent).not.toContain('tag:GDPR')
     })
 })
 

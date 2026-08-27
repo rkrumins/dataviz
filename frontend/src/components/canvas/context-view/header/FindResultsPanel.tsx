@@ -24,10 +24,13 @@
  * box the user typed into.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { Info, Loader2, Sparkles, WifiOff } from 'lucide-react'
+import { Clock, Info, Loader2, Pin, Sparkles, WifiOff } from 'lucide-react'
 import { type FC, useCallback, useRef } from 'react'
 
 import { HitsByParent } from '@/components/canvas/search/panel/HitsByParent'
+import { SearchOmnibox } from '@/components/canvas/search/panel/omnibox/SearchOmnibox'
+import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
+import { useOmniboxFacets } from '@/components/canvas/search/panel/useOmniboxFacets'
 import { MatchBar } from '@/components/canvas/search/panel/MatchBar'
 import { formatPredicateAsSentence } from '@/components/canvas/search/panel/predicateSentence'
 import {
@@ -36,9 +39,9 @@ import {
     type FindScope,
 } from '@/components/canvas/search/find/compileFind'
 import { cn } from '@/lib/utils'
-import { useFocusedMatchUrn } from '@/store/searchStore'
+import { useFocusedMatchUrn, useRecentQueries, useSearchStore } from '@/store/searchStore'
 import type { FindInViewState } from '@/hooks/useFindInView'
-import type { AncestorRef } from '@/types/search'
+import type { AncestorRef, Predicate } from '@/types/search'
 
 
 const SCOPE_ORDER: FindScope[] = ['everything', 'names', 'descriptions', 'tags']
@@ -82,6 +85,20 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
     const isRunning = status === 'running'
     const hasHits = hits.length > 0
     const showZeroState = !isRunning && !hasHits && status !== 'idle'
+    const isIdle = status === 'idle'
+
+    // The same facets, the same ranking, the same component the Advanced
+    // builder uses. A clicked suggestion lands in the box as DSL text
+    // rather than as hidden state, so the user can see it, edit it, and
+    // delete it like any other word they typed — and the readback above
+    // explains it back to them in English.
+    const facets = useOmniboxFacets(viewId || null)
+    const appendFilter = useCallback((predicate: Predicate) => {
+        const fragment = stringifyPredicate(predicate)
+        if (!fragment) return
+        const current = state.text.trim()
+        state.setText(current ? `${current} ${fragment}` : fragment)
+    }, [state])
 
     return (
         <motion.div
@@ -100,7 +117,11 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                 'shadow-2xl shadow-black/20 dark:shadow-black/50',
             )}
         >
-            {/* ---- Scope chips + readback ------------------------------- */}
+            {/* ---- Scope chips + readback -------------------------------
+                Hidden while idle: with nothing typed there is nothing for
+                them to scope, and the launcher below is the useful thing
+                to show instead. */}
+            {!isIdle && (
             <div className="shrink-0 px-3 pt-3 pb-2 border-b border-black/[0.06] dark:border-white/[0.06]">
                 <div
                     role="radiogroup"
@@ -159,8 +180,10 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                     </div>
                 )}
             </div>
+            )}
 
             {/* ---- Match bar: counts, stepper, Highlight/Isolate/Exclude -- */}
+            {!isIdle && (
             <div className="shrink-0 px-3 py-2">
                 <MatchBar
                     count={serverTotal ?? (hasHits ? hits.length : null)}
@@ -200,6 +223,7 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                     </div>
                 )}
             </div>
+            )}
 
             {/* ---- Results --------------------------------------------- */}
             <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-2 pb-2">
@@ -209,6 +233,14 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                         onReveal={onReveal}
                         onOpen={onOpen}
                         scrollElementRef={scrollRef}
+                    />
+                )}
+
+                {isIdle && (
+                    <IdleLauncher
+                        viewId={viewId}
+                        viewName={viewName}
+                        onPick={(entry) => state.setText(stringifyPredicate(entry))}
                     />
                 )}
 
@@ -231,6 +263,20 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                         onEscalate={onEscalate}
                     />
                 )}
+            </div>
+
+            {/* ---- Narrow it down -------------------------------------- */}
+            <div className="shrink-0 px-2 py-1.5 border-t border-black/[0.06] dark:border-white/[0.06]">
+                <SearchOmnibox
+                    variant="inline"
+                    onAdd={appendFilter}
+                    entityTypes={facets.entityTypes}
+                    tagValues={facets.tagValues}
+                    propertyKeys={facets.propertyKeys}
+                    valueSamples={facets.valueSamples}
+                    layers={facets.layers}
+                    discoveryLoading={facets.isLoading}
+                />
             </div>
 
             {/* ---- Escalation ------------------------------------------ */}
@@ -314,3 +360,72 @@ const ZeroAction: FC<{ onClick: () => void; children: React.ReactNode }> = ({
         {children}
     </button>
 )
+
+
+/**
+ * What you searched last, per view.
+ *
+ * An empty search box is a worse starting point than it looks: the user
+ * knows what they want but not what this view calls it. Their own last
+ * few queries are the highest-signal thing to offer, and they cost
+ * nothing — the store already records every dispatched query, pinned
+ * ones first.
+ */
+const IdleLauncher: FC<{
+    viewId: string
+    viewName?: string
+    onPick: (predicate: Predicate) => void
+}> = ({ viewId, viewName, onPick }) => {
+    const recents = useRecentQueries(viewId || null)
+    const togglePin = useSearchStore((s) => s.togglePinRecent)
+
+    if (recents.length === 0) {
+        return (
+            <div className="px-3 py-4 text-[12px] text-ink-muted leading-relaxed">
+                Type to search every entity in
+                {viewName ? <strong className="text-ink"> {viewName}</strong> : ' this view'}
+                {' '}— names, descriptions, tags and property values, at any
+                depth, whether or not you&rsquo;ve opened the container it
+                lives in. Or pick a filter below.
+            </div>
+        )
+    }
+
+    return (
+        <div className="px-1 py-2">
+            <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/60">
+                Recent in this view
+            </div>
+            {recents.slice(0, 6).map((entry) => (
+                <div key={entry.timestamp} className="flex items-center gap-1 group/recent">
+                    <button
+                        onClick={() => onPick(entry.predicate)}
+                        className={cn(
+                            'flex-1 min-w-0 flex items-center gap-2 px-2 py-1.5 rounded-lg text-left',
+                            'text-[12px] text-ink-secondary hover:text-ink',
+                            'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors',
+                        )}
+                    >
+                        {entry.pinned
+                            ? <Pin className="w-3 h-3 shrink-0 text-accent-lineage" strokeWidth={2.4} />
+                            : <Clock className="w-3 h-3 shrink-0 text-ink-muted/50" strokeWidth={2.4} />}
+                        <span className="truncate font-mono text-[11.5px]">
+                            {entry.name ?? entry.label}
+                        </span>
+                    </button>
+                    <button
+                        onClick={() => togglePin(entry.timestamp)}
+                        aria-label={entry.pinned ? 'Unpin this search' : 'Pin this search'}
+                        className={cn(
+                            'p-1 rounded-md shrink-0 transition-opacity',
+                            'text-ink-muted/60 hover:text-accent-lineage',
+                            entry.pinned ? 'opacity-100' : 'opacity-0 group-hover/recent:opacity-100',
+                        )}
+                    >
+                        <Pin className="w-3 h-3" strokeWidth={2.4} />
+                    </button>
+                </div>
+            ))}
+        </div>
+    )
+}

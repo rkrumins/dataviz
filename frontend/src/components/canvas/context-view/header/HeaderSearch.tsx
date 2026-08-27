@@ -67,7 +67,10 @@ export function HeaderFindField({
     const [modeMenuOpen, setModeMenuOpen] = useState(false)
 
     const hasQuery = find.text.trim().length > 0
-    const showPanel = panelOpen && hasQuery
+    // Open on focus even with nothing typed: an empty box is a worse
+    // starting point than it looks, and the panel's idle state offers
+    // this view's recent searches and clickable filters instead.
+    const showPanel = panelOpen
 
     // ⌘F / Ctrl+F focuses the field, and "/" does too when the user
     // isn't already typing somewhere. Both are scoped to this component's
@@ -172,7 +175,7 @@ export function HeaderFindField({
                     placeholder="Find anything in this view…"
                     value={find.text}
                     onChange={(e) => { find.setText(e.target.value); setPanelOpen(true) }}
-                    onFocus={() => { if (hasQuery) setPanelOpen(true) }}
+                    onFocus={() => setPanelOpen(true)}
                     onKeyDown={onKeyDown}
                     aria-label="Find entities anywhere in this view by name, description, tag or property"
                     aria-expanded={showPanel}
