@@ -43,6 +43,7 @@ function makeFind(overrides: Partial<FindInViewState> = {}): FindInViewState {
         status: 'idle', errorMessage: null,
         truncated: false, deadlineExceeded: false, elapsedMs: null,
         isStale: false,
+        hasMore: false, loadMore: vi.fn(), isLoadingMore: false,
         compiled: {
             predicate: null, recognized: [], fallbackText: [], usedOperators: false,
         },
@@ -106,12 +107,14 @@ describe('HeaderFindField — the field', () => {
         expect(find.setText).toHaveBeenCalledWith('orders')
     })
 
-    it('offers the three match modes and reports the choice', () => {
-        const find = makeFind({ text: 'revenue' })
-        renderField(find)
-        fireEvent.click(screen.getByRole('button', { name: /match mode/i }))
-        fireEvent.click(screen.getByRole('option', { name: /starts with/i }))
-        expect(find.setMode).toHaveBeenCalledWith('startsWith')
+    it('keeps a way into Advanced Search visible without opening anything', () => {
+        // It used to be the only route out of this box, and moving it into
+        // a panel you have to open first made the rail unreachable for
+        // anyone who never opened one.
+        const onOpenAdvancedSearch = vi.fn()
+        renderField(makeFind(), { onOpenAdvancedSearch })
+        fireEvent.click(screen.getByRole('button', { name: /Advanced Search/i }))
+        expect(onOpenAdvancedSearch).toHaveBeenCalled()
     })
 
     it('clears the query from the field', () => {
@@ -189,7 +192,7 @@ describe('HeaderFindField — the results panel', () => {
         const panel = screen.getByRole('dialog', { name: /search results/i })
         expect(panel.textContent).toMatch(/47\s*matches/)
         expect(panel.textContent).toContain('1 already on this canvas')
-        expect(panel.textContent).toContain('showing the top 2')
+        expect(panel.textContent).toContain('showing 2 so far')
     })
 
     it('never leads with a total smaller than the rows it is showing', () => {
@@ -202,6 +205,28 @@ describe('HeaderFindField — the results panel', () => {
         const panel = screen.getByRole('dialog', { name: /search results/i })
         expect(panel.textContent).toMatch(/2\s*matches/)
         expect(panel.textContent).not.toMatch(/0\s*matches/)
+    })
+
+    it('renders outside the field, so an overflow-hidden header cannot clip it', () => {
+        // Regression pin. The header sits inside `overflow-hidden` flex
+        // containers, so an absolutely-positioned panel was rendered and
+        // then clipped to nothing — the search looked completely broken.
+        // It is portaled to the body; if it is ever inside the field's
+        // subtree again, it is clippable again.
+        const { container } = renderField(withResults())
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        const panel = screen.getByRole('dialog', { name: /search results/i })
+        expect(container.contains(panel)).toBe(false)
+        expect(document.body.contains(panel)).toBe(true)
+    })
+
+    it('lets the user choose how to match', () => {
+        const find = withResults()
+        renderField(find)
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        const modes = screen.getByRole('radiogroup', { name: /how to match/i })
+        fireEvent.click(within(modes).getByRole('radio', { name: 'Starts with' }))
+        expect(find.setMode).toHaveBeenCalledWith('startsWith')
     })
 
     it('lets the user change which fields are searched', () => {
@@ -257,6 +282,53 @@ describe('HeaderFindField — the results panel', () => {
         // also says "Everything".
         expect(within(panel).getByRole('button', { name: /Look in everything/i }))
             .toBeInTheDocument()
+    })
+})
+
+
+describe('HeaderFindField — a partial result set says so', () => {
+    beforeEach(() => { useSearchStore.getState().clear() })
+
+    function openWith(overrides: Partial<FindInViewState>) {
+        const find = withResults(overrides)
+        renderField(find)
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        return { find, panel: screen.getByRole('dialog', { name: /search results/i }) }
+    }
+
+    it('offers to load the pages it has not fetched', () => {
+        const loadMore = vi.fn()
+        const { panel } = openWith({ hasMore: true, loadMore, serverTotal: 47 })
+        const button = within(panel).getByRole('button', { name: /load more/i })
+        expect(button.textContent).toContain('45 not loaded yet')
+        fireEvent.click(button)
+        expect(loadMore).toHaveBeenCalled()
+    })
+
+    it('offers nothing to load once the set is complete', () => {
+        const { panel } = openWith({ hasMore: false })
+        expect(within(panel).queryByRole('button', { name: /load more/i })).toBeNull()
+    })
+
+    it('warns that Isolate is acting on a partial set', () => {
+        // Isolate hides everything that is not a loaded match. Claiming
+        // "only these" while 45 matches are unfetched would hide entities
+        // the headline just counted.
+        act(() => { useSearchStore.getState().setCanvasFilterMode('isolate', 'view-1') })
+        const { panel } = openWith({ hasMore: true, serverTotal: 47 })
+        expect(panel.textContent).toMatch(/Isolate is acting on the 2 matches loaded so far/)
+    })
+
+    it('says nothing about it in Highlight mode, which hides nothing', () => {
+        act(() => { useSearchStore.getState().setCanvasFilterMode('highlight', 'view-1') })
+        const { panel } = openWith({ hasMore: true, serverTotal: 47 })
+        expect(panel.textContent).not.toMatch(/acting on the/)
+    })
+
+    it('says nothing once every page is loaded', () => {
+        act(() => { useSearchStore.getState().setCanvasFilterMode('isolate', 'view-1') })
+        const { panel } = openWith({ hasMore: false })
+        expect(panel.textContent).not.toMatch(/acting on the/)
     })
 })
 

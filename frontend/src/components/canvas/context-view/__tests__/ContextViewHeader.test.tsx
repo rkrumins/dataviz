@@ -22,6 +22,7 @@ function makeFindState(overrides: Partial<FindInViewState> = {}): FindInViewStat
     status: 'idle', errorMessage: null,
     truncated: false, deadlineExceeded: false, elapsedMs: null,
     isStale: false,
+    hasMore: false, loadMore: vi.fn(), isLoadingMore: false,
     compiled: {
       predicate: null, recognized: [], fallbackText: [], usedOperators: false,
     },

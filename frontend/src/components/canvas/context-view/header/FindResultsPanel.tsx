@@ -24,8 +24,8 @@
  * box the user typed into.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { Clock, Info, Loader2, Pin, Sparkles, WifiOff } from 'lucide-react'
-import { type FC, useCallback, useRef } from 'react'
+import { AlertTriangle, Clock, Info, Loader2, Pin, Sparkles, WifiOff } from 'lucide-react'
+import { type FC, forwardRef, useCallback, useRef } from 'react'
 
 import { HitsByParent } from '@/components/canvas/search/panel/HitsByParent'
 import { SearchOmnibox } from '@/components/canvas/search/panel/omnibox/SearchOmnibox'
@@ -34,20 +34,38 @@ import { useOmniboxFacets } from '@/components/canvas/search/panel/useOmniboxFac
 import { MatchBar } from '@/components/canvas/search/panel/MatchBar'
 import { formatPredicateAsSentence } from '@/components/canvas/search/panel/predicateSentence'
 import {
+    FIND_MODE_LABELS,
     FIND_SCOPE_HINTS,
     FIND_SCOPE_LABELS,
+    type FindMode,
     type FindScope,
 } from '@/components/canvas/search/find/compileFind'
 import { cn } from '@/lib/utils'
-import { useFocusedMatchUrn, useRecentQueries, useSearchStore } from '@/store/searchStore'
+import {
+    useCanvasFilterMode,
+    useFocusedMatchUrn,
+    useRecentQueries,
+    useSearchStore,
+} from '@/store/searchStore'
 import type { FindInViewState } from '@/hooks/useFindInView'
 import type { AncestorRef, Predicate } from '@/types/search'
 
 
 const SCOPE_ORDER: FindScope[] = ['everything', 'names', 'descriptions', 'tags']
+const MODE_ORDER: FindMode[] = ['contains', 'startsWith', 'exact']
+
+const MODE_HINTS: Record<FindMode, string> = {
+    contains: 'Match anywhere in the text',
+    startsWith: 'Match from the beginning',
+    exact: 'Match the whole value, nothing more',
+}
 
 
 export interface FindResultsPanelProps {
+    /** Fixed-position coordinates from the field's anchor measurement —
+     *  this panel is portaled to the body, so it cannot lay itself out
+     *  relative to a trigger it is no longer inside. */
+    style?: React.CSSProperties
     state: FindInViewState
     viewId: string
     viewName?: string
@@ -62,15 +80,18 @@ export interface FindResultsPanelProps {
 }
 
 
-export const FindResultsPanel: FC<FindResultsPanelProps> = ({
-    state, viewId, viewName, onReveal, onOpen, onFrame, onEscalate,
-}) => {
+export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps>(
+    function FindResultsPanel({
+        state, viewId, viewName, style, onReveal, onOpen, onFrame, onEscalate,
+    }, ref) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const focusedUrn = useFocusedMatchUrn()
+    const filterMode = useCanvasFilterMode()
 
     const {
         hits, localCount, serverTotal, status, errorMessage,
         truncated, deadlineExceeded, elapsedMs, compiled, mode, scope,
+        hasMore, loadMore, isLoadingMore,
     } = state
 
     // The stepper moves focus; walking the canvas to the focused match is
@@ -111,16 +132,16 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
 
     return (
         <motion.div
+            ref={ref}
             role="dialog"
             aria-label="Search results"
+            style={style}
             initial={{ opacity: 0, y: -6, scale: 0.985 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.985 }}
             transition={{ type: 'spring', stiffness: 420, damping: 34 }}
             className={cn(
-                'absolute left-1/2 -translate-x-1/2 top-full mt-2 z-50',
-                'w-[min(34rem,calc(100vw-2rem))] max-h-[60vh]',
-                'flex flex-col overflow-hidden',
+                'z-[60] flex flex-col overflow-hidden',
                 'rounded-2xl glass-panel',
                 'border border-black/[0.08] dark:border-white/[0.10]',
                 'shadow-2xl shadow-black/20 dark:shadow-black/50',
@@ -132,6 +153,40 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                 to show instead. */}
             {!isIdle && (
             <div className="shrink-0 px-3 pt-3 pb-2 border-b border-black/[0.06] dark:border-white/[0.06]">
+                {/* How to match, then where to look. Both shape the query,
+                    so they sit together and next to the results they
+                    change — in the field they competed with the text being
+                    typed and had no room to explain themselves. */}
+                <div
+                    role="radiogroup"
+                    aria-label="How to match"
+                    className="flex items-center gap-1 flex-wrap mb-1.5"
+                >
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/60 mr-1">
+                        Match
+                    </span>
+                    {MODE_ORDER.map((m) => (
+                        <button
+                            key={m}
+                            role="radio"
+                            aria-checked={mode === m}
+                            title={MODE_HINTS[m]}
+                            onClick={() => state.setMode(m)}
+                            className={cn(
+                                'px-2 py-1 rounded-lg text-[11.5px] font-medium',
+                                'border transition-all duration-150',
+                                mode === m
+                                    ? 'bg-accent-lineage/15 border-accent-lineage/45 text-accent-lineage'
+                                    : cn(
+                                        'border-transparent text-ink-muted',
+                                        'hover:bg-black/[0.05] dark:hover:bg-white/[0.06] hover:text-ink',
+                                    ),
+                            )}
+                        >
+                            {FIND_MODE_LABELS[m]}
+                        </button>
+                    ))}
+                </div>
                 <div
                     role="radiogroup"
                     aria-label="Which fields to search"
@@ -221,7 +276,7 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                         {hits.length < totalMatches && (
                             <span>
                                 {localCount > 0 && localCount < totalMatches ? ' · ' : ''}
-                                showing the top {hits.length.toLocaleString()}
+                                showing {hits.length.toLocaleString()} so far
                             </span>
                         )}
                         {status === 'localOnly' && (
@@ -230,6 +285,20 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                                 entities loaded on this canvas only
                             </span>
                         )}
+                    </div>
+                )}
+                {/* Isolate and Exclude act on the matches that have LOADED.
+                    While pages remain, "only these" would be a false claim —
+                    the canvas would hide matches this panel just counted. */}
+                {hasMore && hasHits && filterMode !== 'highlight' && (
+                    <div className="mt-1.5 px-0.5 flex items-start gap-1.5 text-[10.5px] leading-snug text-amber-600 dark:text-amber-400">
+                        <AlertTriangle className="w-2.5 h-2.5 mt-[3px] shrink-0" strokeWidth={2.4} />
+                        <span>
+                            {filterMode === 'isolate' ? 'Isolate' : 'Exclude'} is
+                            {' '}acting on the {hits.length.toLocaleString()} matches loaded
+                            so far, not all {totalMatches.toLocaleString()}. Load the rest
+                            to cover them.
+                        </span>
                     </div>
                 )}
             </div>
@@ -259,6 +328,36 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                         <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
                         Searching this view…
                     </div>
+                )}
+
+                {hasMore && hasHits && (
+                    <button
+                        onClick={loadMore}
+                        disabled={isLoadingMore}
+                        className={cn(
+                            'w-full mt-1 px-3 py-2 rounded-lg text-[12px] font-medium',
+                            'border border-dashed border-black/[0.10] dark:border-white/[0.12]',
+                            'text-ink-secondary hover:text-ink',
+                            'hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.06]',
+                            'transition-colors disabled:opacity-60',
+                        )}
+                    >
+                        {isLoadingMore ? (
+                            <span className="inline-flex items-center gap-2">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
+                                Loading…
+                            </span>
+                        ) : (
+                            <>
+                                Load more
+                                {serverTotal !== null && serverTotal > hits.length && (
+                                    <span className="ml-1 text-ink-muted/70 font-normal">
+                                        ({(serverTotal - hits.length).toLocaleString()} not loaded yet)
+                                    </span>
+                                )}
+                            </>
+                        )}
+                    </button>
                 )}
 
                 {showZeroState && (
@@ -307,7 +406,7 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
             </button>
         </motion.div>
     )
-}
+})
 
 
 /**

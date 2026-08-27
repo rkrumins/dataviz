@@ -253,6 +253,115 @@ describe('useFindInView', () => {
         expect(result.current.text).toBe('')
     })
 
+    it('ranks the merged list, so the best match is not the first alphabetically', async () => {
+        // The backend sorts by displayName (no relevance signal in v1) and
+        // returns the first page of that. Without a client-side re-rank the
+        // exact match sits at the bottom of the panel.
+        provider.searchAdvanced.mockResolvedValue(page([
+            { urn: 'urn:x1', displayName: 'a_revenue_draft' },
+            { urn: 'urn:x2', displayName: 'b_revenue_old' },
+            { urn: 'urn:x3', displayName: 'revenue' },
+        ]))
+        const { result } = setup()
+        act(() => { result.current.setText('revenue') })
+
+        await waitFor(() => expect(result.current.status).toBe('ready'))
+        expect(result.current.hits[0].node.displayName).toBe('revenue')
+    })
+
+    it('exposes more pages when the server says there are', async () => {
+        provider.searchAdvanced.mockResolvedValue(
+            page([{ urn: 'urn:p1', displayName: 'revenue_1' }], { cursor: 'CUR1' }),
+        )
+        const { result } = setup()
+        act(() => { result.current.setText('revenue') })
+
+        await waitFor(() => expect(result.current.hasMore).toBe(true))
+    })
+
+    it('appends the next page rather than replacing what is on screen', async () => {
+        provider.searchAdvanced
+            .mockResolvedValueOnce(
+                page([{ urn: 'urn:p1', displayName: 'revenue_1' }], { cursor: 'CUR1' }))
+            .mockResolvedValueOnce(
+                page([{ urn: 'urn:p2', displayName: 'revenue_2' }], { cursor: null }))
+
+        const { result } = setup()
+        act(() => { result.current.setText('revenue') })
+        await waitFor(() => expect(result.current.hasMore).toBe(true))
+
+        act(() => { result.current.loadMore() })
+        await waitFor(() => expect(result.current.hasMore).toBe(false))
+
+        const urns = result.current.hits.map((h) => h.node.urn)
+        expect(urns).toEqual(expect.arrayContaining(['urn:p1', 'urn:p2']))
+    })
+
+    it('pages the query that produced the results, carrying the cursor', async () => {
+        provider.searchAdvanced
+            .mockResolvedValueOnce(
+                page([{ urn: 'urn:p1', displayName: 'revenue_1' }], { cursor: 'CUR1' }))
+            .mockResolvedValue(page([], { cursor: null }))
+
+        const { result } = setup()
+        act(() => { result.current.setText('revenue') })
+        await waitFor(() => expect(result.current.hasMore).toBe(true))
+
+        act(() => { result.current.loadMore() })
+        await waitFor(() => expect(provider.searchAdvanced).toHaveBeenCalledTimes(2))
+
+        const second = provider.searchAdvanced.mock.calls[1][0] as SearchQuery
+        expect(second.options?.cursor).toBe('CUR1')
+        expect(second.scope.viewId).toBe('view-1')
+    })
+
+    it('does not page when there is no cursor', async () => {
+        provider.searchAdvanced.mockResolvedValue(
+            page([{ urn: 'urn:p1', displayName: 'revenue_1' }], { cursor: null }))
+        const { result } = setup()
+        act(() => { result.current.setText('revenue') })
+        await waitFor(() => expect(result.current.status).toBe('ready'))
+        expect(result.current.hasMore).toBe(false)
+
+        act(() => { result.current.loadMore() })
+        expect(provider.searchAdvanced).toHaveBeenCalledTimes(1)
+    })
+
+    it('publishes the widened set, so the spotlight covers the new page', async () => {
+        provider.searchAdvanced
+            .mockResolvedValueOnce(
+                page([{ urn: 'urn:p1', displayName: 'revenue_1' }], { cursor: 'CUR1' }))
+            .mockResolvedValueOnce(
+                page([{ urn: 'urn:p2', displayName: 'revenue_2' }], { cursor: null }))
+
+        const { result } = setup()
+        act(() => { result.current.setText('revenue') })
+        await waitFor(() => expect(result.current.hasMore).toBe(true))
+
+        act(() => { result.current.loadMore() })
+        await waitFor(() => {
+            expect(useSearchStore.getState().matchUrnSet.has('urn:p2')).toBe(true)
+        })
+        expect(useSearchStore.getState().matchUrnSet.has('urn:p1')).toBe(true)
+    })
+
+    it('keeps the pages it has when a load-more fails', async () => {
+        provider.searchAdvanced
+            .mockResolvedValueOnce(
+                page([{ urn: 'urn:p1', displayName: 'revenue_1' }], { cursor: 'CUR1' }))
+            .mockRejectedValueOnce(new Error('backend down'))
+
+        const { result } = setup()
+        act(() => { result.current.setText('revenue') })
+        await waitFor(() => expect(result.current.hasMore).toBe(true))
+
+        act(() => { result.current.loadMore() })
+        await waitFor(() => expect(result.current.isLoadingMore).toBe(false))
+
+        expect(result.current.errorMessage).toContain('backend down')
+        expect(result.current.hits.map((h) => h.node.urn)).toContain('urn:p1')
+    })
+
     it('leaves the rail\'s results alone', async () => {
         // The two surfaces share one result slot; the header must only
         // ever tear down results it published itself.

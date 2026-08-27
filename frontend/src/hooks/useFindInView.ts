@@ -50,6 +50,7 @@ import {
     toSyntheticHit,
     LOCAL_HIT_LIMIT,
 } from '@/components/canvas/search/find/localNodeIndex'
+import { rankHits } from '@/components/canvas/search/find/rankHits'
 import { stampViewScope } from '@/components/canvas/search/panel/stampViewScope'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -82,11 +83,23 @@ const CANDIDATE_CAP = 5000
 const EMPTY_HITS: readonly SearchHit[] = Object.freeze([])
 
 
-/** One server answer, tagged with the query it answers. */
+/** The server's answer to one query, accumulated across pages. */
 interface ServerRun {
     key: string
+    /** The predicate this run was dispatched with. Held so `loadMore`
+     *  pages the query that produced these hits: the live `compiled` can
+     *  already be a keystroke ahead of the debounced run. */
+    predicate: NonNullable<CompiledFind['predicate']>
     hits: readonly SearchHit[]
     total: number | null
+    /** Opaque cursor for the next page; null when the set is exhausted.
+     *  The backend echoes one whenever the page didn't reach the end of
+     *  the sorted hits. Dropping it capped this box at one page. */
+    cursor: string | null
+    /** True while a `loadMore` is in flight. Distinct from the initial
+     *  run: the panel keeps showing the rows it has instead of flipping
+     *  to a spinner. */
+    loadingMore: boolean
     truncated: boolean
     deadlineExceeded: boolean
     elapsedMs: number | null
@@ -130,9 +143,17 @@ export interface FindInViewState {
     hits: readonly SearchHit[]
     /** How many of `hits` came from the canvas already on screen. */
     localCount: number
-    /** Total the server found in the view — may exceed `hits.length`
-     *  because only a page is fetched. `null` until it answers. */
+    /** Total the server found in the view — exceeds `hits.length` until
+     *  every page is loaded. `null` until it answers. */
     serverTotal: number | null
+    /** More pages exist. While true the result set is PROVISIONAL: the
+     *  canvas spotlight and the stepper cover only what has loaded, so
+     *  the UI must not imply the list is the whole answer. */
+    hasMore: boolean
+    /** Fetch the next page and append it. No-op without a cursor. */
+    loadMore: () => void
+    /** A `loadMore` is in flight. */
+    isLoadingMore: boolean
     status: FindStatus
     errorMessage: string | null
     /** The server hit its candidate cap: there are more matches than it
@@ -206,6 +227,35 @@ export function useFindInView({
         ? `${debouncedMode}|${debouncedScope}|${debouncedText}`
         : ''
 
+    /** The request for one page. `cursor` is null for the first. */
+    const buildQuery = useCallback((
+        predicate: NonNullable<CompiledFind['predicate']>,
+        cursor: string | null,
+    ): SearchQuery => stampViewScope(
+        {
+            predicate,
+            options: {
+                results: 'hits',
+                includeAncestorPath: true,
+                pageSize: SERVER_PAGE_SIZE,
+                // Accepted, but the backend has no relevance signal in v1
+                // and falls back to display name. `rankHits` re-sorts what
+                // comes back so the list obeys one rule; asking for it
+                // anyway means this starts working for free if the server
+                // ever gains one.
+                sort: 'relevance',
+                candidateCap: CANDIDATE_CAP,
+                softDeadlineMs: SOFT_DEADLINE_MS,
+                ...(cursor ? { cursor } : {}),
+            },
+        },
+        viewId,
+        // Always 'view', never the rail's persisted mode. A user who last
+        // left Advanced Search on 'visible' must not silently get the
+        // loaded-only bug back in the header box.
+        'view',
+    ), [viewId])
+
     useEffect(() => {
         if (!serverActive) return
 
@@ -218,25 +268,7 @@ export function useFindInView({
 
         const myRun = ++runIdRef.current
         const startedAt = performance.now()
-
-        const query: SearchQuery = stampViewScope(
-            {
-                predicate,
-                options: {
-                    results: 'hits',
-                    includeAncestorPath: true,
-                    pageSize: SERVER_PAGE_SIZE,
-                    sort: 'relevance',
-                    candidateCap: CANDIDATE_CAP,
-                    softDeadlineMs: SOFT_DEADLINE_MS,
-                },
-            },
-            viewId,
-            // Always 'view', never the rail's persisted mode. A user who
-            // last left Advanced Search on 'visible' must not silently get
-            // the loaded-only bug back in the header box.
-            'view',
-        )
+        const query = buildQuery(predicate, null)
 
         void (async () => {
             try {
@@ -244,8 +276,11 @@ export function useFindInView({
                 if (runIdRef.current !== myRun) return   // superseded
                 setServerRun({
                     key: runKey,
+                    predicate,
                     hits: page.hits ?? [],
                     total: page.candidateCount ?? page.hits?.length ?? 0,
+                    cursor: page.cursor ?? null,
+                    loadingMore: false,
                     truncated: Boolean(page.truncated),
                     deadlineExceeded: Boolean(page.deadlineExceeded),
                     elapsedMs: Math.round(performance.now() - startedAt),
@@ -257,8 +292,11 @@ export function useFindInView({
                 // a partial answer beats an empty one.
                 setServerRun({
                     key: runKey,
+                    predicate,
                     hits: [],
                     total: null,
+                    cursor: null,
+                    loadingMore: false,
                     truncated: false,
                     deadlineExceeded: false,
                     elapsedMs: Math.round(performance.now() - startedAt),
@@ -268,12 +306,62 @@ export function useFindInView({
         })()
     }, [
         serverActive, runKey, debouncedText, debouncedMode, debouncedScope,
-        provider, viewId,
+        provider, viewId, buildQuery,
     ])
 
     // Only the answer to the question currently being asked counts.
     const server = serverRun && serverRun.key === runKey ? serverRun : null
     const serverHits = server?.hits ?? EMPTY_HITS
+
+    /**
+     * Fetch the next page and APPEND it.
+     *
+     * The run key stays pinned to the query while paging — a page that
+     * replaced the key would make every page already accumulated look
+     * stale and get discarded. The run-id guard still applies, so a page
+     * that lands after the user has typed something else is dropped.
+     */
+    const loadMore = useCallback(() => {
+        const run = server
+        if (!run || !run.cursor || run.loadingMore) return
+        if (!(provider instanceof RemoteGraphProvider)) return
+
+        const cursor = run.cursor
+        const myRun = runIdRef.current
+        setServerRun((prev) =>
+            prev && prev.key === run.key ? { ...prev, loadingMore: true } : prev)
+
+        void (async () => {
+            try {
+                const page = await provider.searchAdvanced(
+                    buildQuery(run.predicate, cursor),
+                )
+                if (runIdRef.current !== myRun) return   // superseded
+                setServerRun((prev) => {
+                    if (!prev || prev.key !== run.key) return prev
+                    return {
+                        ...prev,
+                        hits: [...prev.hits, ...(page.hits ?? [])],
+                        cursor: page.cursor ?? null,
+                        loadingMore: false,
+                        // A later page can still report truncation.
+                        truncated: prev.truncated || Boolean(page.truncated),
+                    }
+                })
+            } catch (e) {
+                if (runIdRef.current !== myRun) return
+                // Keep the pages already loaded; only report the failure.
+                setServerRun((prev) => {
+                    if (!prev || prev.key !== run.key) return prev
+                    return {
+                        ...prev,
+                        loadingMore: false,
+                        error: e instanceof Error ? e.message : String(e),
+                    }
+                })
+            }
+        })()
+    }, [server, provider, buildQuery])
 
 
     // ---- Merge ------------------------------------------------------------
@@ -285,14 +373,20 @@ export function useFindInView({
             if (urn) byUrn.set(urn, hit)
         }
         // Server rows win: they carry the authoritative ancestor path.
-        // Insertion order keeps local hits first, so the rows the user is
-        // already reading don't reshuffle when the server answers.
+        // Insertion order keeps local hits first, which `rankHits` then
+        // uses as its stable tiebreak.
         for (const hit of serverHits) {
             const urn = urnOf(hit)
             if (urn) byUrn.set(urn, hit)
         }
-        return Array.from(byUrn.values())
-    }, [localHits, serverHits])
+        // One ordering rule for the whole list. Without this the local
+        // half is relevance-ranked and the server half is alphabetical
+        // (the backend has no relevance signal in v1), so the best match
+        // could sit below a worse one purely because of where it came
+        // from. Loading another page genuinely improves the order, which
+        // is why the panel says the list is provisional until it's done.
+        return rankHits(Array.from(byUrn.values()), trimmed)
+    }, [localHits, serverHits, trimmed])
 
     const localUrns = useMemo(() => {
         const s = new Set<string>()
@@ -376,6 +470,9 @@ export function useFindInView({
         hits,
         localCount: localUrns.size,
         serverTotal: server?.total ?? null,
+        hasMore: Boolean(server?.cursor),
+        loadMore,
+        isLoadingMore: Boolean(server?.loadingMore),
         status,
         errorMessage: server?.error ?? null,
         truncated: server?.truncated ?? false,
