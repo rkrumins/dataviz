@@ -51,7 +51,10 @@
  *
  * The parser is intentionally lenient — unknown bareword tokens fall
  * back to a substring text match against ``name``. That means a user
- * can always type a plain word and get a sensible search.
+ * can always type a plain word and get a sensible search. Callers that
+ * own their own notion of "what a plain word means" (find-in-view's
+ * match-mode + field-scope controls) override just that leaf via
+ * ``ParseOptions.onBareword``; the grammar is unchanged.
  */
 import type {
     Predicate,
@@ -81,14 +84,29 @@ export interface ParseResult {
 }
 
 
-export function parsePredicate(input: string): ParseResult {
+export interface ParseOptions {
+    /** Build the predicate for a bareword / quoted-phrase token.
+     *
+     *  Omit and barewords compile to a case-insensitive substring match
+     *  against ``name`` — the behaviour every existing caller relies on.
+     *  Find-in-view passes its own builder so the header's match-mode and
+     *  field-scope controls decide what a plain word means, without
+     *  forking the grammar. */
+    onBareword?: (value: string) => Predicate
+}
+
+
+export function parsePredicate(
+    input: string,
+    opts: ParseOptions = {},
+): ParseResult {
     const tokens = lex(input)
     const recognized: string[] = []
     const fallbackText: string[] = []
     if (tokens.length === 0) {
         return { predicate: null, recognized, fallbackText }
     }
-    const p = new Parser(tokens, recognized, fallbackText)
+    const p = new Parser(tokens, recognized, fallbackText, opts.onBareword)
     try {
         const pred = p.parseExpr()
         if (p.pos < tokens.length) {
@@ -339,6 +357,7 @@ class Parser {
         readonly tokens: Token[],
         readonly recognized: string[],
         readonly fallbackText: string[],
+        readonly onBareword?: (value: string) => Predicate,
     ) {}
 
     peek(): Token | null {
@@ -511,7 +530,9 @@ class Parser {
             throw new Error(`Unexpected token: ${t.raw}`)
         }
         this.fallbackText.push(value)
-        return makeTextPredicate('name', value)
+        return this.onBareword
+            ? this.onBareword(value)
+            : makeTextPredicate('name', value)
     }
 
     tryConsumeInExpression(lhs: string): {

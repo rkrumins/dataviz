@@ -123,6 +123,24 @@ export interface RecentQueryEntry {
 export type CanvasFilterMode = 'highlight' | 'isolate' | 'hide'
 
 
+/**
+ * Which surface owns the current result set.
+ *
+ * Two surfaces publish into the one result slot: the Context View
+ * header's find-in-view box (``'quick'``) and the Advanced Search rail
+ * (``'advanced'``). They share the slot on purpose — one search means one
+ * spotlight, one stepper, one set of roll-up badges, whichever box the
+ * user typed into.
+ *
+ * Sharing needs an owner, because ``useAdvancedSearch`` clears the store
+ * on unmount and ``SearchMapPanel`` unmounts it every time the rail
+ * closes. Without this field, closing the rail would silently blank
+ * results the header owns. Clears that belong to the rail check the
+ * owner first; the header's own clear is unconditional.
+ */
+export type SearchResultSource = 'quick' | 'advanced'
+
+
 interface SearchStoreState {
     /**
      * The view this result set belongs to. When the panel is closed or
@@ -145,6 +163,11 @@ interface SearchStoreState {
      * purpose.
      */
     queryHash: string | null
+    /**
+     * Which surface published the current results — see
+     * ``SearchResultSource``. ``null`` when there are no results.
+     */
+    resultSource: SearchResultSource | null
     /**
      * The predicate currently being authored. Single source of truth
      * shared across the visual builder, the JSON editor, and templates.
@@ -350,6 +373,9 @@ interface SearchStoreActions {
          *  roll-up counts AND a per-type breakdown on collapsed nodes. */
         ancestorPaths?: Iterable<AncestorPathInfo>
         queryHash: string
+        /** Defaults to ``'advanced'`` so existing callers keep their
+         *  behaviour; the header passes ``'quick'``. */
+        source?: SearchResultSource
     }) => void
     /** Replace the draft with a value from outside the builder (template /
      *  JSON editor / load-saved-query). Bumps ``draftRevision``.
@@ -625,8 +651,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // is active at store-create time — callers (SearchMapPanel mount)
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
+    resultSource: null,
 
-    setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
+    setResult: ({ viewId, matchUrns, ancestorPaths, queryHash, source }) => {
         const next = new Set<string>()
         // Build the ordered list and the set in one pass so iteration
         // order from the caller (backend hit order) is preserved for
@@ -656,6 +683,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             ancestorMatchCounts: counts,
             ancestorMatchTypeBreakdowns: breakdowns,
             queryHash,
+            resultSource: source ?? 'advanced',
         })
     },
 
@@ -811,6 +839,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             orderedMatchUrns: EMPTY_ORDERED_URNS,
             focusedMatchIndex: null,
             queryHash: null,
+            resultSource: null,
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
         })
@@ -879,6 +908,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             orderedMatchUrns: EMPTY_ORDERED_URNS,
             focusedMatchIndex: null,
             queryHash: null,
+            resultSource: null,
             draftPredicate: null,
             draftRevision: s.draftRevision + 1,
             draftOptions: null,
@@ -1009,6 +1039,13 @@ export function useIsMatch(urn: string | undefined): boolean {
 }
 
 /** The view + queryHash this result set belongs to. */
+/** Which surface owns the results on screen. Lets the Advanced rail's
+ *  unmount cleanup avoid wiping results the header put there. */
+export function useSearchResultSource(): SearchResultSource | null {
+    return useSearchStore((s) => s.resultSource)
+}
+
+
 export function useSearchResultMeta(): { viewId: string | null; queryHash: string | null } {
     return useSearchStore((s) => ({ viewId: s.viewId, queryHash: s.queryHash }))
 }

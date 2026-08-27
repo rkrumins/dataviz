@@ -241,3 +241,61 @@ describe('predicateComposition — wrap / duplicate / root NOT', () => {
         expect(next.children).toHaveLength(2)
     })
 })
+
+describe('predicateDsl — the onBareword override', () => {
+    const marker: Predicate = {
+        kind: 'text', value: 'MARKER', target: 'description',
+        match: 'exact', caseSensitive: true,
+    }
+
+    it('leaves the default parse byte-identical when no options are passed', () => {
+        // Regression pin: find-in-view added an opt-in hook to this
+        // parser. Every existing caller (the Advanced builder, the
+        // paste-DSL path, the omnibox) must see exactly what it saw
+        // before, so the default is asserted against itself.
+        const inputs = [
+            't2',
+            '"monthly revenue"',
+            't2 AND (account OR opp) OR NOT T1',
+            'tag:PII type:dataset rowCount > 1000',
+            'desc:customer has:owner noUpstream',
+        ]
+        for (const input of inputs) {
+            expect(parsePredicate(input, {})).toEqual(parsePredicate(input))
+        }
+    })
+
+    it('routes barewords through the override', () => {
+        const r = parsePredicate('revenue', { onBareword: () => marker })
+        expect(r.predicate).toEqual(marker)
+        expect(r.fallbackText).toEqual(['revenue'])
+    })
+
+    it('routes quoted phrases through the override too', () => {
+        const seen: string[] = []
+        parsePredicate('"monthly revenue"', {
+            onBareword: (v) => { seen.push(v); return marker },
+        })
+        expect(seen).toEqual(['monthly revenue'])
+    })
+
+    it('never routes structured leaves through the override', () => {
+        const seen: string[] = []
+        const onBareword = (v: string) => { seen.push(v); return marker }
+        const r = parsePredicate(
+            'tag:PII type:dataset rowCount > 1000 desc:customer has:owner',
+            { onBareword },
+        )
+        expect(seen).toEqual([])
+        expect(r.fallbackText).toEqual([])
+        expect(r.recognized.length).toBeGreaterThan(0)
+    })
+
+    it('routes only the bareword half of a mixed query', () => {
+        const seen: string[] = []
+        parsePredicate('revenue AND tag:PII', {
+            onBareword: (v) => { seen.push(v); return marker },
+        })
+        expect(seen).toEqual(['revenue'])
+    })
+})
