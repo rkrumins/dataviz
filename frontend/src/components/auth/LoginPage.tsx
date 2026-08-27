@@ -776,7 +776,14 @@ export function LoginPage() {
     // email-first off. A page with a form the server might refuse still
     // beats a page with nothing on it.
     const allowLocal = context?.allowLocalLogin ?? true
-    const showPasswordForm = allowLocal && (!emailFirst || forcePassword)
+    // Break-glass: with passwords off the form is hidden, and the
+    // deployment's system account still needs its door. `?password=1`
+    // reveals the local form without advertising it on the page —
+    // revealing it grants nothing, because the server refuses every
+    // account that is not marked as a system account.
+    const breakGlass = params.get('password') === '1'
+    const showPasswordForm = breakGlass
+        || (allowLocal && (!emailFirst || forcePassword))
     // Email-first leads with the routed provider and tucks the button row
     // behind a disclosure — otherwise it removes neither the coin flip nor
     // the topology disclosure it exists to remove.

@@ -130,7 +130,13 @@ async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
     """Return the (id, email) of every active super-admin who has no SSO
     identity. Used to refuse the toggle ``allow_local_login=false`` when
     it would produce a lockout (once local login is off, an admin MUST
-    have at least one SSO identity to get back in)."""
+    have at least one SSO identity to get back in).
+
+    System accounts are not counted: the enforcement carves them out
+    (they keep password sign-in while the switch is off), so they cannot
+    be locked out by it — and without this exemption a deployment whose
+    only local admin is the seeded bootstrap account could never turn
+    enforcement on at all."""
     user_ids = await _super_admin_user_ids(session)
     if not user_ids:
         return []
@@ -139,6 +145,7 @@ async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
             UserORM.id.in_(user_ids),
             UserORM.status == "active",
             UserORM.deleted_at.is_(None),
+            UserORM.is_system_account.is_(False),
         )
     )
     offending: list[dict] = []

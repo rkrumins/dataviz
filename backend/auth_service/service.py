@@ -288,8 +288,6 @@ class LocalIdentityService:
         # FE can redirect to the dynamic providers list instead of
         # showing a generic "wrong password".
         cfg = await self._auth_config_provider.get()
-        if not cfg.allow_local_login:
-            raise LocalLoginDisabled()
 
         provider = get_provider("local")
 
@@ -297,6 +295,19 @@ class LocalIdentityService:
         async with self._session_factory() as session:
             async def _get_user_by_email(em: str):
                 return await self._user_repo.get_user_by_email(session, em)
+
+            if not cfg.allow_local_login:
+                # One carve-out from the kill-switch: a system account
+                # (break-glass) keeps the password door while the
+                # platform enforces SSO — otherwise an IdP outage has
+                # no way back in. Unknown emails and every ordinary
+                # account get the identical refusal, before any
+                # password check, so this is not an account oracle.
+                candidate = await _get_user_by_email(email)
+                if candidate is None or not bool(
+                    getattr(candidate, "is_system_account", False)
+                ):
+                    raise LocalLoginDisabled()
 
             identity = await provider.authenticate(
                 ProviderCredentials(email=email, password=password),

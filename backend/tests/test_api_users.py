@@ -401,6 +401,100 @@ async def test_suspend_already_suspended_user(test_client: AsyncClient, db_sessi
     assert resp.status_code == 409
 
 
+# ── POST /admin/users/{user_id}/system-account ────────────────────────
+
+async def test_mark_and_unmark_system_account(test_client: AsyncClient, db_session):
+    """The break-glass flag round-trips, is reported on the response,
+    and a repeat of the current state is a 409 (the suspend idiom)."""
+    from backend.app.db.repositories import user_repo
+
+    user = await user_repo.create_user(
+        db_session,
+        email="sysacct@example.com",
+        password_hash="hash123",
+        first_name="Sys",
+        last_name="Acct",
+    )
+    await user_repo.update_user_status(db_session, user.id, "active")
+
+    resp = await test_client.post(
+        f"/api/v1/admin/users/{user.id}/system-account",
+        json={"isSystemAccount": True},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["isSystemAccount"] is True
+
+    resp = await test_client.post(
+        f"/api/v1/admin/users/{user.id}/system-account",
+        json={"isSystemAccount": True},
+    )
+    assert resp.status_code == 409
+
+    resp = await test_client.post(
+        f"/api/v1/admin/users/{user.id}/system-account",
+        json={"isSystemAccount": False},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["isSystemAccount"] is False
+
+
+async def test_system_account_not_found(test_client: AsyncClient):
+    resp = await test_client.post(
+        "/api/v1/admin/users/usr_nonexistent/system-account",
+        json={"isSystemAccount": True},
+    )
+    assert resp.status_code == 404
+
+
+async def test_unmark_refused_when_it_would_lock_out_the_admin(
+    test_client: AsyncClient, db_session,
+):
+    """Passwords off + active super-admin with no SSO identity: the
+    flag is the only thing keeping that admin able to sign in, so
+    stripping it is refused with the same 409 the config PATCH uses."""
+    from backend.app.db import models as m
+    from backend.app.db.repositories import app_auth_config_repo, user_repo
+
+    user = await user_repo.create_user(
+        db_session,
+        email="lastdoor@example.com",
+        password_hash="hash123",
+        first_name="Last",
+        last_name="Door",
+    )
+    await user_repo.update_user_status(db_session, user.id, "active")
+    await user_repo.set_system_account(db_session, user.id, True)
+    db_session.add(m.RoleBindingORM(
+        id=f"bnd_{user.id}", subject_type="user", subject_id=user.id,
+        role_name="super_admin", scope_type="global", scope_id=None,
+        granted_at="2024-01-01T00:00:00Z", source="local",
+    ))
+    await app_auth_config_repo.update_config(
+        db_session, allow_local_login=False, updated_by="test",
+    )
+    await db_session.flush()
+
+    resp = await test_client.post(
+        f"/api/v1/admin/users/{user.id}/system-account",
+        json={"isSystemAccount": False},
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "would_lock_out_admin"
+
+    # With passwords back on, the same unmark goes through.
+    await app_auth_config_repo.update_config(
+        db_session, allow_local_login=True, updated_by="test",
+    )
+    await db_session.flush()
+
+    resp = await test_client.post(
+        f"/api/v1/admin/users/{user.id}/system-account",
+        json={"isSystemAccount": False},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["isSystemAccount"] is False
+
+
 # ── POST /admin/users/{user_id}/reactivate ────────────────────────────
 
 async def test_reactivate_user_not_found(test_client: AsyncClient):

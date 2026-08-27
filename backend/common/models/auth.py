@@ -44,6 +44,12 @@ class ApproveRejectRequest(BaseModel):
     rejection_reason: Optional[str] = Field(None, alias="rejectionReason", max_length=500)
 
 
+class SetSystemAccountRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    is_system_account: bool = Field(alias="isSystemAccount")
+
+
 class ChangeRoleRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -226,6 +232,9 @@ class AdminUserResponse(BaseModel):
     has_password: bool = Field(False, alias="hasPassword")
     signup_source: Optional[str] = Field(default=None, alias="signupSource")
     identities: list[AdminUserIdentityRef] = Field(default_factory=list)
+    # Break-glass: keeps password sign-in under SSO enforcement, and
+    # forced sign-out sweeps skip it.
+    is_system_account: bool = Field(False, alias="isSystemAccount")
 
 
 class LoginResponse(BaseModel):

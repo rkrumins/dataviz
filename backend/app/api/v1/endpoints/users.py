@@ -72,6 +72,7 @@ from backend.common.models.auth import (
     InviteSummaryResponse,
     InviteTokenResponse,
     ResetTokenResponse,
+    SetSystemAccountRequest,
     UpdateUserRequest,
     UserPublicResponse,
 )
@@ -146,6 +147,7 @@ async def _admin_response(
         hasPassword=is_password_set(user.password_hash),
         signupSource=getattr(user, "signup_source", None),
         identities=[_identity_ref(row) for row in identities],
+        isSystemAccount=bool(getattr(user, "is_system_account", False)),
     )
 
 
@@ -849,6 +851,82 @@ async def suspend_user(
 
     logger.info("User %s suspended by %s", user_id, admin.id)
     return {"detail": "User suspended"}
+
+
+# ── System account (break-glass) ──────────────────────────────────────
+
+@admin_router.post("/{user_id}/system-account", response_model=AdminUserResponse)
+async def set_system_account(
+    user_id: str,
+    body: SetSystemAccountRequest,
+    admin=Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Mark or unmark an account as a system account.
+
+    A system account is the SSO-enforcement carve-out: while
+    ``allowLocalLogin`` is off it can still sign in with its password
+    (break-glass), forced sign-out sweeps skip it, and the
+    admin-lockout guard does not count it.
+
+    Unmarking re-runs the one check that marking bypassed: with
+    passwords already off, stripping the flag from an active
+    super-admin who has no linked SSO identity would strand them — the
+    same 409 the config PATCH answers.
+    """
+    user = await user_repo.get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if bool(getattr(user, "is_system_account", False)) == body.is_system_account:
+        raise HTTPException(
+            status_code=409,
+            detail="User is already " + (
+                "a system account" if body.is_system_account
+                else "not a system account"
+            ),
+        )
+
+    if not body.is_system_account:
+        from backend.app.api.v1.endpoints.admin_sso_config import (
+            _super_admin_user_ids,
+        )
+        from backend.app.db.repositories import app_auth_config_repo
+        snap = await app_auth_config_repo.get_snapshot(session)
+        if not snap.allow_local_login and user.status == "active":
+            admin_ids = await _super_admin_user_ids(session)
+            if user.id in admin_ids:
+                idents = await user_identity_repo.list_for_user(
+                    session, user.id,
+                )
+                if not idents:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "error": "would_lock_out_admin",
+                            "message": "Passwords are off and this admin has "
+                                       "no linked SSO identity — unmarking "
+                                       "the system account would lock them "
+                                       "out.",
+                        },
+                    )
+
+    await user_repo.set_system_account(session, user_id, body.is_system_account)
+    await user_repo.create_outbox_event(
+        session,
+        event_type="user.system_account_changed",
+        payload={
+            "user_id": user_id,
+            "is_system_account": body.is_system_account,
+            "changed_by": admin.id,
+        },
+    )
+    logger.info(
+        "User %s %s as a system account by %s",
+        user_id,
+        "marked" if body.is_system_account else "unmarked",
+        admin.id,
+    )
+    return await _admin_response(session, user)
 
 
 # ── Reactivate ────────────────────────────────────────────────────────

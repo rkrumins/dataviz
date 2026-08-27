@@ -367,6 +367,32 @@ async def update_user_status(session: AsyncSession, user_id: str, status: str) -
     return user
 
 
+async def set_system_account(
+    session: AsyncSession, user_id: str, flag: bool,
+) -> Optional[UserORM]:
+    """Mark or unmark the break-glass flag (``is_system_account``)."""
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return None
+    user.is_system_account = bool(flag)
+    user.updated_at = _now()
+    await session.flush()
+    return user
+
+
+async def system_account_ids(session: AsyncSession) -> set[str]:
+    """Ids of every system account, deleted rows included.
+
+    The sweep and the token sweep both subtract this set, and a
+    soft-deleted system account must still be subtracted — resurrecting
+    its sessions is not the sweep's business either way.
+    """
+    result = await session.execute(
+        select(UserORM.id).where(UserORM.is_system_account.is_(True))
+    )
+    return set(result.scalars().all())
+
+
 # ── Roles ──────────────────────────────────────────────────────────────
 #
 # Two tables track a user's role state and they need to stay in sync:

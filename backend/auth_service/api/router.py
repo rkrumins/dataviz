@@ -1094,10 +1094,17 @@ async def login(
     except LocalLoginDisabled:
         # Phase 4: SSO-only mode. Don't leak the existence of any
         # account; respond with a structured 403 so the FE can
-        # redirect to the providers picker.
+        # redirect to the providers picker. (System accounts are the
+        # one carve-out, resolved inside ``svc.login`` — reaching this
+        # branch means the account is not one, or does not exist, and
+        # the two are deliberately indistinguishable.)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "local_login_disabled"},
+            detail={
+                "error": "local_login_disabled",
+                "message": "Password sign-in is switched off for this "
+                           "deployment — use single sign-on.",
+            },
         )
     except InvalidCredentials:
         # Only failures accumulate, so someone who signs in correctly

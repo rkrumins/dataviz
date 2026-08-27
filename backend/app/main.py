@@ -562,6 +562,15 @@ async def lifespan(_app: FastAPI):
                         await user_repo.set_must_change_password(
                             session, user.id, True,
                         )
+                    # The seeded admin is the deployment's break-glass
+                    # account: it keeps password sign-in even when the
+                    # platform enforces SSO, and forced sign-out sweeps
+                    # skip it. Marked here because this is the one
+                    # account that exists before any operator can mark
+                    # anything.
+                    await user_repo.set_system_account(
+                        session, user.id, True,
+                    )
                     # Phase 6: ``set_global_role`` writes both
                     # ``user_roles`` (legacy display) and
                     # ``role_bindings`` (canonical claims) so the

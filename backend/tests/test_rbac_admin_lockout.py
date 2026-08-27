@@ -75,3 +75,26 @@ async def test_disabling_local_login_allowed_when_admin_has_sso(
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["allowLocalLogin"] is False
+
+
+@pytest.mark.asyncio
+async def test_system_account_admin_does_not_block_enforcement(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """A super-admin with no SSO identity but marked as a system account
+    cannot be locked out by the switch — it keeps password sign-in — so
+    the guard must not count it. Without this exemption a deployment
+    whose only local admin is the seeded bootstrap account could never
+    enforce SSO at all."""
+    await _seed_super_admin(
+        db_session, user_id="usr_admin_system",
+        email="system@example.com", with_identity=False,
+    )
+    from backend.app.db.repositories import user_repo
+    await user_repo.set_system_account(db_session, "usr_admin_system", True)
+    await db_session.commit()
+
+    resp = await test_client.patch(PATCH_PATH, json={"allowLocalLogin": False})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["allowLocalLogin"] is False
