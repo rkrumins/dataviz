@@ -56,6 +56,7 @@ function user(over: Partial<AdminUserResponse> = {}): AdminUserResponse {
         updatedAt: new Date().toISOString(),
         resetRequested: false, mustChangePassword: false,
         hasPassword: true, signupSource: 'local_signup', identities: [],
+        isSystemAccount: false,
         ...over,
     }
 }
@@ -113,6 +114,20 @@ describe('the sign-in column', () => {
         })])
         render(<AdminUsers />)
         expect(await screen.findByText('No sign-in')).toBeInTheDocument()
+    })
+
+    it('a break-glass account leads with a System chip', async () => {
+        listUsers.mockResolvedValue([user({ isSystemAccount: true })])
+        render(<AdminUsers />)
+        expect(await screen.findByText('System')).toBeInTheDocument()
+        // Alongside, not instead of, how it signs in.
+        expect(screen.getByText('Local')).toBeInTheDocument()
+    })
+
+    it('ordinary accounts carry no System chip', async () => {
+        render(<AdminUsers />)
+        expect(await screen.findByText('Local')).toBeInTheDocument()
+        expect(screen.queryByText('System')).not.toBeInTheDocument()
     })
 
     it('search matches provider names, so "who comes from Entra" is one query', async () => {

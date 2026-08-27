@@ -367,6 +367,32 @@ async def update_user_status(session: AsyncSession, user_id: str, status: str) -
     return user
 
 
+async def set_system_account(
+    session: AsyncSession, user_id: str, flag: bool,
+) -> Optional[UserORM]:
+    """Mark or unmark the break-glass flag (``is_system_account``)."""
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        return None
+    user.is_system_account = bool(flag)
+    user.updated_at = _now()
+    await session.flush()
+    return user
+
+
+async def system_account_ids(session: AsyncSession) -> set[str]:
+    """Ids of every system account, deleted rows included.
+
+    The sweep and the token sweep both subtract this set, and a
+    soft-deleted system account must still be subtracted — resurrecting
+    its sessions is not the sweep's business either way.
+    """
+    result = await session.execute(
+        select(UserORM.id).where(UserORM.is_system_account.is_(True))
+    )
+    return set(result.scalars().all())
+
+
 # ── Roles ──────────────────────────────────────────────────────────────
 #
 # Two tables track a user's role state and they need to stay in sync:
@@ -682,6 +708,33 @@ async def revoke_sessions_from_now(session: AsyncSession, user_id: str) -> str:
         .where(UserORM.id == user_id)
         .values(sessions_valid_from=cutoff, updated_at=cutoff)
     )
+    await session.flush()
+    return cutoff
+
+
+async def revoke_sessions_from_now_for_all(
+    session: AsyncSession, *, exclude_user_ids: frozenset[str] | set[str] = frozenset(),
+) -> str:
+    """The platform-wide twin of :func:`revoke_sessions_from_now`.
+
+    One bulk stamp instead of a per-user loop, because the sweep runs
+    against every account at once. ``exclude_user_ids`` carries the
+    system accounts the sweep must leave signed in. Deleted rows are
+    skipped only because they cannot refresh anyway; suspended users
+    ARE stamped — their idle sessions are exactly the kind this
+    exists to end.
+
+    Returns the cutoff so callers can log or report it.
+    """
+    cutoff = _now()
+    stmt = (
+        UserORM.__table__.update()
+        .where(UserORM.deleted_at.is_(None))
+        .values(sessions_valid_from=cutoff, updated_at=cutoff)
+    )
+    if exclude_user_ids:
+        stmt = stmt.where(UserORM.id.not_in(exclude_user_ids))
+    await session.execute(stmt)
     await session.flush()
     return cutoff
 

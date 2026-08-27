@@ -263,6 +263,12 @@ export interface EndSessionsResult {
     dryRun: boolean
 }
 
+/** Outcome of the everyone sweep — every session, password and SSO,
+ *  except system accounts, which the extra count reports. */
+export interface EndAllSessionsResult extends EndSessionsResult {
+    systemAccountsSkipped: number
+}
+
 
 // ── Phase 4: user lookup + search response shapes ───────────────────
 
@@ -759,6 +765,19 @@ export const ssoAdminService = {
     endSsoSessions(opts?: { dryRun?: boolean }): Promise<EndSessionsResult> {
         return request<EndSessionsResult>(
             `${ADMIN}/sso/config/end-sso-sessions`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),
+            },
+        )
+    },
+
+    /** Require everyone to sign in again: end every session — password
+     *  AND SSO — except system accounts. The caller's own session is
+     *  included unless it is one, so the UI warns before calling. */
+    endAllSessions(opts?: { dryRun?: boolean }): Promise<EndAllSessionsResult> {
+        return request<EndAllSessionsResult>(
+            `${ADMIN}/sso/config/end-all-sessions`,
             {
                 method: 'POST',
                 body: JSON.stringify({ dryRun: opts?.dryRun ?? false }),

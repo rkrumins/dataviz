@@ -412,7 +412,7 @@ async def test_no_avatar_url_is_said_in_the_verdict(db_session):
 
 @pytest.mark.asyncio
 async def test_a_fetchable_avatar_reports_type_and_size(db_session):
-    async def fetcher(url):
+    async def fetcher(url, *, provider_id=None):
         return b"png-bytes", "image/png"
 
     provider = await _provider(db_session, slug="dry-av1")
@@ -432,7 +432,7 @@ async def test_a_refused_avatar_carries_the_guard_reason(db_session):
         BlockedOutboundRequest,
     )
 
-    async def fetcher(url):
+    async def fetcher(url, *, provider_id=None):
         raise BlockedOutboundRequest(
             f"{url!r} is not on the avatar image hosts list.",
             reason="host_not_allowlisted",
@@ -470,7 +470,7 @@ async def test_a_certificate_verify_failure_is_named_as_a_trust_problem(
     learns nothing about trust."""
     import httpx
 
-    async def fetcher(url):
+    async def fetcher(url, *, provider_id=None):
         raise httpx.ConnectError(
             "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
             "unable to get local issuer certificate (_ssl.c:1006)",
@@ -490,7 +490,7 @@ async def test_a_certificate_verify_failure_is_named_as_a_trust_problem(
 async def test_an_ordinary_connection_failure_stays_generic(db_session):
     import httpx
 
-    async def fetcher(url):
+    async def fetcher(url, *, provider_id=None):
         raise httpx.ConnectError("connection refused")
 
     provider = await _provider(db_session, slug="dry-av-refused")
@@ -499,3 +499,21 @@ async def test_an_ordinary_connection_failure_stays_generic(db_session):
         provider_id=provider.id,
     )
     assert outcome["avatar"]["reason"] == "fetch_failed"
+
+
+@pytest.mark.asyncio
+async def test_the_rehearsal_hands_the_connection_to_the_fetcher(db_session):
+    """The wiring can only honour the row's own TLS posture (its
+    ``tls_verify`` opt-out) if it is told which row asked."""
+    seen: list = []
+
+    async def fetcher(url, *, provider_id=None):
+        seen.append(provider_id)
+        return b"png-bytes", "image/png"
+
+    provider = await _provider(db_session, slug="dry-av-pid")
+    await _svc(db_session, avatar_fetcher=fetcher).preview_sso_login(
+        _identity(avatar_url="https://avatars.example.com/x.png"),
+        provider_id=provider.id,
+    )
+    assert seen == [provider.id]

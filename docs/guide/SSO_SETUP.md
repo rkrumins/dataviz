@@ -406,8 +406,9 @@ Kubernetes, a bare host) is in the deployment guide.
 
 The per-connection **Skip TLS verification** toggle, in the connection's
 Behaviour section, is the warned last resort: it accepts *any* TLS answer on
-that connection's calls, drops the connection's rating to Unverified unless its
-replies are signed tokens checked against a pasted key or shared secret, and an
+that connection's calls — the gateway legs and the avatar images its sign-ins
+fetch alike — drops the connection's rating to Unverified unless its replies
+are signed tokens checked against a pasted key or shared secret, and an
 Unverified connection cannot grant platform admin roles. Prefer the bundle.
 
 ### Setting it up

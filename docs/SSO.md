@@ -280,17 +280,25 @@ Singleton row in `app_auth_config`:
 | Toggle | Default | When OFF |
 |---|---|---|
 | `sso_enabled` | true | `/auth/providers` returns `[]`; `/auth/{slug}/*` 404s |
-| `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` |
+| `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` (and `POST /auth/signup` the same — a password account minted under enforcement would be a dead end). One carve-out: an account marked `is_system_account` (break-glass) still signs in with its password, and unknown emails get the identical 403 so the carve-out is not an account oracle |
 | `allow_jit_provisioning` | true | New IdP subjects with no email match raise `jit_disabled` |
 | `email_first_login` | **false** | `POST /auth/resolve` always answers `{"provider": null}`; the login page is byte-for-byte what it was |
 
 The PATCH endpoint refuses lockout scenarios:
 
 * `allow_local_login=false` is rejected (HTTP 409) when any active
-  admin lacks an SSO identity. Response carries the offending admin
-  list so the operator can fix it.
+  admin lacks an SSO identity **and is not a system account** — a
+  system account keeps password sign-in under enforcement, so it
+  cannot be locked out by the switch and does not block it. Response
+  carries the offending admin list so the operator can fix it.
 * `sso_enabled=false` AND `allow_local_login=false` together is
   rejected — there'd be no way to log in.
+* The companion sweep `POST /admin/sso/config/end-all-sessions`
+  (`dryRun` supported) ends every session — password and SSO — except
+  system accounts', so enforcement can take effect now instead of when
+  the old sessions expire. Unmarking a system account is refused with
+  the same 409 when passwords are off and that admin has no SSO
+  identity: the flag was the last door in.
 
 ### 1.10 Admin lookup + search
 

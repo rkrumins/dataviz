@@ -36,6 +36,9 @@ export interface AdminUserResponse {
     signupSource: string | null
     /** …and the SSO identities linked to it, with which IdP each is. */
     identities: AdminUserIdentityRef[]
+    /** Break-glass: keeps password sign-in under SSO enforcement, and
+     *  forced sign-out sweeps skip it. */
+    isSystemAccount: boolean
 }
 
 export interface ResetTokenResponse {
@@ -182,6 +185,19 @@ export const adminUserService = {
         return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/suspend`, {
             method: 'POST',
         })
+    },
+
+    /** Mark or unmark the break-glass flag. */
+    setSystemAccount(
+        userId: string, isSystemAccount: boolean,
+    ): Promise<AdminUserResponse> {
+        return authFetch<AdminUserResponse>(
+            `${ADMIN_USERS_API}/${userId}/system-account`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ isSystemAccount }),
+            },
+        )
     },
 
     reactivateUser(userId: string): Promise<{ detail: string }> {

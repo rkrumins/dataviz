@@ -78,7 +78,9 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'Off means single sign-on is the only way in.',
                 technical:
                     'POST /auth/login returns 403. Refused with 409 if it would ' +
-                    'lock out an active admin who has no SSO identity.',
+                    'lock out an active admin who has no SSO identity and is not ' +
+                    'a system account. System accounts keep password sign-in, at ' +
+                    '/login?password=1.',
                 confirmOff: true,
             },
         ],
@@ -143,6 +145,14 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
     // too. ``null`` = count unavailable (the confirm happens anyway).
     const [ssoOffCount, setSsoOffCount] = useState<number | null>(null)
     const [ssoOffSignOut, setSsoOffSignOut] = useState(false)
+    // The allowLocalLogin confirm asks the same question about EVERY
+    // session: enforcement changes what the next sign-in must be, and
+    // the sessions already out there stay valid under the old policy
+    // until they expire. ``null`` = counts unavailable.
+    const [localOffDry, setLocalOffDry] = useState<
+        { affected: number; skipped: number } | null
+    >(null)
+    const [localOffSignOut, setLocalOffSignOut] = useState(false)
 
     const refresh = useCallback(async () => {
         try {
@@ -220,6 +230,43 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         }
     }
 
+    /** Best-effort counts for the allowLocalLogin confirm — same rule as
+     *  ``loadSsoOffCount``: losing the numbers must not lose the confirm. */
+    async function loadLocalOffCounts() {
+        setLocalOffDry(null)
+        setLocalOffSignOut(false)
+        try {
+            const dry = await ssoAdminService.endAllSessions({ dryRun: true })
+            setLocalOffDry({
+                affected: dry.usersAffected,
+                skipped: dry.systemAccountsSkipped,
+            })
+        } catch {
+            setLocalOffDry(null)
+        }
+    }
+
+    async function confirmLocalOff() {
+        const signOut = localOffSignOut
+        const ok = await apply('allowLocalLogin', false)
+        if (!ok || !signOut) return
+        try {
+            const ended = await ssoAdminService.endAllSessions()
+            setNotice(
+                `Signed out ${ended.usersAffected} ${
+                    ended.usersAffected === 1 ? 'person' : 'people'
+                } — everyone signs back in under single sign-on. If your own `
+                + 'session was among them, you will be taken to the sign-in '
+                + 'page in a moment.',
+            )
+        } catch (err) {
+            setError(
+                'Passwords are off, but the sign-everyone-out failed: '
+                + (err as Error).message,
+            )
+        }
+    }
+
     if (cfg === null && error === null) {
         return (
             <div className="grid xl:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
@@ -281,6 +328,12 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                             checked={ssoOffSignOut}
                                             onChange={setSsoOffSignOut}
                                         />
+                                    ) : s.field === 'allowLocalLogin' ? (
+                                        <RequireReloginChoice
+                                            dry={localOffDry}
+                                            checked={localOffSignOut}
+                                            onChange={setLocalOffSignOut}
+                                        />
                                     ) : undefined
                                 }
                                 onRequest={next => {
@@ -289,10 +342,16 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                         if (s.field === 'ssoEnabled') {
                                             void loadSsoOffCount()
                                         }
+                                        if (s.field === 'allowLocalLogin') {
+                                            void loadLocalOffCounts()
+                                        }
                                     } else void apply(s.field, next)
                                 }}
                                 onConfirm={() => {
                                     if (s.field === 'ssoEnabled') void confirmSsoOff()
+                                    else if (s.field === 'allowLocalLogin') {
+                                        void confirmLocalOff()
+                                    }
                                     else void apply(s.field, false)
                                 }}
                                 onCancel={() => setConfirming(null)}
@@ -308,6 +367,18 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                 time (or turned SSO off before the offer existed). */}
             {cfg !== null && !cfg.ssoEnabled && (
                 <EndSsoSessionsCard
+                    onDone={line => { setNotice(line); setError(null) }}
+                    onError={msg => setError(msg)}
+                />
+            )}
+
+            {/* The admin-level "everyone signs in again" — for a posture
+                change already made (enforcement flipped earlier, a
+                suspected leak, an IdP migration). Always present: the
+                moment it is needed is rarely the moment a switch is
+                being flipped. */}
+            {cfg !== null && (
+                <EndAllSessionsCard
                     onDone={line => { setNotice(line); setError(null) }}
                     onError={msg => setError(msg)}
                 />
@@ -522,6 +593,49 @@ function SignOutSsoUsersChoice({
     )
 }
 
+/** The require-everyone-to-sign-in-again choice inside the passwords-off
+ *  confirm. Counts of 0 render as statements, and the "including you"
+ *  warning is the one line that must never be lost to a failed count. */
+function RequireReloginChoice({
+    dry, checked, onChange,
+}: {
+    dry: { affected: number; skipped: number } | null
+    checked: boolean
+    onChange: (next: boolean) => void
+}) {
+    if (dry !== null && dry.affected === 0) {
+        return (
+            <p className="mt-2 text-xs text-ink-secondary">
+                Nobody is signed in right now, so there is nothing to end.
+            </p>
+        )
+    }
+    return (
+        <div className="mt-2">
+            <label className="flex items-center gap-2 text-xs text-ink">
+                <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={e => onChange(e.target.checked)}
+                />
+                {dry === null
+                    ? 'Also require everyone to sign in again now'
+                    : `Also require the ${dry.affected} ${
+                        dry.affected === 1 ? 'person' : 'people'
+                    } signed in right now to sign in again`}
+            </label>
+            <p className="mt-1 text-[11px] text-ink-muted leading-relaxed">
+                That includes you, unless your account is a system account
+                {dry !== null && dry.skipped > 0
+                    ? ` — ${dry.skipped} system ${
+                        dry.skipped === 1 ? 'account stays' : 'accounts stay'
+                    } signed in.`
+                    : '.'}
+            </p>
+        </div>
+    )
+}
+
 /** Standalone sign-out for sessions that outlived the master switch.
  *  Two steps on purpose: the first click only fetches the count, and the
  *  irreversible act is behind a second click that carries the number. */
@@ -605,6 +719,126 @@ function EndSsoSessionsCard({
                                     className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
                                 >
                                     Sign out {count} {count === 1 ? 'person' : 'people'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setAsked(false)}
+                                    disabled={busy}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5"
+                                >
+                                    Never mind
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    )
+}
+
+/** "Require everyone to sign in again" — the platform-wide sweep.
+ *  Same two-step shape as ``EndSsoSessionsCard``: the first click only
+ *  fetches the counts, the act is behind a second click carrying them.
+ *  Ends password AND SSO sessions; system accounts are skipped, and the
+ *  caller's own session is included unless it is one — after which the
+ *  app's session-loss recovery walks them to the sign-in page. */
+function EndAllSessionsCard({
+    onDone, onError,
+}: {
+    onDone: (line: string) => void
+    onError: (msg: string) => void
+}) {
+    const [dry, setDry] = useState<
+        { affected: number; skipped: number } | null
+    >(null)
+    const [asked, setAsked] = useState(false)
+    const [busy, setBusy] = useState(false)
+
+    async function askCounts() {
+        setBusy(true)
+        try {
+            const d = await ssoAdminService.endAllSessions({ dryRun: true })
+            setDry({
+                affected: d.usersAffected,
+                skipped: d.systemAccountsSkipped,
+            })
+            setAsked(true)
+        } catch (err) {
+            onError((err as Error).message)
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    async function end() {
+        setBusy(true)
+        try {
+            const ended = await ssoAdminService.endAllSessions()
+            onDone(
+                `Signed out ${ended.usersAffected} ${
+                    ended.usersAffected === 1 ? 'person' : 'people'
+                } — everyone signs back in under the current policy. If your `
+                + 'own session was among them, you will be taken to the '
+                + 'sign-in page in a moment.',
+            )
+            setAsked(false)
+        } catch (err) {
+            onError((err as Error).message)
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    return (
+        <div className="rounded-xl border border-glass-border bg-canvas-elevated p-4">
+            <div className="flex items-start gap-3.5">
+                <LogOut className="w-4 h-4 mt-0.5 shrink-0 text-ink-muted" />
+                <div className="min-w-0 flex-1">
+                    <span className="text-sm font-semibold text-ink">
+                        Require everyone to sign in again
+                    </span>
+                    <p className="mt-1 text-xs text-ink-secondary leading-relaxed">
+                        Ends every session — password and single sign-on alike —
+                        so everyone comes back in under whatever the switches
+                        above now allow. System accounts are skipped. Your own
+                        session is included unless your account is one.
+                    </p>
+                    {!asked ? (
+                        <button
+                            type="button"
+                            onClick={() => void askCounts()}
+                            disabled={busy}
+                            className="mt-2 px-3 py-1.5 rounded-lg border border-glass-border text-xs font-medium text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                        >
+                            Sign everyone out now…
+                        </button>
+                    ) : dry !== null && dry.affected === 0 ? (
+                        <p className="mt-2 text-xs text-ink-secondary">
+                            Nobody is signed in right now.
+                        </p>
+                    ) : (
+                        <div className="mt-2">
+                            <p className="text-xs text-ink">
+                                This signs out {dry?.affected}{' '}
+                                {dry?.affected === 1 ? 'person' : 'people'} now
+                                {dry !== null && dry.skipped > 0
+                                    ? `; ${dry.skipped} system ${
+                                        dry.skipped === 1
+                                            ? 'account stays'
+                                            : 'accounts stay'
+                                    } signed in`
+                                    : ''}.
+                            </p>
+                            <div className="mt-2 flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => void end()}
+                                    disabled={busy}
+                                    className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
+                                >
+                                    Sign out {dry?.affected}{' '}
+                                    {dry?.affected === 1 ? 'person' : 'people'}
                                 </button>
                                 <button
                                     type="button"

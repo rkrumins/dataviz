@@ -41,6 +41,7 @@ from backend.app.db.repositories.role_repo import (
     RoleScopeError,
     UnknownPermissionError,
 )
+from backend.common.display_name import resolve_display_name
 from backend.common.role_defaults import (
     SYSTEM_ROLE_DEFAULTS,
     default_permissions,
@@ -584,8 +585,10 @@ async def compute_user_access(
         user=UserAccessSubject(
             id=user_orm.id,
             email=user_orm.email,
-            display_name=f"{user_orm.first_name} {user_orm.last_name}".strip()
-                         or user_orm.email,
+            display_name=resolve_display_name(
+                getattr(user_orm, "display_name", None),
+                user_orm.first_name, user_orm.last_name,
+            ) or user_orm.email,
             status=user_orm.status,
             role=primary_role,
         ),
@@ -684,7 +687,10 @@ async def _hydrate_user_impact(
     display_name = None
     email = None
     if user_orm is not None:
-        full = f"{user_orm.first_name} {user_orm.last_name}".strip()
+        full = resolve_display_name(
+            getattr(user_orm, "display_name", None),
+            user_orm.first_name, user_orm.last_name,
+        )
         display_name = full or user_orm.email
         email = user_orm.email
     return ImpactPreviewUser(

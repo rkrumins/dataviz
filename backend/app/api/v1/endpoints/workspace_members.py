@@ -409,7 +409,10 @@ async def preview_revoke_binding(
         display_name = None
         email = None
         if user_orm is not None:
-            full = f"{user_orm.first_name} {user_orm.last_name}".strip()
+            full = resolve_display_name(
+                getattr(user_orm, "display_name", None),
+                user_orm.first_name, user_orm.last_name,
+            )
             display_name = full or user_orm.email
             email = user_orm.email
         user_impact.append(

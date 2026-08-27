@@ -403,6 +403,20 @@ def saml_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
     return _build
 
 
+def _avatar_tls_override(settings: dict) -> bool | None:
+    """The per-connection half of the avatar fetch's TLS choice.
+
+    ``None`` defers to the deployment default (the CA bundle, else the
+    system trust store); ``False`` is the row's explicit ``tls_verify``
+    opt-out — the same wiring its own gateway legs use in
+    ``backchannel.py``. Module-level so it is testable; the closure that
+    calls it cannot be.
+    """
+    from backend.auth_service.providers.backchannel import _as_bool
+
+    return None if _as_bool(settings.get("tls_verify", True)) else False
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup / shutdown lifecycle.
@@ -548,6 +562,15 @@ async def lifespan(_app: FastAPI):
                         await user_repo.set_must_change_password(
                             session, user.id, True,
                         )
+                    # The seeded admin is the deployment's break-glass
+                    # account: it keeps password sign-in even when the
+                    # platform enforces SSO, and forced sign-out sweeps
+                    # skip it. Marked here because this is the one
+                    # account that exists before any operator can mark
+                    # anything.
+                    await user_repo.set_system_account(
+                        session, user.id, True,
+                    )
                     # Phase 6: ``set_global_role`` writes both
                     # ``user_roles`` (legacy display) and
                     # ``role_bindings`` (canonical claims) so the
@@ -984,7 +1007,9 @@ async def lifespan(_app: FastAPI):
 
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
 
-    async def _fetch_avatar_image(url: str) -> tuple[bytes, str]:
+    async def _fetch_avatar_image(
+        url: str, *, provider_id: str | None = None,
+    ) -> tuple[bytes, str]:
         """Download a provider-asserted profile picture, guarded.
 
         The destination must be listed: an external image host needs an
@@ -993,8 +1018,31 @@ async def lifespan(_app: FastAPI):
         it, and with both silent on a host the fetch is refused by name.
         The outbound module supplies the bounded, re-checked redirect
         follow, the streaming size cap and the raster-type check.
+
+        ``provider_id`` names the connection whose sign-in asked for the
+        image, so its own TLS posture applies: a row whose
+        ``tls_verify`` opt-out is on has its avatar fetched the same way
+        its gateway legs are called. Everything else — no id, an
+        unresolvable row, the flag absent — verifies as the deployment
+        does (the CA bundle, else the system store).
         """
         from backend.auth_service.providers.outbound import fetch_image
+
+        verify: bool | None = None
+        if provider_id:
+            try:
+                snap = await _registry.get_snapshot(
+                    provider_id, allow_draft=True,
+                )
+                verify = _avatar_tls_override(snap.settings)
+            except Exception as exc:  # noqa: BLE001
+                # Fails to VERIFYING: an unresolvable row must not turn
+                # verification off.
+                logger.debug(
+                    "Avatar fetch could not resolve provider %s (%s); "
+                    "verifying TLS as the deployment does.",
+                    provider_id, exc,
+                )
 
         gateway_keys = await _allowed_backchannel_hosts()
         try:
@@ -1015,6 +1063,7 @@ async def lifespan(_app: FastAPI):
             url, timeout=5.0,
             allow_hosts=permitted,
             require_hosts=permitted,
+            verify=verify,
         )
 
     _app.state.identity_service = LocalIdentityService(

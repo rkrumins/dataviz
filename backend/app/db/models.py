@@ -1628,6 +1628,14 @@ class UserORM(Base):
     must_change_password = Column(
         Boolean, nullable=False, default=False, server_default="false",
     )
+    # Break-glass. A system account is out of scope for the SSO
+    # enforcement machinery: it keeps password sign-in while
+    # ``allow_local_login`` is off, forced sign-out sweeps skip it, and
+    # the admin-lockout guard does not count it. Set on the seeded
+    # bootstrap admin; toggled per user in Admin → Users.
+    is_system_account = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     # Chosen avatar illustration. Was a browser-local preference, so it
     # reset on a new machine and nobody else ever saw it.
     avatar_id = Column(Text, nullable=True)

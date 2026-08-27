@@ -61,6 +61,7 @@ type ModalType =
     | { kind: 'reject'; userId: string; name: string }
     | { kind: 'role'; userId: string; name: string; currentRole: string }
     | { kind: 'suspend'; userId: string; name: string }
+    | { kind: 'systemAccount'; userId: string; name: string; makeSystem: boolean }
     | { kind: 'resetPassword'; userId: string; name: string }
     | { kind: 'invite' }
     | { kind: 'createUser' }
@@ -173,25 +174,42 @@ function SignInMethods({ user }: { user: AdminUserResponse }) {
     const shown = identities.slice(0, MAX_PROVIDER_CHIPS)
     const overflow = identities.slice(MAX_PROVIDER_CHIPS)
 
+    // Break-glass marker, leading the cell: the one property here that
+    // changes what the enforcement machinery does to this account.
+    const systemChip = user.isSystemAccount ? (
+        <HoverTip label="System account (break-glass): keeps password sign-in even while passwords are off, and forced sign-out sweeps skip it.">
+            <span className={cn(SIGNIN_CHIP, 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20')}>
+                <Shield className="w-3 h-3" />
+                System
+            </span>
+        </HoverTip>
+    ) : null
+
     if (identities.length === 0) {
-        return user.hasPassword ? (
-            <HoverTip label="Signs in with an email and password. No SSO identity is linked.">
-                <span className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary border-glass-border')}>
-                    <KeyRound className="w-3 h-3" />
-                    Local
-                </span>
-            </HoverTip>
-        ) : (
-            <HoverTip label="No usable password and no linked SSO identity — this account has no way to sign in right now. Grant a reset token, or let a connection link it on their next SSO sign-in.">
-                <span className={cn(SIGNIN_CHIP, 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20')}>
-                    No sign-in
-                </span>
-            </HoverTip>
+        return (
+            <div className="flex items-center gap-1.5 flex-wrap">
+                {systemChip}
+                {user.hasPassword ? (
+                    <HoverTip label="Signs in with an email and password. No SSO identity is linked.">
+                        <span className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary border-glass-border')}>
+                            <KeyRound className="w-3 h-3" />
+                            Local
+                        </span>
+                    </HoverTip>
+                ) : (
+                    <HoverTip label="No usable password and no linked SSO identity — this account has no way to sign in right now. Grant a reset token, or let a connection link it on their next SSO sign-in.">
+                        <span className={cn(SIGNIN_CHIP, 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20')}>
+                            No sign-in
+                        </span>
+                    </HoverTip>
+                )}
+            </div>
         )
     }
 
     return (
         <div className="flex items-center gap-1.5 flex-wrap">
+            {systemChip}
             {shown.map(identity => (
                 <HoverTip
                     key={identity.providerId}
@@ -442,6 +460,16 @@ export function AdminUsers() {
         if (modal?.kind !== 'suspend') return
         await withAction(modal.userId, () =>
             adminUserService.suspendUser(modal.userId), 'User suspended')
+        closeModal()
+    }
+
+    const handleSystemAccountConfirm = async () => {
+        if (modal?.kind !== 'systemAccount') return
+        await withAction(modal.userId, () =>
+            adminUserService.setSystemAccount(modal.userId, modal.makeSystem),
+            modal.makeSystem
+                ? 'Marked as a system account'
+                : 'No longer a system account')
         closeModal()
     }
 
@@ -1027,6 +1055,19 @@ export function AdminUsers() {
                                                             <UserCog className="w-4 h-4" />
                                                         </button>
 
+                                                        {/* System account (break-glass) */}
+                                                        <button onClick={() => setModal({ kind: 'systemAccount', userId: user.id, name: user.displayName, makeSystem: !user.isSystemAccount })}
+                                                            disabled={isActing}
+                                                            title={user.isSystemAccount ? 'Unmark system account' : 'Mark as system account'}
+                                                            className={cn(
+                                                                'p-2 rounded-lg transition-colors disabled:opacity-50',
+                                                                user.isSystemAccount
+                                                                    ? 'text-sky-500 bg-sky-500/10 hover:bg-sky-500/20'
+                                                                    : 'text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5',
+                                                            )}>
+                                                            <Shield className="w-4 h-4" />
+                                                        </button>
+
                                                         {/* Reset password. Carries its label rather
                                                             than relying on a hover title: this is
                                                             the action somebody comes to this screen
@@ -1139,6 +1180,31 @@ export function AdminUsers() {
                                     </p>
                                     <ModalFooter onCancel={closeModal} onConfirm={handleSuspendConfirm}
                                         confirmLabel="Suspend User" confirmIcon={Ban} confirmClass="bg-red-500 hover:bg-red-600 shadow-red-500/20"
+                                        loading={!!actionLoading} />
+                                </>
+                            )}
+
+                            {/* ── System account modal ── */}
+                            {modal.kind === 'systemAccount' && (
+                                <>
+                                    <ModalHeader icon={Shield} iconBg="bg-sky-500/10 border-sky-500/20" iconColor="text-sky-500"
+                                        title={modal.makeSystem ? 'Mark as System Account' : 'Unmark System Account'}
+                                        subtitle="Break-glass: out of scope for SSO enforcement" onClose={closeModal} />
+                                    <UserPill name={modal.name} userId={modal.userId} />
+                                    <p className="text-sm text-ink-secondary mb-5">
+                                        {modal.makeSystem
+                                            ? 'A system account stays out of scope for SSO enforcement: it keeps '
+                                              + 'password sign-in even while passwords are off (the login page '
+                                              + 'reveals the form at /login?password=1), and "sign everyone out" '
+                                              + 'sweeps skip it. Reserve this for operational break-glass accounts.'
+                                            : 'This account will be treated like everyone else again: password '
+                                              + 'sign-in is refused while passwords are off, and forced sign-outs '
+                                              + 'include it.'}
+                                    </p>
+                                    <ModalFooter onCancel={closeModal} onConfirm={handleSystemAccountConfirm}
+                                        confirmLabel={modal.makeSystem ? 'Mark as system account' : 'Unmark'}
+                                        confirmIcon={Shield}
+                                        confirmClass="bg-sky-500 hover:bg-sky-600 shadow-sky-500/20"
                                         loading={!!actionLoading} />
                                 </>
                             )}

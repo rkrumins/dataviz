@@ -362,9 +362,10 @@ class BackchannelSettings:
     timeout_seconds: float = 5.0
     max_response_bytes: int = MAX_JSON_BYTES
     #: Verify the TLS identity of every server-side call this row makes
-    #: — gateway, exchange, liveness, JWKS. Off is the warned escape
-    #: hatch for a gateway signed by a corporate CA that cannot be
-    #: mounted; the supported path is ``SSO_OUTBOUND_TLS_CA_CERTS``.
+    #: — gateway, exchange, liveness, JWKS, and the avatar fetches its
+    #: sign-ins trigger. Off is the warned escape hatch for endpoints
+    #: signed by a corporate CA that cannot be mounted; the supported
+    #: path is ``SSO_OUTBOUND_TLS_CA_CERTS``.
     #: With verification off the transport vouches for nothing, so the
     #: row rates Unverified unless its claims are signed against PASTED
     #: material (see ``assurance.py``).
