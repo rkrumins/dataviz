@@ -1945,6 +1945,22 @@ export function ContextViewCanvas({
   useEffect(() => cancelExpansionRecord, [cancelExpansionRecord])
   // Stable identity (refs, not deps) so the ESC listener below attaches
   // once per trace rather than once per render.
+  // ⌘⇧F opens the Advanced Search rail. ⌘F focuses the header's find
+  // field (bound in HeaderFindField); the pair reads like find vs.
+  // find-and-replace. ⌘K is the app-wide palette's alone.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return
+      if (e.key.toLowerCase() !== 'f') return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      e.preventDefault()
+      setAdvancedSearchOpen((v) => !v)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   const exitCanvasTrace = useCallback(() => {
     overlayRef.current?.exit()
     canvasTraceRef.current.exit()

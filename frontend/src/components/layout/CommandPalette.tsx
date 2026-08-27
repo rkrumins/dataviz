@@ -33,6 +33,11 @@ import { wsGradient } from '@/lib/viewUtils'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
 import { guideEntries } from '@/components/guide/guideConfig'
+import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { searchDestinations, type AppDestination } from './appDestinations'
+import { useAuthStore } from '@/store/auth'
+import { useNavCatalogueStore } from '@/store/navCatalogue'
+import { useLocation } from 'react-router-dom'
 import { interpolateBrand } from '@/lib/brandText'
 
 interface CommandPaletteProps {
@@ -79,12 +84,47 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   // into `schemaStore.schema?.views` for the active scope.
   const searchResult = useGlobalSearch(search)
   const isZeroSearch = search.trim() === ''
+
+  // Pages and settings, gated by the same nav-catalogue specs the route
+  // guards read — a destination is offered exactly when the user could
+  // open it. Before this, exactly two of ~25 pages were reachable by
+  // name from the one box that claims to search the app.
+  const permissionClaims = useAuthStore((s) => s.permissions)
+  const sidebarSpecs = useNavCatalogueStore((s) => s.sidebar)
+  const adminSpecs = useNavCatalogueStore((s) => s.adminSections)
+  const destinationHits = useMemo(
+    () => searchDestinations(search, permissionClaims,
+      { sidebar: sidebarSpecs, admin: adminSpecs }),
+    [search, permissionClaims, sidebarSpecs, adminSpecs],
+  )
+
+  // On a view route the in-canvas search is almost certainly what the
+  // user wants; say so rather than letting them conclude the product
+  // can't find their data.
+  const location = useLocation()
+  const onViewRoute = location.pathname.startsWith('/views/')
+
+  /** Does the typed query hit any of these keywords? Used to decide
+   *  whether a hardcoded command group is relevant to what was typed. */
+  const matchesQuery = useCallback((keywords: string) => {
+    const q = search.trim().toLowerCase()
+    if (!q) return false
+    return keywords.split(/\s+/).some((k) => k.startsWith(q) || q.startsWith(k))
+  }, [search])
   const hasEntityHits = !isZeroSearch && CATEGORY_ORDER.some(c => searchResult.byCategory[c].length > 0)
 
   // Keyboard shortcut to open / close
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        // Not while the user is typing somewhere — ⌘K fired inside any
+        // text field before this, including the palette's own input.
+        const t = e.target as HTMLElement | null
+        const typing = !!t && !open && (
+          t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+          || t.tagName === 'SELECT' || t.isContentEditable
+        )
+        if (typing) return
         e.preventDefault()
         onOpenChange(!open)
       }
@@ -158,6 +198,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       case 'theme-dark': setTheme('dark'); break
       case 'theme-system': setTheme('system'); break
       case 'toggle-sidebar': toggleSidebar(); break
+      // Was missing: the "Open Settings" row dispatched this and hit no
+      // case, so it silently closed the palette and went nowhere.
+      case 'open-settings': navigate('/me/account'); break
     }
     close()
   }, [toggleMode, setTheme, toggleSidebar, navigate, wsSetActive, close])
@@ -208,7 +251,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               <Command.Input
                 value={search}
                 onValueChange={setSearch}
-                placeholder="Search workspaces, views, data sources, templates…"
+                placeholder={`Search across ${brand.shortName}…`}
                 className={cn(
                   "flex-1 bg-transparent text-base",
                   "placeholder:text-ink-muted",
@@ -220,6 +263,22 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 <Loader2 className="w-4 h-4 text-ink-muted/60 animate-spin" />
               )}
               <kbd className="kbd">ESC</kbd>
+            </div>
+
+            {/* What this box covers — and, on a canvas, what it doesn't.
+                The old TopBar placeholder promised "Search nodes in <view>"
+                on view routes, which this palette has never been able to
+                do; the data inside a view is a different search, on a
+                different surface, and saying so is better than letting a
+                user conclude the product can't find their tables. */}
+            <div className="px-4 py-1.5 border-b border-glass-border text-2xs text-ink-muted">
+              Workspaces, views, data sources, and pages.
+              {onViewRoute && (
+                <>
+                  {' '}To search the data inside this view, press{' '}
+                  <kbd className="kbd">⌘F</kbd> on the canvas.
+                </>
+              )}
             </div>
 
             {/* Command List */}
@@ -364,41 +423,66 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 </Command.Group>
               )}
 
-              {/* Quick Actions — always shown */}
-              <Command.Group heading="Quick Actions">
-                <CommandItem
-                  icon={mode === 'business' ? Zap : Layers}
-                  label={`Switch to ${mode === 'business' ? 'Technical' : 'Business'} View`}
-                  description="Toggle persona mode"
-                  shortcut="⌘/"
-                  onSelect={() => handleAction('toggle-persona')}
-                />
-              </Command.Group>
+              {/* Pages & Settings — every page this user can open, by
+                  name. Query-driven: the palette runs its own filtering
+                  (shouldFilter={false}), so an unfiltered group would put
+                  "Toggle Theme" under a search for "orders". */}
+              {destinationHits.length > 0 && (
+                <Command.Group heading="Pages & Settings">
+                  {destinationHits.map((d: AppDestination) => (
+                    <CommandItem
+                      key={d.id}
+                      iconName={d.icon}
+                      label={d.label}
+                      description={d.description}
+                      onSelect={() => handleAction(`navigate:${d.path}`)}
+                    />
+                  ))}
+                </Command.Group>
+              )}
 
-              {/* Navigation — always shown */}
-              <Command.Group heading="Navigation">
-                <CommandItem
-                  icon={LayoutDashboard}
-                  label="Go to Dashboard"
-                  description="Open the dashboard"
-                  onSelect={() => handleAction('navigate:/dashboard')}
-                />
-                <CommandItem
-                  icon={Eye}
-                  label="Browse Views"
-                  description="Discover and explore all views"
-                  onSelect={() => handleAction('navigate:/explorer')}
-                />
-              </Command.Group>
+              {/* Quick Actions — the shortcuts worth offering with an empty
+                  box; matched by label once the user starts typing. */}
+              {(isZeroSearch || matchesQuery('switch persona technical business view mode')) && (
+                <Command.Group heading="Quick Actions">
+                  <CommandItem
+                    icon={mode === 'business' ? Zap : Layers}
+                    label={`Switch to ${mode === 'business' ? 'Technical' : 'Business'} View`}
+                    description="Toggle persona mode"
+                    shortcut="⌘/"
+                    onSelect={() => handleAction('toggle-persona')}
+                  />
+                </Command.Group>
+              )}
+
+              {isZeroSearch && (
+                <Command.Group heading="Navigation">
+                  <CommandItem
+                    icon={LayoutDashboard}
+                    label="Go to Dashboard"
+                    description="Open the dashboard"
+                    onSelect={() => handleAction('navigate:/dashboard')}
+                  />
+                  <CommandItem
+                    icon={Eye}
+                    label="Browse Views"
+                    description="Discover and explore all views"
+                    onSelect={() => handleAction('navigate:/explorer')}
+                  />
+                </Command.Group>
+              )}
 
               {/* Help & Docs — the User Guide, searchable from anywhere */}
+              {(isZeroSearch || guideDocResults.length > 0) && (
               <Command.Group heading="Help & Docs">
+                {isZeroSearch && (
                 <CommandItem
                   icon={BookOpen}
                   label="Open the User Guide"
                   description="Browse every guide article"
                   onSelect={() => handleAction('navigate:/guide')}
                 />
+                )}
                 {guideDocResults.map((e) => (
                   <CommandItem
                     key={e.slug}
@@ -409,23 +493,25 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   />
                 ))}
               </Command.Group>
+              )}
 
-              {/* Settings — always shown */}
-              <Command.Group heading="Settings">
-                <CommandItem
-                  icon={theme === 'dark' ? Moon : Sun}
-                  label="Toggle Theme"
-                  description={`Current: ${theme}`}
-                  onSelect={() => handleAction(theme === 'dark' ? 'theme-light' : 'theme-dark')}
-                />
-                <CommandItem
-                  icon={Settings}
-                  label="Open Settings"
-                  description="Customize your experience"
-                  shortcut="⌘,"
-                  onSelect={() => handleAction('open-settings')}
-                />
-              </Command.Group>
+              {(isZeroSearch || matchesQuery('settings theme dark light appearance preferences')) && (
+                <Command.Group heading="Settings">
+                  <CommandItem
+                    icon={theme === 'dark' ? Moon : Sun}
+                    label="Toggle Theme"
+                    description={`Current: ${theme}`}
+                    onSelect={() => handleAction(theme === 'dark' ? 'theme-light' : 'theme-dark')}
+                  />
+                  <CommandItem
+                    icon={Settings}
+                    label="Open Settings"
+                    description="Customize your experience"
+                    shortcut="⌘,"
+                    onSelect={() => handleAction('open-settings')}
+                  />
+                </Command.Group>
+              )}
             </Command.List>
 
             {/* Footer */}
@@ -496,14 +582,19 @@ function EntityHitRow({ hit, query, onSelect }: EntityHitRowProps) {
 }
 
 interface CommandItemProps {
-  icon: React.ComponentType<{ className?: string }>
+  icon?: React.ComponentType<{ className?: string }>
+  /** Lucide icon by name — for rows whose icon is data (the page
+   *  catalogue) rather than a compile-time import. */
+  iconName?: string
   label: string
   description?: string
   shortcut?: string
   onSelect: () => void
 }
 
-function CommandItem({ icon: Icon, label, description, shortcut, onSelect }: CommandItemProps) {
+function CommandItem({
+  icon: Icon, iconName, label, description, shortcut, onSelect,
+}: CommandItemProps) {
   return (
     <Command.Item
       onSelect={onSelect}
@@ -517,7 +608,9 @@ function CommandItem({ icon: Icon, label, description, shortcut, onSelect }: Com
         "w-8 h-8 rounded-lg flex items-center justify-center",
         "bg-black/5 dark:bg-white/5"
       )}>
-        <Icon className="w-4 h-4 text-ink-secondary" />
+        {Icon
+          ? <Icon className="w-4 h-4 text-ink-secondary" />
+          : <DynamicIcon name={iconName ?? 'Circle'} className="w-4 h-4 text-ink-secondary" />}
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-ink">{label}</p>

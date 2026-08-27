@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2 } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
+import { useBrand } from '@/store/branding'
 import { BrandLogo } from '@/components/brand/BrandLogo'
 import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
@@ -20,7 +21,6 @@ import {
   SYSTEM_ROLE_LABELS,
   type SystemRole,
 } from '@/store/auth'
-import { useSchemaStore } from '@/store/schema'
 import { useHelpPanelStore } from '@/store/helpPanel'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { cn } from '@/lib/utils'
@@ -29,19 +29,6 @@ interface TopBarProps {
   onOpenCommandPalette: () => void
 }
 
-/** Dynamic search placeholder based on route context */
-function useSearchPlaceholder(): string {
-  const location = useLocation()
-  const activeView = useSchemaStore((s) => s.getActiveView())
-
-  if (location.pathname.startsWith('/views/') && activeView) {
-    return `Search nodes in ${activeView.name}...`
-  }
-  if (location.pathname.startsWith('/explorer')) {
-    return 'Filter views by name, tag, or workspace...'
-  }
-  return 'Search workspaces, views, or commands...'
-}
 
 export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   // Selector subscriptions so this always-mounted bar doesn't re-render on
@@ -57,7 +44,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const isOrgAdmin = usePermission('system:org-admin')
   const claims = usePermissionClaims()
   const location = useLocation()
-  const searchPlaceholder = useSearchPlaceholder()
+  const brand = useBrand()
   const navigate = useNavigate()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
   const avatarId = usePreferencesStore((s) => s.avatarId)
@@ -198,7 +185,12 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
           >
             <Search className="w-4 h-4 group-hover:text-accent-business transition-colors duration-200" />
             <span className="flex-1 text-left text-sm group-hover:text-ink-secondary transition-colors">
-              {searchPlaceholder}
+              {/* One honest sentence, on every route. The old placeholder
+                  changed with the URL and promised "Search nodes in
+                  <view>" on a canvas — behaviour this button has never
+                  had. The data inside a view is a different search, on
+                  the canvas's own field. */}
+              Search {brand.shortName} — workspaces, views, data sources, pages
             </span>
             <div className="flex items-center gap-1">
               <kbd className="kbd">⌘</kbd>

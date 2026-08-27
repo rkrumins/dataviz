@@ -115,12 +115,13 @@ export function useCanvasKeyboard({
         const isMod = e.metaKey || e.ctrlKey
         const isShift = e.shiftKey
         
-        // Command Palette: Cmd/Ctrl + K
-        if (isMod && e.key === 'k') {
-            e.preventDefault()
-            handlersRef.current.onCommandPalette?.()
-            return
-        }
+        // ⌘K belongs to the app-wide palette (layout/CommandPalette),
+        // which binds it globally. Binding it here too opened BOTH on a
+        // canvas route — the global palette over the canvas's own — and
+        // the two look almost identical, so the user could not tell which
+        // one had their keystrokes. The canvas palette keeps its
+        // `onCommandPalette` handler for its button; only the key is
+        // given up.
         
         // Fit to width: Cmd/Ctrl + 0
         if (isMod && e.key === '0') {
