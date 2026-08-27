@@ -986,7 +986,8 @@ export function BackchannelSettingsForm({
                 >
                     Every server-side call this connection makes — the
                     gateway, the exchange, the session re-check, a JWKS
-                    fetch — will accept <strong>any</strong> TLS answer.
+                    fetch, the avatar images its sign-ins fetch — will
+                    accept <strong>any</strong> TLS answer.
                     Anyone between this server and your gateway can then
                     answer as the gateway and <strong>forge sign-ins as
                     any user</strong>. The connection is rated{' '}

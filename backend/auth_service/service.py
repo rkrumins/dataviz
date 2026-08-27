@@ -208,7 +208,7 @@ class LocalIdentityService:
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
         avatar_fetcher: Optional[
-            Callable[[str], Awaitable[tuple[bytes, str]]]
+            Callable[..., Awaitable[tuple[bytes, str]]]
         ] = None,
     ):
         self._session_factory = session_factory
@@ -230,9 +230,12 @@ class LocalIdentityService:
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
         self._session_revoker = session_revoker
-        # (url) -> (bytes, content_type). Injected by app startup, which
-        # binds the outbound guard and the operator's host allowlist —
-        # auth_service may not import backend.app.* itself.
+        # (url, *, provider_id=None) -> (bytes, content_type). Injected
+        # by app startup, which binds the outbound guard and the
+        # operator's host allowlist — auth_service may not import
+        # backend.app.* itself. ``provider_id`` lets the wiring honour
+        # the connection's own TLS posture (its ``tls_verify`` opt-out)
+        # for the image fetch made during that connection's sign-in.
         self._avatar_fetcher = avatar_fetcher
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
@@ -1061,7 +1064,9 @@ class LocalIdentityService:
                     avatar_asserted = True
                 else:
                     try:
-                        img, ctype = await self._avatar_fetcher(avatar_url)
+                        img, ctype = await self._avatar_fetcher(
+                            avatar_url, provider_id=provider_id,
+                        )
                         await self._user_repo.set_user_avatar_image(
                             session, orm.id,
                             image_b64=base64.b64encode(img).decode("ascii"),
@@ -1464,11 +1469,14 @@ class LocalIdentityService:
         # while it does.
         outcome["avatar"] = await self._preview_avatar(
             getattr(identity, "avatar_url", None),
+            provider_id=provider_id,
         )
 
         return outcome
 
-    async def _preview_avatar(self, avatar_url) -> dict:
+    async def _preview_avatar(
+        self, avatar_url, *, provider_id: Optional[str] = None,
+    ) -> dict:
         """The avatar leg of a rehearsal: the fetch, storing nothing.
 
         Returns a dict the verdict renderer pattern-matches: no URL
@@ -1484,7 +1492,9 @@ class LocalIdentityService:
             return {"url": url, "fetched": False,
                     "reason": "fetch_unavailable"}
         try:
-            body, content_type = await self._avatar_fetcher(url)
+            body, content_type = await self._avatar_fetcher(
+                url, provider_id=provider_id,
+            )
         except Exception as exc:  # noqa: BLE001
             from .providers.outbound import is_tls_verification_failure
 

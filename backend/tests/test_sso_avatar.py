@@ -71,7 +71,7 @@ def _wire_fetcher(monkeypatch):
 
     calls: list[str] = []
 
-    async def _fetch(url: str) -> tuple[bytes, str]:
+    async def _fetch(url: str, *, provider_id=None) -> tuple[bytes, str]:
         calls.append(url)
         return await outbound.fetch_image(url, timeout=5.0)
 
@@ -453,3 +453,41 @@ async def test_the_stored_image_is_served_with_an_etag(
     )
     assert again.status_code == 304
     assert again.headers.get("content-security-policy") == "sandbox"
+
+
+# ── the connection's TLS posture reaches the fetch ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_login_fetch_carries_the_connections_identity(
+    test_client, db_session, registry, sso_events, monkeypatch,
+):
+    """The wiring resolves the row's ``tls_verify`` from this id — an
+    anonymous fetch could only ever verify as the deployment does."""
+    from backend.app.main import app
+
+    seen: list = []
+
+    async def _fetch(url, *, provider_id=None):
+        seen.append(provider_id)
+        return PNG, "image/png"
+
+    monkeypatch.setattr(app.state.identity_service, "_avatar_fetcher", _fetch)
+    _routes(monkeypatch)
+    row = await _make_row(db_session, map_avatar=True)
+
+    resp = await _login(test_client, jti="av-pid", picture=AVATAR_URL)
+    assert resp.status_code == 200, resp.text
+    assert seen == [row.id]
+
+
+def test_the_tls_override_mirrors_the_rows_setting():
+    """None = defer to the deployment (bundle, else system store);
+    False = the row's explicit opt-out. Coerced like every other
+    settings-blob boolean."""
+    from backend.app.main import _avatar_tls_override
+
+    assert _avatar_tls_override({}) is None
+    assert _avatar_tls_override({"tls_verify": True}) is None
+    assert _avatar_tls_override({"tls_verify": False}) is False
+    assert _avatar_tls_override({"tls_verify": "false"}) is False
