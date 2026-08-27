@@ -59,7 +59,12 @@ describe('compileFind — a plain word', () => {
     })
 
     it('maps each field scope onto the backend target vocabulary', () => {
-        expect(as(compile('x', 'contains', 'names').predicate).target).toBe('name')
+        // 'displayName', not 'name': the backend widens 'name' to
+        // displayName OR qualifiedName OR searchableText, which carries
+        // descriptions and property values — a chip that says "Names"
+        // must not quietly return description matches.
+        expect(as(compile('x', 'contains', 'names').predicate).target)
+            .toBe('displayName')
         expect(as(compile('x', 'contains', 'descriptions').predicate).target)
             .toBe('description')
         expect(as(compile('x', 'contains', 'tags').predicate).target).toBe('tags')
@@ -119,7 +124,7 @@ describe('compileFind — operators keep their meaning', () => {
     it('honours the scope for the word half of a mixed query', () => {
         const p = as(compile('revenue tag:PII', 'contains', 'names').predicate)
         expect(p.children[0].kind).toBe('text')
-        expect(p.children[0].target).toBe('name')
+        expect(p.children[0].target).toBe('displayName')
         expect(p.children[1].kind).toBe('tag')
     })
 

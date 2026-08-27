@@ -67,13 +67,24 @@ TextMatchMode = Literal["exact", "prefix", "suffix", "substring", "fulltext", "r
 """
 
 TextTarget = Literal[
-    "name", "qualifiedName", "description", "tags", "property", "any"
+    "displayName", "name", "qualifiedName", "description", "tags",
+    "property", "any"
 ]
 """Which field a text predicate scans.
 
 ``any`` triggers the cross-property ``n.searchableTextLower CONTAINS …``
 path (the only mode that touches the denormalised blob); every other
 target hits a specific real node field.
+
+``name`` is deliberately WIDE: it ORs displayName, qualifiedName and the
+denormalised searchable text, so a partial name still matches when one of
+those columns is empty (legacy sync, partial ingestion). That width is
+right for a default, and wrong for a UI control labelled "names only" —
+``searchableText`` also carries descriptions and property values, so such
+a control would silently return description matches.
+
+``displayName`` is the narrow one: the display name and nothing else. It
+exists so a field-scope control can promise exactly what it delivers.
 """
 
 

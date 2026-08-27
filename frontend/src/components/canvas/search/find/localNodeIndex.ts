@@ -144,7 +144,11 @@ function isMatch(
     scope: FindScope,
 ): boolean {
     const fields: string[] = scope === 'names'
-        ? [doc.nameLc, doc.qnameLc]
+        // The display name alone — mirroring the server's
+        // ``target: 'displayName'``. Including the qualified name here
+        // would make the local tier answer a wider question than the
+        // server does, and rows would vanish when the server replied.
+        ? [doc.nameLc]
         : scope === 'descriptions'
             ? [readString(doc.node.data?.description).toLowerCase()]
             : scope === 'tags'

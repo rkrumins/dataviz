@@ -187,7 +187,8 @@ export type Match = 'exact' | 'prefix' | 'suffix' | 'substring' | 'fulltext' | '
  * Required when ``target='property'``; ignored otherwise.
  */
 export type Propertykey1 = string | null
-export type Target = 'name' | 'qualifiedName' | 'description' | 'tags' | 'property' | 'any'
+export type Target =
+    'displayName' | 'name' | 'qualifiedName' | 'description' | 'tags' | 'property' | 'any'
 export type Value = string
 export type Casesensitive1 = boolean
 export type Key = string
@@ -223,8 +224,7 @@ export type Edgeclass = 'lineage' | 'containment' | 'any'
  * Optional predicate evaluated against every traversed edge. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
 export type Edgepredicate =
-    | (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate)
-    | null
+    (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
 export type Key2 = string
 export type Kind5 = 'edgeProperty'
 export type Op2 =
@@ -288,8 +288,7 @@ export type Edgeclass7 = 'lineage' | 'containment' | 'any'
  * Optional predicate evaluated against every edge in the returned paths. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
 export type Edgepredicate1 =
-    | (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate)
-    | null
+    (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
 /**
  * Optional explicit edge-type list; overrides ``edge_class``'s resolved set.
  */
@@ -384,6 +383,7 @@ export type Qualifiedname = string | null
 export type Sourcesystem = string | null
 export type Tags = string[]
 export type Urn1 = string
+export type Version = string | null
 export type Score1 = number
 export type Samplehits = SearchHit[]
 /**
@@ -943,6 +943,7 @@ export interface GraphNode {
     sourceSystem?: Sourcesystem
     tags?: Tags
     urn: Urn1
+    version?: Version
 }
 export interface Properties {
     [k: string]: unknown

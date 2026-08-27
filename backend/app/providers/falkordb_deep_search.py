@@ -303,9 +303,15 @@ class _Compiler:
         # MISSING/null reads so an absent field reads as a non-matching
         # empty string rather than aborting the comparison.
         #
-        # ``description`` / ``tags`` stay single-field — those are
-        # explicit user targets, not name aliases.
-        if target == "name":
+        # ``displayName`` / ``description`` / ``tags`` stay single-field
+        # — those are explicit user targets, not name aliases.
+        if target == "displayName":
+            # The narrow one. ``name`` below widens to three columns,
+            # which is right as a default and wrong for a UI control that
+            # says "names only" — searchableText also carries descriptions
+            # and property values.
+            cols = ["n.displayName"]
+        elif target == "name":
             cols = ["n.displayName", "n.qualifiedName", "n.searchableText"]
         elif target == "qualifiedName":
             cols = ["n.qualifiedName", "n.searchableText"]

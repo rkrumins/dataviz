@@ -515,6 +515,18 @@
         "urn": {
           "title": "Urn",
           "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
         }
       },
       "required": [
@@ -2073,6 +2085,7 @@
         "target": {
           "default": "any",
           "enum": [
+            "displayName",
             "name",
             "qualifiedName",
             "description",

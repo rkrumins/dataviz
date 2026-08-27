@@ -473,6 +473,29 @@ class TestCompilerLeaves:
         )
         assert c.params == {"p0": "customer"}
 
+    def test_text_display_name_is_the_narrow_target(self):
+        # ``target='name'`` is deliberately wide, and ``searchableText``
+        # carries descriptions and string property values — so a UI
+        # control labelled "Names" cannot be backed by it without
+        # quietly returning description matches. ``displayName`` is the
+        # narrow one that lets such a control promise what it delivers.
+        c = _Compiler()
+        where = c.compile(TextPredicate(value="Customer", target="displayName"))
+        assert where == "toLower(toString(n.displayName)) CONTAINS $p0"
+        assert c.params == {"p0": "customer"}
+
+    def test_text_display_name_honours_the_match_mode(self):
+        for mode, op in (
+            ("prefix", "STARTS WITH"),
+            ("suffix", "ENDS WITH"),
+            ("exact", "="),
+        ):
+            c = _Compiler()
+            where = c.compile(TextPredicate(
+                value="Cust", target="displayName", match=mode,
+            ))
+            assert where == f"toLower(toString(n.displayName)) {op} $p0"
+
     def test_text_name_prefix_ors_with_starts_with(self):
         c = _Compiler()
         where = c.compile(TextPredicate(

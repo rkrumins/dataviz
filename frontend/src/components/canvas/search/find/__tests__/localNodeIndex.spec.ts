@@ -107,6 +107,19 @@ describe('matchLocalNodes — the operators mirror the server', () => {
             .toEqual(['customer', 'net_revenue', 'orders', 'revenue_gross'])
     })
 
+    it('scopes "names" to the display name, as the server does', () => {
+        // Not the qualified name too: the server's target:'displayName'
+        // is that narrow, and a local tier that answered a wider question
+        // would show rows that vanish when the server replies.
+        const withQname = buildLocalNodeIndex([
+            node('a', 'orders', { data: { qualifiedName: 'db.revenue.orders' } }),
+        ])
+        expect(matchLocalNodes(withQname, 'revenue', 'contains', 'names').hits)
+            .toHaveLength(0)
+        expect(matchLocalNodes(withQname, 'revenue', 'contains', 'everything').hits)
+            .toHaveLength(1)
+    })
+
     it('startsWith anchors to the beginning', () => {
         const { hits } = matchLocalNodes(docs, 'revenue', 'startsWith', 'names')
         expect(names(hits)).toEqual(['revenue_gross'])

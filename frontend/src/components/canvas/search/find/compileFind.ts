@@ -78,18 +78,14 @@ export const FIND_MODE_LABELS: Record<FindMode, string> = {
 
 export const FIND_SCOPE_LABELS: Record<FindScope, string> = {
     everything: 'Everything',
-    // Deliberately NOT "Names only": the backend's ``target: 'name'``
-    // widens to displayName OR qualifiedName OR searchableText, and
-    // searchableText carries description + string property values. The
-    // label promises exactly what the query delivers.
-    names: 'Names & IDs',
+    names: 'Names',
     descriptions: 'Descriptions',
     tags: 'Tags',
 }
 
 export const FIND_SCOPE_HINTS: Record<FindScope, string> = {
     everything: 'Names, descriptions, tags, and property values',
-    names: 'Display name, qualified name, and indexed text',
+    names: 'The entity name only',
     descriptions: 'The description field only',
     tags: 'Tags only',
 }
@@ -132,7 +128,12 @@ export function barewordPredicate(
     const match = MODE_TO_MATCH[mode]
     switch (scope) {
         case 'names':
-            return textPredicate('name', value, match)
+            // ``displayName``, not ``name``: the latter widens server-side
+            // to displayName OR qualifiedName OR searchableText, and
+            // searchableText carries descriptions and property values —
+            // so a chip labelled "Names" backed by it would quietly
+            // return description matches.
+            return textPredicate('displayName', value, match)
         case 'descriptions':
             return textPredicate('description', value, match)
         case 'tags':
