@@ -77,6 +77,23 @@ const SERVER_PAGE_SIZE = 100
 const CANDIDATE_CAP = 5000
 
 
+/** Frozen so the merge memo keeps its identity while the server has
+ *  nothing to add. */
+const EMPTY_HITS: readonly SearchHit[] = Object.freeze([])
+
+
+/** One server answer, tagged with the query it answers. */
+interface ServerRun {
+    key: string
+    hits: readonly SearchHit[]
+    total: number | null
+    truncated: boolean
+    deadlineExceeded: boolean
+    elapsedMs: number | null
+    error: string | null
+}
+
+
 export type FindStatus =
     /** Nothing typed. */
     | 'idle'
@@ -144,13 +161,12 @@ export function useFindInView({
     const [mode, setMode] = useState<FindMode>('contains')
     const [scope, setScope] = useState<FindScope>('everything')
 
-    const [serverHits, setServerHits] = useState<readonly SearchHit[]>([])
-    const [serverTotal, setServerTotal] = useState<number | null>(null)
-    const [isRunning, setIsRunning] = useState(false)
-    const [errorMessage, setErrorMessage] = useState<string | null>(null)
-    const [truncated, setTruncated] = useState(false)
-    const [deadlineExceeded, setDeadlineExceeded] = useState(false)
-    const [elapsedMs, setElapsedMs] = useState<number | null>(null)
+    // The server's answer, tagged with the query it answers. Keying it
+    // this way makes "is a request outstanding" DERIVED — the tag doesn't
+    // match what is being asked — rather than a second piece of state an
+    // effect has to keep in sync. No reset on every keystroke, and no
+    // window where the two disagree.
+    const [serverRun, setServerRun] = useState<ServerRun | null>(null)
 
     // Monotonic run id rather than an AbortController: RemoteGraphProvider
     // shares one in-flight promise across identical requests, so aborting
@@ -185,36 +201,22 @@ export function useFindInView({
     const debouncedMode = useDebouncedValue(mode, SERVER_DEBOUNCE_MS)
     const debouncedScope = useDebouncedValue(scope, SERVER_DEBOUNCE_MS)
 
-    useEffect(() => {
-        if (!canSearchServer || !debouncedText) {
-            runIdRef.current += 1
-            setServerHits([])
-            setServerTotal(null)
-            setIsRunning(false)
-            setErrorMessage(null)
-            setTruncated(false)
-            setDeadlineExceeded(false)
-            setElapsedMs(null)
-            return
-        }
+    const serverActive = canSearchServer && debouncedText.length > 0
+    const runKey = serverActive
+        ? `${debouncedMode}|${debouncedScope}|${debouncedText}`
+        : ''
 
-        const { predicate, error } = compileFind({
+    useEffect(() => {
+        if (!serverActive) return
+
+        const { predicate } = compileFind({
             text: debouncedText, mode: debouncedMode, scope: debouncedScope,
         })
-        if (!predicate) {
-            // A half-typed query (unbalanced parens, dangling operator).
-            // The panel renders `compiled.error`; there is nothing to run.
-            runIdRef.current += 1
-            setServerHits([])
-            setServerTotal(null)
-            setIsRunning(false)
-            setErrorMessage(error ?? null)
-            return
-        }
+        // A half-typed query (unbalanced parens, dangling operator) has
+        // nothing to run. The panel renders `compiled.error` instead.
+        if (!predicate) return
 
         const myRun = ++runIdRef.current
-        setIsRunning(true)
-        setErrorMessage(null)
         const startedAt = performance.now()
 
         const query: SearchQuery = stampViewScope(
@@ -240,25 +242,39 @@ export function useFindInView({
             try {
                 const page = await provider.searchAdvanced(query)
                 if (runIdRef.current !== myRun) return   // superseded
-                setServerHits(page.hits ?? [])
-                setServerTotal(page.candidateCount ?? page.hits?.length ?? 0)
-                setTruncated(Boolean(page.truncated))
-                setDeadlineExceeded(Boolean(page.deadlineExceeded))
-                setElapsedMs(Math.round(performance.now() - startedAt))
-                setIsRunning(false)
+                setServerRun({
+                    key: runKey,
+                    hits: page.hits ?? [],
+                    total: page.candidateCount ?? page.hits?.length ?? 0,
+                    truncated: Boolean(page.truncated),
+                    deadlineExceeded: Boolean(page.deadlineExceeded),
+                    elapsedMs: Math.round(performance.now() - startedAt),
+                    error: null,
+                })
             } catch (e) {
                 if (runIdRef.current !== myRun) return
                 // Local results are never destroyed by a server failure —
                 // a partial answer beats an empty one.
-                setErrorMessage(e instanceof Error ? e.message : String(e))
-                setIsRunning(false)
-                setElapsedMs(Math.round(performance.now() - startedAt))
+                setServerRun({
+                    key: runKey,
+                    hits: [],
+                    total: null,
+                    truncated: false,
+                    deadlineExceeded: false,
+                    elapsedMs: Math.round(performance.now() - startedAt),
+                    error: e instanceof Error ? e.message : String(e),
+                })
             }
         })()
     }, [
-        canSearchServer, debouncedText, debouncedMode, debouncedScope,
+        serverActive, runKey, debouncedText, debouncedMode, debouncedScope,
         provider, viewId,
     ])
+
+    // Only the answer to the question currently being asked counts.
+    const server = serverRun && serverRun.key === runKey ? serverRun : null
+    const serverHits = server?.hits ?? EMPTY_HITS
+
 
     // ---- Merge ------------------------------------------------------------
     const hits = useMemo<readonly SearchHit[]>(() => {
@@ -334,24 +350,21 @@ export function useFindInView({
     const clear = useCallback(() => {
         runIdRef.current += 1
         setText('')
-        setServerHits([])
-        setServerTotal(null)
-        setIsRunning(false)
-        setErrorMessage(null)
-        setTruncated(false)
-        setDeadlineExceeded(false)
-        setElapsedMs(null)
+        setServerRun(null)
         const store = useSearchStore.getState()
         if (store.resultSource === 'quick') store.clearSearchResults()
     }, [])
 
     const isStale = trimmed !== debouncedText
+    // Outstanding when the server tier is live, the query compiles, and no
+    // answer tagged with the current question has come back yet.
+    const isRunning = serverActive && !server && compiled.predicate !== null
 
     const status: FindStatus = !trimmed
         ? 'idle'
         : !canSearchServer
             ? 'localOnly'
-            : errorMessage
+            : server?.error
                 ? 'error'
                 : (isRunning || isStale)
                     ? 'running'
@@ -362,12 +375,12 @@ export function useFindInView({
         setText, setMode, setScope, clear,
         hits,
         localCount: localUrns.size,
-        serverTotal,
+        serverTotal: server?.total ?? null,
         status,
-        errorMessage,
-        truncated,
-        deadlineExceeded,
-        elapsedMs,
+        errorMessage: server?.error ?? null,
+        truncated: server?.truncated ?? false,
+        deadlineExceeded: server?.deadlineExceeded ?? false,
+        elapsedMs: server?.elapsedMs ?? null,
         compiled,
         isStale,
     }

@@ -107,7 +107,6 @@ export function stampViewScope(
         ? []
         : allCanvasRootUrns
     if (allCanvasRootUrns.length > SAFE_ROOT_URN_CAP) {
-        // eslint-disable-next-line no-console
         console.warn(
             `[advancedSearch] view has ${allCanvasRootUrns.length} `
             + `top-level containers, over the ${SAFE_ROOT_URN_CAP} cap; `
