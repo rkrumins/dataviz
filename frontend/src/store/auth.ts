@@ -33,6 +33,7 @@ import {
     resetSessionLostLatch,
     setAuthEnvironmentId,
 } from '@/services/fetchWithTimeout'
+import { bumpAvatarCache } from '@/lib/avatarImage'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
 import { ROLE_NAMES, type RoleName } from '@/lib/roleNames'
 import { useNavCatalogueStore } from '@/store/navCatalogue'
@@ -367,6 +368,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ error: null, isLoading: true })
         resetClaimRecovery()
         resetSessionLostLatch()
+        // Sign-in is when the server may have just stored this
+        // person's avatar; forget the misses and version the URL so
+        // the picture appears without a hard refresh.
+        bumpAvatarCache()
         try {
             const { user, environment_id } = await authService.login({ email, password })
             setAuthEnvironmentId(environment_id)
@@ -388,6 +393,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ error: null, isLoading: true })
         resetClaimRecovery()
         resetSessionLostLatch()
+        // Sign-in is when the server may have just stored this
+        // person's avatar; forget the misses and version the URL so
+        // the picture appears without a hard refresh.
+        bumpAvatarCache()
         try {
             const { user } = await authService.loginWithBrowserProfile(
                 providerSlug, payload,
@@ -411,6 +420,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         set({ error: null, lastSsoDenial: null, isLoading: true })
         resetClaimRecovery()
         resetSessionLostLatch()
+        // Sign-in is when the server may have just stored this
+        // person's avatar; forget the misses and version the URL so
+        // the picture appears without a hard refresh.
+        bumpAvatarCache()
         try {
             const { user } = await loginWithBackchannel(providerSlug, body)
             set({ ..._authenticated(user), error: null, isLoading: false })
@@ -449,6 +462,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             if (resp.autoSignedIn && resp.user) {
                 resetClaimRecovery()
                 resetSessionLostLatch()
+                bumpAvatarCache()
                 set({ ..._authenticated(resp.user), error: null, isLoading: false })
                 writeUserCache(resp.user)
                 await hydratePermissions(set)
