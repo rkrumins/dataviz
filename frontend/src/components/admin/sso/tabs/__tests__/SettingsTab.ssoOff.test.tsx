@@ -21,6 +21,7 @@ vi.mock('@/services/ssoAdminService', () => ({
         listProviders: vi.fn(),
         updateAuthConfig: vi.fn(),
         endSsoSessions: vi.fn(),
+        endAllSessions: vi.fn(),
     },
 }))
 // Makes its own service calls and has its own tests.
@@ -46,6 +47,10 @@ beforeEach(() => {
     svc.updateAuthConfig.mockResolvedValue(cfg({ ssoEnabled: false, version: 4 }))
     svc.endSsoSessions.mockResolvedValue({
         usersAffected: 3, tokensRevoked: 5, dryRun: true,
+    })
+    svc.endAllSessions.mockResolvedValue({
+        usersAffected: 4, tokensRevoked: 9, systemAccountsSkipped: 1,
+        dryRun: true,
     })
 })
 
@@ -118,10 +123,14 @@ describe('turning the master switch off', () => {
     })
 
     it('gives the other confirmable switches no session checkbox', async () => {
+        // Both doors carry a session offer now (each its own sweep), so
+        // the switch with none left is JIT provisioning.
         const user = userEvent.setup()
         render(<SettingsTab />)
         await user.click(
-            await screen.findByRole('switch', { name: 'Passwords' }),
+            await screen.findByRole('switch', {
+                name: 'Create accounts automatically',
+            }),
         )
 
         // The confirm block opened…
@@ -130,6 +139,7 @@ describe('turning the master switch off', () => {
         // …but with no session checkbox and no count fetched.
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
         expect(svc.endSsoSessions).not.toHaveBeenCalled()
+        expect(svc.endAllSessions).not.toHaveBeenCalled()
     })
 })
 
