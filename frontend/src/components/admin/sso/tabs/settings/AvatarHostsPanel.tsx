@@ -1,20 +1,17 @@
 /**
- * Which internal addresses SSO is allowed to call.
+ * Which external sites in-app avatars may be fetched from.
  *
- * The outbound guard refuses every private address, which is right for
- * IdP metadata — published on the public internet — and fatal for an
- * enterprise gateway, which is internal by definition. This list is the
- * exception, and it is the only thing standing between a provider
- * settings form and a tool for making requests into your own network.
+ * When a connection maps a profile-picture URL from the claims, OUR
+ * server fetches the image at sign-in and re-serves it from this origin
+ * (browsers never load the remote URL, so member lists cannot leak
+ * viewers to the photo host). This list is the on-switch for external
+ * sources: with it empty, an avatar URL pointing at the public internet
+ * is refused by name — nothing outside your network is fetched until
+ * you say so, host by host.
  *
- * So the panel is written to be *readable by an auditor*, not merely
- * usable by the person adding a host: every entry shows its port and
- * who added it, because the argument for editing this from a browser at
- * all is that each entry is attributable and individually revocable.
- *
- * It lives on the posture tab rather than inside a provider's settings
- * because a per-provider allowlist would be circular — "the URL you
- * typed is permitted" is not a control.
+ * The copy is the feature as much as the form is: the person
+ * configuring this needs to know what qualifies (raster image URLs),
+ * what happens to redirects, and where private hosts belong instead.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { Loader2, Plus, ShieldAlert, Trash2 } from 'lucide-react'
@@ -30,7 +27,7 @@ const inputCls =
     'dark:border-white/[0.12] bg-canvas-elevated text-ink outline-none ' +
     'focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10'
 
-export function BackchannelHostsPanel() {
+export function AvatarHostsPanel() {
     const [hosts, setHosts] = useState<BackchannelHost[] | null>(null)
     const [error, setError] = useState<string | null>(null)
     const [forbidden, setForbidden] = useState(false)
@@ -41,14 +38,13 @@ export function BackchannelHostsPanel() {
 
     const refresh = useCallback(async () => {
         try {
-            setHosts(await ssoAdminService.listBackchannelHosts())
+            setHosts(await ssoAdminService.listBackchannelHosts('avatar'))
             setError(null)
         } catch (e) {
             const message = e instanceof Error ? e.message : String(e)
-            // A 403 here is not a fault to report as one: this list has
-            // its own permission, so an admin who can edit everything
-            // else on this page may legitimately not hold it. Saying
-            // that is more useful than an empty list or a red banner.
+            // Same separately-granted permission as the gateway list —
+            // an admin who can edit everything else here may not hold
+            // it, and that is a fact to state, not a fault to report.
             if (/forbidden|permission|403/i.test(message)) {
                 setForbidden(true)
                 setHosts([])
@@ -67,7 +63,7 @@ export function BackchannelHostsPanel() {
                 host: host.trim(),
                 port: Number(port) || 443,
                 note: note.trim() || undefined,
-            })
+            }, 'avatar')
             setHost(''); setPort('443'); setNote('')
             await refresh()
         } catch (e) {
@@ -91,24 +87,26 @@ export function BackchannelHostsPanel() {
 
     return (
         <div className="space-y-3">
-            <SsoSectionLabel>Internal gateways SSO may call</SsoSectionLabel>
+            <SsoSectionLabel>Avatar image hosts</SsoSectionLabel>
 
             <SsoCard tone="neutral">
                 <p className="text-[12px] text-ink-muted leading-relaxed">
-                    An enterprise gateway provider signs people in by calling
-                    a service inside your network. Nothing here is reachable
-                    until its host is listed, and every entry is a
-                    destination this deployment will make requests to — so
-                    add only the gateways you meant to, and take them off
-                    when they are decommissioned.
+                    When a connection maps profile pictures from its claims,
+                    this server fetches each image once at sign-in and shows
+                    it from here — people&rsquo;s browsers never load the
+                    external site. External avatars are off until a host is
+                    listed: an avatar URL pointing anywhere not on this list
+                    is refused, and the rehearsal names the host to add.
                 </p>
                 <p className="mt-2 text-[11px] text-ink-muted leading-relaxed">
-                    The port is part of the entry: allowing a gateway on 443
-                    does not allow anything else answering on the same
-                    machine. Loopback and cloud metadata addresses are
-                    refused whatever is listed here. This list is about your
-                    own network — external avatar image sites are governed
-                    by the separate list below, not by entries here.
+                    What gets through: raster image URLs only — PNG, JPEG,
+                    GIF, WebP or AVIF, up to 256&nbsp;KiB. A raster image is
+                    a grid of pixels, a finished picture; SVG files (drawing
+                    instructions that can carry scripts) and web pages are
+                    refused. Redirects are followed up to three hops, and
+                    every host in the chain must be listed here. A private
+                    host inside your own network belongs on the
+                    internal-gateways list above instead.
                 </p>
 
                 {forbidden ? (
@@ -129,9 +127,9 @@ export function BackchannelHostsPanel() {
                             )}
                             {hosts?.length === 0 && (
                                 <p className="text-[12px] text-ink-muted">
-                                    Nothing listed. Enterprise gateway
-                                    providers cannot reach anything internal
-                                    yet.
+                                    Nothing listed — external avatars are off.
+                                    Mapped avatar URLs on outside hosts are
+                                    refused until their host is added here.
                                 </p>
                             )}
                             {hosts?.map(entry => (
@@ -168,8 +166,8 @@ export function BackchannelHostsPanel() {
                                 className={`${inputCls} font-mono text-xs flex-1 min-w-[14rem]`}
                                 value={host}
                                 onChange={e => setHost(e.target.value)}
-                                placeholder="sso-gateway.corp.internal"
-                                aria-label="Gateway host"
+                                placeholder="avatars.example.com"
+                                aria-label="Avatar image host"
                             />
                             <input
                                 className={`${inputCls} font-mono text-xs w-24`}

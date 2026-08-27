@@ -329,7 +329,16 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // so repairing here is what makes reloading the page fix it:
             // a reload otherwise changes nothing, because it issues only
             // GETs and no GET needs a CSRF token.
-            void ensureCsrfToken()
+            //
+            // AWAITED, deliberately: fire-and-forget left a window in
+            // which the first admin write raced the repair and lost.
+            // Once the backend heals the cookie on GET /auth/me itself,
+            // this is usually a same-tick no-op (the cookie-present
+            // gate returns immediately); against an older backend it
+            // costs one refresh round trip before the authenticated
+            // flip — which is exactly the ordering that makes writes
+            // safe. Never rejects.
+            await ensureCsrfToken()
             // Re-apply with the server's freshly-returned DTO so
             // role/status updates from the backend overwrite the
             // optimistic copy.

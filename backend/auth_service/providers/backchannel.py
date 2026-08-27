@@ -361,6 +361,14 @@ class BackchannelSettings:
 
     timeout_seconds: float = 5.0
     max_response_bytes: int = MAX_JSON_BYTES
+    #: Verify the TLS identity of every server-side call this row makes
+    #: — gateway, exchange, liveness, JWKS. Off is the warned escape
+    #: hatch for a gateway signed by a corporate CA that cannot be
+    #: mounted; the supported path is ``SSO_OUTBOUND_TLS_CA_CERTS``.
+    #: With verification off the transport vouches for nothing, so the
+    #: row rates Unverified unless its claims are signed against PASTED
+    #: material (see ``assurance.py``).
+    tls_verify: bool = True
     require_auth_time: bool = True
     #: Whether the connection's mapped avatar claim participates at all.
     #: Off — the default — strips ``avatar_url`` from the identity, so
@@ -476,6 +484,7 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         jwt_audience=str(s.get("jwt_audience") or "").strip(),
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
+        tls_verify=_as_bool(s.get("tls_verify", True)),
         require_auth_time=_as_bool(s.get("require_auth_time", True)),
         map_avatar=_as_bool(s.get("map_avatar")),
         trust_gateway_email=_as_bool(s.get("trust_gateway_email", True)),
@@ -835,6 +844,9 @@ class BackchannelProvider:
                 max_bytes=self._s.max_response_bytes,
                 allow_hosts=await self._allow_hosts(),
                 accept_jwt=accept_jwt,
+                # None defers to the deployment CA bundle; False is
+                # this row's explicit opt-out.
+                verify=None if self._s.tls_verify else False,
             )
         except OutboundStatusError as exc:
             if exc.status_code in _AUTHORITATIVE_REJECTIONS:
@@ -1050,6 +1062,9 @@ class BackchannelProvider:
                 self._s.jwks_url, timeout=self._s.timeout_seconds,
                 max_bytes=self._s.max_response_bytes,
                 allow_hosts=await self._allow_hosts(),
+                # None defers to the deployment CA bundle; False is
+                # this row's explicit opt-out.
+                verify=None if self._s.tls_verify else False,
             )
         except OutboundError as exc:
             # The key set not answering is an outage, same as the IdP

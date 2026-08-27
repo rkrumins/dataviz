@@ -32,7 +32,8 @@ from backend.app.db.repositories.refresh_token_repo import make_refresh_store
 import jwt as pyjwt
 
 
-def _identity(email="rehearsal@corp.example", external_id="ext-dry"):
+def _identity(email="rehearsal@corp.example", external_id="ext-dry",
+              avatar_url=None):
     return ProviderIdentity(
         provider="oidc",
         external_id=external_id,
@@ -44,6 +45,7 @@ def _identity(email="rehearsal@corp.example", external_id="ext-dry"):
         groups=["engineering"],
         auth_time=None,
         attributes={},
+        avatar_url=avatar_url,
     )
 
 
@@ -58,7 +60,7 @@ async def _provider(db_session, *, slug="dry", linking_policy="strict"):
     return row
 
 
-def _svc(db_session, previewer=None):
+def _svc(db_session, previewer=None, avatar_fetcher=None):
     @asynccontextmanager
     async def factory():
         yield db_session
@@ -75,6 +77,7 @@ def _svc(db_session, previewer=None):
         # cannot be renewed.
         refresh_store_factory=make_refresh_store,
         sso_role_preview=previewer,
+        avatar_fetcher=avatar_fetcher,
     )
 
 
@@ -389,3 +392,110 @@ async def test_another_token_kind_is_not_a_dry_run_marker(db_session):
     assert _is_dryrun(request, provider_id="idp_a") is False
     with pytest.raises(pyjwt.InvalidTokenError):
         decode_dryrun_token(token)
+
+
+# ── the avatar leg of the verdict ────────────────────────────────────
+#
+# The rehearsal performs the same guarded avatar GET a real sign-in
+# would (storing nothing) and reports what happened — the only surface
+# an operator has for a fetch that otherwise fails as one log line.
+
+
+@pytest.mark.asyncio
+async def test_no_avatar_url_is_said_in_the_verdict(db_session):
+    provider = await _provider(db_session, slug="dry-av0")
+    outcome = await _svc(db_session).preview_sso_login(
+        _identity(), provider_id=provider.id,
+    )
+    assert outcome["avatar"] == {"url": None}
+
+
+@pytest.mark.asyncio
+async def test_a_fetchable_avatar_reports_type_and_size(db_session):
+    async def fetcher(url):
+        return b"png-bytes", "image/png"
+
+    provider = await _provider(db_session, slug="dry-av1")
+    outcome = await _svc(db_session, avatar_fetcher=fetcher).preview_sso_login(
+        _identity(avatar_url="https://avatars.example.com/dry.png"),
+        provider_id=provider.id,
+    )
+    assert outcome["avatar"] == {
+        "url": "https://avatars.example.com/dry.png",
+        "fetched": True, "content_type": "image/png", "size": 9,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_refused_avatar_carries_the_guard_reason(db_session):
+    from backend.auth_service.providers.outbound import (
+        BlockedOutboundRequest,
+    )
+
+    async def fetcher(url):
+        raise BlockedOutboundRequest(
+            f"{url!r} is not on the avatar image hosts list.",
+            reason="host_not_allowlisted",
+        )
+
+    provider = await _provider(db_session, slug="dry-av2")
+    outcome = await _svc(db_session, avatar_fetcher=fetcher).preview_sso_login(
+        _identity(avatar_url="https://elsewhere.example/x.png"),
+        provider_id=provider.id,
+    )
+    assert outcome["avatar"]["fetched"] is False
+    assert outcome["avatar"]["reason"] == "host_not_allowlisted"
+    assert "avatar image hosts list" in outcome["avatar"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_with_no_fetcher_says_so(db_session):
+    provider = await _provider(db_session, slug="dry-av3")
+    outcome = await _svc(db_session).preview_sso_login(
+        _identity(avatar_url="https://avatars.example.com/dry.png"),
+        provider_id=provider.id,
+    )
+    assert outcome["avatar"] == {
+        "url": "https://avatars.example.com/dry.png",
+        "fetched": False, "reason": "fetch_unavailable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_certificate_verify_failure_is_named_as_a_trust_problem(
+    db_session,
+):
+    """httpx wraps the ssl failure in a ConnectError with no ``.reason``
+    — without the mapping the operator reads a generic fetch_failed and
+    learns nothing about trust."""
+    import httpx
+
+    async def fetcher(url):
+        raise httpx.ConnectError(
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "unable to get local issuer certificate (_ssl.c:1006)",
+        )
+
+    provider = await _provider(db_session, slug="dry-av-tls")
+    outcome = await _svc(db_session, avatar_fetcher=fetcher).preview_sso_login(
+        _identity(avatar_url="https://photos.corp.example/a.png"),
+        provider_id=provider.id,
+    )
+    assert outcome["avatar"]["fetched"] is False
+    assert outcome["avatar"]["reason"] == "tls_verify_failed"
+    assert "unable to get local issuer certificate" in outcome["avatar"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_connection_failure_stays_generic(db_session):
+    import httpx
+
+    async def fetcher(url):
+        raise httpx.ConnectError("connection refused")
+
+    provider = await _provider(db_session, slug="dry-av-refused")
+    outcome = await _svc(db_session, avatar_fetcher=fetcher).preview_sso_login(
+        _identity(avatar_url="https://photos.corp.example/a.png"),
+        provider_id=provider.id,
+    )
+    assert outcome["avatar"]["reason"] == "fetch_failed"

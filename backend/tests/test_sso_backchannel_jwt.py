@@ -436,3 +436,30 @@ def test_impossible_jwt_combinations_are_refused(over, needle):
 ])
 def test_pins_are_satisfied_by_any_verification_material(over):
     validate_settings(_settings(**over))
+
+
+@pytest.mark.asyncio
+async def test_tls_verify_off_reaches_the_jwks_fetch(monkeypatch):
+    """The key set is fetched by this row's own client too — the
+    per-connection opt-out has to cover it, or a corporate-CA'd JWKS
+    endpoint would keep a toggled-off row broken anyway."""
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS", raising=False)
+    captured: list[dict] = []
+    handler = _serving(_token())
+
+    def _make(**kwargs):
+        captured.append(dict(kwargs))
+        kwargs.pop("verify", None)
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(handler), **kwargs,
+        )
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _make)
+    await BackchannelProvider(
+        _verified_settings(tls_verify=False),
+    ).fetch_identity("ambient-xyz")
+
+    # The translate leg and the JWKS fetch — every client this row
+    # built carried the opt-out.
+    assert len(captured) == 2
+    assert all(c["verify"] is False for c in captured)

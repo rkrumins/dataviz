@@ -28,10 +28,13 @@ import logging
 import os
 import re
 import socket
+import ssl
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
+
+from backend.common.adapters.redis_tls import _normalize_cert_path
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,17 @@ _PROD_ENV_VALUES = {"prod", "production"}
 
 
 class OutboundError(RuntimeError):
-    """An outbound request that did not produce a usable response."""
+    """An outbound request that did not produce a usable response.
+
+    ``reason`` is a short machine-readable token (``"not_an_image"``,
+    ``"too_many_redirects"``…) for the surfaces that report a refusal to
+    an operator — the rehearsal verdict, chiefly. The message remains
+    the human half; the token is stable where the wording is not.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class BlockedOutboundRequest(OutboundError):
@@ -71,12 +84,80 @@ class OutboundStatusError(OutboundError):
     """
 
     def __init__(self, url: str, status_code: int) -> None:
-        super().__init__(f"{url!r} answered HTTP {status_code}.")
+        super().__init__(
+            f"{url!r} answered HTTP {status_code}.",
+            reason=f"http_{status_code}",
+        )
         self.status_code = status_code
 
 
 def _is_prod() -> bool:
     return os.getenv("ENV", "dev").strip().lower() in _PROD_ENV_VALUES
+
+
+#: Deployment-level trust anchor for outbound SSO TLS: a PEM bundle
+#: path (``file:`` URIs tolerated, like the ``REDIS_*_TLS_CA_CERTS``
+#: family). Read at CALL time, like :func:`_is_prod`, so tests
+#: (``monkeypatch.setenv``) and restartless reconfigures take effect on
+#: the next request.
+SSO_OUTBOUND_TLS_CA_CERTS_ENV = "SSO_OUTBOUND_TLS_CA_CERTS"
+
+#: One ``ssl.SSLContext`` per bundle path. Building one re-reads the
+#: PEM from disk; a login burst should not pay that per call. Failures
+#: are deliberately NOT cached: a bundle that appears later (a Secret
+#: mounted after boot) starts working on the next call, and until then
+#: every call logs.
+_SSL_CONTEXT_CACHE: dict[str, ssl.SSLContext] = {}
+
+
+def _bundle_context(raw: str) -> ssl.SSLContext | None:
+    path = _normalize_cert_path(raw)
+    if not path:
+        return None
+    ctx = _SSL_CONTEXT_CACHE.get(path)
+    if ctx is not None:
+        return ctx
+    try:
+        ctx = ssl.create_default_context(cafile=path)
+    except (OSError, ssl.SSLError) as exc:
+        logger.error(
+            "%s names %r, which cannot be loaded (%s). Outbound TLS "
+            "verification stays on the SYSTEM trust store — hosts signed "
+            "by your corporate CA keep failing, with this line saying "
+            "why, until the path names a readable PEM bundle.",
+            SSO_OUTBOUND_TLS_CA_CERTS_ENV, path, exc,
+        )
+        return None
+    _SSL_CONTEXT_CACHE[path] = ctx
+    return ctx
+
+
+def resolve_outbound_verify(
+    override: bool | str | ssl.SSLContext | None = None,
+) -> bool | ssl.SSLContext:
+    """The ``verify=`` value for one outbound TLS connection.
+
+    Precedence: an explicit per-call *override* (``False`` is
+    meaningful — the back-channel per-connection escape hatch; a str is
+    treated as a bundle path), then the deployment bundle named by
+    :data:`SSO_OUTBOUND_TLS_CA_CERTS_ENV`, then ``True`` — full
+    verification against the system trust store.
+
+    A bundle path that cannot be loaded FAILS CLOSED to ``True``: a
+    typo must not take down every login, and ``True`` is the strictest
+    posture — the only consequence is that corporate-CA hosts keep
+    failing exactly as before, now with an ERROR log naming the fix.
+    Returns a context rather than the path because httpx deprecates
+    ``verify=<str>``.
+    """
+    if override is not None:
+        if isinstance(override, str):
+            return _bundle_context(override) or True
+        return override
+    configured = os.getenv(SSO_OUTBOUND_TLS_CA_CERTS_ENV, "").strip()
+    if not configured:
+        return True
+    return _bundle_context(configured) or True
 
 
 def _unwrap(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
@@ -178,16 +259,18 @@ def assert_fetchable(
     if scheme not in ("http", "https"):
         raise BlockedOutboundRequest(
             f"{scheme or 'relative'!r} is not a fetchable scheme; "
-            "IdP metadata must be served over https."
+            "IdP metadata must be served over https.",
+            reason="unsupported_scheme",
         )
     if scheme == "http" and _is_prod():
         raise BlockedOutboundRequest(
             "refusing to fetch IdP metadata over plain http in production — "
-            "the document decides which keys verify your users' tokens."
+            "the document decides which keys verify your users' tokens.",
+            reason="plain_http_in_production",
         )
     host = parts.hostname
     if not host:
-        raise BlockedOutboundRequest(f"no host in {url!r}")
+        raise BlockedOutboundRequest(f"no host in {url!r}", reason="no_host")
 
     try:
         resolved = socket.getaddrinfo(
@@ -218,17 +301,22 @@ def assert_fetchable(
             raise BlockedOutboundRequest(
                 f"{host!r} resolves to {ip}, which is a loopback, "
                 "link-local, or otherwise non-routable address. No "
-                "allowlist entry permits this."
+                "allowlist entry permits this.",
+                reason="unroutable_address",
             )
         if not _address_is_reachable(ip) and not permitted:
             raise BlockedOutboundRequest(
                 f"{host!r} resolves to {ip}, which is inside this "
                 "deployment's own network, and "
-                f"{host_port_key(url)!r} is not in the allowlist."
+                f"{host_port_key(url)!r} is not in the allowlist.",
+                reason="private_address_not_allowlisted",
             )
 
 
-async def fetch_metadata(url: str, *, timeout: float) -> httpx.Response:
+async def fetch_metadata(
+    url: str, *, timeout: float,
+    verify: bool | str | ssl.SSLContext | None = None,
+) -> httpx.Response:
     """GET *url* once, with redirects off and the body bounded.
 
     Redirects are disabled rather than followed-and-rechecked: a 302 to
@@ -238,6 +326,7 @@ async def fetch_metadata(url: str, *, timeout: float) -> httpx.Response:
     assert_fetchable(url)
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
     ) as client:
         resp = await client.get(url)
         resp.raise_for_status()
@@ -266,6 +355,7 @@ async def request_json(
     max_bytes: int = MAX_JSON_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
     accept_jwt: bool = False,
+    verify: bool | str | ssl.SSLContext | None = None,
 ) -> Any:
     """Make one guarded credentialed request and return the parsed JSON.
 
@@ -304,6 +394,7 @@ async def request_json(
 
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
     ) as client:
         async with client.stream(
             method.upper(), url,
@@ -347,11 +438,20 @@ async def request_json(
 MAX_AVATAR_BYTES = 256 * 1024
 
 #: The content types an avatar fetch will accept, parameter-stripped and
-#: case-folded. Anything else — HTML, JSON, SVG (scriptable) — is not an
-#: image we are willing to re-serve.
+#: case-folded: raster images only. ``image/jpg`` is not a registered
+#: type, but enough photo hosts serve it that refusing the alias only
+#: punishes their users. Anything else — HTML, JSON, SVG (scriptable) —
+#: is not an image we are willing to re-serve.
 _AVATAR_IMAGE_TYPES = frozenset({
-    "image/png", "image/jpeg", "image/gif", "image/webp",
+    "image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp",
+    "image/avif",
 })
+
+#: Redirect hops an avatar fetch will follow. Photo services routinely
+#: 302 to a CDN (Gravatar, Google, GitHub all do), so unlike the
+#: metadata calls a bounded, re-checked follow is the difference between
+#: "works" and "silently never stores".
+_MAX_AVATAR_REDIRECTS = 3
 
 
 async def fetch_image(
@@ -360,47 +460,107 @@ async def fetch_image(
     timeout: float,
     max_bytes: int = MAX_AVATAR_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
+    require_hosts: frozenset[str] | set[str] | None = None,
+    verify: bool | str | ssl.SSLContext | None = None,
 ) -> tuple[bytes, str]:
     """GET one image with :func:`request_json`'s guards, returning
     ``(bytes, content_type)``.
 
-    Same posture as every outbound call here: destination pre-checked,
-    redirects refused, the body capped while streaming. The one addition
-    is the content-type allowlist — the bytes are stored and re-served
-    from our own origin, so a reply that is not a raster image is a
-    refusal, not a passthrough.
-    """
-    assert_fetchable(url, allow_hosts=allow_hosts)
+    Same posture as every outbound call here — destination pre-checked,
+    the body capped while streaming — with two image-specific turns:
+    redirects are followed up to :data:`_MAX_AVATAR_REDIRECTS` hops,
+    with :func:`assert_fetchable` re-run on **every** hop so a 302
+    cannot route past the pre-flight check; and the content-type must be
+    a raster image, because the bytes are stored and re-served from our
+    own origin, so a reply that is not one is a refusal, not a
+    passthrough.
 
+    ``require_hosts`` is the avatar allowlist, and it inverts the
+    default posture: when it is not ``None``, EVERY hop's ``host:port``
+    must appear in it — public hosts included — or the fetch is refused.
+    ``allow_hosts`` keeps its usual meaning (which entries may resolve
+    private). An empty ``require_hosts`` set therefore refuses every
+    destination: the list is the on-switch.
+    """
+    current = url
     async with httpx.AsyncClient(
         timeout=timeout, follow_redirects=False,
+        verify=resolve_outbound_verify(verify),
     ) as client:
-        async with client.stream("GET", url) as resp:
-            if 300 <= resp.status_code < 400:
-                raise BlockedOutboundRequest(
-                    f"{url!r} answered {resp.status_code} with a redirect; "
-                    "redirects are refused because they are how a "
-                    "pre-flight address check gets bypassed."
-                )
-            if resp.status_code >= 400:
-                raise OutboundStatusError(url, resp.status_code)
-            content_type = (
-                resp.headers.get("content-type") or ""
-            ).split(";")[0].strip().lower()
-            if content_type not in _AVATAR_IMAGE_TYPES:
-                raise BlockedOutboundRequest(
-                    f"{url!r} answered with content-type "
-                    f"{content_type or 'unknown'!r}, which is not an "
-                    "image type this fetch accepts."
-                )
-            body = bytearray()
-            async for chunk in resp.aiter_bytes():
-                body.extend(chunk)
-                if len(body) > max_bytes:
+        for _hop in range(_MAX_AVATAR_REDIRECTS + 1):
+            if require_hosts is not None:
+                key = host_port_key(current)
+                if key not in {
+                    str(entry).strip().lower() for entry in require_hosts
+                }:
                     raise BlockedOutboundRequest(
-                        f"{url!r} exceeded the {max_bytes}-byte image cap."
+                        f"{key.rsplit(':', 1)[0]!r} is not on the avatar "
+                        "image hosts list, so this image will not be "
+                        f"fetched. Add {key!r} to the list to allow it.",
+                        reason="host_not_allowlisted",
                     )
-    return bytes(body), content_type
+            assert_fetchable(current, allow_hosts=allow_hosts)
+            async with client.stream("GET", current) as resp:
+                if 300 <= resp.status_code < 400:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise BlockedOutboundRequest(
+                            f"{current!r} answered {resp.status_code} "
+                            "with no Location header.",
+                            reason="redirect_without_location",
+                        )
+                    current = urljoin(current, location)
+                    continue
+                if resp.status_code >= 400:
+                    raise OutboundStatusError(current, resp.status_code)
+                content_type = (
+                    resp.headers.get("content-type") or ""
+                ).split(";")[0].strip().lower()
+                if content_type not in _AVATAR_IMAGE_TYPES:
+                    raise BlockedOutboundRequest(
+                        f"{current!r} answered with content-type "
+                        f"{content_type or 'unknown'!r}, which is not a "
+                        "raster image type this fetch accepts.",
+                        reason="not_an_image",
+                    )
+                body = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > max_bytes:
+                        raise BlockedOutboundRequest(
+                            f"{current!r} exceeded the {max_bytes}-byte "
+                            "image cap.",
+                            reason="too_large",
+                        )
+                return bytes(body), content_type
+    raise BlockedOutboundRequest(
+        f"{url!r} redirected more than {_MAX_AVATAR_REDIRECTS} times.",
+        reason="too_many_redirects",
+    )
+
+
+def is_tls_verification_failure(exc: BaseException) -> bool:
+    """True when *exc* is (or wraps) a TLS certificate-verification
+    failure.
+
+    httpx surfaces these as ``ConnectError`` with no ``.reason`` of the
+    kind :class:`OutboundError` carries — only the ssl error's text —
+    so the cause chain is walked first and the message match is the
+    fallback, not the mechanism. Lets the rehearsal name a trust
+    problem as a trust problem instead of a generic fetch failure.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    msg = str(exc).lower()
+    return (
+        "certificate_verify_failed" in msg
+        or "certificate verify failed" in msg
+    )
 
 
 async def fetch_jwks(
@@ -409,6 +569,7 @@ async def fetch_jwks(
     timeout: float,
     max_bytes: int = MAX_JSON_BYTES,
     allow_hosts: frozenset[str] | set[str] = frozenset(),
+    verify: bool | str | ssl.SSLContext | None = None,
 ) -> dict:
     """GET a JWKS document through the same guards as every other call.
 
@@ -420,7 +581,7 @@ async def fetch_jwks(
     """
     doc = await request_json(
         url, method="GET", timeout=timeout, max_bytes=max_bytes,
-        allow_hosts=allow_hosts,
+        allow_hosts=allow_hosts, verify=verify,
     )
     if not isinstance(doc, dict) or not isinstance(doc.get("keys"), list):
         raise BlockedOutboundRequest(

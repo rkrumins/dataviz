@@ -5,6 +5,15 @@ import { authFetch } from './apiClient'
 
 const ADMIN_USERS_API = '/api/v1/admin/users'
 
+/** One linked SSO identity as the admin list carries it. */
+export interface AdminUserIdentityRef {
+    providerId: string
+    slug: string
+    displayName: string
+    kind: string
+    lastLoginAt: string | null
+}
+
 export interface AdminUserResponse {
     id: string
     email: string
@@ -19,6 +28,14 @@ export interface AdminUserResponse {
     /** Still holding a shipped default password, and required to
      *  change it before it can do anything else. */
     mustChangePassword: boolean
+    /** How the account signs in: a usable password (the disabled
+     *  sentinel counts as none)… */
+    hasPassword: boolean
+    /** …where the account came from (local_signup | sso_jit | invite |
+     *  admin_created | admin_linked)… */
+    signupSource: string | null
+    /** …and the SSO identities linked to it, with which IdP each is. */
+    identities: AdminUserIdentityRef[]
 }
 
 export interface ResetTokenResponse {

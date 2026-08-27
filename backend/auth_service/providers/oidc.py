@@ -37,7 +37,11 @@ from urllib.parse import urlencode
 import httpx
 from authlib.jose import jwt as jose_jwt, JsonWebKey
 
-from .outbound import BlockedOutboundRequest, fetch_metadata
+from .outbound import (
+    BlockedOutboundRequest,
+    fetch_metadata,
+    resolve_outbound_verify,
+)
 from authlib.jose.errors import JoseError as _AuthlibJoseError
 from authlib.oidc.core import CodeIDToken
 
@@ -338,7 +342,14 @@ class OidcProvider:
             "code_verifier": code_verifier,
         }
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            # The one credentialed call built outside outbound.py (it
+            # needs a form body request_json cannot carry). It still has
+            # to honor the deployment's trust anchor — a corporate-CA'd
+            # token endpoint would otherwise fail here AFTER discovery
+            # succeeded through the guarded path.
+            async with httpx.AsyncClient(
+                timeout=_HTTP_TIMEOUT, verify=resolve_outbound_verify(),
+            ) as client:
                 resp = await client.post(meta["token_endpoint"], data=data)
                 resp.raise_for_status()
                 token = resp.json()

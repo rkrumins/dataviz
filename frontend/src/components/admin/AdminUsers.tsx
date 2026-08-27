@@ -8,7 +8,7 @@
  * - Admin password reset (direct or generate token)
  * - Password reset request notifications
  */
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, createElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users, CheckCircle2, XCircle, Clock, Shield, AlertCircle,
@@ -35,8 +35,11 @@ import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { logoFor } from '@/components/admin/sso/IdpLogos'
+import { presetById } from '@/components/admin/sso/vendorPresets'
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { AccessSummary } from '@/components/access/AccessSummary'
@@ -150,6 +153,88 @@ function SortHeader({ label, field, current, dir, onSort }: {
             {label}
             {isActive && (dir === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
         </button>
+    )
+}
+
+// ── How an account signs in, as chips ────────────────────────────────
+//
+// Local (password), each linked IdP by name with its vendor mark, or a
+// stranded account with neither. Everything explains itself on hover —
+// last sign-in, whether SSO provisioned the account, what "Local"
+// means — so the table answers "who is SSO, and from where" without
+// opening a single row.
+
+const MAX_PROVIDER_CHIPS = 2
+const SIGNIN_CHIP =
+    'inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold border'
+
+function SignInMethods({ user }: { user: AdminUserResponse }) {
+    const identities = user.identities ?? []
+    const shown = identities.slice(0, MAX_PROVIDER_CHIPS)
+    const overflow = identities.slice(MAX_PROVIDER_CHIPS)
+
+    if (identities.length === 0) {
+        return user.hasPassword ? (
+            <HoverTip label="Signs in with an email and password. No SSO identity is linked.">
+                <span className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary border-glass-border')}>
+                    <KeyRound className="w-3 h-3" />
+                    Local
+                </span>
+            </HoverTip>
+        ) : (
+            <HoverTip label="No usable password and no linked SSO identity — this account has no way to sign in right now. Grant a reset token, or let a connection link it on their next SSO sign-in.">
+                <span className={cn(SIGNIN_CHIP, 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20')}>
+                    No sign-in
+                </span>
+            </HoverTip>
+        )
+    }
+
+    return (
+        <div className="flex items-center gap-1.5 flex-wrap">
+            {shown.map(identity => (
+                <HoverTip
+                    key={identity.providerId}
+                    label={(
+                        <span className="block space-y-0.5">
+                            <span className="block font-semibold">{identity.displayName}</span>
+                            <span className="block">{identity.slug} · {identity.kind}</span>
+                            {identity.lastLoginAt && (
+                                <span className="block">Last signed in with it {timeAgo(identity.lastLoginAt)}.</span>
+                            )}
+                            {user.signupSource === 'sso_jit' && (
+                                <span className="block">The account itself was provisioned by SSO.</span>
+                            )}
+                        </span>
+                    )}
+                >
+                    <span className={cn(SIGNIN_CHIP, 'bg-indigo-500/[0.06] text-ink-secondary border-glass-border max-w-[11rem]')}>
+                        {createElement(
+                            logoFor(presetById(identity.kind)?.id, identity.kind),
+                            { className: 'w-3 h-3 shrink-0' },
+                        )}
+                        <span className="truncate">{identity.displayName}</span>
+                    </span>
+                </HoverTip>
+            ))}
+            {overflow.length > 0 && (
+                <HoverTip label={`Also linked: ${overflow.map(i => i.displayName).join(', ')}`}>
+                    <span className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border-glass-border')}>
+                        +{overflow.length}
+                    </span>
+                </HoverTip>
+            )}
+            {user.hasPassword && (
+                <HoverTip label="Also has a password — can sign in locally too.">
+                    <span
+                        aria-label="Also has a password"
+                        className={cn(SIGNIN_CHIP, 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border-glass-border px-1.5')}
+                    >
+                        <KeyRound className="w-3 h-3" />
+                    </span>
+                </HoverTip>
+            )}
+        </div>
     )
 }
 
@@ -300,7 +385,10 @@ export function AdminUsers() {
             list = list.filter(u =>
                 u.displayName.toLowerCase().includes(q) ||
                 u.email.toLowerCase().includes(q) ||
-                u.role.toLowerCase().includes(q)
+                u.role.toLowerCase().includes(q) ||
+                (u.identities ?? []).some(i =>
+                    i.displayName.toLowerCase().includes(q) ||
+                    i.slug.toLowerCase().includes(q))
             )
         }
         list.sort((a, b) => {
@@ -750,7 +838,7 @@ export function AdminUsers() {
                 </div>
                 <div className="relative flex-1 max-w-xs ml-auto">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-                    <input type="text" placeholder="Search by name, email, or role..."
+                    <input type="text" placeholder="Search by name, email, role, or provider..."
                         value={search} onChange={(e) => setSearch(e.target.value)}
                         className="input pl-9 h-9 text-sm bg-white/50 dark:bg-black/20 w-full" />
                     {search && (
@@ -799,6 +887,7 @@ export function AdminUsers() {
                             <tr className="border-b border-glass-border">
                                 <th className="text-left px-5 py-3"><SortHeader label="User" field="name" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Status" field="status" current={sortField} dir={sortDir} onSort={handleSort} /></th>
+                                <th className="text-left px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Sign-in</span></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Role" field="role" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-left px-5 py-3"><SortHeader label="Joined" field="createdAt" current={sortField} dir={sortDir} onSort={handleSort} /></th>
                                 <th className="text-right px-5 py-3"><span className="text-xs font-semibold uppercase tracking-wider text-ink-muted">Actions</span></th>
@@ -871,6 +960,12 @@ export function AdminUsers() {
                                             ) : (
                                                 <span className="text-xs text-ink-muted">{user.status}</span>
                                             )}
+                                        </td>
+
+                                        {/* Sign-in methods — local, which IdP(s), or stranded.
+                                            Plain spans: the row click (drawer) stays usable. */}
+                                        <td className="px-5 py-4">
+                                            <SignInMethods user={user} />
                                         </td>
 
                                         {/* Role with icon — shared visual map. */}

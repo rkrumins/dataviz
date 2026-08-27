@@ -75,8 +75,14 @@ export interface BackchannelSettings {
 /** One permitted internal destination for a back-channel provider.
  *  Platform-level rather than per-provider: a per-provider allowlist
  *  would be circular. Managed under ``system:sso:hosts:manage``. */
+/** Which outbound flow a host entry serves: 'gateway' rows unlock
+ *  internal destinations for the back-channel legs; 'avatar' rows name
+ *  the external image hosts in-app avatars may be fetched from. */
+export type HostPurpose = 'gateway' | 'avatar'
+
 export interface BackchannelHost {
     id: string
+    purpose?: HostPurpose
     host: string
     port: number
     note?: string | null
@@ -332,6 +338,46 @@ export interface RehearsalOutcome {
      *  re-certification ceiling measured against it. Absent from older
      *  servers — absent means say nothing. */
     auth_time?: { present?: boolean; ceiling_hours?: number }
+    /** The avatar leg: the rehearsal makes the same guarded image GET a
+     *  real sign-in would (storing nothing) and reports the verdict.
+     *  Absent from older servers — absent means say nothing. */
+    avatar?: {
+        url?: string | null
+        fetched?: boolean
+        content_type?: string
+        size?: number
+        reason?: string
+        detail?: string
+    }
+}
+
+/** The avatar verdict as one operator-readable line, or null for the
+ *  no-URL case on a connection that maps no avatar — a fact worth a
+ *  line only when someone expected a picture, which the caller cannot
+ *  know; the rehearsal page itself prints it, this summary stays
+ *  quiet. */
+function avatarLine(
+    a: NonNullable<RehearsalOutcome['avatar']>,
+): string | null {
+    if (!a.url) return null
+    if (a.fetched) {
+        const kib = Math.max(1, Math.round((a.size ?? 0) / 1024))
+        return `Their picture would arrive (${a.content_type ?? 'image'}, `
+            + `${kib} KiB) — a real sign-in stores and shows it.`
+    }
+    const why = a.reason === 'host_not_allowlisted'
+        ? 'its host is not on the avatar image hosts list (Settings tab)'
+        : a.reason === 'not_an_image'
+            ? 'the URL does not serve a raster image (PNG, JPEG, GIF, '
+              + 'WebP or AVIF)'
+            : a.reason === 'too_many_redirects'
+                ? 'the URL redirects more than three times'
+                : a.reason === 'tls_verify_failed'
+                    ? "the host's TLS does not validate against this "
+                      + "deployment's trust — mount your corporate CA "
+                      + 'bundle and point SSO_OUTBOUND_TLS_CA_CERTS at it'
+                    : a.detail || a.reason || 'the fetch failed'
+    return `Their picture would NOT arrive: ${why}.`
 }
 
 /** The verification verdict as one operator-readable line, or null when
@@ -379,6 +425,10 @@ export function summarizeRehearsalOutcome(outcome: RehearsalOutcome): string[] {
             + 're-certification will measure from each sign-in instead '
             + 'of from the IdP.',
         )
+    }
+    if (outcome.avatar) {
+        const line = avatarLine(outcome.avatar)
+        if (line) lines.push(line)
     }
     const groups = outcome.groups ?? []
     lines.push(
@@ -457,25 +507,31 @@ export const ssoAdminService = {
         )
     },
 
-    // ── Back-channel host allowlist ──────────────────────────────────
+    // ── Outbound host allowlists ─────────────────────────────────────
     //
-    // Which internal addresses a back-channel provider may call. Gated
-    // server-side on ``system:sso:hosts:manage`` rather than
-    // ``system:admin``, so these three can 403 for someone who can edit
-    // every other thing on this page — the UI has to say so rather than
-    // showing an empty list.
+    // Two lists on one route, told apart by ?purpose=: 'gateway'
+    // (default — which internal addresses a back-channel provider may
+    // call) and 'avatar' (which external image hosts in-app avatars may
+    // be fetched from). Gated server-side on
+    // ``system:sso:hosts:manage`` rather than ``system:admin``, so
+    // these three can 403 for someone who can edit every other thing on
+    // this page — the UI has to say so rather than showing an empty
+    // list.
 
-    listBackchannelHosts(): Promise<BackchannelHost[]> {
+    listBackchannelHosts(purpose?: HostPurpose): Promise<BackchannelHost[]> {
         return request<BackchannelHost[]>(
-            `${ADMIN}/idp-providers/backchannel-hosts`,
+            `${ADMIN}/idp-providers/backchannel-hosts${
+                purpose ? `?purpose=${purpose}` : ''}`,
         )
     },
 
     addBackchannelHost(
         body: { host: string; port?: number; note?: string },
+        purpose?: HostPurpose,
     ): Promise<BackchannelHost> {
         return request<BackchannelHost>(
-            `${ADMIN}/idp-providers/backchannel-hosts`,
+            `${ADMIN}/idp-providers/backchannel-hosts${
+                purpose ? `?purpose=${purpose}` : ''}`,
             { method: 'POST', body: JSON.stringify(body) },
         )
     },

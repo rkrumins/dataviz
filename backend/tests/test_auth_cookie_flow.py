@@ -111,6 +111,118 @@ async def test_me_without_cookie_returns_401(test_client: AsyncClient):
     assert me.status_code == 401
 
 
+# ── /me heals a lost CSRF cookie ─────────────────────────────────────
+#
+# Nothing else mints ``nx_csrf`` outside a rotation, so a reload — all
+# GETs — used to change nothing: a session whose CSRF cookie was
+# evicted (a sibling deployment's sign-out sweeps the shared parent
+# domain) kept failing every write. The bootstrap GET is the one moment
+# the server knows the session is valid before any write happens.
+
+def _csrf_set_cookies(resp) -> list[str]:
+    # httpx spells it get_list; starlette spells it getlist.
+    read = getattr(resp.headers, "get_list", None) or resp.headers.getlist
+    return [
+        h for h in read("set-cookie")
+        if h.startswith(f"{CSRF_COOKIE_NAME}=")
+    ]
+
+
+async def _login_cookie_user(test_client, db_session) -> None:
+    await _seed(db_session)
+    login = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "cookie@example.com", "password": _PASSWORD},
+    )
+    assert login.status_code == 200
+
+
+async def test_me_re_mints_a_missing_csrf_cookie(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    from backend.auth_service.core.tokens import decode_token
+    from backend.auth_service.csrf import verify_csrf_token
+
+    await _login_cookie_user(test_client, db_session)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+
+    me = await test_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    minted = _csrf_set_cookies(me)
+    assert len(minted) == 1
+    # The healed token is bound to THIS session's sid — a cookie any
+    # sibling could satisfy would defeat the double-submit binding.
+    value = minted[0].split(";", 1)[0].split("=", 1)[1]
+    sid = decode_token(test_client.cookies.get(ACCESS_COOKIE_NAME)).get("sid")
+    assert verify_csrf_token(value, sid) is True
+
+
+async def test_me_leaves_a_valid_csrf_cookie_alone(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    # No gratuitous rotation: re-minting on every GET would widen the
+    # header/cookie skew window the client already races.
+    await _login_cookie_user(test_client, db_session)
+
+    me = await test_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert _csrf_set_cookies(me) == []
+
+
+def test_the_heal_replaces_a_cookie_minted_for_another_session():
+    """The sid-mismatch branch, unit-shaped: the flows in this test
+    environment mint no ``sid``, so the case cannot arise end to end
+    here — but a sid-carrying deployment must not keep accepting a
+    cookie the middleware is about to refuse."""
+    from fastapi import Response
+    from starlette.requests import Request
+
+    from backend.auth_service.api.router import _heal_csrf_cookie
+    from backend.auth_service.core.tokens import create_access_token
+    from backend.auth_service.csrf import mint_csrf_token, verify_csrf_token
+
+    access = create_access_token(
+        "usr_1", "a@example.com", "user", extra={"sid": "sess_alice"},
+    )
+    planted = mint_csrf_token("sess_mallory")
+    request = Request({
+        "type": "http",
+        "headers": [(
+            b"cookie",
+            f"{ACCESS_COOKIE_NAME}={access}; "
+            f"{CSRF_COOKIE_NAME}={planted}".encode(),
+        )],
+    })
+    response = Response()
+    _heal_csrf_cookie(request, response)
+
+    minted = _csrf_set_cookies(response)
+    assert len(minted) == 1
+    value = minted[0].split(";", 1)[0].split("=", 1)[1]
+    assert verify_csrf_token(value, "sess_alice") is True
+
+    # And the converse: a cookie minted for THIS sid is left alone.
+    ok = Request({
+        "type": "http",
+        "headers": [(
+            b"cookie",
+            f"{ACCESS_COOKIE_NAME}={access}; "
+            f"{CSRF_COOKIE_NAME}={mint_csrf_token('sess_alice')}".encode(),
+        )],
+    })
+    untouched = Response()
+    _heal_csrf_cookie(ok, untouched)
+    assert _csrf_set_cookies(untouched) == []
+
+
+async def test_me_does_not_mint_for_anonymous(test_client: AsyncClient):
+    test_client.cookies.delete(ACCESS_COOKIE_NAME)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+    me = await test_client.get("/api/v1/auth/me")
+    assert me.status_code == 401
+    assert _csrf_set_cookies(me) == []
+
+
 # ── refresh rotation ─────────────────────────────────────────────────
 
 async def test_refresh_rotates_tokens(

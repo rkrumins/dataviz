@@ -616,3 +616,66 @@ async def test_a_populated_top_level_key_still_wins_over_nested(monkeypatch):
     _routes(monkeypatch, handler)
     identity = await _provider().fetch_identity("ambient-xyz")
     assert identity.groups == ("real",)
+
+
+# ── per-connection TLS verification ──────────────────────────────────
+#
+# ``tls_verify`` off passes ``verify=False`` into every server-side
+# client this row builds; on (the default) passes ``None``, deferring
+# to the deployment CA bundle (``resolve_outbound_verify`` → True when
+# none is configured).
+
+
+def _routes_capturing(monkeypatch, handler):
+    captured: list[dict] = []
+
+    def _make(**kwargs):
+        captured.append(dict(kwargs))
+        kwargs.pop("verify", None)
+        return _REAL_ASYNC_CLIENT(
+            transport=httpx.MockTransport(handler), **kwargs,
+        )
+
+    monkeypatch.setattr(outbound.httpx, "AsyncClient", _make)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_tls_verify_off_reaches_both_legs(monkeypatch):
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS", raising=False)
+    captured = _routes_capturing(monkeypatch, _happy)
+    await _provider(tls_verify=False).fetch_identity("ambient-xyz")
+    assert len(captured) == 2
+    assert all(c["verify"] is False for c in captured)
+
+
+@pytest.mark.asyncio
+async def test_tls_verify_defaults_to_full_verification(monkeypatch):
+    monkeypatch.delenv("SSO_OUTBOUND_TLS_CA_CERTS", raising=False)
+    captured = _routes_capturing(monkeypatch, _happy)
+    await _provider().fetch_identity("ambient-xyz")
+    assert len(captured) == 2
+    assert all(c["verify"] is True for c in captured)
+
+
+def test_settings_from_snapshot_parses_tls_verify():
+    from backend.auth_service.providers.backchannel import (
+        settings_from_snapshot,
+    )
+
+    def _snap(settings):
+        return ProviderConfigSnapshot(
+            id="idp_t", slug="corp", display_name="Corp",
+            kind="backchannel", enabled=True, priority=100,
+            settings=settings, claim_mapping={}, linking_policy="strict",
+            button_label=None, button_icon=None,
+        )
+
+    base = {"gateway_url": GATEWAY, "gateway_token_path": "access_token"}
+    assert settings_from_snapshot(_snap(base)).tls_verify is True
+    assert settings_from_snapshot(
+        _snap({**base, "tls_verify": "false"})
+    ).tls_verify is False
+    assert settings_from_snapshot(
+        _snap({**base, "tls_verify": True})
+    ).tls_verify is True

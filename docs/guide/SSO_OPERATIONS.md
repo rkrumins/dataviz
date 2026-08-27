@@ -264,7 +264,7 @@ specifics (which URL, which path, which status).
 |---|---|---|
 | `backchannel_no_session` | The request arrived without your portal's session cookie (or header) | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
 | `backchannel_idp_rejected:401` / `:403` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
-| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. Existing sessions ride out a short outage; see below |
+| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. An `idp_unreachable` whose summary mentions *certificate verify failed* means this deployment does not trust the gateway's TLS: mount your corporate CA bundle (`SSO_OUTBOUND_TLS_CA_CERTS`) rather than switching verification off. Existing sessions ride out a short outage; see below |
 | `backchannel_token_absent` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
 | `backchannel_claims_absent` | Same, for the user details | Same fix |
 | `backchannel_claims_unmappable` | The details arrived, but the claim mapping could not produce an identity from them | Open the connection's **Claim mapping**, load the last assertion, and see which required field (subject, email) has no source |
@@ -437,4 +437,6 @@ should usually be zero.
 **Rehearse after changes.** The rehearsal from setup is available on every
 connection's card at any time, not just during setup. It writes nothing and
 creates no session, so there is no reason not to use it after editing a
-connection.
+connection. Its verdict also tells the avatar story — whether the mapped
+picture would arrive (type and size), or which rule refused it and, when the
+host is the problem, which host to add to the avatar image hosts list.

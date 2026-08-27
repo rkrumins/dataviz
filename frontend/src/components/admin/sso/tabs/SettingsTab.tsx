@@ -34,6 +34,7 @@ import {
 import { cn } from '@/lib/utils'
 import { ErrorBanner } from './ErrorBanner'
 import { BackchannelHostsPanel } from './settings/BackchannelHostsPanel'
+import { AvatarHostsPanel } from './settings/AvatarHostsPanel'
 import { describePosture, riskChecks, type PostureTone } from './settings/posture'
 import { SsoCard, SsoSectionLabel, type CardTone } from '../ui/SsoCard'
 import { SsoSettingsSkeleton, SsoLoading } from '../ui/SsoSkeleton'
@@ -317,6 +318,8 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                 reach. It belongs beside them rather than inside one
                 provider's settings, where it would be circular. */}
             <BackchannelHostsPanel />
+
+            <AvatarHostsPanel />
 
             <p className="text-[11px] text-ink-muted">
                 Version {cfg?.version ?? '—'} · last changed {relative(cfg?.updatedAt)}

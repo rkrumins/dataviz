@@ -167,6 +167,22 @@ describe('saving', () => {
             .toBe('brand-new-secret')
     })
 
+    it('sends a blanked button label as an empty string, not null', async () => {
+        // The server reads null as "field not in this PATCH", so a
+        // blanked box sent as null kept the old label forever — the
+        // owner's "Sign in via DSP" outlived every edit. '' clears.
+        const user = userEvent.setup()
+        renderDrawer({ buttonLabel: 'Sign in via DSP' })
+
+        await user.click(section(/login page/i))
+        const labelInput = screen.getByDisplayValue('Sign in via DSP')
+        await user.clear(labelInput)
+        await user.click(screen.getByRole('button', { name: /save changes/i }))
+
+        await waitFor(() => expect(updateProvider).toHaveBeenCalled())
+        expect(updateProvider.mock.calls[0][1].buttonLabel).toBe('')
+    })
+
     it('reports a failed save in place instead of closing', async () => {
         const user = userEvent.setup()
         updateProvider.mockRejectedValue(new Error('slug already in use'))

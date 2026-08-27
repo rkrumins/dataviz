@@ -1799,6 +1799,13 @@ class SsoBackchannelHostORM(Base):
         Text, primary_key=True,
         default=lambda: f"bch_{uuid.uuid4().hex[:12]}",
     )
+    #: Which outbound flow the entry serves. ``gateway`` rows relax the
+    #: private-address refusal for the back-channel legs; ``avatar`` rows
+    #: name the external image hosts in-app avatars may be fetched from
+    #: (with the avatar list empty, external avatar hosts are refused —
+    #: the list is the on-switch, not a narrowing).
+    purpose = Column(Text, nullable=False, default="gateway",
+                     server_default="gateway")
     #: Lowercased, trailing root dot stripped — normalised by the repo so
     #: one destination is one row rather than three spellings.
     host = Column(Text, nullable=False)
@@ -1810,14 +1817,15 @@ class SsoBackchannelHostORM(Base):
     created_by = Column(Text, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("host", "port", name="uq_sso_backchannel_host_port"),
+        UniqueConstraint("purpose", "host", "port",
+                         name="uq_sso_backchannel_purpose_host_port"),
         CheckConstraint(
             "port > 0 AND port <= 65535", name="ck_sso_backchannel_port",
         ),
     )
 
     def __repr__(self) -> str:
-        return f"<SsoBackchannelHost {self.host}:{self.port}>"
+        return f"<SsoBackchannelHost {self.purpose}:{self.host}:{self.port}>"
 
 
 # ------------------------------------------------------------------ #
