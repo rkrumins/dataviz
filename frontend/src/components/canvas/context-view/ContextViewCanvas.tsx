@@ -87,6 +87,7 @@ import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
+import { useFindInView } from '@/hooks/useFindInView'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState, useHoverHighlight, useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useTraceFilteredHierarchy } from '@/hooks/useTraceFilteredHierarchy'
@@ -1031,8 +1032,9 @@ export function ContextViewCanvas({
     return () => clearTimeout(t)
   }, [assignmentStatus, resetAssignmentStatus])
 
-  // Search state
-  const [searchQuery, setSearchQuery] = useState('')
+  // Search state lives in useFindInView — see the hook for the two tiers
+  // (instant local, authoritative server) behind the header box. Declared
+  // below, once displayFlat / displayMap / parentMap exist.
 
   // Entity creation. Every entry point (layer "add" buttons, per-row
   // add-child, right-click create, palette, 'N' key) opens the shared
@@ -2342,25 +2344,26 @@ export function ContextViewCanvas({
   }, [trace.isTracing, trace.drilldowns, renderMap])
 
 
-  // Search results
-  const searchResults = useMemo(() => {
-    if (!searchQuery.trim()) return []
-    const query = searchQuery.toLowerCase()
-    return displayFlat.filter((node) =>
-      node.name.toLowerCase().includes(query) ||
-      node.typeId.toLowerCase().includes(query)
-    )
-  }, [searchQuery, displayFlat])
+  // Find-in-view. Two tiers: the nodes already hydrated answer every
+  // keystroke instantly, and a debounced view-scoped /search/advanced
+  // call finds the rest — including entities nobody has expanded, which
+  // the old `displayFlat.filter(...)` here could never see.
+  const findInView = useFindInView({
+    viewId: activeView?.id ?? '',
+    displayFlat,
+    parentMap,
+    displayMap,
+  })
 
-  // Advanced-search match URN set (W1 substrate). Subscribed once so a
-  // re-render fires only when the set object identity changes. The
-  // canvas highlights these URNs via the existing `searchResults` prop
-  // on LayerColumn — same visual treatment as the legacy quick-search
-  // fallback, just sourced server-side. Union with the legacy quick-
-  // search hits so both lit at once (legacy is W9 cleanup target).
+  // The single match set the canvas lights up. Both search surfaces —
+  // this header box and the Advanced Search rail — publish into the same
+  // store slot, so the spotlight, the isolate/exclude filter, the
+  // stepper and the "N matches inside" roll-up badges behave identically
+  // whichever box the user typed into. Subscribed once so a re-render
+  // fires only when the set's identity changes.
   const advancedMatchUrns = useMatchUrnSet()
   const matchedNodeIds = useMemo(() => {
-    const out = new Set<string>(searchResults.map((n) => n.id))
+    const out = new Set<string>()
     if (advancedMatchUrns.size > 0) {
       for (const node of displayFlat) {
         const urn = (node as { urn?: string }).urn ?? node.id
@@ -2370,10 +2373,10 @@ export function ContextViewCanvas({
       }
     }
     // Kept as a Set: LayerColumn tests membership once per rendered row, and
-    // an advanced search can match thousands of nodes — an array turns that
-    // into an O(matches) scan per row on every render.
+    // a search can match thousands of nodes — an array turns that into an
+    // O(matches) scan per row on every render.
     return out
-  }, [searchResults, advancedMatchUrns, displayFlat])
+  }, [advancedMatchUrns, displayFlat])
 
   // Action: Move entity to layer (updated for unified context menu)
   // Stages a `move_to_layer` change instead of immediately persisting via
@@ -4352,23 +4355,12 @@ export function ContextViewCanvas({
       />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        searchResults={searchResults}
-        onSearchResultClick={(node) => {
-          selectNode(node.id)
-          // Tracing: the overlay owns expansion (and the hit may be nested
-          // inside a closed card, so open the way to it too). Mid-walk there
-          // is no overlay yet and browse expansion is not restored on exit,
-          // so leave it alone.
-          if (traceWriteLocked()) {
-            if (overlay.active) {
-              expandTraceChain(node.id)
-              overlay.expandPath([node.id])
-            }
-            return
-          }
-          setExpandedNodes((prev) => new Set([...prev, node.id]))
+        find={findInView}
+        viewId={activeView?.id ?? ''}
+        onRevealSearchHit={revealSearchHit}
+        onOpenSearchHit={(urn) => selectNode(urnToIdMap.get(urn) ?? urn)}
+        onFrameMatches={() => {
+          void handleFrameMatches([...useSearchStore.getState().orderedMatchUrns])
         }}
         showLineageFlow={showLineageFlow}
         onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
@@ -4395,19 +4387,18 @@ export function ContextViewCanvas({
           else setTraceDepthDown(value)
           recordTraceView(dir === 'upstream' ? { depthUp: value } : { depthDown: value })
         }}
-        onOpenAdvancedSearch={(seedQuery) => {
-          // Toggle the panel. When the user escalates from the
-          // quick search (passes a seed string), force-open the
-          // panel + clear the quick-search input (so the no-match
-          // escalation card disappears) + stash the typed query as
-          // a one-shot ``pendingSearchSeed`` (W2.7) so the empty
-          // hero's "Type to search by name across this view…"
-          // input opens pre-filled with the user's text. The hero
-          // consumes + clears the seed on mount.
-          if (seedQuery && seedQuery.trim()) {
-            const trimmed = seedQuery.trim()
-            setSearchQuery('')
-            useSearchStore.getState().setPendingSearchSeed(trimmed)
+        onOpenAdvancedSearch={(seed) => {
+          // Escalating from the header carries the whole query over, not
+          // just the words: the rail opens with the user's conditions as
+          // editable, removable, savable filter rows via the same
+          // requestSearchRun bridge the Property Manager uses. Falls back
+          // to seeding the hero's text input when the query didn't compile
+          // (a half-typed operator), so the user still doesn't retype.
+          const text = seed?.text?.trim()
+          if (text) {
+            const predicate = findInView.compiled.predicate
+            if (predicate) useSearchStore.getState().requestSearchRun(predicate)
+            else useSearchStore.getState().setPendingSearchSeed(text)
             setAdvancedSearchOpen(true)
             return
           }

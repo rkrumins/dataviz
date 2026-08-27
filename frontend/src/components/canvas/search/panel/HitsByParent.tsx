@@ -33,7 +33,7 @@ const VIRTUALIZE_THRESHOLD = 200
 
 
 export interface HitsByParentProps {
-    hits: SearchHit[]
+    hits: readonly SearchHit[]
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
     /** Ref to the scrollable parent in ``ResultsPane``. Required for
@@ -189,7 +189,7 @@ function ParentGroup({
  * "1 match" folder header — they'd just add noise.
  */
 function groupByParent(
-    hits: SearchHit[],
+    hits: readonly SearchHit[],
     minGroupSize: number,
 ): { flat: SearchHit[]; groups: Group[] } {
     const buckets = new Map<string, Group>()

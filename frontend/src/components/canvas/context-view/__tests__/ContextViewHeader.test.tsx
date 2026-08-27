@@ -10,13 +10,30 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ContextViewHeader, type ContextViewHeaderProps } from '../ContextViewHeader'
+import type { FindInViewState } from '@/hooks/useFindInView'
+
+/** An idle find-in-view state. The header renders the field from this;
+ *  the search behaviour itself is covered by HeaderSearch.test.tsx. */
+function makeFindState(overrides: Partial<FindInViewState> = {}): FindInViewState {
+  return {
+    text: '', mode: 'contains', scope: 'everything',
+    setText: vi.fn(), setMode: vi.fn(), setScope: vi.fn(), clear: vi.fn(),
+    hits: [], localCount: 0, serverTotal: null,
+    status: 'idle', errorMessage: null,
+    truncated: false, deadlineExceeded: false, elapsedMs: null,
+    isStale: false,
+    compiled: {
+      predicate: null, recognized: [], fallbackText: [], usedOperators: false,
+    },
+    ...overrides,
+  }
+}
 
 function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextViewHeaderProps {
   return {
-    searchQuery: '',
-    onSearchChange: vi.fn(),
-    searchResults: [],
-    onSearchResultClick: vi.fn(),
+    find: makeFindState(),
+    viewId: 'view-1',
+    onRevealSearchHit: vi.fn(),
     showLineageFlow: true,
     onToggleLineageFlow: vi.fn(),
     showEdgeDirection: false,

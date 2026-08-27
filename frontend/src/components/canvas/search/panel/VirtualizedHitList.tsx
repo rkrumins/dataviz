@@ -33,7 +33,7 @@ import { SearchHitRow } from '../SearchHitRow'
 
 
 export interface VirtualizedHitListProps {
-    hits: SearchHit[]
+    hits: readonly SearchHit[]
     /** Ref to the scrollable parent owned by ``ResultsPane``. The
      *  virtualizer measures its viewport from this element and only
      *  paints rows in the visible range + overscan. */

@@ -20,20 +20,25 @@
  */
 
 import { motion, AnimatePresence } from 'framer-motion'
-import type { HierarchyNode } from './types'
+import type { FindInViewState } from '@/hooks/useFindInView'
+import type { AncestorRef } from '@/types/search'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
-import { HeaderSearch, HeaderSearchResults } from './header/HeaderSearch'
+import { HeaderFindField } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
 import { ViewTitleMenu } from './header/ViewTitleMenu'
 
 export interface ContextViewHeaderProps {
-  // Search
-  searchQuery: string
-  onSearchChange: (q: string) => void
-  searchResults: HierarchyNode[]
-  onSearchResultClick: (node: HierarchyNode) => void
+  // Search — the whole find-in-view state, owned by the canvas and
+  // rendered by header/HeaderSearch.tsx. Results no longer travel as a
+  // separate array + click handler: the field's own panel renders them,
+  // grouped by parent, with reveal wired straight through.
+  find: FindInViewState
+  viewId: string
+  onRevealSearchHit: (urn: string, ancestorPath: AncestorRef[]) => void
+  onOpenSearchHit?: (urn: string) => void
+  onFrameMatches?: () => void
 
   // Lineage flow
   showLineageFlow: boolean
@@ -97,7 +102,7 @@ export interface ContextViewHeaderProps {
   //     ``TextPredicate{target:'name', value: seedQuery}`` so the
   //     user picks up where they left off without retyping.
   // When invoked WITHOUT a seedQuery, just toggle the panel.
-  onOpenAdvancedSearch?: (seedQuery?: string) => void
+  onOpenAdvancedSearch?: (seed?: { text: string }) => void
 
   // Property Manager — opens the reusable right-side drawer for browsing
   // properties and authoring display-rule tags. Optional so canvases that
@@ -157,10 +162,11 @@ export interface ContextViewHeaderProps {
 }
 
 export function ContextViewHeader({
-  searchQuery,
-  onSearchChange,
-  searchResults,
-  onSearchResultClick,
+  find,
+  viewId,
+  onRevealSearchHit,
+  onOpenSearchHit,
+  onFrameMatches,
   showLineageFlow,
   onToggleLineageFlow,
   showEdgeDirection,
@@ -306,11 +312,15 @@ export function ContextViewHeader({
           onRetrySync={onRetrySync}
         />
 
-        {/* Zone 2 — Search. See header/HeaderSearch.tsx for the field +
-            helper-row implementation. */}
-        <HeaderSearch
-          searchQuery={searchQuery}
-          onSearchChange={onSearchChange}
+        {/* Zone 2 — Search. The field owns its own results panel; see
+            header/HeaderSearch.tsx and header/FindResultsPanel.tsx. */}
+        <HeaderFindField
+          find={find}
+          viewId={viewId}
+          viewName={viewName}
+          onReveal={onRevealSearchHit}
+          onOpen={onOpenSearchHit}
+          onFrame={onFrameMatches}
           onOpenAdvancedSearch={onOpenAdvancedSearch}
         />
 
@@ -358,22 +368,6 @@ export function ContextViewHeader({
         </AnimatePresence>
       </div>
 
-      {/* Search Results — three states drive the row:
-            1. query empty       → nothing rendered
-            2. query + matches   → chip list + a tail "Search entire
-                                   graph" escalation link
-            3. query + no match  → prominent escalation card pointing
-                                   the user at Advanced Search
-          The escalation card makes the empty case the BEST moment to
-          discover Advanced Search — exactly when the user has typed
-          something and the visible canvas couldn't find it.
-          See header/HeaderSearch.tsx for the implementation. */}
-      <HeaderSearchResults
-        searchQuery={searchQuery}
-        searchResults={searchResults}
-        onSearchResultClick={onSearchResultClick}
-        onOpenAdvancedSearch={onOpenAdvancedSearch}
-      />
     </div>
   )
 }

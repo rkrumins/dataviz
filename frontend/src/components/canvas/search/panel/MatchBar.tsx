@@ -12,7 +12,7 @@
  *     ``focusedMatchIndex`` in the search store, which drives both
  *     the in-panel row scroll AND the canvas auto-reveal (wired in
  *     ResultsPane).
- *   - 3-segment Highlight│Isolate│Hide toggle: sets
+ *   - 3-segment Highlight│Isolate│Exclude toggle: sets
  *     ``canvasFilterMode`` (persisted per-view). See
  *     ``useSearchHighlight`` for the per-row semantics.
  *   - Frame: fly the canvas viewport to encompass all matches.
@@ -461,11 +461,15 @@ const MODE_OPTIONS: ReadonlyArray<ModeMeta> = [
     },
     {
         value: 'hide',
-        label: 'Hide',
+        // "Exclude", not "Hide": on a three-way toggle beside Isolate,
+        // "hide" reads ambiguously — hide the matches, or hide the rest?
+        // The store value stays 'hide'; only the word the user reads
+        // changes.
+        label: 'Exclude',
         Icon: EyeOff,
-        title: 'Hide matches',
+        title: 'Exclude matches',
         description:
-            'The inverse view: hide matched nodes, keep the rest. Useful for finding gaps in a result set.',
+            'The inverse view: hide the matched nodes, keep everything else. Useful for finding gaps in a result set.',
         footer:
             'Try it with "has owner" to surface tables WITHOUT owners.',
         accent: {
