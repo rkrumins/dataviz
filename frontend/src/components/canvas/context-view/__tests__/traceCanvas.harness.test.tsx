@@ -84,26 +84,22 @@ describe('the trace overlay on the real canvas', () => {
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 
-  // CHILD SEARCH is the one browse action that could not be undone: it
-  // `removeNodes`/`removeEdges` a parent's loaded children and `addGraph`s
-  // the hits, recording nothing about what it dropped. Both halves are
-  // checked here — the affordance is withdrawn, and the handler behind it
-  // refuses anyway.
-  it('child search is withdrawn during a trace, and refuses if reached', async () => {
+  // SEARCH is the action that used to be un-undoable: the per-node child
+  // search `removeNodes`/`removeEdges`'d a parent's loaded children and
+  // `addGraph`'d the hits, recording nothing about what it dropped. It is
+  // gone, and its replacement — the header's find-in-view box — holds its
+  // results in hook state and never touches the canvas store. Pinned in
+  // browse AND mid-trace, because a search that wrote during a walk would
+  // have nothing to undo it on exit.
+  it('searching never writes to the canvas store, in browse or in a trace', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
-
-    // Browse offers it, and opening the box is a normal browse interaction.
-    expect(h.childSearchButton('tableau')).toBe(true)
-    await h.openChildSearch('tableau')
-
-    await h.startTrace('cfo')
     const before = h.snapshotStore()
 
-    // The magnifier is gone from trace rows…
-    expect(h.childSearchButton('tableau')).toBe(false)
-    // …and the box opened before the trace is still mounted, so this really
-    // does reach the canvas's handler — the exact keystroke path, no mock.
-    expect(await h.typeChildSearch('orders')).toBe(true)
+    expect(await h.typeInFind('orders')).toBe(true)
+    expect(h.storeWrites()).toBe(0)
+
+    await h.startTrace('cfo')
+    expect(await h.typeInFind('tableau')).toBe(true)
 
     expect(h.storeWrites()).toBe(0)
     expect(h.snapshotStore()).toEqual(before)
@@ -234,10 +230,6 @@ describe('the trace overlay on the real canvas', () => {
   // key on the SESSION, not on whether the overlay has anything to draw yet.
   it('the canvas is already read-only while the walk runs', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true })
-    // Open a child-search box while still in browse, so it is reachable
-    // during the walk — the trace cannot withdraw an affordance it has not
-    // rendered yet, which is exactly why the handler has to refuse too.
-    await h.openChildSearch('tableau')
     const before = h.snapshotStore()
 
     await h.startTrace('cfo')
@@ -245,8 +237,6 @@ describe('the trace overlay on the real canvas', () => {
 
     // A browse chevron: a no-op, never a fall-through to the browse expand.
     await h.toggle('INTERMEDIATE_T2')
-    // A submitted child search: refused.
-    expect(await h.typeChildSearch('orders')).toBe(true)
     expect(h.storeWrites()).toBe(0)
 
     await h.resolveTrace()

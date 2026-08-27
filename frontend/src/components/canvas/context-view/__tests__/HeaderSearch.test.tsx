@@ -8,7 +8,7 @@
  * Highlight / Isolate / Exclude reach the store from here, not only from
  * the Advanced rail.
  */
-import { act, render, screen, fireEvent, within } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useSearchStore } from '@/store/searchStore'
@@ -119,6 +119,40 @@ describe('HeaderFindField — the field', () => {
         renderField(find)
         fireEvent.click(screen.getByLabelText('Clear search'))
         expect(find.clear).toHaveBeenCalled()
+    })
+
+    it('unwinds one layer per Escape, and consumes only its own', async () => {
+        // The results panel is a role="dialog", and the canvas's
+        // trace-exit handler yields the first Escape to any open dialog.
+        // A panel that claims that press without consuming it would leave
+        // a user unable to leave a trace while a search is open.
+        const find = makeFind({ text: 'revenue', status: 'ready', hits: [] })
+        renderField(find)
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        expect(screen.getByRole('dialog', { name: /search results/i })).toBeInTheDocument()
+
+        // 1st: the panel. (It exits on an animation, so wait it out.)
+        fireEvent.keyDown(window, { key: 'Escape' })
+        expect(find.clear).not.toHaveBeenCalled()
+        await waitFor(() => {
+            expect(screen.queryByRole('dialog', { name: /search results/i })).toBeNull()
+        })
+
+        // 2nd: the query.
+        fireEvent.keyDown(window, { key: 'Escape' })
+        expect(find.clear).toHaveBeenCalled()
+    })
+
+    it('lets Escape through once it has nothing of its own to close', () => {
+        const outer = vi.fn()
+        window.addEventListener('keydown', outer)
+        try {
+            renderField(makeFind())
+            fireEvent.keyDown(window, { key: 'Escape' })
+            expect(outer).toHaveBeenCalled()
+        } finally {
+            window.removeEventListener('keydown', outer)
+        }
     })
 
     it('focuses the field on Cmd+F', () => {

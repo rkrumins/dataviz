@@ -75,15 +75,9 @@ export interface TraceCanvasHarness {
   countPill(id: string): string | null
   /** Every layer-header count tooltip currently on screen. */
   headerTitles(): string[]
-  /** Is the child-search magnifier offered on this card? */
-  childSearchButton(id: string): boolean
-  /** Click that magnifier, opening the column's inline search box. */
-  openChildSearch(id: string): Promise<void>
-  /** Type a query into an open child-search box AND SUBMIT it — the real
-   *  keystroke path into the canvas's `onSearchChildren`. The box keeps its
-   *  own local value and only commits on Enter/blur, so a change event alone
-   *  reaches nothing. Returns false if no box is open. */
-  typeChildSearch(query: string): Promise<boolean>
+  /** Type into the header's find-in-view box, the surface that replaced
+   *  the per-node child search. Returns false if the field isn't mounted. */
+  typeInFind(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
   toggle(id: string): Promise<void>
   /** How many closure fetches the provider has served. The number a
@@ -651,33 +645,15 @@ export async function renderCanvasWithTrace(
       [...document.querySelectorAll<HTMLElement>('[title]')]
         .map(el => el.getAttribute('title') ?? '')
         .filter(Boolean),
-    childSearchButton: (id: string) => {
-      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
-      return [...(row?.querySelectorAll('button') ?? [])]
-        .some(b => b.getAttribute('title') === 'Search children')
-    },
-    async openChildSearch(id: string) {
-      const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
-      const button = [...(row?.querySelectorAll('button') ?? [])]
-        .find(b => b.getAttribute('title') === 'Search children')
-      if (!button) throw new Error(`no child-search button on ${id}`)
-      await act(async () => { fireEvent.click(button) })
-      await settle()
-    },
-    async typeChildSearch(query: string) {
-      // The column's own input, driven the way a reader drives it — no prop
-      // capture, no mock: this is the exact path to `onSearchChildren`.
-      //
-      // ENTER IS LOAD-BEARING. SearchBoxItem holds the text in local state
-      // and only calls its `onChange` on Enter or blur, so a change event by
-      // itself commits nothing — a test that stops there passes whether the
-      // handler is gated or not.
-      const input = document.querySelector<HTMLInputElement>('input[placeholder^="Search node"]')
+    async typeInFind(query: string) {
+      // The real field, driven the way a reader drives it — no prop
+      // capture, no mock. Search must never write to the canvas store;
+      // the surface this replaced did exactly that.
+      const input = document.querySelector<HTMLInputElement>(
+        'input[placeholder="Find anything in this view…"]',
+      )
       if (!input) return false
-      await act(async () => {
-        fireEvent.change(input, { target: { value: query } })
-        fireEvent.keyDown(input, { key: 'Enter' })
-      })
+      await act(async () => { fireEvent.change(input, { target: { value: query } }) })
       await settle()
       return true
     },

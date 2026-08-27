@@ -42,8 +42,6 @@ interface FlatTreeItemProps {
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
   onFocus: (node: HierarchyNode) => void
-  onToggleSearch?: (id: string) => void
-  isSearchVisible?: boolean
   /** When set (draft/authoring mode), show the hover connection handle. */
   onBeginConnect?: (sourceId: string, start: { x: number; y: number }) => void
   /** Custom-order mode (draft + layer.nodeSortMode === 'custom'): root rows expose
@@ -102,8 +100,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onDoubleClick,
   onAddChild,
   onFocus,
-  onToggleSearch,
-  isSearchVisible = false,
   onBeginConnect,
   reorderEnabled = false,
   onReorderDrop,
@@ -756,28 +752,6 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             title="Focus on this subtree"
           >
             <LucideIcons.Maximize2 className="w-3 h-3 block" />
-          </button>
-        )}
-
-        {/* Search children button. Hidden while tracing: child search
-            REPLACES a parent's loaded children in the canvas store, which a
-            trace can never undo on exit, so the handler refuses it — and an
-            affordance that does nothing is worse than no affordance. */}
-        {hasChildren && onToggleSearch && !isTracing && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              onToggleSearch(node.id)
-            }}
-            className={cn(
-              "flex items-center justify-center p-1.5 rounded-lg transition-all duration-200 hover:scale-110 active:scale-95 leading-none",
-              isSearchVisible
-                ? "bg-amber-500/20 text-amber-400"
-                : "bg-white/[0.06] hover:bg-white/[0.12] text-ink-muted/80 hover:text-ink-muted"
-            )}
-            title="Search children"
-          >
-            <LucideIcons.Search className="w-3 h-3 block" />
           </button>
         )}
 

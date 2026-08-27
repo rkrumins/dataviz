@@ -9,7 +9,6 @@ export interface FlatTreeNode {
   parentIsLast: boolean[]  // Track which parents are "last" for proper tree lines
   isLoadMore?: boolean
   loadMoreCount?: number
-  isSearchBox?: boolean
   isSkeleton?: boolean
   skeletonIndex?: number
   isFailed?: boolean

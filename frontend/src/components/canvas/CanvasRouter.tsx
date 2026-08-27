@@ -63,7 +63,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
 
   // Single source of truth for initial graph data loading.
   // Only CanvasRouter passes hydrate=true — canvas components use the hook
-  // without hydration (loadChildren/searchChildren only).
+  // without hydration (loadChildren only).
   const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
   useLoadingToast(

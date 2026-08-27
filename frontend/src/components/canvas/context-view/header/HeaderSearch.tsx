@@ -101,6 +101,37 @@ export function HeaderFindField({
         return () => window.removeEventListener('keydown', handler)
     }, [])
 
+    // Escape, layered, at the window in CAPTURE phase.
+    //
+    // It cannot live on the input alone. The results panel is a
+    // `role="dialog"`, and the canvas's trace-exit handler deliberately
+    // yields the first Escape to any open dialog — "close this" before
+    // "take the whole trace down". So a panel that claims that press
+    // without consuming it swallows Escape entirely: the user is left
+    // unable to leave a trace while a search is open, whenever focus
+    // isn't in the field (they clicked a result, or the mode menu).
+    //
+    // Capture, so we resolve before the canvas-level handlers; and only
+    // while there is something of ours to close, so every other press
+    // passes straight through.
+    useEffect(() => {
+        const hasOwnLayer = modeMenuOpen || showPanel || hasQuery
+        if (!hasOwnLayer) return
+        const handler = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return
+            e.preventDefault()
+            e.stopPropagation()
+            // One layer per press. Losing a query you are still refining
+            // to a stray Escape is the more expensive mistake, so the
+            // query goes last.
+            if (modeMenuOpen) setModeMenuOpen(false)
+            else if (showPanel) setPanelOpen(false)
+            else find.clear()
+        }
+        window.addEventListener('keydown', handler, true)
+        return () => window.removeEventListener('keydown', handler, true)
+    }, [modeMenuOpen, showPanel, hasQuery, find])
+
     // Click-away closes the panel but keeps the query — the canvas is
     // still lit up, and reopening shouldn't cost a retype.
     useEffect(() => {
@@ -119,15 +150,6 @@ export function HeaderFindField({
     }
 
     const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Escape') {
-            e.preventDefault()
-            // First press dismisses the panel, second clears the search.
-            // Losing a query you're still refining to a stray Escape is
-            // the more expensive mistake.
-            if (showPanel) setPanelOpen(false)
-            else if (hasQuery) find.clear()
-            return
-        }
         if (e.key === 'Enter') {
             e.preventDefault()
             if (e.metaKey || e.ctrlKey) { escalate(); return }

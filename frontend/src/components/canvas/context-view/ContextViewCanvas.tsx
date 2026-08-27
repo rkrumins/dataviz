@@ -1838,10 +1838,6 @@ export function ContextViewCanvas({
     if (hydration) {
       for (const id of hydration.loadingNodes) {
         hydration.cancel(id)
-        // `searchChildren` queues under its OWN keyspace while recording the
-        // BARE id in `loadingNodes`, so cancelling the id alone leaves an
-        // in-flight child search running straight into the trace.
-        hydration.cancel(`search:${id}`)
       }
     }
     canvasTrace.start(urn)
@@ -2743,7 +2739,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -2783,10 +2779,6 @@ export function ContextViewCanvas({
   // nothing about what it dropped. A trace that let it run could therefore
   // never be exited back to the canvas the reader started from. The
   // magnifier is hidden while tracing (FlatTreeItem); this is the backstop.
-  const searchChildrenGuarded = useCallback((parentId: string, query: string) => {
-    if (traceWriteLocked()) return
-    void searchChildren(parentId, query)
-  }, [searchChildren, traceWriteLocked])
 
   // Arming a connection is the first step of staging an edge: the next click
   // resolves a target, the picker opens, and confirming writes a create_edge
@@ -5034,8 +5026,6 @@ export function ContextViewCanvas({
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadMoreChildren}
-                onSearchChildren={searchChildrenGuarded}
-                isLoadingChildren={isLoadingChildren}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}

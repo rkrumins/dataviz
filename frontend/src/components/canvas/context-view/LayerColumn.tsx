@@ -28,7 +28,6 @@ import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup }
 import { FlatTreeItem } from './FlatTreeItem'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
-import { SearchBoxItem } from './SearchBoxItem'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
@@ -72,8 +71,6 @@ interface LayerColumnProps {
   isHoverHighlight?: boolean
   onAnimationComplete?: () => void
   onLoadMore?: (parentId: string) => void
-  onSearchChildren?: (parentId: string, query: string) => void
-  isLoadingChildren?: boolean
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
   onScroll?: () => void
@@ -148,7 +145,6 @@ interface LayerColumnProps {
 // Stable key for each flat tree item (used by virtualizer for measurement cache stability)
 function getItemKey(item: FlatTreeNode, _index: number): string {
   if (item.isSkeleton) return `skeleton-${item.node.id}-${item.skeletonIndex}`
-  if (item.isSearchBox) return `search-${item.node.id}`
   if (item.isLoadMore) return `loadmore-${item.node.id}`
   if (item.isFailed) return `error-${item.node.id}`
   return item.node.id
@@ -180,8 +176,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   isHoverHighlight = false,
   onAnimationComplete: _onAnimationComplete,
   onLoadMore,
-  onSearchChildren,
-  isLoadingChildren,
   loadingNodes,
   failedNodes,
   onScroll,
@@ -262,8 +256,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
-  const [childSearchQueries, setChildSearchQueries] = useState<Record<string, string>>({})
-  const [activeSearchNodes, setActiveSearchNodes] = useState<Set<string>>(new Set())
   const [isDragOver, setIsDragOver] = useState(false)
   const [focusIndex, setFocusIndex] = useState(-1)
   // Draft layer-management: inline rename, delete-confirm, and which kind of drag is hovering
@@ -302,29 +294,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   useEffect(() => () => {
     if (dragScrollRafRef.current != null) cancelAnimationFrame(dragScrollRafRef.current)
   }, [])
-
-  const toggleSearchNode = useCallback((nodeId: string) => {
-    setActiveSearchNodes(prev => {
-      const next = new Set(prev)
-      if (next.has(nodeId)) {
-        next.delete(nodeId)
-        // Also optionally clear the search query if closed
-        setChildSearchQueries(q => {
-          const newQ = { ...q }
-          delete newQ[nodeId]
-          return newQ
-        })
-      } else {
-        next.add(nodeId)
-      }
-      return next
-    })
-
-    // Auto-expand the node so the user immediately sees the search box drop down
-    if (!activeSearchNodes.has(nodeId) && !expandedNodes.has(nodeId)) {
-      onToggle(nodeId)
-    }
-  }, [activeSearchNodes, expandedNodes, onToggle])
 
   // Search-driven canvas filter state. ``matchUrnSet`` is the source of
   // truth for "is this row a direct match"; ``ancestorMatchCounts > 0``
@@ -392,17 +361,6 @@ export const LayerColumn = React.memo(function LayerColumn({
       const isNodeLoading = loadingNodes?.has(node.id) ?? false
       const childParentIsLast = [...parentIsLast, isLast]
 
-      // Inline search box
-      if (activeSearchNodes.has(node.id)) {
-        result.push({
-          node,
-          depth: depth + 1,
-          isLast: node.children.length === 0 && !isNodeLoading,
-          parentIsLast: childParentIsLast,
-          isSearchBox: true,
-        })
-      }
-
       // Error row
       const isNodeFailed = (failedNodes?.has(node.id) ?? false) && !isNodeLoading && node.children.length === 0
       if (isNodeFailed) {
@@ -430,11 +388,10 @@ export const LayerColumn = React.memo(function LayerColumn({
       } else {
         // Push children onto stack in reverse order (+ optional loadMore at bottom)
         const displayChildren = node.children
-        const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
         // In trace mode the trace API already returns the complete set of
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
-        const hasMore = !isTracing && node.children.length < childCount && !activeQuery
+        const hasMore = !isTracing && node.children.length < childCount
 
         if (hasMore) {
           stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - node.children.length })
@@ -453,7 +410,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes, isTracing])
+  }, [nodes, expandedNodes, localFocusId, loadingNodes, failedNodes, isTracing])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -565,7 +522,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   // ── 4.5 Keyboard Navigation ───────────────────────────────────────────────
   // Only the real FlatTreeItem rows (no skeletons, errors, search boxes, load-more)
   const navigableItems = useMemo(
-    () => flatTree.filter(item => !item.isSearchBox && !item.isSkeleton && !item.isFailed && !item.isLoadMore),
+    () => flatTree.filter(item => !item.isSkeleton && !item.isFailed && !item.isLoadMore),
     [flatTree]
   )
 
@@ -580,7 +537,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   const nodeToFlatIndexMap = useMemo(() => {
     const map = new Map<string, number>()
     flatTree.forEach((item, idx) => {
-      if (!item.isSkeleton && !item.isSearchBox && !item.isFailed && !item.isLoadMore) {
+      if (!item.isSkeleton && !item.isFailed && !item.isLoadMore) {
         map.set(item.node.id, idx)
       }
     })
@@ -638,7 +595,6 @@ export const LayerColumn = React.memo(function LayerColumn({
     getScrollElement: () => scrollContainerRef.current,
     estimateSize: (index) => {
       const item = flatTree[index]
-      if (item.isSearchBox) return rowHeights.searchBox
       if (item.isSkeleton) return rowHeights.skeleton
       if (item.isFailed) return rowHeights.failed
       if (item.isLoadMore) return rowHeights.loadMore
@@ -868,7 +824,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   // of loaded entities, so X ≤ Y holds by construction.
   const visibleCount = useMemo(
     () => flatTree.reduce((acc, it) =>
-      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore ? 0 : 1), 0),
+      acc + (it.isSkeleton || it.isFailed || it.isLoadMore ? 0 : 1), 0),
     [flatTree],
   )
 
@@ -890,7 +846,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   }, [])
 
   const isRealRow = useCallback((it: FlatTreeNode) =>
-    !it.isSkeleton && !it.isSearchBox && !it.isFailed && !it.isLoadMore
+    !it.isSkeleton && !it.isFailed && !it.isLoadMore
   , [])
 
   const overflowCounts = useMemo(() => {
@@ -980,7 +936,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     const n = Math.min(48, flatTree.length)
     const vals = new Array<number>(n).fill(0)
     flatTree.forEach((item, idx) => {
-      if (item.isSkeleton || item.isSearchBox || item.isFailed || item.isLoadMore) return
+      if (item.isSkeleton || item.isFailed || item.isLoadMore) return
       const c = lineageCounts.get(item.node.id)
       if (!c) return
       vals[Math.min(n - 1, Math.floor((idx / flatTree.length) * n))] += c.in + c.out
@@ -1943,38 +1899,6 @@ export const LayerColumn = React.memo(function LayerColumn({
                   )
                 }
 
-                if (item.isSearchBox) {
-                  return (
-                    <div
-                      key={itemKey}
-                      data-index={virtualRow.index}
-                      ref={virtualizer.measureElement}
-                      style={virtualStyle}
-                    >
-                      <div style={isNew ? {
-                        animation: `flatTreeFadeIn 0.15s cubic-bezier(0.25, 0.46, 0.45, 0.94) backwards`,
-                      } : undefined}>
-                        <SearchBoxItem
-                          parentId={item.node.id}
-                          depth={item.depth}
-                          parentIsLast={item.parentIsLast}
-                          value={childSearchQueries[item.node.id] || ''}
-                          onChange={(val) => {
-                            setChildSearchQueries(prev => ({ ...prev, [item.node.id]: val }))
-                            if (val.trim()) {
-                              onSearchChildren && onSearchChildren(item.node.id, val)
-                            } else {
-                              // If search is cleared, refetch the original children
-                              onLoadMore && onLoadMore(item.node.id)
-                            }
-                          }}
-                          isLoading={isLoadingChildren}
-                          layer={layer}
-                        />
-                      </div>
-                    </div>
-                  )
-                }
 
                 if (item.isLoadMore) {
                   return (
@@ -2036,8 +1960,6 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onDoubleClick={onDoubleClick}
                         onAddChild={onAddChild}
                         onFocus={handleFocus}
-                        onToggleSearch={toggleSearchNode}
-                        isSearchVisible={activeSearchNodes.has(node.id)}
                         onBeginConnect={onBeginConnect}
                         reorderEnabled={reorderEnabled}
                         onReorderDrop={onReorderDrop}
