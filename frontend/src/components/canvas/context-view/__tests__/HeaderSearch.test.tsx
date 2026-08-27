@@ -180,12 +180,28 @@ describe('HeaderFindField — the results panel', () => {
             .toBeInTheDocument()
     })
 
-    it('reports both counts rather than collapsing them into one', () => {
+    it('leads with the whole view, and says how much of it is on screen', () => {
+        // The old box could only count what had loaded and presented that
+        // as the answer. The headline is now the view's total; the line
+        // under it is what the canvas is already showing.
         renderField(withResults())
         fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
         const panel = screen.getByRole('dialog', { name: /search results/i })
-        expect(panel.textContent).toContain('1 on this canvas')
-        expect(panel.textContent).toContain('47 in this view')
+        expect(panel.textContent).toMatch(/47\s*matches/)
+        expect(panel.textContent).toContain('1 already on this canvas')
+        expect(panel.textContent).toContain('showing the top 2')
+    })
+
+    it('never leads with a total smaller than the rows it is showing', () => {
+        // The local tier reads property keys and numeric values that the
+        // server's indexed text doesn't carry, so it can hold rows the
+        // server didn't count. "0 matches" over a list of two is worse
+        // than either number alone.
+        renderField(withResults({ serverTotal: 0, localCount: 2 }))
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        const panel = screen.getByRole('dialog', { name: /search results/i })
+        expect(panel.textContent).toMatch(/2\s*matches/)
+        expect(panel.textContent).not.toMatch(/0\s*matches/)
     })
 
     it('lets the user change which fields are searched', () => {

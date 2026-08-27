@@ -84,6 +84,15 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
 
     const isRunning = status === 'running'
     const hasHits = hits.length > 0
+    // The server's total is authoritative for the view — it counts matches
+    // nobody has expanded. But the local tier reads a few fields the
+    // server's indexed text doesn't carry (property keys, numeric values),
+    // so it can legitimately hold rows the server didn't count. Take the
+    // larger: a headline that says "0 in this view" over a list of three
+    // rows is worse than either number alone.
+    const totalMatches = serverTotal !== null
+        ? Math.max(serverTotal, hits.length)
+        : hits.length
     const showZeroState = !isRunning && !hasHits && status !== 'idle'
     const isIdle = status === 'idle'
 
@@ -186,7 +195,7 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
             {!isIdle && (
             <div className="shrink-0 px-3 py-2">
                 <MatchBar
-                    count={serverTotal ?? (hasHits ? hits.length : null)}
+                    count={totalMatches}
                     elapsedMs={elapsedMs}
                     isRunning={isRunning}
                     errorMessage={errorMessage}
@@ -198,26 +207,27 @@ export const FindResultsPanel: FC<FindResultsPanelProps> = ({
                     onClear={state.clear}
                     viewId={viewId}
                 />
-                {/* Two counts, never one. The local tier can legitimately
-                    find things the server's indexed text can't see
-                    (property keys, numeric values), so collapsing them
-                    into a single number would make one of the two lie. */}
+                {/* The headline count is the whole view. This line says how
+                    much of it is on screen — the thing the old box hid by
+                    only ever searching what had loaded. */}
                 {hasHits && (
                     <div className="mt-1.5 px-0.5 text-[10.5px] text-ink-muted/70">
-                        {localCount > 0 && (
-                            <span>{localCount.toLocaleString()} on this canvas</span>
-                        )}
-                        {localCount > 0 && serverTotal !== null && <span> · </span>}
-                        {serverTotal !== null && (
+                        {localCount > 0 && localCount < totalMatches && (
                             <span>
-                                {serverTotal.toLocaleString()} in this view
-                                {viewName ? ` (${viewName})` : ''}
+                                {localCount.toLocaleString()} already on this canvas
+                                {viewName ? `, the rest deeper in ${viewName}` : ''}
+                            </span>
+                        )}
+                        {hits.length < totalMatches && (
+                            <span>
+                                {localCount > 0 && localCount < totalMatches ? ' · ' : ''}
+                                showing the top {hits.length.toLocaleString()}
                             </span>
                         )}
                         {status === 'localOnly' && (
-                            <span className="ml-1 text-amber-600 dark:text-amber-400">
+                            <span className="text-amber-600 dark:text-amber-400">
                                 <WifiOff className="inline w-2.5 h-2.5 mr-0.5 -mt-px" strokeWidth={2.4} />
-                                loaded entities only
+                                entities loaded on this canvas only
                             </span>
                         )}
                     </div>
