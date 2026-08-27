@@ -712,6 +712,33 @@ async def revoke_sessions_from_now(session: AsyncSession, user_id: str) -> str:
     return cutoff
 
 
+async def revoke_sessions_from_now_for_all(
+    session: AsyncSession, *, exclude_user_ids: frozenset[str] | set[str] = frozenset(),
+) -> str:
+    """The platform-wide twin of :func:`revoke_sessions_from_now`.
+
+    One bulk stamp instead of a per-user loop, because the sweep runs
+    against every account at once. ``exclude_user_ids`` carries the
+    system accounts the sweep must leave signed in. Deleted rows are
+    skipped only because they cannot refresh anyway; suspended users
+    ARE stamped — their idle sessions are exactly the kind this
+    exists to end.
+
+    Returns the cutoff so callers can log or report it.
+    """
+    cutoff = _now()
+    stmt = (
+        UserORM.__table__.update()
+        .where(UserORM.deleted_at.is_(None))
+        .values(sessions_valid_from=cutoff, updated_at=cutoff)
+    )
+    if exclude_user_ids:
+        stmt = stmt.where(UserORM.id.not_in(exclude_user_ids))
+    await session.execute(stmt)
+    await session.flush()
+    return cutoff
+
+
 def _hash_token(token: str) -> str:
     """SHA-256 hash a reset token for safe storage."""
     return hashlib.sha256(token.encode()).hexdigest()
