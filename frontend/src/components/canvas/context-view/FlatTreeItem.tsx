@@ -393,9 +393,13 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // (with a ✦N badge) or expanded (descendants then carry their
         // own stronger highlight). Suppressed when the row is itself a
         // direct match, selected, or part of a trace focus path.
+        // Roughly half the direct-match weight: clearly subordinate, but
+        // actually perceptible. At 6% fill / 18% ring this was below the
+        // perception threshold on the dark canvas and read as no
+        // treatment at all — the row looked identical to an unrelated one.
         ancestorMatchCount > 0 && !isSearchResult && !isSelected && !isFocusNode && cn(
-            "bg-gradient-to-r from-amber-500/[0.06] to-transparent",
-            "shadow-[inset_0_0_0_1px_rgba(245,158,11,0.18)]",
+            "bg-gradient-to-r from-amber-500/[0.09] to-transparent",
+            "shadow-[inset_0_0_0_1px_rgba(245,158,11,0.30)]",
         ),
         // Focus node (trace target)
         isFocusNode && "ring-2 ring-accent-lineage/60 ring-offset-1 ring-offset-canvas shadow-lg shadow-accent-lineage/20",
@@ -688,10 +692,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             called ``account_details`` whose columns are
             ``account_number`` etc. needs to tell the user that
             expanding surfaces more matches; suppressing the badge on
-            direct-match rows hid that signal. (GraphCanvas +
-            HierarchyCanvas already render it unconditionally — this
-            keeps ContextView aligned.) */}
-        {ancestorMatchCount > 0 && !isExpanded && hasChildren && (
+            direct-match rows hid that signal.
+
+            NOT gated on the row being collapsed. It used to be, on the
+            theory that an expanded row's descendants carry their own
+            highlight — but that assumes the matching descendant is on
+            screen. In a virtualized column it is routinely scrolled out
+            of view, several levels down, or behind a collapsed child.
+            Reported as "no indicator in Snowflake that there is a match
+            within its nested children", with Snowflake expanded. At
+            depth, the count IS the signal. */}
+        {ancestorMatchCount > 0 && hasChildren && (
           <SearchMatchBadge
             count={ancestorMatchCount}
             breakdown={ancestorMatchBreakdown}
@@ -730,7 +741,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
         className={cn(
           "absolute inset-y-0 flex items-center gap-1 pl-8 pr-1 rounded-l-xl z-[4]",
-          (ancestorMatchCount > 0 && !isExpanded && hasChildren)
+          // Must mirror the badge's own condition below, or the overlay
+          // lands on top of it and eats its hover tooltip.
+          (ancestorMatchCount > 0 && hasChildren)
             ? "right-[3.125rem]"
             : "right-2",
           isHovered && cn(

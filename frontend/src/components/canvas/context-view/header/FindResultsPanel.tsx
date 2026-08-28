@@ -11,23 +11,37 @@
  *   │ Reading this as: their name contains "revenue"           │  readback
  *   ├──────────────────────────────────────────────────────────┤
  *   │ 47 matches · 240 ms   ‹3 of 47›  Highlight Isolate Excl. │  MatchBar
+ *   │ 4 already on this canvas · showing 100  Load all matches  │
  *   ├──────────────────────────────────────────────────────────┤
- *   │ ▾ SALES · Orders (Data)                               12 │  HitsByParent
- *   │    ◆ revenue_gross      dataset                          │
+ *   │ ▾ WAREHOUSE · Snowflake                         214  📍  │  Grouped-
+ *   │    ◆ revenue_gross      GOLD ›            dataset        │  HitBrowser
+ *   │ ▸ SOURCE · Commerce                               3  📍  │
  *   ├──────────────────────────────────────────────────────────┤
  *   │ ⚡ Open in Advanced Search — combine filters, save, share │
  *   └──────────────────────────────────────────────────────────┘
  *
- * Everything below the scope row is a component the Advanced Search rail
- * already uses. That is deliberate: one search means one results shape,
- * one row renderer, one stepper, one isolate/exclude toggle, whichever
- * box the user typed into.
+ * The scope row, the stepper and the isolate/exclude toggle are the same
+ * components the Advanced Search rail uses. That is deliberate: one
+ * search means one results shape, one row renderer, one stepper, one
+ * isolate/exclude toggle, whichever box the user typed into. The results
+ * list itself is `GroupedHitBrowser` rather than the rail's
+ * `HitsByParent`, because this panel groups by the canvas's top-level
+ * nodes — which only the canvas knows — and has to stay grouped and
+ * browsable at 500 hits, where the rail's grouping bails out to a flat
+ * list.
+ *
+ * The escalation to Advanced Search is pinned outside the scroll area,
+ * so it stays one click away however far down a long result list the
+ * user has scrolled.
  */
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertTriangle, Clock, Info, Loader2, Pin, Sparkles, WifiOff } from 'lucide-react'
+import {
+    AlertTriangle, Clock, Info, Loader2, Pin, RotateCw, Sparkles, WifiOff,
+} from 'lucide-react'
 import { type FC, forwardRef, useCallback, useRef } from 'react'
 
-import { HitsByParent } from '@/components/canvas/search/panel/HitsByParent'
+import { GroupedHitBrowser } from '@/components/canvas/search/panel/GroupedHitBrowser'
+import type { CanvasRoot } from '@/components/canvas/search/panel/groupHitsByTopLevel'
 import { SearchOmnibox } from '@/components/canvas/search/panel/omnibox/SearchOmnibox'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
 import { useOmniboxFacets } from '@/components/canvas/search/panel/useOmniboxFacets'
@@ -40,6 +54,7 @@ import {
     type FindMode,
     type FindScope,
 } from '@/components/canvas/search/find/compileFind'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
 import { cn } from '@/lib/utils'
 import {
     useCanvasFilterMode,
@@ -73,6 +88,11 @@ export interface FindResultsPanelProps {
     onReveal: (urn: string, ancestorPath: AncestorRef[]) => void
     /** Open the entity drawer for a hit. */
     onOpen?: (urn: string) => void
+    /** The canvas's top-level nodes, by URN. Results group under these so
+     *  the list is arranged the way the canvas is. Empty is valid. */
+    canvasRoots: ReadonlyMap<string, CanvasRoot>
+    /** Scroll the canvas to a group's top-level node. */
+    onRevealRoot?: (root: CanvasRoot) => void
     /** Fly the viewport to encompass every match. */
     onFrame?: () => void
     /** Hand the compiled query to the Advanced Search rail. */
@@ -82,7 +102,8 @@ export interface FindResultsPanelProps {
 
 export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps>(
     function FindResultsPanel({
-        state, viewId, viewName, style, onReveal, onOpen, onFrame, onEscalate,
+        state, viewId, viewName, style, canvasRoots,
+        onReveal, onOpen, onRevealRoot, onFrame, onEscalate,
     }, ref) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const focusedUrn = useFocusedMatchUrn()
@@ -91,7 +112,7 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
     const {
         hits, localCount, serverTotal, status, errorMessage,
         truncated, deadlineExceeded, elapsedMs, compiled, mode, scope,
-        hasMore, loadMore, isLoadingMore,
+        hasMore, loadMore, isLoadingMore, loadAll, isLoadingAll, retry,
     } = state
 
     // The stepper moves focus; walking the canvas to the focused match is
@@ -116,6 +137,17 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
         : hits.length
     const showZeroState = !isRunning && !hasHits && status !== 'idle'
     const isIdle = status === 'idle'
+
+    // A server failure with local matches still on screen is a PARTIAL
+    // failure, and MatchBar treats any error as total — it hides the
+    // stepper and the Highlight / Isolate / Exclude cluster. That is the
+    // right contract for the Advanced rail, where an error means no
+    // results at all, and the wrong one here, where the local tier is
+    // designed to survive the server going down. So the error only
+    // reaches MatchBar when there is genuinely nothing to act on;
+    // otherwise it renders below as its own line and the controls stay.
+    const failed = status === 'error' && errorMessage !== null
+    const partialFailure = failed && hasHits
 
     // The same facets, the same ranking, the same component the Advanced
     // builder uses. A clicked suggestion lands in the box as DSL text
@@ -253,7 +285,7 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
                     count={totalMatches}
                     elapsedMs={elapsedMs}
                     isRunning={isRunning}
-                    errorMessage={errorMessage}
+                    errorMessage={partialFailure ? null : humaneError(errorMessage)}
                     truncated={truncated}
                     deadlineExceeded={deadlineExceeded}
                     candidateCount={serverTotal}
@@ -279,6 +311,25 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
                                 showing {hits.length.toLocaleString()} so far
                             </span>
                         )}
+                        {/* Scrolling loads the next page on its own, but a
+                            user who wants the WHOLE set — to isolate on it,
+                            to trust the roll-up counts, to read it top to
+                            bottom — shouldn't have to scroll to the end of a
+                            partial list to ask for it. */}
+                        {hasMore && (
+                            <button
+                                onClick={loadAll}
+                                disabled={isLoadingAll || isLoadingMore}
+                                className={cn(
+                                    'ml-1.5 font-semibold text-accent-lineage',
+                                    'hover:underline disabled:opacity-60 disabled:no-underline',
+                                )}
+                            >
+                                {isLoadingAll
+                                    ? 'Loading every match…'
+                                    : 'Load all matches'}
+                            </button>
+                        )}
                         {status === 'localOnly' && (
                             <span className="text-amber-600 dark:text-amber-400">
                                 <WifiOff className="inline w-2.5 h-2.5 mr-0.5 -mt-px" strokeWidth={2.4} />
@@ -301,17 +352,33 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
                         </span>
                     </div>
                 )}
+                {partialFailure && (
+                    <PartialFailureNotice
+                        detail={errorMessage}
+                        localCount={hits.length}
+                        viewName={viewName}
+                        onRetry={retry}
+                    />
+                )}
             </div>
             )}
 
             {/* ---- Results --------------------------------------------- */}
             <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-2 pb-2">
                 {hasHits && (
-                    <HitsByParent
+                    <GroupedHitBrowser
                         hits={hits}
+                        canvasRoots={canvasRoots}
+                        scrollElementRef={scrollRef}
                         onReveal={onReveal}
                         onOpen={onOpen}
-                        scrollElementRef={scrollRef}
+                        onRevealRoot={onRevealRoot}
+                        hasMore={hasMore}
+                        loadMore={loadMore}
+                        isLoadingMore={isLoadingMore}
+                        loadAll={loadAll}
+                        isLoadingAll={isLoadingAll}
+                        serverTotal={serverTotal}
                     />
                 )}
 
@@ -328,36 +395,6 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
                         <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
                         Searching this view…
                     </div>
-                )}
-
-                {hasMore && hasHits && (
-                    <button
-                        onClick={loadMore}
-                        disabled={isLoadingMore}
-                        className={cn(
-                            'w-full mt-1 px-3 py-2 rounded-lg text-[12px] font-medium',
-                            'border border-dashed border-black/[0.10] dark:border-white/[0.12]',
-                            'text-ink-secondary hover:text-ink',
-                            'hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.06]',
-                            'transition-colors disabled:opacity-60',
-                        )}
-                    >
-                        {isLoadingMore ? (
-                            <span className="inline-flex items-center gap-2">
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
-                                Loading…
-                            </span>
-                        ) : (
-                            <>
-                                Load more
-                                {serverTotal !== null && serverTotal > hits.length && (
-                                    <span className="ml-1 text-ink-muted/70 font-normal">
-                                        ({(serverTotal - hits.length).toLocaleString()} not loaded yet)
-                                    </span>
-                                )}
-                            </>
-                        )}
-                    </button>
                 )}
 
                 {showZeroState && (
@@ -407,6 +444,81 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
         </motion.div>
     )
 })
+
+
+/**
+ * Turn a transport error into something a business user can read.
+ *
+ * ``RemoteGraphProvider`` builds ``API Error 500: {"detail": ...}`` and
+ * this panel used to render it verbatim, which is how a JSON blob ends
+ * up in front of someone looking for a table. Pull the human sentence
+ * out of the body when there is one; otherwise say what happened without
+ * pretending to know why.
+ */
+function humaneError(raw: string | null): string | null {
+    if (!raw) return null
+    const body = raw.match(/^API Error \d{3}: ([\s\S]*)$/)
+    if (!body) return raw
+    const extracted = extractErrorMessageFromText(body[1].trim(), '')
+    // A JSON dump that survived extraction is still a JSON dump.
+    if (!extracted || extracted.trimStart().startsWith('{')) {
+        return 'This view couldn\u2019t be searched on the server just now.'
+    }
+    return extracted
+}
+
+
+/**
+ * The server tier failed but the local one didn't.
+ *
+ * Says which half of the answer survived, offers the one action that
+ * could fix it, and keeps the technical detail available for support
+ * without putting it in the user's face.
+ */
+const PartialFailureNotice: FC<{
+    detail: string | null
+    localCount: number
+    viewName?: string
+    onRetry: () => void
+}> = ({ detail, localCount, viewName, onRetry }) => {
+    const humane = humaneError(detail)
+    return (
+        <div className={cn(
+            'mt-1.5 px-2 py-1.5 rounded-lg',
+            'bg-rose-500/[0.07] border border-rose-500/25',
+        )}>
+            <div className="flex items-start gap-1.5 text-[10.5px] leading-snug text-rose-700 dark:text-rose-300">
+                <AlertTriangle className="w-2.5 h-2.5 mt-[3px] shrink-0" strokeWidth={2.4} />
+                <span className="min-w-0">
+                    Couldn&rsquo;t search the rest of
+                    {viewName ? ` ${viewName}` : ' this view'} — showing the
+                    {' '}{localCount.toLocaleString()} match{localCount === 1 ? '' : 'es'}
+                    {' '}already on this canvas.
+                </span>
+                <button
+                    onClick={onRetry}
+                    className={cn(
+                        'shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md',
+                        'font-semibold hover:bg-rose-500/15 transition-colors',
+                    )}
+                >
+                    <RotateCw className="w-2.5 h-2.5" strokeWidth={2.6} />
+                    Retry
+                </button>
+            </div>
+            {humane && (
+                <details className="mt-1 pl-4">
+                    <summary className="cursor-pointer text-[10px] text-ink-muted/70 hover:text-ink-muted">
+                        Details for support
+                    </summary>
+                    <p className="mt-0.5 font-mono text-[10px] text-ink-muted/80 break-all">
+                        {humane}
+                    </p>
+                </details>
+            )}
+        </div>
+    )
+}
 
 
 /**

@@ -171,6 +171,7 @@ import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { SearchMapPanel } from '../search/SearchMapPanel'
+import type { CanvasRoot } from '../search/panel/groupHitsByTopLevel'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
@@ -2367,6 +2368,31 @@ export function ContextViewCanvas({
     displayMap,
   })
 
+  // The canvas's top-level nodes, keyed by URN, for grouping results the
+  // way the canvas is arranged. Built from `nodesByLayer` — the roots of
+  // each column, which is exactly what the user sees — rather than from
+  // `node.layerAssignment`, the persisted stamp that can disagree with
+  // the effective column. Small (one entry per column entry) and
+  // re-derived only when the columns themselves change.
+  const searchCanvasRoots = useMemo(() => {
+    const roots = new Map<string, CanvasRoot>()
+    for (const layer of sortedLayers) {
+      for (const node of nodesByLayer.get(layer.id) ?? []) {
+        const urn = node.urn || node.id
+        if (!urn) continue
+        roots.set(urn, {
+          urn,
+          id: node.id,
+          displayName: node.name,
+          entityType: node.typeId,
+          layerName: layer.name ?? null,
+          layerColor: layer.color ?? null,
+        })
+      }
+    }
+    return roots
+  }, [nodesByLayer, sortedLayers])
+
   // The single match set the canvas lights up. Both search surfaces —
   // this header box and the Advanced Search rail — publish into the same
   // store slot, so the spotlight, the isolate/exclude filter, the
@@ -4366,6 +4392,8 @@ export function ContextViewCanvas({
         find={findInView}
         viewId={activeView?.id ?? ''}
         onRevealSearchHit={revealSearchHit}
+        searchCanvasRoots={searchCanvasRoots}
+        onRevealSearchRoot={(root) => { void revealSearchHit(root.urn, []) }}
         onOpenSearchHit={(urn) => selectNode(urnToIdMap.get(urn) ?? urn)}
         onFrameMatches={() => {
           void handleFrameMatches([...useSearchStore.getState().orderedMatchUrns])

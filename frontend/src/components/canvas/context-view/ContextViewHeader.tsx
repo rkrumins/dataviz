@@ -23,6 +23,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import type { FindInViewState } from '@/hooks/useFindInView'
 import type { AncestorRef } from '@/types/search'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
+import type { CanvasRoot } from '../search/panel/groupHitsByTopLevel'
 import { HeaderFindField } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
@@ -37,6 +38,11 @@ export interface ContextViewHeaderProps {
   find: FindInViewState
   viewId: string
   onRevealSearchHit: (urn: string, ancestorPath: AncestorRef[]) => void
+  /** The canvas's top-level nodes by URN — results group under these so
+   *  the list is arranged the way the canvas is. */
+  searchCanvasRoots: ReadonlyMap<string, CanvasRoot>
+  /** Scroll the canvas to a result group's top-level node. */
+  onRevealSearchRoot?: (root: CanvasRoot) => void
   onOpenSearchHit?: (urn: string) => void
   onFrameMatches?: () => void
 
@@ -165,6 +171,8 @@ export function ContextViewHeader({
   find,
   viewId,
   onRevealSearchHit,
+  searchCanvasRoots,
+  onRevealSearchRoot,
   onOpenSearchHit,
   onFrameMatches,
   showLineageFlow,
@@ -320,6 +328,8 @@ export function ContextViewHeader({
           viewName={viewName}
           onReveal={onRevealSearchHit}
           onOpen={onOpenSearchHit}
+          canvasRoots={searchCanvasRoots}
+          onRevealRoot={onRevealSearchRoot}
           onFrame={onFrameMatches}
           onOpenAdvancedSearch={onOpenAdvancedSearch}
         />

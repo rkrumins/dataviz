@@ -44,6 +44,8 @@ function makeFind(overrides: Partial<FindInViewState> = {}): FindInViewState {
         truncated: false, deadlineExceeded: false, elapsedMs: null,
         isStale: false,
         hasMore: false, loadMore: vi.fn(), isLoadingMore: false,
+        loadAll: vi.fn(), isLoadingAll: false,
+        retry: vi.fn(),
         compiled: {
             predicate: null, recognized: [], fallbackText: [], usedOperators: false,
         },
@@ -60,6 +62,7 @@ function renderField(
             find={find}
             viewId="view-1"
             viewName="Data Landscape"
+            canvasRoots={new Map()}
             onReveal={vi.fn()}
             {...props}
         />,
@@ -305,9 +308,20 @@ describe('HeaderFindField — a partial result set says so', () => {
         expect(loadMore).toHaveBeenCalled()
     })
 
+    it('offers to complete the set without scrolling to the end of it', () => {
+        // A user who wants every match — to isolate on it, or to trust
+        // the roll-up counts — shouldn't have to walk a partial list to
+        // find the button that completes it.
+        const loadAll = vi.fn()
+        const { panel } = openWith({ hasMore: true, loadAll, serverTotal: 300 })
+        fireEvent.click(within(panel).getByRole('button', { name: /load all matches/i }))
+        expect(loadAll).toHaveBeenCalled()
+    })
+
     it('offers nothing to load once the set is complete', () => {
         const { panel } = openWith({ hasMore: false })
         expect(within(panel).queryByRole('button', { name: /load more/i })).toBeNull()
+        expect(within(panel).queryByRole('button', { name: /load all/i })).toBeNull()
     })
 
     it('warns that Isolate is acting on a partial set', () => {
@@ -396,5 +410,137 @@ describe('HeaderFindField — handing over to Advanced Search', () => {
             key: 'Enter', metaKey: true,
         })
         expect(onOpenAdvancedSearch).toHaveBeenCalledWith({ text: 'revenue' })
+    })
+})
+
+/**
+ * Browsing hundreds of results.
+ *
+ * Reported: a term that genuinely appears hundreds of times has to stay
+ * browsable — paginated, showing each hit's path, grouped under the
+ * top-level node the user actually sees on the canvas.
+ */
+describe('HeaderFindField — browsing a large result set', () => {
+    beforeEach(() => { useSearchStore.getState().clear() })
+
+    const ROOTS = new Map([
+        ['urn:snowflake', {
+            urn: 'urn:snowflake', id: 'urn:snowflake', displayName: 'Snowflake',
+            entityType: 'container', layerName: 'Warehouse', layerColor: '#0af',
+        }],
+        ['urn:commerce', {
+            urn: 'urn:commerce', id: 'urn:commerce', displayName: 'Commerce',
+            entityType: 'container', layerName: 'Source', layerColor: '#fa0',
+        }],
+    ])
+
+    function deepHit(urn: string, rootUrn: string): SearchHit {
+        return {
+            node: { urn, entityType: 'dataset', displayName: urn, properties: {} },
+            ancestorPath: [
+                { urn: rootUrn, displayName: rootUrn, entityType: 'container' },
+                { urn: 'urn:gold', displayName: 'GOLD', entityType: 'container' },
+            ],
+        } as SearchHit
+    }
+
+    function openWithHits(hits: SearchHit[], overrides: Partial<FindInViewState> = {}) {
+        useSearchStore.getState().setResult({
+            viewId: 'view-1',
+            matchUrns: hits.map((h) => h.node.urn!),
+            queryHash: 'find:contains:everything:customer',
+            source: 'quick',
+        })
+        renderField(
+            makeFind({
+                text: 'customer', status: 'ready', hits,
+                localCount: hits.length, serverTotal: hits.length,
+                ...overrides,
+            }),
+            { canvasRoots: ROOTS },
+        )
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        return screen.getByRole('dialog', { name: /search results/i })
+    }
+
+    it('groups results under the top-level node, with its layer', () => {
+        const panel = openWithHits([
+            deepHit('urn:h1', 'urn:snowflake'),
+            deepHit('urn:h2', 'urn:snowflake'),
+            deepHit('urn:h3', 'urn:commerce'),
+        ])
+        expect(within(panel).getByText('Snowflake')).toBeInTheDocument()
+        expect(within(panel).getByText('Warehouse')).toBeInTheDocument()
+        expect(within(panel).getByText('Commerce')).toBeInTheDocument()
+        expect(within(panel).getByText('Source')).toBeInTheDocument()
+    })
+
+    it('keeps the grouping at 500 results instead of collapsing to a flat list', () => {
+        // The old browser dropped grouping above 200 hits — exactly when
+        // it carries the most signal.
+        const many: SearchHit[] = []
+        for (let i = 0; i < 500; i++) {
+            many.push(deepHit(`urn:h${i}`, i % 2 ? 'urn:commerce' : 'urn:snowflake'))
+        }
+        const panel = openWithHits(many)
+        expect(within(panel).getByText('Snowflake')).toBeInTheDocument()
+        expect(within(panel).getByText('Commerce')).toBeInTheDocument()
+        // Each group reports its own size, so the header answers the
+        // question without opening 250 rows.
+        expect(within(panel).getAllByText('250')).toHaveLength(2)
+    })
+
+    it('drops the group name from each row breadcrumb', () => {
+        const panel = openWithHits([deepHit('urn:h1', 'urn:snowflake')])
+        // One group, so no header — and the full path is kept.
+        expect(within(panel).getAllByText('GOLD').length).toBeGreaterThan(0)
+    })
+})
+
+
+/**
+ * A failing server tier must not take the local one down with it.
+ *
+ * Reported as "I don't have the previous highlight feature and nothing
+ * happens": MatchBar hides the stepper and the Highlight / Isolate /
+ * Exclude cluster on ANY error, which is right for the Advanced rail and
+ * wrong here, where local matches survive by design.
+ */
+describe('HeaderFindField — a partial server failure', () => {
+    beforeEach(() => { useSearchStore.getState().clear() })
+
+    function openFailed() {
+        const find = withResults({
+            status: 'error',
+            errorMessage: 'API Error 500: {"detail":"Internal Server Error"}',
+            serverTotal: null,
+        })
+        renderField(find)
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        return { find, panel: screen.getByRole('dialog', { name: /search results/i }) }
+    }
+
+    it('keeps Highlight / Isolate / Exclude usable on the matches it has', () => {
+        const { panel } = openFailed()
+        expect(within(panel).getByRole('radio', { name: 'Isolate' })).toBeInTheDocument()
+        expect(within(panel).getByRole('radio', { name: 'Exclude' })).toBeInTheDocument()
+        // …and the stepper, which is the only way to walk matches that
+        // are several levels deep.
+        expect(within(panel).getByRole('button', { name: /next match/i })).toBeInTheDocument()
+    })
+
+    it('says what still works instead of printing the transport error', () => {
+        const { panel } = openFailed()
+        expect(panel.textContent).toMatch(/couldn.t search the rest/i)
+        expect(panel.textContent).toMatch(/already on this canvas/i)
+        // The raw JSON body never reaches the user.
+        expect(panel.textContent).not.toContain('{"detail"')
+        expect(panel.textContent).not.toMatch(/API Error 500/)
+    })
+
+    it('offers a retry that re-runs the server tier', () => {
+        const { find, panel } = openFailed()
+        fireEvent.click(within(panel).getByRole('button', { name: /retry/i }))
+        expect(find.retry).toHaveBeenCalled()
     })
 })

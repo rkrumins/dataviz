@@ -144,10 +144,17 @@ export interface SearchHitRowProps {
     onOpen?: (urn: string) => void
     /** Click an ancestor chip → re-scope the panel to that ancestor. */
     onAncestorClick?: (ancestor: AncestorRef) => void
+    /**
+     * Drop this many leading ancestors from the breadcrumb. Set by a
+     * grouped list so a row under "Snowflake" reads ``GOLD › dim_orders``
+     * instead of repeating ``Snowflake ›`` on every row beneath the
+     * header that already says it. Defaults to 0 — the full path.
+     */
+    fromDepth?: number
 }
 
 export const SearchHitRow: FC<SearchHitRowProps> = ({
-    hit, index, onReveal, onOpen, onAncestorClick,
+    hit, index, onReveal, onOpen, onAncestorClick, fromDepth = 0,
 }) => {
     // Per-row focused subscription. Re-renders only when THIS row's
     // focus state flips, not on every MatchBar step — see the
@@ -158,7 +165,11 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
         [hit.node.entityType],
     )
     const IconComp = useMemo(() => lucideIcon(style.icon), [style.icon])
-    const ancestors = hit.ancestorPath ?? []
+    const fullPath = hit.ancestorPath ?? []
+    // Never slice the path away entirely: a hit sitting directly under
+    // its group root has nothing left after the slice, and an empty
+    // breadcrumb is the right answer there — the header IS the path.
+    const ancestors = fromDepth > 0 ? fullPath.slice(fromDepth) : fullPath
 
     return (
         <motion.div

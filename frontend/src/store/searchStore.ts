@@ -156,6 +156,14 @@ interface SearchStoreState {
      */
     matchUrnSet: ReadonlySet<string>
     /**
+     * True when more matches exist on the server than have been fetched,
+     * so every count derived from ``matchUrnSet`` — the MatchBar total,
+     * the roll-up badges — is a LOWER BOUND. Consumers render ``N+``
+     * rather than ``N``: a number that is wrong and silent is worse than
+     * one that admits it.
+     */
+    resultsArePartial: boolean
+    /**
      * A stable identifier for the current query. Lets consumers detect
      * "same result set as last time" without diffing the URN set. We
      * use JSON.stringify of the SearchQuery — deterministic within a
@@ -376,6 +384,8 @@ interface SearchStoreActions {
         /** Defaults to ``'advanced'`` so existing callers keep their
          *  behaviour; the header passes ``'quick'``. */
         source?: SearchResultSource
+        /** More pages exist on the server. Defaults to false. */
+        partial?: boolean
     }) => void
     /** Replace the draft with a value from outside the builder (template /
      *  JSON editor / load-saved-query). Bumps ``draftRevision``.
@@ -652,8 +662,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
     resultSource: null,
+    resultsArePartial: false,
 
-    setResult: ({ viewId, matchUrns, ancestorPaths, queryHash, source }) => {
+    setResult: ({ viewId, matchUrns, ancestorPaths, queryHash, source, partial }) => {
         const next = new Set<string>()
         // Build the ordered list and the set in one pass so iteration
         // order from the caller (backend hit order) is preserved for
@@ -684,6 +695,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             ancestorMatchTypeBreakdowns: breakdowns,
             queryHash,
             resultSource: source ?? 'advanced',
+            resultsArePartial: partial ?? false,
         })
     },
 
@@ -840,6 +852,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             focusedMatchIndex: null,
             queryHash: null,
             resultSource: null,
+            resultsArePartial: false,
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
         })
@@ -909,6 +922,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             focusedMatchIndex: null,
             queryHash: null,
             resultSource: null,
+            resultsArePartial: false,
             draftPredicate: null,
             draftRevision: s.draftRevision + 1,
             draftOptions: null,
@@ -1097,6 +1111,20 @@ export function useAncestorMatchBreakdown(urn: string | undefined): ReadonlyMap<
     return useSearchStore((s) =>
         (urn ? s.ancestorMatchTypeBreakdowns.get(urn) ?? EMPTY_MAP : EMPTY_MAP),
     )
+}
+
+/**
+ * True while the current result set is incomplete (pages remain). Every
+ * count on the canvas is a lower bound while this holds.
+ */
+export function useResultsArePartial(): boolean {
+    return useSearchStore((s) => s.resultsArePartial)
+}
+
+/** Subscribe to the whole ancestor-match breakdown map, for components that
+ *  aggregate across many URNs at once (e.g. a layer column summing its roots). */
+export function useAncestorMatchBreakdowns(): ReadonlyMap<string, ReadonlyMap<string, number>> {
+    return useSearchStore((s) => s.ancestorMatchTypeBreakdowns)
 }
 
 /**

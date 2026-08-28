@@ -20,6 +20,7 @@ and that's enforced here — before any Cypher is generated.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Optional, Tuple
 
@@ -44,6 +45,22 @@ from backend.common.models.search import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _query_fingerprint(query: SearchQuery) -> str:
+    """Short, stable hash of the predicate tree.
+
+    Logged instead of the predicate itself: a predicate can carry the
+    literal values a user typed, and those belong in the request, not in
+    a log file. The hash is enough to tell "the same query failed again"
+    from "a different one failed", and to correlate a report with a log
+    line.
+    """
+    try:
+        payload = query.predicate.model_dump_json() if query.predicate else ""
+    except Exception:  # pragma: no cover - defensive
+        payload = repr(query.predicate)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
 # Predicate-tree caps now live in DeepSearchSettings (env-overridable).
@@ -349,6 +366,24 @@ class AdvancedSearchService:
             # Ontology hasn't been configured for this workspace. The
             # existing graph endpoints translate this to 400.
             raise ValidationError(str(exc)) from exc
+        except Exception:
+            # Anything else — a driver error, a Cypher runtime failure, a
+            # bug in ancestor hydration — used to propagate to FastAPI's
+            # generic handler and reach the user as a bare 500 with
+            # nothing in the logs tying it to a view or a query. Log the
+            # traceback with enough identity to reproduce it, then
+            # re-raise unchanged so the HTTP mapping is untouched.
+            logger.exception(
+                "search.execution_failed view=%s ws=%s roots=%d types=%d "
+                "deadline_ms=%s query_hash=%s",
+                eff_scope.view_id,
+                eff_scope.workspace_id,
+                len(eff_scope.root_urns or ()),
+                len(eff_scope.entity_types or ()),
+                deadline_ms,
+                _query_fingerprint(query),
+            )
+            raise
 
     async def explain(self, query: SearchQuery):
         """Compile-only path. Returns the generated Cypher + bound params

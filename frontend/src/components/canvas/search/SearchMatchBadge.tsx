@@ -39,6 +39,7 @@ import { createPortal } from 'react-dom'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import type { useSchemaStore } from '@/store/schema'
+import { useResultsArePartial } from '@/store/searchStore'
 
 
 type Schema = ReturnType<typeof useSchemaStore.getState>['schema']
@@ -54,6 +55,13 @@ export interface SearchMatchBadgeProps {
 export function SearchMatchBadge({
     count, breakdown, schema,
 }: SearchMatchBadgeProps) {
+    // While pages remain unfetched, every roll-up is a LOWER BOUND —
+    // it counts the ancestor paths of the hits that have loaded, not
+    // the ones still on the server. Read here rather than threaded
+    // through four call sites: the badge only mounts where a count
+    // exists, so this is a handful of subscriptions to a boolean, not
+    // one per canvas row. Renders `✦ 12+` instead of a confident `✦ 12`.
+    const approximate = useResultsArePartial()
     const [hovered, setHovered] = useState(false)
     const ref = useRef<HTMLSpanElement>(null)
     const [coords, setCoords] = useState<{
@@ -111,10 +119,12 @@ export function SearchMatchBadge({
                     'cursor-help transition-shadow',
                     hovered && 'shadow-[0_0_12px_rgba(245,158,11,0.45)]',
                 )}
-                aria-label={`${count} matches in this subtree — hover for breakdown`}
+                aria-label={approximate
+                    ? `At least ${count} matches in this subtree — more still loading, hover for breakdown`
+                    : `${count} matches in this subtree — hover for breakdown`}
             >
                 <Sparkles className="w-2.5 h-2.5" strokeWidth={2.5} />
-                <span>{count}</span>
+                <span>{count}{approximate && '+'}</span>
             </motion.span>
 
             {typeof document !== 'undefined' && createPortal(
@@ -124,6 +134,7 @@ export function SearchMatchBadge({
                             count={count}
                             items={items}
                             coords={coords}
+                            approximate={approximate}
                         />
                     )}
                 </AnimatePresence>,
@@ -152,7 +163,7 @@ interface BreakdownItem {
 
 
 function PremiumTooltip({
-    count, items, coords,
+    count, items, coords, approximate,
 }: {
     count: number
     items: BreakdownItem[]
@@ -161,6 +172,7 @@ function PremiumTooltip({
         placeAbove: boolean
         anchorX: number
     }
+    approximate: boolean
 }) {
     const caretLeft = Math.max(16, Math.min(TOOLTIP_W - 16, coords.anchorX))
     return (
@@ -216,10 +228,12 @@ function PremiumTooltip({
                 </div>
                 <div className="flex flex-col leading-tight">
                     <span className="text-[22px] font-display font-semibold text-ink tabular-nums leading-none">
-                        {count.toLocaleString()}
+                        {count.toLocaleString()}{approximate && '+'}
                     </span>
                     <span className="mt-1 text-[11px] text-ink-muted leading-snug">
-                        {count === 1 ? 'match' : 'matches'} inside this subtree
+                        {approximate
+                            ? 'matches so far — still loading more'
+                            : `${count === 1 ? 'match' : 'matches'} inside this subtree`}
                     </span>
                 </div>
             </div>

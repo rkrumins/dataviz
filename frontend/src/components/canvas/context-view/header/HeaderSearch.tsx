@@ -27,6 +27,7 @@ import { cn } from '@/lib/utils'
 import { useSearchStore } from '@/store/searchStore'
 import type { AncestorRef } from '@/types/search'
 
+import type { CanvasRoot } from '../../search/panel/groupHitsByTopLevel'
 import { FindResultsPanel } from './FindResultsPanel'
 
 
@@ -41,6 +42,11 @@ export interface HeaderFindFieldProps {
     viewName?: string
     onReveal: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
+    /** The canvas's top-level nodes, by URN. Passed straight through to
+     *  the panel, which groups results under them. */
+    canvasRoots: ReadonlyMap<string, CanvasRoot>
+    /** Scroll the canvas to a result group's top-level node. */
+    onRevealRoot?: (root: CanvasRoot) => void
     onFrame?: () => void
     /** Hand the compiled query to the Advanced Search rail. */
     onOpenAdvancedSearch?: (seed?: { text: string }) => void
@@ -48,7 +54,8 @@ export interface HeaderFindFieldProps {
 
 
 export function HeaderFindField({
-    find, viewId, viewName, onReveal, onOpen, onFrame, onOpenAdvancedSearch,
+    find, viewId, viewName, canvasRoots,
+    onReveal, onOpen, onRevealRoot, onFrame, onOpenAdvancedSearch,
 }: HeaderFindFieldProps) {
     const inputRef = useRef<HTMLInputElement>(null)
     const fieldRef = useRef<HTMLDivElement>(null)
@@ -266,6 +273,11 @@ export function HeaderFindField({
                                 : { position: 'fixed', left: EDGE, top: EDGE }}
                             onReveal={(urn, path) => { onReveal(urn, path); setPanelOpen(false) }}
                             onOpen={onOpen}
+                            canvasRoots={canvasRoots}
+                            onRevealRoot={(root) => {
+                                onRevealRoot?.(root)
+                                setPanelOpen(false)
+                            }}
                             onFrame={onFrame}
                             onEscalate={escalate}
                         />

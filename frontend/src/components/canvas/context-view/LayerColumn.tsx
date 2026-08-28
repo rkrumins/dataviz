@@ -19,12 +19,14 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import {
+  useAncestorMatchBreakdowns,
   useAncestorMatchCounts,
   useCanvasFilterMode,
   useMatchUrnSet,
 } from '@/store/searchStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi, AnchorProxyGroup } from './types'
+import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { FlatTreeItem } from './FlatTreeItem'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
@@ -307,7 +309,34 @@ export const LayerColumn = React.memo(function LayerColumn({
   // visual contact with what they're inspecting.
   const matchUrnSet = useMatchUrnSet()
   const ancestorMatchCounts = useAncestorMatchCounts()
+  const ancestorMatchBreakdowns = useAncestorMatchBreakdowns()
   const canvasFilterMode = useCanvasFilterMode()
+
+  // Matches anywhere in this column, so a user scanning across columns
+  // can see WHICH ONE holds their hit before expanding anything. Summed
+  // per top-level node: the node itself if it matched, plus the rollup
+  // of everything beneath it. Both maps are already subscribed above for
+  // the isolate/hide filter, so this costs one pass over the column's
+  // roots — not a new subscription.
+  const { layerMatchCount, layerMatchBreakdown } = useMemo(() => {
+    let total = 0
+    const breakdown = new Map<string, number>()
+    for (const node of nodes) {
+      const urn = node.urn || node.id
+      if (matchUrnSet.has(urn)) {
+        total += 1
+        breakdown.set(node.typeId, (breakdown.get(node.typeId) ?? 0) + 1)
+      }
+      total += ancestorMatchCounts.get(urn) ?? 0
+      const sub = ancestorMatchBreakdowns.get(urn)
+      if (sub) {
+        for (const [type, n] of sub) {
+          breakdown.set(type, (breakdown.get(type) ?? 0) + n)
+        }
+      }
+    }
+    return { layerMatchCount: total, layerMatchBreakdown: breakdown }
+  }, [nodes, matchUrnSet, ancestorMatchCounts, ancestorMatchBreakdowns])
 
   // Build flat tree from hierarchy (visible items only)
   const rawFlatTree = useMemo(() => {
@@ -1306,6 +1335,17 @@ export const LayerColumn = React.memo(function LayerColumn({
                       </>
                     )}
                   </div>
+                )}
+                {/* Matches in this column — a distinct amber grammar, never
+                    merged into the `X / Y` count above. Lets a user scanning
+                    across columns see WHICH one holds their hit without
+                    expanding anything. */}
+                {layerMatchCount > 0 && (
+                  <SearchMatchBadge
+                    count={layerMatchCount}
+                    breakdown={layerMatchBreakdown}
+                    schema={schema}
+                  />
                 )}
                 {/* Curated-order signal — always visible (never hover-gated) so
                     read-only consumers know the arrangement is deliberate. */}

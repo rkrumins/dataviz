@@ -77,6 +77,12 @@ const SERVER_PAGE_SIZE = 100
 /** Matches DEFAULT_DRAFT_OPTIONS in the search store. */
 const CANDIDATE_CAP = 5000
 
+/** Ceiling on `loadAll`. A term that genuinely appears tens of thousands
+ *  of times is not something the browser should try to hold in one list;
+ *  stopping here leaves the cursor intact, so `hasMore` stays true and
+ *  every count keeps its `+` rather than quietly claiming completeness. */
+const LOAD_ALL_CAP = 2000
+
 
 /** Frozen so the merge memo keeps its identity while the server has
  *  nothing to add. */
@@ -100,6 +106,8 @@ interface ServerRun {
      *  run: the panel keeps showing the rows it has instead of flipping
      *  to a spinner. */
     loadingMore: boolean
+    /** True while `loadAll` is walking the cursor chain to completion. */
+    loadingAll: boolean
     truncated: boolean
     deadlineExceeded: boolean
     elapsedMs: number | null
@@ -154,8 +162,17 @@ export interface FindInViewState {
     loadMore: () => void
     /** A `loadMore` is in flight. */
     isLoadingMore: boolean
+    /** Page to completion, so every count describes the whole view
+     *  rather than the pages that happen to have loaded. */
+    loadAll: () => void
+    /** `loadAll` is walking the cursor chain. */
+    isLoadingAll: boolean
     status: FindStatus
     errorMessage: string | null
+    /** Re-run the server tier for the current query, from the first
+     *  page. The local tier is untouched, so the matches already on
+     *  screen stay on screen while it runs. */
+    retry: () => void
     /** The server hit its candidate cap: there are more matches than it
      *  looked at. Surfaced, never swallowed. */
     truncated: boolean
@@ -195,6 +212,15 @@ export function useFindInView({
     // stale result achieves the same thing and lets the dedupe work FOR
     // us — backspacing to a query already in flight costs no round-trip.
     const runIdRef = useRef(0)
+
+    // Bumped by `retry`. Sits in the fetch effect's deps but NOT in the
+    // run key: the key still tags the answer with the question, so the
+    // retried result is accepted rather than discarded as stale. The
+    // retry itself starts from page 1 — it is only offered after a
+    // failure, where there are no pages to preserve. The local tier is
+    // untouched throughout.
+    const [retryNonce, setRetryNonce] = useState(0)
+    const retry = useCallback(() => setRetryNonce((n) => n + 1), [])
 
     const trimmed = text.trim()
     const compiled = useMemo(
@@ -281,6 +307,7 @@ export function useFindInView({
                     total: page.candidateCount ?? page.hits?.length ?? 0,
                     cursor: page.cursor ?? null,
                     loadingMore: false,
+                    loadingAll: false,
                     truncated: Boolean(page.truncated),
                     deadlineExceeded: Boolean(page.deadlineExceeded),
                     elapsedMs: Math.round(performance.now() - startedAt),
@@ -297,6 +324,7 @@ export function useFindInView({
                     total: null,
                     cursor: null,
                     loadingMore: false,
+                    loadingAll: false,
                     truncated: false,
                     deadlineExceeded: false,
                     elapsedMs: Math.round(performance.now() - startedAt),
@@ -306,12 +334,16 @@ export function useFindInView({
         })()
     }, [
         serverActive, runKey, debouncedText, debouncedMode, debouncedScope,
-        provider, viewId, buildQuery,
+        provider, viewId, buildQuery, retryNonce,
     ])
 
     // Only the answer to the question currently being asked counts.
     const server = serverRun && serverRun.key === runKey ? serverRun : null
     const serverHits = server?.hits ?? EMPTY_HITS
+    /** Pages remain. While true, everything derived from `hits` — the
+     *  headline count, the canvas roll-ups, isolate/exclude — describes a
+     *  subset, and says so. */
+    const hasMore = Boolean(server?.cursor)
 
     /**
      * Fetch the next page and APPEND it.
@@ -323,7 +355,7 @@ export function useFindInView({
      */
     const loadMore = useCallback(() => {
         const run = server
-        if (!run || !run.cursor || run.loadingMore) return
+        if (!run || !run.cursor || run.loadingMore || run.loadingAll) return
         if (!(provider instanceof RemoteGraphProvider)) return
 
         const cursor = run.cursor
@@ -359,6 +391,71 @@ export function useFindInView({
                         error: e instanceof Error ? e.message : String(e),
                     }
                 })
+            }
+        })()
+    }, [server, provider, buildQuery])
+
+    /**
+     * Walk the cursor chain to completion and append every page.
+     *
+     * The reason this exists is not impatience — it is honesty. While
+     * pages remain, the roll-up badges, the MatchBar total and the
+     * isolate/exclude filter all describe the subset that has loaded.
+     * "Load all" is the one action that makes them describe the view.
+     *
+     * The cursor lives in the loop rather than being re-read from state
+     * between pages: this loop owns the chain, and reading it back would
+     * race with its own appends.
+     */
+    const loadAll = useCallback(() => {
+        const run = server
+        if (!run || !run.cursor || run.loadingMore || run.loadingAll) return
+        if (!(provider instanceof RemoteGraphProvider)) return
+
+        const myRun = runIdRef.current
+        setServerRun((prev) =>
+            prev && prev.key === run.key ? { ...prev, loadingAll: true } : prev)
+
+        void (async () => {
+            let cursor: string | null = run.cursor
+            let loaded = run.hits.length
+            try {
+                while (cursor && loaded < LOAD_ALL_CAP) {
+                    const page = await provider.searchAdvanced(
+                        buildQuery(run.predicate, cursor),
+                    )
+                    if (runIdRef.current !== myRun) return   // superseded
+                    const pageHits = page.hits ?? []
+                    // A cursor that returns nothing would otherwise spin
+                    // forever against a backend bug.
+                    if (pageHits.length === 0) { cursor = null; break }
+                    loaded += pageHits.length
+                    cursor = page.cursor ?? null
+                    const nextCursor = cursor
+                    setServerRun((prev) => {
+                        if (!prev || prev.key !== run.key) return prev
+                        return {
+                            ...prev,
+                            hits: [...prev.hits, ...pageHits],
+                            cursor: nextCursor,
+                            truncated: prev.truncated || Boolean(page.truncated),
+                        }
+                    })
+                }
+            } catch (e) {
+                if (runIdRef.current !== myRun) return
+                setServerRun((prev) => {
+                    if (!prev || prev.key !== run.key) return prev
+                    return {
+                        ...prev,
+                        error: e instanceof Error ? e.message : String(e),
+                    }
+                })
+            } finally {
+                setServerRun((prev) =>
+                    prev && prev.key === run.key
+                        ? { ...prev, loadingAll: false }
+                        : prev)
             }
         })()
     }, [server, provider, buildQuery])
@@ -431,8 +528,12 @@ export function useFindInView({
             ancestorPaths,
             queryHash: `find:${mode}:${scope}:${trimmed}`,
             source: 'quick',
+            // Tells every roll-up badge on the canvas that its count is a
+            // lower bound. Without it a search with 500 matches lights up
+            // `✦ 4` under Snowflake and looks authoritative.
+            partial: hasMore,
         })
-    }, [debouncedHits, trimmed, viewId, mode, scope])
+    }, [debouncedHits, trimmed, viewId, mode, scope, hasMore])
 
     // Drop the spotlight when the canvas unmounts or the view changes —
     // otherwise stale matches keep glowing on a view they don't belong to.
@@ -470,11 +571,14 @@ export function useFindInView({
         hits,
         localCount: localUrns.size,
         serverTotal: server?.total ?? null,
-        hasMore: Boolean(server?.cursor),
+        hasMore,
         loadMore,
         isLoadingMore: Boolean(server?.loadingMore),
+        loadAll,
+        isLoadingAll: Boolean(server?.loadingAll),
         status,
         errorMessage: server?.error ?? null,
+        retry,
         truncated: server?.truncated ?? false,
         deadlineExceeded: server?.deadlineExceeded ?? false,
         elapsedMs: server?.elapsedMs ?? null,

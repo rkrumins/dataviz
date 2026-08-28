@@ -860,10 +860,13 @@ function HierarchyContainer({
               <h4 className="text-sm font-medium text-ink truncate flex-1 min-w-0">
                 {node.name}
               </h4>
-              {/* W2.1 — N-level subtree match count. Shown only on
-                  collapsed rows so the badge doesn't double-up
-                  the visible matches once the user expands. */}
-              {ancestorMatchCount > 0 && !isExpanded && hasChildren && schema && (
+              {/* N-level subtree match count, shown whether or not the
+                  row is expanded. It used to be collapsed-only, to avoid
+                  "doubling up" the visible matches — but expanding does
+                  not put a deep match on screen, and the count is what
+                  tells you it is worth scrolling. Matches ContextView
+                  and GraphCanvas. */}
+              {ancestorMatchCount > 0 && hasChildren && schema && (
                 <SearchMatchBadge
                   count={ancestorMatchCount}
                   breakdown={ancestorBreakdown}

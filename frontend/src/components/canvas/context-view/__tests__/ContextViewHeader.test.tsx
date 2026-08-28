@@ -23,6 +23,8 @@ function makeFindState(overrides: Partial<FindInViewState> = {}): FindInViewStat
     truncated: false, deadlineExceeded: false, elapsedMs: null,
     isStale: false,
     hasMore: false, loadMore: vi.fn(), isLoadingMore: false,
+    loadAll: vi.fn(), isLoadingAll: false,
+    retry: vi.fn(),
     compiled: {
       predicate: null, recognized: [], fallbackText: [], usedOperators: false,
     },
@@ -35,6 +37,7 @@ function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextView
     find: makeFindState(),
     viewId: 'view-1',
     onRevealSearchHit: vi.fn(),
+    searchCanvasRoots: new Map(),
     showLineageFlow: true,
     onToggleLineageFlow: vi.fn(),
     showEdgeDirection: false,
