@@ -599,24 +599,40 @@ class TestCompilerLeaves:
         assert c.params == {"p0": "ops"}
 
     def test_text_target_any_matches_display_name(self):
-        # A node with displayName='Orders Pipeline' has its lowercased
-        # displayName denormalised into n.searchableText at write time, so
-        # the compiled CONTAINS predicate against n.searchableText with
-        # parameter 'orders' matches it.
+        # A node with displayName='Orders Pipeline' matches on 'orders'
+        # TWICE over: via n.searchableText, into which displayName is
+        # denormalised at write time, and via n.displayName directly.
         c = _Compiler()
         where = c.compile(TextPredicate(value="orders", target="any"))
-        assert where == "toLower(toString(n.searchableText)) CONTAINS $p0"
+        assert where == (
+            "(toLower(toString(n.searchableText)) CONTAINS $p0"
+            " OR toLower(toString(n.displayName)) CONTAINS $p0"
+            " OR toLower(toString(n.qualifiedName)) CONTAINS $p0"
+            " OR toLower(toString(n.description)) CONTAINS $p0)"
+        )
         assert c.params == {"p0": "orders"}
+
+    def test_text_target_any_survives_a_node_with_no_searchable_text(self):
+        # The reason 'any' is not a single column. searchableText is only
+        # written by the provider paths; a node written by a script that
+        # talks raw Cypher has it unset, and `null CONTAINS 'x'` is null —
+        # so with one column that node is silently unmatchable and the
+        # whole search returns zero, fast, with no error. The OR is what
+        # makes the name and description columns able to answer instead.
+        c = _Compiler()
+        where = c.compile(TextPredicate(value="account", target="any"))
+        assert "n.displayName" in where
+        assert "n.description" in where
+        assert where.startswith("(") and where.endswith(")")
 
     def test_text_target_any_matches_property_value(self):
         # A node with sourceSystem='snowflake' and no 'snowflake' in the
         # displayName still matches because every string-valued user
-        # property is folded into n.searchableText at write time. The
-        # compiled fragment is the same — the matching happens in the
-        # graph against the denormalised field.
+        # property is folded into n.searchableText at write time — the
+        # branch of the OR that no other column can cover.
         c = _Compiler()
         where = c.compile(TextPredicate(value="Snowflake", target="any"))
-        assert where == "toLower(toString(n.searchableText)) CONTAINS $p0"
+        assert "toLower(toString(n.searchableText)) CONTAINS $p0" in where
         assert c.params == {"p0": "snowflake"}
 
     def test_text_target_any_prefix(self):
@@ -624,7 +640,12 @@ class TestCompilerLeaves:
         where = c.compile(TextPredicate(
             value="orders", target="any", match="prefix",
         ))
-        assert where == "toLower(toString(n.searchableText)) STARTS WITH $p0"
+        assert where == (
+            "(toLower(toString(n.searchableText)) STARTS WITH $p0"
+            " OR toLower(toString(n.displayName)) STARTS WITH $p0"
+            " OR toLower(toString(n.qualifiedName)) STARTS WITH $p0"
+            " OR toLower(toString(n.description)) STARTS WITH $p0)"
+        )
         assert c.params == {"p0": "orders"}
 
     def test_text_target_any_exact(self):
@@ -632,7 +653,12 @@ class TestCompilerLeaves:
         where = c.compile(TextPredicate(
             value="orders pipeline", target="any", match="exact",
         ))
-        assert where == "toLower(toString(n.searchableText)) = $p0"
+        assert where == (
+            "(toLower(toString(n.searchableText)) = $p0"
+            " OR toLower(toString(n.displayName)) = $p0"
+            " OR toLower(toString(n.qualifiedName)) = $p0"
+            " OR toLower(toString(n.description)) = $p0)"
+        )
         assert c.params == {"p0": "orders pipeline"}
 
     def test_text_target_any_with_fulltext_match_raises(self):

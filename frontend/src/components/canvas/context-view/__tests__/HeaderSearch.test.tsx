@@ -46,6 +46,7 @@ function makeFind(overrides: Partial<FindInViewState> = {}): FindInViewState {
         hasMore: false, loadMore: vi.fn(), isLoadingMore: false,
         loadAll: vi.fn(), isLoadingAll: false,
         retry: vi.fn(),
+        scopeDiagnostics: null,
         compiled: {
             predicate: null, recognized: [], fallbackText: [], usedOperators: false,
         },
@@ -542,5 +543,78 @@ describe('HeaderFindField — a partial server failure', () => {
         const { find, panel } = openFailed()
         fireEvent.click(within(panel).getByRole('button', { name: /retry/i }))
         expect(find.retry).toHaveBeenCalled()
+    })
+})
+
+/**
+ * Browsing must not cost you the list.
+ *
+ * Reported as "I don't even see where to find any highlighted items":
+ * every path back to the canvas — clicking a result, clicking the canvas
+ * itself — dismissed the panel, and with it the only evidence the search
+ * had worked. At 300 results that is not a papercut, it is unusable.
+ */
+describe('HeaderFindField — the results survive using them', () => {
+    beforeEach(() => { useSearchStore.getState().clear() })
+
+    function open(overrides: Partial<FindInViewState> = {}) {
+        const find = withResults(overrides)
+        const onReveal = vi.fn()
+        renderField(find, { onReveal })
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        return {
+            find, onReveal,
+            panel: screen.getByRole('dialog', { name: /search results/i }),
+        }
+    }
+
+    it('stays open after you click through to a result', () => {
+        const { onReveal, panel } = open()
+        fireEvent.click(within(panel).getAllByRole('button', { name: /reveal in canvas/i })[0])
+        expect(onReveal).toHaveBeenCalled()
+        expect(screen.queryByRole('dialog', { name: /search results/i }))
+            .toBeInTheDocument()
+    })
+
+    it('stays open when you click the canvas to go look at a match', () => {
+        open()
+        fireEvent.mouseDown(document.body)
+        expect(screen.queryByRole('dialog', { name: /search results/i }))
+            .toBeInTheDocument()
+    })
+
+    it('still closes on Escape, which is the deliberate way out', async () => {
+        open()
+        fireEvent.keyDown(window, { key: 'Escape' })
+        // The panel leaves on an exit animation, so it unmounts a beat
+        // after the state flips.
+        await waitFor(() => {
+            expect(screen.queryByRole('dialog', { name: /search results/i }))
+                .toBeNull()
+        })
+    })
+
+    it('closes on click-away when there is no query to lose', async () => {
+        renderField(makeFind())
+        fireEvent.focus(screen.getByPlaceholderText('Find anything in this view…'))
+        expect(screen.getByRole('dialog', { name: /search results/i })).toBeInTheDocument()
+        fireEvent.mouseDown(document.body)
+        await waitFor(() => {
+            expect(screen.queryByRole('dialog', { name: /search results/i }))
+                .toBeNull()
+        })
+    })
+
+    it('keeps the match count visible in the field once the panel is closed', () => {
+        // The canvas is still lit; the field must say so. Closing the
+        // panel used to erase every trace that the search had worked.
+        open()
+        fireEvent.keyDown(window, { key: 'Escape' })
+        const chip = screen.getByRole('button', { name: /2 matches — show results/i })
+        expect(chip).toBeInTheDocument()
+
+        fireEvent.click(chip)
+        expect(screen.getByRole('dialog', { name: /search results/i }))
+            .toBeInTheDocument()
     })
 })

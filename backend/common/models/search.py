@@ -72,9 +72,11 @@ TextTarget = Literal[
 ]
 """Which field a text predicate scans.
 
-``any`` triggers the cross-property ``n.searchableTextLower CONTAINS …``
-path (the only mode that touches the denormalised blob); every other
-target hits a specific real node field.
+``any`` is the cross-property mode: it ORs the denormalised
+``n.searchableText`` (the only column carrying property VALUES) with
+``displayName``, ``qualifiedName`` and ``description``, so a node whose
+``searchableText`` was never written is still found by name rather than
+being silently unmatchable. Every other target hits specific node fields.
 
 ``name`` is deliberately WIDE: it ORs displayName, qualifiedName and the
 denormalised searchable text, so a partial name still matches when one of
@@ -584,6 +586,22 @@ class SearchScope(_Base):
         ),
     )
     layer_assignment: Optional[str] = Field(None, alias="layerAssignment")
+    include_hidden_entity_types: bool = Field(
+        False, alias="includeHiddenEntityTypes",
+        description=(
+            "Ignore the view's entity-type allow-list (visibleEntityTypes "
+            "and per-layer entityTypes) when deciding what may be "
+            "RETURNED. Those are canvas DISPLAY preferences, not an "
+            "authorisation boundary — the boundary is root_urns plus "
+            "containment expansion, and this flag does not touch it, so "
+            "it can never widen a search beyond the view. Set by "
+            "find-in-view, whose box promises to find anything in the "
+            "view including types the canvas is currently hiding; without "
+            "it, a view showing 2 of 7 types can never return a schema "
+            "field no matter what the user types. Note that passing a "
+            "wider ``entity_types`` list instead is rejected with 400."
+        ),
+    )
 
     @model_validator(mode="after")
     def _enforce_root_urns_cap(self) -> "SearchScope":

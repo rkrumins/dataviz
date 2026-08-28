@@ -128,6 +128,27 @@ signals nodes that still need the native-property migration
 (`python -m backend.scripts.migrate_native_properties`) to be queryable by
 property.
 
+### The denormalised `searchableText` column
+
+`TextPredicate(target='any')` — what a plain typed word in the Context View's
+search box compiles to — reads `n.searchableText`, a lowercased concatenation
+of displayName, qualifiedName, description and every string-valued user
+property, written by `_compute_searchable_text` at node-write time.
+
+Only the provider write paths populate it. Nodes written by a script that
+issues raw Cypher will not have it, and **property values are the one thing no
+other column carries**. The compiler therefore ORs `searchableText` with
+`displayName`, `qualifiedName` and `description`, so a node missing the column
+is still found by name — but its property values are not searchable until the
+column exists. Backfill an existing graph with:
+
+```
+python -m backend.scripts.migrate_native_properties --searchable-text
+```
+
+Any new node-write path must set `searchableText`; a missing column produces
+no error, just silently unmatchable rows.
+
 ## Limitations
 
 - **FalkorDB only.** Deep Search is implemented for the FalkorDB adapter;

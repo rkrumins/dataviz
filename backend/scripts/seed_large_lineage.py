@@ -32,7 +32,9 @@ from dataclasses import dataclass, field
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from backend.app.models.graph import GraphNode, GraphEdge
-from backend.app.providers.falkordb_provider import FalkorDBProvider
+from backend.app.providers.falkordb_provider import (
+    FalkorDBProvider, _compute_searchable_text,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -278,7 +280,14 @@ async def push_to_falkordb(seeder: LargeSeeder):
             "qualifiedName": node.qualified_name or "",
             "properties": json.dumps(node.properties),
             "tags": json.dumps(node.tags or []),
-            "childCount": node.child_count or 0
+            "childCount": node.child_count or 0,
+            # See seed_data_lake.py — raw Cypher bypasses the provider,
+            # so this denormalised search column has to be written here
+            # or `TextPredicate(target='any')` can never match the node.
+            "searchableText": _compute_searchable_text(
+                node.display_name, node.qualified_name,
+                node.description, node.properties,
+            ),
         })
 
     # 2. Bulk Push Nodes
@@ -291,7 +300,8 @@ async def push_to_falkordb(seeder: LargeSeeder):
             UNWIND $batch AS map
             MERGE (n:{label} {{urn: map.urn}})
             SET n.displayName = map.displayName, n.qualifiedName = map.qualifiedName,
-                n.properties = map.properties, n.tags = map.tags, n.childCount = map.childCount
+                n.properties = map.properties, n.tags = map.tags, n.childCount = map.childCount,
+                n.searchableText = map.searchableText
             """
             await graph.query(cypher, params={"batch": batch})
             logger.info(f"  {label}: {i+len(batch)}/{len(nodes)}")

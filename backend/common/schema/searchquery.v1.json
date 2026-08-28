@@ -1913,6 +1913,12 @@
           "description": "Optional. Must be \u2286 view's visibleEntityTypes; out-of-set values cause the request to be rejected with 400.",
           "title": "Entitytypes"
         },
+        "includeHiddenEntityTypes": {
+          "default": false,
+          "description": "Ignore the view's entity-type allow-list (visibleEntityTypes and per-layer entityTypes) when deciding what may be RETURNED. Those are canvas DISPLAY preferences, not an authorisation boundary \u2014 the boundary is root_urns plus containment expansion, and this flag does not touch it, so it can never widen a search beyond the view. Set by find-in-view, whose box promises to find anything in the view including types the canvas is currently hiding; without it, a view showing 2 of 7 types can never return a schema field no matter what the user types. Note that passing a wider ``entity_types`` list instead is rejected with 400.",
+          "title": "Includehiddenentitytypes",
+          "type": "boolean"
+        },
         "layerAssignment": {
           "anyOf": [
             {

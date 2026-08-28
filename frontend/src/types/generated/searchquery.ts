@@ -334,6 +334,10 @@ export type Op6 = 'and' | 'or' | 'not'
  * Optional. Must be ⊆ view's visibleEntityTypes; out-of-set values cause the request to be rejected with 400.
  */
 export type Entitytypes = string[] | null
+/**
+ * Ignore the view's entity-type allow-list (visibleEntityTypes and per-layer entityTypes) when deciding what may be RETURNED. Those are canvas DISPLAY preferences, not an authorisation boundary — the boundary is root_urns plus containment expansion, and this flag does not touch it, so it can never widen a search beyond the view. Set by find-in-view, whose box promises to find anything in the view including types the canvas is currently hiding; without it, a view showing 2 of 7 types can never return a schema field no matter what the user types. Note that passing a wider ``entity_types`` list instead is rejected with 400.
+ */
+export type Includehiddenentitytypes = boolean
 export type Layerassignment1 = string | null
 /**
  * Clamped to min(client, view.maxDepth) by the resolver.
@@ -861,6 +865,7 @@ export interface GroupPredicate {
  */
 export interface SearchScope {
     entityTypes?: Entitytypes
+    includeHiddenEntityTypes?: Includehiddenentitytypes
     layerAssignment?: Layerassignment1
     maxDepth?: Maxdepth1
     rootUrns?: Rooturns

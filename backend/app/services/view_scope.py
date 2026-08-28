@@ -348,7 +348,19 @@ class ViewScopeResolver:
         allowed_root_urns: List[str] = sorted(set(ref_roots) | set(cnt_roots))
         # Entity-type allow-list is the union of both sources; empty
         # means "no constraint from the view".
-        allowed_entity_types: FrozenSet[str] = ref_ent_types | cnt_ent_types
+        #
+        # Both sources are canvas DISPLAY config — which types the view
+        # chooses to draw — not authorisation. Applying them to search
+        # means a view showing 2 of 7 types can never return a schema
+        # field, however deep in the view it sits and however exactly the
+        # user names it. A caller that is searching rather than drawing
+        # opts out; the containment clamp below is untouched, so this
+        # cannot reach outside the view.
+        allowed_entity_types: FrozenSet[str] = (
+            frozenset()
+            if requested.include_hidden_entity_types
+            else ref_ent_types | cnt_ent_types
+        )
 
         # Depth: view config > request hint, then hard cap.
         view_max_depth = cnt_max_depth if cnt_max_depth > 0 else _DEFAULT_MAX_DEPTH
@@ -423,6 +435,21 @@ def _intersect_root_urns(
     equal to one of ``allowed`` or share its prefix. The Cypher
     scope-continuation step then runs the rigorous descendancy check.
 
+    That prefix test is a cheap pre-filter and it is WRONG for composite
+    URNs — ``urn:li:dataset:(urn:li:dataPlatform:snowflake,GOLD.dim_x,PROD)``
+    does not start with ``urn:li:container:GOLD`` even though it descends
+    from it. So a client hint that is entirely legitimate can be dropped
+    in full.
+
+    ``SearchScope`` calls these "narrowing hints". A hint that narrows to
+    nothing is not a hint, so when EVERY requested URN is dropped we fall
+    back to the view's own roots — the exact clamp an unhinted request
+    gets. That is strictly tighter than "no clamp", which is what the
+    security guard actually forbids: the caller is authorised for this
+    view, and this is that view. The drop is still reported, so the
+    response says the hint was ignored rather than silently returning an
+    empty page.
+
     Returns ``(kept, dropped)``.
     """
     if not requested:
@@ -448,6 +475,9 @@ def _intersect_root_urns(
             kept.append(urn)
         else:
             dropped.append(urn)
+    if not kept:
+        # Every hint dropped. Narrow to the view instead of to nothing.
+        return list(allowed), dropped
     return kept, dropped
 
 

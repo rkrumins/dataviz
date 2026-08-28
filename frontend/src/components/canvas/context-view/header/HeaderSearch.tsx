@@ -24,7 +24,7 @@ import { createPortal } from 'react-dom'
 
 import type { FindInViewState } from '@/hooks/useFindInView'
 import { cn } from '@/lib/utils'
-import { useSearchStore } from '@/store/searchStore'
+import { useOrderedMatchUrns, useSearchStore } from '@/store/searchStore'
 import type { AncestorRef } from '@/types/search'
 
 import type { CanvasRoot } from '../../search/panel/groupHitsByTopLevel'
@@ -63,6 +63,10 @@ export function HeaderFindField({
     const [panelOpen, setPanelOpen] = useState(false)
 
     const hasQuery = find.text.trim().length > 0
+    // Read from the store, not from `find.hits`: this is the count the
+    // CANVAS is lit with, so the chip and the highlighting can never
+    // disagree about how many matches there are.
+    const matchCount = useOrderedMatchUrns().length
     const { box, place } = useAnchorBox(fieldRef, panelOpen)
 
     // Measure BEFORE opening, in the same batch. The field is already laid
@@ -127,8 +131,15 @@ export function HeaderFindField({
     // Click-away. The panel is portaled, so it is NOT inside the field's
     // subtree — testing only the field would close the panel on its own
     // scope chips and Load-more button.
+    //
+    // Only while there is no query. Browsing results MEANS touching the
+    // canvas — expanding a container, following a hit, reading the row
+    // your search just lit up — and dismissing the list on the first
+    // such click makes a long result set unusable: you get one look,
+    // then you retype. With a query live the panel is dismissed
+    // deliberately: Escape, the × in the MatchBar, or clearing the box.
     useEffect(() => {
-        if (!panelOpen) return
+        if (!panelOpen || hasQuery) return
         const onPointerDown = (e: MouseEvent) => {
             const t = e.target as Node
             if (fieldRef.current?.contains(t)) return
@@ -137,7 +148,7 @@ export function HeaderFindField({
         }
         document.addEventListener('mousedown', onPointerDown)
         return () => document.removeEventListener('mousedown', onPointerDown)
-    }, [panelOpen])
+    }, [panelOpen, hasQuery])
 
     const escalate = useCallback(() => {
         const text = find.text.trim()
@@ -215,6 +226,29 @@ export function HeaderFindField({
                     box, and burying it in a panel you have to open first made
                     the rail unreachable for anyone who didn't. */}
                 <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    {/* The answer, in the field. Closing the panel used to
+                        erase every trace that the search had worked —
+                        "I don't even see where to find any highlighted
+                        items" — while the canvas was still lit and the
+                        matches were still there. Click it to get the list
+                        back. */}
+                    {hasQuery && !panelOpen && matchCount > 0 && (
+                        <button
+                            onClick={openPanel}
+                            aria-label={`${matchCount} matches — show results`}
+                            title="Show results"
+                            className={cn(
+                                'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md',
+                                'bg-amber-500/15 border border-amber-500/40',
+                                'text-amber-700 dark:text-amber-300',
+                                'text-[10px] font-semibold tabular-nums leading-none',
+                                'hover:bg-amber-500/25 transition-colors',
+                            )}
+                        >
+                            <LucideIcons.Sparkles className="w-2.5 h-2.5" strokeWidth={2.5} />
+                            {matchCount.toLocaleString()}
+                        </button>
+                    )}
                     {hasQuery && (
                         <button
                             onClick={() => { find.clear(); inputRef.current?.focus() }}
@@ -271,13 +305,17 @@ export function HeaderFindField({
                                 // environment): render it rather than
                                 // swallowing the panel entirely.
                                 : { position: 'fixed', left: EDGE, top: EDGE }}
-                            onReveal={(urn, path) => { onReveal(urn, path); setPanelOpen(false) }}
+                            // The panel STAYS OPEN through a reveal. It
+                            // used to close on every result click, which
+                            // is the wrong trade at any scale and an
+                            // impossible one at 300 hits: the canvas
+                            // walks to the node behind the panel, and the
+                            // next result stays one click away instead of
+                            // one retype.
+                            onReveal={onReveal}
                             onOpen={onOpen}
                             canvasRoots={canvasRoots}
-                            onRevealRoot={(root) => {
-                                onRevealRoot?.(root)
-                                setPanelOpen(false)
-                            }}
+                            onRevealRoot={(root) => onRevealRoot?.(root)}
                             onFrame={onFrame}
                             onEscalate={escalate}
                         />

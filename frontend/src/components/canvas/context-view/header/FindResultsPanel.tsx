@@ -41,6 +41,7 @@ import {
 import { type FC, forwardRef, useCallback, useRef } from 'react'
 
 import { GroupedHitBrowser } from '@/components/canvas/search/panel/GroupedHitBrowser'
+import { summariseScope } from '@/components/canvas/search/panel/summariseScope'
 import type { CanvasRoot } from '@/components/canvas/search/panel/groupHitsByTopLevel'
 import { SearchOmnibox } from '@/components/canvas/search/panel/omnibox/SearchOmnibox'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
@@ -63,7 +64,7 @@ import {
     useSearchStore,
 } from '@/store/searchStore'
 import type { FindInViewState } from '@/hooks/useFindInView'
-import type { AncestorRef, Predicate } from '@/types/search'
+import type { AncestorRef, Predicate, ScopeDiagnostics } from '@/types/search'
 
 
 const SCOPE_ORDER: FindScope[] = ['everything', 'names', 'descriptions', 'tags']
@@ -113,6 +114,7 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
         hits, localCount, serverTotal, status, errorMessage,
         truncated, deadlineExceeded, elapsedMs, compiled, mode, scope,
         hasMore, loadMore, isLoadingMore, loadAll, isLoadingAll, retry,
+        scopeDiagnostics,
     } = state
 
     // The stepper moves focus; walking the canvas to the focused match is
@@ -402,6 +404,8 @@ export const FindResultsPanel = forwardRef<HTMLDivElement, FindResultsPanelProps
                         query={state.text.trim()}
                         viewName={viewName}
                         scope={scope}
+                        scopeDiagnostics={scopeDiagnostics}
+                        localOnly={status === 'localOnly'}
                         usedOperators={compiled.usedOperators}
                         onWiden={() => state.setScope('everything')}
                         onLoosen={() => state.setMode('contains')}
@@ -532,18 +536,43 @@ const ZeroState: FC<{
     scope: FindScope
     usedOperators: boolean
     canLoosen: boolean
+    scopeDiagnostics: ScopeDiagnostics | null
+    localOnly: boolean
     onWiden: () => void
     onLoosen: () => void
     onEscalate: () => void
-}> = ({ query, viewName, scope, usedOperators, canLoosen, onWiden, onLoosen, onEscalate }) => (
+}> = ({
+    query, viewName, scope, usedOperators, canLoosen,
+    scopeDiagnostics, localOnly, onWiden, onLoosen, onEscalate,
+}) => {
+    // Derived from what the backend says it searched, never asserted.
+    // The old copy promised "every entity in this view, including
+    // containers you haven't opened" unconditionally — a promise this
+    // panel is in no position to make, and one that was flatly false
+    // whenever the view's type filter, a dropped root hint or a missing
+    // backend had narrowed the search out from under it.
+    const summary = summariseScope(
+        FIND_SCOPE_HINTS[scope].toLowerCase(), scopeDiagnostics, localOnly,
+    )
+    return (
     <div className="px-3 py-5">
         <div className="text-[13px] font-display font-semibold text-ink">
             No match for &ldquo;{query}&rdquo;{viewName ? ` in ${viewName}` : ''}
         </div>
         <div className="mt-1 text-[11.5px] text-ink-muted leading-relaxed">
-            Searched {FIND_SCOPE_HINTS[scope].toLowerCase()} across every entity
-            in this view, including containers you haven&rsquo;t opened.
+            {summary.sentence}
         </div>
+        {summary.caveat && (
+            <div className={cn(
+                'mt-2 flex items-start gap-1.5 px-2 py-1.5 rounded-lg',
+                'text-[11px] leading-snug',
+                'bg-amber-500/[0.08] border border-amber-500/25',
+                'text-amber-700 dark:text-amber-300',
+            )}>
+                <AlertTriangle className="w-2.5 h-2.5 mt-[3px] shrink-0" strokeWidth={2.4} />
+                <span className="min-w-0">{summary.caveat}</span>
+            </div>
+        )}
         <div className="mt-3 flex flex-col gap-1.5">
             {scope !== 'everything' && (
                 <ZeroAction onClick={onWiden}>
@@ -556,6 +585,11 @@ const ZeroState: FC<{
                     Loosen the match to <strong>contains</strong>
                 </ZeroAction>
             )}
+            {summary.canWiden && (
+                <ZeroAction onClick={onEscalate}>
+                    Search <strong>every entity type</strong> in this view
+                </ZeroAction>
+            )}
             {!usedOperators && (
                 <ZeroAction onClick={onEscalate}>
                     Filter by tag, type or property instead
@@ -563,7 +597,8 @@ const ZeroState: FC<{
             )}
         </div>
     </div>
-)
+    )
+}
 
 
 const ZeroAction: FC<{ onClick: () => void; children: React.ReactNode }> = ({

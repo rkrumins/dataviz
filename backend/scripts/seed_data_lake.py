@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from backend.app.models.graph import GraphEdge, GraphNode
+from backend.app.providers.falkordb_provider import _compute_searchable_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("seed_data_lake")
@@ -2110,6 +2111,15 @@ async def push_to_falkordb(builder: DataLakeBuilder, graph_name: str = "data_lak
             "sourceSystem": node.source_system or "",
             "lastSyncedAt": node.last_synced_at or "",
             "childCount": node.child_count or 0,
+            # Denormalised search column. This script writes raw Cypher
+            # instead of going through the provider, so nothing else
+            # populates it — and `TextPredicate(target='any')` reads it.
+            # Omitting it made every node seeded here unfindable by the
+            # header search box.
+            "searchableText": _compute_searchable_text(
+                node.display_name, node.qualified_name,
+                node.description, node.properties,
+            ),
         })
 
     # ── 2. Push nodes ───────────────────────────────────────────────
@@ -2128,7 +2138,8 @@ async def push_to_falkordb(builder: DataLakeBuilder, graph_name: str = "data_lak
                 n.layerAssignment = map.layerAssignment,
                 n.sourceSystem = map.sourceSystem,
                 n.lastSyncedAt = map.lastSyncedAt,
-                n.childCount = map.childCount
+                n.childCount = map.childCount,
+                n.searchableText = map.searchableText
             """
             await graph.query(cypher, params={"batch": batch})
 

@@ -139,6 +139,21 @@ describe('useFindInView', () => {
         expect(query.scope.scopeMode).toBe('view')
     })
 
+    it('opts out of the view’s display-type filter', async () => {
+        // Regression pin for the reported bug. A Context View set to show
+        // 2 of 7 entity types had that list applied as a HARD FILTER on
+        // results, so a search for a column name could never return a
+        // schema field — 0 matches in 27ms, no error, for something
+        // plainly inside the view. The box says "Find anything in this
+        // view"; visibleEntityTypes says what the canvas DRAWS.
+        const { result } = setup()
+        act(() => { result.current.setText('account') })
+
+        await waitFor(() => expect(provider.searchAdvanced).toHaveBeenCalled())
+        const query = provider.searchAdvanced.mock.calls[0][0] as SearchQuery
+        expect(query.scope.includeHiddenEntityTypes).toBe(true)
+    })
+
     it('asks for ancestor paths — collapsed containers need them for their badges', async () => {
         const { result } = setup()
         act(() => { result.current.setText('revenue') })

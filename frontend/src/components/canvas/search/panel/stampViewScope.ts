@@ -50,6 +50,15 @@ export function stampViewScope(
      *  ``'view'`` so a user who last left the rail on ``'visible'``
      *  doesn't silently get loaded-only results in the header box. */
     scopeModeOverride?: ScopeMode,
+    opts: {
+        /** Ignore the view's ``visibleEntityTypes`` when deciding what
+         *  may be RETURNED. Find-in-view sets this: that list is which
+         *  types the canvas DRAWS, and applying it to search means a
+         *  view showing 2 of 7 types can never return a schema field —
+         *  however exactly the user names it. The containment clamp is
+         *  untouched, so this cannot reach outside the view. */
+        includeHiddenEntityTypes?: boolean
+    } = {},
 ): SearchQuery {
     // ALWAYS stamp the viewId — the backend's ViewScopeResolver requires
     // it on every request.
@@ -137,15 +146,20 @@ export function stampViewScope(
         scopeMode,
         ...(visibleUrns ? { visibleUrns } : {}),
         ...(rootUrns ? { rootUrns } : {}),
+        ...(opts.includeHiddenEntityTypes
+            ? { includeHiddenEntityTypes: true }
+            : {}),
     }
 
-    // Defensive normalisation: the backend's predicate compiler
-    // currently mishandles bare top-level leaf predicates (text /
-    // isOrphan / isLeaf / …) — they evaluate to zero results even when
-    // an equivalent group-wrapped version returns the expected hits.
-    // Wrap leaf-rooted predicates in a single-child AND group so every
-    // outgoing request has the shape the compiler is happy with. No-op
-    // when the root is already a group.
+    // Wrap a leaf-rooted predicate in a single-child AND group.
+    //
+    // This was added on the theory that the backend compiler mishandles
+    // bare leaves at the root. It does not — running the real compiler on
+    // a bare leaf, an AND group and an OR group produces correct Cypher
+    // for all three, and `test_advanced_search.py` pins each. The wrap is
+    // kept only because it normalises the shape the builder round-trips,
+    // and removing it would churn the rail for no gain. It fixes nothing;
+    // do not reach for it when a search returns zero results.
     const predicate = raw.predicate.kind === 'group'
         ? raw.predicate
         : { kind: 'group' as const, op: 'and' as const,

@@ -56,7 +56,9 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useSearchStore, type AncestorPathInfo } from '@/store/searchStore'
 import type { HierarchyNode } from '@/types/hierarchy'
-import type { SearchHit, SearchQuery } from '@/types/search'
+import type {
+    ScopeDiagnostics, SearchHit, SearchQuery,
+} from '@/types/search'
 
 import { useDebouncedValue } from './useDebouncedValue'
 
@@ -112,6 +114,12 @@ interface ServerRun {
     deadlineExceeded: boolean
     elapsedMs: number | null
     error: string | null
+    /** What the backend actually searched: the entity types it allowed,
+     *  the roots it clamped to, the hints it discarded. Attached to every
+     *  response and, until now, thrown away — which is how a zero result
+     *  could claim it had "searched every entity in this view" while the
+     *  view's type filter was quietly excluding the answer. */
+    scopeDiagnostics: ScopeDiagnostics | null
 }
 
 
@@ -169,6 +177,10 @@ export interface FindInViewState {
     isLoadingAll: boolean
     status: FindStatus
     errorMessage: string | null
+    /** What the server actually searched. `null` until it answers, and
+     *  on a server failure. Drives the zero-state, which must describe
+     *  the search that ran rather than the one we hoped for. */
+    scopeDiagnostics: ScopeDiagnostics | null
     /** Re-run the server tier for the current query, from the first
      *  page. The local tier is untouched, so the matches already on
      *  screen stay on screen while it runs. */
@@ -280,6 +292,12 @@ export function useFindInView({
         // left Advanced Search on 'visible' must not silently get the
         // loaded-only bug back in the header box.
         'view',
+        // The box says "Find anything in this view…". The view's
+        // visibleEntityTypes says which types the canvas DRAWS, and the
+        // backend was applying it to results too — so a view configured
+        // to show 2 of 7 types could never return a schema field, which
+        // is exactly what a search for a column name is looking for.
+        { includeHiddenEntityTypes: true },
     ), [viewId])
 
     useEffect(() => {
@@ -312,6 +330,7 @@ export function useFindInView({
                     deadlineExceeded: Boolean(page.deadlineExceeded),
                     elapsedMs: Math.round(performance.now() - startedAt),
                     error: null,
+                    scopeDiagnostics: page.scopeDiagnostics ?? null,
                 })
             } catch (e) {
                 if (runIdRef.current !== myRun) return
@@ -329,6 +348,7 @@ export function useFindInView({
                     deadlineExceeded: false,
                     elapsedMs: Math.round(performance.now() - startedAt),
                     error: e instanceof Error ? e.message : String(e),
+                    scopeDiagnostics: null,
                 })
             }
         })()
@@ -578,6 +598,7 @@ export function useFindInView({
         isLoadingAll: Boolean(server?.loadingAll),
         status,
         errorMessage: server?.error ?? null,
+        scopeDiagnostics: server?.scopeDiagnostics ?? null,
         retry,
         truncated: server?.truncated ?? false,
         deadlineExceeded: server?.deadlineExceeded ?? false,

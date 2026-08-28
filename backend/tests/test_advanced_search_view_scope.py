@@ -69,9 +69,38 @@ class TestIntersectRootUrns:
         assert dropped == []
 
     def test_out_of_view_urn_dropped(self):
+        # Dropped, and reported — but the search still runs over the
+        # view's own roots rather than over nothing. A hint that narrows
+        # to nothing is not a narrowing hint.
         kept, dropped = _intersect_root_urns(["urn:hostile"], ["urn:a"])
-        assert kept == []
+        assert kept == ["urn:a"]
         assert dropped == ["urn:hostile"]
+
+    def test_composite_urn_under_a_root_falls_back_to_the_view(self):
+        # The prefix test can't see that a DataHub-style composite URN
+        # descends from a container — it doesn't start with the root. The
+        # hint is dropped, and the fallback is what keeps the search
+        # alive: without it the service short-circuits to an empty page
+        # WITHOUT touching the database, which is a search that reports
+        # "0 matches" in ~27ms for a term that is plainly in the view.
+        composite = (
+            "urn:li:dataset:(urn:li:dataPlatform:snowflake,"
+            "GOLD.dim_customer123,PROD)"
+        )
+        kept, dropped = _intersect_root_urns(
+            [composite], ["urn:li:container:GOLD"],
+        )
+        assert kept == ["urn:li:container:GOLD"]
+        assert dropped == [composite]
+
+    def test_fallback_never_widens_past_the_view(self):
+        # The security invariant: a dropped hint must not become "no
+        # scope clamp". Falling back to the view's own roots is strictly
+        # tighter than that — it is exactly what an unhinted request gets.
+        allowed = ["urn:a", "urn:b"]
+        kept, _ = _intersect_root_urns(["urn:hostile"], allowed)
+        assert kept == allowed
+        assert "urn:hostile" not in kept
 
     def test_empty_urns_filtered(self):
         kept, dropped = _intersect_root_urns(["", "urn:a"], ["urn:a"])
@@ -547,6 +576,47 @@ async def test_resolver_rejects_out_of_view_entity_type(db_session: AsyncSession
             ),
         )
     assert exc.value.reason == "entity_type_not_in_view"
+
+
+async def test_resolver_honours_include_hidden_entity_types(
+    db_session: AsyncSession,
+):
+    """A view drawing 2 of N types must still be searchable for the rest.
+
+    ``visibleEntityTypes`` is canvas display config. Applied to search it
+    became a hard label filter, so a Context View showing "2 types" could
+    never return a SchemaField — which is exactly what someone searching
+    for a column name is looking for. The opt-out clears the type filter
+    and NOTHING else: the containment clamp is what bounds the view.
+    """
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="graph",
+        config={"content": {
+            "visibleEntityTypes": ["Domain", "DataPlatform"],
+            "rootUrns": ["urn:li:container:GOLD"],
+        }},
+    )
+    resolver = ViewScopeResolver(db_session)
+
+    constrained = await resolver.resolve(
+        workspace_id=ws.id,
+        requested=SearchScope(view_id=view.id),
+    )
+    assert constrained.entity_type_allow_list == frozenset(
+        {"Domain", "DataPlatform"}
+    )
+
+    opted_out = await resolver.resolve(
+        workspace_id=ws.id,
+        requested=SearchScope(
+            view_id=view.id, include_hidden_entity_types=True,
+        ),
+    )
+    assert opted_out.entity_type_allow_list == frozenset()
+    # The boundary that actually matters is untouched.
+    assert opted_out.root_urns == ("urn:li:container:GOLD",)
 
 
 async def test_resolver_clamps_max_depth(db_session: AsyncSession):

@@ -25,6 +25,7 @@ function makeFindState(overrides: Partial<FindInViewState> = {}): FindInViewStat
     hasMore: false, loadMore: vi.fn(), isLoadingMore: false,
     loadAll: vi.fn(), isLoadingAll: false,
     retry: vi.fn(),
+    scopeDiagnostics: null,
     compiled: {
       predicate: null, recognized: [], fallbackText: [], usedOperators: false,
     },

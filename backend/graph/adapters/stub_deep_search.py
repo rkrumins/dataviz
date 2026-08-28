@@ -250,6 +250,25 @@ class StubDeepSearchProvider:
 # ---------------------------------------------------------------------------
 
 
+def _match_text(haystack: str, needle: str, match: Optional[str]) -> bool:
+    """One column against one needle — the stub's equivalent of the
+    compiler's ``toLower(toString(col)) <op> $p``.
+
+    Extracted so a multi-column target can evaluate each column on its
+    own. Joining the columns into one string instead would make
+    ``exact`` and ``prefix`` mean something the compiled Cypher does not:
+    ``exact`` would compare against a concatenation no single field ever
+    equals.
+    """
+    if match == "exact":
+        return haystack == needle
+    if match == "prefix":
+        return haystack.startswith(needle)
+    if match == "suffix":
+        return haystack.endswith(needle)
+    return needle in haystack
+
+
 def _matches(node: Dict[str, Any], predicate) -> bool:
     """Walk the predicate tree against an in-memory node dict.
 
@@ -308,24 +327,23 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
         elif target == "tags":
             haystack = " ".join(node.get("tags") or []).lower()
         elif target == "any":
-            haystack = str(node.get("searchableText") or "").lower()
-            # Belt-and-braces: a fixture node that hasn't been
-            # pre-computed ``searchableText`` shouldn't silently fail
-            # — fall back to the same fields the production write path
-            # would have denormalised.
-            if not haystack:
-                haystack = " ".join(
-                    str(node.get(k) or "") for k in
-                    ("displayName", "qualifiedName", "description")
-                ).lower()
+            # Production ORs these four columns, evaluating each one
+            # SEPARATELY. This used to be `searchableText` with a
+            # concatenating fallback applied only when it was empty —
+            # which was strictly MORE FORGIVING than production, and is
+            # why a real search that returned zero for every node missing
+            # `searchableText` had a fully green test suite. A stub that
+            # is kinder than the thing it stands in for does not catch
+            # bugs, it hides them.
+            return any(
+                _match_text(str(node.get(k) or "").lower(),
+                            needle, predicate.match)
+                for k in ("searchableText", "displayName",
+                          "qualifiedName", "description")
+            )
         else:
             haystack = str(node.get(target) or "").lower()
-        if predicate.match == "exact":
-            return haystack == needle
-        if predicate.match == "prefix":
-            return haystack.startswith(needle)
-        # default substring
-        return needle in haystack
+        return _match_text(haystack, needle, predicate.match)
 
     if isinstance(predicate, PropertyPredicate):
         v = node.get(predicate.key)

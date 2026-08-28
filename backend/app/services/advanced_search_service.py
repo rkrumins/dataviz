@@ -325,11 +325,16 @@ class AdvancedSearchService:
         eff_scope = await self._resolve_scope(query.scope)
         query = _stamp_resolved_scope(query, eff_scope)
 
-        # Security guard: if the client passed root_urns but every one
-        # was dropped by the resolver (none belonged to this view), we
-        # must NOT silently widen the search to "no scope clamp" — that
-        # would leak data from outside the view. Return an empty page
-        # instead, so the FE can show "no matches in this view".
+        # Security guard: never run without a clamp when the client asked
+        # for one. Widening to "no scope clamp" would leak data from
+        # outside the view.
+        #
+        # The resolver now falls back to the view's OWN roots when every
+        # client hint is dropped, so this fires only when the view itself
+        # has no roots to fall back to — i.e. there is genuinely nothing
+        # to clamp against. It used to fire on every dropped hint, which
+        # is how a legitimate search returned an empty page in 27ms
+        # without touching the database.
         if client_requested_urns and not eff_scope.root_urns:
             logger.info(
                 "search.all_root_urns_dropped view=%s ws=%s n=%d",
@@ -339,8 +344,9 @@ class AdvancedSearchService:
             page = _empty_page(query)
             page.scope_diagnostics = self._build_scope_diagnostics(
                 eff_scope, extra_notes=[
-                    "All client-supplied root URNs were dropped — none "
-                    "belonged to this view. Search short-circuited to "
+                    "All client-supplied root URNs were dropped and this "
+                    "view configures no roots of its own, so there is "
+                    "nothing to clamp against. Search short-circuited to "
                     "an empty page (security guard).",
                 ],
             )
@@ -379,7 +385,7 @@ class AdvancedSearchService:
                 eff_scope.view_id,
                 eff_scope.workspace_id,
                 len(eff_scope.root_urns or ()),
-                len(eff_scope.entity_types or ()),
+                len(eff_scope.entity_type_allow_list or ()),
                 deadline_ms,
                 _query_fingerprint(query),
             )
@@ -479,6 +485,16 @@ class AdvancedSearchService:
                 f"View '{eff_scope.view_id}' has no rootUrns configured "
                 "and the client supplied none — search ran across the "
                 "entire data source (no scope clamp).",
+            )
+        elif eff_scope.dropped_urns:
+            # The client's narrowing hint didn't survive the view's
+            # allow-list. Say so: the search still ran, over the whole
+            # view, and a reader comparing "what I asked for" against
+            # "what was searched" should not have to guess why.
+            notes.append(
+                f"{len(eff_scope.dropped_urns)} client-supplied root URN(s) "
+                "were not recognised as belonging to this view and were "
+                "ignored; the search used the view's own roots instead.",
             )
 
         return ScopeDiagnostics(

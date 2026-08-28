@@ -55,6 +55,9 @@ from typing import Any, Dict, List, Tuple
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from backend.app.models.graph import GraphEdge, GraphNode
+from backend.app.providers.falkordb_provider import (
+    _compute_searchable_text,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("seed_platform_lineage")
@@ -1396,6 +1399,12 @@ async def push_to_falkordb(builder: PlatformLineageBuilder, graph_name: str):
             "sourceSystem": n.source_system or "",
             "lastSyncedAt": n.last_synced_at or "",
             "childCount": n.child_count or 0,
+            # See seed_data_lake.py — raw Cypher bypasses the provider,
+            # so this denormalised search column has to be written here
+            # or `TextPredicate(target='any')` can never match the node.
+            "searchableText": _compute_searchable_text(
+                n.display_name, n.qualified_name, n.description, n.properties,
+            ),
         })
 
     for label, batch_nodes in nodes_by_label.items():
@@ -1413,7 +1422,8 @@ async def push_to_falkordb(builder: PlatformLineageBuilder, graph_name: str):
                     n.layerAssignment = map.layerAssignment,
                     n.sourceSystem = map.sourceSystem,
                     n.lastSyncedAt = map.lastSyncedAt,
-                    n.childCount = map.childCount
+                    n.childCount = map.childCount,
+                    n.searchableText = map.searchableText
             """, params={"batch": batch})
 
     edges_grouped: Dict[Tuple[str, str, str], List[Dict]] = {}

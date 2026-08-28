@@ -12,8 +12,9 @@ predicate visitor independently importable for unit tests.
 v1 surface (intentionally bounded)
 ----------------------------------
 **Compiled to Cypher natively** — all in a single WHERE fragment:
-    TextPredicate    target=name|qualifiedName|description|tags|property
-                     match=exact|prefix|substring
+    TextPredicate    target=any|name|displayName|qualifiedName|description
+                     |tags|property
+                     match=exact|prefix|suffix|substring
     PropertyPredicate eq|neq|gt|gte|lt|lte|in|notIn|contains|startsWith|endsWith|between
     TagPredicate     has|hasAll|hasAny|notHas  (JSON-substring on n.tags)
     HasPropertyPredicate  EXISTS(n.<key>)
@@ -30,9 +31,11 @@ v1 surface (intentionally bounded)
     by='entityType'   (hit's own type — cheap, no traversal)
 
 **Deferred to a follow-up** (raise :class:`CompileError` with a clear msg):
-    TextPredicate target='any' / match='fulltext' / match='regex'
-        — need the n.searchableTextLower field + fulltext index that
-        aren't created yet.
+    TextPredicate match='fulltext' / match='regex'
+        — need a fulltext index that isn't created yet. ``target='any'``
+        is implemented: it ORs the denormalised n.searchableText with the
+        fields it is derived from, so a node whose searchableText was
+        never written still matches on its name or description.
     WithinHopsPredicate
         — needs a separate MATCH that's awkward to compose with the
         scope-verification step; not blocking the headline UX.
@@ -299,9 +302,10 @@ class _Compiler:
         # commits to. Any single field can be null/empty on a given
         # node (legacy sync, partial ingestion) without blackholing the
         # search — the predicate matches if ANY of the listed columns
-        # contains the value. ``COALESCE(..., '')`` guards against
-        # MISSING/null reads so an absent field reads as a non-matching
-        # empty string rather than aborting the comparison.
+        # contains the value. That OR *is* the null guard: a null column
+        # yields null, and the surviving terms decide the result. There is
+        # no ``COALESCE`` — see ``wrap_col`` below for why it was removed.
+        # A single-column target therefore has no null tolerance at all.
         #
         # ``displayName`` / ``description`` / ``tags`` stay single-field
         # — those are explicit user targets, not name aliases.
@@ -330,7 +334,25 @@ class _Compiler:
             # n.searchableText is denormalised at write-time (already
             # lowercased). The toLower on read is defensive in case a
             # node was written by an older provider that didn't lowercase.
-            cols = ["n.searchableText"]
+            #
+            # The other three are NOT redundant. searchableText is only
+            # written by the provider paths (save_custom_graph,
+            # create_node, the versioning projector); nodes written by a
+            # script that talks raw Cypher have it unset, and with a
+            # single column ``null CONTAINS 'x'`` is null, so every one of
+            # those nodes is silently unmatchable — a search for a term
+            # visible on the canvas returns zero, fast, with no error.
+            # Listing the source fields alongside it is the same
+            # null-tolerance ``name`` and ``qualifiedName`` already rely
+            # on, and it is what the stub adapter has always done
+            # (graph/adapters/stub_deep_search.py), which is why this gap
+            # was invisible to every test.
+            cols = [
+                "n.searchableText",
+                "n.displayName",
+                "n.qualifiedName",
+                "n.description",
+            ]
         else:
             raise CompileError(f"unknown text target: {target!r}")
 
