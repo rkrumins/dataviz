@@ -40,7 +40,10 @@ import {
 
 import { cn } from '@/lib/utils'
 import { rememberUrnLabels } from '@/lib/urnLabels'
-import { useAdvancedSearch } from '@/hooks/useAdvancedSearch'
+import {
+    useAdvancedSearch,
+    type UseAdvancedSearchResult,
+} from '@/hooks/useAdvancedSearch'
 import {
     DEFAULT_DRAFT_OPTIONS,
     readPersistedCanvasFilterMode,
@@ -79,11 +82,17 @@ export interface SearchMapPanelProps {
     onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
+    /** The canvas's own search pipeline, when it has one. A canvas that
+     *  owns a search session (ContextViewCanvas) hands it in so the panel
+     *  reports on the query the header box ran instead of running a
+     *  second, identical one of its own. Omitted by the canvases whose
+     *  only search IS this panel — see `OwnedSessionPanel`. */
+    session?: UseAdvancedSearchResult
 }
 
 
 export const SearchMapPanel: FC<SearchMapPanelProps> = ({
-    open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches,
+    open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches, session,
 }) => {
     const [width, setWidth] = useState<number>(() => readPersistedWidth())
 
@@ -108,13 +117,24 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                         style={{ width }}
                     >
                         {viewId ? (
-                            <PanelInner
-                                onClose={onClose}
-                                viewId={viewId}
-                                onRevealNode={onRevealNode}
-                                onOpenNode={onOpenNode}
-                                onFrameMatches={onFrameMatches}
-                            />
+                            session ? (
+                                <PanelInner
+                                    onClose={onClose}
+                                    viewId={viewId}
+                                    session={session}
+                                    onRevealNode={onRevealNode}
+                                    onOpenNode={onOpenNode}
+                                    onFrameMatches={onFrameMatches}
+                                />
+                            ) : (
+                                <OwnedSessionPanel
+                                    onClose={onClose}
+                                    viewId={viewId}
+                                    onRevealNode={onRevealNode}
+                                    onOpenNode={onOpenNode}
+                                    onFrameMatches={onFrameMatches}
+                                />
+                            )
                         ) : (
                             <NoViewState onClose={onClose} />
                         )}
@@ -137,19 +157,32 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
 interface PanelInnerProps {
     onClose: () => void
     viewId: string
+    /** The pipeline to report on — the canvas's session, or the one
+     *  `OwnedSessionPanel` mounts for the canvases that have none. */
+    session: UseAdvancedSearchResult
     onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
 }
 
 
+/** The panel's own pipeline, for the canvases whose only search is this
+ *  panel (GraphCanvas / HierarchyCanvas). A wrapper rather than a
+ *  fallback inside `PanelInner` because a hook cannot be called
+ *  conditionally. */
+function OwnedSessionPanel(props: Omit<PanelInnerProps, 'session'>) {
+    const session = useAdvancedSearch(props.viewId)
+    return <PanelInner {...props} session={session} />
+}
+
+
 function PanelInner({
-    onClose, viewId, onRevealNode, onOpenNode, onFrameMatches,
+    onClose, viewId, session, onRevealNode, onOpenNode, onFrameMatches,
 }: PanelInnerProps) {
     const {
         view, runState, runPredicate, cancel,
         resetTemplate, loadMore, isLoadingMore,
-    } = useAdvancedSearch(viewId)
+    } = session
 
     const draftPredicate = useDraftPredicate()
     const draftOptions = useDraftOptions()

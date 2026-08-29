@@ -33,7 +33,7 @@
  * pipeline through `runPredicate`. The hook stays focused on
  * template-driven + visual-builder paths.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -706,7 +706,12 @@ export function useAdvancedSearch(
         }
     }, [view])
 
-    return {
+    // Memoised because callers hold this object, not its fields: the view
+    // search session re-exposes it on a context, so a fresh literal every
+    // render would re-render every consumer of that context on any
+    // unrelated canvas state change. Every function below is already
+    // `useCallback`ed, so the identity tracks the state.
+    return useMemo(() => ({
         view,
         runState,
         isIdle: view.kind === 'idle',
@@ -719,5 +724,8 @@ export function useAdvancedSearch(
         cancel,
         loadMore,
         isLoadingMore,
-    }
+    }), [
+        view, runState, selectTemplate, setInput, resetTemplate,
+        run, runTemplate, runPredicate, cancel, loadMore, isLoadingMore,
+    ])
 }

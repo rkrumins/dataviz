@@ -302,3 +302,22 @@ describe('useAdvancedSearch — clearOnUnmount', () => {
         expect(useSearchStore.getState().matchUrnSet.has('hit-1')).toBe(true)
     })
 })
+
+
+/**
+ * The session hands this whole object to the panel and re-exposes it on a
+ * context. A fresh object literal every render would make the session
+ * itself a fresh object every render, and every consumer of that context
+ * would re-render on any canvas state change — so the identity has to
+ * track the state, not the render.
+ */
+describe('useAdvancedSearch — stable identity', () => {
+    it('returns the same object across a re-render with unchanged state', () => {
+        const { result, rerender } = renderHook(() => useAdvancedSearch('view-1'))
+
+        const first = result.current
+        rerender()
+
+        expect(result.current).toBe(first)
+    })
+})
