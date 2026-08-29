@@ -2835,7 +2835,7 @@ def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
 # matter how the two fields compare in length.
 _FIELD_WEIGHTS: Dict[str, float] = {
     "displayName": 1.0,
-    "qualifiedName": 0.7,
+    "qualifiedName": 0.5,
     "tags": 0.6,
     "property": 0.5,
     "description": 0.4,
@@ -3180,15 +3180,14 @@ def _build_hits_from_rows(
                 return v.lower()
             hits.sort(key=key, reverse=reverse)
         elif sort_field == "relevance":
-            # Score first, name second. `sort_dir` steers the tiebreak —
-            # as it does for the name sorts — but never the ranking:
-            # "least relevant first" is not a thing anyone asks for.
-            # Two passes, leaning on Python's stable sort, so the name
+            # Score first, name second. The name pass is always
+            # ascending (A→Z), never `sort_dir` — a business user
+            # reading two equally-relevant hits expects alphabetical
+            # order, not its reversal; `sort_dir` keeps its ordinary
+            # meaning for the plain name/property sorts above. Two
+            # passes, leaning on Python's stable sort, so the name
             # order survives underneath the score order.
-            hits.sort(
-                key=lambda h: (h.node.display_name or "").lower(),
-                reverse=reverse,
-            )
+            hits.sort(key=lambda h: (h.node.display_name or "").lower())
             hits.sort(key=lambda h: -h.score)
 
     total_sorted = len(hits)

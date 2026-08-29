@@ -3454,6 +3454,111 @@ class TestHitProvenance:
         )[0] == pytest.approx(100.0)
 
 
+class TestRelevanceOrdering:
+    """A friendly name outranks a technical path, and ties read A→Z.
+
+    The "Top matches" dropdown shows the first 10 hits in server
+    relevance order to business users — so a `qualifiedName` exact hit
+    must never out-rank a `displayName` prefix hit, and two equally
+    relevant hits must never surface Z-before-A regardless of
+    `sortDir` (which keeps its ordinary meaning for the plain
+    `displayName`/`qualifiedName` sorts)."""
+
+    @staticmethod
+    def _node(**kw):
+        from backend.common.models.graph import GraphNode
+        kw.setdefault("urn", "urn:n")
+        kw.setdefault("entityType", "dataset")
+        kw.setdefault("displayName", "node")
+        return GraphNode(**kw)
+
+    @staticmethod
+    def _mock_prov():
+        class _MockProv:
+            def _extract_node_from_result(self, n):
+                return n
+        return _MockProv()
+
+    def test_displayName_prefix_outranks_qualifiedName_exact(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        # Exact qualifiedName hit: tier 100 x weight 0.5 = 50.
+        qn_exact = self._node(
+            urn="urn:qn", displayName="Unrelated Name",
+            qualifiedName="orders",
+        )
+        # Prefix displayName hit: tier 60 x weight 1.0 = 60.
+        name_prefix = self._node(
+            urn="urn:name", displayName="orders_2024",
+            qualifiedName="qn_2024",
+        )
+        query = SearchQuery(
+            predicate=TextPredicate(value="orders", target="any"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(sort="relevance", pageSize=10),
+        )
+        hits, _, _, _ = _build_hits_from_rows(
+            self._mock_prov(), [qn_exact, name_prefix], query,
+        )
+        assert [h.node.urn for h in hits] == ["urn:name", "urn:qn"]
+        assert hits[0].score == pytest.approx(60.0)
+        assert hits[1].score == pytest.approx(50.0)
+
+    def test_equal_score_ties_order_a_to_z_with_sortDir_unset(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        zeta = self._node(urn="urn:z", displayName="zeta_orders")
+        alpha = self._node(urn="urn:a", displayName="alpha_orders")
+        query = SearchQuery(
+            predicate=TextPredicate(value="orders", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(sort="relevance", pageSize=10),
+        )
+        hits, _, _, _ = _build_hits_from_rows(
+            self._mock_prov(), [zeta, alpha], query,
+        )
+        assert [h.node.urn for h in hits] == ["urn:a", "urn:z"]
+
+    def test_equal_score_ties_order_a_to_z_even_with_sortDir_desc(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        zeta = self._node(urn="urn:z", displayName="zeta_orders")
+        alpha = self._node(urn="urn:a", displayName="alpha_orders")
+        query = SearchQuery(
+            predicate=TextPredicate(value="orders", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(sort="relevance", sortDir="desc",
+                                  pageSize=10),
+        )
+        hits, _, _, _ = _build_hits_from_rows(
+            self._mock_prov(), [zeta, alpha], query,
+        )
+        assert [h.node.urn for h in hits] == ["urn:a", "urn:z"]
+
+    def test_displayName_field_sort_still_honours_sortDir_desc(self):
+        """`sortDir` keeps its ordinary meaning outside relevance — a
+        plain displayName sort with `sortDir: 'desc'` still reads
+        Z→A."""
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        zeta = self._node(urn="urn:z", displayName="zeta_orders")
+        alpha = self._node(urn="urn:a", displayName="alpha_orders")
+        query = SearchQuery(
+            predicate=TextPredicate(value="orders", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(sort="displayName", sortDir="desc",
+                                  pageSize=10),
+        )
+        hits, _, _, _ = _build_hits_from_rows(
+            self._mock_prov(), [zeta, alpha], query,
+        )
+        assert [h.node.urn for h in hits] == ["urn:z", "urn:a"]
+
+
 # ---------------------------------------------------------------------------
 # Cursor validation — a cursor belongs to the query that minted it
 # ---------------------------------------------------------------------------
