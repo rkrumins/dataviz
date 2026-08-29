@@ -12,6 +12,7 @@ are skipped where the graph module isn't loaded — see the same pattern
 in test_falkordb_native_properties.py.
 """
 import asyncio
+import json
 import logging
 
 import pytest
@@ -25,6 +26,7 @@ from backend.app.providers.falkordb_deep_search import (
     _resolve_entity_types_scope,
     decode_cursor,
     encode_cursor,
+    match_hash,
     query_hash,
 )
 from backend.app.services.advanced_search_service import (
@@ -2014,7 +2016,7 @@ class TestSortByProperty:
                 "pageSize": 10,
             },
         )
-        hits, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
         assert [h.node.urn for h in hits] == ["urn:b", "urn:c", "urn:a"]
 
     def test_hits_sorted_by_native_property_ascending(self):
@@ -2043,7 +2045,7 @@ class TestSortByProperty:
                 "pageSize": 10,
             },
         )
-        hits, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
         assert [h.node.urn for h in hits] == ["urn:a", "urn:c", "urn:b"]
 
     def test_missing_property_clumps_consistently(self):
@@ -2074,7 +2076,7 @@ class TestSortByProperty:
                 "pageSize": 10,
             },
         )
-        hits, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
         # All three returned; missing-rowCount node grouped consistently
         assert len(hits) == 3
         urns_with_value = [h.node.urn for h in hits if h.node.properties.get("rowCount") is not None]
@@ -2122,7 +2124,7 @@ class TestCursorPagination:
             _build_hits_from_rows,
         )
         rows = self._mock_rows(30)
-        hits, offset_after, total = _build_hits_from_rows(
+        hits, offset_after, total, _ = _build_hits_from_rows(
             self._mock_prov(), rows, self._query(page_size=10),
         )
         assert [h.node.urn for h in hits] == [f"urn:{i:03d}" for i in range(10)]
@@ -2135,13 +2137,13 @@ class TestCursorPagination:
         )
         rows = self._mock_rows(30)
         # Page 1
-        page1, off1, _ = _build_hits_from_rows(
+        page1, off1, _, _ = _build_hits_from_rows(
             self._mock_prov(), rows, self._query(page_size=10),
         )
         # Encode the next-cursor the way execute_deep_search does
         cursor = encode_cursor({"offset": off1, "q": "irrelevant"})
         # Page 2
-        page2, off2, _ = _build_hits_from_rows(
+        page2, off2, _, _ = _build_hits_from_rows(
             self._mock_prov(), rows,
             self._query(page_size=10, cursor=cursor),
         )
@@ -2157,7 +2159,7 @@ class TestCursorPagination:
         )
         rows = self._mock_rows(30)
         cursor = encode_cursor({"offset": 20})
-        page, off, total = _build_hits_from_rows(
+        page, off, total, _ = _build_hits_from_rows(
             self._mock_prov(), rows,
             self._query(page_size=10, cursor=cursor),
         )
@@ -2174,7 +2176,7 @@ class TestCursorPagination:
         )
         rows = self._mock_rows(30)
         cursor = encode_cursor({"offset": 30})
-        page, off, total = _build_hits_from_rows(
+        page, off, total, _ = _build_hits_from_rows(
             self._mock_prov(), rows,
             self._query(page_size=10, cursor=cursor),
         )
@@ -2191,13 +2193,13 @@ class TestCursorPagination:
         )
         rows = self._mock_rows(30)
         # Page 1 with size 5
-        _, off1, _ = _build_hits_from_rows(
+        _, off1, _, _ = _build_hits_from_rows(
             self._mock_prov(), rows, self._query(page_size=5),
         )
         assert off1 == 5
         # Page 2 with bumped-up size 15 — should slice [5:20]
         cursor = encode_cursor({"offset": off1})
-        page2, off2, _ = _build_hits_from_rows(
+        page2, off2, _, _ = _build_hits_from_rows(
             self._mock_prov(), rows,
             self._query(page_size=15, cursor=cursor),
         )
@@ -2212,7 +2214,7 @@ class TestCursorPagination:
         )
         rows = self._mock_rows(10)
         cursor = encode_cursor({"offset": -5})
-        page, off, total = _build_hits_from_rows(
+        page, off, total, _ = _build_hits_from_rows(
             self._mock_prov(), rows,
             self._query(page_size=10, cursor=cursor),
         )
@@ -3261,7 +3263,7 @@ class TestHitProvenance:
             scope=_TEST_SCOPE,
             options=SearchOptions(sort="relevance", pageSize=10),
         )
-        hits, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
+        hits, _, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
         assert [h.node.urn for h in hits] == ["urn:b", "urn:c", "urn:a"]
         assert hits[0].score == pytest.approx(100.0)  # exact displayName
         assert hits[1].score == pytest.approx(60.0)   # prefix displayName
@@ -3284,7 +3286,7 @@ class TestHitProvenance:
                 cursor=encode_cursor({"offset": 20}),
             ),
         )
-        hits, offset_after, total = _build_hits_from_rows(
+        hits, offset_after, total, _ = _build_hits_from_rows(
             self._mock_prov(), rows, query,
         )
         assert offset_after == 30 and total == 30
@@ -3308,7 +3310,7 @@ class TestHitProvenance:
             options=SearchOptions(sort="relevance", pageSize=10,
                                   highlights=False),
         )
-        hits, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
+        hits, _, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
         assert len(hits) == 5
         assert all(h.highlights == [] for h in hits)
         assert all(h.score == pytest.approx(60.0) for h in hits)
@@ -3449,3 +3451,281 @@ class TestHitProvenance:
         assert _score_hit(
             name_node, any_exact, want_highlights=False,
         )[0] == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# Cursor validation — a cursor belongs to the query that minted it
+# ---------------------------------------------------------------------------
+
+class TestCursorValidation:
+    """``match_hash`` is the query's identity for pagination purposes.
+
+    Paging controls are deliberately outside it: the same walk may
+    re-tune its page size mid-iteration (``TestCursorPagination``
+    pins that), so only the parts that decide *which* nodes match are
+    hashed.
+    """
+
+    def test_match_hash_ignores_cursor_and_page_size(self):
+        base = _hits_query(pageSize=10)
+        paged = _hits_query(
+            pageSize=200, cursor=encode_cursor({"offset": 10, "q": "x"}),
+        )
+        assert match_hash(base) == match_hash(paged)
+
+    def test_match_hash_changes_with_the_predicate(self):
+        a = _hits_query()
+        b = SearchQuery(
+            predicate=TextPredicate(value="orders", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(results="hits", candidateCap=100),
+        )
+        assert match_hash(a) != match_hash(b)
+
+    @pytest.mark.asyncio
+    async def test_cursor_from_another_query_is_rejected_up_front(self):
+        """The offset means nothing against a different match set, so
+        the rejection has to happen before the scan is even sent."""
+        prov = _CountingProvider(hit_rows=30, total=30)
+        stale = encode_cursor({"offset": 10, "q": match_hash(_hits_query())})
+        q = SearchQuery(
+            predicate=TextPredicate(value="orders", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(results="hits", candidateCap=100,
+                                  pageSize=10, cursor=stale),
+        )
+        with pytest.raises(CompileError, match="different query"):
+            await execute_deep_search(prov, q)
+        assert prov.calls == []
+
+    @pytest.mark.asyncio
+    async def test_next_cursor_carries_the_match_hash(self):
+        prov = _CountingProvider(hit_rows=30, total=30)
+        q = _hits_query(pageSize=10)
+        page = await execute_deep_search(prov, q)
+        assert decode_cursor(page.cursor) == {
+            "offset": 10, "q": match_hash(q),
+        }
+
+    @pytest.mark.asyncio
+    async def test_cursor_minted_by_this_query_is_accepted(self):
+        prov = _CountingProvider(hit_rows=30, total=30)
+        page1 = await execute_deep_search(prov, _hits_query(pageSize=10))
+        page2 = await execute_deep_search(
+            prov, _hits_query(pageSize=10, cursor=page1.cursor),
+        )
+        assert len(page2.hits) == 10
+        assert not (set(h.node.urn for h in page1.hits)
+                    & set(h.node.urn for h in page2.hits))
+
+
+# ---------------------------------------------------------------------------
+# Redis match-set cache — a cursor page is a slice, not a second scan
+# ---------------------------------------------------------------------------
+
+class _FakeRedis:
+    """Dict-backed stand-in for the provider's ``TimeoutRedis`` proxy.
+
+    Only the two calls the match-set cache makes are implemented; the
+    ``ex`` argument is recorded so a test can pin the TTL.
+    """
+
+    def __init__(self):
+        self.store = {}
+        self.set_calls = []
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value
+        self.set_calls.append((key, value, ex))
+
+
+def _cached_node(i: int) -> GraphNode:
+    return GraphNode(urn=f"urn:n{i:05d}", entityType="dataset",
+                     displayName=f"customer-{i:05d}")
+
+
+class _CachingProvider(_CountingProvider):
+    """``_CountingProvider`` with a Redis and a real ``get_nodes_batch``.
+
+    Nodes are named ``customer-000NN`` so the request's TextPredicate
+    actually matches them — a cached page has to carry the same scores
+    and highlights a scanned one would. ``vanished`` deletes nodes
+    between pages.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._redis = _FakeRedis()
+        self._cache_ns = "h:1:g"
+        self.batch_calls = []
+        self.vanished = set()
+
+    def _extract_node_from_result(self, row):
+        return _cached_node(row[0])
+
+    async def get_nodes_batch(self, urns):
+        self.batch_calls.append(list(urns))
+        known = {n.urn: n
+                 for n in (_cached_node(i) for i in range(self._hit_rows))}
+        # Reversed on purpose: the real one answers per label bucket, so
+        # its caller may never rely on the order it comes back in.
+        return [known[u] for u in reversed(list(urns))
+                if u in known and u not in self.vanished]
+
+
+def _cache_query(**opts) -> SearchQuery:
+    opts.setdefault("results", "hits")
+    opts.setdefault("sort", "displayName")
+    opts.setdefault("sortDir", "asc")
+    opts.setdefault("pageSize", 10)
+    return SearchQuery(
+        predicate=TextPredicate(value="customer", target="name",
+                                match="prefix"),
+        scope=_TEST_SCOPE,
+        options=SearchOptions(candidateCap=100, **opts),
+    )
+
+
+class TestMatchSetCache:
+    """Page 1 remembers the sorted match set; every later page slices it.
+
+    Without this each "Load more" re-runs the whole candidate scan and
+    re-sorts up to the candidate cap in Python.
+    """
+
+    @pytest.mark.asyncio
+    async def test_first_page_writes_the_sorted_match_set(self):
+        from backend.app.services.deep_search import get_deep_search_settings
+
+        prov = _CachingProvider(hit_rows=30)
+        q = _cache_query(sortDir="desc")
+        page = await execute_deep_search(prov, q)
+
+        assert page.cache_hit is False
+        assert len(prov._redis.set_calls) == 1
+        key, raw, ex = prov._redis.set_calls[0]
+        assert key == f"h:1:g:dsearch:{match_hash(q)}"
+        assert ex == get_deep_search_settings().cache_ttl_seconds
+        envelope = json.loads(raw)
+        # The SORTED set, not the scan order the rows arrived in.
+        assert envelope["urns"] == [
+            f"urn:n{i:05d}" for i in reversed(range(30))
+        ]
+        assert envelope["candidate_count"] == 30
+        assert envelope["truncated"] is False
+        assert envelope["total_count"] == 30
+
+    @pytest.mark.asyncio
+    async def test_a_single_page_result_is_not_cached(self):
+        """No page follows, so no cursor is minted — an entry for it
+        could only ever be dead weight."""
+        prov = _CachingProvider(hit_rows=5)
+        page = await execute_deep_search(prov, _cache_query())
+
+        assert page.cursor is None
+        assert prov._redis.set_calls == []
+
+    @pytest.mark.asyncio
+    async def test_cursor_page_slices_the_cache_without_rescanning(self):
+        prov = _CachingProvider(hit_rows=30)
+        first = await execute_deep_search(prov, _cache_query())
+        assert first.cursor is not None
+        prov.calls.clear()
+
+        q2 = _cache_query(cursor=first.cursor)
+        page = await execute_deep_search(prov, q2)
+
+        assert prov.calls == []  # no re-scan
+        assert prov.batch_calls == [
+            [f"urn:n{i:05d}" for i in range(10, 20)]
+        ]
+        assert [h.node.urn for h in page.hits] == [
+            f"urn:n{i:05d}" for i in range(10, 20)
+        ]
+        assert page.cache_hit is True
+        assert page.candidate_count == 30
+        assert page.truncated is False
+        assert page.total_count == 30
+        assert all(h.score == pytest.approx(60.0) for h in page.hits)
+        assert all(h.highlights[0].field == "displayName"
+                   for h in page.hits)
+        assert decode_cursor(page.cursor) == {
+            "offset": 20, "q": match_hash(q2),
+        }
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_falls_back_to_the_scan(self):
+        prov = _CachingProvider(hit_rows=30)
+        cursor = encode_cursor(
+            {"offset": 10, "q": match_hash(_cache_query())},
+        )
+        page = await execute_deep_search(prov, _cache_query(cursor=cursor))
+
+        assert len(prov.calls) == 1
+        assert prov.batch_calls == []
+        assert page.cache_hit is False
+        assert [h.node.urn for h in page.hits] == [
+            f"urn:n{i:05d}" for i in range(10, 20)
+        ]
+
+    @pytest.mark.asyncio
+    async def test_provider_without_redis_still_pages(self):
+        prov = _CountingProvider(hit_rows=30, total=30)
+        cursor = encode_cursor(
+            {"offset": 10, "q": match_hash(_cache_query())},
+        )
+        page = await execute_deep_search(prov, _cache_query(cursor=cursor))
+
+        assert len(prov.calls) == 1
+        assert page.cache_hit is False
+        assert len(page.hits) == 10
+
+    @pytest.mark.asyncio
+    async def test_deadline_exceeded_page_is_not_cached(self):
+        prov = _CachingProvider(hit_rows=100,
+                                count_error=asyncio.TimeoutError())
+        page = await execute_deep_search(prov, _cache_query())
+
+        assert page.deadline_exceeded is True
+        assert prov._redis.set_calls == []
+
+    @pytest.mark.asyncio
+    async def test_urns_that_vanished_since_the_scan_are_dropped(self):
+        prov = _CachingProvider(hit_rows=30)
+        first = await execute_deep_search(prov, _cache_query())
+        prov.vanished = {"urn:n00012", "urn:n00015"}
+        prov.calls.clear()
+
+        page = await execute_deep_search(
+            prov, _cache_query(cursor=first.cursor),
+        )
+        assert [h.node.urn for h in page.hits] == [
+            f"urn:n{i:05d}" for i in range(10, 20) if i not in (12, 15)
+        ]
+        # The walk still advances by the full slice — a deleted node
+        # must not make the next page repeat this one.
+        assert decode_cursor(page.cursor)["offset"] == 20
+
+    @pytest.mark.asyncio
+    async def test_both_shape_still_aggregates_on_a_cached_page(self):
+        """The cache answers for hits only; the facets a ``both`` page
+        asks for are still computed against the live graph."""
+        prov = _CachingProvider(hit_rows=30)
+        aggs = [AggregationSpec(by="entityType")]
+        first = await execute_deep_search(
+            prov, _cache_query(results="both", aggregations=aggs),
+        )
+        assert len(prov.calls) == 2  # scan + facet
+        prov.calls.clear()
+
+        page = await execute_deep_search(
+            prov, _cache_query(results="both", aggregations=aggs,
+                               cursor=first.cursor),
+        )
+        assert page.cache_hit is True
+        assert page.aggregates is not None
+        assert len(prov.calls) == 1
+        assert not prov.calls[0][0].endswith("RETURN n")

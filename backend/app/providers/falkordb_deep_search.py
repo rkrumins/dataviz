@@ -1258,9 +1258,27 @@ def _build_within_hops_continuation(
 def query_hash(query: SearchQuery) -> str:
     """SHA1 (12 chars) of the canonicalized query JSON.
 
-    Used to invalidate cursors that reference a different query.
+    The identity of a whole request, paging controls included. Cursor
+    invalidation uses ``match_hash`` instead — a page-size change must
+    not strand a walk mid-iteration.
     """
     j = query.model_dump_json(by_alias=True)
+    return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
+
+
+def match_hash(query: SearchQuery) -> str:
+    """SHA1 (12 chars) of the query MINUS its paging controls.
+
+    The identity of a *match set*, as opposed to ``query_hash``'s
+    identity of a whole request: ``cursor`` and ``page_size`` change
+    which slice a caller wants, never which nodes match, and a walk is
+    allowed to re-tune its page size mid-iteration. Everything else —
+    predicate, resolved scope, sort, result shape — is in, so a cursor
+    minted against one match set can never be spent against another.
+    """
+    j = query.model_dump_json(
+        by_alias=True, exclude={"options": {"cursor", "page_size"}},
+    )
     return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
 
 
@@ -1276,6 +1294,99 @@ def decode_cursor(s: str) -> Dict[str, Any]:
         return json.loads(raw)
     except Exception:
         raise CompileError("invalid cursor encoding")
+
+
+# ---------------------------------------------------------------------------
+# Match-set cache. Page 1 stores the SORTED urn list under the query's
+# ``match_hash``, so every later cursor page is a slice plus a batched
+# node fetch instead of a second full candidate scan + re-sort. Keyed
+# under the provider's cache namespace and the RESOLVED scope (the
+# service stamps it before the hash is taken), so one view's match set
+# can never answer another's.
+# ---------------------------------------------------------------------------
+
+def _match_set_key(ns: str, query: SearchQuery) -> str:
+    return f"{ns}:dsearch:{match_hash(query)}"
+
+
+async def _read_match_set(
+    provider, query: SearchQuery,
+) -> Optional[Dict[str, Any]]:
+    """The cached envelope for this query, or ``None``.
+
+    Never raises: an absent, unreachable or corrupt cache degrades to
+    the full scan the first page always runs.
+    """
+    redis = getattr(provider, "_redis", None)
+    ns = getattr(provider, "_cache_ns", None)
+    if redis is None or not ns:
+        return None
+    try:
+        raw = await redis.get(_match_set_key(ns, query))
+        if not raw:
+            return None
+        data = json.loads(raw)
+        # An envelope this build doesn't recognise — a shape change
+        # deployed inside the TTL window — is a miss, not a 500.
+        if not isinstance(data, dict) or not {
+            "urns", "candidate_count", "truncated", "total_count",
+        } <= data.keys():
+            return None
+        return data
+    except Exception as exc:
+        logger.debug("deep_search: match-set cache read failed: %r", exc)
+        return None
+
+
+async def _write_match_set(
+    provider, query: SearchQuery, envelope: Dict[str, Any], ttl_s: int,
+) -> None:
+    """Store the sorted match set for ``ttl_s`` seconds. Never raises."""
+    redis = getattr(provider, "_redis", None)
+    ns = getattr(provider, "_cache_ns", None)
+    if redis is None or not ns:
+        return
+    try:
+        await redis.set(
+            _match_set_key(ns, query), json.dumps(envelope), ex=ttl_s,
+        )
+    except Exception as exc:
+        logger.debug("deep_search: match-set cache write failed: %r", exc)
+
+
+async def _hits_from_match_set(
+    provider, query: SearchQuery, urns: List[str],
+) -> Tuple[List[SearchHit], int, int]:
+    """Build one page of hits from a cached URN list.
+
+    Returns ``(hits, offset_after, total)`` — the same accounting
+    ``_build_hits_from_rows`` reports, so the caller's cursor logic
+    doesn't care which path produced the page. Scores and highlights
+    are computed by the same ``_score_hit`` the scan path uses.
+
+    ``offset_after`` advances by the SLICE, not by the hits that
+    survived it: a node deleted since the scan must not make the next
+    page repeat this one.
+    """
+    offset = max(0, int(decode_cursor(query.options.cursor).get("offset", 0)))
+    page_urns = urns[offset : offset + query.options.page_size]
+    nodes = await provider.get_nodes_batch(page_urns) if page_urns else []
+    # get_nodes_batch answers per label bucket, so its order is its own.
+    by_urn = {n.urn: n for n in nodes}
+    leaves = _collect_text_leaves(query.predicate)
+    hits: List[SearchHit] = []
+    for urn in page_urns:
+        node = by_urn.get(urn)
+        if node is None:
+            continue  # deleted between the scan and this page
+        score, matched, highlights = _score_hit(
+            node, leaves, want_highlights=query.options.highlights,
+        )
+        hits.append(SearchHit(
+            node=node, score=score, matched_predicates=matched,
+            highlights=highlights,
+        ))
+    return hits, offset + len(page_urns), len(urns)
 
 
 # ---------------------------------------------------------------------------
@@ -1905,6 +2016,16 @@ async def execute_deep_search(
     cache (``provider._get_ancestor_chain``). This function only sees
     the public-ish provider surface.
     """
+    # A cursor's offset indexes ONE match set. Spending it against a
+    # different query would page silently through the wrong rows, so
+    # the cursor carries that match set's identity and a mismatch is
+    # rejected here — before any query is sent.
+    if query.options.cursor:
+        if decode_cursor(query.options.cursor).get("q") != match_hash(query):
+            raise CompileError(
+                "cursor was issued for a different query — restart from "
+                "the first page"
+            )
     _s = get_deep_search_settings()
     effective_candidate_cap = _resolve_candidate_cap(query, _s)
     start = time.monotonic()
@@ -2033,6 +2154,10 @@ async def execute_deep_search(
     # stays safe on aggregates-only / timeout paths.
     hits_offset_after = 0
     hits_total_sorted = 0
+    # The full sorted URN list, kept so the page just built can be
+    # cached for the cursor pages that follow it.
+    sorted_urns: List[str] = []
+    cache_hit = False
 
     shape = query.options.results
     aggs = query.options.aggregations or []
@@ -2062,66 +2187,85 @@ async def execute_deep_search(
             candidate_count = min(total_count, effective_candidate_cap)
             truncated = total_count > effective_candidate_cap
         else:
-            # Hits requested (and maybe aggregates too). Materialise the
-            # candidate set once; build hits from it, optionally aggregate.
-            result = await provider._ro_query(
-                cand_cypher + " RETURN n",
-                params=base_params, timeout=timeout_s,
+            # Hits requested (and maybe aggregates too). A cursor page
+            # slices the match set page 1 cached, when one is still
+            # warm; otherwise materialise the candidate set once, build
+            # hits from it, and optionally aggregate.
+            cached = (
+                await _read_match_set(provider, query)
+                if query.options.cursor else None
             )
-            rows = result.result_set or []
-            candidate_count = len(rows)
-            truncated = candidate_count >= effective_candidate_cap
-            hits, hits_offset_after, hits_total_sorted = _build_hits_from_rows(
-                provider, rows, query,
-            )
-            if not truncated:
-                # The scan returned every match, so the exact total is
-                # already in hand — no second query.
-                total_count = candidate_count
+            if cached is not None:
+                (
+                    hits, hits_offset_after, hits_total_sorted,
+                ) = await _hits_from_match_set(
+                    provider, query, cached["urns"],
+                )
+                # The page reports the numbers the scan that filled the
+                # cache measured, so page 2 can't contradict page 1.
+                candidate_count = cached["candidate_count"]
+                truncated = cached["truncated"]
+                total_count = cached["total_count"]
+                cache_hit = True
             else:
-                # The cap fired, so ``candidate_count`` is a floor. Pay
-                # for one uncapped count; if it doesn't fit in what's
-                # left of the budget, the page still returns its hits
-                # and the FE renders "N+" instead of an exact total.
-                try:
-                    total_count = await _run_count(
-                        provider, uncapped_cypher, base_params,
-                        timeout_s=remaining(),
-                    )
-                    # The exact total can also DISPROVE the cap
-                    # heuristic: ``candidate_count >= cap`` only ever
-                    # meant "the cap fired", and the set may turn out to
-                    # be exactly that size. Without this the wire says
-                    # truncated with totalCount == candidateCount, which
-                    # the UI renders as a phantom "N+".
-                    truncated = total_count > candidate_count
-                except asyncio.TimeoutError:
-                    deadline_exceeded = True
-                    logger.info(
-                        "deep_search: exact count exceeded the remaining "
-                        "budget; returning hits without a total",
-                    )
-                except Exception as exc:
-                    # The hits are built and correct — nothing the count
-                    # raises may cost the caller that page. This is the
-                    # ORDINARY failure path, not an exotic one: the
-                    # engine cancels a query ~500ms before the asyncio
-                    # net (see ``_db_timeout_ms``), so an over-budget
-                    # count surfaces as a provider error rather than an
-                    # asyncio.TimeoutError, and the service maps anything
-                    # unrecognised to a 500. Degrade to "no exact total"
-                    # and leave ``truncated`` on the cap heuristic; only
-                    # a spent budget makes it a deadline. (CancelledError
-                    # is a BaseException, so a real client disconnect
-                    # still propagates.)
-                    elapsed_ms = int((time.monotonic() - start) * 1000)
-                    if elapsed_ms >= timeout_s * 1000 * 0.95:
+                result = await provider._ro_query(
+                    cand_cypher + " RETURN n",
+                    params=base_params, timeout=timeout_s,
+                )
+                rows = result.result_set or []
+                candidate_count = len(rows)
+                truncated = candidate_count >= effective_candidate_cap
+                (
+                    hits, hits_offset_after, hits_total_sorted, sorted_urns,
+                ) = _build_hits_from_rows(provider, rows, query)
+                if not truncated:
+                    # The scan returned every match, so the exact total is
+                    # already in hand — no second query.
+                    total_count = candidate_count
+                else:
+                    # The cap fired, so ``candidate_count`` is a floor. Pay
+                    # for one uncapped count; if it doesn't fit in what's
+                    # left of the budget, the page still returns its hits
+                    # and the FE renders "N+" instead of an exact total.
+                    try:
+                        total_count = await _run_count(
+                            provider, uncapped_cypher, base_params,
+                            timeout_s=remaining(),
+                        )
+                        # The exact total can also DISPROVE the cap
+                        # heuristic: ``candidate_count >= cap`` only ever
+                        # meant "the cap fired", and the set may turn out to
+                        # be exactly that size. Without this the wire says
+                        # truncated with totalCount == candidateCount, which
+                        # the UI renders as a phantom "N+".
+                        truncated = total_count > candidate_count
+                    except asyncio.TimeoutError:
                         deadline_exceeded = True
-                    logger.warning(
-                        "deep_search: exact count failed after %sms; "
-                        "returning hits without a total: %r",
-                        elapsed_ms, exc,
-                    )
+                        logger.info(
+                            "deep_search: exact count exceeded the remaining "
+                            "budget; returning hits without a total",
+                        )
+                    except Exception as exc:
+                        # The hits are built and correct — nothing the count
+                        # raises may cost the caller that page. This is the
+                        # ORDINARY failure path, not an exotic one: the
+                        # engine cancels a query ~500ms before the asyncio
+                        # net (see ``_db_timeout_ms``), so an over-budget
+                        # count surfaces as a provider error rather than an
+                        # asyncio.TimeoutError, and the service maps anything
+                        # unrecognised to a 500. Degrade to "no exact total"
+                        # and leave ``truncated`` on the cap heuristic; only
+                        # a spent budget makes it a deadline. (CancelledError
+                        # is a BaseException, so a real client disconnect
+                        # still propagates.)
+                        elapsed_ms = int((time.monotonic() - start) * 1000)
+                        if elapsed_ms >= timeout_s * 1000 * 0.95:
+                            deadline_exceeded = True
+                        logger.warning(
+                            "deep_search: exact count failed after %sms; "
+                            "returning hits without a total: %r",
+                            elapsed_ms, exc,
+                        )
             if shape == "both" and aggs:
                 aggregates = []
                 for spec in aggs:
@@ -2152,6 +2296,26 @@ async def execute_deep_search(
         else:
             raise
 
+    # Remember the sorted match set so the next cursor page is a slice
+    # rather than a second full scan. Only worth storing when a page
+    # actually follows this one — a result that fits in one page mints
+    # no cursor, so its entry could only ever be dead weight. A page
+    # cut short by the deadline holds a PARTIAL match set; caching it
+    # would freeze that truncation in for the whole TTL. Nothing here
+    # may cost the caller their page (see ``_write_match_set``).
+    if (hits is not None and not cache_hit and not deadline_exceeded
+            and hits_offset_after < hits_total_sorted):
+        await _write_match_set(
+            provider, query,
+            {
+                "urns": sorted_urns,
+                "candidate_count": candidate_count,
+                "truncated": truncated,
+                "total_count": total_count,
+            },
+            _s.cache_ttl_seconds,
+        )
+
     # 6. Optional ancestor hydration for hits — inside the same budget,
     # so a slow ancestor cache can't stretch the request past the
     # deadline the client was given. Hydration already degrades to an
@@ -2169,13 +2333,13 @@ async def execute_deep_search(
             )
 
     # Emit a next-cursor whenever the page didn't exhaust the sorted
-    # candidate set. The cursor embeds ``query_hash(query)`` so a future
-    # iteration can reject cursors issued against a different query
-    # (not enforced this turn — codec carries the hash for the follow-up).
+    # candidate set. The cursor embeds ``match_hash(query)`` — the
+    # identity of the match set the offset indexes into — which the top
+    # of this function checks before spending it.
     next_cursor: Optional[str] = None
     if hits_offset_after < hits_total_sorted:
         next_cursor = encode_cursor(
-            {"offset": hits_offset_after, "q": query_hash(query)}
+            {"offset": hits_offset_after, "q": match_hash(query)}
         )
 
     return SearchResultPage(
@@ -2187,7 +2351,7 @@ async def execute_deep_search(
         total_count=total_count,
         deadline_exceeded=deadline_exceeded,
         elapsed_ms=int((time.monotonic() - start) * 1000),
-        cache_hit=False,
+        cache_hit=cache_hit,
     )
 
 
@@ -2894,16 +3058,19 @@ def _score_hit(
 
 def _build_hits_from_rows(
     provider, rows, query: SearchQuery,
-) -> Tuple[List[SearchHit], int, int]:
+) -> Tuple[List[SearchHit], int, int, List[str]]:
     """Convert candidate rows to SearchHits, applying sort + cursor-paged
     slicing in-memory.
 
-    Returns ``(hits, offset_after, total_sorted)`` where:
+    Returns ``(hits, offset_after, total_sorted, sorted_urns)`` where:
       * ``hits`` — the page's SearchHits (sliced ``[offset : offset+page_size]``)
       * ``offset_after`` — the next-cursor offset (offset + len(hits))
       * ``total_sorted`` — the size of the full sorted candidate set,
         so the caller can decide whether there are more pages to emit
         a next-cursor.
+      * ``sorted_urns`` — every match in sort order, which the caller
+        caches so the cursor pages after this one are a slice rather
+        than a second scan.
 
     The candidate Cypher deliberately doesn't ORDER BY — sorting in
     Cypher forces a materialisation barrier that thwarts the candidate
@@ -2977,7 +3144,8 @@ def _build_hits_from_rows(
             _, _, hit.highlights = _score_hit(
                 hit.node, leaves, want_highlights=True,
             )
-    return page, offset + len(page), total_sorted
+    return (page, offset + len(page), total_sorted,
+            [h.node.urn for h in hits])
 
 
 async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
