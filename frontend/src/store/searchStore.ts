@@ -352,7 +352,9 @@ interface SearchStoreActions {
          *  aggregation. When provided, each entry OVERRIDES that URN's
          *  page-derived rollup — the aggregation covers every match in
          *  the view, not just the hits on the current page, so it stays
-         *  correct across ``loadMore``. */
+         *  correct across ``loadMore``. An entry with no ``breakdown``
+         *  clears that URN's, rather than leaving a page-derived
+         *  composition under a whole-view count. */
         ancestorCounts?: Iterable<AncestorCountInfo>
         queryHash: string
     }) => void
@@ -499,6 +501,14 @@ function deriveAncestorRollups(infos: Iterable<AncestorPathInfo>): {
  * grandparent the current page proves has matches under it has no bucket
  * of its own, and dropping it would make Isolate/Hide swallow a container
  * the user can see a match inside.
+ *
+ * A bucket carrying no breakdown DELETES the rollup's. The count and the
+ * breakdown are rendered together — SearchMatchBadge puts "42 matches
+ * inside this subtree" straight above a type list whose bars are
+ * proportioned to that list's own sum — so leaving the page's `{column: 1}`
+ * beside the server's 42 would state a composition the count contradicts.
+ * A count on its own is the honest answer; today every bucket takes this
+ * path, because the request asks for no sub-aggregation.
  */
 function overlayServerAncestorCounts(
     counts: Map<string, number>,
@@ -509,6 +519,7 @@ function overlayServerAncestorCounts(
         if (!urn) continue
         counts.set(urn, count)
         if (breakdown) breakdowns.set(urn, new Map(breakdown))
+        else breakdowns.delete(urn)
     }
 }
 

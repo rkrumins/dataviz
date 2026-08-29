@@ -62,6 +62,29 @@ describe('searchStore.setResult — ancestorCounts (server-exact) vs path rollup
         expect(s.ancestorMatchTypeBreakdowns.get('P')?.get('column')).toBe(1)
     })
 
+    it('drops the rollup breakdown of an ancestor the server counted', () => {
+        useSearchStore.getState().setResult({
+            viewId: 'view-1',
+            matchUrns: ['hit-1'],
+            ancestorPaths: [
+                {
+                    path: [{ urn: 'A', displayName: 'A', entityType: 'table' }],
+                    leafEntityType: 'column',
+                },
+            ],
+            // The request asks for no sub-aggregation, so a bucket arrives
+            // with an exact count and no composition.
+            ancestorCounts: [{ urn: 'A', count: 42 }],
+            queryHash: 'q4',
+        })
+        const s = useSearchStore.getState()
+        expect(s.ancestorMatchCounts.get('A')).toBe(42)
+        // Keeping the page's `{column: 1}` here would put a breakdown
+        // summing to 1 under a badge reading "42 matches inside this
+        // subtree". A count with no composition is the honest answer.
+        expect(s.ancestorMatchTypeBreakdowns.get('A')).toBeUndefined()
+    })
+
     it('falls back to the page-derived rollup when ancestorCounts is omitted', () => {
         useSearchStore.getState().setResult({
             viewId: 'view-1',
