@@ -149,6 +149,25 @@ describe('SearchDropdown — the strips', () => {
         expect(screen.getByText('Top matches · 1,284 in this view')).toBeInTheDocument()
     })
 
+    // Ten of five hundred is not an answer, and "See all" only moves the
+    // same haystack to a bigger rail. The two narrowings that actually
+    // help are one click each.
+    it('offers a way in when the count is more than anyone can read', () => {
+        const props = renderDropdown({ count: 500, rows: [hit('a')] })
+
+        expect(screen.getByText('Many matches — narrow:')).toBeInTheDocument()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Names only' }))
+        expect(props.onNarrow).toHaveBeenCalledWith({ lookIn: 'name' })
+    })
+
+    it('stays quiet about a count the list already answers', () => {
+        renderDropdown({ count: 50, rows: [hit('a')] })
+
+        expect(screen.queryByText('Many matches — narrow:')).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Names only' })).not.toBeInTheDocument()
+    })
+
     it('offers the whole result set at the bottom', () => {
         const props = renderDropdown({ count: 1284, rows: [hit('a')] })
 

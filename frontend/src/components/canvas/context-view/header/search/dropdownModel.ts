@@ -21,6 +21,11 @@ import type { AncestorRef, SearchHit } from '@/types/search'
 /** How many rows the dropdown offers before "See all" is the answer. */
 export const TOP_MATCHES = 10
 
+/** Above this, the list is a sample rather than an answer. Ten of two
+ *  hundred is still a plausible top ten; ten of five thousand is a word
+ *  that needs narrowing, not a longer list. */
+export const MANY_MATCHES = 200
+
 
 /**
  * The first `n` hits, in the order the server sent them.
@@ -149,4 +154,34 @@ export function formatPath(
 export function depthNote(depth: number): string | null {
     if (depth < 3) return null
     return `${depth} levels deep`
+}
+
+
+/**
+ * The one-click narrowings worth offering when a query matched far too
+ * much, in the order they help.
+ *
+ * "See all" is not the answer to five thousand matches — it moves the
+ * same haystack to a bigger rail. These two are: looking only at names
+ * drops every incidental hit in a description or a property value, and
+ * matching the start of a name drops every word that merely contains the
+ * text. Both are one click and both are reversible.
+ *
+ * A narrowing the user has already taken is not offered again: a chip
+ * that does nothing, shown at the exact moment someone is looking for
+ * help, is worse than no chip.
+ */
+export function narrowingHints(
+    count: number | null | undefined,
+    quick: QuickQuery,
+): { label: string; patch: Partial<QuickQuery> }[] {
+    if (count == null || count <= MANY_MATCHES) return []
+    const hints: { label: string; patch: Partial<QuickQuery> }[] = []
+    if (quick.lookIn === 'everything') {
+        hints.push({ label: 'Names only', patch: { lookIn: 'name' } })
+    }
+    if (quick.match === 'substring') {
+        hints.push({ label: 'Starts with', patch: { match: 'prefix' } })
+    }
+    return hints
 }

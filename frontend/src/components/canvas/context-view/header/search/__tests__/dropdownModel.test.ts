@@ -13,7 +13,7 @@ import type { QuickQuery } from '@/components/canvas/search/session/quickPredica
 import type { AncestorRef, SearchHit } from '@/types/search'
 
 import {
-    TOP_MATCHES, depthNote, formatPath, topMatches, whyLabel,
+    TOP_MATCHES, depthNote, formatPath, narrowingHints, topMatches, whyLabel,
 } from '../dropdownModel'
 
 
@@ -170,5 +170,38 @@ describe('depthNote', () => {
     it('says how deep it is from three levels down', () => {
         expect(depthNote(3)).toBe('3 levels deep')
         expect(depthNote(6)).toBe('6 levels deep')
+    })
+})
+
+
+describe('narrowingHints', () => {
+    it('says nothing about a result set a person can actually read', () => {
+        expect(narrowingHints(200, DEFAULT_QUICK)).toEqual([])
+        expect(narrowingHints(0, DEFAULT_QUICK)).toEqual([])
+        expect(narrowingHints(null, DEFAULT_QUICK)).toEqual([])
+    })
+
+    it('offers both ways in from two hundred and one', () => {
+        expect(narrowingHints(201, DEFAULT_QUICK)).toEqual([
+            { label: 'Names only', patch: { lookIn: 'name' } },
+            { label: 'Starts with', patch: { match: 'prefix' } },
+        ])
+    })
+
+    // A hint that is already on is not a hint — it is a button that does
+    // nothing, offered at the exact moment the user is looking for help.
+    it('drops the one the user has already taken', () => {
+        expect(narrowingHints(5000, { ...DEFAULT_QUICK, lookIn: 'name' })).toEqual([
+            { label: 'Starts with', patch: { match: 'prefix' } },
+        ])
+        expect(narrowingHints(5000, { ...DEFAULT_QUICK, match: 'prefix' })).toEqual([
+            { label: 'Names only', patch: { lookIn: 'name' } },
+        ])
+    })
+
+    it('has nothing left to suggest once both are narrowed', () => {
+        expect(narrowingHints(5000, {
+            ...DEFAULT_QUICK, lookIn: 'name', match: 'prefix',
+        })).toEqual([])
     })
 })

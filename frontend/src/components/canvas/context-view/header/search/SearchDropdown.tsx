@@ -39,7 +39,7 @@ import type { QuickQuery } from '@/components/canvas/search/session/quickPredica
 import type { SearchHit } from '@/types/search'
 
 import { TopMatchRow } from './TopMatchRow'
-import { TOP_MATCHES, topMatches, whyLabel } from './dropdownModel'
+import { TOP_MATCHES, narrowingHints, topMatches, whyLabel } from './dropdownModel'
 
 
 /** The row ids the input's `aria-activedescendant` points at. Derived in
@@ -138,6 +138,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
     const countLabel = count === null
         ? null
         : `${count.toLocaleString()}${plus ? '+' : ''}`
+    const hints = narrowingHints(count, quick)
 
     const body = (() => {
         if (!trimmed) return <EmptyState recents={recents} onRecent={onRecent} />
@@ -161,6 +162,19 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
                             <kbd className="kbd">esc</kbd>
                         </span>
                     </div>
+
+                    {hints.length > 0 && (
+                        <div className="px-3 pb-1.5 flex flex-wrap items-center gap-1.5">
+                            <span className="text-[10.5px] text-ink-muted/70">
+                                Many matches — narrow:
+                            </span>
+                            {hints.map((hint) => (
+                                <Chip key={hint.label} onClick={() => onNarrow(hint.patch)}>
+                                    {hint.label}
+                                </Chip>
+                            ))}
+                        </div>
+                    )}
 
                     <div
                         role="listbox"
