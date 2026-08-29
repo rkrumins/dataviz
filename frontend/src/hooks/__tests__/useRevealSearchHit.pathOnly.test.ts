@@ -281,6 +281,66 @@ describe('useRevealSearchHit — the path, and nothing else', () => {
 })
 
 
+describe('useRevealSearchHit — telling the canvas what it opened', () => {
+  it('accounts for every level whose spine child actually attached', async () => {
+    // The canvas auto-pages an expanded container that holds nothing. Today
+    // a revealed level escapes that only because its primed edge happens to
+    // have populated the containment map — an inference, made in another
+    // file, from data this walk never checks. The walk says it outright now.
+    const markFirstPageHandled = vi.fn()
+    const { result } = renderHook(() =>
+      useRevealSearchHit({
+        setExpandedNodes: vi.fn(),
+        provider: makeProvider(),
+        markFirstPageHandled,
+      }),
+    )
+
+    await act(async () => { await result.current(HIT, SPINE) })
+
+    expect(markFirstPageHandled.mock.calls.map((c) => c[0])).toEqual([L1, L2, L3])
+  })
+
+  it('accounts for no level when the spine never attached', async () => {
+    // A prime that failed leaves the levels genuinely empty, and an empty
+    // expanded container is exactly what the auto-load exists to fill. The
+    // walk must not claim a level it did not furnish.
+    const markFirstPageHandled = vi.fn()
+    const provider = makeProvider({
+      getEdgesBetween: vi.fn(async () => []),
+    } as Partial<GraphDataProvider>)
+    const { result } = renderHook(() =>
+      useRevealSearchHit({
+        setExpandedNodes: vi.fn(),
+        provider,
+        markFirstPageHandled,
+      }),
+    )
+
+    await act(async () => { await result.current(HIT, SPINE) })
+
+    expect(markFirstPageHandled).not.toHaveBeenCalled()
+  })
+
+  it('tells the store when the spine edges could not be fetched', async () => {
+    // The canvas surfaces a degraded edge picture from this flag. A reveal
+    // that lost its edges is exactly that, and it used to pass in silence.
+    const noteEdgeFetchFailure = vi.fn()
+    useCanvasStore.setState({ noteEdgeFetchFailure })
+    const provider = makeProvider({
+      getEdgesBetween: vi.fn().mockRejectedValue(new Error('502 shed')),
+    } as Partial<GraphDataProvider>)
+    const { result } = renderHook(() =>
+      useRevealSearchHit({ setExpandedNodes: vi.fn(), provider }),
+    )
+
+    await act(async () => { await result.current(HIT, SPINE) })
+
+    expect(noteEdgeFetchFailure).toHaveBeenCalledWith('502 shed')
+  })
+})
+
+
 describe('useRevealSearchHit — the stagger', () => {
   it('opens one level every 80 ms rather than all of them at once', async () => {
     // `toFake` deliberately spares requestAnimationFrame: the frame the

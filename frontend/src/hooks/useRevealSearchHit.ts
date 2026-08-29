@@ -91,6 +91,15 @@ export interface UseRevealSearchHitDeps {
      *  halts at the first ancestor that wasn't fetched on hydration
      *  (which, with lazy loading, is every non-top-level ancestor). */
     provider: GraphDataProvider
+    /**
+     * Optional: tell the canvas that this level's first page is accounted
+     * for, so its first-page auto-load leaves the level alone
+     * (`shouldAutoLoadFirstPage`). Called per opened level, and ONLY when
+     * that level actually holds its spine child — a level whose edge prime
+     * failed is genuinely empty, and an empty expanded container is exactly
+     * what the auto-load exists to fill.
+     */
+    markFirstPageHandled?: (nodeId: string) => void
     /** Optional: after the hit is selected (or after we fall back to the
      *  deepest level that opened), bring that node into the viewport.
      *  Receives the canvas-node id (== URN for the ContextView layout).
@@ -125,7 +134,7 @@ export type RevealSearchHit = (urn: string, ancestorPath: AncestorRef[]) => Prom
 export const LANDED_NOWHERE: RevealOutcome = { landedOn: 'ancestor', urn: '', displayName: '' }
 
 
-export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView }: UseRevealSearchHitDeps): RevealSearchHit {
+export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView, markFirstPageHandled }: UseRevealSearchHitDeps): RevealSearchHit {
     const selectNode = useCanvasStore((s) => s.selectNode)
     const containmentEdgeTypes = useViewContainmentEdgeTypes()
 
@@ -182,6 +191,13 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView 
                 }
             } catch (e) {
                 console.warn('[reveal] spine edge priming failed', e)
+                // The canvas surfaces a degraded edge picture from this
+                // flag; a reveal that lost its spine edges is exactly that,
+                // and it used to fail in silence (cf. useGraphHydration's
+                // cross-page supplement).
+                useCanvasStore.getState().noteEdgeFetchFailure(
+                    e instanceof Error ? e.message : undefined,
+                )
             }
         }
 
@@ -203,6 +219,15 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView 
             // Between levels, not before the first: the reveal answers a
             // click, and the top of the path is the answer's first frame.
             if (opened > 0) await wait(LEVEL_STAGGER_MS)
+            // Claim the level's first page BEFORE opening it, and only if
+            // this level really does hold the child that leads onward. The
+            // store's edges are the authority — not the containment map,
+            // which is one derivation away and belongs to the renderer.
+            const nextOnSpine = ancestorPath[opened + 1]?.urn ?? urn
+            const holdsSpineChild = useCanvasStore.getState().edges.some(
+                (e) => e.source === ancestor.urn && e.target === nextOnSpine,
+            )
+            if (holdsSpineChild) markFirstPageHandled?.(ancestor.urn)
             setExpandedNodes((prev) => {
                 const next = new Set(prev)
                 next.add(ancestor.urn)
@@ -235,7 +260,7 @@ export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView 
         selectNode(landed.urn)
         scrollIntoView?.(landed.urn)
         return { landedOn: 'ancestor', urn: landed.urn, displayName: landed.displayName }
-    }, [setExpandedNodes, provider, selectNode, scrollIntoView, containmentEdgeTypes])
+    }, [setExpandedNodes, provider, selectNode, scrollIntoView, containmentEdgeTypes, markFirstPageHandled])
 }
 
 

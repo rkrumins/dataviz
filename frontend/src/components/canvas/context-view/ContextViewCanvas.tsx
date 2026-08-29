@@ -48,6 +48,7 @@ import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
+import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
@@ -2889,17 +2890,16 @@ export function ContextViewCanvas({
     if (expandedNodes.size === 0) return
 
     for (const nodeId of expandedNodes) {
-      if (autoLoadedFirstPageRef.current.has(nodeId)) continue
+      // In-flight state stays here; the RULE lives in `shouldAutoLoadFirstPage`
+      // so it can be read and tested without mounting this component.
       if (loadingNodes.has(nodeId)) continue
       if (failedNodes.has(nodeId)) continue
-
-      const node = displayMap.get(nodeId)
-      if (!node) continue
-      const childCount = (node.data?.childCount as number) ?? 0
-      if (childCount === 0) continue
-      // Already has children on the canvas — this is a page-2+ situation, which
-      // is the Load-more row's job, not ours.
-      if ((childMap.get(nodeId)?.length ?? 0) > 0) continue
+      if (!shouldAutoLoadFirstPage({
+        nodeId,
+        displayMap,
+        childMap,
+        autoLoaded: autoLoadedFirstPageRef.current,
+      })) continue
 
       autoLoadedFirstPageRef.current.add(nodeId)
       void loadChildrenSorted(nodeId)
@@ -3079,10 +3079,17 @@ export function ContextViewCanvas({
   // (W3). Uses `useRevealSearchHit` (renamed from the original Advanced
   // Search `useRevealNode` during the resilience-hardening integration to
   // coexist with the entity-drawer reveal hook above).
+  // A level the walk opened AND furnished with its spine child is accounted
+  // for: nothing may page it afterwards. Stable identity — the ref is the
+  // state, so this callback never needs to change.
+  const markFirstPageHandled = useCallback((nodeId: string) => {
+    autoLoadedFirstPageRef.current.add(nodeId)
+  }, [])
   const revealSearchHitBrowse = useRevealSearchHit({
     setExpandedNodes,
     provider,
     scrollIntoView: scrollHitIntoView,
+    markFirstPageHandled,
   })
   const revealSearchHit = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
     if (traceWriteLocked()) {
