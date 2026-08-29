@@ -243,59 +243,60 @@ export function ConnectionsPanel({
                           togglePin(row.type)
                         }}
                         className={cn(
-                          'group/row flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors',
+                          'group/row flex flex-col gap-0.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors',
                           'hover:bg-black/5 dark:hover:bg-white/5',
                           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                           isPinned && 'bg-accent-lineage/10 ring-1 ring-accent-lineage/30',
                         )}
                       >
-                        <Swatch def={def} />
+                        <span className="flex items-center gap-2">
+                          <Swatch def={def} />
+                          <span className="flex-1 min-w-0 text-xs font-medium text-ink truncate">{def.label}</span>
+                          <span className="flex-shrink-0 text-xs font-semibold text-ink tabular-nums">
+                            {row.relationships.toLocaleString()}
+                          </span>
+                          <button
+                            type="button"
+                            title="Hide this type"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onToggleType(row.type)
+                            }}
+                            className="flex-shrink-0 p-1 rounded text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+                        </span>
 
-                        <span className="flex-1 min-w-0">
-                          <span className="block text-xs font-medium text-ink truncate">{def.label}</span>
+                        <span className="flex items-center gap-2 pl-14">
                           {def.description && (
-                            <span data-connection-description className="block text-2xs text-ink-muted truncate">
+                            <span
+                              data-connection-description
+                              className="flex-1 min-w-0 text-2xs text-ink-muted truncate"
+                            >
                               {def.description}
                             </span>
                           )}
+                          <span
+                            title={DIRECTION_TITLE}
+                            className="ml-auto flex-shrink-0 text-2xs text-ink-muted tabular-nums whitespace-nowrap group-hover/row:hidden group-focus-within/row:hidden"
+                          >
+                            {`→ ${row.forward.toLocaleString()} · ← ${row.backward.toLocaleString()}`}
+                            {row.bidirectional > 0 ? ` · ⇄ ${row.bidirectional.toLocaleString()}` : ''}
+                          </span>
+                          <button
+                            type="button"
+                            data-connection-only
+                            title="Show only this type"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onSoloType(row.type, allTypes)
+                            }}
+                            className="ml-auto hidden group-hover/row:inline-flex group-focus-within/row:inline-flex flex-shrink-0 items-center text-2xs text-ink-muted hover:text-ink px-1.5 py-0.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                          >
+                            Only
+                          </button>
                         </span>
-
-                        <button
-                          type="button"
-                          data-connection-only
-                          title="Show only this type"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onSoloType(row.type, allTypes)
-                          }}
-                          className="flex-shrink-0 text-2xs text-ink-muted hover:text-ink px-1.5 py-0.5 rounded opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-opacity"
-                        >
-                          Only
-                        </button>
-
-                        <span className="flex-shrink-0 text-xs font-semibold text-ink tabular-nums">
-                          {row.relationships.toLocaleString()}
-                        </span>
-
-                        <span
-                          title={DIRECTION_TITLE}
-                          className="flex-shrink-0 text-2xs text-ink-muted tabular-nums whitespace-nowrap min-w-[4.5rem] text-right"
-                        >
-                          {`→ ${row.forward.toLocaleString()} · ← ${row.backward.toLocaleString()}`}
-                          {row.bidirectional > 0 ? ` · ⇄ ${row.bidirectional.toLocaleString()}` : ''}
-                        </span>
-
-                        <button
-                          type="button"
-                          title="Hide this type"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onToggleType(row.type)
-                          }}
-                          className="flex-shrink-0 p-1 rounded text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                        </button>
                       </div>
                     )
                   })}

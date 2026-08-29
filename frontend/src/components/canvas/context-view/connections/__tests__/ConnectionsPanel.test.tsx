@@ -415,4 +415,34 @@ describe('ConnectionsPanel', () => {
     mount({ defaultExpanded: true, traceMode: true })
     expect(screen.getByText('Applies to this trace only.')).toBeTruthy()
   })
+
+  // ─── Fix round 2 (live browser check) ──────────────────────────────────────
+
+  it("the row label keeps its own line — Only never sits in the label's flow", () => {
+    // Measured in Chromium at the panel's real 256px width: the label and the
+    // description had computed width ZERO, squeezed out by an opacity-0 `Only`
+    // button that was still taking 34px of the flex line, the count and a
+    // min-width direction split. The reader saw a swatch and two numbers and
+    // never the type's NAME — the one thing the row exists to say.
+    mount({ defaultExpanded: true })
+    const row = rowFor('FLOWS_TO')
+
+    const label = within(row).getByText('Flows to')
+    expect(label.className.split(/\s+/)).toEqual(expect.arrayContaining(['truncate', 'min-w-0', 'flex-1']))
+
+    // `Only` is display:none until the row is hovered or holds focus, so it
+    // takes no space in any line — and CSS owns that, never React state.
+    const only = row.querySelector<HTMLElement>('[data-connection-only]')!
+    expect(only.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(['hidden', 'group-hover/row:inline-flex', 'group-focus-within/row:inline-flex']),
+    )
+
+    // It takes the direction split's slot rather than a slot of its own.
+    const split = within(row).getByTitle(
+      '→ flows with the layer order · ← flows back upstream · ⇄ both ways',
+    )
+    expect(split.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(['group-hover/row:hidden', 'group-focus-within/row:hidden']),
+    )
+  })
 })
