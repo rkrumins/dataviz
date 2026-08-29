@@ -19,7 +19,7 @@ import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { useLoadingToast } from '@/components/ui/toast'
+import { useLoadingToast, useToastStore } from '@/components/ui/toast'
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
@@ -104,6 +104,11 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     const { clearTrace, resetAddedEdgeIds } = useTraceStore.getState()
     clearTrace()
     resetAddedEdgeIds()
+    // Same reasoning for the toast message log the status chips surface: it is
+    // an app singleton, so without this the messages raised while view A was
+    // open would be listed as view B's. In memory only — no persistence, so a
+    // refresh starts clean too.
+    useToastStore.getState().clearHistory()
   }, [activeViewId, currentBranchId])
 
   // Scope staged changes to the active (workspace, data source, branch). Staged edits belong to

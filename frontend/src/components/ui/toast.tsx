@@ -40,29 +40,59 @@ export interface Toast {
   createdAt: number
 }
 
+/**
+ * A toast that already came and went. A toast lives 4.5s; the user who looked
+ * away has no way back to it, so every non-loading toast is also written to a
+ * capped, newest-first log (`history`) that the canvas surfaces on demand.
+ * Loading toasts are excluded — they are transient progress whose outcome
+ * arrives as its own success/error toast.
+ */
+export interface ToastHistoryEntry {
+  id: number
+  type: Exclude<ToastType, 'loading'>
+  message: string
+  createdAt: number
+}
+
+/** Oldest entries fall off the end past this. In memory only — a refresh starts clean. */
+export const TOAST_HISTORY_LIMIT = 100
+
 // ─── Store ────────────────────────────────────────────────────────────────
 
 interface ToastState {
   toasts: Toast[]
+  /** Newest first, capped at TOAST_HISTORY_LIMIT. Independent of `toasts`:
+   *  dismissing a live toast never removes its history entry. Cleared per
+   *  view by CanvasRouter so the log always describes the open view. */
+  history: ToastHistoryEntry[]
   _nextId: number
   addToast: (toast: Omit<Toast, 'id' | 'createdAt'>) => number
   removeToast: (id: number) => void
   removeByKey: (key: string) => void
+  clearHistory: () => void
 }
 
 export const useToastStore = create<ToastState>((set, get) => ({
   toasts: [],
+  history: [],
   _nextId: 1,
   addToast: (toast) => {
     const id = get()._nextId
+    const createdAt = Date.now()
     // For loading toasts with a key, replace any existing toast with that key
     // so we don't stack duplicates for the same operation.
     set(state => ({
       _nextId: state._nextId + 1,
       toasts: [
         ...state.toasts.filter(t => !(toast.key && t.key === toast.key)),
-        { ...toast, id, createdAt: Date.now() },
+        { ...toast, id, createdAt },
       ],
+      history: toast.type === 'loading'
+        ? state.history
+        : [
+            { id, type: toast.type, message: toast.message, createdAt },
+            ...state.history,
+          ].slice(0, TOAST_HISTORY_LIMIT),
     }))
     return id
   },
@@ -72,6 +102,7 @@ export const useToastStore = create<ToastState>((set, get) => ({
   removeByKey: (key) => set(state => ({
     toasts: state.toasts.filter(t => t.key !== key),
   })),
+  clearHistory: () => set({ history: [] }),
 }))
 
 // ─── Hook ─────────────────────────────────────────────────────────────────
@@ -160,7 +191,7 @@ const accentColors: Record<ToastType, string> = {
   loading: 'bg-indigo-500',
 }
 
-const iconColors: Record<ToastType, string> = {
+export const iconColors: Record<ToastType, string> = {
   success: 'text-emerald-500',
   error: 'text-red-500',
   warning: 'text-amber-500',
@@ -168,7 +199,7 @@ const iconColors: Record<ToastType, string> = {
   loading: 'text-indigo-500',
 }
 
-const iconComponents: Record<ToastType, React.ComponentType<{ className?: string }>> = {
+export const iconComponents: Record<ToastType, React.ComponentType<{ className?: string }>> = {
   success: CheckCircle2,
   error: AlertCircle,
   warning: AlertTriangle,
