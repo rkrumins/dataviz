@@ -580,7 +580,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       </AnimatePresence>
 
       {/* Advanced search — same SearchMapPanel surface mounted on every
-          canvas. Trigger handles ⌘K globally; panel is a flex-sibling
+          canvas. Trigger handles ⌘⇧F globally; panel is a flex-sibling
           drawer alongside EntityDrawer. */}
       <CanvasSearchTrigger
         open={advancedSearchOpen}
@@ -653,7 +653,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onCancel={interactions.cancelInlineEdit}
       />
 
-      {/* Command Palette - Press Cmd+K */}
+      {/* Command Palette - Press Cmd+Shift+P */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}

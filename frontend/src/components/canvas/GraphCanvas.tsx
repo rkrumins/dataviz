@@ -1565,7 +1565,7 @@ export function GraphCanvas({ className }: { className?: string }) {
       )}
       </div>{/* end canvas + right-rail row */}
 
-      {/* Advanced search trigger + panel. The trigger handles ⌘K
+      {/* Advanced search trigger + panel. The trigger handles ⌘⇧F
           globally; the panel mounts as a flex-sibling drawer (parity
           with ContextViewCanvas). Disabled when no view is active. */}
       <CanvasSearchTrigger
