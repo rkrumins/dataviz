@@ -234,7 +234,15 @@ export function HeaderSearch() {
   }, [open])
 
   const pick = useCallback((hit: SearchHit) => {
-    void revealHit(hit.node.urn, hit.ancestorPath ?? [])
+    void revealHit(hit.node.urn, hit.ancestorPath ?? []).then((outcome) => {
+      // Where the walk actually landed, when that is not where it aimed.
+      // A hit under a level that would not open is a near-miss, and a
+      // near-miss that says nothing reads as a click that did nothing.
+      if (outcome.landedOn !== 'ancestor') return
+      setLandingNote(outcome.displayName
+        ? `Showing ${outcome.displayName} — ${hit.node.displayName} couldn't be opened`
+        : `${hit.node.displayName} couldn't be opened`)
+    })
     // The text and the canvas highlights stay: the user picked ONE of
     // several matches, and the others are still worth seeing (E-b).
     setDismissed(true)

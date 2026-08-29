@@ -9,7 +9,7 @@
  * those specs assert on the surface, because there is nowhere else for
  * that state to live.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { act, render, screen, fireEvent } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_QUICK } from '@/components/canvas/search/session/quickPredicate'
@@ -442,6 +442,75 @@ describe('HeaderSearch — picking', () => {
     fireEvent.click(screen.getByRole('button', { name: 'public' }))
 
     expect(session.revealHit).toHaveBeenCalledWith('urn:public', [anc('crm')])
+  })
+})
+
+
+describe('HeaderSearch — where the reveal landed', () => {
+  it('says which level it is showing when the hit could not be opened', async () => {
+    const session = answering([hit('customer_id', [anc('crm'), anc('public')])])
+    session.revealHit = vi.fn(async () => ({
+      landedOn: 'ancestor' as const, urn: 'urn:public', displayName: 'public',
+    }))
+    renderBox(session)
+    openList()
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('option')[0])
+    })
+
+    expect(screen.getByText(
+      "Showing public — customer_id couldn't be opened",
+    )).toBeInTheDocument()
+  })
+
+  it('drops the note after four seconds, leaving the count behind', async () => {
+    vi.useFakeTimers()
+    const session = answering([hit('customer_id', [anc('crm')])])
+    session.revealHit = vi.fn(async () => ({
+      landedOn: 'ancestor' as const, urn: 'urn:crm', displayName: 'crm',
+    }))
+    renderBox(session)
+    openList()
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('option')[0])
+    })
+    expect(screen.getByText(/couldn't be opened/)).toBeInTheDocument()
+
+    await act(async () => { vi.advanceTimersByTime(4000) })
+
+    expect(screen.queryByText(/couldn't be opened/)).not.toBeInTheDocument()
+    expect(screen.getByText(/1 match/)).toBeInTheDocument()
+  })
+
+  it('says nothing when the reveal landed on the hit', async () => {
+    const session = answering([hit('customer_id', [anc('crm')])])
+    renderBox(session)
+    openList()
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('option')[0])
+    })
+
+    expect(screen.queryByText(/couldn't be opened/)).not.toBeInTheDocument()
+  })
+
+  // Nothing on the spine opened — there is no level to name, and
+  // "Showing  — …" is not a sentence.
+  it('names no level when the walk opened none', async () => {
+    const session = answering([hit('customer_id', [anc('crm')])])
+    session.revealHit = vi.fn(async () => ({
+      landedOn: 'ancestor' as const, urn: '', displayName: '',
+    }))
+    renderBox(session)
+    openList()
+
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('option')[0])
+    })
+
+    expect(screen.getByText("customer_id couldn't be opened")).toBeInTheDocument()
   })
 })
 
