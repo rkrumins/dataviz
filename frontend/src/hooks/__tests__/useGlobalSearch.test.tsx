@@ -12,7 +12,9 @@
  *     the palette has built it;
  *   * only the destinations this reader may actually open, resolved
  *     through the same gates the routes use;
- *   * deep tabs as first-class destinations, `?tab=` and all;
+ *   * deep tabs as first-class destinations, `?tab=` and all, and the
+ *     words people use for a screen that has since been folded into
+ *     another one;
  *   * the server's own count for views, not the length of the page we
  *     happened to fetch;
  *   * docs copy with the brand tokens resolved, because `{brand}` is
@@ -149,6 +151,15 @@ describe('useGlobalSearch', () => {
 
         await waitFor(() => expect(result.current.byCategory.Page).toHaveLength(1))
         expect((result.current.byCategory.Page[0] as PageHit).path).toBe('/ingestion?tab=freshness')
+    })
+
+    it('finds Explorer by what the retired gallery was called', async () => {
+        // `/views` left the index — it only redirects here — and its words
+        // would have left with it, so "gallery" found nothing at all.
+        const { result } = renderHook(() => useGlobalSearch('gallery', { appWide: true }), { wrapper })
+
+        await waitFor(() => expect(result.current.byCategory.Page).toHaveLength(1))
+        expect((result.current.byCategory.Page[0] as PageHit).path).toBe('/explorer')
     })
 
     it('reports the server total for views, not the page it fetched', async () => {

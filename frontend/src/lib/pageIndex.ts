@@ -68,7 +68,7 @@ export const PAGE_INDEX: PageEntry[] = [
         category: 'Page',
         title: 'Explorer',
         description: 'Browse and open saved views',
-        keywords: ['explore', 'discover', 'lineage', 'search', 'browse'],
+        keywords: ['explore', 'discover', 'lineage', 'search', 'browse', 'views', 'gallery', 'saved', 'diagrams'],
         path: '/explorer',
         gate: { kind: 'sidebar', key: 'explore' },
     },
