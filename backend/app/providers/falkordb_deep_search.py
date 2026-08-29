@@ -2219,13 +2219,16 @@ async def _run_aggregation(
     *,
     query: SearchQuery,
     timeout_s: float,
-    uncapped_cypher: str = "",
+    uncapped_cypher: str,
 ) -> List[SearchAggregateBucket]:
     """Run one aggregation pivoted on the candidate set ``n``.
 
     ``uncapped_cypher`` is the same candidate prefix without the
-    ``LIMIT``; the kinds below all pivot on the capped set, so only an
-    aggregation that must see every match reaches for it.
+    ``LIMIT``; most kinds below pivot on the capped set, so only an
+    aggregation that must see every match reaches for it. Required
+    rather than defaulted: an omitted one would leave ``by='ancestor'``
+    prefixing its pivot with nothing, and ``MATCH (anc)-[…]->(n)`` with
+    both ends unbound is a whole-graph walk.
     """
     if spec.by == "ancestorType":
         return await _run_aggregation_ancestor_type(
@@ -2508,7 +2511,21 @@ async def _run_aggregation_ancestor(
     Two-stage aggregation — per (ancestor, entity type) first, then the
     per-ancestor roll-up — so ``max_buckets`` bounds ancestors rather
     than (ancestor, type) rows. There is no samples column, so
-    ``sample_hits_per_bucket`` is ignored.
+    ``sample_hits_per_bucket`` is ignored. The shape is::
+
+        <uncapped> MATCH (anc)-[:REL*1..D]->(n)
+        WITH anc, labels(n)[0] AS et, count(DISTINCT n) AS c
+        WITH anc, sum(c) AS mc, collect([et, c]) AS breakdown
+          ORDER BY mc DESC LIMIT <maxBuckets>
+        RETURN anc.urn, anc.displayName, labels(anc)[0], mc, breakdown
+
+    The ``ORDER BY … LIMIT`` rides the ``WITH`` and NOT the trailing
+    ``RETURN``: this engine silently discards an ORDER BY attached to a
+    ``RETURN`` that follows an aggregation (see
+    falkordb-orderby-aggregation-gotcha). Silently, and this pivot is
+    uncapped — so the wrong shape returns an arbitrary ``maxBuckets``
+    containers instead of the fullest ones, with nothing in the
+    response to say the ranking was dropped.
 
     Empty containment-edge-type set short-circuits (consistent with
     ancestorType / parent).
@@ -2531,9 +2548,9 @@ async def _run_aggregation_ancestor(
         f"MATCH (anc)-[:{rel}*1..{int(max_depth)}]->(n) "
         "WITH anc, labels(n)[0] AS et, count(DISTINCT n) AS c "
         "WITH anc, sum(c) AS mc, collect([et, c]) AS breakdown "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)} "
         "RETURN anc.urn AS urn, anc.displayName AS name, "
-        "labels(anc)[0] AS etype, mc, breakdown "
-        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+        "labels(anc)[0] AS etype, mc, breakdown"
     )
     result = await provider._ro_query(
         agg_cypher, params=cand_params, timeout=timeout_s,

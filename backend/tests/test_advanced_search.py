@@ -3008,11 +3008,37 @@ class TestAggregationAncestor:
         assert "sum(c) AS mc" in cypher
         assert "collect([et, c]) AS breakdown" in cypher
         assert "ORDER BY mc DESC LIMIT 20000" in cypher
+        # ...and it must ride the WITH, BEFORE the RETURN. An ORDER BY
+        # hung off a RETURN that follows an aggregation is silently
+        # discarded on this stack (it has already broken keyset
+        # pagination here once) — which for an uncapped pivot means an
+        # ARBITRARY 20000 containers instead of the fullest ones, with
+        # nothing in the response to say so.
+        assert cypher.index("ORDER BY") < cypher.index("RETURN anc.urn")
         # The candidate cap would silently undercount "N matches
         # inside" — the ONLY LIMIT here is the bucket one.
         assert cypher.count("LIMIT") == 1
         assert params == {"p0": "customer"}
         assert timeout == 3.0
+
+    @pytest.mark.asyncio
+    async def test_scope_max_depth_bounds_the_ancestor_walk(self):
+        """The walk depth is the scope's, not a constant. Every other
+        case here rides the default 12, so a hardcoded 12 would pass
+        them all."""
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_ancestor,
+        )
+        prov = _AncestorAggProvider()
+        shallow = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=SearchScope(view_id="view_test", maxDepth=4),
+        )
+        await _run_aggregation_ancestor(
+            prov, self.UNCAPPED, {}, _ancestor_spec(),
+            query=shallow, timeout_s=3.0,
+        )
+        assert "MATCH (anc)-[:CONTAINS*1..4]->(n)" in prov.calls[0][0]
 
     @pytest.mark.asyncio
     async def test_rows_map_to_match_count_and_type_counts(self):
