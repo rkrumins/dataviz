@@ -109,13 +109,25 @@ describe('SearchMapPanel — the builder follows Refine, not the results', () =>
         expect(screen.queryByRole('button', BUILDER)).not.toBeInTheDocument()
     })
 
-    it('offers Refine as a toggle on both edges', () => {
-        const session = stubSession({ refineOpen: true })
+    it('offers Refine as a toggle once there is an answer behind it', () => {
+        const session = stubSession({
+            refineOpen: true,
+            advanced: stubAdvanced({ view: RESULTS }),
+        })
         renderPanel(session)
 
         screen.getByRole('button', { name: 'Refine' }).click()
 
         expect(session.closeRefine).toHaveBeenCalledTimes(1)
         expect(session.refine).not.toHaveBeenCalled()
+    })
+
+    it('does not offer a hide chip with nothing to hide behind', () => {
+        // Cold open: the builder is all there is. A chip whose only job
+        // is to put it away would either do nothing or blank the rail.
+        renderPanel(stubSession({ refineOpen: true }))
+
+        expect(screen.queryByRole('button', { name: 'Refine' }))
+            .not.toBeInTheDocument()
     })
 })

@@ -398,6 +398,48 @@ describe('useViewSearchSessionController — panel', () => {
         expect(result.current.refineOpen).toBe(true)
     })
 
+    it('closeRefine keeps the builder when there is nothing to fall back to', () => {
+        const { result } = renderSession()
+        act(() => { result.current.openPanel() })
+        expect(result.current.refineOpen).toBe(true)
+
+        act(() => { result.current.closeRefine() })
+
+        // Idle pipeline: the builder IS the panel here, and collapsing it
+        // would leave the rail blank with no way back into it.
+        expect(result.current.refineOpen).toBe(true)
+    })
+
+    it('closeRefine collapses onto the results it falls back to', () => {
+        const { result, rerender } = renderSession()
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+        act(() => { result.current.refine() })
+        expect(result.current.refineOpen).toBe(true)
+
+        act(() => { result.current.closeRefine() })
+
+        expect(result.current.refineOpen).toBe(false)
+    })
+
+    it('an error card is something to fall back to as well', () => {
+        const { result, rerender } = renderSession()
+        mocks.state.view = {
+            kind: 'error', template: TEMPLATE, inputs: {},
+            query: { predicate: LEAF, scope: { viewId: VIEW_ID } },
+            message: 'the provider is warming up', elapsedMs: 8,
+        }
+        rerender()
+        act(() => { result.current.refine() })
+
+        act(() => { result.current.closeRefine() })
+
+        // Anything the results section paints — a running skeleton, rows,
+        // or this error card — leaves the panel with content.
+        expect(result.current.refineOpen).toBe(false)
+    })
+
     it('togglePanel flips it both ways, and closing that way also drops Refine', () => {
         const { result } = renderSession()
         act(() => { result.current.togglePanel() })

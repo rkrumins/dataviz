@@ -40,6 +40,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 
 import {
     useAdvancedSearch,
+    type PanelView,
     type UseAdvancedSearchResult,
 } from '@/hooks/useAdvancedSearch'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
@@ -82,6 +83,23 @@ function runnableFor(
     minLength: number,
 ): { predicate: Predicate; hash: string } | null {
     return buildRunnablePredicate(buildQuickPredicate(q, minLength))
+}
+
+
+/**
+ * Whether the panel has anything to show BESIDES the builder — a running
+ * skeleton, result rows, or an error card.
+ *
+ * Exported because two rules depend on it and must not disagree: the
+ * builder may only be collapsed when this is true, and the chip that
+ * collapses it is only offered when it is. Split across two files with
+ * two hand-written conditions, they drifted once already — the chip was
+ * offered over a state that refused to collapse.
+ */
+export function hasReportableView(view: PanelView): boolean {
+    return view.kind === 'running'
+        || view.kind === 'results'
+        || view.kind === 'error'
 }
 
 
@@ -268,6 +286,10 @@ export function useViewSearchSessionController(
     // derivation had the builder unmount mid-word: on a cold open it
     // showed only because no results existed yet, and the first thing the
     // user typed auto-ran 250 ms later and took it away.
+    // Deliberately NOT `hasReportableView`: opening asks "is there an
+    // answer to open ON?", and a query still running is not one yet —
+    // the user who just hit ⌘⇧F should land on the builder, not on a
+    // skeleton. Collapsing asks the weaker "will anything remain?".
     const openPanel = useCallback(() => {
         setPanelOpen(true)
         setRefineOpen(advancedRef.current.view.kind !== 'results')
@@ -287,7 +309,14 @@ export function useViewSearchSessionController(
         setPanelOpen(true)
         setRefineOpen(true)
     }, [])
-    const closeRefine = useCallback(() => { setRefineOpen(false) }, [])
+    const closeRefine = useCallback(() => {
+        // Collapsing has to leave something behind. Before the first run,
+        // after a Clear and after a view switch the builder IS the panel:
+        // putting it away would blank the rail, and the chip that did it
+        // would be the only way back.
+        if (!hasReportableView(advancedRef.current.view)) return
+        setRefineOpen(false)
+    }, [])
 
     const resolveLayer = useCallback((hit: SearchHit) => resolveHitLayer(
         hit.node,

@@ -76,6 +76,7 @@ import { ScopeModePicker } from './panel/ScopeModePicker'
 import { setScopeCondition } from './panel/predicateComposition'
 import { useLoadAll } from './panel/useLoadAll'
 import { useViewSearchSessionOptional } from './session/ViewSearchSessionContext'
+import { hasReportableView } from './session/useViewSearchSessionController'
 import { usePendingSearchRun } from './usePendingSearchRun'
 import {
     defaultInputs,
@@ -392,9 +393,7 @@ function PanelInner({
     const candidateCount = view.kind === 'results'
         ? (view.result.candidateCount ?? null)
         : null
-    const showResultsSection = view.kind === 'running'
-        || view.kind === 'results'
-        || view.kind === 'error'
+    const showResultsSection = hasReportableView(view)
 
     // Resolve the focused match's ancestor path from the current
     // result page. Stepping (J/K) only updates ``focusedMatchIndex``;
@@ -476,7 +475,12 @@ function PanelInner({
                         onOpenOptions={() => openAdvanced('options')}
                         optionsDeltaCount={optionsDeltaCount}
                         refineOpen={refineOpen}
-                        onToggleRefine={viewSession
+                        // Offered only when there is something to fall
+                        // back to. With the builder alone on screen the
+                        // chip could not put it away (the session refuses,
+                        // so the rail can't go blank) — a control that
+                        // does nothing is worse than no control.
+                        onToggleRefine={viewSession && showResultsSection
                             ? () => {
                                 if (viewSession.refineOpen) viewSession.closeRefine()
                                 else viewSession.refine()
