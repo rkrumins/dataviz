@@ -3123,3 +3123,229 @@ class TestAggregationAncestor:
         assert page.aggregates[0][0].type_counts is None
         assert page.aggregates[1][0].ancestor_urn == "urn:d1"
         assert page.aggregates[1][0].type_counts == {"Column": 7}
+
+
+# ---------------------------------------------------------------------------
+# Hit provenance — score / matchedPredicates / highlights
+# ---------------------------------------------------------------------------
+
+class TestHitProvenance:
+    @staticmethod
+    def _node(**kw):
+        from backend.common.models.graph import GraphNode
+        kw.setdefault("urn", "urn:n")
+        kw.setdefault("entityType", "dataset")
+        kw.setdefault("displayName", "node")
+        return GraphNode(**kw)
+
+    @staticmethod
+    def _mock_prov():
+        class _MockProv:
+            def _extract_node_from_result(self, n):
+                return n
+        return _MockProv()
+
+    def test_dfs_indices_count_every_leaf_kind(self):
+        """``matched_predicates`` indices are a DFS over ALL leaves — a
+        non-textual leaf still consumes its index, or the FE maps the
+        badge onto the wrong branch of the tree it sent."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+        )
+        pred = GroupPredicate(op="and", children=[
+            TagPredicate(values=["pii"]),
+            GroupPredicate(op="or", children=[
+                TextPredicate(value="alpha", target="name"),
+                TextPredicate(value="beta", target="description"),
+            ]),
+        ])
+        leaves = _collect_text_leaves(pred)
+        assert [i for i, _ in leaves] == [1, 2]
+        assert [p.value for _, p in leaves] == ["alpha", "beta"]
+
+    def test_exact_name_outranks_substring_description(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(displayName="Customer",
+                          description="the customer ledger")
+
+        exact_name = _collect_text_leaves(
+            TextPredicate(value="customer", target="name", match="exact"),
+        )
+        score, matched, _ = _score_hit(node, exact_name, want_highlights=False)
+        assert score == pytest.approx(100.0)  # tier 100 x displayName 1.0
+        assert matched == [0]
+
+        # "ustomer" sits mid-word inside the description: substring floor.
+        loose_desc = _collect_text_leaves(
+            TextPredicate(value="ustomer", target="description"),
+        )
+        weak, matched_weak, _ = _score_hit(
+            node, loose_desc, want_highlights=False,
+        )
+        assert weak == pytest.approx(8.0)  # tier 20 x description 0.4
+        assert matched_weak == [0]
+        assert score > weak
+
+    def test_property_target_reports_its_field_and_ranges(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(
+            displayName="orders",
+            properties={"owner": "The CUST team owns this table"},
+        )
+        leaves = _collect_text_leaves(
+            TextPredicate(value="cust", target="property", propertyKey="owner"),
+        )
+        score, matched, highlights = _score_hit(
+            node, leaves, want_highlights=True,
+        )
+        assert matched == [0]
+        assert score == pytest.approx(20.0)  # word boundary 40 x property 0.5
+        assert len(highlights) == 1
+        hl = highlights[0]
+        assert hl.field == "property:owner"
+        assert hl.score == pytest.approx(20.0)
+        start, end = hl.ranges[0]
+        assert hl.snippet.lower()[start:end] == "cust"
+
+    def test_ranges_stay_snippet_relative_when_the_snippet_is_cut(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(
+            description=("lorem ipsum " * 20) + "customer ledger",
+        )
+        leaves = _collect_text_leaves(
+            TextPredicate(value="customer", target="description"),
+        )
+        _, _, highlights = _score_hit(node, leaves, want_highlights=True)
+        hl = highlights[0]
+        assert hl.snippet.startswith("…")  # leading context was cut
+        start, end = hl.ranges[0]
+        assert hl.snippet.lower()[start:end] == "customer"
+
+    def test_tag_hit_scores_at_the_tag_weight(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(displayName="orders", tags=["pii sensitive"])
+        leaves = _collect_text_leaves(
+            TextPredicate(value="sensitive", target="tags"),
+        )
+        score, matched, highlights = _score_hit(
+            node, leaves, want_highlights=True,
+        )
+        assert score == pytest.approx(24.0)  # word boundary 40 x tags 0.6
+        assert matched == [0]
+        assert highlights[0].field == "tags"
+
+    def test_relevance_sort_orders_by_score(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = [
+            self._node(urn="urn:a", displayName="zeta",
+                       description="a customer note"),
+            self._node(urn="urn:b", displayName="customer"),
+            self._node(urn="urn:c", displayName="customer_events"),
+        ]
+        query = SearchQuery(
+            predicate=TextPredicate(value="customer", target="any"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(sort="relevance", pageSize=10),
+        )
+        hits, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
+        assert [h.node.urn for h in hits] == ["urn:b", "urn:c", "urn:a"]
+        assert hits[0].score == pytest.approx(100.0)  # exact displayName
+        assert hits[1].score == pytest.approx(60.0)   # prefix displayName
+        assert hits[2].score == pytest.approx(16.0)   # word bdy x desc 0.4
+
+    def test_highlights_are_built_for_a_cursor_page_too(self):
+        """Highlights are filled for the page slice, not for the first
+        page — page 2 of a cursor walk must carry its own snippets."""
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = [self._node(urn=f"urn:{i:02d}", displayName=f"customer-{i:02d}")
+                for i in range(30)]
+        query = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name",
+                                    match="prefix"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                sort="displayName", sortDir="asc", pageSize=10,
+                cursor=encode_cursor({"offset": 20}),
+            ),
+        )
+        hits, offset_after, total = _build_hits_from_rows(
+            self._mock_prov(), rows, query,
+        )
+        assert offset_after == 30 and total == 30
+        assert [h.node.urn for h in hits] == [
+            f"urn:{i:02d}" for i in range(20, 30)
+        ]
+        assert all(len(h.highlights) == 1 for h in hits)
+        assert hits[0].highlights[0].field == "displayName"
+        assert all(h.score == pytest.approx(60.0) for h in hits)
+
+    def test_highlights_disabled_still_scores_and_attributes(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _build_hits_from_rows,
+        )
+        rows = [self._node(urn=f"urn:{i:02d}", displayName=f"customer-{i:02d}")
+                for i in range(5)]
+        query = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name",
+                                    match="prefix"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(sort="relevance", pageSize=10,
+                                  highlights=False),
+        )
+        hits, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
+        assert len(hits) == 5
+        assert all(h.highlights == [] for h in hits)
+        assert all(h.score == pytest.approx(60.0) for h in hits)
+        assert all(h.matched_predicates == [0] for h in hits)
+
+    def test_property_predicate_scores_only_textual_ops(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(properties={"owner": "Data Platform",
+                                      "rowCount": 42})
+        textual = _collect_text_leaves(
+            PropertyPredicate(key="owner", op="contains", value="platform"),
+        )
+        score, matched, highlights = _score_hit(
+            node, textual, want_highlights=True,
+        )
+        assert score == pytest.approx(20.0)  # word bdy 40 x property 0.5
+        assert matched == [0]
+        assert highlights[0].field == "property:owner"
+
+        # A numeric comparison has no text to attribute the hit to.
+        numeric = _collect_text_leaves(
+            PropertyPredicate(key="rowCount", op="gt", value=10),
+        )
+        assert _score_hit(node, numeric, want_highlights=True) == (0.0, [], [])
+
+    def test_empty_needle_earns_no_provenance(self):
+        """``col CONTAINS ''`` is true for every non-null column — scoring
+        it would rank the whole result set at the prefix tier."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(properties={"owner": "Data Platform"})
+        leaves = _collect_text_leaves(
+            PropertyPredicate(key="owner", op="contains", value=""),
+        )
+        assert _score_hit(node, leaves, want_highlights=True) == (0.0, [], [])

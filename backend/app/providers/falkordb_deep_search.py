@@ -56,8 +56,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections import Counter
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
@@ -66,11 +68,15 @@ from backend.common.models.search import (
     AncestorRef,
     DegreePredicate,
     EdgeRef,
+    GroupPredicate,
     PathHit,
+    PropertyPredicate,
     SearchAggregateBucket,
+    SearchHighlight,
     SearchHit,
     SearchQuery,
     SearchResultPage,
+    TextPredicate,
 )
 
 logger = logging.getLogger(__name__)
@@ -2597,6 +2603,249 @@ def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:
     return buckets
 
 
+# ---------------------------------------------------------------------------
+# Hit provenance — score, matchedPredicates, highlights
+# ---------------------------------------------------------------------------
+
+# Per-field relevance weights, applied to the match tier. A hit on the
+# node's own name is worth more than the same hit buried in a long
+# description, so "exact name" outranks "substring description" no
+# matter how the two fields compare in length.
+_FIELD_WEIGHTS: Dict[str, float] = {
+    "displayName": 1.0,
+    "qualifiedName": 0.7,
+    "tags": 0.6,
+    "property": 0.5,
+    "description": 0.4,
+}
+
+# Match tiers, best first. Gated by the predicate's match mode — an
+# ``exact`` predicate can only ever earn the exact tier, so a hit never
+# claims a closer match than the query asked for.
+_TIER_EXACT = 100
+_TIER_PREFIX = 60
+_TIER_WORD = 40
+_TIER_SUBSTRING = 20
+
+# Context kept either side of the match in a highlight snippet.
+_SNIPPET_PAD = 40
+_ELLIPSIS = "…"
+
+# Property ops that read as text. Everything else (ordering, ranges,
+# set-exclusion) has no textual provenance to report.
+_PROPERTY_OP_MODES = {
+    "eq": "exact",
+    "in": "exact",
+    "contains": "substring",
+    "startsWith": "prefix",
+    "endsWith": "suffix",
+}
+
+
+@lru_cache(maxsize=512)
+def _word_boundary_re(needle: str) -> re.Pattern:
+    """``(?<!\\w)<needle>`` matcher, compiled once per distinct needle.
+
+    ``_score_hit`` runs once per candidate row — up to the candidate cap
+    — so a leaf's pattern has to be compiled once for the whole page,
+    never once per row.
+    """
+    return re.compile(r"(?<!\w)" + re.escape(needle))
+
+
+def _collect_text_leaves(predicate) -> List[Tuple[int, Any]]:
+    """Number every leaf of the predicate tree; keep the textual ones.
+
+    ``SearchHit.matched_predicates`` indices are a 0-based DFS over
+    *all* leaves — the caller maps them back onto the tree it sent — so
+    the counter advances for every leaf kind, not only the ones that
+    carry text. Recursion follows ``GroupPredicate.children`` alone;
+    a ``PathPredicate``'s edge predicate scores against edges, not the
+    node, and is a single leaf here.
+    """
+    leaves: List[Tuple[int, Any]] = []
+    index = 0
+
+    def walk(p) -> None:
+        nonlocal index
+        if isinstance(p, GroupPredicate):
+            for child in p.children:
+                walk(child)
+            return
+        if isinstance(p, (TextPredicate, PropertyPredicate)):
+            leaves.append((index, p))
+        index += 1
+
+    walk(predicate)
+    return leaves
+
+
+def _leaf_needles(pred) -> Tuple[List[str], str]:
+    """The literal(s) a leaf searches for, and the mode to score under.
+
+    A ``PropertyPredicate`` only has textual provenance when both its op
+    and its value are textual; a typed comparison returns no needles and
+    contributes nothing to the score.
+    """
+    if isinstance(pred, PropertyPredicate):
+        mode = _PROPERTY_OP_MODES.get(pred.op)
+        if mode is None:
+            return [], "substring"
+        if pred.op == "in":
+            values = [v for v in (pred.value or []) if isinstance(v, str)]
+        else:
+            values = [pred.value] if isinstance(pred.value, str) else []
+        # An empty needle is satisfied by every field trivially
+        # (``CONTAINS ''`` is true for any non-null column) — it would
+        # score the whole result set at the prefix tier and highlight
+        # nothing. Drop it.
+        return [v for v in values if v], mode
+    return [pred.value], pred.match
+
+
+def _scored_fields(node, pred) -> List[Tuple[str, str, float]]:
+    """The ``(field, text, weight)`` triples one leaf scores against.
+
+    Mirrors the columns ``_visit_text`` ORs into that leaf's WHERE
+    fragment, so provenance can never name a field the query didn't
+    read. ``any`` expands to what feeds ``n.searchableText`` — name,
+    qualifiedName, description, tags and string-valued properties; the
+    blob itself is not a field a reader can be pointed at.
+    """
+    if isinstance(pred, PropertyPredicate):
+        value = (node.properties or {}).get(pred.key)
+        if not isinstance(value, str) or not value:
+            return []
+        return [(f"property:{pred.key}", value, _FIELD_WEIGHTS["property"])]
+
+    fields: List[Tuple[str, str, float]] = []
+
+    def add(field: str, text, weight_key: Optional[str] = None) -> None:
+        if isinstance(text, str) and text:
+            fields.append((field, text, _FIELD_WEIGHTS[weight_key or field]))
+
+    target = pred.target
+    if target in ("name", "any"):
+        add("displayName", node.display_name)
+    if target in ("name", "qualifiedName", "any"):
+        add("qualifiedName", node.qualified_name)
+    if target in ("description", "any"):
+        add("description", node.description)
+    if target in ("tags", "any"):
+        for tag in node.tags or []:
+            add("tags", tag)
+    if target == "property" and pred.property_key:
+        # The compiled column is ``toLower(toString(n.<key>))``, so a
+        # non-string scalar is matchable — stringify it the same way.
+        value = (node.properties or {}).get(pred.property_key)
+        add(f"property:{pred.property_key}",
+            None if value is None else str(value), "property")
+    if target == "any":
+        for key, value in (node.properties or {}).items():
+            if isinstance(value, str):
+                add(f"property:{key}", value, "property")
+    return fields
+
+
+def _match_tier(haystack: str, needle: str, mode: str) -> Tuple[int, int]:
+    """Best tier this needle earns in this haystack, plus the offset of
+    the occurrence a highlight should point at. ``(0, -1)`` = no match.
+
+    Both arguments arrive already case-normalised. The mode gates which
+    tiers are reachable: ``exact`` reaches only the exact tier,
+    ``prefix`` exact or prefix, ``suffix`` exact or the substring floor
+    (a tail match carries no positional strength), and ``substring``
+    reaches every tier. The row is already known to satisfy the
+    predicate *somewhere*, but a leaf fans out over several fields —
+    this decides which of them actually matched.
+    """
+    if haystack == needle:
+        return _TIER_EXACT, 0
+    if mode == "exact":
+        return 0, -1
+    if mode == "prefix":
+        return (_TIER_PREFIX, 0) if haystack.startswith(needle) else (0, -1)
+    if mode == "suffix":
+        if not haystack.endswith(needle):
+            return 0, -1
+        return _TIER_SUBSTRING, len(haystack) - len(needle)
+    # substring — every tier is reachable.
+    if haystack.startswith(needle):
+        return _TIER_PREFIX, 0
+    boundary = _word_boundary_re(needle).search(haystack)
+    if boundary is not None:
+        return _TIER_WORD, boundary.start()
+    position = haystack.find(needle)
+    return (_TIER_SUBSTRING, position) if position >= 0 else (0, -1)
+
+
+def _build_highlight(
+    field: str, text: str, position: int, length: int, score: float,
+) -> SearchHighlight:
+    """±40 characters of context around the match, with the match's
+    offsets *within the snippet* — the reader marks the range it is
+    handed, so the ellipsis we prepend has to be counted into it."""
+    start = max(0, position - _SNIPPET_PAD)
+    end = min(len(text), position + length + _SNIPPET_PAD)
+    lead = _ELLIPSIS if start > 0 else ""
+    trail = _ELLIPSIS if end < len(text) else ""
+    snippet = lead + text[start:end] + trail
+    range_start = len(lead) + (position - start)
+    return SearchHighlight(
+        field=field, snippet=snippet, score=score,
+        ranges=[[range_start, min(range_start + length, len(snippet))]],
+    )
+
+
+def _score_hit(
+    node, leaves, *, want_highlights: bool,
+) -> Tuple[float, List[int], List[SearchHighlight]]:
+    """Score one node against the request's textual leaves.
+
+    Returns ``(score, matched_predicate_indices, highlights)``. The
+    score is ``max(tier × field weight)`` across every leaf and field —
+    a max, not a sum, so a node can't out-rank a closer match by
+    repeating a weak one. Highlights are one per matched field (that
+    field's best match) and are built only when asked: the caller
+    scores every candidate row but needs snippets only for the page it
+    returns.
+    """
+    score = 0.0
+    matched: List[int] = []
+    best: Dict[str, Tuple[float, str, int, int]] = {}
+
+    for index, pred in leaves:
+        needles, mode = _leaf_needles(pred)
+        if not needles:
+            continue
+        if not pred.case_sensitive:
+            needles = [n.lower() for n in needles]
+        matched_leaf = False
+        for field, text, weight in _scored_fields(node, pred):
+            haystack = text if pred.case_sensitive else text.lower()
+            for needle in needles:
+                tier, position = _match_tier(haystack, needle, mode)
+                if not tier:
+                    continue
+                matched_leaf = True
+                field_score = tier * weight
+                if field_score > score:
+                    score = field_score
+                if want_highlights:
+                    previous = best.get(field)
+                    if previous is None or field_score > previous[0]:
+                        best[field] = (field_score, text, position, len(needle))
+        if matched_leaf:
+            matched.append(index)
+
+    highlights = [
+        _build_highlight(field, text, position, length, field_score)
+        for field, (field_score, text, position, length)
+        in sorted(best.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    ]
+    return score, matched, highlights
+
+
 def _build_hits_from_rows(
     provider, rows, query: SearchQuery,
 ) -> Tuple[List[SearchHit], int, int]:
@@ -2618,15 +2867,22 @@ def _build_hits_from_rows(
       1. `options.sort_property` (an arbitrary native node property
          like 'rowCount' or 'createdAt') wins if set — powers
          "biggest first" / "newest first" UX.
-      2. `options.sort` ('displayName' / 'qualifiedName' / 'relevance'
-         falls back to displayName until fulltext lands).
+      2. `options.sort` ('displayName' / 'qualifiedName' / 'relevance',
+         the last ranking on the provenance score).
       'depth' is deferred — currently silently coerces to displayName.
+
+    Every row is scored, because relevance sorts the whole candidate set
+    before it is sliced; only the page slice pays for highlights.
     """
+    leaves = _collect_text_leaves(query.predicate)
     hits: List[SearchHit] = []
     for row in rows:
         node = provider._extract_node_from_result(row)
         if node:
-            hits.append(SearchHit(node=node))
+            score, matched, _ = _score_hit(node, leaves, want_highlights=False)
+            hits.append(SearchHit(
+                node=node, score=score, matched_predicates=matched,
+            ))
 
     sort_dir = query.options.sort_dir
     reverse = (sort_dir == "desc")
@@ -2653,11 +2909,16 @@ def _build_hits_from_rows(
                 return v.lower()
             hits.sort(key=key, reverse=reverse)
         elif sort_field == "relevance":
-            # No relevance signal in v1 (no fulltext). Fall back to displayName.
+            # Score first, name second. `sort_dir` steers the tiebreak —
+            # as it does for the name sorts — but never the ranking:
+            # "least relevant first" is not a thing anyone asks for.
+            # Two passes, leaning on Python's stable sort, so the name
+            # order survives underneath the score order.
             hits.sort(
                 key=lambda h: (h.node.display_name or "").lower(),
                 reverse=reverse,
             )
+            hits.sort(key=lambda h: -h.score)
 
     total_sorted = len(hits)
     offset = 0
@@ -2665,6 +2926,11 @@ def _build_hits_from_rows(
         state = decode_cursor(query.options.cursor)
         offset = max(0, int(state.get("offset", 0)))
     page = hits[offset : offset + query.options.page_size]
+    if query.options.highlights:
+        for hit in page:
+            _, _, hit.highlights = _score_hit(
+                hit.node, leaves, want_highlights=True,
+            )
     return page, offset + len(page), total_sorted
 
 
