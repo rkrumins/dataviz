@@ -76,3 +76,4 @@ async def provider():
 @pytest.mark.asyncio
 async def test_falkordb_provider_contract(provider):
     await _runner.run_all(provider, snapshot_label="falkordb")
+    await _runner.run_extended(provider, snapshot_label="falkordb")
