@@ -348,6 +348,67 @@ async def test_group_predicate_not(stub):
 
 
 # ---------------------------------------------------------------------------
+# Scope clamps — the stub mirrors the FalkorDB provider's rule that a
+# containment boundary, where one exists, is the only boundary.
+# ---------------------------------------------------------------------------
+
+
+def _nested_provider() -> StubDeepSearchProvider:
+    """A ``dataset`` nested inside a ``domain`` — the shape a curated
+    view has when its layers declare only the container type."""
+    return StubDeepSearchProvider(
+        nodes=[
+            {
+                "urn": "urn:domain:customers",
+                "entityType": "domain",
+                "displayName": "Customers Domain",
+                "tags": ["PII"],
+            },
+            {
+                "urn": "urn:dataset:customers",
+                "entityType": "dataset",
+                "displayName": "Customers",
+                "tags": ["PII"],
+                "ancestorUrns": ["urn:domain:customers"],
+            },
+        ],
+        edges=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_root_scope_does_not_clamp_descendant_types():
+    """``root_urns`` bounds the search, so the stamped entity types must
+    not gate it too — otherwise the nested ``dataset`` is unfindable."""
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(
+            view_id="test-view",
+            root_urns=["urn:domain:customers"],
+            entity_types=["domain"],
+        ),
+        options=SearchOptions(results="hits", page_size=50),
+    )
+    page = await _nested_provider().deep_search(query)
+    assert {h.node.urn for h in page.hits} == {
+        "urn:domain:customers",
+        "urn:dataset:customers",
+    }
+
+
+@pytest.mark.asyncio
+async def test_entity_types_still_clamp_without_roots():
+    """No containment boundary → the type clamp is all there is."""
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id="test-view", entity_types=["domain"]),
+        options=SearchOptions(results="hits", page_size=50),
+    )
+    page = await _nested_provider().deep_search(query)
+    assert {h.node.urn for h in page.hits} == {"urn:domain:customers"}
+
+
+# ---------------------------------------------------------------------------
 # Negative paths — the stub raises CompileError on unsupported kinds.
 # ---------------------------------------------------------------------------
 

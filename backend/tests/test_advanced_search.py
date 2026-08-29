@@ -1470,6 +1470,84 @@ class TestScopeChainSemantics:
 
 
 # ---------------------------------------------------------------------------
+# Entity types must not gate the candidate scan when a containment
+# traversal already bounds it (the curated-view case: the layers declare
+# only container types, and the node the user is looking for is a
+# descendant three levels down with a different type)
+# ---------------------------------------------------------------------------
+
+class TestTypesDoNotGateDescendants:
+    def test_roots_present_omits_label_filter(self):
+        """A view whose layers declare ``Table`` stamps that into
+        ``scope.entity_types``. Emitting it as a label filter on the
+        candidate scan makes every descendant of another type (a
+        ``Column``) unfindable. The traversal from the roots is already
+        the boundary, so the type filter is dropped."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="view",
+                root_urns=["urn:layerA"],
+                entity_types=["dataset"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        assert "MATCH (root0)" in cypher
+        assert "$_scopeEntityTypes" not in cypher
+        assert "_scopeEntityTypes" not in result["params"]
+        assert any(
+            "entity-type filter not applied" in n for n in result["notes"]
+        ), result["notes"]
+
+    def test_no_roots_keeps_label_filter(self):
+        """No traversal boundary → the label filter is the only thing
+        bounding the candidate scan, so it stays."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="view",
+                entity_types=["dataset"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        assert "MATCH (root" not in result["cypher"]
+        assert "$_scopeEntityTypes" in result["cypher"]
+        assert result["params"]["_scopeEntityTypes"] == ["dataset"]
+
+    def test_hoisted_descendant_of_also_suppresses_types(self):
+        """``data_source`` mode drops the view-root clamp, but an explicit
+        ``descendantOf`` anchor is still a containment boundary — the
+        types must not gate the scan under it either."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                TagPredicate(values=["PII"]),
+                DescendantOfPredicate(urns=["urn:reporting"]),
+            ]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="data_source",
+                entity_types=["dataset"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        assert "MATCH (root0)" in result["cypher"]
+        assert "$_scopeEntityTypes" not in result["cypher"]
+        assert "_scopeEntityTypes" not in result["params"]
+
+
+# ---------------------------------------------------------------------------
 # Candidate Cypher assembly
 # ---------------------------------------------------------------------------
 

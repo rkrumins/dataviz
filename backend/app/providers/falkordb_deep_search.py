@@ -1362,9 +1362,22 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
                 "pass without ancestry verification."
             )
 
-    effective_types, et_note = _resolve_entity_types_scope(
-        provider, list(query.scope.entity_types or []),
-    )
+    effective_types: Optional[List[str]] = None
+    et_note: Optional[str] = None
+    if scope_chain:
+        # The containment traversal IS the boundary. Applying the view's
+        # entity types as a label filter on top of it would make every
+        # descendant of another type unreachable — a view whose layers
+        # declare only ``Table`` could never return a ``Column`` nested
+        # three levels below one of its roots.
+        notes.append(
+            "entity-type filter not applied: the containment traversal "
+            "from the resolved roots is the search boundary"
+        )
+    else:
+        effective_types, et_note = _resolve_entity_types_scope(
+            provider, list(query.scope.entity_types or []),
+        )
     use_entity_types = effective_types is not None
     if use_entity_types:
         # Lowercased to pair with the case-insensitive ``toLower(l)``
@@ -1922,10 +1935,16 @@ async def execute_deep_search(
     )
     base_params.update(wh_params)
 
-    # 5. Build the candidate prefix
-    effective_types, et_note = _resolve_entity_types_scope(
-        provider, list(query.scope.entity_types or []),
-    )
+    # 5. Build the candidate prefix. When a containment traversal bounds
+    #    the scan, the entity types must not gate it as well — see the
+    #    parallel branch in explain_deep_search, which surfaces the same
+    #    decision as a note.
+    effective_types: Optional[List[str]] = None
+    et_note: Optional[str] = None
+    if not scope_chain:
+        effective_types, et_note = _resolve_entity_types_scope(
+            provider, list(query.scope.entity_types or []),
+        )
     use_entity_types = effective_types is not None
     if use_entity_types:
         # Lowercased to pair with the case-insensitive ``toLower(l)``

@@ -87,8 +87,12 @@ class StubDeepSearchProvider:
                 if n.get("urn") in roots
                 or any(a in roots for a in n.get("ancestorUrns", []))
             ]
-        # Entity-type clamp from scope (resolver-stamped).
-        if query.scope.entity_types:
+        # Entity-type clamp from scope (resolver-stamped) — skipped when
+        # root_urns already bound the search, mirroring the FalkorDB
+        # provider: where a containment boundary exists it is the only
+        # boundary, or a descendant of another type could never be
+        # returned.
+        if query.scope.entity_types and not query.scope.root_urns:
             allowed = set(query.scope.entity_types)
             matches = [
                 n for n in matches if n.get("entityType") in allowed
