@@ -203,7 +203,7 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
       isBundled: !bundle.isLeafEdge,
       kind: 'raw',
       complete: ledger.state(source, target) === 'complete',
-      types: bundle.edgeTypes,
+      types: [...bundle.edgeTypes],
     })
   }
 

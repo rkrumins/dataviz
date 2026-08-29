@@ -55,6 +55,13 @@ export interface ConnectionsPanelProps {
 }
 
 const DIRECTION_TITLE = '→ flows with the layer order · ← flows back upstream · ⇄ both ways'
+/** Browse subtracts when a type is hidden — the projection drops those
+ *  relationships per member. A trace cannot: its lines carry a total rather
+ *  than a list of what makes it up, so a line carrying a hidden type AND a
+ *  visible one stays on the board at its full count. Said plainly on the row
+ *  rather than left for the reader to notice as a number that will not move. */
+const TRACE_COUNT_NOTE =
+  ' During a trace, a connection that carries several types keeps its full count when one of them is hidden.'
 const ROW_HINT = 'Hover a row to spotlight its connections · click to keep it lit.'
 
 /** A row is not a <button>: it holds the Eye and Only buttons (nesting is
@@ -223,7 +230,7 @@ export function ConnectionsPanel({
                       <div
                         key={row.type}
                         data-connection-row={row.type}
-                        title={`${def.label} — ${row.relationships.toLocaleString()} of the connections on screen carry this type. A connection carrying more than one type is counted in each of its types.`}
+                        title={`${def.label} — ${row.relationships.toLocaleString()} of the connections on screen carry this type. A connection carrying more than one type is counted in each of its types.${traceMode ? TRACE_COUNT_NOTE : ''}`}
                         tabIndex={0}
                         onMouseEnter={() => setHoveredType(row.type)}
                         onMouseLeave={() => setHoveredType(null)}

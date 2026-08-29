@@ -393,6 +393,20 @@ describe('ConnectionsPanel', () => {
     expect(lastHighlight(onHighlight)).toBeNull()
   })
 
+  it('only the trace row tooltip says hiding a shared type leaves the count alone', () => {
+    // Browse really does subtract — the projection drops those relationships
+    // per member. A trace cannot: its lines carry a total, not a list, so
+    // the reader is told rather than left to wonder why nothing moved.
+    const clause =
+      'During a trace, a connection that carries several types keeps its full count when one of them is hidden.'
+    const { unmount } = mount({ defaultExpanded: true })
+    expect(rowFor('FLOWS_TO').getAttribute('title')).not.toMatch(/During a trace/)
+    unmount()
+
+    mount({ defaultExpanded: true, traceMode: true })
+    expect(rowFor('FLOWS_TO').getAttribute('title')).toContain(clause)
+  })
+
   it('the trace-mode footer says the toggles apply to this trace only', () => {
     const { unmount } = mount({ defaultExpanded: true })
     expect(screen.queryByText('Applies to this trace only.')).toBeNull()

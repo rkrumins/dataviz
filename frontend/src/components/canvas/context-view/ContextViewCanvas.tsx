@@ -67,6 +67,7 @@ import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation } from './useBandReservation'
 
+import { buildTraceLaneIndex, isReverseTraceWire } from '@/hooks/lib/traceWireDirection'
 import { useUnifiedTrace, type UseUnifiedTraceResult, type TraceResult } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
 import { getEdgeTypeDefinition, getEdgeTypeFromSchema, type EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
@@ -3835,6 +3836,14 @@ export function ContextViewCanvas({
     setTraceHiddenTypes(EMPTY_TYPE_SET)
   }, [overlay.active, showAllBrowseTypes])
 
+  // WHICH WAY A TRACE WIRE RUNS is a question about the TRACE's board, and
+  // the trace's board is its lanes — a card the walk brought in is in none
+  // of the browse layers, so `nodeLayerIndexMap` answers "nothing" for it
+  // (see traceWireDirection for what that cost). Lanes arrive in the view's
+  // own layer order.
+  const traceLanes = overlay.view?.lanes
+  const traceLaneIndex = useMemo(() => buildTraceLaneIndex(traceLanes), [traceLanes])
+
   // THE TRACE'S OWN WIRES: one line per flow, at the one grain the reader's
   // expansion has earned. Endpoints are card ids (a Context View node id IS
   // its urn), which is what LineageFlowOverlay anchors on.
@@ -3859,9 +3868,13 @@ export function ContextViewCanvas({
         types: w.types.filter(t => !traceHiddenTypes.has(t.toUpperCase())),
         // A rollup or residual wire IS a summary and must draw dashed.
         isGhost: w.kind !== 'raw',
-        isReverseFlow: (nodeLayerIndexMap?.get(w.target) ?? 0) < (nodeLayerIndexMap?.get(w.source) ?? 0),
+        // Both ends must be placed before a wire is called reverse: the flag
+        // re-routes the line through the overlay's back-arc and lands in the
+        // panel's `←` column, so an unplaced endpoint must read as "unknown",
+        // never as Source.
+        isReverseFlow: isReverseTraceWire(w, traceLaneIndex),
       }))
-  }, [overlay.active, overlay.view, browseVisibleLineageEdges, traceHiddenTypes, nodeLayerIndexMap])
+  }, [overlay.active, overlay.view, browseVisibleLineageEdges, traceHiddenTypes, traceLaneIndex])
 
   // Publish the projected lineage edge set to the canvas store so panels
   // outside the canvas (EntityDrawer's Lineage section) can mirror exactly
@@ -4398,9 +4411,12 @@ export function ContextViewCanvas({
   // change ARRIVES — React's "adjusting state when a prop changes", the same
   // idiom the panel uses, not an effect, which would paint the stale
   // highlight for one committed frame first.
-  const [highlightScope, setHighlightScope] = useState({ viewId: connectionsViewId, tracing: traceActive, focus: canvasTrace.tracedUrn })
-  if (highlightScope.viewId !== connectionsViewId || highlightScope.tracing !== traceActive || highlightScope.focus !== canvasTrace.tracedUrn) {
-    setHighlightScope({ viewId: connectionsViewId, tracing: traceActive, focus: canvasTrace.tracedUrn })
+  // Keyed on `overlay.active`, the same signal the panel drops its own pin
+  // on: clearing on `traceActive` instead left the pinned ROW lit for the
+  // whole walk with nothing lit on the board to match it.
+  const [highlightScope, setHighlightScope] = useState({ viewId: connectionsViewId, tracing: overlay.active, focus: canvasTrace.tracedUrn })
+  if (highlightScope.viewId !== connectionsViewId || highlightScope.tracing !== overlay.active || highlightScope.focus !== canvasTrace.tracedUrn) {
+    setHighlightScope({ viewId: connectionsViewId, tracing: overlay.active, focus: canvasTrace.tracedUrn })
     setConnectionHighlight(null)
   }
   const overlayHighlightEdges = useMemo(
