@@ -1,6 +1,7 @@
 // Re-export HierarchyNode from shared types for backward compatibility
 export type { HierarchyNode } from '@/types/hierarchy'
 import type { HierarchyNode } from '@/types/hierarchy'
+import type { AncestorRef, SearchHit } from '@/types/search'
 
 export interface FlatTreeNode {
   node: HierarchyNode
@@ -13,6 +14,18 @@ export interface FlatTreeNode {
   isSkeleton?: boolean
   skeletonIndex?: number
   isFailed?: boolean
+  /** A hit of the view search that lives INSIDE this row's container.
+   *  Virtual: it is rendered from the search result alone and is never
+   *  written to the canvas store, so `node` is the PARENT (the same
+   *  convention `isLoadMore` uses) and `hit` is the entity shown. */
+  isSearchHit?: boolean
+  hit?: SearchHit
+  /** The steps between the container and the hit, ancestors above the
+   *  container cut away — see `inlineSearchHits`. */
+  crumbs?: AncestorRef[]
+  /** Set on the single trailing row instead of `hit`: how many hits the
+   *  inline cap left for the panel to show. */
+  overflow?: number
 }
 
 /** Imperative geometry API each LayerColumn registers with the canvas.

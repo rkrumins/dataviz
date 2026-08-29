@@ -29,10 +29,15 @@ import { FlatTreeItem } from './FlatTreeItem'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
+import { SearchHitInlineRow } from './SearchHitInlineRow'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights } from './density'
+import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
+import { useViewSearchSessionOptional } from '../search/session/ViewSearchSessionContext'
+import { matchesQuick } from '../search/session/quickPredicate'
+import type { AncestorRef } from '@/types/search'
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -72,8 +77,11 @@ interface LayerColumnProps {
   isHoverHighlight?: boolean
   onAnimationComplete?: () => void
   onLoadMore?: (parentId: string) => void
-  onSearchChildren?: (parentId: string, query: string) => void
-  isLoadingChildren?: boolean
+  /** Walk a search hit's ancestors open and scroll to it. The inline hit
+   *  rows are pointers into the result set — the entity itself may be
+   *  nowhere near loaded — so clicking one has to go through the canvas's
+   *  reveal, the same one the results panel uses. */
+  onRevealSearchHit?: (urn: string, ancestorPath: AncestorRef[]) => void
   loadingNodes?: Set<string>
   failedNodes?: Set<string>
   onScroll?: () => void
@@ -149,6 +157,7 @@ interface LayerColumnProps {
 function getItemKey(item: FlatTreeNode, _index: number): string {
   if (item.isSkeleton) return `skeleton-${item.node.id}-${item.skeletonIndex}`
   if (item.isSearchBox) return `search-${item.node.id}`
+  if (item.isSearchHit) return `hit-${item.node.id}-${item.hit?.node.urn ?? 'more'}`
   if (item.isLoadMore) return `loadmore-${item.node.id}`
   if (item.isFailed) return `error-${item.node.id}`
   return item.node.id
@@ -180,8 +189,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   isHoverHighlight = false,
   onAnimationComplete: _onAnimationComplete,
   onLoadMore,
-  onSearchChildren,
-  isLoadingChildren,
+  onRevealSearchHit,
   loadingNodes,
   failedNodes,
   onScroll,
@@ -340,6 +348,16 @@ export const LayerColumn = React.memo(function LayerColumn({
   const ancestorMatchCounts = useAncestorMatchCounts()
   const canvasFilterMode = useCanvasFilterMode()
 
+  // The view's ONE search session — the same object the header box and the
+  // results panel hold. A row-level search box is a scoped instance of it,
+  // not a search of its own: it clamps the session to one container, and
+  // the answer comes back here as a local filter over the children already
+  // loaded plus the hits the server found deeper inside. Optional because
+  // the other canvases render columns without providing a session.
+  const session = useViewSearchSessionOptional()
+  const quick = session?.quick
+  const advancedView = session?.advanced.view
+
   // Build flat tree from hierarchy (visible items only)
   const rawFlatTree = useMemo(() => {
     const result: FlatTreeNode[] = []
@@ -360,6 +378,8 @@ export const LayerColumn = React.memo(function LayerColumn({
     type FrameItem =
       | { kind: 'node'; node: HierarchyNode; depth: number; isLast: boolean; parentIsLast: boolean[] }
       | { kind: 'loadMore'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]; count: number }
+      | { kind: 'searchHits'; parent: HierarchyNode; depth: number; parentIsLast: boolean[]
+          rows: InlineSearchHitRow[]; overflow: number; endsTheGroup: boolean }
 
     const stack: FrameItem[] = []
     // Push root nodes in reverse so first root is processed first
@@ -379,6 +399,31 @@ export const LayerColumn = React.memo(function LayerColumn({
           isLoadMore: true,
           loadMoreCount: frame.count,
         })
+        continue
+      }
+
+      if (frame.kind === 'searchHits') {
+        frame.rows.forEach((row, i) => {
+          result.push({
+            node: frame.parent,
+            depth: frame.depth,
+            isLast: frame.endsTheGroup && frame.overflow === 0 && i === frame.rows.length - 1,
+            parentIsLast: frame.parentIsLast,
+            isSearchHit: true,
+            hit: row.hit,
+            crumbs: row.crumbs,
+          })
+        })
+        if (frame.overflow > 0) {
+          result.push({
+            node: frame.parent,
+            depth: frame.depth,
+            isLast: frame.endsTheGroup,
+            parentIsLast: frame.parentIsLast,
+            isSearchHit: true,
+            overflow: frame.overflow,
+          })
+        }
         continue
       }
 
@@ -429,15 +474,54 @@ export const LayerColumn = React.memo(function LayerColumn({
         }
       } else {
         // Push children onto stack in reverse order (+ optional loadMore at bottom)
-        const displayChildren = node.children
         const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
+        // The row box FILTERS the children this parent already has — it no
+        // longer replaces them. `matchesQuick` abstains (passes the row)
+        // whenever the query looks somewhere a display name cannot answer
+        // for, so the local pass never hides a child the server would
+        // return as a hit.
+        //
+        // NOT during a trace. The trace's tree is an overlay: a filtered
+        // view of the graph, chosen by the walk. FlatTreeItem withdraws the
+        // magnifier from trace rows, so a box left open from before the
+        // trace must not go on subtracting rows from it — nor may the
+        // session's hits below, which come from the browse graph underneath
+        // and are exactly what the walk left out.
+        const displayChildren = !isTracing && activeQuery && quick
+          ? node.children.filter(c => matchesQuick(c.name, quick))
+          : node.children
         // In trace mode the trace API already returns the complete set of
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
         const hasMore = !isTracing && node.children.length < childCount && !activeQuery
 
+        // What the session found INSIDE this container, at any depth — the
+        // half of the answer that is NOT already on the canvas. These rows
+        // are read straight off the result page and never written to the
+        // store, which is the whole difference from the row box this
+        // replaces.
+        const scope = quick?.scope
+        const inline = !isTracing
+          && scope && scope !== 'view'
+          && scope.insideUrn === (node.urn ?? node.id)
+          && advancedView?.kind === 'results'
+          ? inlineSearchHits(
+            scope.insideUrn,
+            advancedView.result.hits ?? [],
+            new Set(node.children.map(c => c.urn ?? c.id)),
+          )
+          : null
+        const hasInline = inline !== null && (inline.rows.length > 0 || inline.overflow > 0)
+
         if (hasMore) {
           stack.push({ kind: 'loadMore', parent: node, depth: depth + 1, parentIsLast: childParentIsLast, count: childCount - node.children.length })
+        }
+
+        if (inline && hasInline) {
+          stack.push({
+            kind: 'searchHits', parent: node, depth: depth + 1, parentIsLast: childParentIsLast,
+            rows: inline.rows, overflow: inline.overflow, endsTheGroup: !hasMore,
+          })
         }
 
         for (let i = displayChildren.length - 1; i >= 0; i--) {
@@ -445,7 +529,7 @@ export const LayerColumn = React.memo(function LayerColumn({
             kind: 'node',
             node: displayChildren[i],
             depth: depth + 1,
-            isLast: i === displayChildren.length - 1 && !hasMore,
+            isLast: i === displayChildren.length - 1 && !hasMore && !hasInline,
             parentIsLast: childParentIsLast,
           })
         }
@@ -453,7 +537,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes, isTracing])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes, isTracing, quick, advancedView])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -483,7 +567,13 @@ export const LayerColumn = React.memo(function LayerColumn({
       return !isMatch
     }
 
-    return rawFlatTree.filter((item) => isVisibleNode(item.node))
+    return rawFlatTree.filter((item) => {
+      // An inline hit row IS a match, but its `node` is the container it
+      // hangs under — so `isVisibleNode` would answer for the wrong entity
+      // and keep the row in Hide mode, which exists to take matches away.
+      if (item.isSearchHit) return canvasFilterMode !== 'hide'
+      return isVisibleNode(item.node)
+    })
   }, [
     rawFlatTree, matchUrnSet, ancestorMatchCounts, canvasFilterMode,
     selectedNodeId,
@@ -565,7 +655,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   // ── 4.5 Keyboard Navigation ───────────────────────────────────────────────
   // Only the real FlatTreeItem rows (no skeletons, errors, search boxes, load-more)
   const navigableItems = useMemo(
-    () => flatTree.filter(item => !item.isSearchBox && !item.isSkeleton && !item.isFailed && !item.isLoadMore),
+    () => flatTree.filter(item => !item.isSearchBox && !item.isSkeleton && !item.isFailed && !item.isLoadMore && !item.isSearchHit),
     [flatTree]
   )
 
@@ -580,7 +670,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   const nodeToFlatIndexMap = useMemo(() => {
     const map = new Map<string, number>()
     flatTree.forEach((item, idx) => {
-      if (!item.isSkeleton && !item.isSearchBox && !item.isFailed && !item.isLoadMore) {
+      if (!item.isSkeleton && !item.isSearchBox && !item.isFailed && !item.isLoadMore && !item.isSearchHit) {
         map.set(item.node.id, idx)
       }
     })
@@ -639,6 +729,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     estimateSize: (index) => {
       const item = flatTree[index]
       if (item.isSearchBox) return rowHeights.searchBox
+      if (item.isSearchHit) return rowHeights.child
       if (item.isSkeleton) return rowHeights.skeleton
       if (item.isFailed) return rowHeights.failed
       if (item.isLoadMore) return rowHeights.loadMore
@@ -868,7 +959,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   // of loaded entities, so X ≤ Y holds by construction.
   const visibleCount = useMemo(
     () => flatTree.reduce((acc, it) =>
-      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore ? 0 : 1), 0),
+      acc + (it.isSkeleton || it.isSearchBox || it.isFailed || it.isLoadMore || it.isSearchHit ? 0 : 1), 0),
     [flatTree],
   )
 
@@ -890,7 +981,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   }, [])
 
   const isRealRow = useCallback((it: FlatTreeNode) =>
-    !it.isSkeleton && !it.isSearchBox && !it.isFailed && !it.isLoadMore
+    !it.isSkeleton && !it.isSearchBox && !it.isFailed && !it.isLoadMore && !it.isSearchHit
   , [])
 
   const overflowCounts = useMemo(() => {
@@ -980,7 +1071,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     const n = Math.min(48, flatTree.length)
     const vals = new Array<number>(n).fill(0)
     flatTree.forEach((item, idx) => {
-      if (item.isSkeleton || item.isSearchBox || item.isFailed || item.isLoadMore) return
+      if (item.isSkeleton || item.isSearchBox || item.isFailed || item.isLoadMore || item.isSearchHit) return
       const c = lineageCounts.get(item.node.id)
       if (!c) return
       vals[Math.min(n - 1, Math.floor((idx / flatTree.length) * n))] += c.in + c.out
@@ -1961,15 +2052,54 @@ export const LayerColumn = React.memo(function LayerColumn({
                           value={childSearchQueries[item.node.id] || ''}
                           onChange={(val) => {
                             setChildSearchQueries(prev => ({ ...prev, [item.node.id]: val }))
+                            // A box opened before the trace is still mounted
+                            // during it, and the trace withdrew the affordance
+                            // that opens one. It drives nothing from here.
+                            if (isTracing) return
                             if (val.trim()) {
-                              onSearchChildren && onSearchChildren(item.node.id, val)
+                              // Clamp the view's one search to this container.
+                              // Nothing local is dropped: the children stay,
+                              // filtered, and the hits arrive as their own rows.
+                              session?.setQuick({
+                                text: val,
+                                scope: { insideUrn: item.node.urn ?? item.node.id, label: item.node.name },
+                              })
                             } else {
-                              // If search is cleared, refetch the original children
-                              onLoadMore && onLoadMore(item.node.id)
+                              // Clearing the box unclamps the session. There is
+                              // nothing to refetch — nothing was ever removed.
+                              session?.setQuick({ text: '' })
+                              session?.clearScope()
                             }
                           }}
-                          isLoading={isLoadingChildren}
+                          isLoading={session?.advanced.view.kind === 'running'}
                           layer={layer}
+                        />
+                      </div>
+                    </div>
+                  )
+                }
+
+                if (item.isSearchHit) {
+                  return (
+                    <div
+                      key={itemKey}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={virtualStyle}
+                    >
+                      <div style={isNew ? {
+                        animation: `flatTreeFadeIn 0.15s cubic-bezier(0.25, 0.46, 0.45, 0.94) backwards`,
+                      } : undefined}>
+                        <SearchHitInlineRow
+                          depth={item.depth}
+                          parentIsLast={item.parentIsLast}
+                          layer={layer}
+                          schema={schema}
+                          hit={item.hit}
+                          crumbs={item.crumbs}
+                          overflow={item.overflow}
+                          onReveal={onRevealSearchHit}
+                          onOpenPanel={() => session?.openPanel()}
                         />
                       </div>
                     </div>

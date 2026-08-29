@@ -4986,7 +4986,10 @@ export function ContextViewCanvas({
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadMoreChildren}
-                isLoadingChildren={isLoadingChildren}
+                // The row box's inline hit rows are pointers into the
+                // result set, so a click has to walk the ancestors open —
+                // the same reveal the results panel uses.
+                onRevealSearchHit={revealSearchHit}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
