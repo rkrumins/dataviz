@@ -1336,3 +1336,224 @@ async def test_resolver_branch_effective_config_and_distinct_hash(
     assert published.scope_hash != draft.scope_hash
     assert published.scope_hash != other_draft.scope_hash
     assert draft.scope_hash != other_draft.scope_hash
+
+
+# ---------------------------------------------------------------------------
+# F3 — view ↔ data-source guard.
+#
+# The engine picks its provider from ``?dataSourceId=`` (else the workspace
+# primary); the search's roots come from ``scope.viewId``. Nothing used to
+# check that those two agree, so a view belonging to source A searched with
+# ``?dataSourceId=B`` ran A's root URNs against B's graph and returned 0 —
+# a silent wrong answer, which is worse than an error.
+# ---------------------------------------------------------------------------
+
+_DS_MISMATCH_MESSAGE = (
+    "This view belongs to a different data source than the one being searched."
+)
+
+
+async def _seed_data_source(
+    session: AsyncSession,
+    workspace: WorkspaceORM,
+    *,
+    primary: bool = False,
+    graph_name: str = "g",
+):
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+
+    existing = await session.get(ProviderORM, "prov_ds_guard")
+    if existing is None:
+        session.add(ProviderORM(
+            id="prov_ds_guard", name="P", provider_type="falkordb",
+        ))
+        await session.flush()
+    ds = WorkspaceDataSourceORM(
+        workspace_id=workspace.id,
+        provider_id="prov_ds_guard",
+        graph_name=graph_name,
+        label=f"ds-{graph_name}",
+        is_primary=primary,
+        is_active=True,
+    )
+    session.add(ds)
+    await session.flush()
+    return ds
+
+
+def _ds_query(view_id: str):
+    from backend.common.models.search import (
+        SearchOptions, SearchQuery, SearchScope, TextPredicate,
+    )
+    return SearchQuery(
+        predicate=TextPredicate(value="customer", target="name"),
+        scope=SearchScope(view_id=view_id),
+        options=SearchOptions(results="both"),
+    )
+
+
+async def test_search_rejects_view_from_a_different_data_source(
+    db_session: AsyncSession,
+):
+    """View belongs to source A, request targets source B → 400, and the
+    provider is never asked."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    ds_b = await _seed_data_source(db_session, ws, graph_name="b")
+    view = await _seed_view(db_session, ws, data_source_id=ds_a.id)
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_b.id,
+    )
+    with pytest.raises(ValidationError) as exc:
+        await svc.search(_ds_query(view.id))
+    assert _DS_MISMATCH_MESSAGE in str(exc.value)
+    assert engine.provider.calls == []
+
+
+async def test_explain_rejects_view_from_a_different_data_source(
+    db_session: AsyncSession,
+):
+    """The same guard on the compile-only path — explain must not hand
+    back Cypher for a graph the view does not live in."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    ds_b = await _seed_data_source(db_session, ws, graph_name="b")
+    view = await _seed_view(db_session, ws, data_source_id=ds_a.id)
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_b.id,
+    )
+    with pytest.raises(ValidationError) as exc:
+        await svc.explain(_ds_query(view.id))
+    assert _DS_MISMATCH_MESSAGE in str(exc.value)
+    assert engine.provider.calls == []
+
+
+async def test_search_rejects_when_omitted_source_falls_back_to_primary(
+    db_session: AsyncSession,
+):
+    """The silent case: no ``?dataSourceId=`` in a multi-source workspace.
+
+    The engine took the workspace PRIMARY; the view belongs to the other
+    source. Nothing in the request names a data source, so the guard has
+    to resolve the primary itself to notice.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+
+    ws = await _seed_workspace(db_session)
+    primary = await _seed_data_source(db_session, ws, primary=True, graph_name="p")
+    other = await _seed_data_source(db_session, ws, graph_name="o")
+    view = await _seed_view(db_session, ws, data_source_id=other.id)
+    assert primary.id != other.id
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=None,
+    )
+    with pytest.raises(ValidationError) as exc:
+        await svc.search(_ds_query(view.id))
+    assert _DS_MISMATCH_MESSAGE in str(exc.value)
+    assert engine.provider.calls == []
+
+
+async def test_search_proceeds_when_view_matches_the_searched_source(
+    db_session: AsyncSession,
+):
+    """Matching ids → the search runs as before."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    view = await _seed_view(db_session, ws, data_source_id=ds_a.id)
+
+    engine = _FakeEngine()
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_a.id,
+    )
+    page, _eff = await svc.search(_ds_query(view.id))
+    assert page.candidate_count == 0
+    assert len(engine.provider.calls) == 1
+
+
+async def test_search_proceeds_when_view_matches_the_primary_source(
+    db_session: AsyncSession,
+):
+    """Omitted ``?dataSourceId=`` + a view on the primary → no rejection."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    ws = await _seed_workspace(db_session)
+    primary = await _seed_data_source(db_session, ws, primary=True, graph_name="p")
+    view = await _seed_view(db_session, ws, data_source_id=primary.id)
+
+    engine = _FakeEngine()
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=None,
+    )
+    page, _eff = await svc.search(_ds_query(view.id))
+    assert page.candidate_count == 0
+    assert len(engine.provider.calls) == 1
+
+
+async def test_search_proceeds_when_view_has_no_data_source(
+    db_session: AsyncSession,
+):
+    """A view with no data source of its own is not evidence of a
+    mismatch — the guard stays silent rather than inventing one."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    view = await _seed_view(db_session, ws, data_source_id=None)
+
+    engine = _FakeEngine()
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_a.id,
+    )
+    page, _eff = await svc.search(_ds_query(view.id))
+    assert page.candidate_count == 0
+    assert len(engine.provider.calls) == 1
+
+
+async def test_resolver_reports_the_views_own_data_source(
+    db_session: AsyncSession,
+):
+    """``view_data_source_id`` is the VIEW's, never the request's — the
+    existing ``data_source_id`` field is overridden by the caller's and so
+    can never answer 'which source does this view belong to?'.
+    """
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(db_session, ws, data_source_id="ds_view_owns")
+
+    resolver = ViewScopeResolver(db_session)
+    eff = await resolver.resolve(
+        workspace_id=ws.id,
+        requested=SearchScope(view_id=view.id),
+        data_source_id="ds_the_caller_asked_for",
+    )
+    assert eff.view_data_source_id == "ds_view_owns"
+    assert eff.data_source_id == "ds_the_caller_asked_for"

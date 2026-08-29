@@ -360,6 +360,7 @@ class AdvancedSearchService:
 
         client_requested_urns = bool(query.scope.root_urns)
         eff_scope = await self._resolve_scope(query.scope)
+        await self._guard_view_data_source(eff_scope)
         query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
 
         # Security guard: if the client passed root_urns but every one
@@ -427,6 +428,7 @@ class AdvancedSearchService:
         """
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
+        await self._guard_view_data_source(eff_scope)
         query, _entity_types_note = _stamp_resolved_scope(query, eff_scope)
         _reject_unbounded_text_any(query)
         try:
@@ -535,6 +537,58 @@ class AdvancedSearchService:
             lineage_edge_types=lineage,
             containment_edge_types=containment,
             notes=notes,
+        )
+
+    async def _guard_view_data_source(
+        self, eff_scope: EffectiveViewScope,
+    ) -> None:
+        """Refuse a view whose data source isn't the one being searched.
+
+        The two halves of a search are chosen independently: the roots
+        come from ``scope.viewId``, the graph from ``?dataSourceId=``
+        (or, when that is omitted, the workspace's PRIMARY source). Send
+        a view of source A with source B and the compiler faithfully
+        runs A's root URNs against B's graph — where they match nothing.
+        The answer comes back 0 hits, HTTP 200, no note: a wrong answer
+        wearing the shape of a right one, and the hardest kind to
+        report as a bug.
+
+        The primary is resolved here rather than read off the engine
+        because the silent case is precisely the one that names no data
+        source at all — an omitted ``?dataSourceId=`` in a workspace
+        that has more than one source. Only a view that HAS a source and
+        a search whose source we can name are compared; anything less is
+        an unknown, and a guard that guesses is worse than none.
+        """
+        view_ds = eff_scope.view_data_source_id
+        if not view_ds:
+            return
+        searched_ds = self._data_source_id
+        if not searched_ds and self._session is not None and self._workspace_id:
+            from ..db.repositories import data_source_repo
+            try:
+                primary = await data_source_repo.get_primary_data_source(
+                    self._session, self._workspace_id,
+                )
+            except Exception as exc:
+                # The search itself doesn't need this lookup — only the
+                # guard does. A repo failure must not cost the caller
+                # their results.
+                logger.warning(
+                    "search.view_ds_guard: primary lookup failed for ws=%s: %r",
+                    self._workspace_id, exc,
+                )
+                return
+            searched_ds = primary.id if primary is not None else None
+        if not searched_ds or searched_ds == view_ds:
+            return
+        logger.info(
+            "search.view_ds_mismatch view=%s view_ds=%s searched_ds=%s ws=%s",
+            eff_scope.view_id, view_ds, searched_ds, eff_scope.workspace_id,
+        )
+        raise ValidationError(
+            "This view belongs to a different data source than the one "
+            "being searched."
         )
 
     async def _resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:
