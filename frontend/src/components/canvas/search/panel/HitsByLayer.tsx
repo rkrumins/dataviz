@@ -45,7 +45,7 @@ import { VirtualizedHitList } from './VirtualizedHitList'
 /** What a hit whose chain touches no layer of this view is filed under.
  *  It is a real answer — the match exists, the canvas just doesn't show
  *  that part of the graph — so it gets a group instead of being dropped. */
-export const OFF_CANVAS_LAYER_NAME = 'Not on this canvas'
+const OFF_CANVAS_LAYER_NAME = 'Not on this canvas'
 
 /** Per-kind row heights for the virtualizer's first pass. It measures the
  *  painted row afterwards; these only need to be close enough that the

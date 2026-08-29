@@ -46,7 +46,7 @@ export const HIT_ROW_ID_PREFIX = 'search-hit-row-'
  * — ``qualifiedName`` is the "path" everywhere else in this UI, and a
  * property key arrives prefixed.
  */
-export function matchedFieldLabel(field: string): string {
+function matchedFieldLabel(field: string): string {
     if (field.startsWith('property:')) return `property ${field.slice('property:'.length)}`
     switch (field) {
         case 'displayName':
