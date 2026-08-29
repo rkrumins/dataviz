@@ -641,6 +641,15 @@ export function useAdvancedSearch(
             if (controller.signal.aborted) return
             // Merge: append new hits, replace cursor (may now be null
             // signalling "no more pages"), keep aggregates from p1.
+            //
+            // APPEND ONLY — NEVER RE-SORT BY `score`. The page arrives in
+            // the server's relevance order, computed over a projected
+            // scan; each `hit.score` is then recomputed from the full
+            // node, so the two are not the same number. Sorting the
+            // merged list by `score` would silently reorder the page away
+            // from the ranking the backend actually chose, and every
+            // surface that reads "the first ten" would be reading a
+            // different top ten from the one the panel's counts describe.
             const mergedHits = [
                 ...(view.result.hits ?? []),
                 ...(nextPage.hits ?? []),

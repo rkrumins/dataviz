@@ -4,6 +4,12 @@
  * Shared because the header box and the panel's QueryCard must ask the
  * backend the same question — a badge that says "42 inside" from one
  * surface and "8 inside" from the other is worse than no badge.
+ *
+ * Whatever comes back, `hits` arrive in the SERVER'S relevance order and
+ * no client may re-sort them by `hit.score`: that score is recomputed
+ * from the full node, while the ranking was computed over a projected
+ * scan, so re-sorting by it reorders the page away from the answer the
+ * backend gave.
  */
 import type { SearchQuery } from '@/types/search'
 
