@@ -560,3 +560,41 @@ describe('useViewSearchSessionController — view lifetime', () => {
         expect(result.current.panelOpen).toBe(true)
     })
 })
+
+
+// A result set outlives the query that produced it: the box keeps taking
+// keystrokes, and the debounced lane deliberately ignores anything under
+// two characters. So "there are results" and "these results answer what is
+// in the box" are different questions, and the surfaces that splice hits
+// into a tree have to ask the second one.
+describe('useViewSearchSessionController — resultMatchesQuick', () => {
+    it('is false when the box holds nothing runnable, even with no run to compare against', () => {
+        // Both sides are absent here. Comparing them directly would answer
+        // `undefined === undefined` — true — and hand every consumer a
+        // standing result for a query that does not exist.
+        const { result } = renderSession()
+        expect(result.current.resultMatchesQuick).toBe(false)
+    })
+
+    it('tracks whether the standing result is the query in the box', () => {
+        const { result, rerender } = renderSession()
+
+        // A view-wide "cust" has run and its results are on screen.
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+        expect(result.current.resultMatchesQuick).toBe(false)
+
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        expect(result.current.resultMatchesQuick).toBe(true)
+
+        // One character, clamped to a container: the debounced lane skips
+        // it (QUICK_MIN_LENGTH), so nothing is dispatched and the view-wide
+        // result is still the standing one — for a different query.
+        act(() => { result.current.setQuick({ text: 'o', scope: { insideUrn: 'P', label: 'P' } }) })
+        act(() => { vi.advanceTimersByTime(400) })
+
+        expect(mocks.runPredicate).not.toHaveBeenCalled()
+        expect(result.current.resultMatchesQuick).toBe(false)
+    })
+})

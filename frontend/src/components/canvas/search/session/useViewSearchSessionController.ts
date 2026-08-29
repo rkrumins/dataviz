@@ -125,6 +125,18 @@ export interface ViewSearchSession {
 
     /** The header input, so `/` and Esc can focus it from anywhere. */
     inputRef: RefObject<HTMLInputElement | null>
+    /**
+     * Whether the results now standing are the answer to what is in the box.
+     *
+     * A result set outlives the query that produced it: the box keeps taking
+     * keystrokes, and the debounced lane deliberately ignores anything under
+     * two characters. So "there are results" and "these results answer this
+     * box" are different questions, and any surface that splices hits in
+     * beside real rows — the row-level box does — has to ask the second one.
+     * The header only ever reports a count, so it can live with the first.
+     */
+    resultMatchesQuick: boolean
+
     /** Which layer column a hit badges under, for this view's layout. */
     resolveLayer: (hit: SearchHit) => string | null
     /** The view's layer columns, in board order. `resolveLayer` answers
@@ -230,6 +242,18 @@ export function useViewSearchSessionController(
         setQuickState((prev) => ({ ...prev, scope: 'view' }))
     }, [])
 
+    // EXPLICIT_MIN_LENGTH, not the debounce's floor: the question is whether
+    // the standing result answers this box, and a single character that
+    // Enter actually ran is a legitimate yes.
+    const runStateHash = advanced.runState?.hash
+    const resultMatchesQuick = useMemo(() => {
+        const runnable = runnableFor(quick, EXPLICIT_MIN_LENGTH)
+        // Never compare the two sides directly. With an empty box and no run
+        // both are undefined, and `undefined === undefined` would hand every
+        // consumer a standing result for a query that does not exist.
+        return runnable !== null && runStateHash === runnable.hash
+    }, [quick, runStateHash])
+
     const resultsHash = advanced.view.kind === 'results'
         ? (advanced.runState?.hash ?? null)
         : null
@@ -277,12 +301,14 @@ export function useViewSearchSessionController(
         quick, setQuick, runNow, clearQuery: teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine, closeRefine,
+        resultMatchesQuick,
         inputRef, resolveLayer, layers,
         advanced,
     }), [
         viewId,
         quick, setQuick, runNow, teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
-        refineOpen, refine, closeRefine, resolveLayer, layers, advanced,
+        refineOpen, refine, closeRefine, resultMatchesQuick,
+        resolveLayer, layers, advanced,
     ])
 }

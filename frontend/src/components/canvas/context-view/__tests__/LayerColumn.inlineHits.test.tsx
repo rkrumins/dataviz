@@ -4,20 +4,25 @@
  * The box used to be the one browse action that could not be undone: it
  * removed a parent's loaded children from the canvas store and put the
  * server's one-hop hits in their place. It is now a scoped instance of the
- * view's one search session, and this file pins the two halves of that:
+ * view's one search session, and this file pins what that costs the column:
  *
- *  - the loaded children are STILL THERE while the scoped search has
- *    results (nothing was replaced), and
- *  - the hits inside that container arrive as their own rows — virtual
- *    ones, carrying the hit, never written to the store.
+ *  - the loaded children are STILL THERE (nothing is replaced), filtered
+ *    locally, and the hits inside that container arrive as their own
+ *    virtual rows;
+ *  - the box's text and its filter come from the SESSION, not from a
+ *    parallel local copy that can drift from it;
+ *  - and rows are only ever drawn from a result that belongs to the query
+ *    the box is actually holding.
  *
  * `inlineSearchHits.spec.ts` owns which hits get a row; this owns whether
- * the column actually renders them, and what a click on one does.
+ * the column renders them, and what a click on one does.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 
 import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
+import type { QuickQuery } from '@/components/canvas/search/session/quickPredicate'
+import type { ViewSearchSession } from '@/components/canvas/search/session/useViewSearchSessionController'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import { stubAdvanced, stubSession } from '@/test/stubSearchSession'
 import type { PanelView } from '@/hooks/useAdvancedSearch'
@@ -62,18 +67,31 @@ function results(hits: SearchHit[]): PanelView {
     } as unknown as PanelView
 }
 
+/** A quick query scoped into one container — what the row box produces. */
+function scopedTo(insideUrn: string, text: string): QuickQuery {
+    return { text, lookIn: 'everything', match: 'substring', scope: { insideUrn, label: insideUrn } }
+}
+
+/** The session as it stands when a scoped search has ANSWERED: results are
+ *  in, and they belong to the query the box is holding. */
+function answered(quick: QuickQuery, hits: SearchHit[]): Partial<ViewSearchSession> {
+    return { quick, advanced: stubAdvanced({ view: results(hits) }), resultMatchesQuick: true }
+}
+
+const DEFAULT_NODES = [node('P', [node('C1')])]
+
 function renderColumn(
-    over: Parameters<typeof stubSession>[0] = {},
-    { isTracing = false }: { isTracing?: boolean } = {},
+    over: Partial<ViewSearchSession> = {},
+    { isTracing = false, nodes = DEFAULT_NODES }: { isTracing?: boolean; nodes?: HierarchyNode[] } = {},
 ) {
     installJsdomLayout()
     const onRevealSearchHit = vi.fn()
     const session = stubSession(over)
-    render(
-        <ViewSearchSessionContext.Provider value={session}>
+    const tree = (s: ViewSearchSession) => (
+        <ViewSearchSessionContext.Provider value={s}>
             <LayerColumn
                 layer={layer}
-                nodes={[node('P', [node('C1')])]}
+                nodes={nodes}
                 schema={null}
                 selectedNodeId={null}
                 expandedNodes={new Set(['P'])}
@@ -92,35 +110,133 @@ function renderColumn(
                 // stack and its trailing row sit below it otherwise.
                 overscan={200}
             />
-        </ViewSearchSessionContext.Provider>,
+        </ViewSearchSessionContext.Provider>
     )
-    return { session, onRevealSearchHit }
+    const view = render(tree(session))
+    return {
+        session,
+        onRevealSearchHit,
+        /** Re-render with a different session — how the header's × reaches
+         *  a column that is already on screen. */
+        withSession: (next: Partial<ViewSearchSession>) => view.rerender(tree(stubSession(next))),
+    }
 }
+
+/** Click a row's magnifier, which is what mounts its search box. */
+function openBox(nodeId: string) {
+    const row = document.getElementById(`layer-node-${nodeId}`)
+    const button = [...(row?.querySelectorAll('button') ?? [])]
+        .find(b => b.getAttribute('title') === 'Search children')
+    if (!button) throw new Error(`no child-search button on ${nodeId}`)
+    fireEvent.click(button)
+}
+
+function boxInput(): HTMLInputElement {
+    const input = document.querySelector<HTMLInputElement>('input[placeholder^="Search node"]')
+    if (!input) throw new Error('no child-search box is open')
+    return input
+}
+
+/** Type and submit. The box holds its own value and only commits on
+ *  Enter or blur, so a change event alone reaches nothing. */
+function submit(text: string) {
+    const input = boxInput()
+    fireEvent.change(input, { target: { value: text } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+}
+
+const hitUrns = () => [...document.querySelectorAll('[data-search-hit]')]
+    .map(el => el.getAttribute('data-search-hit'))
+
+const rowExists = (id: string) => document.getElementById(`layer-node-${id}`) !== null
+
+
+describe('LayerColumn — the box drives the session', () => {
+    it('clamps the session to this container when text is submitted', () => {
+        const { session } = renderColumn()
+        openBox('P')
+        submit('orders')
+
+        expect(session.setQuick).toHaveBeenCalledWith({
+            text: 'orders',
+            scope: { insideUrn: 'P', label: 'P' },
+        })
+    })
+
+    it('unclamps it when the box is emptied — there is nothing to refetch', () => {
+        const { session } = renderColumn({ quick: scopedTo('P', 'orders') })
+        openBox('P')
+        submit('')
+
+        expect(session.setQuick).toHaveBeenCalledWith({ text: '' })
+        expect(session.clearScope).toHaveBeenCalled()
+    })
+})
+
+
+describe('LayerColumn — local filter over the loaded children', () => {
+    it('keeps the children whose names match and drops the ones that do not', () => {
+        renderColumn(
+            { quick: scopedTo('P', 'orders') },
+            { nodes: [node('P', [node('orders_daily'), node('customers')])] },
+        )
+
+        expect(rowExists('orders_daily')).toBe(true)
+        expect(rowExists('customers')).toBe(false)
+    })
+
+    it('reads its text from the session, so a box on ANOTHER row never filters this one', () => {
+        // The desync this replaces: the box's text used to live in a
+        // per-node local map while the filter read the one session query,
+        // so a second box's word filtered the first box's row.
+        renderColumn(
+            { quick: scopedTo('OTHER', 'zzz') },
+            { nodes: [node('P', [node('orders_daily'), node('customers')])] },
+        )
+        openBox('P')
+
+        expect(boxInput().value).toBe('')
+        expect(rowExists('orders_daily')).toBe(true)
+        expect(rowExists('customers')).toBe(true)
+    })
+
+    it('empties the box and stops filtering when the session is cleared elsewhere', () => {
+        // The header chip's × calls clearScope on the session the column
+        // reads; a box holding its own copy of the text would go on
+        // filtering with a word the user can no longer see.
+        const { withSession } = renderColumn(
+            { quick: scopedTo('P', 'orders') },
+            { nodes: [node('P', [node('orders_daily'), node('customers')])] },
+        )
+        openBox('P')
+        expect(boxInput().value).toBe('orders')
+        expect(rowExists('customers')).toBe(false)
+
+        withSession({})
+
+        expect(boxInput().value).toBe('')
+        expect(rowExists('customers')).toBe(true)
+    })
+})
 
 
 describe('LayerColumn — inline search-hit rows', () => {
     it('renders a row per hit inside the scoped container, and keeps the loaded children', () => {
-        renderColumn({
-            quick: { text: 'g', lookIn: 'everything', match: 'substring', scope: { insideUrn: 'P', label: 'P' } },
-            advanced: stubAdvanced({ view: results([hit('C1', ['P']), hit('G1', ['P', 'C2'])]) }),
-        })
+        renderColumn(answered(scopedTo('P', 'C'), [hit('C1', ['P']), hit('G1', ['P', 'C2'])]))
 
         // Non-destructive: the loaded child still has its own row.
-        expect(document.getElementById('layer-node-C1')).not.toBeNull()
+        expect(rowExists('C1')).toBe(true)
 
         // C1 is a hit AND a loaded child, so only G1 gets a hit row.
-        const hitRows = document.querySelectorAll('[data-search-hit]')
-        expect(hitRows).toHaveLength(1)
-        expect(hitRows[0].getAttribute('data-search-hit')).toBe('G1')
+        expect(hitUrns()).toEqual(['G1'])
         // The crumb is relative to the container the reader is looking at.
-        expect(hitRows[0].textContent).toContain('C2')
+        expect(document.querySelector('[data-search-hit="G1"]')?.textContent).toContain('C2')
     })
 
     it('reveals the hit — with its path — when the row is clicked', () => {
-        const { onRevealSearchHit } = renderColumn({
-            quick: { text: 'g', lookIn: 'everything', match: 'substring', scope: { insideUrn: 'P', label: 'P' } },
-            advanced: stubAdvanced({ view: results([hit('G1', ['P', 'C2'])]) }),
-        })
+        const { onRevealSearchHit } = renderColumn(
+            answered(scopedTo('P', 'G'), [hit('G1', ['P', 'C2'])]),
+        )
 
         fireEvent.click(screen.getByRole('button', { name: /G1/ }))
 
@@ -132,15 +248,26 @@ describe('LayerColumn — inline search-hit rows', () => {
         )
     })
 
+    it('brings back a loaded child the name filter hid, as its own hit row', () => {
+        // `matchesQuick` can only read a display name. Under "everything"
+        // the server also matches descriptions, tags and property values —
+        // so a child it returned as a hit can be one the local pass hid.
+        // Deduping against the FILTERED children is what stops that match
+        // from disappearing off the canvas entirely.
+        renderColumn(
+            answered(scopedTo('P', 'profit'), [hit('revenue_daily', ['P'])]),
+            { nodes: [node('P', [node('revenue_daily')])] },
+        )
+
+        expect(rowExists('revenue_daily')).toBe(false)
+        expect(hitUrns()).toEqual(['revenue_daily'])
+    })
+
     it('sends the rest to the panel instead of splicing 500 rows into a tree', () => {
         const many = Array.from({ length: 52 }, (_, i) => hit(`H${i}`, ['P']))
-        const { session } = renderColumn({
-            quick: { text: 'h', lookIn: 'everything', match: 'substring', scope: { insideUrn: 'P', label: 'P' } },
-            advanced: stubAdvanced({ view: results(many) }),
-        })
+        const { session } = renderColumn(answered(scopedTo('P', 'H'), many))
 
-        const rows = [...document.querySelectorAll('[data-search-hit]')]
-        expect(rows.filter(r => r.getAttribute('data-search-hit') !== 'more')).toHaveLength(50)
+        expect(hitUrns().filter(u => u !== 'more')).toHaveLength(50)
 
         const more = document.querySelector<HTMLElement>('[data-search-hit="more"]')
         expect(more?.textContent).toContain('+2 more')
@@ -150,25 +277,37 @@ describe('LayerColumn — inline search-hit rows', () => {
         expect(session.openPanel).toHaveBeenCalled()
     })
 
+    it('draws nothing from a result that belongs to a different query', () => {
+        // Header search at view scope, then one character into a row box:
+        // that text is below the debounce's floor, so nothing is
+        // dispatched and the VIEW-WIDE result is still standing. Splicing
+        // it in would put 50 foreign entities under this container, with
+        // their full paths passed off as relative crumbs.
+        renderColumn({
+            quick: scopedTo('P', 'o'),
+            advanced: stubAdvanced({ view: results([hit('FOREIGN', ['ELSEWHERE'])]) }),
+            resultMatchesQuick: false,
+        })
+
+        expect(hitUrns()).toEqual([])
+    })
+
     it('leaves a trace alone — the walk chose what is on that tree', () => {
         // The trace's tree is an overlay, and its rows are the ones the walk
         // put there. A scope set before the trace would otherwise splice in
         // hits from the browse graph underneath — exactly what the walk left
         // out. FlatTreeItem withdraws the magnifier for the same reason.
-        renderColumn({
-            quick: { text: 'g', lookIn: 'everything', match: 'substring', scope: { insideUrn: 'P', label: 'P' } },
-            advanced: stubAdvanced({ view: results([hit('G1', ['P', 'C2'])]) }),
-        }, { isTracing: true })
+        renderColumn(
+            answered(scopedTo('P', 'G'), [hit('G1', ['P', 'C2'])]),
+            { isTracing: true },
+        )
 
-        expect(document.querySelectorAll('[data-search-hit]')).toHaveLength(0)
+        expect(hitUrns()).toEqual([])
     })
 
     it('renders nothing extra when the session is scoped to another container', () => {
-        renderColumn({
-            quick: { text: 'g', lookIn: 'everything', match: 'substring', scope: { insideUrn: 'OTHER', label: 'other' } },
-            advanced: stubAdvanced({ view: results([hit('G1', ['OTHER'])]) }),
-        })
+        renderColumn(answered(scopedTo('OTHER', 'G'), [hit('G1', ['OTHER'])]))
 
-        expect(document.querySelectorAll('[data-search-hit]')).toHaveLength(0)
+        expect(hitUrns()).toEqual([])
     })
 })

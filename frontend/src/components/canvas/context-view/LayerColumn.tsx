@@ -270,7 +270,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [localFocusId, setLocalFocusId] = useState<string | null>(null)
   const [breadcrumb, setBreadcrumb] = useState<HierarchyNode[]>([])
   const [isCollapsed, setIsCollapsed] = useState(false)
-  const [childSearchQueries, setChildSearchQueries] = useState<Record<string, string>>({})
   const [activeSearchNodes, setActiveSearchNodes] = useState<Set<string>>(new Set())
   const [isDragOver, setIsDragOver] = useState(false)
   const [focusIndex, setFocusIndex] = useState(-1)
@@ -311,28 +310,49 @@ export const LayerColumn = React.memo(function LayerColumn({
     if (dragScrollRafRef.current != null) cancelAnimationFrame(dragScrollRafRef.current)
   }, [])
 
+  // The view's ONE search session — the same object the header box and the
+  // results panel hold. A row-level search box is a scoped instance of it,
+  // not a search of its own: it clamps the session to one container, and
+  // the answer comes back here as a local filter over the children already
+  // loaded plus the hits the server found deeper inside. Optional because
+  // the other canvases render columns without providing a session.
+  const session = useViewSearchSessionOptional()
+  const quick = session?.quick
+  const advancedView = session?.advanced.view
+  const resultMatchesQuick = session?.resultMatchesQuick ?? false
+
+  // What THIS row's box holds — read off the session, never a copy of it.
+  // There is one query; a per-row copy drifts the moment a second box opens
+  // or the header's × clears the search, and then a box goes on filtering
+  // with a word the user can no longer see.
+  const boxTextFor = useCallback((n: HierarchyNode): string => (
+    quick && quick.scope !== 'view' && quick.scope.insideUrn === (n.urn ?? n.id)
+      ? quick.text
+      : ''
+  ), [quick])
+
   const toggleSearchNode = useCallback((nodeId: string) => {
     setActiveSearchNodes(prev => {
       const next = new Set(prev)
-      if (next.has(nodeId)) {
-        next.delete(nodeId)
-        // Also optionally clear the search query if closed
-        setChildSearchQueries(q => {
-          const newQ = { ...q }
-          delete newQ[nodeId]
-          return newQ
-        })
-      } else {
-        next.add(nodeId)
-      }
+      if (next.has(nodeId)) next.delete(nodeId)
+      else next.add(nodeId)
       return next
     })
 
+    // Closing the box ends its search. The text lives on the session now,
+    // so leaving the scope clamped would keep this container's hit rows on
+    // screen with nothing left on the row to explain where they came from.
+    const closing = activeSearchNodes.has(nodeId)
+    if (closing && quick && quick.scope !== 'view' && quick.scope.insideUrn === nodeId) {
+      session?.setQuick({ text: '' })
+      session?.clearScope()
+    }
+
     // Auto-expand the node so the user immediately sees the search box drop down
-    if (!activeSearchNodes.has(nodeId) && !expandedNodes.has(nodeId)) {
+    if (!closing && !expandedNodes.has(nodeId)) {
       onToggle(nodeId)
     }
-  }, [activeSearchNodes, expandedNodes, onToggle])
+  }, [activeSearchNodes, expandedNodes, onToggle, quick, session])
 
   // Search-driven canvas filter state. ``matchUrnSet`` is the source of
   // truth for "is this row a direct match"; ``ancestorMatchCounts > 0``
@@ -347,16 +367,6 @@ export const LayerColumn = React.memo(function LayerColumn({
   const matchUrnSet = useMatchUrnSet()
   const ancestorMatchCounts = useAncestorMatchCounts()
   const canvasFilterMode = useCanvasFilterMode()
-
-  // The view's ONE search session — the same object the header box and the
-  // results panel hold. A row-level search box is a scoped instance of it,
-  // not a search of its own: it clamps the session to one container, and
-  // the answer comes back here as a local filter over the children already
-  // loaded plus the hits the server found deeper inside. Optional because
-  // the other canvases render columns without providing a session.
-  const session = useViewSearchSessionOptional()
-  const quick = session?.quick
-  const advancedView = session?.advanced.view
 
   // Build flat tree from hierarchy (visible items only)
   const rawFlatTree = useMemo(() => {
@@ -474,7 +484,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         }
       } else {
         // Push children onto stack in reverse order (+ optional loadMore at bottom)
-        const activeQuery = childSearchQueries[node.id]?.trim().toLowerCase()
+        const activeQuery = boxTextFor(node).trim().toLowerCase()
         // The row box FILTERS the children this parent already has — it no
         // longer replaces them. `matchesQuick` abstains (passes the row)
         // whenever the query looks somewhere a display name cannot answer
@@ -500,15 +510,23 @@ export const LayerColumn = React.memo(function LayerColumn({
         // are read straight off the result page and never written to the
         // store, which is the whole difference from the row box this
         // replaces.
-        const scope = quick?.scope
-        const inline = !isTracing
-          && scope && scope !== 'view'
-          && scope.insideUrn === (node.urn ?? node.id)
+        //
+        // `resultMatchesQuick` is what keeps them honest. A result set
+        // outlives its query — type one character into the box and the
+        // debounced lane skips it, leaving the previous, possibly VIEW-WIDE
+        // answer standing — and drawing from that splices foreign entities
+        // under this container, their full paths passed off as crumbs.
+        //
+        // The dedupe set is the FILTERED children, not the loaded ones: the
+        // local pass can only read a display name, so a child the server
+        // matched on its description is hidden by it. Deduping against the
+        // full set would drop that hit too, and the match would vanish.
+        const inline = !isTracing && activeQuery && resultMatchesQuick
           && advancedView?.kind === 'results'
           ? inlineSearchHits(
-            scope.insideUrn,
+            node.urn ?? node.id,
             advancedView.result.hits ?? [],
-            new Set(node.children.map(c => c.urn ?? c.id)),
+            new Set(displayChildren.map(c => c.urn ?? c.id)),
           )
           : null
         const hasInline = inline !== null && (inline.rows.length > 0 || inline.overflow > 0)
@@ -537,7 +555,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
 
     return result
-  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, childSearchQueries, loadingNodes, failedNodes, isTracing, quick, advancedView])
+  }, [nodes, expandedNodes, localFocusId, activeSearchNodes, boxTextFor, loadingNodes, failedNodes, isTracing, quick, advancedView, resultMatchesQuick])
 
   // Canvas filter pass: drop rows the user asked to hide via the
   // MatchBar's Isolate / Hide modes. We filter at the data layer (not
@@ -2049,9 +2067,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                           parentId={item.node.id}
                           depth={item.depth}
                           parentIsLast={item.parentIsLast}
-                          value={childSearchQueries[item.node.id] || ''}
+                          value={boxTextFor(item.node)}
                           onChange={(val) => {
-                            setChildSearchQueries(prev => ({ ...prev, [item.node.id]: val }))
                             // A box opened before the trace is still mounted
                             // during it, and the trace withdrew the affordance
                             // that opens one. It drives nothing from here.

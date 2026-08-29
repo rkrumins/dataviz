@@ -54,6 +54,10 @@ export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSe
         refineOpen: false,
         refine: vi.fn(),
         closeRefine: vi.fn(),
+        // Default false: a surface that draws rows from the standing result
+        // must opt IN to "this result answers the box", so a fixture that
+        // forgets to say so fails loudly rather than drawing stale hits.
+        resultMatchesQuick: false,
         inputRef: createRef<HTMLInputElement>(),
         resolveLayer: vi.fn(() => null),
         layers: [],
