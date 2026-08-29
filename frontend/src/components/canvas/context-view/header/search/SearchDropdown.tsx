@@ -31,7 +31,10 @@
  */
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
-import { useLayoutEffect, useState, type FC, type RefObject } from 'react'
+import {
+    useEffect, useLayoutEffect, useState,
+    type FC, type ReactNode, type RefObject,
+} from 'react'
 import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
@@ -52,8 +55,12 @@ export function optionId(listId: string, index: number): string {
 /** Narrower than the box on a small screen would put the path on a
  *  second line, which is the one thing the row is for. */
 const MIN_WIDTH = 560
-/** Breathing room against the viewport's right edge and its bottom. */
+/** Breathing room against the viewport's bottom. */
 const EDGE = 16
+/** ...and against either side. The 560 floor is worth keeping on a narrow
+ *  window — it is what puts the path on one line — so the surface slides
+ *  left to stay on screen rather than shrinking below it. */
+const SIDE = 8
 
 
 export interface SearchDropdownProps {
@@ -81,6 +88,10 @@ export interface SearchDropdownProps {
     plus: boolean
     /** What was searched in this view before, newest first. */
     recents: string[]
+    /** Whether `rows` still answer the box as it now stands. Rows that do
+     *  not are dimmed, and they lose to the one-character hint: a box
+     *  holding one letter has no standing answer worth showing. */
+    stale: boolean
     /** Which layer column a hit badges under, in this view's layout. */
     layerOf: (hit: SearchHit) => string | null
 
@@ -98,7 +109,7 @@ export interface SearchDropdownProps {
 
 export const SearchDropdown: FC<SearchDropdownProps> = ({
     anchorRef, listId, text, quick, rows, activeIndex, running, error, zero,
-    count, plus, recents, layerOf,
+    count, plus, recents, stale, layerOf,
     onActivate, onPick, onCrumb, onRecent, onNarrow, onSeeAll, onRefine, onRetry,
 }) => {
     const [box, setBox] = useState<
@@ -109,14 +120,13 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
         const update = () => {
             const rect = anchorRef.current?.getBoundingClientRect()
             if (!rect) return
-            const left = rect.left
+            const width = Math.max(rect.width, MIN_WIDTH)
             setBox({
                 top: rect.bottom + 6,
-                left,
-                width: Math.min(
-                    Math.max(rect.width, MIN_WIDTH),
-                    Math.max(window.innerWidth - left - EDGE, MIN_WIDTH),
-                ),
+                // Flush with the box's left edge, unless that would hang
+                // the right edge off the window.
+                left: Math.max(SIDE, Math.min(rect.left, window.innerWidth - width - SIDE)),
+                width,
             })
         }
         update()
@@ -127,6 +137,19 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
             window.removeEventListener('scroll', update, true)
         }
     }, [anchorRef])
+
+    // The list scrolls inside its own 60vh box, so ten rows can outrun it
+    // and the highlight is the only thing saying what ↵ will do. Looked up
+    // by id rather than by selector: `useId` produces ids containing ':',
+    // which is not a valid selector without escaping.
+    //
+    // `box` is a dependency because it is null on the first render — the
+    // anchor is measured in a layout effect — so the options do not exist
+    // in the DOM yet on the pass that opens the list.
+    useEffect(() => {
+        document.getElementById(optionId(listId, activeIndex))
+            ?.scrollIntoView({ block: 'nearest' })
+    }, [listId, activeIndex, rows, box])
 
     if (typeof document === 'undefined' || !box) return null
 
@@ -140,16 +163,38 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
         : `${count.toLocaleString()}${plus ? '+' : ''}`
     const hints = narrowingHints(count, quick)
 
+    // Rows that no longer answer the box are still worth showing — the
+    // alternative is a list that blinks out on every keystroke — but they
+    // are drawn as what they are.
+    const dimmed = stale || running
+    const oneChar = trimmed.length === 1
+
     const body = (() => {
-        if (!trimmed) return <EmptyState recents={recents} onRecent={onRecent} />
+        if (!trimmed) {
+            return (
+                <EmptyState
+                    listId={listId}
+                    recents={recents}
+                    activeIndex={activeIndex}
+                    onActivate={onActivate}
+                    onRecent={onRecent}
+                />
+            )
+        }
         if (error) return <ErrorState message={error} onRetry={onRetry} />
         if (zero && shown.length === 0) {
             return <ZeroState text={trimmed} onNarrow={onNarrow} onRefine={onRefine} />
         }
-        if (shown.length > 0) {
+        if (shown.length > 0 && !(oneChar && stale)) {
             return (
                 <>
-                    <div className="px-3 pt-2 pb-1.5 flex items-baseline gap-2">
+                    <div
+                        data-testid="dropdown-header"
+                        className={cn(
+                            'px-3 pt-2 pb-1.5 flex items-baseline gap-2',
+                            dimmed && 'opacity-60',
+                        )}
+                    >
                         <span className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/70">
                             {countLabel === null
                                 ? 'Top matches'
@@ -184,7 +229,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
                         className={cn(
                             'px-1.5 pb-1.5 flex flex-col gap-0.5',
                             'overflow-y-auto custom-scrollbar',
-                            running && 'opacity-60',
+                            dimmed && 'opacity-60',
                         )}
                     >
                         {shown.map((hit, i) => (
@@ -218,7 +263,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
                 </>
             )
         }
-        if (trimmed.length === 1) {
+        if (oneChar) {
             return (
                 <Note>{`Keep typing — or press ↵ to search for "${trimmed}"`}</Note>
             )
@@ -280,7 +325,7 @@ const GUIDANCE =
     + " even containers you haven't opened."
 
 
-function Note({ children }: { children: React.ReactNode }) {
+function Note({ children }: { children: ReactNode }) {
     return (
         <div className="px-3 py-3 text-[11.5px] leading-relaxed text-ink-muted/80">
             {children}
@@ -289,8 +334,22 @@ function Note({ children }: { children: React.ReactNode }) {
 }
 
 
-function EmptyState({ recents, onRecent }: {
+/**
+ * The empty box: what was searched here before, and what searching here
+ * covers.
+ *
+ * The recents are REAL options — same `role`, same listbox, same id
+ * scheme as the hit rows — so ↑/↓ and ↵ work on them without the box
+ * needing a second keyboard mode, and its `aria-controls` points at one
+ * element whichever state is up. With no recents there is no listbox at
+ * all: the guidance line is prose, not a choice, and a combobox that
+ * claimed an empty popup would send a screen reader looking for one.
+ */
+function EmptyState({ listId, recents, activeIndex, onActivate, onRecent }: {
+    listId: string
     recents: string[]
+    activeIndex: number
+    onActivate: (index: number) => void
     onRecent: (text: string) => void
 }) {
     return (
@@ -300,18 +359,26 @@ function EmptyState({ recents, onRecent }: {
                     <div className="px-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/70">
                         Recent in this view
                     </div>
-                    <div className="px-1.5 pb-1.5 flex flex-col">
-                        {recents.map((r) => (
-                            <button
+                    <div
+                        role="listbox"
+                        id={listId}
+                        aria-label="Recent searches"
+                        className="px-1.5 pb-1.5 flex flex-col"
+                    >
+                        {recents.map((r, i) => (
+                            <div
                                 key={r}
-                                type="button"
-                                tabIndex={-1}
+                                id={optionId(listId, i)}
+                                role="option"
+                                aria-selected={i === activeIndex}
+                                onMouseEnter={() => onActivate(i)}
                                 onClick={() => onRecent(r)}
                                 className={cn(
-                                    'flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left',
-                                    'text-[12.5px] text-ink-secondary',
-                                    'hover:bg-black/[0.04] dark:hover:bg-white/[0.05] hover:text-ink',
-                                    'transition-colors',
+                                    'flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer',
+                                    'text-[12.5px] transition-colors',
+                                    i === activeIndex
+                                        ? 'bg-accent-lineage/10 text-ink'
+                                        : 'text-ink-secondary hover:bg-black/[0.04] dark:hover:bg-white/[0.05] hover:text-ink',
                                 )}
                             >
                                 <LucideIcons.Clock
@@ -319,7 +386,7 @@ function EmptyState({ recents, onRecent }: {
                                     strokeWidth={2.2}
                                 />
                                 <span className="truncate">{r}</span>
-                            </button>
+                            </div>
                         ))}
                     </div>
                 </>
@@ -375,7 +442,7 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
 
 
 function Chip({ children, onClick, accent }: {
-    children: React.ReactNode
+    children: ReactNode
     onClick: () => void
     accent?: boolean
 }) {
@@ -399,7 +466,7 @@ function Chip({ children, onClick, accent }: {
 
 
 function FooterButton({ children, onClick, accent }: {
-    children: React.ReactNode
+    children: ReactNode
     onClick: () => void
     accent?: boolean
 }) {

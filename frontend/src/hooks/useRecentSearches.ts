@@ -35,6 +35,21 @@ function write(storageKey: string, values: string[]) {
 export function useRecentSearches(storageKey: string = EXPLORER_RECENTS_KEY) {
   const [recents, setRecents] = useState<string[]>(() => read(storageKey))
 
+  // Re-seed when the KEY changes under a live hook. The canvas tree does
+  // not remount on a view switch, so the per-view key moves while this
+  // hook stays mounted: seeding only on mount left the new view offering
+  // the old one's searches, and recording one wrote it under the new key
+  // while the list on screen still showed the old.
+  //
+  // Adjusted during render rather than in an effect, which is the same
+  // read the lazy initializer above already does: an effect would paint
+  // one frame of the previous view's list first.
+  const [seeded, setSeeded] = useState(storageKey)
+  if (seeded !== storageKey) {
+    setSeeded(storageKey)
+    setRecents(read(storageKey))
+  }
+
   // Sync when the storage changes from another tab.
   useEffect(() => {
     function handler(e: StorageEvent) {

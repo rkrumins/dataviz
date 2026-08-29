@@ -34,6 +34,41 @@ describe('useRecentSearches', () => {
         expect(palette.result.current.recents).toEqual(['workspaces'])
     })
 
+    // The canvas tree does not remount when the user switches view, so the
+    // key changes under a live hook. Seeding only on mount left view B
+    // offering view A's searches — and recording one wrote it under B's
+    // key while the list on screen still said A's.
+    it('re-reads when the storage key changes under it', () => {
+        window.localStorage.setItem(EXPLORER_RECENTS_KEY, JSON.stringify(['sales']))
+        window.localStorage.setItem(PALETTE_RECENTS_KEY, JSON.stringify(['docs']))
+
+        const { result, rerender } = renderHook(
+            ({ key }) => useRecentSearches(key),
+            { initialProps: { key: EXPLORER_RECENTS_KEY } },
+        )
+        expect(result.current.recents).toEqual(['sales'])
+
+        rerender({ key: PALETTE_RECENTS_KEY })
+
+        expect(result.current.recents).toEqual(['docs'])
+    })
+
+    it('records under the new key only, and leaves the old list alone', () => {
+        window.localStorage.setItem(EXPLORER_RECENTS_KEY, JSON.stringify(['sales']))
+
+        const { result, rerender } = renderHook(
+            ({ key }) => useRecentSearches(key),
+            { initialProps: { key: EXPLORER_RECENTS_KEY } },
+        )
+        rerender({ key: PALETTE_RECENTS_KEY })
+        act(() => result.current.record('orders'))
+
+        expect(JSON.parse(window.localStorage.getItem(PALETTE_RECENTS_KEY) ?? '[]'))
+            .toEqual(['orders'])
+        expect(JSON.parse(window.localStorage.getItem(EXPLORER_RECENTS_KEY) ?? '[]'))
+            .toEqual(['sales'])
+    })
+
     it('reads pre-existing entries for the given storageKey on mount', () => {
         window.localStorage.setItem(PALETTE_RECENTS_KEY, JSON.stringify(['docs', 'settings']))
         const { result } = renderHook(() => useRecentSearches(PALETTE_RECENTS_KEY))

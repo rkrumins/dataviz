@@ -164,6 +164,18 @@ export function HeaderSearch() {
   const holds = !trimmed ? NO_ANSWER : (answer ?? standing)
   if (holds !== standing) setStanding(holds)
   const rows = holds.rows
+  // Whether what is on screen still answers the box. Rows that do not are
+  // dimmed rather than dropped — a list that blinked out between
+  // keystrokes would be worse — but nothing may CLAIM anything about the
+  // current text on their behalf: "nothing contains zzz", said before
+  // anyone asked about "zzz", is simply false.
+  const stale = rows.length > 0 && answer === null
+
+  // The empty box offers its recents, and they are real options: same
+  // role, same listbox, same arrow keys. Two keyboard modes for two
+  // kinds of row is how one of them ends up unreachable.
+  const showingRecents = trimmed === '' && recents.length > 0
+  const optionCount = rows.length > 0 ? rows.length : (showingRecents ? recents.length : 0)
 
   // `hasContent` is the third of the open rule: an empty box has recents
   // to offer and one character has a hint, but a half-typed word with
@@ -175,9 +187,15 @@ export function HeaderSearch() {
   // Closing and re-opening the list does NOT move the highlight — the
   // user left it where they left it (E-b) — so this is keyed on the
   // answer, not on whether anything is on screen.
-  const active = activeAt.hash === resultsHash && rows.length > 0
-    ? Math.min(activeAt.index, rows.length - 1)
+  const active = activeAt.hash === resultsHash && optionCount > 0
+    ? Math.min(activeAt.index, optionCount - 1)
     : 0
+  // A combobox's `aria-controls` promises to name the popup it has open.
+  // The listbox exists only where there are options to put in it, so
+  // where there are none — the guidance line, a zero, an error — the box
+  // says it has nothing open rather than naming an element that is not
+  // there.
+  const hasOptions = open && optionCount > 0
   const setActive = useCallback((index: number) => {
     setActiveAt({ hash: resultsHash, index })
   }, [resultsHash])
@@ -249,6 +267,14 @@ export function HeaderSearch() {
     record(textRef.current)
   }, [revealHit, record])
 
+  // `runNow({ text })`, not a bare `runNow()`: the session's `quick` is
+  // still the empty box this render was built from, and a run of THAT
+  // dispatches nothing at all.
+  const chooseRecent = useCallback((text: string) => {
+    setQuick({ text })
+    runNow({ text })
+  }, [setQuick, runNow])
+
   const pickCrumb = useCallback((hit: SearchHit, index: number) => {
     const path = hit.ancestorPath ?? []
     const target = path[index]
@@ -261,12 +287,12 @@ export function HeaderSearch() {
   const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp'
       || e.key === 'Home' || e.key === 'End') {
-      if (!open || rows.length === 0) return
+      if (!open || optionCount === 0) return
       e.preventDefault()
-      const to = e.key === 'ArrowDown' ? (active + 1) % rows.length
-        : e.key === 'ArrowUp' ? (active - 1 + rows.length) % rows.length
+      const to = e.key === 'ArrowDown' ? (active + 1) % optionCount
+        : e.key === 'ArrowUp' ? (active - 1 + optionCount) % optionCount
           : e.key === 'Home' ? 0
-            : rows.length - 1
+            : optionCount - 1
       setActive(to)
       return
     }
@@ -275,6 +301,11 @@ export function HeaderSearch() {
       if (e.metaKey || e.ctrlKey) {
         openPanel()
         setDismissed(true)
+        return
+      }
+      // A highlighted recent is a query to run, not a hit to reveal.
+      if (showingRecents && recents[active]) {
+        chooseRecent(recents[active])
         return
       }
       // Only the rows that ANSWER this box can be revealed. Anything
@@ -302,7 +333,8 @@ export function HeaderSearch() {
     }
     if (e.key === 'Tab') setDismissed(true)
   }, [
-    open, rows, active, setActive, view, resultMatchesQuick,
+    open, rows, optionCount, active, setActive, view, resultMatchesQuick,
+    showingRecents, recents, chooseRecent,
     pick, runNow, openPanel, clearQuery,
   ])
 
@@ -383,12 +415,10 @@ export function HeaderSearch() {
             onKeyDown={onKeyDown}
             aria-label="Search this view"
             role="combobox"
-            aria-expanded={open}
-            aria-controls={listId}
+            aria-expanded={hasOptions}
+            aria-controls={hasOptions ? listId : undefined}
             aria-autocomplete="list"
-            aria-activedescendant={
-              open && rows.length > 0 ? optionId(listId, active) : undefined
-            }
+            aria-activedescendant={hasOptions ? optionId(listId, active) : undefined}
             className={cn(
               "flex-1 min-w-0 bg-transparent border-0 px-2 py-2.5",
               "text-[13.5px] text-ink placeholder:text-ink-muted/45",
@@ -498,15 +528,16 @@ export function HeaderSearch() {
             activeIndex={active}
             running={view.kind === 'running'}
             error={view.kind === 'error' ? view.message : null}
-            zero={holds.answered && rows.length === 0}
+            zero={answer?.answered === true && rows.length === 0}
             count={holds.count}
             plus={holds.plus}
             recents={recents}
+            stale={stale}
             layerOf={layerOf}
             onActivate={setActive}
             onPick={pick}
             onCrumb={pickCrumb}
-            onRecent={(text) => { setQuick({ text }); runNow() }}
+            onRecent={chooseRecent}
             onNarrow={(patch) => setQuick(patch)}
             onSeeAll={() => { openPanel(); setDismissed(true) }}
             onRefine={() => { refine(); setDismissed(true) }}

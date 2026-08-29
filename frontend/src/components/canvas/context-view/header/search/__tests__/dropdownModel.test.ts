@@ -129,15 +129,26 @@ describe('formatPath', () => {
         const { crumbs, depth } = formatPath(path)
 
         expect(depth).toBe(3)
-        expect(crumbs).toEqual(path)
+        expect(crumbs).toEqual([
+            { ancestor: path[0], index: 0 },
+            { ancestor: path[1], index: 1 },
+            { ancestor: path[2], index: 2 },
+        ])
     })
 
+    // The index is the crumb's place in the WHOLE path, not in what
+    // survived the elision: revealing a crumb slices the path with it,
+    // and a renderer that recovered the number by searching the array
+    // would hand back the wrong one for a repeated name.
     it('keeps the first and the last two, and elides the middle at four', () => {
         const path = [anc('crm'), anc('public'), anc('customers'), anc('columns')]
         const { crumbs } = formatPath(path)
 
         expect(crumbs).toEqual([
-            path[0], { ellipsis: true }, path[2], path[3],
+            { ancestor: path[0], index: 0 },
+            { ellipsis: true },
+            { ancestor: path[2], index: 2 },
+            { ancestor: path[3], index: 3 },
         ])
     })
 
@@ -145,7 +156,12 @@ describe('formatPath', () => {
         const path = [anc('a'), anc('b'), anc('c'), anc('d'), anc('e')]
 
         expect(formatPath(path, { head: 2, tail: 1 })).toMatchObject({
-            crumbs: [path[0], path[1], { ellipsis: true }, path[4]],
+            crumbs: [
+                { ancestor: path[0], index: 0 },
+                { ancestor: path[1], index: 1 },
+                { ellipsis: true },
+                { ancestor: path[4], index: 4 },
+            ],
         })
     })
 

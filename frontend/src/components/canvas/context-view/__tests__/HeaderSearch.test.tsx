@@ -24,12 +24,16 @@ import { HeaderSearch } from '../header/HeaderSearch'
 const BOX = /search this view/i
 const RECENTS_KEY = 'nexus.viewSearch.recent.view-1'
 
-function renderBox(session: ViewSearchSession) {
-  render(
+function boxOf(session: ViewSearchSession) {
+  return (
     <ViewSearchSessionContext.Provider value={session}>
       <HeaderSearch />
-    </ViewSearchSessionContext.Provider>,
+    </ViewSearchSessionContext.Provider>
   )
+}
+
+function renderBox(session: ViewSearchSession) {
+  return render(boxOf(session))
 }
 
 /** A finished run. Only `result` is read by the status line and the
@@ -238,19 +242,62 @@ describe('HeaderSearch — opening and closing the list', () => {
     openList()
 
     expect(screen.getByText('Recent in this view')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'orders' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'orders' })).toBeInTheDocument()
   })
 
-  it('a recent puts its text back in the box and runs it', () => {
+  // `runNow({ text })`, not a bare `runNow()`: the session's `quick` is
+  // still the empty box this render was built from, so the unpatched call
+  // dispatched nothing at all and the recent only ran because the
+  // debounce happened to pick the text up 300 ms later.
+  it('a recent puts its text back in the box and runs THAT', () => {
     window.localStorage.setItem(RECENTS_KEY, JSON.stringify(['orders']))
     const session = stubSession()
     renderBox(session)
     openList()
 
-    fireEvent.click(screen.getByRole('button', { name: 'orders' }))
+    fireEvent.click(screen.getByRole('option', { name: 'orders' }))
 
     expect(session.setQuick).toHaveBeenCalledWith({ text: 'orders' })
-    expect(session.runNow).toHaveBeenCalledTimes(1)
+    expect(session.runNow).toHaveBeenCalledWith({ text: 'orders' })
+  })
+
+  // A combobox promises that `aria-controls` names the popup it has
+  // open. It pointed at an id that only existed while there were hit
+  // rows, so on an empty box it named nothing at all.
+  it('points at the list it actually has open', () => {
+    window.localStorage.setItem(RECENTS_KEY, JSON.stringify(['orders']))
+    renderBox(stubSession())
+    openList()
+
+    expect(box().getAttribute('aria-expanded')).toBe('true')
+    const controls = box().getAttribute('aria-controls')
+    expect(controls).toBeTruthy()
+    expect(document.getElementById(controls as string)).toBe(screen.getByRole('listbox'))
+  })
+
+  it('claims nothing open when all it has is the guidance line', () => {
+    renderBox(stubSession())
+    openList()
+
+    expect(screen.getByText(/searches names, descriptions, tags/i)).toBeInTheDocument()
+    expect(box().getAttribute('aria-expanded')).toBe('false')
+    expect(box().getAttribute('aria-controls')).toBeNull()
+  })
+
+  it('walks the recents with the arrows and runs the one it lands on', () => {
+    window.localStorage.setItem(RECENTS_KEY, JSON.stringify(['orders', 'customer id']))
+    const session = stubSession()
+    renderBox(session)
+    openList()
+
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(box().getAttribute('aria-activedescendant'))
+      .toBe(screen.getAllByRole('option')[1].id)
+
+    fireEvent.keyDown(box(), { key: 'Enter' })
+
+    expect(session.setQuick).toHaveBeenCalledWith({ text: 'customer id' })
+    expect(session.runNow).toHaveBeenCalledWith({ text: 'customer id' })
   })
 
   it('a keystroke re-opens a list Escape put away', () => {
@@ -307,6 +354,52 @@ describe('HeaderSearch — opening and closing the list', () => {
 
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
     expect(screen.queryByText(/searches names, descriptions, tags/i)).not.toBeInTheDocument()
+  })
+})
+
+
+describe('HeaderSearch — a standing answer that is no longer the question', () => {
+  // The held answer is what keeps the list from blinking out between
+  // keystrokes. It must not be allowed to make a CLAIM about the text
+  // that is in the box now — "nothing contains zzz" said before anyone
+  // asked about "zzz" is simply false.
+  it('does not call a zero a zero until the new word has been asked', () => {
+    const zeroed = stubSession({
+      quick: { ...DEFAULT_QUICK, text: 'zzzq' },
+      resultMatchesQuick: true,
+      advanced: stubAdvanced({
+        view: resultsView({ candidateCount: 0, truncated: false, hits: [] }),
+        runState: { hash: 'h1' } as never,
+      }),
+    })
+    const { rerender } = renderBox(zeroed)
+    openList()
+    expect(screen.getByText('Nothing in this view contains "zzzq"')).toBeInTheDocument()
+
+    // One character deleted. The standing result still answers "zzzq";
+    // nothing has been dispatched for "zzz" yet.
+    rerender(boxOf(stubSession({
+      quick: { ...DEFAULT_QUICK, text: 'zzz' },
+      resultMatchesQuick: false,
+      advanced: zeroed.advanced,
+    })))
+
+    expect(screen.queryByText('Nothing in this view contains "zzz"')).not.toBeInTheDocument()
+  })
+
+  it('keeps the rows it has, and says they are not the answer yet', () => {
+    const answered = answering([hit('orders'), hit('orders_daily')])
+    const { rerender } = renderBox(answered)
+    openList()
+
+    rerender(boxOf(stubSession({
+      quick: { ...DEFAULT_QUICK, text: 'orders_' },
+      resultMatchesQuick: false,
+      advanced: answered.advanced,
+    })))
+
+    expect(screen.getAllByRole('option')).toHaveLength(2)
+    expect(screen.getByTestId('dropdown-rows').className).toContain('opacity-60')
   })
 })
 

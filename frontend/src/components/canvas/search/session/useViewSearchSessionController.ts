@@ -176,9 +176,17 @@ export interface ViewSearchSession {
     quick: QuickQuery
     /** Patch one or more fields; a text change starts the debounce. */
     setQuick: (partial: Partial<QuickQuery>) => void
-    /** Enter: run what's in the box now, single characters included, and
-     *  unconditionally — including a re-run of a query that just failed. */
-    runNow: () => void
+    /**
+     * Enter: run what's in the box now, single characters included, and
+     * unconditionally — including a re-run of a query that just failed.
+     *
+     * `patch` runs the box AS IF that patch had already landed. A caller
+     * that sets a field and runs in the same tick — the recents list does
+     * exactly that — would otherwise dispatch the state this render was
+     * built from, which for a recent picked out of an empty box is
+     * nothing at all.
+     */
+    runNow: (patch?: Partial<QuickQuery>) => void
     /** The × : abort, drop the results, the highlights and the draft, and
      *  empty the box. The same teardown a view switch performs. */
     clearQuery: () => void
@@ -309,11 +317,14 @@ export function useViewSearchSessionController(
         dispatch(runnable)
     }, [debouncedQuick, dispatch])
 
-    const runNow = useCallback(() => {
+    const runNow = useCallback((patch?: Partial<QuickQuery>) => {
         // Deliberately unguarded. Enter on unchanged text means "ask
         // again" — and after a failure it is the only way back, since
         // `runState` then holds that very hash with status 'failed'.
-        const runnable = runnableFor(quick, EXPLICIT_MIN_LENGTH)
+        const runnable = runnableFor(
+            patch ? { ...quick, ...patch } : quick,
+            EXPLICIT_MIN_LENGTH,
+        )
         if (runnable) dispatch(runnable)
     }, [dispatch, quick])
 

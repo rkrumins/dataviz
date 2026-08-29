@@ -298,6 +298,32 @@ describe('useViewSearchSessionController — runNow', () => {
         expect(useSearchStore.getState().draftPredicate).toEqual(LEAF)
     })
 
+    // A caller that sets the text and runs in the same tick — the recents
+    // list does exactly that — held the render's own `quick`, so Enter
+    // dispatched the OLD text (an empty box dispatches nothing at all)
+    // and the recent only ran because the debounce picked it up 300 ms
+    // later. The patch is what the run is FOR.
+    it('runs the patch it was handed, not the text the box still holds', () => {
+        const { result } = renderSession()
+
+        act(() => { result.current.runNow({ text: 'cust' }) })
+
+        expect(mocks.runPredicate).toHaveBeenCalledTimes(1)
+        expect(mocks.runPredicate).toHaveBeenLastCalledWith(LEAF, SEARCH_OPTIONS)
+    })
+
+    it('a patch does not have to be the text', () => {
+        const { result } = renderSession()
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+
+        act(() => { result.current.runNow({ match: 'prefix' }) })
+
+        expect(mocks.runPredicate).toHaveBeenLastCalledWith(
+            { kind: 'text', target: 'any', value: 'cust', match: 'prefix' },
+            SEARCH_OPTIONS,
+        )
+    })
+
     it('re-runs once the query changes again', () => {
         const { result, rerender } = renderSession()
 

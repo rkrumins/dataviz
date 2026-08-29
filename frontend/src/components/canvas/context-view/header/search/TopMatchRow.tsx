@@ -16,6 +16,13 @@
  * listbox and the input keeps focus throughout, so the crumb buttons are
  * out of the tab order — the keyboard reaches a row with ↑/↓ and takes
  * it with ↵.
+ *
+ * WHICH MAKES THE CRUMBS MOUSE-ONLY, deliberately. An `option` may not
+ * contain its own focusable controls: a screen reader reads an option as
+ * one thing, and a tab stop inside the popup would break the combobox's
+ * promise that focus stays in the input. So the crumbs are a shortcut for
+ * a pointer, and the keyboard path to an ancestor is the one it already
+ * has — reveal the hit, then walk up the tree on the canvas.
  */
 import { type FC } from 'react'
 
@@ -53,8 +60,7 @@ export const TopMatchRow: FC<TopMatchRowProps> = ({
     hit, id, active, query, why, layer, onActivate, onPick, onCrumb,
 }) => {
     const style = styleFor(hit.node.entityType)
-    const ancestors = hit.ancestorPath ?? []
-    const { crumbs, depth, full } = formatPath(ancestors)
+    const { crumbs, depth, full } = formatPath(hit.ancestorPath ?? [])
     const note = depthNote(depth)
 
     return (
@@ -114,13 +120,16 @@ export const TopMatchRow: FC<TopMatchRowProps> = ({
                                 … ›
                             </span>
                         ) : (
-                            <span key={crumb.urn} className="inline-flex items-center gap-1 min-w-0">
+                            <span
+                                key={`${crumb.ancestor.urn}-${crumb.index}`}
+                                className="inline-flex items-center gap-1 min-w-0"
+                            >
                                 <button
                                     type="button"
                                     tabIndex={-1}
                                     onClick={(e) => {
                                         e.stopPropagation()
-                                        onCrumb(crumb, ancestors.indexOf(crumb))
+                                        onCrumb(crumb.ancestor, crumb.index)
                                     }}
                                     className={cn(
                                         'max-w-[120px] truncate rounded px-0.5',
@@ -128,7 +137,7 @@ export const TopMatchRow: FC<TopMatchRowProps> = ({
                                         'transition-colors',
                                     )}
                                 >
-                                    {crumb.displayName}
+                                    {crumb.ancestor.displayName}
                                 </button>
                                 {i < crumbs.length - 1 && (
                                     <span aria-hidden className="shrink-0 text-ink-muted/45">›</span>

@@ -102,9 +102,18 @@ export function whyLabel(
 }
 
 
-/** One rendered crumb: an ancestor, or the gap where the middle of the
- *  path used to be. */
-export type PathCrumb = AncestorRef | { ellipsis: true }
+/**
+ * One rendered crumb: an ancestor with its place in the WHOLE path, or
+ * the gap where the middle of that path used to be.
+ *
+ * The index travels with the ancestor because revealing a crumb slices
+ * the path at it, and after the elision a renderer cannot count its way
+ * back to the right number — nor search for it, since two containers in
+ * one path are quite often called the same thing.
+ */
+export type PathCrumb =
+    | { ancestor: AncestorRef; index: number }
+    | { ellipsis: true }
 
 export interface FormattedPath {
     /** Head crumbs, the elision, then tail crumbs — ready to render. */
@@ -133,12 +142,14 @@ export function formatPath(
     const full = ancestorPath.map((a) => a.displayName).join(' › ')
     // At or under the budget an ellipsis would stand in for nothing —
     // it would cost a crumb to hide none of them.
+    const at = (ancestor: AncestorRef, index: number): PathCrumb => ({ ancestor, index })
     const crumbs: PathCrumb[] = depth <= head + tail
-        ? [...ancestorPath]
+        ? ancestorPath.map(at)
         : [
-            ...ancestorPath.slice(0, head),
+            ...ancestorPath.slice(0, head).map(at),
             { ellipsis: true },
-            ...ancestorPath.slice(depth - tail),
+            ...ancestorPath.slice(depth - tail)
+                .map((ancestor, i) => at(ancestor, depth - tail + i)),
         ]
     return { crumbs, depth, full }
 }

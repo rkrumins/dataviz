@@ -8,7 +8,7 @@
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { createRef } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_QUICK } from '@/components/canvas/search/session/quickPredicate'
 import type { AncestorRef, SearchHit } from '@/types/search'
@@ -30,9 +30,21 @@ function hit(displayName: string, ancestorPath: AncestorRef[] = []): SearchHit {
     } as unknown as SearchHit
 }
 
-function renderDropdown(over: Partial<SearchDropdownProps> = {}) {
+/** jsdom measures everything as zero, so a spec about geometry has to say
+ *  where the box is itself. */
+function renderDropdown(
+    over: Partial<SearchDropdownProps> = {},
+    rect?: { left: number; width: number },
+) {
     const anchor = document.createElement('div')
     document.body.appendChild(anchor)
+    if (rect) {
+        anchor.getBoundingClientRect = () => ({
+            left: rect.left, width: rect.width, right: rect.left + rect.width,
+            top: 40, bottom: 72, height: 32, x: rect.left, y: 40,
+            toJSON: () => ({}),
+        })
+    }
     const anchorRef = createRef<HTMLElement>() as { current: HTMLElement | null }
     anchorRef.current = anchor
 
@@ -49,6 +61,7 @@ function renderDropdown(over: Partial<SearchDropdownProps> = {}) {
         count: 1,
         plus: false,
         recents: [],
+        stale: false,
         layerOf: () => null,
         onActivate: vi.fn(),
         onPick: vi.fn(),
@@ -63,6 +76,11 @@ function renderDropdown(over: Partial<SearchDropdownProps> = {}) {
     render(<SearchDropdown {...props} />)
     return props
 }
+
+const surface = () =>
+    document.querySelector('[data-view-search-dropdown]') as HTMLElement
+
+afterEach(() => { vi.restoreAllMocks() })
 
 
 describe('SearchDropdown — the list', () => {
@@ -197,8 +215,36 @@ describe('SearchDropdown — the states', () => {
         expect(screen.getByText(/every level, even containers you haven't opened/i))
             .toBeInTheDocument()
 
-        fireEvent.click(screen.getByRole('button', { name: 'customer id' }))
+        fireEvent.click(screen.getByRole('option', { name: 'customer id' }))
         expect(props.onRecent).toHaveBeenCalledWith('customer id')
+    })
+
+    // Real options in the SAME listbox the rows use, with the same ids:
+    // the box's `aria-controls` points at one element and its
+    // `aria-activedescendant` at one id scheme, whichever state is up.
+    it('offers the recents as options the box can point at', () => {
+        const props = renderDropdown({
+            text: '', quick: DEFAULT_QUICK, rows: [], count: null,
+            recents: ['orders', 'customer id'], activeIndex: 1,
+        })
+
+        expect(screen.getByRole('listbox').id).toBe('view-search-list')
+        const options = screen.getAllByRole('option')
+        expect(options.map((o) => o.id)).toEqual([
+            'view-search-list-option-0', 'view-search-list-option-1',
+        ])
+        expect(options.map((o) => o.getAttribute('aria-selected')))
+            .toEqual(['false', 'true'])
+
+        fireEvent.mouseEnter(options[0])
+        expect(props.onActivate).toHaveBeenCalledWith(0)
+    })
+
+    it('has no list at all when there is nothing but the guidance', () => {
+        renderDropdown({ text: '', quick: DEFAULT_QUICK, rows: [], count: null })
+
+        expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+        expect(screen.queryByRole('option')).not.toBeInTheDocument()
     })
 
     it('an empty box with no history still explains itself', () => {
@@ -223,6 +269,24 @@ describe('SearchDropdown — the states', () => {
         expect(screen.getAllByRole('option')).toHaveLength(1)
         expect(screen.getByTestId('dropdown-rows').className).toContain('opacity-60')
         expect(screen.getByTestId('dropdown-running-bar')).toBeInTheDocument()
+    })
+
+    it('lets the hint win over rows that answer an older word', () => {
+        renderDropdown({
+            text: 'a', quick: { ...DEFAULT_QUICK, text: 'a' },
+            rows: [hit('orders')], stale: true, count: 1,
+        })
+
+        expect(screen.getByText('Keep typing — or press ↵ to search for "a"'))
+            .toBeInTheDocument()
+        expect(screen.queryByRole('option')).not.toBeInTheDocument()
+    })
+
+    it('dims the count along with the rows it no longer describes', () => {
+        renderDropdown({ rows: [hit('orders')], stale: true, count: 1 })
+
+        expect(screen.getByTestId('dropdown-header').className).toContain('opacity-60')
+        expect(screen.getByTestId('dropdown-rows').className).toContain('opacity-60')
     })
 
     it('a real zero says so in the words that were typed, and offers a way out', () => {
@@ -258,5 +322,43 @@ describe('SearchDropdown — the states', () => {
         renderDropdown({ rows: [hit('orders')], error: 'Boom', count: 1 })
 
         expect(screen.queryByRole('option')).not.toBeInTheDocument()
+    })
+})
+
+
+describe('SearchDropdown — geometry', () => {
+    // The list scrolls inside a 60vh box, so ten rows can outrun it. The
+    // highlight is the only thing telling the user what ↵ will do.
+    it('keeps the active option in view when the highlight moves', () => {
+        const scrolled: string[] = []
+        vi.spyOn(Element.prototype, 'scrollIntoView')
+            .mockImplementation(function (this: Element) { scrolled.push(this.id) })
+
+        renderDropdown({ rows: [hit('a'), hit('b'), hit('c')], activeIndex: 2, count: 3 })
+
+        expect(scrolled).toContain('view-search-list-option-2')
+    })
+
+    it('hangs under the box, six pixels down and flush with its left edge', () => {
+        renderDropdown({}, { left: 240, width: 640 })
+
+        expect(surface().style.top).toBe('78px')
+        expect(surface().style.left).toBe('240px')
+        expect(surface().style.width).toBe('640px')
+    })
+
+    // A 560-wide surface hung at the box's left edge ran off the right of
+    // a narrow window. The floor stays — the path line is what it buys —
+    // so the surface slides left instead.
+    it('slides left rather than off the edge of a narrow window', () => {
+        const previous = window.innerWidth
+        Object.defineProperty(window, 'innerWidth', { value: 600, configurable: true })
+
+        renderDropdown({}, { left: 200, width: 300 })
+
+        expect(surface().style.width).toBe('560px')
+        expect(surface().style.left).toBe('32px')
+
+        Object.defineProperty(window, 'innerWidth', { value: previous, configurable: true })
     })
 })
