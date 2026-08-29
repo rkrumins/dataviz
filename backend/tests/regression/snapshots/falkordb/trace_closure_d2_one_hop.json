@@ -21,6 +21,15 @@
     {
       "confidence": null,
       "edge_type": "CONTAINS",
+      "id": "2",
+      "properties": {},
+      "source_urn": "urn:test:schema:s2",
+      "target_urn": "urn:test:dataset:d3",
+      "version": null
+    },
+    {
+      "confidence": null,
+      "edge_type": "CONTAINS",
       "id": "3",
       "properties": {},
       "source_urn": "urn:test:schema:s2",
@@ -37,20 +46,22 @@
       "version": null
     }
   ],
-  "downstream_urns": [
-    "urn:test:dataset:d2"
-  ],
+  "downstream_urns": [],
   "edges": [
     {
       "confidence": null,
       "edge_type": "DERIVES_FROM",
+      "id": "5",
+      "properties": {},
+      "source_urn": "urn:test:dataset:d3",
+      "target_urn": "urn:test:dataset:d2",
+      "version": null
+    },
+    {
+      "confidence": null,
+      "edge_type": "DERIVES_FROM",
       "id": "6",
-      "properties": {
-        "sourceEdgeTypes": [
-          "DERIVES_FROM"
-        ],
-        "weight": 1
-      },
+      "properties": {},
       "source_urn": "urn:test:dataset:d1",
       "target_urn": "urn:test:dataset:d2",
       "version": null
@@ -60,8 +71,11 @@
   "focus": {
     "entity_type": "dataset",
     "level": 2,
-    "urn": "urn:test:dataset:d1"
+    "urn": "urn:test:dataset:d2"
   },
+  "frontier_down": [],
+  "frontier_up": [],
+  "grain": null,
   "inherited_from_urn": null,
   "is_inherited": false,
   "nodes": [
@@ -82,17 +96,35 @@
       "version": null
     },
     {
-      "child_count": null,
+      "child_count": 0,
       "description": "",
       "display_name": "Dataset 2",
       "entity_type": "dataset",
       "last_synced_at": "",
       "layer_assignment": "",
-      "properties": {},
+      "properties": {
+        "childCount": 0
+      },
       "qualified_name": "",
       "source_system": "",
       "tags": [],
       "urn": "urn:test:dataset:d2",
+      "version": null
+    },
+    {
+      "child_count": 0,
+      "description": "",
+      "display_name": "Dataset 3",
+      "entity_type": "dataset",
+      "last_synced_at": "",
+      "layer_assignment": "",
+      "properties": {
+        "childCount": 0
+      },
+      "qualified_name": "",
+      "source_system": "",
+      "tags": [],
+      "urn": "urn:test:dataset:d3",
       "version": null
     },
     {
@@ -144,7 +176,12 @@
       "version": null
     }
   ],
+  "seed_cursor": null,
+  "seed_truncated": false,
   "truncated": false,
   "truncation_reason": null,
-  "upstream_urns": []
+  "upstream_urns": [
+    "urn:test:dataset:d1",
+    "urn:test:dataset:d3"
+  ]
 }

@@ -10,13 +10,14 @@
       "id": "l1",
       "properties": {},
       "source_urn": "urn:test:dataset:d1",
-      "target_urn": "urn:test:dataset:d2"
+      "target_urn": "urn:test:dataset:d2",
+      "version": null
     }
   ],
   "has_more": false,
   "nodes": [
     {
-      "child_count": 0,
+      "child_count": null,
       "description": "",
       "display_name": "Dataset 1",
       "entity_type": "dataset",
@@ -26,10 +27,11 @@
       "qualified_name": "",
       "source_system": "",
       "tags": [],
-      "urn": "urn:test:dataset:d1"
+      "urn": "urn:test:dataset:d1",
+      "version": null
     },
     {
-      "child_count": 0,
+      "child_count": null,
       "description": "",
       "display_name": "Dataset 2",
       "entity_type": "dataset",
@@ -39,7 +41,8 @@
       "qualified_name": "",
       "source_system": "",
       "tags": [],
-      "urn": "urn:test:dataset:d2"
+      "urn": "urn:test:dataset:d2",
+      "version": null
     }
   ],
   "total_count": 2,

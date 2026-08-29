@@ -1,0 +1,56 @@
+{
+  "containment_edge_types": [
+    "CONTAINS"
+  ],
+  "edge_type_metadata": {
+    "AGGREGATED": {
+      "category": "association",
+      "description": "association relationship: AGGREGATED",
+      "direction": "bidirectional",
+      "is_containment": false,
+      "is_lineage": false
+    },
+    "CONTAINS": {
+      "category": "structural",
+      "description": "structural relationship: CONTAINS",
+      "direction": "parent-to-child",
+      "is_containment": true,
+      "is_lineage": false
+    },
+    "DERIVES_FROM": {
+      "category": "flow",
+      "description": "flow relationship: DERIVES_FROM",
+      "direction": "source-to-target",
+      "is_containment": false,
+      "is_lineage": true
+    }
+  },
+  "entity_type_hierarchy": {
+    "dataset": {
+      "can_be_contained_by": [
+        "schema"
+      ],
+      "can_contain": []
+    },
+    "domain": {
+      "can_be_contained_by": [],
+      "can_contain": [
+        "schema"
+      ]
+    },
+    "schema": {
+      "can_be_contained_by": [
+        "domain"
+      ],
+      "can_contain": [
+        "dataset"
+      ]
+    }
+  },
+  "lineage_edge_types": [
+    "DERIVES_FROM"
+  ],
+  "root_entity_types": [
+    "domain"
+  ]
+}
