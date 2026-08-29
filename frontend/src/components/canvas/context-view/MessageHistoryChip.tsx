@@ -51,6 +51,9 @@ function subscribeViewport(onChange: () => void) {
 }
 
 const getViewportTick = () => viewportTick
+/** While the panel is closed there is no rect to keep — subscribe to nothing
+ *  rather than re-render this chip on every scroll anywhere in the app. */
+const subscribeNothing = () => () => {}
 
 // ── Rows ───────────────────────────────────────────────────────────────────
 
@@ -82,7 +85,7 @@ export function MessageHistoryChip({ className }: { className?: string }) {
   const [open, setOpen] = useState(false)
   const [chipEl, setChipEl] = useState<HTMLButtonElement | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
-  const tick = useSyncExternalStore(subscribeViewport, getViewportTick)
+  const tick = useSyncExternalStore(open ? subscribeViewport : subscribeNothing, getViewportTick)
 
   // Escape closes (window-level so it works before focus lands inside).
   useEffect(() => {
@@ -108,14 +111,16 @@ export function MessageHistoryChip({ className }: { className?: string }) {
     return () => document.removeEventListener('mousedown', onPointerDown)
   }, [open, chipEl])
 
-  // Anchored above the chip's right edge. `tick` is the dependency that makes
-  // resize/scroll re-measure — it is read for exactly that reason.
-  const anchor = useMemo(() => {
-    if (!open || !chipEl) return null
-    void tick
-    const rect = chipEl.getBoundingClientRect()
-    return { right: window.innerWidth - rect.right, bottom: window.innerHeight - rect.top + 8 }
-  }, [open, chipEl, tick])
+  // Anchored above the chip's right edge, measured on every render while the
+  // panel is open. Not memoised on `tick`: the cluster's `bottom` is a CSS
+  // calc over `--edge-legend-height` / `--trace-dock-height`, so opening the
+  // Connections panel or the trace dock moves the chip with no resize and no
+  // scroll event, and a cached rect would leave the panel detached from it.
+  void tick // read so resize/scroll re-render this component
+  const chipRect = open && chipEl ? chipEl.getBoundingClientRect() : null
+  const anchor = chipRect
+    ? { right: window.innerWidth - chipRect.right, bottom: window.innerHeight - chipRect.top + 8 }
+    : null
 
   const rows = useMemo(() => foldRuns(history), [history])
 
