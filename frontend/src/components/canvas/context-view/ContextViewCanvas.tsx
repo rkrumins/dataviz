@@ -4835,7 +4835,10 @@ export function ContextViewCanvas({
             Lifts above TraceBottomDock via --trace-dock-height. */}
         <div
           ref={edgeLegendRef}
-          className="absolute z-30 w-64 pointer-events-auto transition-all duration-300 ease-out"
+          // z-40, the floating-chrome tier (trace dock, lens pills): the
+          // columns area is `relative z-30` and later in the DOM, so at
+          // z-30 the opened panel body painted UNDER the rows it overlaps.
+          className="absolute z-40 w-64 pointer-events-auto transition-all duration-300 ease-out"
           style={{
             bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))',
             right: '1rem',
