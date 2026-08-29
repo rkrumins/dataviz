@@ -62,6 +62,7 @@ from collections import Counter
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.models.search import (
     AggregationSpec,
@@ -1608,15 +1609,14 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
 # Reserved keys are the provider-owned top-level fields. The discover
 # scan strips them from the per-label key list so the response only
-# contains user-supplied property names. Kept in sync with
-# `falkordb_provider._RESERVED_NODE_KEYS`.
-_DISCOVER_RESERVED_KEYS = frozenset({
-    "urn", "entityType", "displayName", "qualifiedName", "description",
-    "tags", "layerAssignment", "childCount", "sourceSystem", "lastSyncedAt",
-    "level", "levelDigest",
-    "properties",      # legacy blob
-    "propertiesRaw",   # native escape hatch
-})
+# contains user-supplied property names.
+#
+# Bound to the provider's own set rather than restated beside it: a
+# restatement that says it is "kept in sync" drifts silently, and this
+# one had — it was four keys behind (`entityId`, `searchableText`, and
+# the conformance stamp's `urnSource` / `nameSource`), so every one of
+# them was offered to the user as a property somebody had written.
+_DISCOVER_RESERVED_KEYS = _RESERVED_NODE_KEYS
 
 
 # Discovery caps (per-key value samples, value keys per label, tag-value

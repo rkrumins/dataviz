@@ -3896,3 +3896,38 @@ class TestDiscoverMissingSearchableText:
         })
         result = await discover_native_property_keys(prov, include_edges=False)
         assert result["missingSearchableText"] == 2
+
+
+class TestDiscoverStripsProviderOwnedFields:
+    """The FE's "Look in" menu is built from discover's per-label key
+    list, so anything left in it reads to the user as a property somebody
+    wrote. The write paths SET several denormalised fields directly on
+    the node — `searchableText`, `entityId`, and the conformance stamp's
+    `urnSource` / `nameSource` — and the provider reserves every one of
+    them. Discover must strip exactly the same set."""
+
+    @pytest.mark.asyncio
+    async def test_denormalised_write_fields_are_not_offered_as_properties(self):
+        prov = _DiscoverProvider({"dataset": [{
+            "urn": "urn:a",
+            "displayName": "Orders",
+            "entityId": "urn:a",
+            "searchableText": "orders warehouse.public.orders",
+            "urnSource": "id",
+            "nameSource": "name",
+            "rowCount": 12,
+        }]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["labels"]["dataset"]["keys"] == ["rowCount"]
+
+    @pytest.mark.asyncio
+    async def test_value_samples_drop_them_too(self):
+        """The value pickers read `valueSamplesByKey`; a key stripped from
+        `keys` but left with samples would still autocomplete."""
+        prov = _DiscoverProvider({"dataset": [{
+            "urn": "urn:a", "searchableText": "orders", "rowCount": 12,
+        }]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert list(
+            result["labels"]["dataset"]["valueSamplesByKey"],
+        ) == ["rowCount"]
