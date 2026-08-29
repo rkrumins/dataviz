@@ -2046,13 +2046,15 @@ async def execute_deep_search(
                 aggregates.append(buckets)
             # Counted uncapped: with no hit list to compare against, the
             # count is the ONLY signal for how much the aggregations
-            # missed, so it has to see past the cap.
-            candidate_count = await _run_count(
+            # missed, so it has to see past the cap. ``candidate_count``
+            # keeps the meaning it has in every other shape — the size
+            # of the CAPPED set the aggregations actually ran over.
+            total_count = await _run_count(
                 provider, uncapped_cypher, base_params,
                 timeout_s=remaining(),
             )
-            total_count = candidate_count
-            truncated = candidate_count > effective_candidate_cap
+            candidate_count = min(total_count, effective_candidate_cap)
+            truncated = total_count > effective_candidate_cap
         else:
             # Hits requested (and maybe aggregates too). Materialise the
             # candidate set once; build hits from it, optionally aggregate.

@@ -2780,8 +2780,28 @@ class TestExactTotalCount:
         assert "LIMIT" not in count_cypher
         assert count_timeout <= agg_timeout
         assert page.total_count == 1284
-        assert page.candidate_count == 1284
+        # ``candidateCount`` keeps its meaning in every shape: the size
+        # of the CAPPED set the aggregations ran over.
+        assert page.candidate_count == 100
         assert page.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_aggregates_only_below_cap_counts_the_same_set_twice(self):
+        """Under the cap the aggregations saw every match, so the capped
+        and the exact number are the same number."""
+        q = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                results="aggregates",
+                aggregations=[AggregationSpec(by="entityType")],
+                candidateCap=100,
+            ),
+        )
+        page = await execute_deep_search(_CountingProvider(total=40), q)
+        assert page.candidate_count == 40
+        assert page.total_count == 40
+        assert page.truncated is False
 
     @pytest.mark.asyncio
     async def test_aggregates_only_total_equal_to_cap_is_not_truncated(self):
@@ -2797,6 +2817,7 @@ class TestExactTotalCount:
             ),
         )
         page = await execute_deep_search(_CountingProvider(total=100), q)
+        assert page.candidate_count == 100
         assert page.total_count == 100
         assert page.truncated is False
 
