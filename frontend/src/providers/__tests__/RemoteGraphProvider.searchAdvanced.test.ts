@@ -6,8 +6,15 @@
  * shared promise — so aborting the superseded call would reject the
  * identical superseding call too. This pins:
  *   - the signal is forwarded into the `fetchWithTimeout` RequestInit
- *   - aborting that signal rejects the `searchAdvanced` call
  *   - two identical signalled bodies produce two real fetches (no dedupe)
+ *   - a signalled call's cleanup can't evict a concurrent unsignalled
+ *     call's still-pending dedupe entry for the same body
+ *
+ * `fetchWithTimeout` is mocked directly here (see the sibling
+ * `.abort.test.ts` for why the ACTUAL abort-rejection path — and its
+ * circuit-breaker side effect — must run through the real
+ * `fetchWithTimeout`/`_doFetch` stack instead: a mocked rejection shape
+ * can't see what `_doFetch`'s error handling does with a real one).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -54,24 +61,6 @@ describe('RemoteGraphProvider.searchAdvanced signal + timeout', () => {
     expect(init?.signal).toBe(controller.signal)
     expect(init?.timeoutMs).toBe(TIMEOUTS.SEARCH_ADVANCED_MS)
     expect(TIMEOUTS.SEARCH_ADVANCED_MS).toBe(45_000)
-  })
-
-  it('rejects when the caller aborts the signal', async () => {
-    mockFetch.mockImplementation((_url, init) => new Promise((_resolve, reject) => {
-      const signal = (init as RequestInit)?.signal
-      if (signal?.aborted) {
-        reject(new DOMException('Aborted', 'AbortError'))
-        return
-      }
-      signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
-    }))
-    const provider = new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' })
-    const controller = new AbortController()
-
-    const pending = provider.searchAdvanced(query, { signal: controller.signal })
-    controller.abort()
-
-    await expect(pending).rejects.toThrow('Aborted')
   })
 
   it('two identical signalled bodies produce two fetches, not one deduped promise', async () => {

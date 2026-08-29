@@ -333,6 +333,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
             circuitBreaker.recordSuccess()
             return data
         } catch (err) {
+            // A caller-initiated abort (e.g. search-as-you-type superseding
+            // its own previous request) surfaces here as the same generic
+            // "timed out" TypeError a real client-side timeout would raise
+            // — fetchWithTimeout's runOnce links both onto one internal
+            // AbortController and can't tell them apart. It is not a
+            // backend health signal, so it must not feed the breaker.
+            if (fetchOptions.signal?.aborted) {
+                throw err
+            }
             if (err instanceof TypeError) {
                 circuitBreaker.recordFailure()
                 if (err.message.includes('timed out')) {
