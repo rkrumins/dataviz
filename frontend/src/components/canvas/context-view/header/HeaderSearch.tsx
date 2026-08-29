@@ -83,6 +83,13 @@ const LANDING_NOTE_MS = 4000
  *  "clicked away" from "clicked in the list" across the portal. */
 const DROPDOWN_MARK = 'data-view-search-dropdown'
 
+/** Marks the Look-in/Match popovers specifically — not every portalled
+ *  `role="dialog"` surface. The app has ~19 other dialogs (the
+ *  onboarding tour, admin/versioning drawers) that carry that role and
+ *  have nothing to do with this search; treating any of them as "inside"
+ *  left the list open through a click into one of them. */
+const POPOVER_MARK = 'data-view-search-popover'
+
 /** The last answer the box got, kept while the next run is in flight —
  *  the rows stay on screen (dimmed) rather than blinking out per
  *  keystroke. `answered` is what separates "zero matches" from "nothing
@@ -245,22 +252,27 @@ export function HeaderSearch() {
 
 
   // Warm the spine of the row the user has SETTLED on. Arrowing through
-  // a list would otherwise fire ten requests to answer one ↵.
+  // a list would otherwise fire ten requests to answer one ↵. Gated on
+  // the same `kind === 'rows'` the surface renders from — held rows
+  // behind a card (an error, a one-character hint) are not on screen,
+  // and warming a row nobody can see is a wasted round trip.
   useEffect(() => {
-    if (!open || rows.length === 0) return
+    if (!open || kind !== 'rows') return
     const hit = rows[active]
     if (!hit) return
     const timer = window.setTimeout(() => {
       void prefetchHit(hit.node.urn, hit.ancestorPath ?? [])
     }, PREFETCH_MS)
     return () => window.clearTimeout(timer)
-  }, [open, active, rows, prefetchHit])
+  }, [open, active, rows, prefetchHit, kind])
 
   // Clicking away closes the list. A click inside the box, inside the
   // list itself (portalled — hence the marker attribute) or inside one of
-  // the Look-in/Match popovers (portalled `role="dialog"`) is not away:
-  // reading those as "clicked away" put the list down the moment the
-  // user went to narrow the search.
+  // the Look-in/Match popovers (portalled, and marked the same way —
+  // NOT every `role="dialog"` surface: the app has ~19 others, from the
+  // onboarding tour to admin drawers, that have nothing to do with this
+  // search) is not away: reading those as "clicked away" put the list
+  // down the moment the user went to narrow the search.
   useEffect(() => {
     if (!open) return
     const onMouseDown = (e: MouseEvent) => {
@@ -268,7 +280,7 @@ export function HeaderSearch() {
       if (!target) return
       if (boxRef.current?.contains(target)) return
       if (target.closest?.(`[${DROPDOWN_MARK}]`)) return
-      if (target.closest?.('[role="dialog"]')) return
+      if (target.closest?.(`[${POPOVER_MARK}]`)) return
       setDismissed(true)
     }
     document.addEventListener('mousedown', onMouseDown)
@@ -438,7 +450,7 @@ export function HeaderSearch() {
               if (!next) return
               if (boxRef.current?.contains(next)) return
               if (next.closest?.(`[${DROPDOWN_MARK}]`)) return
-              if (next.closest?.('[role="dialog"]')) return
+              if (next.closest?.(`[${POPOVER_MARK}]`)) return
               setFocused(false)
             }}
             onKeyDown={onKeyDown}
@@ -827,6 +839,7 @@ function AnchoredMenu({ icon: Icon, current, label, active, children }: {
               transition={{ duration: 0.13, ease: 'easeOut' }}
               role="dialog"
               aria-label={label}
+              data-view-search-popover="true"
               style={{
                 position: 'fixed',
                 top: anchor.top,

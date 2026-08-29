@@ -347,6 +347,25 @@ describe('HeaderSearch — opening and closing the list', () => {
     expect(screen.getByRole('listbox')).toBeInTheDocument()
   })
 
+  // A click into any OTHER portalled `role="dialog"` — the onboarding
+  // tour, an admin/versioning drawer — is a click away, not a click in
+  // one of the box's own popovers. Only the Look-in/Match popovers may
+  // hold the list open.
+  it('closes on a click into an unrelated dialog, not just a click outside all of them', () => {
+    renderBox(answering([hit('orders')]))
+    openList()
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+
+    const tour = document.createElement('div')
+    tour.setAttribute('role', 'dialog')
+    document.body.appendChild(tour)
+
+    fireEvent.mouseDown(tour)
+
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    document.body.removeChild(tour)
+  })
+
   it('stays shut while a two-character query has nothing to report yet', () => {
     renderBox(stubSession({ quick: { ...DEFAULT_QUICK, text: 'or' } }))
 
@@ -744,5 +763,31 @@ describe('HeaderSearch — prefetch', () => {
     vi.advanceTimersByTime(50)
     expect(session.prefetchHit).toHaveBeenCalledTimes(1)
     expect(session.prefetchHit).toHaveBeenCalledWith('urn:orders_daily', [])
+  })
+
+  // The held rows survive a failed run so they can dim rather than
+  // vanish, but nothing is rendered for them while an error card is up
+  // (`listboxKind` says 'none'). Warming a row nobody can see is a
+  // wasted round trip.
+  it('does not warm a held row that an error card is standing in front of', () => {
+    vi.useFakeTimers()
+    const answered = answering([hit('orders', [anc('crm')]), hit('orders_daily')])
+    const { rerender } = renderBox(answered)
+    openList()
+
+    const failed = stubSession({
+      quick: { ...DEFAULT_QUICK, text: 'orders' },
+      advanced: stubAdvanced({
+        view: {
+          kind: 'error', template: {}, inputs: {}, query: {},
+          message: 'Query deadline exceeded', elapsedMs: 9,
+        } as unknown as PanelView,
+      }),
+    })
+    rerender(boxOf(failed))
+
+    vi.advanceTimersByTime(200)
+
+    expect(failed.prefetchHit).not.toHaveBeenCalled()
   })
 })

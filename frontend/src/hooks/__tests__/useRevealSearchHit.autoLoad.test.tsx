@@ -18,7 +18,7 @@
  * skips the wait cannot see it.
  */
 import { render, waitFor, act } from '@testing-library/react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/queryClient', () => ({ getQueryClient: () => ({}) }))
@@ -32,6 +32,8 @@ vi.mock('@/hooks/useViewSchema', () => ({
 
 import { useRevealSearchHit } from '../useRevealSearchHit'
 import { useContainmentHierarchy } from '../useContainmentHierarchy'
+import { shouldAutoLoadFirstPage } from '@/components/canvas/context-view/autoLoadFirstPage'
+import type { HierarchyNode } from '@/components/canvas/context-view/types'
 import { useCanvasStore, useCanvasVersion, type LineageNode } from '@/store/canvas'
 import { usePreferencesStore } from '@/store/preferences'
 import type { GraphDataProvider, GraphNode } from '@/providers/GraphDataProvider'
@@ -110,23 +112,34 @@ function Canvas({ provider, onAutoLoad, revealRef }: {
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
   const displayMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
 
+  // The guard the path-only reveal depends on — the RULE lives in
+  // `shouldAutoLoadFirstPage`, same as production (ContextViewCanvas).
   const autoLoadedFirstPageRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (expandedNodes.size === 0) return
     for (const nodeId of expandedNodes) {
-      if (autoLoadedFirstPageRef.current.has(nodeId)) continue
-      const node = displayMap.get(nodeId)
-      if (!node) continue
-      const childCount = (node.data?.childCount as number) ?? 0
-      if (childCount === 0) continue
-      // The guard the path-only reveal depends on.
-      if ((childMap.get(nodeId)?.length ?? 0) > 0) continue
+      if (!shouldAutoLoadFirstPage({
+        nodeId,
+        // `shouldAutoLoadFirstPage` only reads `.data?.childCount`; this
+        // canvas's nodes are the store's own `LineageNode`s, not the real
+        // canvas's assembled `HierarchyNode`s.
+        displayMap: displayMap as unknown as Map<string, HierarchyNode>,
+        childMap,
+        autoLoaded: autoLoadedFirstPageRef.current,
+      })) continue
       autoLoadedFirstPageRef.current.add(nodeId)
       onAutoLoad(nodeId)
     }
   }, [expandedNodes, displayMap, childMap, onAutoLoad])
 
-  revealRef.current = useRevealSearchHit({ setExpandedNodes, provider })
+  // A level the walk opened AND furnished with its spine child is
+  // accounted for — same wiring as ContextViewCanvas, so this documentary
+  // canvas cannot disagree with production about whether a reveal-opened
+  // level still needs its own auto-loaded page.
+  const markFirstPageHandled = useCallback((nodeId: string) => {
+    autoLoadedFirstPageRef.current.add(nodeId)
+  }, [])
+  revealRef.current = useRevealSearchHit({ setExpandedNodes, provider, markFirstPageHandled })
   return null
 }
 
