@@ -3019,14 +3019,19 @@ class TestAggregationAncestor:
         from backend.app.providers.falkordb_deep_search import (
             _run_aggregation_ancestor,
         )
-        prov = _AncestorAggProvider(
-            rows=[["urn:t1", "T1", "Table", 3, [["Column", 2], ["View", 1]]]],
-        )
+        prov = _AncestorAggProvider(rows=[
+            ["urn:t1", "T1", "Table", 3, [["Column", 2], ["View", 1]]],
+            # A node carrying no label makes ``labels(n)[0]`` null. A
+            # null dict key fails Dict[str, int] validation, which would
+            # cost the WHOLE page -- every other bucket included -- over
+            # one unlabelled node. It costs its own type name instead.
+            ["urn:t2", "T2", "Table", 1, [[None, 1]]],
+        ])
         buckets = await _run_aggregation_ancestor(
             prov, self.UNCAPPED, {}, _ancestor_spec(),
             query=self._query(), timeout_s=3.0,
         )
-        assert len(buckets) == 1
+        assert len(buckets) == 2
         bucket = buckets[0]
         assert bucket.ancestor_urn == "urn:t1"
         assert bucket.ancestor_display_name == "T1"
@@ -3036,6 +3041,8 @@ class TestAggregationAncestor:
         assert bucket.type_counts == {"Column": 2, "View": 1}
         # No samples column — sampleHitsPerBucket is ignored by this kind.
         assert bucket.sample_hits == []
+        assert buckets[1].type_counts == {"": 1}
+        assert buckets[1].match_count == 1
 
     @pytest.mark.asyncio
     async def test_no_containment_edge_types_returns_no_buckets(self):

@@ -2549,7 +2549,11 @@ async def _run_aggregation_ancestor(
             ancestor_entity_type=etype or "",
             ancestor_depth_from_scope_root=0,  # v1: not computed
             match_count=int(mc),
-            type_counts={et: int(c) for et, c in (breakdown or [])},
+            # ``et or ""`` for the same reason the three fields above
+            # coerce: a node with no label makes ``labels(n)[0]`` null,
+            # and a null key fails Dict[str, int] validation — which
+            # would cost the whole page over one unlabelled node.
+            type_counts={(et or ""): int(c) for et, c in (breakdown or [])},
         ))
     return buckets
 
