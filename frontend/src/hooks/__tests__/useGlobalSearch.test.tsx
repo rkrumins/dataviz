@@ -18,9 +18,11 @@
  *   * the server's own count for views, not the length of the page we
  *     happened to fetch;
  *   * docs copy with the brand tokens resolved, because `{brand}` is
- *     what the markdown literally says.
+ *     what the markdown literally says;
+ *   * a search that is still loading while the index builds, because the
+ *     palette renders "nothing found" the moment it isn't.
  */
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -175,6 +177,31 @@ describe('useGlobalSearch', () => {
         await waitFor(() => expect(result.current.byCategory.View).toHaveLength(1))
         expect(result.current.totalByCategory.View).toBe(137)
         expect(result.current.viewsHasMore).toBe(true)
+    })
+
+    it('stays loading while the docs index is still building', async () => {
+        // The palette shows "nothing found" on `!hasEntityHits &&
+        // !isLoading`, so a docs-only query that reported "done" during the
+        // build would say nothing matched and then fill in behind itself.
+        listViewsMock.mockResolvedValue({ items: [], total: 3, hasMore: false, nextOffset: null })
+        let finishBuild: (index: IndexEntry[]) => void = () => {}
+        getIndexMock.mockReturnValue(new Promise<IndexEntry[]>(resolve => { finishBuild = resolve }))
+
+        const { result } = renderHook(() => useGlobalSearch('lineage', { appWide: true }), { wrapper })
+        const hero = renderHook(() => useGlobalSearch('lineage'), { wrapper })
+
+        // The views answer has landed and the debounce has elapsed, so the
+        // index is the only thing still outstanding.
+        await waitFor(() => expect(result.current.totalByCategory.View).toBe(3))
+        expect(result.current.isLoading).toBe(true)
+        // ...and it is outstanding for the palette only: the hero never
+        // asked for docs, so it must not spin for someone else's fetch.
+        expect(hero.result.current.isLoading).toBe(false)
+
+        await act(async () => { finishBuild(DOCS_INDEX) })
+
+        await waitFor(() => expect(result.current.isLoading).toBe(false))
+        expect(result.current.byCategory.Doc).toHaveLength(1)
     })
 
     it('resolves the brand tokens in a doc title and snippet', async () => {

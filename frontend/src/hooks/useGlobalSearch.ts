@@ -349,12 +349,18 @@ export function useGlobalSearch(
         const isStale = trimmed !== debouncedQuery
         return {
             query: debouncedQuery,
-            isLoading: isStale || viewsQuery.isFetching,
+            // The index build counts: the palette renders "nothing found"
+            // on `!hasEntityHits && !isLoading`, so a docs-only query that
+            // claimed to be done would deny the answer it is fetching.
+            // `appWide` again, because two hooks observing one query key
+            // share its `isFetching` — the hero must not spin for a build
+            // it will not read.
+            isLoading: isStale || viewsQuery.isFetching || (appWide && docsQuery.isFetching),
             byCategory,
             totalByCategory,
             viewsHasMore: viewsQuery.data?.hasMore ?? false,
         }
-    }, [debouncedQuery, trimmed, workspaces, templates, ontologies, viewsQuery.data, viewsQuery.isFetching, appWide, visiblePages, docsQuery.data, brand, limitPerCategory])
+    }, [debouncedQuery, trimmed, workspaces, templates, ontologies, viewsQuery.data, viewsQuery.isFetching, appWide, visiblePages, docsQuery.data, docsQuery.isFetching, brand, limitPerCategory])
 }
 
 /** Flattens hits in canonical category order for consumers that want a single list. */
