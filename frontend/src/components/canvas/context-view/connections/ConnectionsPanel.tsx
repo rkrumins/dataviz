@@ -164,7 +164,7 @@ export function ConnectionsPanel({
   return (
     <div
       className={cn(
-        'bg-canvas-elevated/95 border border-glass-border shadow-lg rounded-xl overflow-hidden',
+        'bg-canvas-elevated border border-glass-border shadow-lg rounded-xl overflow-hidden',
         className,
       )}
     >

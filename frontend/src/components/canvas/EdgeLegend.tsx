@@ -169,7 +169,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
     // ghosts a mis-placed tile over its rows (the "white strip").
     // Opacity gives the same separation without the mechanism.
     return (
-        <div className={cn("bg-canvas-elevated/95 border border-glass-border shadow-lg rounded-xl overflow-hidden", className)}>
+        <div className={cn("bg-canvas-elevated border border-glass-border shadow-lg rounded-xl overflow-hidden", className)}>
             {/* Header */}
             <button
                 onClick={() => setIsExpanded(!isExpanded)}
