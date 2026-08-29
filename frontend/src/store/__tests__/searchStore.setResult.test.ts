@@ -9,7 +9,7 @@ beforeEach(() => {
 
 
 describe('searchStore.setResult — ancestorCounts (server-exact) vs path rollup', () => {
-    it('ancestorCounts, when provided, replaces the page-derived rollup', () => {
+    it('a server bucket overrides the page-derived rollup for that ancestor', () => {
         useSearchStore.getState().setResult({
             viewId: 'view-1',
             matchUrns: ['hit-1'],
@@ -29,6 +29,37 @@ describe('searchStore.setResult — ancestorCounts (server-exact) vs path rollup
         const s = useSearchStore.getState()
         expect(s.ancestorMatchCounts.get('A')).toBe(7)
         expect(s.ancestorMatchTypeBreakdowns.get('A')?.get('dataset')).toBe(7)
+    })
+
+    it('an ancestor the server sent no bucket for keeps its rollup count', () => {
+        useSearchStore.getState().setResult({
+            viewId: 'view-1',
+            matchUrns: ['hit-1'],
+            // The hit's path credits its parent 'A' AND its grandparent 'P'.
+            ancestorPaths: [
+                {
+                    path: [
+                        { urn: 'P', displayName: 'P', entityType: 'domain' },
+                        { urn: 'A', displayName: 'A', entityType: 'table' },
+                    ],
+                    leafEntityType: 'column',
+                },
+            ],
+            // The aggregation groups by immediate parent, so only 'A'
+            // comes back with a bucket.
+            ancestorCounts: [
+                { urn: 'A', count: 7, breakdown: new Map([['column', 7]]) },
+            ],
+            queryHash: 'q3',
+        })
+        const s = useSearchStore.getState()
+        expect(s.ancestorMatchCounts.get('A')).toBe(7)
+        expect(s.ancestorMatchTypeBreakdowns.get('A')?.get('column')).toBe(7)
+        // 'P' has no bucket, so it keeps what this page proved — otherwise
+        // Isolate/Hide would drop a container that demonstrably has matches
+        // under it.
+        expect(s.ancestorMatchCounts.get('P')).toBe(1)
+        expect(s.ancestorMatchTypeBreakdowns.get('P')?.get('column')).toBe(1)
     })
 
     it('falls back to the page-derived rollup when ancestorCounts is omitted', () => {

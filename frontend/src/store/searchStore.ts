@@ -329,8 +329,8 @@ export interface AncestorPathInfo {
 /**
  * One bucket of the server's ``ancestor`` aggregation: an exact match
  * count for a single ancestor URN, with an optional per-entityType
- * breakdown (from ``bucket.typeCounts``). Passed to ``setResult`` in
- * place of the page-derived ``ancestorPaths`` rollup.
+ * breakdown (from ``bucket.typeCounts``). Passed to ``setResult`` on top
+ * of the page-derived ``ancestorPaths`` rollup.
  */
 export interface AncestorCountInfo {
     urn: string
@@ -346,11 +346,11 @@ interface SearchStoreActions {
          *  end of that path). Used to derive both ``ancestorMatchCounts``
          *  and ``ancestorMatchTypeBreakdowns`` so the canvas can surface
          *  roll-up counts AND a per-type breakdown on collapsed nodes.
-         *  Ignored when ``ancestorCounts`` is provided. */
+         *  Ancestors ``ancestorCounts`` doesn't cover keep these values. */
         ancestorPaths?: Iterable<AncestorPathInfo>
         /** Exact per-ancestor match counts from the server's ``ancestor``
-         *  aggregation. When provided, REPLACES the page-derived rollup
-         *  from ``ancestorPaths`` — the aggregation covers every match in
+         *  aggregation. When provided, each entry OVERRIDES that URN's
+         *  page-derived rollup — the aggregation covers every match in
          *  the view, not just the hits on the current page, so it stays
          *  correct across ``loadMore``. */
         ancestorCounts?: Iterable<AncestorCountInfo>
@@ -489,23 +489,27 @@ function deriveAncestorRollups(infos: Iterable<AncestorPathInfo>): {
 }
 
 /**
- * Converts the server's exact ``ancestor`` aggregation buckets straight
- * into the same ``{ counts, breakdowns }`` shape ``deriveAncestorRollups``
- * produces, so ``setResult`` can treat both sources identically. No
- * summing needed — each bucket already IS the ancestor's total.
+ * Overlays the server's exact ``ancestor`` aggregation onto the
+ * page-derived rollup, in place. A bucket wins outright for its own URN —
+ * it counts the whole candidate set, not just this page's hits, and no
+ * summing is needed because each bucket already IS that ancestor's total.
+ *
+ * Ancestors the server sent no bucket for keep their rollup value rather
+ * than disappearing: the aggregation groups by immediate parent, so a
+ * grandparent the current page proves has matches under it has no bucket
+ * of its own, and dropping it would make Isolate/Hide swallow a container
+ * the user can see a match inside.
  */
-function ancestorCountsFromServer(infos: Iterable<AncestorCountInfo>): {
-    counts: Map<string, number>
-    breakdowns: Map<string, Map<string, number>>
-} {
-    const counts = new Map<string, number>()
-    const breakdowns = new Map<string, Map<string, number>>()
+function overlayServerAncestorCounts(
+    counts: Map<string, number>,
+    breakdowns: Map<string, Map<string, number>>,
+    infos: Iterable<AncestorCountInfo>,
+): void {
     for (const { urn, count, breakdown } of infos) {
         if (!urn) continue
         counts.set(urn, count)
         if (breakdown) breakdowns.set(urn, new Map(breakdown))
     }
-    return { counts, breakdowns }
 }
 
 const EMPTY_ISSUES: ReadonlyArray<BuilderValidationIssue> = Object.freeze([])
@@ -658,14 +662,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 ordered.push(urn)
             }
         }
-        // ancestorCounts (server-exact) takes priority over the
-        // page-derived ancestorPaths rollup when both are supplied.
-        const { counts, breakdowns } = ancestorCounts
-            ? ancestorCountsFromServer(ancestorCounts)
-            : ancestorPaths
-                ? deriveAncestorRollups(ancestorPaths)
-                : { counts: new Map<string, number>(),
-                    breakdowns: new Map<string, Map<string, number>>() }
+        // The page-derived rollup is the floor; the server's exact
+        // per-ancestor counts (when this query asked for them) win for
+        // every URN they cover.
+        const { counts, breakdowns } = ancestorPaths
+            ? deriveAncestorRollups(ancestorPaths)
+            : { counts: new Map<string, number>(),
+                breakdowns: new Map<string, Map<string, number>>() }
+        if (ancestorCounts) {
+            overlayServerAncestorCounts(counts, breakdowns, ancestorCounts)
+        }
         set({
             viewId,
             matchUrnSet: next,
