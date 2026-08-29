@@ -17,9 +17,12 @@
  * - "Fit" runs fit-to-width, so orientation and the way back to
  *   see-everything live on the same surface.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+
+/** Breathing room between the strip and the last row it must never cover. */
+const STRIP_GAP_PX = 8
 
 export interface LayerStripLayer {
   id: string
@@ -42,6 +45,28 @@ export function LayerStrip({
 }) {
   // Layer ids whose columns are currently (mostly) inside the viewport.
   const [visibleIds, setVisibleIds] = useState<Set<string>>(() => new Set())
+
+  // The strip floats over the bottom of the columns. Publish its height
+  // on the canvas body (the way TraceBottomDock publishes
+  // `--trace-dock-height`) so the columns can reserve the band — otherwise
+  // a column whose content ends under the strip has a last row that the
+  // strip's pills take the click for, and nothing to scroll it clear.
+  const barRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const bar = barRef.current
+    const body = bar?.closest<HTMLElement>('[data-canvas-body]')
+    if (!bar || !body) return
+    const publish = () => {
+      body.style.setProperty('--layer-strip-height', `${bar.offsetHeight + STRIP_GAP_PX}px`)
+    }
+    publish()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(publish) : null
+    ro?.observe(bar)
+    return () => {
+      ro?.disconnect()
+      body.style.removeProperty('--layer-strip-height')
+    }
+  }, [])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -91,7 +116,7 @@ export function LayerStrip({
       style={{ bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
-      <div className="pointer-events-auto flex items-center gap-1 px-1.5 py-1 rounded-full backdrop-blur-md border border-black/10 dark:border-white/10 shadow-lg bg-canvas-elevated/90 max-w-[70vw] overflow-x-auto custom-scrollbar">
+      <div ref={barRef} className="pointer-events-auto flex items-center gap-1 px-1.5 py-1 rounded-full backdrop-blur-md border border-black/10 dark:border-white/10 shadow-lg bg-canvas-elevated/90 max-w-[70vw] overflow-x-auto custom-scrollbar">
         {layers.map(layer => {
           const active = visibleIds.has(layer.id)
           return (

@@ -4896,7 +4896,11 @@ export function ContextViewCanvas({
           ref={horizontalScrollRef}
           className="flex-1 overflow-auto relative scroll-smooth"
           onClick={handleBackgroundClick}
-          style={{ paddingBottom: 'var(--trace-dock-height, 0px)' }}
+          // Reserve the bottom band the floating chrome occupies (trace
+          // dock, layer strip) so a column's last row can always scroll
+          // clear of it — and be clicked. Both variables are published by
+          // the chrome itself and are 0 when it is not rendered.
+          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px))' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
