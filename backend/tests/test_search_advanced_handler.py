@@ -31,11 +31,11 @@ from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.search import SearchQuery, SearchResultPage
 
 
-def _query(scope_mode: str = "view") -> SearchQuery:
+def _query(scope_mode: str = "view", view_id: str = "view-1") -> SearchQuery:
     return SearchQuery.model_validate({
         "predicate": {"kind": "text", "value": "orders"},
         "scope": {
-            "viewId": "view-1",
+            "viewId": view_id,
             "scopeMode": scope_mode,
             "rootUrns": ["urn:root"],
         },
@@ -262,6 +262,29 @@ async def test_capability_identity_may_search_its_view(slot, patched_search):
     assert len(patched_search) == 1
 
 
+async def test_capability_identity_cannot_name_a_foreign_view_in_the_body(
+    slot, patched_search,
+):
+    """``?viewId=view-1`` authorises the capability, but the search body
+    carries its OWN ``scope.viewId`` — naming a different view there
+    must not let the identity search it, even in ``view`` mode, which
+    is otherwise always allowed."""
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_advanced(
+            query=_query("view", view_id="view-2"),
+            request=_request(view_capability="view-1"),
+            response=Response(),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "This link can only search inside its view."
+    assert patched_search == [], "must refuse before running the search"
+    assert slot["acquisitions"] == []
+
+
 @pytest.mark.parametrize("scope_mode", ["data_source", "visible", "view"])
 async def test_full_permission_user_is_unaffected(
     scope_mode, slot, patched_search,
@@ -305,6 +328,32 @@ async def test_explain_applies_the_same_capability_guard(
     with pytest.raises(HTTPException) as exc:
         await graph_mod.search_explain(
             query=_query(scope_mode),
+            request=_request(view_capability="view-1"),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 403
+    assert calls == []
+
+
+async def test_explain_refuses_a_foreign_view_named_in_the_body(monkeypatch):
+    """Same escape as ``search_advanced``'s, same refusal."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    calls: list = []
+
+    async def _fake_explain(self, query):
+        calls.append(query)
+        return {}
+
+    monkeypatch.setattr(AdvancedSearchService, "explain", _fake_explain)
+
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_explain(
+            query=_query("view", view_id="view-2"),
             request=_request(view_capability="view-1"),
             ws_id="ws-1",
             engine=_FakeEngine(),

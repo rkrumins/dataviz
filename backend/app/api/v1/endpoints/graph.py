@@ -1449,20 +1449,27 @@ def _guard_capability_scope(
     ``capability_gate`` stamps ``request.state.view_capability`` when the
     caller reached this route through a view capability rather than
     ``workspace:datasource:read`` membership. For that identity the view
-    IS the RBAC boundary, and two scope modes escape it: ``data_source``
-    drops the view's root clamp outright, and ``visible``'s only clamp is
-    the CLIENT-supplied ``visibleUrns`` list. ``view`` mode resolves
-    against the view's own authorised roots, so it stays open. Membership
-    callers are unaffected.
+    IS the RBAC boundary, and three things escape it: ``data_source``
+    drops the view's root clamp outright, ``visible``'s only clamp is
+    the CLIENT-supplied ``visibleUrns`` list, and — because the capability
+    is authorised via the ``?viewId=`` query param while the search body
+    carries its OWN ``scope.viewId`` — a caller could otherwise name a
+    DIFFERENT view in the body and have it resolved as if the capability
+    covered it. ``view`` mode against the capability's OWN view resolves
+    against the view's own authorised roots, so that alone stays open.
+    Membership callers are unaffected.
 
     ``query=None`` is ``/search/discover``, which takes no query at all:
     it reports the whole graph's labels, property keys and tag values,
     and nothing narrows that to the granted view — so every capability
     identity is refused there.
     """
-    if not getattr(request.state, "view_capability", None):
+    cap_view_id = getattr(request.state, "view_capability", None)
+    if not cap_view_id:
         return
-    if query is None or query.scope.scope_mode in ("data_source", "visible"):
+    if (query is None
+            or query.scope.scope_mode in ("data_source", "visible")
+            or query.scope.view_id != cap_view_id):
         raise HTTPException(
             status_code=403,
             detail="This link can only search inside its view.",
@@ -1505,9 +1512,8 @@ async def search_advanced(
     slot, so a search-as-you-type keystroke storm sheds load with 429 +
     Retry-After instead of pegging the graph's single Cypher thread.
 
-    See ``backend/common/models/search.py`` for the full contract and
-    ``docs/api/advanced-search.md`` for the AI-agent iterative-drill
-    pattern.
+    See ``backend/common/models/search.py`` for the full contract,
+    including the AI-agent iterative-drill / facet-discovery pattern.
     """
     if not ws_id:
         raise HTTPException(
