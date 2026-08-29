@@ -25,16 +25,18 @@
  *     Enter on unchanged text means "ask again", and after a failed run
  *     it is the only way back (`runState` holds the failed hash). The
  *     panel's own Run button is unguarded for the same reason;
- *   * the panel opening itself on the first results for a query — and not
- *     again, so a user who closes it can keep it closed while later pages
- *     of the same query arrive.
+ *   * the panel's open/Refine state, which is now opened only by a
+ *     deliberate gesture. It used to open ITSELF on the first result set
+ *     for a query; the header's "Top matches" list answers that need
+ *     without taking the canvas away, so the rail is left to ⌘⇧F,
+ *     "See all" and Refine (E-d).
  *
  * `clearOnUnmount: false` is what keeps highlights on the canvas after the
  * panel closes. They end when the query is cleared or the view changes:
  * `teardown` does both, because this hook does NOT remount on a view
  * switch — the canvas route is not keyed on the view id, so a switch that
- * only cleared highlights would leave the box, the pipeline and the
- * panel's auto-open memory holding the previous view's search.
+ * only cleared highlights would leave the box and the pipeline holding
+ * the previous view's search.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 
@@ -45,7 +47,8 @@ import {
 } from '@/hooks/useAdvancedSearch'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { useSearchStore } from '@/store/searchStore'
-import type { Predicate, SearchHit } from '@/types/search'
+import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
+import type { AncestorRef, Predicate, SearchHit } from '@/types/search'
 import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 
 import { buildRunnablePredicate } from '../panel/runnablePredicate'
@@ -151,6 +154,17 @@ export interface ViewSearchSessionOptions {
     viewId: string
     layers: ViewLayerConfig[]
     assignments: Record<string, LayerAssignmentEntry>
+    /**
+     * Walk a hit onto the canvas: prime its spine, expand each level and
+     * select it. Passed IN rather than built here because it needs the
+     * canvas's own expansion state and hydration — the session has
+     * neither, and a hook that reached for them would tie every search
+     * surface to one canvas.
+     */
+    revealHit: RevealSearchHit
+    /** Warm a hit's spine without expanding anything, so the reveal that
+     *  follows does not pay the round-trip. */
+    prefetchHit: (urn: string, ancestorPath: AncestorRef[]) => Promise<void>
 }
 
 export interface ViewSearchSession {
@@ -220,6 +234,16 @@ export interface ViewSearchSession {
     advanced: UseAdvancedSearchResult
 
     /**
+     * Walk a hit onto the canvas — what the dropdown's ↵ and the panel's
+     * "Reveal" both call. Handed to the session by the canvas.
+     */
+    revealHit: RevealSearchHit
+    /** Warm a hit's spine ahead of a reveal the user has not asked for
+     *  yet — the dropdown fires it once a row has been active for a
+     *  moment. */
+    prefetchHit: (urn: string, ancestorPath: AncestorRef[]) => Promise<void>
+
+    /**
      * What the layer columns read, on its own context.
      *
      * Exposed here so the canvas can provide both from one hook, but a
@@ -231,7 +255,7 @@ export interface ViewSearchSession {
 
 
 export function useViewSearchSessionController(
-    { viewId, layers, assignments }: ViewSearchSessionOptions,
+    { viewId, layers, assignments, revealHit, prefetchHit }: ViewSearchSessionOptions,
 ): ViewSearchSession {
     const advanced = useAdvancedSearch(viewId, { clearOnUnmount: false })
     const [quick, setQuickState] = useState<QuickQuery>(DEFAULT_QUICK)
@@ -248,11 +272,6 @@ export function useViewSearchSessionController(
     const advancedRef = useRef(advanced)
     useEffect(() => { advancedRef.current = advanced })
 
-    // Which query the panel has already opened itself for. A result set
-    // is published on every page of a query, and the user's close must
-    // survive them.
-    const autoOpenedHashRef = useRef<string | null>(null)
-
     const teardown = useCallback(() => {
         // `resetTemplate` is the pipeline's own teardown: it aborts the
         // in-flight request, drops the run state and rewinds the view to
@@ -264,9 +283,6 @@ export function useViewSearchSessionController(
         // dispatch, and the highlights on the canvas.
         useSearchStore.getState().clear()
         setQuickState(DEFAULT_QUICK)
-        // Whatever comes next is a fresh query as far as the panel is
-        // concerned, even when it hashes to the same string.
-        autoOpenedHashRef.current = null
         // Same rule `openPanel` applies, applied to the state this just
         // produced: there are no results any more, so a panel still open
         // has nothing to report on and the builder is its only content.
@@ -324,15 +340,6 @@ export function useViewSearchSessionController(
         // consumer a standing result for a query that does not exist.
         return runnable !== null && runStateHash === runnable.hash
     }, [quick, runStateHash])
-
-    const resultsHash = advanced.view.kind === 'results'
-        ? (advanced.runState?.hash ?? null)
-        : null
-    useEffect(() => {
-        if (resultsHash === null || autoOpenedHashRef.current === resultsHash) return
-        autoOpenedHashRef.current = resultsHash
-        setPanelOpen(true)
-    }, [resultsHash])
 
     // Opening decides what the panel opens ON, once, here — rather than
     // the panel deriving it from "are there results right now?". That
@@ -405,12 +412,13 @@ export function useViewSearchSessionController(
         refineOpen, refine, closeRefine,
         resultMatchesQuick,
         inputRef, resolveLayer, layers,
+        revealHit, prefetchHit,
         advanced, rowSearch,
     }), [
         viewId,
         quick, setQuick, runNow, teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine, closeRefine, resultMatchesQuick,
-        resolveLayer, layers, advanced, rowSearch,
+        resolveLayer, layers, revealHit, prefetchHit, advanced, rowSearch,
     ])
 }

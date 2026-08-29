@@ -14,6 +14,18 @@
  * surface with a second query. Both are gone: there is one query now, and
  * the panel is where its results live.
  *
+ * What the box adds on top of the session is the LIST under it. "Top
+ * matches" is the first tier of the search: the ten best hits with the
+ * path to each one on the canvas, driven entirely from the keyboard. It
+ * replaced the results panel opening itself on every first result set —
+ * an answer that took over a whole rail for a question most often
+ * settled by "that one". The panel is still there behind "See all".
+ *
+ * The rules live HERE and the surface (`search/SearchDropdown`) draws
+ * them: when the list is open, which row is active, what each key does,
+ * what a pick means. That split is what makes the rules testable without
+ * a portal and the surface testable without a session.
+ *
  * "Look in" and "Match" are two anchored lists built the way
  * `DisplayMenu` builds its popover (portal + framer-motion, no
  * AnimatePresence — an interrupted exit strands an invisible
@@ -23,7 +35,8 @@
  */
 
 import {
-  useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode,
+  useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState,
+  type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
@@ -31,10 +44,15 @@ import * as LucideIcons from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { useRecentSearches } from '@/hooks/useRecentSearches'
+import type { SearchHit } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { TEXT_MATCH_OPTIONS } from '../../search/panel/ConditionRow'
 import type { QuickLookIn, QuickMatch } from '../../search/session/quickPredicate'
 import { useViewSearchSession } from '../../search/session/ViewSearchSessionContext'
+import { hasReportableView } from '../../search/session/useViewSearchSessionController'
+import { SearchDropdown, optionId } from './search/SearchDropdown'
+import { topMatches } from './search/dropdownModel'
 
 const FIXED_LOOK_IN: { value: QuickLookIn; label: string }[] = [
   { value: 'everything', label: 'Everything' },
@@ -52,6 +70,34 @@ const MATCH_OPTIONS = TEXT_MATCH_OPTIONS
 /** What a click can move focus to on its own. */
 const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
 
+/** Long enough that arrowing THROUGH a row costs nothing, short enough
+ *  that a row the user has actually stopped on is warm by the time they
+ *  press ↵. */
+const PREFETCH_MS = 150
+
+/** How long the box says where a reveal landed before going back to
+ *  reporting the count. */
+const LANDING_NOTE_MS = 4000
+
+/** Marks the portalled list, so the box's outside-click handler can tell
+ *  "clicked away" from "clicked in the list" across the portal. */
+const DROPDOWN_MARK = 'data-view-search-dropdown'
+
+/** The last answer the box got, kept while the next run is in flight —
+ *  the rows stay on screen (dimmed) rather than blinking out per
+ *  keystroke. `answered` is what separates "zero matches" from "nothing
+ *  has come back yet"; a count of 0 cannot. */
+interface StandingAnswer {
+  rows: SearchHit[]
+  count: number | null
+  plus: boolean
+  answered: boolean
+}
+
+const NO_ANSWER: StandingAnswer = {
+  rows: [], count: null, plus: false, answered: false,
+}
+
 function lookInLabel(lookIn: QuickLookIn): string {
   if (typeof lookIn === 'object') return lookIn.property
   return FIXED_LOOK_IN.find((o) => o.value === lookIn)?.label ?? 'Everything'
@@ -62,13 +108,194 @@ export function HeaderSearch() {
   // ref, and reading a ref-bearing object's fields through it during
   // render trips the react-hooks lint.
   const {
-    quick, setQuick, runNow, clearQuery, clearScope, refine, inputRef, viewId,
+    quick, setQuick, runNow, clearQuery, clearScope, refine, openPanel,
+    inputRef, viewId, resultMatchesQuick, advanced, resolveLayer, layers,
+    revealHit, prefetchHit,
   } = useViewSearchSession()
   const scope = quick.scope
+  const view = advanced.view
+
+  // The list's own state. All three are the box's, not the session's: a
+  // search that is still standing has to survive the list being closed
+  // (E-b), and the session must not care whether anything is on screen.
+  const [focused, setFocused] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(0)
+  // Where a reveal actually landed, when that is not where it was aimed.
+  // The producer is the reveal walk itself (E4); the slot, its expiry and
+  // its place in the status line are here.
+  const [landingNote, setLandingNote] = useState<string | null>(null)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const listId = useId()
+  const { recents, record } = useRecentSearches(`nexus.viewSearch.recent.${viewId}`)
+
+  const trimmed = quick.text.trim()
+
+  // The answer to what is in the box, or null while the standing result
+  // belongs to something else. Memoised on the pipeline's own view
+  // object so the rows keep their identity between renders — the
+  // prefetch timer restarts on a new array, and one that changed per
+  // render would never fire.
+  const answer = useMemo<StandingAnswer | null>(() => {
+    if (view.kind !== 'results' || !resultMatchesQuick) return null
+    const result = view.result
+    return {
+      rows: topMatches(result.hits),
+      count: result.totalCount ?? result.candidateCount ?? null,
+      // "More than this" is what the plus means, so it belongs only to a
+      // count that IS a floor. A truncated run the server still counted
+      // exactly has nothing more than its total.
+      plus: result.truncated === true && result.totalCount == null,
+      answered: true,
+    }
+  }, [view, resultMatchesQuick])
+
+  // Held across the next run so the rows dim rather than vanish. Emptied
+  // when the box is, because then they answer a question nobody is
+  // asking any more.
+  const standingRef = useRef<StandingAnswer>(NO_ANSWER)
+  if (!trimmed) standingRef.current = NO_ANSWER
+  else if (answer) standingRef.current = answer
+  const standing = standingRef.current
+  const rows = standing.rows
+  const active = rows.length > 0 ? Math.min(activeIndex, rows.length - 1) : 0
+
+  // `hasContent` is the third of the open rule: an empty box has recents
+  // to offer and one character has a hint, but a half-typed word with
+  // nothing back yet has nothing to put on screen.
+  const hasContent = trimmed === '' || trimmed.length === 1 || hasReportableView(view)
+  const open = focused && !dismissed && hasContent
+
+  // A new answer re-ranks the list, so the highlight goes back to the
+  // top. Closing and re-opening does not — the user left it where they
+  // left it (E-b).
+  const resultsHash = view.kind === 'results' ? (advanced.runState?.hash ?? null) : null
+  useEffect(() => { setActiveIndex(0) }, [resultsHash])
+
+  // Recents are what was SEARCHED, not what was typed: a query recorded
+  // per keystroke would fill the list with five prefixes of one word.
+  // A run that found nothing is not worth offering back either.
+  const foundCount = view.kind === 'results' ? (view.result.candidateCount ?? 0) : 0
+  const textRef = useRef(quick.text)
+  textRef.current = quick.text
+  useEffect(() => {
+    if (resultsHash === null || foundCount <= 0) return
+    record(textRef.current)
+  }, [resultsHash, foundCount, record])
+
+  useEffect(() => {
+    if (!landingNote) return
+    const timer = window.setTimeout(() => setLandingNote(null), LANDING_NOTE_MS)
+    return () => window.clearTimeout(timer)
+  }, [landingNote])
+
+  // Warm the spine of the row the user has SETTLED on. Arrowing through
+  // a list would otherwise fire ten requests to answer one ↵.
+  useEffect(() => {
+    if (!open || rows.length === 0) return
+    const hit = rows[active]
+    if (!hit) return
+    const timer = window.setTimeout(() => {
+      void prefetchHit(hit.node.urn, hit.ancestorPath ?? [])
+    }, PREFETCH_MS)
+    return () => window.clearTimeout(timer)
+  }, [open, active, rows, prefetchHit])
+
+  // Clicking away closes the list. A click inside the box, inside the
+  // list itself (portalled — hence the marker attribute) or inside one of
+  // the Look-in/Match popovers (portalled `role="dialog"`) is not away:
+  // reading those as "clicked away" put the list down the moment the
+  // user went to narrow the search.
+  useEffect(() => {
+    if (!open) return
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (!target) return
+      if (boxRef.current?.contains(target)) return
+      if (target.closest?.(`[${DROPDOWN_MARK}]`)) return
+      if (target.closest?.('[role="dialog"]')) return
+      setDismissed(true)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [open])
+
+  const pick = useCallback((hit: SearchHit) => {
+    void revealHit(hit.node.urn, hit.ancestorPath ?? [])
+    // The text and the canvas highlights stay: the user picked ONE of
+    // several matches, and the others are still worth seeing (E-b).
+    setDismissed(true)
+    record(textRef.current)
+  }, [revealHit, record])
+
+  const pickCrumb = useCallback((hit: SearchHit, index: number) => {
+    const path = hit.ancestorPath ?? []
+    const target = path[index]
+    if (!target) return
+    // The crumb's OWN ancestors, which is everything before it.
+    void revealHit(target.urn, path.slice(0, index))
+    setDismissed(true)
+  }, [revealHit])
+
+  const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp'
+      || e.key === 'Home' || e.key === 'End') {
+      if (!open || rows.length === 0) return
+      e.preventDefault()
+      setActiveIndex((prev) => {
+        const from = Math.min(prev, rows.length - 1)
+        if (e.key === 'ArrowDown') return (from + 1) % rows.length
+        if (e.key === 'ArrowUp') return (from - 1 + rows.length) % rows.length
+        return e.key === 'Home' ? 0 : rows.length - 1
+      })
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (e.metaKey || e.ctrlKey) {
+        openPanel()
+        setDismissed(true)
+        return
+      }
+      // Only the rows that ANSWER this box can be revealed. Anything
+      // else — a failed run, a query still being typed — means "ask
+      // again", and after a failure Enter is the only way back.
+      if (view.kind === 'results' && resultMatchesQuick && rows.length > 0) {
+        pick(rows[active])
+      } else {
+        runNow()
+      }
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      // Two steps (E-f): the list goes first, and the query — with the
+      // canvas highlights it published — only if there is no list left
+      // to put away.
+      if (open) {
+        setDismissed(true)
+        return
+      }
+      clearQuery()
+      e.currentTarget.blur()
+      return
+    }
+    if (e.key === 'Tab') setDismissed(true)
+  }, [
+    open, rows, active, view, resultMatchesQuick, pick, runNow, openPanel, clearQuery,
+  ])
+
+  // Which layer column a hit badges under, by NAME — the row shows the
+  // path top-down and the layer is its first term.
+  const layerOf = useCallback((hit: SearchHit) => {
+    const id = resolveLayer(hit)
+    if (!id) return null
+    return layers.find((l) => l.id === id)?.name ?? null
+  }, [resolveLayer, layers])
 
   return (
     <div data-tour="canvas-search" className="justify-self-center w-full max-w-xl">
-      <div className="relative group">
+      <div ref={boxRef} className="relative group">
         {/* Accent halo on focus — soft glow behind the field that lifts
             it off the header gradient. Pure decoration; sits behind via
             negative inset. */}
@@ -113,18 +340,34 @@ export function HeaderSearch() {
             type="text"
             placeholder="Search this view…"
             value={quick.text}
-            onChange={(e) => setQuick({ text: e.target.value })}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                runNow()
-              } else if (e.key === 'Escape') {
-                e.preventDefault()
-                clearQuery()
-                e.currentTarget.blur()
-              }
+            onChange={(e) => {
+              // A new word is a new question — whatever the user put the
+              // list away for, they are asking again.
+              setDismissed(false)
+              setQuick({ text: e.target.value })
             }}
+            onFocus={() => { setFocused(true); setDismissed(false) }}
+            onBlur={(e) => {
+              // Only a focus that went somewhere REAL and outside closes
+              // the list. Focus landing nowhere (a click on inert chrome)
+              // belongs to the mousedown handler above, and the two
+              // popovers take focus on purpose while the list stays.
+              const next = e.relatedTarget as HTMLElement | null
+              if (!next) return
+              if (boxRef.current?.contains(next)) return
+              if (next.closest?.(`[${DROPDOWN_MARK}]`)) return
+              if (next.closest?.('[role="dialog"]')) return
+              setFocused(false)
+            }}
+            onKeyDown={onKeyDown}
             aria-label="Search this view"
+            role="combobox"
+            aria-expanded={open}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={
+              open && rows.length > 0 ? optionId(listId, active) : undefined
+            }
             className={cn(
               "flex-1 min-w-0 bg-transparent border-0 px-2 py-2.5",
               "text-[13.5px] text-ink placeholder:text-ink-muted/45",
@@ -188,24 +431,25 @@ export function HeaderSearch() {
             )}
           </AnchoredMenu>
 
-          <button
-            type="button"
-            onClick={() => refine()}
-            aria-label="Refine this search"
-            title="Refine — build this query out in the results panel"
-            className={cn(
-              'shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg',
-              'transition-all duration-200',
-              'text-accent-lineage',
-              'bg-gradient-to-br from-accent-lineage/15 to-purple-500/10',
-              'border border-accent-lineage/30',
-              'hover:from-accent-lineage/25 hover:to-purple-500/20',
-              'hover:border-accent-lineage/55 hover:shadow-md hover:shadow-accent-lineage/20',
-              'active:scale-95',
-            )}
-          >
-            <LucideIcons.Sparkles className="w-3.5 h-3.5" strokeWidth={2.4} />
-          </button>
+          <HoverTip label="Refine — build this query out in the results panel">
+            <button
+              type="button"
+              onClick={() => refine()}
+              aria-label="Refine this search"
+              className={cn(
+                'shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg',
+                'transition-all duration-200',
+                'text-accent-lineage',
+                'bg-gradient-to-br from-accent-lineage/15 to-purple-500/10',
+                'border border-accent-lineage/30',
+                'hover:from-accent-lineage/25 hover:to-purple-500/20',
+                'hover:border-accent-lineage/55 hover:shadow-md hover:shadow-accent-lineage/20',
+                'active:scale-95',
+              )}
+            >
+              <LucideIcons.Sparkles className="w-3.5 h-3.5" strokeWidth={2.4} />
+            </button>
+          </HoverTip>
 
           {quick.text && (
             <button
@@ -222,8 +466,34 @@ export function HeaderSearch() {
             </button>
           )}
         </div>
+
+        {open && (
+          <SearchDropdown
+            anchorRef={boxRef}
+            listId={listId}
+            text={quick.text}
+            quick={quick}
+            rows={rows}
+            activeIndex={active}
+            running={view.kind === 'running'}
+            error={view.kind === 'error' ? view.message : null}
+            zero={standing.answered && rows.length === 0}
+            count={standing.count}
+            plus={standing.plus}
+            recents={recents}
+            layerOf={layerOf}
+            onActivate={setActiveIndex}
+            onPick={pick}
+            onCrumb={pickCrumb}
+            onRecent={(text) => { setQuick({ text }); runNow() }}
+            onNarrow={(patch) => setQuick(patch)}
+            onSeeAll={() => { openPanel(); setDismissed(true) }}
+            onRefine={() => { refine(); setDismissed(true) }}
+            onRetry={() => runNow()}
+          />
+        )}
       </div>
-      <StatusLine />
+      <StatusLine landingNote={landingNote} />
     </div>
   )
 }
@@ -232,12 +502,16 @@ export function HeaderSearch() {
  * What the current run has to say, in one line. Silent when idle or
  * failed — the panel owns the error and the zero-result diagnostic; a
  * second copy of either under the box would just be noise.
+ *
+ * A landing note outranks the count while it stands: "the reveal put you
+ * somewhere other than where you aimed" is news, and the count is not.
  */
-function StatusLine() {
+function StatusLine({ landingNote }: { landingNote: string | null }) {
   const s = useViewSearchSession()
   const view = s.advanced.view
 
   const line = (() => {
+    if (landingNote) return landingNote
     if (view.kind === 'running') return 'Searching…'
     if (view.kind !== 'results') return null
     const result = view.result
@@ -249,10 +523,13 @@ function StatusLine() {
         .map((hit) => s.resolveLayer(hit))
         .filter((id): id is string => id !== null),
     )
-    // A truncated count is always "more than this", so it reads plural
-    // however small the number the server managed to reach.
-    const matches = count === 1 && !result.truncated ? 'match' : 'matches'
-    return `${count.toLocaleString()}${result.truncated ? '+' : ''} ${matches}`
+    // The plus means "more than this", so it belongs only to a count that
+    // is a floor — a run the server truncated AND could not count. With
+    // an exact total there is nothing more than it, and the count reads
+    // singular at one like any other exact number.
+    const plus = result.truncated === true && result.totalCount == null
+    const matches = count === 1 && !plus ? 'match' : 'matches'
+    return `${count.toLocaleString()}${plus ? '+' : ''} ${matches}`
       + ` · ${layers.size} ${layers.size === 1 ? 'layer' : 'layers'}`
   })()
 
@@ -264,6 +541,7 @@ function StatusLine() {
     </div>
   )
 }
+
 
 /** The property keys this view can be searched by, alongside the four
  *  fixed fields. Mounted only while the menu is open, so the discover

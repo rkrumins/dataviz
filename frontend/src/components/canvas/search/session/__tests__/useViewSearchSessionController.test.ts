@@ -13,9 +13,10 @@
  *   * Enter runs immediately AND the debounce that lands behind it stays
  *     quiet, because the hash it would dispatch is the one already run.
  *     Without that guard every Enter costs two identical queries;
- *   * the panel auto-opens on the first result set for a query and NOT
- *     again — a user who closes it must be able to keep it closed while
- *     more pages of the same query arrive;
+ *   * results do NOT open the panel. The header's own "Top matches" list
+ *     answers most searches, and a rail that took over the canvas on
+ *     every first result set was answering a question nobody asked; the
+ *     panel opens on ⌘⇧F, "See all" and Refine, and on nothing else;
  *   * what it runs is what it commits, so Refine opens on the identical
  *     condition row instead of an empty builder.
  *
@@ -105,11 +106,21 @@ function resultsView(elapsedMs = 12): PanelView {
     }
 }
 
+/** What the canvas hands the session: the reveal walk and its warm-up.
+ *  Both are the canvas's — they need its expansion state and hydration —
+ *  so the session only carries them. */
+const canvas = {
+    revealHit: vi.fn(async () => {}),
+    prefetchHit: vi.fn(async () => {}),
+}
+
 function renderSession(
     layers: ViewLayerConfig[] = [],
     assignments: Record<string, LayerAssignmentEntry> = {},
 ) {
-    return renderHook(() => useViewSearchSessionController({ viewId: VIEW_ID, layers, assignments }))
+    return renderHook(() => useViewSearchSessionController({
+        viewId: VIEW_ID, layers, assignments, ...canvas,
+    }))
 }
 
 
@@ -306,36 +317,33 @@ describe('useViewSearchSessionController — runNow', () => {
 
 
 describe('useViewSearchSessionController — panel', () => {
-    it('auto-opens on the first result set for a query, once', () => {
+    // E-d: the header's "Top matches" list is what answers a search now.
+    // The panel opening itself took over the canvas on every first result
+    // set — including the first result set of a word still being typed.
+    it('leaves the panel shut when results land, however many pages arrive', () => {
         const { result, rerender } = renderSession()
         expect(result.current.panelOpen).toBe(false)
 
         mocks.state.view = resultsView()
         mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
         rerender()
-        expect(result.current.panelOpen).toBe(true)
-
-        act(() => { result.current.closePanel() })
         expect(result.current.panelOpen).toBe(false)
 
-        // A second result set for the SAME query (a "load more" page)
-        // must not reopen a panel the user closed.
         mocks.state.view = resultsView(31)
+        rerender()
+        expect(result.current.panelOpen).toBe(false)
+
+        // Nor does a different query talk its way in.
+        mocks.state.runState = { hash: '{"kind":"text","value":"orders"}', status: 'done' }
         rerender()
         expect(result.current.panelOpen).toBe(false)
     })
 
-    it('opens again for a different query', () => {
-        const { result, rerender } = renderSession()
+    it('carries the canvas\'s reveal and its warm-up through to the surfaces', () => {
+        const { result } = renderSession()
 
-        mocks.state.view = resultsView()
-        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
-        rerender()
-        act(() => { result.current.closePanel() })
-
-        mocks.state.runState = { hash: '{"kind":"text","value":"orders"}', status: 'done' }
-        rerender()
-        expect(result.current.panelOpen).toBe(true)
+        expect(result.current.revealHit).toBe(canvas.revealHit)
+        expect(result.current.prefetchHit).toBe(canvas.prefetchHit)
     })
 
     it('Refine opens the panel with the builder', () => {
@@ -363,7 +371,6 @@ describe('useViewSearchSessionController — panel', () => {
         mocks.state.view = resultsView()
         mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
         rerender()
-        act(() => { result.current.closePanel() })
 
         act(() => { result.current.openPanel() })
 
@@ -391,6 +398,7 @@ describe('useViewSearchSessionController — panel', () => {
         mocks.state.view = resultsView()
         mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
         rerender()
+        act(() => { result.current.openPanel() })
         expect(result.current.refineOpen).toBe(false)
 
         act(() => { result.current.clearQuery() })
@@ -476,23 +484,20 @@ describe('useViewSearchSessionController — clearQuery', () => {
         expect(useSearchStore.getState().draftPredicate).toBeNull()
     })
 
-    it('a cleared query can be retyped and still auto-opens the panel', () => {
+    it('a Clear does not shut a panel the user opened on purpose', () => {
         const { result, rerender } = renderSession()
-
-        mocks.state.view = resultsView()
-        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
-        rerender()
-        act(() => { result.current.closePanel() })
+        act(() => { result.current.openPanel() })
 
         act(() => { result.current.clearQuery() })
         mocks.state.view = { kind: 'idle' }
         mocks.state.runState = null
         rerender()
 
-        mocks.state.view = resultsView()
-        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
-        rerender()
+        // Clearing empties the box, not the rail: the builder is what is
+        // left, and closing the panel out from under the user is a second
+        // decision they did not make.
         expect(result.current.panelOpen).toBe(true)
+        expect(result.current.refineOpen).toBe(true)
     })
 })
 
@@ -571,7 +576,7 @@ describe('useViewSearchSessionController — view lifetime', () => {
         // has to be dropped here or it describes the view the user left.
         const { result, rerender } = renderHook(
             ({ viewId }) => useViewSearchSessionController({
-                viewId, layers: [], assignments: {},
+                viewId, layers: [], assignments: {}, ...canvas,
             }),
             { initialProps: { viewId: 'view-A' } },
         )
@@ -581,8 +586,8 @@ describe('useViewSearchSessionController — view lifetime', () => {
         mocks.state.view = resultsView()
         mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
         rerender({ viewId: 'view-A' })
+        act(() => { result.current.openPanel() })
         expect(result.current.panelOpen).toBe(true)
-        act(() => { result.current.closePanel() })
 
         rerender({ viewId: 'view-B' })
 
@@ -593,16 +598,6 @@ describe('useViewSearchSessionController — view lifetime', () => {
         expect(mocks.resetTemplate).toHaveBeenCalledTimes(1)
         expect(useSearchStore.getState().draftPredicate).toBeNull()
         expect(useSearchStore.getState().matchUrnSet.size).toBe(0)
-
-        // ...including the panel's memory of what it has auto-opened for:
-        // the same query in the new view is a new query.
-        mocks.state.view = { kind: 'idle' }
-        mocks.state.runState = null
-        rerender({ viewId: 'view-B' })
-        mocks.state.view = resultsView()
-        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
-        rerender({ viewId: 'view-B' })
-        expect(result.current.panelOpen).toBe(true)
     })
 })
 

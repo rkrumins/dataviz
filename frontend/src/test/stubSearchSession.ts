@@ -85,6 +85,8 @@ export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSe
         inputRef: createRef<HTMLInputElement>(),
         resolveLayer: vi.fn(() => null),
         layers: [],
+        revealHit: vi.fn(async () => {}),
+        prefetchHit: vi.fn(async () => {}),
         advanced: stubAdvanced(),
         rowSearch: stubRowSearch(),
         ...over,

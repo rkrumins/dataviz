@@ -49,7 +49,9 @@ import { LayerStrip } from './LayerStrip'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
-import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
+import {
+  useRevealSearchHit, usePrefetchSearchHitSpine, type RevealSearchHit,
+} from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
@@ -1549,6 +1551,23 @@ export function ContextViewCanvas({
     [activeView?.content, activeReferenceLayout],
   )
 
+  // The reveal walk, handed to the search session below so the header's
+  // "Top matches" list can put a hit on the canvas without going through
+  // the results panel.
+  //
+  // A STABLE WRAPPER over a ref rather than the walk itself: the walk is
+  // built far below this line because it needs the hydration loader and
+  // the scroll helper, and neither exists yet here. Hoisting them would
+  // mean hoisting a third of this component above the session, and a
+  // session input that changed identity per render would churn every
+  // consumer of the search context. The warm-up has no such problem —
+  // the provider is resolved at the top of the file.
+  const revealSearchHitRef = useRef<RevealSearchHit | null>(null)
+  const revealHitForSearch = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
+    await revealSearchHitRef.current?.(urn, ancestorPath)
+  }, [])
+  const prefetchSearchHitSpine = usePrefetchSearchHitSpine(provider)
+
   // The canvas's ONE search session: the header box, the layer columns and
   // the results panel all read it back off the context below, so they can
   // no longer disagree about what was searched. Both inputs are memoised
@@ -1558,6 +1577,8 @@ export function ContextViewCanvas({
     viewId: activeView?.id ?? '',
     layers: sortedLayers,
     assignments: activeReferenceLayout.assignments,
+    revealHit: revealHitForSearch,
+    prefetchHit: prefetchSearchHitSpine,
   })
   // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
   // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
@@ -3061,6 +3082,12 @@ export function ContextViewCanvas({
     }
     await revealSearchHitBrowse(urn, ancestorPath)
   }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
+
+  // Close the loop on the wrapper the search session was handed above.
+  // The trace-aware `revealSearchHit`, not the bare browse walk: a reveal
+  // fired while a trace is on screen must go through the same write lock
+  // every other reveal does.
+  useEffect(() => { revealSearchHitRef.current = revealSearchHit })
 
   // "Frame matches" — scroll the horizontal canvas container so the first
   // match-bearing node is centered. This is a viewport-not-zoom action since
