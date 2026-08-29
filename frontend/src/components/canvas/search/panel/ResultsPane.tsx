@@ -15,22 +15,67 @@ import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import type { PanelView } from '@/hooks/useAdvancedSearch'
 import { useSchemaStore } from '@/store/schema'
-import { useDraftPredicate, useFocusedMatchUrn } from '@/store/searchStore'
+import {
+    useAncestorMatchCounts,
+    useDraftPredicate,
+    useFocusedMatchUrn,
+} from '@/store/searchStore'
 import type {
     AncestorRef,
     SearchAggregateBucket,
     SearchHit,
+    SearchQuery,
+    SearchResultPage,
 } from '@/types/search'
 
 import { AggregateBucketCard } from '../AggregateBucketCard'
 import { PathResultPanel } from '../PathResultPanel'
 import { HIT_ROW_ID_PREFIX } from '../SearchHitRow'
 import { ZeroResultsDiagnostic } from '../ZeroResultsDiagnostic'
+import { useViewSearchSessionOptional } from '../session/ViewSearchSessionContext'
 
 import { ErrorView } from './ErrorView'
+import { HitsByLayer, groupHitsByLayer } from './HitsByLayer'
 import { HitsByParent } from './HitsByParent'
 import { RunningSkeleton } from './RunningSkeleton'
 import { findScopeCondition } from './predicateComposition'
+
+
+/**
+ * Which aggregations still deserve a bucket CARD.
+ *
+ * The container roll-up (``by: 'parent'``, and ``by: 'ancestor'`` once
+ * the backend ships it) is what makes the canvas badges and the panel's
+ * per-container counts exact — up to 20 000 buckets of it. On a canvas
+ * with a session those numbers are already rendered, in place, by the
+ * layer › container grouping below; painting them again as a wall of
+ * cards buries the results the user asked for. So there they are
+ * badge-only, and every other facet (type, tag, property) still gets its
+ * card.
+ *
+ * The canvases whose only search IS this panel have no such grouping,
+ * and their bucket cards ARE the orientation step — they keep the lot.
+ *
+ * Buckets arrive as one list per requested aggregation, in request
+ * order; a list we cannot attribute to a spec is kept, because
+ * "unattributable" is not the same as "container-shaped" and dropping it
+ * would silently lose a facet.
+ */
+export function visibleFacetBuckets(
+    result: SearchResultPage,
+    query: SearchQuery,
+    hasSession: boolean,
+): SearchAggregateBucket[] {
+    const lists = result.aggregates ?? []
+    if (!hasSession) return lists.flat()
+    const specs = query.options?.aggregations ?? []
+    return lists
+        .filter((_, i) => {
+            const by = specs[i]?.by as string | undefined
+            return by !== 'parent' && by !== 'ancestor'
+        })
+        .flat()
+}
 
 
 export interface ResultsPaneProps {
@@ -47,11 +92,19 @@ export interface ResultsPaneProps {
     onLoadMore?: () => void
     /** True while a ``loadMore`` request is in flight. */
     isLoadingMore?: boolean
+    /** Page through the whole match set in one gesture — the panel loops
+     *  ``onLoadMore`` until the cursor runs out. */
+    onLoadAll?: () => void
+    /** True while that loop is running. */
+    isLoadingAll?: boolean
+    /** Stop the loop where it is; the pages already loaded stay. */
+    onCancelLoadAll?: () => void
 }
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
     view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
+    onLoadAll, isLoadingAll, onCancelLoadAll,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
     // VirtualizedHitList so the virtualizer can measure the visible
@@ -79,6 +132,9 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
                     isLoadingMore={isLoadingMore}
+                    onLoadAll={onLoadAll}
+                    isLoadingAll={isLoadingAll}
+                    onCancelLoadAll={onCancelLoadAll}
                     scrollElementRef={scrollContainerRef}
                 />
             </div>
@@ -89,7 +145,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 function Dispatch({
     view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
         case 'running':
@@ -105,6 +161,9 @@ function Dispatch({
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
                     isLoadingMore={isLoadingMore}
+                    onLoadAll={onLoadAll}
+                    isLoadingAll={isLoadingAll}
+                    onCancelLoadAll={onCancelLoadAll}
                     scrollElementRef={scrollElementRef}
                 />
             )
@@ -116,7 +175,7 @@ function Dispatch({
 
 function ResultsContent({
     view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
     onScopeToGroup: ResultsPaneProps['onScopeToGroup']
@@ -124,14 +183,22 @@ function ResultsContent({
     onOpen?: ResultsPaneProps['onOpen']
     onLoadMore?: ResultsPaneProps['onLoadMore']
     isLoadingMore?: ResultsPaneProps['isLoadingMore']
+    onLoadAll?: ResultsPaneProps['onLoadAll']
+    isLoadingAll?: ResultsPaneProps['isLoadingAll']
+    onCancelLoadAll?: ResultsPaneProps['onCancelLoadAll']
     scrollElementRef: RefObject<HTMLDivElement | null>
 }) {
     const { result } = view
+    // Present on the canvas that owns a search session; null on the ones
+    // whose only search IS this panel. It decides both halves of the
+    // results-first layout: which facets are worth a card, and whether
+    // the rows group by layer or by immediate parent.
+    const session = useViewSearchSessionOptional()
 
-    const allBuckets: SearchAggregateBucket[] = useMemo(() => {
-        if (!result.aggregates) return []
-        return result.aggregates.flat()
-    }, [result.aggregates])
+    const allBuckets: SearchAggregateBucket[] = useMemo(
+        () => visibleFacetBuckets(result, view.query, Boolean(session)),
+        [result, view.query, session],
+    )
     const grandTotal = useMemo(
         () => allBuckets.reduce((sum, b) => sum + b.matchCount, 0),
         [allBuckets],
@@ -210,6 +277,19 @@ function ResultsContent({
     // even when the user's row filter would have hidden the focused
     // hit — the focused URN is always a valid match regardless of
     // the presentational filter.
+    // Layer › container grouping. Computed here rather than inside
+    // HitsByLayer because the section header states how many layers the
+    // page landed in — grouping twice is how those two numbers would come
+    // to disagree. Empty (and unused) on the canvases with no session.
+    const ancestorMatchCounts = useAncestorMatchCounts()
+    const layerGroups = useMemo(
+        () => (session
+            ? groupHitsByLayer(
+                filteredHits, session.resolveLayer, ancestorMatchCounts, session.layers)
+            : []),
+        [session, filteredHits, ancestorMatchCounts],
+    )
+
     const hitsByUrn = useMemo(() => {
         const map = new Map<string, SearchHit>()
         for (const h of hits) {
@@ -253,11 +333,17 @@ function ResultsContent({
     // candidate set, so it is the honest total even when the hit list below is
     // only the first page. Bucket counts are computed server-side over that same
     // full set, so per-group numbers stay exact regardless of paging.
+    // ``totalCount`` is the server's exact size of the whole match set and
+    // outranks ``candidateCount`` (what the scan had to consider) wherever
+    // the backend sends it. Read off-type: the schema regen that declares
+    // it is a separate step, and a panel that waited for it would keep
+    // reporting the scan size as the total.
+    const totalCount = (result as { totalCount?: number | null }).totalCount ?? null
     const candidateCount = result.candidateCount ?? null
-    const totalMatches = candidateCount ?? hits.length
+    const totalMatches = totalCount ?? candidateCount ?? hits.length
     // The hit list is a page; the counts are not. Say so, rather than letting
     // the user read "1,000 matches" and assume that's all there is.
-    const hitsArePartial = candidateCount !== null && hits.length < candidateCount
+    const hitsArePartial = hits.length < totalMatches
 
     return (
         <div className="flex flex-col">
@@ -342,9 +428,15 @@ function ResultsContent({
                         subtitle={
                             filterActive
                                 ? 'Filtering rows only · canvas still highlights every backend match'
-                                : result.truncated
-                                    ? `Showing first ${hits.length} · refine to narrow`
-                                    : 'Grouped by immediate parent · click a folder to collapse'
+                                // The match count above is the whole set; the
+                                // layers below are only the ones this PAGE
+                                // reached. Say which is which — the two
+                                // numbers are not measuring the same thing.
+                                : session
+                                    ? `Where they live · ${layerGroups.length} layer${layerGroups.length === 1 ? '' : 's'} on this page`
+                                    : result.truncated
+                                        ? `Showing first ${hits.length} · refine to narrow`
+                                        : 'Grouped by immediate parent · click a folder to collapse'
                         }
                     />
                     {showFacets && (
@@ -376,6 +468,13 @@ function ResultsContent({
                                     Reset filters
                                 </button>
                             </div>
+                        ) : session ? (
+                            <HitsByLayer
+                                groups={layerGroups}
+                                onReveal={onReveal}
+                                onOpen={onOpen}
+                                scrollElementRef={scrollElementRef}
+                            />
                         ) : (
                             <HitsByParent
                                 hits={filteredHits}
@@ -393,24 +492,67 @@ function ResultsContent({
                             list — same query, longer result. */}
                         {result.cursor && onLoadMore && (
                             <div className="mt-2 px-3 pb-2">
-                                <button
-                                    type="button"
-                                    onClick={() => onLoadMore()}
-                                    disabled={isLoadingMore}
-                                    className={cn(
-                                        'w-full rounded-lg px-3 py-2',
-                                        'border border-glass-border',
-                                        'bg-canvas-base/40 hover:bg-canvas-base/60',
-                                        'text-[12px] font-medium text-ink',
-                                        'transition-colors',
-                                        'disabled:opacity-60 disabled:cursor-progress',
-                                        'flex items-center justify-center gap-2',
-                                    )}
-                                >
-                                    {isLoadingMore
-                                        ? 'Loading…'
-                                        : `Load more (${hits.length} so far)`}
-                                </button>
+                                {isLoadingAll ? (
+                                    /* One page at a time, so the count moves
+                                       and the user can stop it. What is
+                                       already loaded stays either way. */
+                                    <div className="flex items-center gap-2">
+                                        <span className="flex-1 min-w-0 text-[11.5px] text-ink-muted tabular-nums">
+                                            Loading everything — {hits.length.toLocaleString()}
+                                            {' of '}{totalMatches.toLocaleString()}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={onCancelLoadAll}
+                                            className={cn(
+                                                'rounded-lg px-3 py-1.5 shrink-0',
+                                                'border border-glass-border',
+                                                'text-[12px] font-medium text-ink',
+                                                'hover:bg-glass/40 transition-colors',
+                                            )}
+                                        >
+                                            Stop
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => onLoadMore()}
+                                            disabled={isLoadingMore}
+                                            className={cn(
+                                                'flex-1 rounded-lg px-3 py-2',
+                                                'border border-glass-border',
+                                                'bg-canvas-base/40 hover:bg-canvas-base/60',
+                                                'text-[12px] font-medium text-ink',
+                                                'transition-colors',
+                                                'disabled:opacity-60 disabled:cursor-progress',
+                                                'flex items-center justify-center gap-2',
+                                            )}
+                                        >
+                                            {isLoadingMore
+                                                ? 'Loading…'
+                                                : `Load more (${hits.length} so far)`}
+                                        </button>
+                                        {onLoadAll && (
+                                            <button
+                                                type="button"
+                                                onClick={onLoadAll}
+                                                disabled={isLoadingMore}
+                                                title={`Keep paging until all ${totalMatches.toLocaleString()} are loaded`}
+                                                className={cn(
+                                                    'rounded-lg px-3 py-2 shrink-0',
+                                                    'border border-glass-border',
+                                                    'text-[12px] font-medium text-ink-secondary',
+                                                    'hover:text-ink hover:bg-glass/40 transition-colors',
+                                                    'disabled:opacity-60',
+                                                )}
+                                            >
+                                                Load all
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>

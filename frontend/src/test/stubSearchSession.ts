@@ -53,8 +53,10 @@ export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSe
         togglePanel: vi.fn(),
         refineOpen: false,
         refine: vi.fn(),
+        closeRefine: vi.fn(),
         inputRef: createRef<HTMLInputElement>(),
         resolveLayer: vi.fn(() => null),
+        layers: [],
         advanced: stubAdvanced(),
         ...over,
     }

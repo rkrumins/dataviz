@@ -34,7 +34,6 @@ import { ChevronDown, ChevronRight, Folder, Layers } from 'lucide-react'
 import { type FC, type RefObject, useCallback, useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
-import { useAncestorMatchCounts } from '@/store/searchStore'
 import type { AncestorRef, SearchHit } from '@/types/search'
 import type { ViewLayerConfig } from '@/types/schema'
 
@@ -197,11 +196,10 @@ export function flattenRows(
 // ---------------------------------------------------------------------------
 
 export interface HitsByLayerProps {
-    hits: SearchHit[]
-    /** The session's own placement rule — see ``resolveHitLayer``. */
-    resolveLayer: (hit: SearchHit) => string | null
-    /** The view's layer columns, in board order. */
-    layers: ViewLayerConfig[]
+    /** Already grouped, because the pane above also reports how many
+     *  layers the page landed in — grouping twice is how the two
+     *  numbers would come to disagree. */
+    groups: LayerGroup[]
     /** The scroll container ``ResultsPane`` owns. */
     scrollElementRef: RefObject<HTMLElement | null>
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
@@ -210,15 +208,10 @@ export interface HitsByLayerProps {
 
 
 export const HitsByLayer: FC<HitsByLayerProps> = ({
-    hits, resolveLayer, layers, scrollElementRef, onReveal, onOpen,
+    groups, scrollElementRef, onReveal, onOpen,
 }) => {
-    const ancestorMatchCounts = useAncestorMatchCounts()
     const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
 
-    const groups = useMemo(
-        () => groupHitsByLayer(hits, resolveLayer, ancestorMatchCounts, layers),
-        [hits, resolveLayer, ancestorMatchCounts, layers],
-    )
     const rows = useMemo(() => flattenRows(groups, collapsed), [groups, collapsed])
 
     const toggle = useCallback((key: string) => {

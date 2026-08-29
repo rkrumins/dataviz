@@ -18,6 +18,12 @@
  *     │     int_clean_tickets_t2  DATASET            │
  *     └──────────────────────────────────────────────┘
  *
+ * On a canvas that owns a search session the panel opens RESULTS-FIRST:
+ * the Query card is folded away behind the Refine chip and the sentence
+ * above the match bar states what was asked. The canvases whose only
+ * search is this panel have nowhere else to compose a query, so for them
+ * the card stays at the top.
+ *
  * One Query card holds the entire active query. Rows compose with AND;
  * the Visual ↔ Code toggle switches between row-builder and DSL text.
  * Templates SEED the rows (no opaque "replace + run"). Advanced drawer
@@ -28,7 +34,7 @@
  * the lineage canvas spotlights matches and shows enriched badges.
  */
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, SlidersHorizontal, X } from 'lucide-react'
+import { BookOpen, SlidersHorizontal, Sparkles, X } from 'lucide-react'
 import {
     type FC,
     useCallback,
@@ -61,12 +67,15 @@ import { LibraryPopover } from './panel/LibraryPopover'
 import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
+import { QuerySentence } from './panel/QuerySentence'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { setScopeCondition } from './panel/predicateComposition'
+import { useLoadAll } from './panel/useLoadAll'
+import { useViewSearchSessionOptional } from './session/ViewSearchSessionContext'
 import { usePendingSearchRun } from './usePendingSearchRun'
 import {
     defaultInputs,
@@ -191,6 +200,17 @@ function PanelInner({
         view, runState, runPredicate, cancel,
         resetTemplate, loadMore, isLoadingMore,
     } = session
+    // The canvas's session, when there is one. `session` above is only
+    // its PIPELINE; everything the results-first layout needs beyond that
+    // — whether the builder is showing, how a hit maps to a layer column,
+    // the layer names — lives on the session object itself.
+    const viewSession = useViewSearchSessionOptional()
+    // Results-first: on a canvas with a session the panel opens on the
+    // answer and the builder is a mode you ask for. The canvases whose
+    // only search IS this panel have nowhere else to compose a query, so
+    // for them the builder is always the top of the panel.
+    const refineOpen = viewSession ? viewSession.refineOpen : true
+    const { loadAll, isLoadingAll, cancelLoadAll } = useLoadAll(session)
 
     const draftPredicate = useDraftPredicate()
     const draftOptions = useDraftOptions()
@@ -455,6 +475,13 @@ function PanelInner({
                         libraryOpen={libraryOpen}
                         onOpenOptions={() => openAdvanced('options')}
                         optionsDeltaCount={optionsDeltaCount}
+                        refineOpen={refineOpen}
+                        onToggleRefine={viewSession
+                            ? () => {
+                                if (viewSession.refineOpen) viewSession.closeRefine()
+                                else viewSession.refine()
+                            }
+                            : undefined}
                     />
                 </div>
             </LibraryPopover>
@@ -482,16 +509,21 @@ function PanelInner({
                         'flex-1 min-h-0 overflow-y-auto custom-scrollbar',
                         'px-3 py-3 flex flex-col gap-3',
                     )}>
-                        <QueryCard
-                            viewId={viewId}
-                            isRunning={view.kind === 'running'}
-                            runState={runState}
-                            onRun={handleRun}
-                            onOpenAdvanced={() => openAdvanced('options')}
-                        />
+                        {refineOpen && (
+                            <QueryCard
+                                viewId={viewId}
+                                isRunning={view.kind === 'running'}
+                                runState={runState}
+                                onRun={handleRun}
+                                onOpenAdvanced={() => openAdvanced('options')}
+                            />
+                        )}
 
                         {showResultsSection && (
                             <div className="flex flex-col gap-2">
+                                {/* With the builder folded away this is the
+                                    only statement of what was asked. */}
+                                <QuerySentence draftPredicate={draftPredicate} />
                                 <MatchBar
                                     count={resultsCount}
                                     elapsedMs={elapsedMs}
@@ -518,6 +550,9 @@ function PanelInner({
                                     onOpen={onOpenNode}
                                     onLoadMore={loadMore}
                                     isLoadingMore={isLoadingMore}
+                                    onLoadAll={loadAll}
+                                    isLoadingAll={isLoadingAll}
+                                    onCancelLoadAll={cancelLoadAll}
                                 />
                             </div>
                         )}
@@ -547,12 +582,17 @@ function PanelInner({
  */
 function CompactHeader({
     onClose, onOpenLibrary, libraryOpen, onOpenOptions, optionsDeltaCount,
+    refineOpen, onToggleRefine,
 }: {
     onClose: () => void
     onOpenLibrary: () => void
     libraryOpen: boolean
     onOpenOptions: () => void
     optionsDeltaCount: number
+    refineOpen: boolean
+    /** Absent on the canvases whose builder is always showing — there is
+     *  nothing to toggle it to. */
+    onToggleRefine?: () => void
 }) {
     return (
         <div className={cn(
@@ -578,6 +618,17 @@ function CompactHeader({
                 </div>
             </div>
             <div className="ml-auto flex items-center gap-1">
+                {onToggleRefine && (
+                    <ToolbarChip
+                        label="Refine"
+                        title={refineOpen
+                            ? 'Hide the query builder'
+                            : 'Build on this query — more conditions, AND / OR, lineage'}
+                        Icon={Sparkles}
+                        active={refineOpen}
+                        onClick={onToggleRefine}
+                    />
+                )}
                 <ToolbarChip
                     label="Library"
                     title="Saved queries, recent runs, and templates"

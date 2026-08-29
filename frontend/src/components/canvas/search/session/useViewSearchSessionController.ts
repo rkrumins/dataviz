@@ -118,11 +118,20 @@ export interface ViewSearchSession {
     refineOpen: boolean
     /** The sparkles chip: open the panel on the builder. */
     refine: () => void
+    /** Put the builder away without closing the panel — the panel's own
+     *  Refine chip is a toggle, and `closePanel` would take the results
+     *  with it. */
+    closeRefine: () => void
 
     /** The header input, so `/` and Esc can focus it from anywhere. */
     inputRef: RefObject<HTMLInputElement | null>
     /** Which layer column a hit badges under, for this view's layout. */
     resolveLayer: (hit: SearchHit) => string | null
+    /** The view's layer columns, in board order. `resolveLayer` answers
+     *  WHICH layer; the panel's grouping also needs the name and the
+     *  order to render, and reading the layout a second time from the
+     *  schema store is how the two would drift. */
+    layers: ViewLayerConfig[]
 
     /**
      * The pipeline underneath, whole.
@@ -242,6 +251,7 @@ export function useViewSearchSessionController(
         setPanelOpen(true)
         setRefineOpen(true)
     }, [])
+    const closeRefine = useCallback(() => { setRefineOpen(false) }, [])
 
     const resolveLayer = useCallback((hit: SearchHit) => resolveHitLayer(
         hit.node,
@@ -254,13 +264,13 @@ export function useViewSearchSessionController(
         viewId,
         quick, setQuick, runNow, clearQuery: teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
-        refineOpen, refine,
-        inputRef, resolveLayer,
+        refineOpen, refine, closeRefine,
+        inputRef, resolveLayer, layers,
         advanced,
     }), [
         viewId,
         quick, setQuick, runNow, teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
-        refineOpen, refine, resolveLayer, advanced,
+        refineOpen, refine, closeRefine, resolveLayer, layers, advanced,
     ])
 }
