@@ -812,16 +812,21 @@ export const LayerColumn = React.memo(function LayerColumn({
       // second lets the row mount before we ask it to scroll its
       // horizontally-scrollable ancestor (the canvas's
       // ``horizontalScrollRef`` container) into view.
-      // ``block: 'nearest'`` keeps the virtualizer's vertical scroll
-      // from being overridden; ``inline: 'center'`` is what brings
-      // the LayerColumn horizontally on-screen.
+      // ``inline: 'center'`` is what brings the LayerColumn
+      // horizontally on-screen. ``block`` must AGREE with the
+      // virtualizer's ``align: 'center'`` above rather than defer to
+      // it: ``'nearest'`` scrolls each ancestor the least amount that
+      // makes the row visible, so against a smooth scroll still in
+      // flight it parks the row flush against an edge — a hit landing
+      // at y=953 of a 1000px viewport, on the fold, with nothing under
+      // it. Two scrolls asking for the same thing land in the middle.
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           const row = document.getElementById(`layer-node-${targetId}`)
           if (row) {
             row.scrollIntoView({
               inline: 'center',
-              block: 'nearest',
+              block: 'center',
               behavior: 'smooth',
             })
           }
