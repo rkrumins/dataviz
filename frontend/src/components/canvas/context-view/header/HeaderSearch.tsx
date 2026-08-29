@@ -22,7 +22,9 @@
  * request, and a menu nobody opened should not pay for one.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -44,6 +46,9 @@ const FIXED_LOOK_IN: { value: QuickLookIn; label: string }[] = [
 const MATCH_OPTIONS = TEXT_MATCH_OPTIONS
   .filter((o) => o.value !== 'wildcard')
   .map((o) => ({ value: o.value as QuickMatch, label: o.label }))
+
+/** What a click can move focus to on its own. */
+const FOCUSABLE = 'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
 
 function lookInLabel(lookIn: QuickLookIn): string {
   if (typeof lookIn === 'object') return lookIn.property
@@ -237,7 +242,11 @@ function StatusLine() {
         .map((hit) => s.resolveLayer(hit))
         .filter((id): id is string => id !== null),
     )
-    return `${count.toLocaleString()}${result.truncated ? '+' : ''} matches · ${layers.size} layers`
+    // A truncated count is always "more than this", so it reads plural
+    // however small the number the server managed to reach.
+    const matches = count === 1 && !result.truncated ? 'match' : 'matches'
+    return `${count.toLocaleString()}${result.truncated ? '+' : ''} ${matches}`
+      + ` · ${layers.size} ${layers.size === 1 ? 'layer' : 'layers'}`
   })()
 
   if (!line) return null
@@ -294,7 +303,6 @@ function MenuItem({ label, selected, onPick }: {
   return (
     <button
       type="button"
-      role="menuitem"
       onClick={onPick}
       className={cn(
         'w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left',
@@ -320,6 +328,13 @@ function MenuItem({ label, selected, onPick }: {
  * list rendered inline would be layered under the canvas. No
  * AnimatePresence: the list unmounts instantly on close so an interrupted
  * exit can never strand an invisible click-blocker over the toolbar.
+ *
+ * `role="dialog"` over plain buttons, the way `DisplayMenu` does it —
+ * NOT `menu`/`menuitem`, which promise arrow-key navigation and a roving
+ * tabindex this does not implement. Focus moves to the first row on open
+ * (the list is portalled to the end of `document.body`, so otherwise a
+ * keyboard user reaches it only by tabbing past the whole app) and goes
+ * back to the trigger when it closes, so it is never simply dropped.
  */
 function AnchoredMenu({ label, ariaLabel, children }: {
   label: string
@@ -347,16 +362,50 @@ function AnchoredMenu({ label, ariaLabel, children }: {
     }
   }, [open])
 
+  const close = useCallback(() => { setOpen(false) }, [])
+
+  // Whether this popover currently owns the page's focus. It decides who
+  // gets focus back when the popover closes, and it is the reason the two
+  // effects below can be the only places that touch a ref.
+  const holdsFocusRef = useRef(false)
+
+  // Focus the first row once per opening. `anchor` is measured in a layout
+  // effect, so the list is not yet in the DOM on the render that flips
+  // `open`; the flag also keeps a later anchor update (resize, scroll)
+  // from stealing focus back from wherever the user has since moved it.
+  useEffect(() => {
+    if (!open || holdsFocusRef.current) return
+    const first = listRef.current?.querySelector('button')
+    if (!first) return
+    holdsFocusRef.current = true
+    first.focus()
+  }, [open, anchor])
+
+  // Closing while still holding focus — Escape, a chosen row, a click on
+  // inert chrome — would otherwise drop it on <body>, and the list is
+  // portalled to the end of the document, so there is nothing sensible
+  // after it to tab to. A click on another control cleared the flag
+  // already: the user went there on purpose.
+  useEffect(() => {
+    if (open || !holdsFocusRef.current) return
+    holdsFocusRef.current = false
+    triggerRef.current?.focus()
+  }, [open])
+
   useEffect(() => {
     if (!open) return
     const onMouseDown = (e: MouseEvent) => {
-      const target = e.target as Node
+      const target = e.target as HTMLElement
       if (triggerRef.current?.contains(target)) return
       if (listRef.current?.contains(target)) return
-      setOpen(false)
+      // Clicking a control means going there — taking focus back would
+      // fight the user. Clicking inert chrome leaves focus nowhere, so
+      // the trigger keeps its claim on it.
+      if (target.closest?.(FOCUSABLE)) holdsFocusRef.current = false
+      close()
     }
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') close()
     }
     document.addEventListener('mousedown', onMouseDown)
     document.addEventListener('keydown', onKeyDown)
@@ -364,15 +413,15 @@ function AnchoredMenu({ label, ariaLabel, children }: {
       document.removeEventListener('mousedown', onMouseDown)
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [open])
+  }, [open, close])
 
   return (
     <>
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-haspopup="menu"
+        onClick={() => { if (open) close(); else setOpen(true) }}
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`${ariaLabel} · ${label}`}
         className={cn(
@@ -399,7 +448,7 @@ function AnchoredMenu({ label, ariaLabel, children }: {
               initial={{ opacity: 0, y: -4, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ duration: 0.13, ease: 'easeOut' }}
-              role="menu"
+              role="dialog"
               aria-label={ariaLabel}
               style={{
                 position: 'fixed',
@@ -410,7 +459,7 @@ function AnchoredMenu({ label, ariaLabel, children }: {
               }}
               className="min-w-[180px] overflow-y-auto custom-scrollbar p-1 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40"
             >
-              {children(() => setOpen(false))}
+              {children(close)}
             </motion.div>
           )}
         </>,

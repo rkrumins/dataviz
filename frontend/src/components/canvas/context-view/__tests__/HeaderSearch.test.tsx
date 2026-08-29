@@ -7,7 +7,7 @@
  * scope chip and the status line — read the session's own state back.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { DEFAULT_QUICK } from '@/components/canvas/search/session/quickPredicate'
 import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
@@ -81,9 +81,30 @@ describe('HeaderSearch', () => {
     renderBox(session)
 
     fireEvent.click(screen.getByRole('button', { name: /match/i }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Starts with' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Starts with' }))
 
     expect(session.setQuick).toHaveBeenCalledWith({ match: 'prefix' })
+  })
+
+  // The list is portalled to document.body, so without these a keyboard
+  // user reaches it only by tabbing past the entire app — and lands
+  // nowhere at all once it closes.
+  it('moves focus into the menu when it opens', () => {
+    renderBox(stubSession())
+
+    fireEvent.click(screen.getByRole('button', { name: /match/i }))
+
+    expect(screen.getByRole('button', { name: 'Contains' })).toHaveFocus()
+  })
+
+  it('returns focus to the trigger when an item is chosen', () => {
+    renderBox(stubSession())
+    const trigger = screen.getByRole('button', { name: /match/i })
+
+    fireEvent.click(trigger)
+    fireEvent.click(screen.getByRole('button', { name: 'Starts with' }))
+
+    expect(trigger).toHaveFocus()
   })
 
   it('opens the builder from Refine', () => {
@@ -104,5 +125,19 @@ describe('HeaderSearch', () => {
     renderBox(session)
 
     expect(screen.getByText(/1,284 matches/)).toBeInTheDocument()
+  })
+
+  it('counts one match in one layer without an English mistake', () => {
+    const session = stubSession({
+      resolveLayer: vi.fn(() => 'gold'),
+      advanced: stubAdvanced({
+        view: resultsView({
+          candidateCount: 1, truncated: false, hits: [{ node: { urn: 'a' } }],
+        }),
+      }),
+    })
+    renderBox(session)
+
+    expect(screen.getByText('1 match · 1 layer')).toBeInTheDocument()
   })
 })
