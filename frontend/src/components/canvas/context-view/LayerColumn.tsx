@@ -163,6 +163,27 @@ function getItemKey(item: FlatTreeNode, _index: number): string {
   return item.node.id
 }
 
+/**
+ * A container nobody has browsed: every child it currently holds was put
+ * there out of band by a search reveal (`viaReveal`), not by a page anyone
+ * asked for.
+ *
+ * The "N more" row is also a one-page-ahead sentinel, and a path-only reveal
+ * scrolls the hit into view — which drops that row into the viewport for
+ * every ancestor on the spine without the reader having scrolled at all.
+ * Each one then pages itself, which is exactly the cost the reveal exists to
+ * avoid (three `children-with-edges` and three toasts for one three-deep
+ * hit). Being carried somewhere is not the same as scrolling there, so the
+ * sentinel stays disarmed until the container holds something the reader
+ * actually asked for. The button is unaffected.
+ */
+function holdsOnlyRevealedChildren(node: HierarchyNode): boolean {
+  return node.children.length > 0
+    && node.children.every(
+      (child) => (child.data as { viaReveal?: boolean } | undefined)?.viaReveal === true,
+    )
+}
+
 export const LayerColumn = React.memo(function LayerColumn({
   layer,
   nodes,
@@ -2153,8 +2174,11 @@ export const LayerColumn = React.memo(function LayerColumn({
                         // One-page-ahead auto-load — OFF in Isolate/Hide
                         // filter modes, where freshly-loaded children are
                         // filtered out of the tree and the pinned row
-                        // would drain the parent (the historical pump).
-                        autoLoad={matchUrnSet.size === 0 || canvasFilterMode === 'highlight'}
+                        // would drain the parent (the historical pump);
+                        // and OFF for a level a reveal opened, which the
+                        // reader was carried to rather than scrolled to.
+                        autoLoad={(matchUrnSet.size === 0 || canvasFilterMode === 'highlight')
+                          && !holdsOnlyRevealedChildren(item.node)}
                       />
                     </div>
                   )
