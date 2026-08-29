@@ -80,6 +80,13 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
         estimateSize: (index) => (rows && estimateRowSize
             ? estimateRowSize(index)
             : estimatedRowHeightPx),
+        // Measured sizes are cached under this key, NOT under the index.
+        // Without it, collapsing a layer re-indexes every row below and
+        // the 34px measurement of a group header gets reused for the
+        // 64px hit row that lands on its index.
+        getItemKey: (index) => (rows
+            ? rows[index].key
+            : (hits?.[index]?.node.urn ?? index)),
         overscan,
     })
 
@@ -95,9 +102,7 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
                 const hit = hits?.[vRow.index]
                 return (
                     <div
-                        key={rows
-                            ? rows[vRow.index].key
-                            : (hit?.node.urn ?? `v-${vRow.index}`)}
+                        key={vRow.key}
                         ref={(el) => {
                             if (el) {
                                 measureRef.current.set(vRow.index, el)
