@@ -119,7 +119,15 @@ export function MessageHistoryChip({ className }: { className?: string }) {
 
   const rows = useMemo(() => foldRuns(history), [history])
 
-  if (history.length === 0) return null
+  // Nothing to show — and the panel must not survive the emptying. The chip
+  // unmounts but the component instance does not (its sibling status chips keep
+  // it rendered), so an `open` left standing would spring the panel back over
+  // the canvas the moment the next toast refills the log. Reset during render,
+  // not in an effect.
+  if (history.length === 0) {
+    if (open) setOpen(false)
+    return null
+  }
 
   return (
     <>

@@ -13,7 +13,7 @@
  * message fold into one ×N row, and it closes the way every canvas surface
  * does — Escape, outside click, or the chip itself.
  */
-import { render, screen, within, cleanup } from '@testing-library/react'
+import { render, screen, within, cleanup, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { MessageHistoryChip } from '../MessageHistoryChip'
@@ -121,6 +121,43 @@ describe('MessageHistoryChip', () => {
     expect(useToastStore.getState().history).toEqual([])
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /message/i })).not.toBeInTheDocument()
+  })
+
+  it('does not re-open itself when a new toast arrives after Clear', async () => {
+    const user = userEvent.setup()
+    seed([{ type: 'success', message: 'View saved' }])
+    render(<MessageHistoryChip />)
+
+    await user.click(screen.getByRole('button', { name: /1 message/i }))
+    await user.click(await screen.findByRole('button', { name: /clear/i }))
+
+    // The chip is gone, but the component is still mounted alongside its
+    // sibling chips. The next toast the app raises must bring back a CLOSED
+    // chip — not a panel the user never asked for, over the canvas.
+    seed([{ type: 'info', message: 'Saved to draft.' }])
+    const chip = await screen.findByRole('button', { name: /1 message/i })
+    expect(chip).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('does not re-open itself after a view change clears the log', async () => {
+    const user = userEvent.setup()
+    seed([{ type: 'success', message: 'View saved' }])
+    render(<MessageHistoryChip />)
+
+    await user.click(screen.getByRole('button', { name: /1 message/i }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+
+    // CanvasRouter clears the history on every view/branch change, with the
+    // panel still open. The new view's first toast must not pop it back open.
+    useToastStore.getState().clearHistory()
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    seed([{ type: 'error', message: 'Load failed' }])
+
+    const chip = await screen.findByRole('button', { name: /1 message/i })
+    expect(chip).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('closes on Escape', async () => {
