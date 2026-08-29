@@ -1580,6 +1580,34 @@ class TestTypesDoNotGateDescendants:
             for n in result["notes"]
         ), result["notes"]
 
+    def test_roots_present_but_no_containment_edges_keeps_label_filter(self):
+        """Without a configured containment edge type,
+        ``_build_scope_continuation_chain`` returns no chain at all —
+        there is no traversal boundary to replace the label filter
+        with, even though the view supplied root URNs. Dropping the
+        type gate here too would leave the candidate scan with no
+        boundary at all."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+
+        class _NoContainmentProvider(_StubScopeProvider):
+            def _get_containment_edge_types(self):
+                return set()
+
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="view",
+                root_urns=["urn:layerA"],
+                entity_types=["dataset"],
+            ),
+        )
+        result = explain_deep_search(_NoContainmentProvider(), q)
+        assert "$_scopeEntityTypes" in result["cypher"]
+        assert result["params"]["_scopeEntityTypes"] == ["dataset"]
+
     def test_visible_mode_without_urns_keeps_label_filter(self):
         """Empty ``visible_urns`` injects no clause — the mode falls back
         to view semantics, so there is no boundary and the types stay."""
@@ -1796,6 +1824,15 @@ class TestCursor:
     def test_bad_cursor_raises(self):
         with pytest.raises(CompileError, match="invalid cursor"):
             decode_cursor("not-base64!!!")
+
+    def test_hand_edited_non_numeric_offset_raises_compile_error(self):
+        """A syntactically valid cursor (decodes fine, right ``q``) with
+        an offset that isn't int-convertible must not reach the bare
+        ``int(...)`` call at the two ``decode_cursor(...).get("offset")``
+        call sites and surface as an unhandled ``ValueError`` (→ 500)."""
+        encoded = encode_cursor({"offset": "not-a-number", "q": "x"})
+        with pytest.raises(CompileError, match="cursor is malformed"):
+            decode_cursor(encoded)
 
     def test_query_hash_stable_across_runs(self):
         q1 = SearchQuery(predicate=TagPredicate(values=["PII"]), scope=_TEST_SCOPE)
@@ -3587,6 +3624,84 @@ class TestCursorValidation:
             options=SearchOptions(results="hits", candidateCap=100),
         )
         assert match_hash(a) != match_hash(b)
+
+    def test_match_hash_ignores_highlights(self):
+        with_highlights = _hits_query(highlights=True)
+        without_highlights = _hits_query(highlights=False)
+        assert match_hash(with_highlights) == match_hash(without_highlights)
+
+    @pytest.mark.asyncio
+    async def test_fe_load_more_shape_is_accepted(self):
+        """``useAdvancedSearch.ts``'s ``loadMore`` re-sends page 1's
+        options with ``cursor`` added, ``aggregations`` dropped, and
+        ``results`` forced to ``'hits'`` — everything else (including
+        ``includeAncestorPath``) carries over unchanged. That has to
+        mint a hit against the SAME match set as page 1, and with the
+        match set cached, take the cached-slice path rather than
+        re-scanning."""
+        prov = _CachingProvider(hit_rows=30)
+        page1_query = _cache_query(
+            results="both",
+            aggregations=[_ancestor_spec()],
+            includeAncestorPath=True,
+        )
+        page1 = await execute_deep_search(prov, page1_query)
+        assert page1.cursor is not None
+
+        page2_query = page1_query.model_copy(update={
+            "options": page1_query.options.model_copy(update={
+                "cursor": page1.cursor,
+                "aggregations": None,
+                "results": "hits",
+            }),
+        })
+        page2 = await execute_deep_search(prov, page2_query)
+
+        assert page2.cache_hit is True
+        assert page2.hits is not None
+
+    @pytest.mark.asyncio
+    async def test_changed_sort_is_rejected(self):
+        prov = _CountingProvider(hit_rows=30, total=30)
+        page1_query = _hits_query(pageSize=10, sort="relevance")
+        page1 = await execute_deep_search(prov, page1_query)
+        page2_query = _hits_query(
+            pageSize=10, sort="displayName", cursor=page1.cursor,
+        )
+        with pytest.raises(CompileError, match="different query"):
+            await execute_deep_search(prov, page2_query)
+
+    @pytest.mark.asyncio
+    async def test_changed_predicate_is_rejected(self):
+        prov = _CountingProvider(hit_rows=30, total=30)
+        page1_query = _hits_query(pageSize=10)
+        page1 = await execute_deep_search(prov, page1_query)
+        page2_query = SearchQuery(
+            predicate=TextPredicate(value="orders", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                results="hits", candidateCap=100, pageSize=10,
+                cursor=page1.cursor,
+            ),
+        )
+        with pytest.raises(CompileError, match="different query"):
+            await execute_deep_search(prov, page2_query)
+
+    @pytest.mark.asyncio
+    async def test_changed_scope_roots_is_rejected(self):
+        prov = _CountingProvider(hit_rows=30, total=30)
+        page1_query = _hits_query(pageSize=10)
+        page1 = await execute_deep_search(prov, page1_query)
+        page2_query = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=SearchScope(view_id="view_test", root_urns=["urn:other-root"]),
+            options=SearchOptions(
+                results="hits", candidateCap=100, pageSize=10,
+                cursor=page1.cursor,
+            ),
+        )
+        with pytest.raises(CompileError, match="different query"):
+            await execute_deep_search(prov, page2_query)
 
     @pytest.mark.asyncio
     async def test_cursor_from_another_query_is_rejected_up_front(self):

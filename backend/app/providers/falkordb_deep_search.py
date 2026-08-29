@@ -1268,17 +1268,28 @@ def query_hash(query: SearchQuery) -> str:
 
 
 def match_hash(query: SearchQuery) -> str:
-    """SHA1 (12 chars) of the query MINUS its paging controls.
+    """SHA1 (12 chars) of what determines the query's MATCH SET.
 
     The identity of a *match set*, as opposed to ``query_hash``'s
-    identity of a whole request: ``cursor`` and ``page_size`` change
-    which slice a caller wants, never which nodes match, and a walk is
-    allowed to re-tune its page size mid-iteration. Everything else —
-    predicate, resolved scope, sort, result shape — is in, so a cursor
-    minted against one match set can never be spent against another.
+    identity of a whole request: only the predicate, the resolved
+    scope, and the sort / candidate-cap knobs decide which nodes match
+    and in what order. An INCLUDE-list, not an exclude-list — a page-2
+    "load more" request (``useAdvancedSearch.ts``'s ``loadMore``)
+    re-sends page 1's options with ``aggregations`` dropped and
+    ``results`` forced to ``'hits'`` while asking for the SAME walk,
+    so those (plus ``highlights``, ``include_ancestor_path``,
+    ``cursor``, ``page_size``, ``soft_deadline_ms``) must never
+    invalidate a cursor. A new ``SearchOptions`` field starts out
+    excluded by default rather than silently 400ing every open cursor
+    the next time someone changes an unrelated presentation knob.
     """
     j = query.model_dump_json(
-        by_alias=True, exclude={"options": {"cursor", "page_size"}},
+        by_alias=True,
+        include={
+            "predicate": True,
+            "scope": True,
+            "options": {"sort", "sort_dir", "sort_property", "candidate_cap"},
+        },
     )
     return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
 
@@ -1292,9 +1303,21 @@ def encode_cursor(state: Dict[str, Any]) -> str:
 def decode_cursor(s: str) -> Dict[str, Any]:
     try:
         raw = base64.urlsafe_b64decode(s.encode("ascii")).decode("utf-8")
-        return json.loads(raw)
+        state = json.loads(raw)
     except Exception:
         raise CompileError("invalid cursor encoding")
+    # A hand-edited cursor can carry a syntactically valid envelope
+    # (decodes, right ``q``) with an ``offset`` that isn't int-able.
+    # Both call sites that read it do ``int(state.get("offset", 0))``
+    # unguarded — catch that here, once, instead of at each site, so
+    # a bad offset is a 400 (CompileError) rather than an unhandled
+    # ValueError/TypeError surfacing as a 500.
+    if "offset" in state:
+        try:
+            int(state["offset"])
+        except (TypeError, ValueError):
+            raise CompileError("cursor is malformed")
+    return state
 
 
 # ---------------------------------------------------------------------------
