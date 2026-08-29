@@ -2082,11 +2082,39 @@ async def execute_deep_search(
                         provider, uncapped_cypher, base_params,
                         timeout_s=remaining(),
                     )
+                    # The exact total can also DISPROVE the cap
+                    # heuristic: ``candidate_count >= cap`` only ever
+                    # meant "the cap fired", and the set may turn out to
+                    # be exactly that size. Without this the wire says
+                    # truncated with totalCount == candidateCount, which
+                    # the UI renders as a phantom "N+".
+                    truncated = total_count > candidate_count
                 except asyncio.TimeoutError:
                     deadline_exceeded = True
                     logger.info(
                         "deep_search: exact count exceeded the remaining "
                         "budget; returning hits without a total",
+                    )
+                except Exception as exc:
+                    # The hits are built and correct — nothing the count
+                    # raises may cost the caller that page. This is the
+                    # ORDINARY failure path, not an exotic one: the
+                    # engine cancels a query ~500ms before the asyncio
+                    # net (see ``_db_timeout_ms``), so an over-budget
+                    # count surfaces as a provider error rather than an
+                    # asyncio.TimeoutError, and the service maps anything
+                    # unrecognised to a 500. Degrade to "no exact total"
+                    # and leave ``truncated`` on the cap heuristic; only
+                    # a spent budget makes it a deadline. (CancelledError
+                    # is a BaseException, so a real client disconnect
+                    # still propagates.)
+                    elapsed_ms = int((time.monotonic() - start) * 1000)
+                    if elapsed_ms >= timeout_s * 1000 * 0.95:
+                        deadline_exceeded = True
+                    logger.warning(
+                        "deep_search: exact count failed after %sms; "
+                        "returning hits without a total: %r",
+                        elapsed_ms, exc,
                     )
             if shape == "both" and aggs:
                 aggregates = []

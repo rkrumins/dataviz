@@ -11,6 +11,9 @@ Integration tests against a live FalkorDB live in a separate file and
 are skipped where the graph module isn't loaded — see the same pattern
 in test_falkordb_native_properties.py.
 """
+import asyncio
+import logging
+
 import pytest
 
 from backend.app.providers.falkordb_deep_search import (
@@ -2678,11 +2681,23 @@ class _CountingProvider:
 
     async def _ro_query(self, cypher, *, params=None, timeout=None):
         self.calls.append((cypher, params, timeout))
+        # Let the monotonic clock advance by a real interval so the
+        # "each follow-up gets LESS than the last" assertions below are
+        # about the budget, not about float noise.
+        await asyncio.sleep(0.001)
         if cypher.endswith("RETURN count(n) AS c"):
             if self._count_error is not None:
                 raise self._count_error
             return _Rows([[self._total]])
-        return _Rows([[i] for i in range(self._hit_rows)])
+        if cypher.endswith("RETURN n"):
+            return _Rows([[i] for i in range(self._hit_rows)])
+        return _Rows([])  # aggregation pivot — buckets aren't under test
+
+    async def _get_ancestor_chain(self, urn):
+        return []
+
+    async def get_nodes_batch(self, urns):
+        return []
 
     def _get_lineage_edge_types(self):
         return ["LINEAGE"]
@@ -2742,22 +2757,87 @@ class TestExactTotalCount:
         assert count_cypher.endswith("RETURN count(n) AS c")
         assert "LIMIT" not in count_cypher
         # The follow-up runs on what is LEFT of the request's deadline,
-        # not on a fresh copy of it.
-        assert count_timeout <= prov.calls[0][2]
+        # not on a fresh copy of it. Strictly less: the candidate query
+        # gets ``timeout_s`` verbatim, so an un-budgeted follow-up would
+        # tie here rather than undercut.
+        assert count_timeout < prov.calls[0][2]
         assert page.total_count == 1284
         assert page.candidate_count == 100
         assert page.truncated is True
 
     @pytest.mark.asyncio
     async def test_count_timeout_keeps_the_hits(self):
-        import asyncio
-
         prov = _CountingProvider(hit_rows=100, count_error=asyncio.TimeoutError())
         page = await execute_deep_search(prov, _hits_query())
         assert page.hits is not None and len(page.hits) == 50
         assert page.total_count is None
         assert page.deadline_exceeded is True
         assert page.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_count_failure_keeps_the_hits(self, caplog):
+        """The hits page is already built and correct. NOTHING the count
+        raises may cost the caller that page — and FalkorDB's own
+        deadline arrives as a provider error, not a TimeoutError, so
+        this is the ordinary path rather than the exotic one."""
+        prov = _CountingProvider(hit_rows=100, count_error=RuntimeError("boom"))
+        with caplog.at_level(logging.WARNING):
+            page = await execute_deep_search(prov, _hits_query())
+        assert page.hits is not None and len(page.hits) == 50
+        assert page.total_count is None
+        assert page.truncated is True
+        # A fast failure is not a blown deadline — the elapsed check
+        # decides that, and 3ms of a 30s budget is not it.
+        assert page.deadline_exceeded is False
+        # Degraded, never silent.
+        assert any(
+            r.levelno == logging.WARNING and "boom" in r.getMessage()
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    @pytest.mark.asyncio
+    async def test_exact_count_disproves_the_cap_heuristic(self):
+        """``candidateCount == cap`` only ever meant "the cap fired". Once
+        the exact total says the set is that size, the page is NOT
+        truncated — the UI would otherwise render a complete result as
+        "100+"."""
+        prov = _CountingProvider(hit_rows=100, total=100)
+        page = await execute_deep_search(prov, _hits_query())
+        assert page.total_count == 100
+        assert page.candidate_count == 100
+        assert page.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_every_follow_up_shares_one_budget(self, monkeypatch):
+        """The candidate query gets the whole deadline; the count, the
+        aggregation and the ancestor hydration each get what is left of
+        it. Asserted as a strictly descending chain, so restoring
+        ``timeout_s`` at any one of the three sites fails this test."""
+        waits = []
+        real_wait_for = asyncio.wait_for
+
+        async def _spy(awaitable, timeout=None):
+            waits.append(timeout)
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", _spy)
+        q = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                results="both",
+                aggregations=[AggregationSpec(by="entityType")],
+                candidateCap=100,
+                includeAncestorPath=True,
+            ),
+        )
+        prov = _CountingProvider(hit_rows=100, total=1284)
+        page = await execute_deep_search(prov, q)
+        candidate_t, count_t, agg_t = (c[2] for c in prov.calls)
+        assert candidate_t == 30.0, "the candidate scan gets the full deadline"
+        assert len(waits) == 1, "ancestor hydration must run under wait_for"
+        assert candidate_t > count_t > agg_t > waits[0] > 0
+        assert page.total_count == 1284
 
     @pytest.mark.asyncio
     async def test_aggregates_only_counts_uncapped(self):
@@ -2778,7 +2858,7 @@ class TestExactTotalCount:
         count_cypher, _, count_timeout = prov.calls[1]
         assert count_cypher.endswith("RETURN count(n) AS c")
         assert "LIMIT" not in count_cypher
-        assert count_timeout <= agg_timeout
+        assert count_timeout < agg_timeout
         assert page.total_count == 1284
         # ``candidateCount`` keeps its meaning in every shape: the size
         # of the CAPPED set the aggregations ran over.
