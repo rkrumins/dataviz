@@ -242,10 +242,29 @@ def _stamp_resolved_scope(
     as authoritative; this function makes sure those mirror the resolver's
     output, never the client's request, before the compiler runs.
 
+    Roots are stamped in ``view`` mode only — the compiler reads them
+    nowhere else (``_collect_scope_urn_sets``), and stamping them in
+    ``visible`` / ``data_source`` mode would push a large view over the
+    root cap for a clamp that is never applied.
+
     Pydantic models are immutable-by-convention (``Config.frozen`` is not
     set, but mutating fields can confuse caches). We construct a new
     ``SearchScope`` and use ``model_copy`` to swap it in.
     """
+    root_urns = None
+    if query.scope.scope_mode == "view" and eff_scope.root_urns:
+        # ``SearchScope`` raises a pydantic error above the cap, which
+        # would escape as a 500. Check first and raise the service's
+        # own caller-facing error instead.
+        cap = get_deep_search_settings().scope_root_urns_cap
+        if len(eff_scope.root_urns) > cap:
+            raise ValidationError(
+                f"This view has {len(eff_scope.root_urns)} top-level "
+                f"containers, above the search limit of {cap}. Search "
+                f"from a view with fewer top-level containers, or ask "
+                f"an administrator to raise the limit."
+            )
+        root_urns = list(eff_scope.root_urns)
     new_scope = SearchScope(
         view_id=eff_scope.view_id,
         scope_mode=query.scope.scope_mode,
@@ -253,7 +272,7 @@ def _stamp_resolved_scope(
             list(query.scope.visible_urns)
             if query.scope.visible_urns else None
         ),
-        root_urns=list(eff_scope.root_urns) if eff_scope.root_urns else None,
+        root_urns=root_urns,
         max_depth=eff_scope.max_depth,
         entity_types=(
             sorted(eff_scope.entity_type_allow_list)

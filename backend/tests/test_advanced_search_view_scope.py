@@ -18,6 +18,8 @@ file proves the resolver alone is correct.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -632,6 +634,26 @@ class _FakeEngine:
         self._data_source_id = None
 
 
+@contextmanager
+def _root_urns_cap(monkeypatch, value: str):
+    """Run the body with a lowered ``DEEP_SEARCH_SCOPE_ROOT_URNS_CAP``.
+
+    The settings object is lru_cached, so both the override and its
+    removal have to clear the cache — otherwise the lowered cap leaks
+    into every test that runs after this one.
+    """
+    from backend.app.services.deep_search.settings import (
+        get_deep_search_settings,
+    )
+    monkeypatch.setenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", value)
+    get_deep_search_settings.cache_clear()
+    try:
+        yield
+    finally:
+        monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", raising=False)
+        get_deep_search_settings.cache_clear()
+
+
 async def test_service_short_circuits_when_all_client_urns_dropped(
     db_session: AsyncSession,
 ):
@@ -903,6 +925,102 @@ async def test_visible_mode_with_urns_bypasses_guard(db_session: AsyncSession):
     await svc.search(query)
 
     assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    # The compiler reads roots in view mode only, so none are stamped.
+    assert stamped_query.scope.root_urns is None
+
+
+async def test_service_root_cap_overflow_is_validation_error(
+    db_session: AsyncSession, monkeypatch,
+):
+    """A view with more top-level containers than the search limit is a
+    caller-facing 400 with an explanation — not the unhandled pydantic
+    error the stamped ``SearchScope`` used to raise (HTTP 500).
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [
+                        {"urn": f"urn:domain:{i}"} for i in range(11)
+                    ],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    with _root_urns_cap(monkeypatch, "10"):
+        with pytest.raises(ValidationError, match="top-level containers"):
+            await svc.search(query)
+
+    assert engine.provider.calls == []
+
+
+async def test_service_data_source_mode_ignores_root_cap(
+    db_session: AsyncSession, monkeypatch,
+):
+    """``scope_mode='data_source'`` searches the whole source — the
+    compiler never reads the view's roots there, so they are neither
+    stamped nor counted against the cap.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [
+                        {"urn": f"urn:domain:{i}"} for i in range(11)
+                    ],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id, scope_mode="data_source"),
+    )
+    with _root_urns_cap(monkeypatch, "10"):
+        await svc.search(query)
+
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert stamped_query.scope.root_urns is None
 
 
 async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSession):
