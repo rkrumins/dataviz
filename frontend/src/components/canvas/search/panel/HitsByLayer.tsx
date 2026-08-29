@@ -19,7 +19,9 @@
  *   * a container's count is the SERVER's per-ancestor aggregation over
  *     the whole match set (``searchStore.ancestorMatchCounts``), so a
  *     container showing two rows can honestly say "40 matches" — the
- *     other 38 are on later pages;
+ *     other 38 are on later pages. Except when that container is SPLIT
+ *     across two layers, where the server's whole-container number
+ *     belongs to neither half;
  *   * the hits under it are only this page's.
  * The layer count is the sum of its containers, which inherits that
  * exactness. Where the server did not count an ancestor, the page
@@ -137,10 +139,28 @@ export function groupHitsByLayer(
     }
 
     const groups = order.map((key) => byLayer.get(key)!)
+
+    // A container can land in more than one group: a mid-path ancestor
+    // with its own assignment (or one that doesn't pass itself down)
+    // sends two hits under the SAME top-level container to two different
+    // layer columns. The server's count is for the whole container, so
+    // giving it to both halves would have the two headers sum to 80 over
+    // a 3-row page. A split container therefore falls back to what each
+    // group can actually see; exact counts are for containers that sit
+    // in one place.
+    const groupsPerUrn = new Map<string, number>()
     for (const group of groups) {
         for (const container of group.containers) {
-            container.count = ancestorMatchCounts.get(container.urn)
-                ?? container.hits.length
+            groupsPerUrn.set(container.urn, (groupsPerUrn.get(container.urn) ?? 0) + 1)
+        }
+    }
+
+    for (const group of groups) {
+        for (const container of group.containers) {
+            const split = (groupsPerUrn.get(container.urn) ?? 1) > 1
+            container.count = split
+                ? container.hits.length
+                : (ancestorMatchCounts.get(container.urn) ?? container.hits.length)
         }
         group.count = group.containers.reduce((sum, c) => sum + c.count, 0)
     }

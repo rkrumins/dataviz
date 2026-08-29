@@ -84,6 +84,34 @@ describe('groupHitsByLayer', () => {
 })
 
 
+describe('groupHitsByLayer — a container split across two layers', () => {
+    // Reachable whenever a mid-path ancestor carries its own assignment
+    // (or one with `inheritsChildren: false`): two hits under the SAME
+    // top-level container resolve to different layer columns.
+    const SPLIT = [hit('a', 'C1'), hit('b', 'C1')]
+    const splitLayer = (h: SearchHit) => (h.node.urn === 'a' ? 'L1' : 'L2')
+
+    it('does not hand each layer the whole server count', () => {
+        const groups = groupHitsByLayer(SPLIT, splitLayer, COUNTS, LAYERS)
+
+        // C1 holds 40 matches in total. Neither half may claim all 40 —
+        // the two layer headers would then sum to 80 under a 3-row page.
+        expect(groups.map((g) => g.count)).toEqual([1, 1])
+        expect(groups[0].containers[0].count).toBe(1)
+        expect(groups[1].containers[0].count).toBe(1)
+    })
+
+    it('still uses the exact count for the containers that are not split', () => {
+        const groups = groupHitsByLayer(
+            [...SPLIT, hit('c', 'C2')], splitLayer, COUNTS, LAYERS)
+
+        // C2 lives in one layer only, so its server count stands.
+        const l2 = groups.find((g) => g.layerId === 'L2')!
+        expect(l2.containers.find((c) => c.urn === 'C2')!.count).toBe(3)
+    })
+})
+
+
 describe('flattenRows', () => {
     it('emits a header per layer, per container, then the hits', () => {
         const rows = flattenRows(groupHitsByLayer(HITS, resolveLayer, COUNTS, LAYERS), new Set())
