@@ -3,8 +3,8 @@
  *
  * GraphCanvas only: the Context View draws its own Connections panel
  * (context-view/connections/ConnectionsPanel.tsx) instead. `visibleEdges` is
- * therefore always supplied, and the store-backed "Canvas mode" branches
- * that nothing could reach are gone.
+ * therefore required, and the store-backed "Canvas mode" branches that
+ * nothing could reach are gone.
  */
 
 import { useState, useMemo } from 'react'
@@ -32,10 +32,6 @@ export interface LegendEdge {
     data?: { edgeType?: string; edgeTypes?: string[]; edgeCount?: number }
 }
 
-/** Module constant, not an inline `?? []`: a fresh array literal per render
- *  would defeat the counts memo below. */
-const NO_EDGES: LegendEdge[] = []
-
 function edgeTypesOf(edge: LegendEdge): string[] {
     if (Array.isArray(edge.types) && edge.types.length > 0) return edge.types
     if (Array.isArray(edge.data?.edgeTypes) && edge.data.edgeTypes.length > 0) return edge.data.edgeTypes
@@ -57,7 +53,7 @@ interface EdgeLegendProps {
      * The edges rendered on this canvas. Type discovery, counts and
      * highlighting all come from them, never from the raw canvas store.
      */
-    visibleEdges?: LegendEdge[]
+    visibleEdges: LegendEdge[]
 }
 
 export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }: EdgeLegendProps) {
@@ -75,8 +71,6 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
         toggleFilter,
     } = useEdgeFiltersStore()
 
-    const activeEdges = visibleEdges ?? NO_EDGES
-
     // Edge type metadata (color, label, icon, stroke style) always comes from
     // the store — the schema-driven definitions live there regardless of mode.
     const edgeTypeDefinitions = useMemo(() => {
@@ -87,12 +81,12 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
         )
     }, [storeEdges, relationshipTypes, containmentEdgeTypes])
 
-    // Per-type counts from the *active* edge list.
+    // Per-type counts from the edges this canvas is rendering.
     // For projected edges each entry may represent multiple underlying edges
     // (edge.edgeCount), so we sum those to get meaningful counts.
     const countsByType = useMemo(() => {
         const counts: Record<string, number> = {}
-        activeEdges.forEach(edge => {
+        visibleEdges.forEach(edge => {
             const types = edgeTypesOf(edge)
             const n = edgeBundleCount(edge)
             types.forEach(t => {
@@ -101,9 +95,9 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
             })
         })
         return counts
-    }, [activeEdges])
+    }, [visibleEdges])
 
-    // Types present in the active edge set.
+    // Types present in that same edge set.
     // Rows are built from countsByType directly — the rendered edges may include
     // synthetic types (e.g. "AGGREGATED") that have no entry in the schema-based
     // edgeTypeDefinitions.  Building from countsByType guarantees that
@@ -134,7 +128,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
     // Click a type row → highlight all edges of that type in the overlay.
     const handleHighlightType = (type: string) => {
         const upper = type.toUpperCase()
-        const matchingIds = activeEdges
+        const matchingIds = visibleEdges
             .filter(e => edgeTypesOf(e).some(t => t.toUpperCase() === upper))
             .map(e => e.id)
 
@@ -148,7 +142,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
 
     const isTypeHighlighted = (type: string) => {
         const upper = type.toUpperCase()
-        return activeEdges
+        return visibleEdges
             .filter(e => edgeTypesOf(e).some(t => t.toUpperCase() === upper))
             .some(e => highlightedEdgeIds.has(e.id))
     }

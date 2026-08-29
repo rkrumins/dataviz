@@ -64,12 +64,6 @@ const TRACE_COUNT_NOTE =
   ' During a trace, a connection that carries several types keeps its full count when one of them is hidden.'
 const ROW_HINT = 'Hover a row to spotlight its connections · click to keep it lit.'
 
-/** A row is not a <button>: it holds the Eye and Only buttons (nesting is
- *  invalid), and the collapsed header must stay the FIRST button in the root.
- *  So it earns its keyboard the long way — focusable, Enter/Space pins, and
- *  focus counts as hover, which is also what reveals the Only control. */
-const ROW_KEYS = new Set(['Enter', ' ', 'Spacebar'])
-
 function Swatch({ def }: { def: EdgeTypeDefinition }) {
   return (
     <svg width="48" height="8" viewBox="0 0 48 8" className="flex-shrink-0" aria-hidden="true">
@@ -220,7 +214,7 @@ export function ConnectionsPanel({
                   onMouseLeave={() => setHoveredType(null)}
                 >
                   {model.rows.length === 0 && (
-                    <p className="text-xs text-ink-muted py-3 text-center">No connections on screen</p>
+                    <p className="text-xs text-ink-muted py-3 text-center">No connections in view</p>
                   )}
 
                   {model.rows.map((row) => {
@@ -230,31 +224,45 @@ export function ConnectionsPanel({
                       <div
                         key={row.type}
                         data-connection-row={row.type}
-                        title={`${def.label} — ${row.relationships.toLocaleString()} of the connections on screen carry this type. A connection carrying more than one type is counted in each of its types.${traceMode ? TRACE_COUNT_NOTE : ''}`}
-                        tabIndex={0}
+                        title={`${def.label} — ${row.relationships.toLocaleString()} of the connections in view carry this type. A connection carrying more than one type is counted in each of its types.${traceMode ? TRACE_COUNT_NOTE : ''}`}
                         onMouseEnter={() => setHoveredType(row.type)}
                         onMouseLeave={() => setHoveredType(null)}
-                        onFocus={() => setHoveredType(row.type)}
-                        onBlur={() => setHoveredType(null)}
                         onClick={() => togglePin(row.type)}
-                        onKeyDown={(e) => {
-                          if (!ROW_KEYS.has(e.key)) return
-                          e.preventDefault()
-                          togglePin(row.type)
-                        }}
                         className={cn(
                           'group/row flex flex-col gap-0.5 px-2 py-1.5 rounded-lg cursor-pointer transition-colors',
                           'hover:bg-black/5 dark:hover:bg-white/5',
-                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                           isPinned && 'bg-accent-lineage/10 ring-1 ring-accent-lineage/30',
                         )}
                       >
                         <span className="flex items-center gap-2">
-                          <Swatch def={def} />
-                          <span className="flex-1 min-w-0 text-xs font-medium text-ink truncate">{def.label}</span>
-                          <span className="flex-shrink-0 text-xs font-semibold text-ink tabular-nums">
-                            {row.relationships.toLocaleString()}
-                          </span>
+                          {/* The pin is a real button: a screen reader hears the
+                              type's name, a role and whether it is pinned. It
+                              cannot be the ROW — that holds the Eye and Only
+                              buttons (nesting is invalid) and must not displace
+                              the collapsed header as the first button in the
+                              root. The row keeps the pointer conveniences
+                              (hover spotlights, a click anywhere on it pins),
+                              so this click stops there rather than counting
+                              twice; focus does what hover does, which is also
+                              what reveals the Only control. */}
+                          <button
+                            type="button"
+                            aria-pressed={isPinned}
+                            aria-label={def.label}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              togglePin(row.type)
+                            }}
+                            onFocus={() => setHoveredType(row.type)}
+                            onBlur={() => setHoveredType(null)}
+                            className="flex-1 min-w-0 flex items-center gap-2 text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                          >
+                            <Swatch def={def} />
+                            <span className="flex-1 min-w-0 text-xs font-medium text-ink truncate">{def.label}</span>
+                            <span className="flex-shrink-0 text-xs font-semibold text-ink tabular-nums">
+                              {row.relationships.toLocaleString()}
+                            </span>
+                          </button>
                           <button
                             type="button"
                             title="Hide this type"

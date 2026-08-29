@@ -230,15 +230,6 @@ export function LineageFlowOverlay({
   // toggled off) so columns never show stale connection counts.
   useEffect(() => () => { useColumnPeripheryStore.getState().clear() }, [])
 
-  // Publish how many edges are actually painted — the IntersectionObserver
-  // -gated, sameRows-guarded `computedEdges` set — for ConnectionsPanel's
-  // "N drawn". Zeroed on unmount, which is also when Lineage is off.
-  const setDrawn = useDrawnEdgesStore(s => s.setDrawn)
-  useEffect(() => {
-    setDrawn(computedEdges.length)
-    return () => setDrawn(0)
-  }, [computedEdges.length, setDrawn])
-
   // Selection changes redraw the overlay so the rail recomputes; the
   // ref keeps updateFlow's identity stable.
   useEffect(() => {
@@ -1219,6 +1210,17 @@ export function LineageFlowOverlay({
     if (edge.minY > viewport.scrollTop + viewport.clientHeight + VIEWPORT_MARGIN) return false
     return true
   }), [computedEdges, viewport])
+
+  // Publish how many edges are actually PAINTED — `visibleEdges`, the
+  // viewport-culled subset the `<g data-edge-id>` elements are rendered from,
+  // not the wider `computedEdges` set it is culled out of — for
+  // ConnectionsPanel's "N drawn". Zeroed on unmount, which is also when
+  // Lineage is off.
+  const setDrawn = useDrawnEdgesStore(s => s.setDrawn)
+  useEffect(() => {
+    setDrawn(visibleEdges.length)
+    return () => setDrawn(0)
+  }, [visibleEdges.length, setDrawn])
 
   // ── Density-adaptive render tier ───────────────────────────────────────
   //

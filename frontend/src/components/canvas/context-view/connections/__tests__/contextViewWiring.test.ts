@@ -37,12 +37,11 @@ describe('the Connections panel is wired into the Context View', () => {
     // A pinned highlight or an opened panel must not survive a view switch.
     expect(source).toContain('key={connectionsViewId}')
     // getEdgeTypeDefinition fabricates prose when the ontology has none; the
-    // resolver overrides it so the panel prints the ontology's words or none.
-    // The RULE, not its formatting: the schema's own description first, the
-    // ontology metadata's second, and an empty string — never a sentence
-    // nobody wrote — when neither says anything.
+    // resolver overrides it so the panel prints the schema's words or none.
+    // The RULE, not its formatting: the schema's own description, and an
+    // empty string — never a sentence nobody wrote — when it has none.
     expect(source).toMatch(
-      /getEdgeTypeFromSchema\([^)]*\)\?\.description\s*\|\|[\s\S]{0,200}?\|\|\s*''/
+      /getEdgeTypeFromSchema\([^)]*\)\?\.description\s*\|\|\s*''/
     )
   })
 

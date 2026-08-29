@@ -1,7 +1,8 @@
 /**
  * Drawn-edge count — how many connection lines the Context View overlay is
- * actually painting right now, published by LineageFlowOverlay from its
- * IntersectionObserver-gated `computedEdges` set (see rowEquality.ts) and
+ * actually painting right now, published by LineageFlowOverlay from the
+ * `visibleEdges` set it renders (its IntersectionObserver-gated,
+ * sameRows-guarded `computedEdges`, then culled to the scroll viewport) and
  * read by ConnectionsPanel's header ("N drawn").
  *
  * A dedicated store (not canvas state), same reason as `columnPeriphery.ts`:

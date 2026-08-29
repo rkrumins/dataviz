@@ -176,13 +176,11 @@ function makeConnectionTypeResolver(
     // getEdgeTypeDefinition FABRICATES a description when the ontology has
     // none — "Edge type: Flows To", "Data flow relationship: Flows To",
     // "Parent-child containment relationship". The panel prints its
-    // description line only when it is non-empty, so hand it the ontology's
-    // own words or nothing at all, never a sentence nobody wrote.
-    const metadata = ontologyMetadata.edgeTypeMetadata as Record<string, { description?: string } | undefined>
-    const description =
-      getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description ||
-      metadata[edgeType.toUpperCase()]?.description ||
-      ''
+    // description line only when it is non-empty, so hand it the schema's own
+    // words or nothing at all, never a sentence nobody wrote. (The view's
+    // edgeTypeMetadata carries no prose — only isContainment / isLineage /
+    // direction / category — so there is nothing else to fall back to.)
+    const description = getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description || ''
     const resolved = { ...def, description }
     cache.set(edgeType, resolved)
     return resolved
@@ -4406,17 +4404,20 @@ export function ContextViewCanvas({
   // It carries edge ids and no nodes; routed to the columns as well, an
   // active highlight with an empty node set would dim every card.
   const [connectionHighlight, setConnectionHighlight] = useState<ReadonlySet<string> | null>(null)
-  // A highlight must not outlive what it pointed at: switching view or
-  // entering/leaving a trace replaces the board under it. Reconciled as the
-  // change ARRIVES — React's "adjusting state when a prop changes", the same
-  // idiom the panel uses, not an effect, which would paint the stale
-  // highlight for one committed frame first.
+  // A highlight must not outlive the board it pointed at: switching view, and
+  // crossing into or out of a trace, replace every edge id under it.
+  // Reconciled as the change ARRIVES — React's "adjusting state when a prop
+  // changes", the same idiom the panel uses, not an effect, which would paint
+  // the stale highlight for one committed frame first.
   // Keyed on `overlay.active`, the same signal the panel drops its own pin
   // on: clearing on `traceActive` instead left the pinned ROW lit for the
-  // whole walk with nothing lit on the board to match it.
-  const [highlightScope, setHighlightScope] = useState({ viewId: connectionsViewId, tracing: overlay.active, focus: canvasTrace.tracedUrn })
-  if (highlightScope.viewId !== connectionsViewId || highlightScope.tracing !== overlay.active || highlightScope.focus !== canvasTrace.tracedUrn) {
-    setHighlightScope({ viewId: connectionsViewId, tracing: overlay.active, focus: canvasTrace.tracedUrn })
+  // whole walk with nothing lit on the board to match it. NOT keyed on the
+  // traced urn: a re-focus inside a trace keeps the panel's pin, which
+  // re-emits against the new model, so clearing here would only blank the
+  // board for a frame.
+  const [highlightScope, setHighlightScope] = useState({ viewId: connectionsViewId, tracing: overlay.active })
+  if (highlightScope.viewId !== connectionsViewId || highlightScope.tracing !== overlay.active) {
+    setHighlightScope({ viewId: connectionsViewId, tracing: overlay.active })
     setConnectionHighlight(null)
   }
   const overlayHighlightEdges = useMemo(

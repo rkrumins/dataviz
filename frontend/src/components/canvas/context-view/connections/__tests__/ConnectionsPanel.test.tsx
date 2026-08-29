@@ -15,7 +15,8 @@
  * - The header button is the FIRST button in the panel — the canvas
  *   reserves the bottom band from `el.querySelector('button').offsetHeight`.
  */
-import { render, screen, fireEvent, cleanup, createEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within, act } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionsPanel, type ConnectionsPanelProps } from '../ConnectionsPanel'
 import type { ConnectionModel, ConnectionTypeRow } from '../connectionModel'
@@ -325,29 +326,52 @@ describe('ConnectionsPanel', () => {
     expect(headerButton().getAttribute('aria-expanded')).toBe('true')
   })
 
-  it('a focused row emits its bundle ids; Enter pins it and Enter again clears it', () => {
+  it('the pin is a real button: focus spotlights, Enter and Space pin and unpin it', async () => {
+    // The row is a plain div — it holds the Eye and Only buttons, so it can
+    // never be a button itself. The PIN is, which is how a screen reader
+    // hears the type's name, a role, and whether it is currently pinned.
+    const user = userEvent.setup()
     const onHighlight = vi.fn()
     mount({ defaultExpanded: true, onHighlight })
     const row = rowFor('FLOWS_TO')
-    expect(row.getAttribute('tabindex')).toBe('0')
+    expect(row.getAttribute('tabindex')).toBeNull()
 
-    fireEvent.focus(row)
+    const pin = within(row).getByRole('button', { name: 'Flows to' })
+    expect(pin.getAttribute('aria-pressed')).toBe('false')
+
+    // Focus counts as hover — which is also what reveals the Only control.
+    // (A real focus, not fireEvent: `user.keyboard` types into whatever the
+    // document says is active.)
+    act(() => pin.focus())
     expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
 
     // Enter pins it — the highlight then survives focus leaving the row.
-    fireEvent.keyDown(row, { key: 'Enter' })
-    fireEvent.blur(row)
+    await user.keyboard('{Enter}')
+    expect(pin.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.blur(pin)
     expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
 
-    fireEvent.focus(row)
-    fireEvent.keyDown(row, { key: 'Enter' })
-    fireEvent.blur(row)
+    // Space unpins it: the native button owns both keys, so nothing here has
+    // to intercept them (or preventDefault the page scroll by hand).
+    act(() => pin.focus())
+    await user.keyboard(' ')
+    expect(pin.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.blur(pin)
     expect(lastHighlight(onHighlight)).toBeNull()
+  })
 
-    // Space must not scroll the canvas out from under the reader.
-    const space = createEvent.keyDown(row, { key: ' ' })
-    fireEvent(row, space)
-    expect(space.defaultPrevented).toBe(true)
+  it('a click on the pin pins the type exactly once, not twice', () => {
+    // The row div pins too (a pointer convenience: click anywhere on the
+    // row), so the button's own click has to stop there — counted twice it
+    // would pin and immediately unpin.
+    const onHighlight = vi.fn()
+    mount({ defaultExpanded: true, onHighlight })
+    const pin = within(rowFor('FLOWS_TO')).getByRole('button', { name: 'Flows to' })
+
+    fireEvent.click(pin)
+    expect(pin.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.mouseLeave(rowList())
+    expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
   })
 
   it('says what a row does, whenever there is a row to do it to', () => {

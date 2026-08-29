@@ -36,8 +36,24 @@ const edge = (id: string, source: string, target: string, type = 'FLOWS_TO', edg
     : { edgeType: type, edgeTypes },
 })
 
+type DetailedEdge = { id: string; sourceUrn: string; targetUrn: string; edgeType: string }
+/** One entry of `aggregatedEdges`, as a Map tuple — typed so the fixtures
+ *  build the map without a cast. */
+type AggregatedEntry = [string, {
+  state: 'collapsed' | 'expanded'
+  detailedEdges: DetailedEdge[]
+  aggregated: {
+    id: string
+    sourceUrn: string
+    targetUrn: string
+    edgeCount: number
+    edgeTypes: string[]
+    confidence: number
+  }
+}]
+
 /** One collapsed AGGREGATED entry as `aggregatedEdges` holds them. */
-const aggEntry = (id: string, sourceUrn: string, targetUrn: string, edgeTypes: string[] = ['FLOWS_TO']) => ([
+const aggEntry = (id: string, sourceUrn: string, targetUrn: string, edgeTypes: string[] = ['FLOWS_TO']): AggregatedEntry => ([
   id,
   {
     state: 'collapsed',
@@ -47,7 +63,7 @@ const aggEntry = (id: string, sourceUrn: string, targetUrn: string, edgeTypes: s
 ])
 
 /** One EXPANDED entry — its `detailedEdges` take the urn-keyed case-C path. */
-const expandedEntry = (id: string, detailedEdges: Array<{ id: string; sourceUrn: string; targetUrn: string; edgeType: string }>) => ([
+const expandedEntry = (id: string, detailedEdges: DetailedEdge[]): AggregatedEntry => ([
   id,
   {
     state: 'expanded',
@@ -59,7 +75,7 @@ const expandedEntry = (id: string, detailedEdges: Array<{ id: string; sourceUrn:
 function run(opts: {
   edges?: ReturnType<typeof edge>[]
   roots: HierarchyNode[]
-  aggregatedEdges?: Map<string, any>
+  aggregatedEdges?: Map<string, AggregatedEntry[1]>
   expandedNodes?: Set<string>
   parentMap?: Map<string, string>
   browseBundleEnabled?: boolean
@@ -135,7 +151,7 @@ describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
   it('an AGGREGATED edge is a roll-up even when both endpoints are visible', () => {
     const res = run({
       roots: [hNode('a'), hNode('b')],
-      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')] as any),
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),
     })
     expect(bundles(res)).toHaveLength(1)
     expect(bundles(res)[0].isAggregated).toBe(true)
@@ -159,7 +175,7 @@ describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
     const res = run({
       roots: [hNode('a'), hNode('b')],
       edges: [edge('e1', 'a', 'b')],                                   // forward: raw
-      aggregatedEdges: new Map([aggEntry('agg1', 'b', 'a')] as any),   // reverse: AGGREGATED
+      aggregatedEdges: new Map([aggEntry('agg1', 'b', 'a')]),          // reverse: AGGREGATED
     })
     expect(bundles(res)).toHaveLength(1)
     expect(bundles(res)[0].isBidirectional).toBe(true)
@@ -173,7 +189,7 @@ describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
       roots: [hNode('p', [c1]), hNode('b')],   // p collapsed → c1 resolves to p
       aggregatedEdges: new Map([expandedEntry('agg1', [
         { id: 'd1', sourceUrn: 'c1', targetUrn: 'b', edgeType: 'FLOWS_TO' },
-      ])] as any),
+      ])]),
     })
     const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
     expect(pb).toBeDefined()
@@ -188,7 +204,7 @@ describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
       roots: [hNode('p', [c1]), hNode('b')],
       aggregatedEdges: new Map([expandedEntry('agg1', [
         { id: 'd1', sourceUrn: 'c1', targetUrn: 'b', edgeType: 'FLOWS_TO' },
-      ])] as any),
+      ])]),
     })
     const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
     expect(pb).toBeDefined()
