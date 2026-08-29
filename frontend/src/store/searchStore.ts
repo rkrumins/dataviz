@@ -497,18 +497,20 @@ function deriveAncestorRollups(infos: Iterable<AncestorPathInfo>): {
  * summing is needed because each bucket already IS that ancestor's total.
  *
  * Ancestors the server sent no bucket for keep their rollup value rather
- * than disappearing: the aggregation groups by immediate parent, so a
- * grandparent the current page proves has matches under it has no bucket
- * of its own, and dropping it would make Isolate/Hide swallow a container
- * the user can see a match inside.
+ * than disappearing: the aggregation is capped at ``maxBuckets`` and is
+ * computed over the candidate set, so a container the current page proves
+ * has matches under it can still be missing from the response, and
+ * dropping it would make Isolate/Hide swallow a container the user can
+ * see a match inside.
  *
  * A bucket carrying no breakdown DELETES the rollup's. The count and the
  * breakdown are rendered together — SearchMatchBadge puts "42 matches
  * inside this subtree" straight above a type list whose bars are
  * proportioned to that list's own sum — so leaving the page's `{column: 1}`
  * beside the server's 42 would state a composition the count contradicts.
- * A count on its own is the honest answer; today every bucket takes this
- * path, because the request asks for no sub-aggregation.
+ * A count on its own is the honest answer. Most buckets now arrive WITH a
+ * breakdown — the ``ancestor`` facet ships ``typeCounts`` per bucket — so
+ * this path is the exception rather than the rule it once was.
  */
 function overlayServerAncestorCounts(
     counts: Map<string, number>,
