@@ -88,11 +88,16 @@ export interface SearchMapPanelProps {
      *  second, identical one of its own. Omitted by the canvases whose
      *  only search IS this panel — see `OwnedSessionPanel`. */
     session?: UseAdvancedSearchResult
+    /** What Clear (×) means when a canvas owns the search. The panel's
+     *  own reset reaches everything it can see and nothing the header box
+     *  holds, which would strand the query text with no results and no
+     *  way to re-ask. Omitted alongside `session`. */
+    onClear?: () => void
 }
 
 
 export const SearchMapPanel: FC<SearchMapPanelProps> = ({
-    open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches, session,
+    open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches, session, onClear,
 }) => {
     const [width, setWidth] = useState<number>(() => readPersistedWidth())
 
@@ -122,6 +127,7 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                                     onClose={onClose}
                                     viewId={viewId}
                                     session={session}
+                                    onClear={onClear}
                                     onRevealNode={onRevealNode}
                                     onOpenNode={onOpenNode}
                                     onFrameMatches={onFrameMatches}
@@ -160,6 +166,8 @@ interface PanelInnerProps {
     /** The pipeline to report on — the canvas's session, or the one
      *  `OwnedSessionPanel` mounts for the canvases that have none. */
     session: UseAdvancedSearchResult
+    /** The session's own teardown, when there is one. */
+    onClear?: () => void
     onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
@@ -170,14 +178,14 @@ interface PanelInnerProps {
  *  panel (GraphCanvas / HierarchyCanvas). A wrapper rather than a
  *  fallback inside `PanelInner` because a hook cannot be called
  *  conditionally. */
-function OwnedSessionPanel(props: Omit<PanelInnerProps, 'session'>) {
+function OwnedSessionPanel(props: Omit<PanelInnerProps, 'session' | 'onClear'>) {
     const session = useAdvancedSearch(props.viewId)
     return <PanelInner {...props} session={session} />
 }
 
 
 function PanelInner({
-    onClose, viewId, session, onRevealNode, onOpenNode, onFrameMatches,
+    onClose, viewId, session, onClear, onRevealNode, onOpenNode, onFrameMatches,
 }: PanelInnerProps) {
     const {
         view, runState, runPredicate, cancel,
@@ -253,6 +261,17 @@ function PanelInner({
     }, [draftOptions])
 
     const handleClear = useCallback(() => {
+        // On a canvas that owns the search, Clear is the SESSION's
+        // teardown. The three resets below reach everything this panel can
+        // see and nothing the header box holds, so on their own they would
+        // leave the query text in the box with its results, highlights and
+        // status gone — and the debounced lane only dispatches when the
+        // debounced query CHANGES, so unchanged text never asks again.
+        // `clearQuery` does all three and empties the box.
+        if (onClear) {
+            onClear()
+            return
+        }
         // Three resets — each owns a different slice of state and skipping
         // any leaves stale UI behind:
         //   1. cancel()       aborts an in-flight request and clears
@@ -273,7 +292,7 @@ function PanelInner({
         cancel()
         resetTemplate()
         clearStore()
-    }, [cancel, resetTemplate, clearStore])
+    }, [onClear, cancel, resetTemplate, clearStore])
 
     /**
      * Seed-from-template: rather than calling runTemplate (which would

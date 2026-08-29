@@ -4328,6 +4328,7 @@ export function ContextViewCanvas({
         onClose={search.closePanel}
         viewId={activeView?.id ?? ''}
         session={search.advanced}
+        onClear={search.clearQuery}
         onRevealNode={revealSearchHit}
         onFrameMatches={handleFrameMatches}
       />
