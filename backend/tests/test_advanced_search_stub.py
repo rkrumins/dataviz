@@ -259,6 +259,35 @@ async def test_text_predicate_substring_matches_property_value(stub):
 
 
 @pytest.mark.asyncio
+async def test_text_target_any_matches_property_but_name_does_not():
+    """``target='any'`` scans n.searchableText (which in production has
+    property values folded in); ``target='name'`` only scans
+    displayName + qualifiedName and must NOT fall back to
+    searchableText, so a value that lives only in a folded property
+    matches 'any' but not 'name'."""
+    nodes = [{
+        "urn": "urn:dataset:metrics",
+        "entityType": "dataset",
+        "displayName": "Metrics Table",
+        "qualifiedName": "warehouse.public.metrics",
+        "searchableText": (
+            "metrics table warehouse.public.metrics zephyrus-cluster"
+        ),
+    }]
+    stub = StubDeepSearchProvider(nodes=nodes)
+
+    any_page = await stub.deep_search(
+        _query(TextPredicate(value="zephyrus", target="any"))
+    )
+    assert any_page.candidate_count == 1
+
+    name_page = await stub.deep_search(
+        _query(TextPredicate(value="zephyrus", target="name"))
+    )
+    assert name_page.candidate_count == 0
+
+
+@pytest.mark.asyncio
 async def test_group_predicate_and(stub):
     query = _query(GroupPredicate(op="and", children=[
         EntityTypePredicate(op="in", values=["dataset"]),

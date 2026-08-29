@@ -249,8 +249,12 @@ async def _backfill_searchable_text(
                     if k in _RESERVED_NODE_KEYS:
                         continue
                     user_props[k] = v
+            # n.tags is stored as a JSON-encoded string on the node;
+            # _compute_searchable_text parses it.
+            raw_tags = props.get("tags") if isinstance(props, dict) else None
             text = _compute_searchable_text(
                 display_name, qualified_name, description, user_props,
+                tags=raw_tags,
             )
             batch_items.append({"urn": urn, "text": text})
             last_urn = urn

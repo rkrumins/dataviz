@@ -282,50 +282,52 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
     if isinstance(predicate, TextPredicate):
         # Mirror the FalkorDB compiler's column mapping (see
         # ``_visit_text`` in ``falkordb_deep_search.py``):
-        #   name           → displayName + qualifiedName + searchableText
-        #   qualifiedName  → qualifiedName + searchableText
+        #   name           → displayName + qualifiedName
+        #   qualifiedName  → qualifiedName
         #   description    → description
         #   tags           → tag list
-        #   any            → searchableText
+        #   any            → searchableText + displayName + qualifiedName
         # Otherwise the stub silently produces different results than
-        # production for the same predicate.
+        # production for the same predicate. Each column is evaluated
+        # SEPARATELY (a match on displayName OR a match on
+        # qualifiedName) — never a space-joined haystack across fields
+        # — so exact/prefix/suffix semantics hold per field.
         target = predicate.target or "any"
         needle = (predicate.value or "").lower()
         if not needle:
             return True
         if target == "name":
-            haystack = " ".join(
-                str(node.get(k) or "") for k in
-                ("displayName", "qualifiedName", "searchableText")
-            ).lower()
+            cols = ("displayName", "qualifiedName")
         elif target == "qualifiedName":
-            haystack = " ".join(
-                str(node.get(k) or "") for k in
-                ("qualifiedName", "searchableText")
-            ).lower()
+            cols = ("qualifiedName",)
         elif target == "description":
-            haystack = str(node.get("description") or "").lower()
+            cols = ("description",)
         elif target == "tags":
-            haystack = " ".join(node.get("tags") or []).lower()
+            cols = ("tags",)
         elif target == "any":
-            haystack = str(node.get("searchableText") or "").lower()
-            # Belt-and-braces: a fixture node that hasn't been
-            # pre-computed ``searchableText`` shouldn't silently fail
-            # — fall back to the same fields the production write path
-            # would have denormalised.
-            if not haystack:
-                haystack = " ".join(
-                    str(node.get(k) or "") for k in
-                    ("displayName", "qualifiedName", "description")
-                ).lower()
+            cols = ("searchableText", "displayName", "qualifiedName")
         else:
-            haystack = str(node.get(target) or "").lower()
-        if predicate.match == "exact":
-            return haystack == needle
-        if predicate.match == "prefix":
-            return haystack.startswith(needle)
-        # default substring
-        return needle in haystack
+            cols = (target,)
+
+        def _field(key: str) -> str:
+            v = node.get(key)
+            if isinstance(v, list):
+                return " ".join(str(x) for x in v).lower()
+            return str(v or "").lower()
+
+        for key in cols:
+            value = _field(key)
+            if predicate.match == "exact":
+                matched = value == needle
+            elif predicate.match == "prefix":
+                matched = value.startswith(needle)
+            elif predicate.match == "suffix":
+                matched = value.endswith(needle)
+            else:  # substring (default)
+                matched = needle in value
+            if matched:
+                return True
+        return False
 
     if isinstance(predicate, PropertyPredicate):
         v = node.get(predicate.key)

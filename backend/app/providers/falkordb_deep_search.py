@@ -294,21 +294,25 @@ class _Compiler:
             )
         target = t.target
 
-        # ``target='name'`` and ``target='qualifiedName'`` widen to OR
-        # across the canonical name-like fields the storage layer
-        # commits to. Any single field can be null/empty on a given
-        # node (legacy sync, partial ingestion) without blackholing the
+        # ``target='name'`` widens to OR across the canonical name-like
+        # fields the storage layer commits to — displayName and
+        # qualifiedName only. It deliberately does NOT include
+        # n.searchableText: that field also absorbs description and
+        # every string-valued user property, so folding it into 'name'
+        # would make "name is exactly X" / "name ends with X" false —
+        # either false-positiving on a property value or never matching
+        # via the blob. ``target='any'`` is the broad, property-inclusive
+        # target. Any single field can be null/empty on a given node
+        # (legacy sync, partial ingestion) without blackholing the
         # search — the predicate matches if ANY of the listed columns
-        # contains the value. ``COALESCE(..., '')`` guards against
-        # MISSING/null reads so an absent field reads as a non-matching
-        # empty string rather than aborting the comparison.
+        # contains the value.
         #
-        # ``description`` / ``tags`` stay single-field — those are
-        # explicit user targets, not name aliases.
+        # ``description`` / ``tags`` / ``qualifiedName`` stay
+        # single-field — those are explicit, pure user targets.
         if target == "name":
-            cols = ["n.displayName", "n.qualifiedName", "n.searchableText"]
+            cols = ["n.displayName", "n.qualifiedName"]
         elif target == "qualifiedName":
-            cols = ["n.qualifiedName", "n.searchableText"]
+            cols = ["n.qualifiedName"]
         elif target == "description":
             cols = ["n.description"]
         elif target == "tags":
@@ -322,9 +326,13 @@ class _Compiler:
             cols = [f"n.{_safe_property_name(t.property_key)}"]
         elif target == "any":
             # n.searchableText is denormalised at write-time (already
-            # lowercased). The toLower on read is defensive in case a
-            # node was written by an older provider that didn't lowercase.
-            cols = ["n.searchableText"]
+            # lowercased, includes description + string-valued user
+            # properties). The toLower on read is defensive in case a
+            # node was written by an older provider that didn't
+            # lowercase. displayName/qualifiedName are ORed in directly
+            # so a node whose searchableText hasn't been backfilled yet
+            # is still found by its name.
+            cols = ["n.searchableText", "n.displayName", "n.qualifiedName"]
         else:
             raise CompileError(f"unknown text target: {target!r}")
 
@@ -368,21 +376,29 @@ class _Compiler:
     def _visit_property(self, p) -> str:
         col = f"n.{_safe_property_name(p.key)}"
         op = p.op
-        if op in ("eq", "neq", "gt", "gte", "lt", "lte"):
-            symbol = {"eq": "=", "neq": "<>", "gt": ">",
-                      "gte": ">=", "lt": "<", "lte": "<="}[op]
+
+        def case_fold(value):
+            # Same case-fold helper the contains/startsWith/endsWith
+            # branch uses: stringify, then toLower(toString(col)) unless
+            # case_sensitive bypasses the wrap.
+            v = "" if value is None else str(value)
+            if p.case_sensitive:
+                return col, v
+            return f"toLower(toString({col}))", v.lower()
+
+        if op in ("eq", "neq"):
+            symbol = {"eq": "=", "neq": "<>"}[op]
+            pn = self._next()
+            col_expr, self.params[pn] = case_fold(p.value)
+            return f"{col_expr} {symbol} ${pn}"
+        if op in ("gt", "gte", "lt", "lte"):
+            symbol = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[op]
             pn = self._next()
             self.params[pn] = p.value
             return f"{col} {symbol} ${pn}"
         if op in ("contains", "startsWith", "endsWith"):
             pn = self._next()
-            v = "" if p.value is None else str(p.value)
-            if p.case_sensitive:
-                self.params[pn] = v
-                col_expr = col
-            else:
-                self.params[pn] = v.lower()
-                col_expr = f"toLower(toString({col}))"
+            col_expr, self.params[pn] = case_fold(p.value)
             keyword = {"contains": "CONTAINS",
                        "startsWith": "STARTS WITH",
                        "endsWith": "ENDS WITH"}[op]

@@ -459,17 +459,17 @@ class TestServiceValidator:
 class TestCompilerLeaves:
     def test_text_substring_case_insensitive(self):
         # ``target='name'`` widens to OR across the canonical name-like
-        # fields the storage layer commits to (displayName, qualifiedName,
-        # searchableText). A null field on a given node reads as an empty
-        # null on a given node — Cypher's three-valued logic returns
-        # null for that CONTAINS, and the OR over the other terms
-        # decides the result.
+        # fields the storage layer commits to (displayName,
+        # qualifiedName) — NOT searchableText, which is a different,
+        # broader target (``any``). A null field on a given node reads
+        # as an empty null — Cypher's three-valued logic returns null
+        # for that CONTAINS, and the OR over the other term decides
+        # the result.
         c = _Compiler()
         where = c.compile(TextPredicate(value="Customer", target="name"))
         assert where == (
             "(toLower(toString(n.displayName)) CONTAINS $p0"
-            " OR toLower(toString(n.qualifiedName)) CONTAINS $p0"
-            " OR toLower(toString(n.searchableText)) CONTAINS $p0)"
+            " OR toLower(toString(n.qualifiedName)) CONTAINS $p0)"
         )
         assert c.params == {"p0": "customer"}
 
@@ -480,8 +480,7 @@ class TestCompilerLeaves:
         ))
         assert where == (
             "(toLower(toString(n.displayName)) STARTS WITH $p0"
-            " OR toLower(toString(n.qualifiedName)) STARTS WITH $p0"
-            " OR toLower(toString(n.searchableText)) STARTS WITH $p0)"
+            " OR toLower(toString(n.qualifiedName)) STARTS WITH $p0)"
         )
         assert c.params == {"p0": "cust"}
 
@@ -492,8 +491,7 @@ class TestCompilerLeaves:
         ))
         assert where == (
             "(toLower(toString(n.displayName)) = $p0"
-            " OR toLower(toString(n.qualifiedName)) = $p0"
-            " OR toLower(toString(n.searchableText)) = $p0)"
+            " OR toLower(toString(n.qualifiedName)) = $p0)"
         )
         assert c.params == {"p0": "customer"}
 
@@ -507,10 +505,22 @@ class TestCompilerLeaves:
         ))
         assert where == (
             "(toLower(toString(n.displayName)) ENDS WITH $p0"
-            " OR toLower(toString(n.qualifiedName)) ENDS WITH $p0"
-            " OR toLower(toString(n.searchableText)) ENDS WITH $p0)"
+            " OR toLower(toString(n.qualifiedName)) ENDS WITH $p0)"
         )
         assert c.params == {"p0": "_v2"}
+
+    def test_name_exact_does_not_touch_searchable_text(self):
+        # Regression guard: ``target='name'`` must never widen into
+        # ``n.searchableText`` for ANY match mode — that's what makes
+        # "name is exactly X" / "name ends with X" honest instead of
+        # silently matching a property value denormalised into the
+        # blob (or never matching, for exact).
+        for match in ("substring", "prefix", "suffix", "exact"):
+            c = _Compiler()
+            where = c.compile(TextPredicate(
+                value="Customer", target="name", match=match,
+            ))
+            assert "searchableText" not in where
 
     def test_text_description_suffix(self):
         # Suffix on a single-field target (description) — no OR wrap.
@@ -521,32 +531,28 @@ class TestCompilerLeaves:
         assert where == "toLower(toString(n.description)) ENDS WITH $p0"
         assert c.params == {"p0": "."}
 
-    def test_text_qualifiedName_ors_with_searchableText(self):
-        # ``target='qualifiedName'`` widens to qualifiedName OR
-        # searchableText so a node whose qname is null but whose
-        # searchableText was denormalised still matches.
+    def test_text_qualifiedName_is_pure(self):
+        # ``target='qualifiedName'`` is a pure single-column match — it
+        # no longer widens into searchableText, so "qualifiedName is
+        # exactly X" / "ends with X" are honest instead of
+        # false-positiving on a property value folded into the blob.
         c = _Compiler()
         where = c.compile(TextPredicate(
             value="abc", target="qualifiedName",
         ))
-        assert where == (
-            "(toLower(toString(n.qualifiedName)) CONTAINS $p0"
-            " OR toLower(toString(n.searchableText)) CONTAINS $p0)"
-        )
+        assert where == "toLower(toString(n.qualifiedName)) CONTAINS $p0"
         assert c.params == {"p0": "abc"}
 
     def test_text_exact_case_sensitive(self):
         # Case-sensitive paths skip the toLower() wrap — the column read
-        # is raw — for the multi-field expansion.
+        # is raw. ``qualifiedName`` is single-column (no OR) since it no
+        # longer widens into searchableText.
         c = _Compiler()
         where = c.compile(TextPredicate(
             value="X", target="qualifiedName",
             match="exact", case_sensitive=True,
         ))
-        assert where == (
-            "(n.qualifiedName = $p0"
-            " OR n.searchableText = $p0)"
-        )
+        assert where == "n.qualifiedName = $p0"
         assert c.params == {"p0": "X"}
 
     def test_text_property_target(self):
@@ -579,21 +585,48 @@ class TestCompilerLeaves:
         # A node with displayName='Orders Pipeline' has its lowercased
         # displayName denormalised into n.searchableText at write time, so
         # the compiled CONTAINS predicate against n.searchableText with
-        # parameter 'orders' matches it.
+        # parameter 'orders' matches it. ``any`` also ORs displayName and
+        # qualifiedName directly, so a node whose searchableText hasn't
+        # been backfilled yet is still found by its name.
         c = _Compiler()
         where = c.compile(TextPredicate(value="orders", target="any"))
-        assert where == "toLower(toString(n.searchableText)) CONTAINS $p0"
+        assert where == (
+            "(toLower(toString(n.searchableText)) CONTAINS $p0"
+            " OR toLower(toString(n.displayName)) CONTAINS $p0"
+            " OR toLower(toString(n.qualifiedName)) CONTAINS $p0)"
+        )
         assert c.params == {"p0": "orders"}
+
+    def test_any_ors_display_and_qualified_name(self):
+        # Regression guard for the ``any`` OR-widening, exercised
+        # case-sensitive so the raw (non-toLower) column list is visible
+        # directly rather than folded through the same wrap as the
+        # substring test above.
+        c = _Compiler()
+        where = c.compile(TextPredicate(
+            value="Orders", target="any", case_sensitive=True,
+        ))
+        assert where == (
+            "(n.searchableText CONTAINS $p0"
+            " OR n.displayName CONTAINS $p0"
+            " OR n.qualifiedName CONTAINS $p0)"
+        )
+        assert c.params == {"p0": "Orders"}
 
     def test_text_target_any_matches_property_value(self):
         # A node with sourceSystem='snowflake' and no 'snowflake' in the
         # displayName still matches because every string-valued user
         # property is folded into n.searchableText at write time. The
-        # compiled fragment is the same — the matching happens in the
-        # graph against the denormalised field.
+        # compiled fragment ORs in displayName/qualifiedName too, but the
+        # match here only happens via the denormalised searchableText
+        # field.
         c = _Compiler()
         where = c.compile(TextPredicate(value="Snowflake", target="any"))
-        assert where == "toLower(toString(n.searchableText)) CONTAINS $p0"
+        assert where == (
+            "(toLower(toString(n.searchableText)) CONTAINS $p0"
+            " OR toLower(toString(n.displayName)) CONTAINS $p0"
+            " OR toLower(toString(n.qualifiedName)) CONTAINS $p0)"
+        )
         assert c.params == {"p0": "snowflake"}
 
     def test_text_target_any_prefix(self):
@@ -601,7 +634,11 @@ class TestCompilerLeaves:
         where = c.compile(TextPredicate(
             value="orders", target="any", match="prefix",
         ))
-        assert where == "toLower(toString(n.searchableText)) STARTS WITH $p0"
+        assert where == (
+            "(toLower(toString(n.searchableText)) STARTS WITH $p0"
+            " OR toLower(toString(n.displayName)) STARTS WITH $p0"
+            " OR toLower(toString(n.qualifiedName)) STARTS WITH $p0)"
+        )
         assert c.params == {"p0": "orders"}
 
     def test_text_target_any_exact(self):
@@ -609,7 +646,11 @@ class TestCompilerLeaves:
         where = c.compile(TextPredicate(
             value="orders pipeline", target="any", match="exact",
         ))
-        assert where == "toLower(toString(n.searchableText)) = $p0"
+        assert where == (
+            "(toLower(toString(n.searchableText)) = $p0"
+            " OR toLower(toString(n.displayName)) = $p0"
+            " OR toLower(toString(n.qualifiedName)) = $p0)"
+        )
         assert c.params == {"p0": "orders pipeline"}
 
     def test_text_target_any_with_fulltext_match_raises(self):
@@ -629,8 +670,25 @@ class TestCompilerLeaves:
         where = c.compile(PropertyPredicate(key="logicalType", op="eq", value="STRING"))
         # All user-supplied property keys are backtick-quoted by
         # ``_safe_property_name`` so spaces / punctuation work safely.
+        # ``eq`` case-folds by default, same as contains/startsWith/endsWith.
+        assert where == "toLower(toString(n.`logicalType`)) = $p0"
+        assert c.params == {"p0": "string"}
+
+    def test_property_eq_case_sensitive_bypasses_fold(self):
+        # ``case_sensitive=True`` skips the toLower/toString wrap — the
+        # same bypass the contains/startsWith/endsWith branch already has.
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(
+            key="logicalType", op="eq", value="STRING", case_sensitive=True,
+        ))
         assert where == "n.`logicalType` = $p0"
         assert c.params == {"p0": "STRING"}
+
+    def test_property_neq_case_folds_by_default(self):
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(key="logicalType", op="neq", value="STRING"))
+        assert where == "toLower(toString(n.`logicalType`)) <> $p0"
+        assert c.params == {"p0": "string"}
 
     def test_property_between(self):
         c = _Compiler()
@@ -667,7 +725,7 @@ class TestCompilerLeaves:
         the backticked identifier is unambiguous Cypher."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="Asset Owner", op="eq", value="ops"))
-        assert where == "n.`Asset Owner` = $p0"
+        assert where == "toLower(toString(n.`Asset Owner`)) = $p0"
         assert c.params == {"p0": "ops"}
 
     def test_property_with_hyphens_and_dots_compiles_safely(self):
@@ -675,7 +733,7 @@ class TestCompilerLeaves:
         real-world property names (``pii-class``, ``user.id``)."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="pii-class", op="eq", value="high"))
-        assert where == "n.`pii-class` = $p0"
+        assert where == "toLower(toString(n.`pii-class`)) = $p0"
 
     def test_property_injection_neutralised_by_backticks(self):
         """Cypher injection attempts now compile to safe Cypher
@@ -684,7 +742,7 @@ class TestCompilerLeaves:
         reach the Cypher parser as syntax."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="x); DROP TABLE", op="eq", value="y"))
-        assert where == "n.`x); DROP TABLE` = $p0"
+        assert where == "toLower(toString(n.`x); DROP TABLE`)) = $p0"
         assert c.params == {"p0": "y"}
 
     def test_property_internal_backtick_escaped(self):
@@ -693,14 +751,14 @@ class TestCompilerLeaves:
         backticks aren't terminated early."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="a`b", op="eq", value="z"))
-        assert where == "n.`a``b` = $p0"
+        assert where == "toLower(toString(n.`a``b`)) = $p0"
 
     def test_property_with_leading_digit_compiles_safely(self):
         """Backticked identifiers may begin with a digit; common in
         year-prefixed property names (``2024_revenue``)."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="2024_revenue", op="eq", value=100))
-        assert where == "n.`2024_revenue` = $p0"
+        assert where == "toLower(toString(n.`2024_revenue`)) = $p0"
 
     def test_tag_has(self):
         c = _Compiler()
@@ -1040,12 +1098,12 @@ class TestCompilerGroups:
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
         assert where == (
-            "((n.tags CONTAINS $p0) AND n.`logicalType` = $p1)"
+            "((n.tags CONTAINS $p0) AND toLower(toString(n.`logicalType`)) = $p1)"
         )
-        assert c.params == {"p0": '"PII"', "p1": "STRING"}
+        assert c.params == {"p0": '"PII"', "p1": "string"}
 
     def test_or(self):
-        # ``target='name'`` now expands to a multi-field OR (see
+        # ``target='name'`` now expands to a two-field OR (see
         # ``test_text_substring_case_insensitive``), so an OR group
         # containing it has the expanded shape nested inside the
         # outer OR.
@@ -1056,8 +1114,7 @@ class TestCompilerGroups:
         ]))
         assert where == (
             "((toLower(toString(n.displayName)) = $p0"
-            " OR toLower(toString(n.qualifiedName)) = $p0"
-            " OR toLower(toString(n.searchableText)) = $p0)"
+            " OR toLower(toString(n.qualifiedName)) = $p0)"
             " OR EXISTS(n.`foo`))"
         )
 
@@ -1076,7 +1133,7 @@ class TestCompilerGroups:
             DescendantOfPredicate(urns=["urn:domain:A", "urn:domain:B"]),
             PropertyPredicate(key="logicalType", op="eq", value="STRING"),
         ]))
-        assert where == "(true AND n.`logicalType` = $p0)"
+        assert where == "(true AND toLower(toString(n.`logicalType`)) = $p0)"
         assert c.hoisted_root_urns == [["urn:domain:A", "urn:domain:B"]]
 
     def test_descendant_of_inside_or_rejected(self):
