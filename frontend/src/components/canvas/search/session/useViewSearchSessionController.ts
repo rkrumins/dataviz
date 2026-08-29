@@ -18,26 +18,33 @@
  *   * `commitDraft` of the very predicate it dispatches, so Refine opens
  *     on the identical condition row and QueryCard's own auto-run stays
  *     quiet (it compares the same hash);
- *   * the run-once guard: Enter and the debounce landing behind it would
- *     otherwise cost two identical queries;
+ *   * TWO dispatch lanes over one compile step. The debounced lane skips
+ *     a predicate whose hash is already the one that ran — otherwise
+ *     Enter, plus the debounce landing 300 ms behind it, costs two
+ *     identical queries. The explicit lane (Enter) never skips: pressing
+ *     Enter on unchanged text means "ask again", and after a failed run
+ *     it is the only way back (`runState` holds the failed hash). The
+ *     panel's own Run button is unguarded for the same reason;
  *   * the panel opening itself on the first results for a query — and not
  *     again, so a user who closes it can keep it closed while later pages
  *     of the same query arrive.
  *
  * `clearOnUnmount: false` is what keeps highlights on the canvas after the
- * panel closes. They end when the query is cleared or the view changes —
- * hence the teardown effect keyed on `viewId`.
+ * panel closes. They end when the query is cleared or the view changes:
+ * `teardown` does both, because this hook does NOT remount on a view
+ * switch — the canvas route is not keyed on the view id, so a switch that
+ * only cleared highlights would leave the box, the pipeline and the
+ * panel's auto-open memory holding the previous view's search.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 
 import {
     useAdvancedSearch,
-    type PanelView,
     type UseAdvancedSearchResult,
 } from '@/hooks/useAdvancedSearch'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { useSearchStore } from '@/store/searchStore'
-import type { SearchHit } from '@/types/search'
+import type { Predicate, SearchHit } from '@/types/search'
 import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 
 import { buildRunnablePredicate } from '../panel/runnablePredicate'
@@ -61,6 +68,23 @@ const DEBOUNCE_MS = 300
 const EXPLICIT_MIN_LENGTH = 1
 
 
+/**
+ * Compile a quick query into what the pipeline runs, plus its hash.
+ *
+ * Routed through `buildRunnablePredicate` — the same function QueryCard
+ * uses — so the hash is the identical string on both surfaces: that is
+ * what lets the debounced lane recognise its own running query, and what
+ * keeps QueryCard's auto-run quiet once the session has committed the
+ * draft it just ran.
+ */
+function runnableFor(
+    q: QuickQuery,
+    minLength: number,
+): { predicate: Predicate; hash: string } | null {
+    return buildRunnablePredicate(buildQuickPredicate(q, minLength))
+}
+
+
 export interface ViewSearchSessionOptions {
     viewId: string
     layers: ViewLayerConfig[]
@@ -72,9 +96,11 @@ export interface ViewSearchSession {
     quick: QuickQuery
     /** Patch one or more fields; a text change starts the debounce. */
     setQuick: (partial: Partial<QuickQuery>) => void
-    /** Enter: run what's in the box now, single characters included. */
+    /** Enter: run what's in the box now, single characters included, and
+     *  unconditionally — including a re-run of a query that just failed. */
     runNow: () => void
-    /** The × : abort, drop the results and the draft, empty the box. */
+    /** The × : abort, drop the results, the highlights and the draft, and
+     *  empty the box. The same teardown a view switch performs. */
     clearQuery: () => void
     /** Clamp the search to one container (the row box, a result group). */
     setScope: (scope: Exclude<QuickScope, 'view'>) => void
@@ -94,12 +120,17 @@ export interface ViewSearchSession {
     /** Which layer column a hit badges under, for this view's layout. */
     resolveLayer: (hit: SearchHit) => string | null
 
-    // The pipeline underneath, for the surfaces that render its state.
-    view: PanelView
-    runPredicate: UseAdvancedSearchResult['runPredicate']
-    loadMore: () => Promise<void>
-    isLoadingMore: boolean
-    cancel: () => void
+    /**
+     * The pipeline underneath, whole.
+     *
+     * Not a curated subset: the header renders `view`, and the panel needs
+     * `runState` for its own same-hash defence plus the template surface
+     * (`isIdle`, `selectTemplate`, `setInput`, `run`, `runTemplate`,
+     * `resetTemplate`) that it destructures from its own hook instance
+     * today. Handing it `session.advanced` wholesale is what lets it stop
+     * running a second search of its own.
+     */
+    advanced: UseAdvancedSearchResult
 }
 
 
@@ -121,28 +152,53 @@ export function useViewSearchSessionController(
     const advancedRef = useRef(advanced)
     useEffect(() => { advancedRef.current = advanced })
 
-    // Highlights outlive the panel, but not the view — a canvas that
-    // swaps views (or goes away) leaves nothing lit behind it.
-    useEffect(() => () => { useSearchStore.getState().clear() }, [viewId])
+    // Which query the panel has already opened itself for. A result set
+    // is published on every page of a query, and the user's close must
+    // survive them.
+    const autoOpenedHashRef = useRef<string | null>(null)
 
-    const dispatch = useCallback((q: QuickQuery, minLength: number) => {
-        // Route through buildRunnablePredicate so the hash is computed
-        // exactly the way QueryCard computes it — same string, same
-        // skip decision on both surfaces.
-        const runnable = buildRunnablePredicate(buildQuickPredicate(q, minLength))
-        if (!runnable) return
-        if (advancedRef.current.runState?.hash === runnable.hash) return
+    const teardown = useCallback(() => {
+        // `resetTemplate` is the pipeline's own teardown: it aborts the
+        // in-flight request, drops the run state and rewinds the view to
+        // idle. Plain `cancel` leaves `view.kind === 'results'`, so the
+        // header would keep reporting a match count for a query that is
+        // gone.
+        advancedRef.current.resetTemplate()
+        // What the session itself published: the draft it commits on every
+        // dispatch, and the highlights on the canvas.
+        useSearchStore.getState().clear()
+        setQuickState(DEFAULT_QUICK)
+        // Whatever comes next is a fresh query as far as the panel is
+        // concerned, even when it hashes to the same string.
+        autoOpenedHashRef.current = null
+    }, [])
+
+    // A view switch is a teardown, not just an un-highlight: this hook
+    // does not remount when the canvas swaps views, so everything above
+    // would otherwise still describe the view the user just left.
+    useEffect(() => () => { teardown() }, [viewId, teardown])
+
+    const dispatch = useCallback((runnable: { predicate: Predicate; hash: string }) => {
         useSearchStore.getState().commitDraft(runnable.predicate)
         void advancedRef.current.runPredicate(runnable.predicate, SEARCH_OPTIONS)
     }, [])
 
     const debouncedQuick = useDebouncedValue(quick, DEBOUNCE_MS)
     useEffect(() => {
-        dispatch(debouncedQuick, QUICK_MIN_LENGTH)
+        const runnable = runnableFor(debouncedQuick, QUICK_MIN_LENGTH)
+        // The debounced lane — and ONLY this lane — skips a query that is
+        // already the running one: Enter, then the debounce landing 300 ms
+        // behind it, would otherwise ask the server the same thing twice.
+        if (!runnable || advancedRef.current.runState?.hash === runnable.hash) return
+        dispatch(runnable)
     }, [debouncedQuick, dispatch])
 
     const runNow = useCallback(() => {
-        dispatch(quick, EXPLICIT_MIN_LENGTH)
+        // Deliberately unguarded. Enter on unchanged text means "ask
+        // again" — and after a failure it is the only way back, since
+        // `runState` then holds that very hash with status 'failed'.
+        const runnable = runnableFor(quick, EXPLICIT_MIN_LENGTH)
+        if (runnable) dispatch(runnable)
     }, [dispatch, quick])
 
     const setQuick = useCallback((partial: Partial<QuickQuery>) => {
@@ -157,10 +213,6 @@ export function useViewSearchSessionController(
         setQuickState((prev) => ({ ...prev, scope: 'view' }))
     }, [])
 
-    // Which query the panel has already opened itself for. A result set
-    // is published on every page of a query, and the user's close must
-    // survive them.
-    const autoOpenedHashRef = useRef<string | null>(null)
     const resultsHash = advanced.view.kind === 'results'
         ? (advanced.runState?.hash ?? null)
         : null
@@ -176,28 +228,15 @@ export function useViewSearchSessionController(
         // Refine is a mode of the open panel, not a state of its own.
         setRefineOpen(false)
     }, [])
-    const togglePanel = useCallback(() => { setPanelOpen((open) => !open) }, [])
+    // Routed through the two above so "closing clears Refine" lives in one
+    // place — ⌘⇧F is bound here, so this is a common way the panel closes.
+    const togglePanel = useCallback(() => {
+        if (panelOpen) closePanel()
+        else openPanel()
+    }, [panelOpen, closePanel, openPanel])
     const refine = useCallback(() => {
         setPanelOpen(true)
         setRefineOpen(true)
-    }, [])
-
-    const clearQuery = useCallback(() => {
-        // `resetTemplate` is the pipeline's full teardown: it aborts the
-        // in-flight request, clears the published result-set and the
-        // draft, and rewinds the view to idle. Plain `cancel` leaves
-        // `view.kind === 'results'`, so the header would keep reporting a
-        // match count for a query the user had just cleared.
-        advancedRef.current.resetTemplate()
-        // The session owns the draft it commits on every dispatch, so it
-        // drops it here rather than leaning on the teardown above to do
-        // it — clearing the box must not leave Refine holding a query
-        // that is no longer running.
-        useSearchStore.getState().commitDraft(null)
-        setQuickState(DEFAULT_QUICK)
-        // The next results are a fresh query as far as the panel is
-        // concerned, even when the user retypes the same word.
-        autoOpenedHashRef.current = null
     }, [])
 
     const resolveLayer = useCallback((hit: SearchHit) => resolveHitLayer(
@@ -208,20 +247,14 @@ export function useViewSearchSessionController(
     ), [assignments, layers])
 
     return useMemo(() => ({
-        quick, setQuick, runNow, clearQuery, setScope, clearScope,
+        quick, setQuick, runNow, clearQuery: teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine,
         inputRef, resolveLayer,
-        view: advanced.view,
-        runPredicate: advanced.runPredicate,
-        loadMore: advanced.loadMore,
-        isLoadingMore: advanced.isLoadingMore,
-        cancel: advanced.cancel,
+        advanced,
     }), [
-        quick, setQuick, runNow, clearQuery, setScope, clearScope,
+        quick, setQuick, runNow, teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
-        refineOpen, refine, resolveLayer,
-        advanced.view, advanced.runPredicate, advanced.loadMore,
-        advanced.isLoadingMore, advanced.cancel,
+        refineOpen, refine, resolveLayer, advanced,
     ])
 }

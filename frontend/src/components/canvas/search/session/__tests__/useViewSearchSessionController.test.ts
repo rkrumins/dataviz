@@ -132,6 +132,24 @@ describe('useViewSearchSessionController — composition', () => {
         expect(mocks.composedWith.clearOnUnmount).toBe(false)
     })
 
+    it('exposes the pipeline WHOLE, so the panel can be handed it instead of running its own', () => {
+        mocks.state.runState = { hash: 'h1', status: 'running' }
+        const { result } = renderSession()
+
+        // The panel needs `runState` for its own same-hash defence, and the
+        // template surface it destructures from its own hook instance today.
+        expect(result.current.advanced.runState).toEqual({ hash: 'h1', status: 'running' })
+        expect(result.current.advanced.view).toEqual({ kind: 'idle' })
+        expect(result.current.advanced.isIdle).toBe(true)
+        expect(result.current.advanced.isLoadingMore).toBe(false)
+        for (const fn of [
+            'selectTemplate', 'setInput', 'resetTemplate', 'run', 'runTemplate',
+            'runPredicate', 'cancel', 'loadMore',
+        ] as const) {
+            expect(typeof result.current.advanced[fn]).toBe('function')
+        }
+    })
+
     it('starts on the default quick query with the panel closed', () => {
         const { result } = renderSession()
         expect(result.current.quick).toEqual({
@@ -242,6 +260,28 @@ describe('useViewSearchSessionController — runNow', () => {
         expect(mocks.runPredicate).toHaveBeenCalledTimes(1)
     })
 
+    it('re-runs a query that FAILED, on unchanged text — the guard is the debounce\'s alone', () => {
+        const { result, rerender } = renderSession()
+
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        act(() => { result.current.runNow() })
+        expect(mocks.runPredicate).toHaveBeenCalledTimes(1)
+
+        // `useAdvancedSearch` records a failed run against the very hash it
+        // dispatched. If Enter honoured the hash guard, this query could
+        // never be retried without editing the text first.
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'failed' }
+        rerender()
+        // Emptied so the re-commit is visible: a skipped dispatch skips
+        // commitDraft too, which would leave Refine holding nothing.
+        act(() => { useSearchStore.getState().commitDraft(null) })
+
+        act(() => { result.current.runNow() })
+        expect(mocks.runPredicate).toHaveBeenCalledTimes(2)
+        expect(mocks.runPredicate).toHaveBeenLastCalledWith(LEAF, SEARCH_OPTIONS)
+        expect(useSearchStore.getState().draftPredicate).toEqual(LEAF)
+    })
+
     it('re-runs once the query changes again', () => {
         const { result, rerender } = renderSession()
 
@@ -306,12 +346,19 @@ describe('useViewSearchSessionController — panel', () => {
         expect(result.current.refineOpen).toBe(false)
     })
 
-    it('togglePanel flips it both ways', () => {
+    it('togglePanel flips it both ways, and closing that way also drops Refine', () => {
         const { result } = renderSession()
         act(() => { result.current.togglePanel() })
         expect(result.current.panelOpen).toBe(true)
+
+        act(() => { result.current.refine() })
+        expect(result.current.refineOpen).toBe(true)
+
+        // ⌘⇧F is bound to the toggle, so it is a common way the panel
+        // closes — it must not leave Refine armed for the next open.
         act(() => { result.current.togglePanel() })
         expect(result.current.panelOpen).toBe(false)
+        expect(result.current.refineOpen).toBe(false)
     })
 })
 
@@ -419,5 +466,45 @@ describe('useViewSearchSessionController — view lifetime', () => {
 
         unmount()
         expect(useSearchStore.getState().draftPredicate).toBeNull()
+    })
+
+    it('a view switch tears the whole session down, not just the highlights', () => {
+        // The canvas route is not keyed on the view id, so this hook does
+        // NOT remount on /views/A → /views/B. Everything the session holds
+        // has to be dropped here or it describes the view the user left.
+        const { result, rerender } = renderHook(
+            ({ viewId }) => useViewSearchSessionController({
+                viewId, layers: [], assignments: {},
+            }),
+            { initialProps: { viewId: 'view-A' } },
+        )
+
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        act(() => { vi.advanceTimersByTime(300) })
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender({ viewId: 'view-A' })
+        expect(result.current.panelOpen).toBe(true)
+        act(() => { result.current.closePanel() })
+
+        rerender({ viewId: 'view-B' })
+
+        expect(result.current.quick.text).toBe('')
+        expect(result.current.quick.scope).toBe('view')
+        // The pipeline is rewound to idle (view, run state, in-flight
+        // request) and the canvas is no longer lit.
+        expect(mocks.resetTemplate).toHaveBeenCalledTimes(1)
+        expect(useSearchStore.getState().draftPredicate).toBeNull()
+        expect(useSearchStore.getState().matchUrnSet.size).toBe(0)
+
+        // ...including the panel's memory of what it has auto-opened for:
+        // the same query in the new view is a new query.
+        mocks.state.view = { kind: 'idle' }
+        mocks.state.runState = null
+        rerender({ viewId: 'view-B' })
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender({ viewId: 'view-B' })
+        expect(result.current.panelOpen).toBe(true)
     })
 })

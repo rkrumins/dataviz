@@ -148,4 +148,23 @@ describe('matchesQuick', () => {
     it('matches on one character — the local filter has no length floor', () => {
         expect(matchesQuick('Customer', quick({ text: 'c', match: 'prefix' }))).toBe(true)
     })
+
+    it('abstains when the query looks at a description — a name cannot answer for it', () => {
+        // The row would be hidden on its name alone, but the server may
+        // well return it as a hit on its description. Passing is the safe
+        // error; hiding a real match is not.
+        expect(matchesQuick('Orders', quick({ text: 'customer', lookIn: 'description' }))).toBe(true)
+    })
+
+    it.each([
+        ['tags', 'tags' as const],
+        ['a property key', { property: 'logicalType' } as const],
+    ])('abstains for %s too', (_label, lookIn) => {
+        expect(matchesQuick('Orders', quick({ text: 'customer', lookIn }))).toBe(true)
+    })
+
+    it('still filters for the two look-ins a name CAN answer for', () => {
+        expect(matchesQuick('Orders', quick({ text: 'customer', lookIn: 'name' }))).toBe(false)
+        expect(matchesQuick('Orders', quick({ text: 'customer', lookIn: 'everything' }))).toBe(false)
+    })
 })

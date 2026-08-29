@@ -115,8 +115,15 @@ export function buildQuickPredicate(
  * over the display name, and always case-insensitively (the header box has
  * no case control). An empty query matches everything: the box is a filter,
  * and an empty filter hides nothing.
+ *
+ * A name is all this filter has. When the query is looking somewhere the
+ * name cannot answer for — a description, a tag, a property value — it
+ * abstains and passes the row: hiding a child the server WOULD return as a
+ * hit is the worse of the two errors, and the server's own hits render
+ * alongside these rows.
  */
 export function matchesQuick(name: string, q: QuickQuery): boolean {
+    if (q.lookIn !== 'everything' && q.lookIn !== 'name') return true
     const needle = q.text.trim().toLowerCase()
     if (needle.length === 0) return true
     const haystack = name.toLowerCase()
