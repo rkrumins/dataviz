@@ -46,7 +46,7 @@ export const HIT_ROW_ID_PREFIX = 'search-hit-row-'
  * — ``qualifiedName`` is the "path" everywhere else in this UI, and a
  * property key arrives prefixed.
  */
-function matchedFieldLabel(field: string): string {
+export function matchedFieldLabel(field: string): string {
     if (field.startsWith('property:')) return `property ${field.slice('property:'.length)}`
     switch (field) {
         case 'displayName':
@@ -60,7 +60,7 @@ function matchedFieldLabel(field: string): string {
 }
 
 
-interface EntityTypeStyle {
+export interface EntityTypeStyle {
     icon: string
     iconBg: string
     iconText: string
@@ -145,7 +145,7 @@ const DEFAULT_STYLE: EntityTypeStyle = {
     chipText: 'text-ink-muted',
 }
 
-function styleFor(type: string): EntityTypeStyle {
+export function styleFor(type: string): EntityTypeStyle {
     return ENTITY_STYLES[type] ?? DEFAULT_STYLE
 }
 
