@@ -349,7 +349,16 @@ function ResultsContent({
         <div className="flex flex-col">
             {isEmpty && (
                 <div className="flex flex-col gap-3 p-4">
-                    <ZeroResultsDiagnostic result={result} query={view.query} />
+                    <ZeroResultsDiagnostic
+                        result={result}
+                        query={view.query}
+                        // Switching the match mode re-runs the same word
+                        // through the session's own debounce — the panel
+                        // never dispatches a second query of its own.
+                        onSwitchMatch={session
+                            ? (match) => session.setQuick({ match })
+                            : undefined}
+                    />
                 </div>
             )}
 

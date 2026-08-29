@@ -36,6 +36,30 @@ import type { AncestorRef, SearchHit } from '@/types/search'
 export const HIT_ROW_ID_PREFIX = 'search-hit-row-'
 
 
+/**
+ * The wire name of a matched field, in the words the user searched with.
+ *
+ * A bare word now matches the name, the path, the description, the tags
+ * AND every property value, so a row that shows only a name leaves the
+ * user guessing why it is in the list. The backend answers with
+ * ``highlights``; this turns its field spelling into something readable
+ * — ``qualifiedName`` is the "path" everywhere else in this UI, and a
+ * property key arrives prefixed.
+ */
+export function matchedFieldLabel(field: string): string {
+    if (field.startsWith('property:')) return `property ${field.slice('property:'.length)}`
+    switch (field) {
+        case 'displayName':
+        case 'name':
+            return 'name'
+        case 'qualifiedName':
+            return 'path'
+        default:
+            return field
+    }
+}
+
+
 interface EntityTypeStyle {
     icon: string
     iconBg: string
@@ -159,6 +183,10 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
     )
     const IconComp = useMemo(() => lucideIcon(style.icon), [style.icon])
     const ancestors = hit.ancestorPath ?? []
+    // Best highlight only. The backend orders them by score, and a row
+    // that listed every field a broad word touched would be taller than
+    // the hit itself.
+    const highlight = hit.highlights?.[0]
 
     return (
         <motion.div
@@ -257,6 +285,26 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                         {hit.node.qualifiedName}
                     </div>
                 ) : null}
+
+                {/* Row 2b: where the match actually landed */}
+                {highlight && (
+                    <div className="mt-1.5 flex items-baseline gap-1.5 min-w-0">
+                        <span className={cn(
+                            "inline-flex items-center px-1.5 py-0.5 rounded-md shrink-0",
+                            "text-[10px] font-medium",
+                            "bg-accent-lineage/10 text-accent-lineage",
+                            "border border-accent-lineage/25",
+                        )}>
+                            in {matchedFieldLabel(highlight.field)}
+                        </span>
+                        <span
+                            className="min-w-0 truncate text-[11px] text-ink-muted"
+                            title={highlight.snippet}
+                        >
+                            {highlight.snippet}
+                        </span>
+                    </div>
+                )}
 
                 {/* Row 3: action chips, hover-revealed */}
                 {(onReveal || onOpen) && (
