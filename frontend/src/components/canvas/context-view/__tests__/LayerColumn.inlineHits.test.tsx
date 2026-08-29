@@ -20,11 +20,14 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 
-import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
-import type { QuickQuery } from '@/components/canvas/search/session/quickPredicate'
+import {
+    ViewRowSearchContext,
+    ViewSearchSessionContext,
+} from '@/components/canvas/search/session/ViewSearchSessionContext'
+import { DEFAULT_QUICK, type QuickQuery } from '@/components/canvas/search/session/quickPredicate'
 import type { ViewSearchSession } from '@/components/canvas/search/session/useViewSearchSessionController'
 import { installJsdomLayout } from '@/test/canvasHarness'
-import { stubAdvanced, stubSession } from '@/test/stubSearchSession'
+import { stubAdvanced, stubRowSearch, stubSession } from '@/test/stubSearchSession'
 import type { PanelView } from '@/hooks/useAdvancedSearch'
 import type { SearchHit } from '@/types/search'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -87,29 +90,35 @@ function renderColumn(
     installJsdomLayout()
     const onRevealSearchHit = vi.fn()
     const session = stubSession(over)
+    // Every prop is built ONCE. A column is `React.memo`, so a fresh
+    // `vi.fn()` per render would re-render it on its own and the
+    // render-cost tests below could never fail.
+    const props = {
+        layer,
+        schema: null,
+        selectedNodeId: null,
+        expandedNodes: new Set(['P']),
+        searchResults: new Set<string>(),
+        onSelect: vi.fn(),
+        onToggle: vi.fn(),
+        onContextMenu: vi.fn(),
+        onDoubleClick: vi.fn(),
+        traceFocusId: null,
+        traceNodes: new Set<string>(),
+        traceContextSet: new Set<string>(),
+        onRevealSearchHit,
+        // jsdom gives the scroller a 40px viewport, so the virtualizer's
+        // window is a handful of rows. The capped stack and its trailing
+        // row sit below it otherwise.
+        overscan: 200,
+    }
+    // Both providers, nested exactly as ContextViewCanvas nests them: the
+    // session for the header and the panel, the row slice for the columns.
     const tree = (s: ViewSearchSession) => (
         <ViewSearchSessionContext.Provider value={s}>
-            <LayerColumn
-                layer={layer}
-                nodes={nodes}
-                schema={null}
-                selectedNodeId={null}
-                expandedNodes={new Set(['P'])}
-                searchResults={new Set()}
-                onSelect={vi.fn()}
-                onToggle={vi.fn()}
-                onContextMenu={vi.fn()}
-                onDoubleClick={vi.fn()}
-                traceFocusId={null}
-                traceNodes={new Set()}
-                traceContextSet={new Set()}
-                isTracing={isTracing}
-                onRevealSearchHit={onRevealSearchHit}
-                // jsdom gives the scroller a 40px viewport, so the
-                // virtualizer's window is a handful of rows. The capped
-                // stack and its trailing row sit below it otherwise.
-                overscan={200}
-            />
+            <ViewRowSearchContext.Provider value={s.rowSearch}>
+                <LayerColumn {...props} nodes={nodes} isTracing={isTracing} />
+            </ViewRowSearchContext.Provider>
         </ViewSearchSessionContext.Provider>
     )
     const view = render(tree(session))
@@ -309,5 +318,78 @@ describe('LayerColumn — inline search-hit rows', () => {
         renderColumn(answered(scopedTo('OTHER', 'G'), [hit('G1', ['OTHER'])]))
 
         expect(hitUrns()).toEqual([])
+    })
+})
+
+
+describe('LayerColumn — what a header keystroke costs a column', () => {
+    /** A node that counts every read of its children. The flat-tree
+     *  builder walks `children` for each expanded row, so this is a
+     *  direct probe of the O(rows) rebuild — and of the render that
+     *  would trigger it. */
+    function probed(id: string, children: HierarchyNode[]) {
+        const n = node(id)
+        let reads = 0
+        Object.defineProperty(n, 'children', {
+            get() { reads++; return children },
+            enumerable: true,
+            configurable: true,
+        })
+        return { node: n, reads: () => reads }
+    }
+
+    /** Typing in the header replaces the session object on every
+     *  character. What it must NOT replace is the row slice. */
+    function typed(text: string, rowSearch: ViewSearchSession['rowSearch']) {
+        return { rowSearch, quick: { ...DEFAULT_QUICK, text } }
+    }
+
+    it('rebuilds nothing while the search is view-wide', () => {
+        // The session is memoised on `quick`, so every character in the
+        // header mints a new one. A column that read the session rebuilt
+        // its whole flat tree — plus the navigable index, the visible
+        // count and the density buckets on top of it — per keystroke, in
+        // every column on the board, with no row box open anywhere.
+        const rowSearch = stubRowSearch()
+        const p = probed('P', [node('C1'), node('C2')])
+        const { withSession } = renderColumn(
+            typed('cu', rowSearch),
+            { nodes: [p.node] },
+        )
+
+        const before = p.reads()
+        expect(before).toBeGreaterThan(0)
+
+        withSession(typed('cust', rowSearch))
+        expect(p.reads()).toBe(before)
+
+        withSession(typed('customer', rowSearch))
+        expect(p.reads()).toBe(before)
+    })
+
+    it('rebuilds once a box clamps the session to a container', () => {
+        // The other half of the same rule: when the row slice DOES change
+        // — a box was opened, typed in, or its answer landed — the column
+        // has to rebuild, because the filter and the hit rows come out of
+        // that rebuild. Without this the test above would pass on a
+        // column that had simply stopped reading the search.
+        const rowSearch = stubRowSearch()
+        const p = probed('P', [node('C1'), node('C2')])
+        const { withSession } = renderColumn(
+            typed('cu', rowSearch),
+            { nodes: [p.node] },
+        )
+
+        const before = p.reads()
+        withSession({
+            rowSearch: stubRowSearch({
+                scope: { insideUrn: 'P', label: 'P' },
+                quick: scopedTo('P', 'C1'),
+            }),
+        })
+
+        expect(p.reads()).toBeGreaterThan(before)
+        expect(rowExists('C1')).toBe(true)
+        expect(rowExists('C2')).toBe(false)
     })
 })

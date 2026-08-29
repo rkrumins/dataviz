@@ -103,6 +103,50 @@ export function hasReportableView(view: PanelView): boolean {
 }
 
 
+/**
+ * The slice of the session a LAYER COLUMN reads.
+ *
+ * Split off the session for one reason: a column memoises an O(rows)
+ * flat tree — and, on top of it, the navigable index, the visible count
+ * and the density buckets — on whatever it reads out of the search. The
+ * session object changes identity on every character typed in the
+ * header, so reading THAT rebuilt every column on the board per
+ * keystroke, with no row box open anywhere.
+ *
+ * This value is referentially STABLE for as long as the search is
+ * view-wide: everything a column would react to is null until a box
+ * actually clamps the session to a container. When one has, it changes
+ * exactly when the column's answer changes — the text, and the page the
+ * hit rows are read off.
+ */
+export interface ViewRowSearch {
+    /** The container the search is clamped to, or null while it is
+     *  view-wide. The row whose URN this names is the row whose box is
+     *  open. */
+    scope: Exclude<QuickScope, 'view'> | null
+    /** The query itself — for the local name filter — and only while it
+     *  is scoped. Null is not "no query": it is "no query this column
+     *  has any business filtering on". */
+    quick: QuickQuery | null
+    /** Whether the standing result answers `quick`. See the session's
+     *  own field: a column that splices hit rows in beside real ones has
+     *  to ask this before it draws any. */
+    resultMatchesQuick: boolean
+    /** The pipeline's view, so the column can read the hits inside its
+     *  container off the current result page. Scoped only, for the same
+     *  reason. */
+    view: PanelView | null
+
+    /** Open or retarget the scope — what a row box does when it is typed
+     *  into. Identity-stable. */
+    setQuick: (partial: Partial<QuickQuery>) => void
+    /** Unclamp — what emptying or closing a row box does. */
+    clearScope: () => void
+    /** "See all in panel", from the overflow row under a container. */
+    openPanel: () => void
+}
+
+
 export interface ViewSearchSessionOptions {
     viewId: string
     layers: ViewLayerConfig[]
@@ -174,6 +218,15 @@ export interface ViewSearchSession {
      * running a second search of its own.
      */
     advanced: UseAdvancedSearchResult
+
+    /**
+     * What the layer columns read, on its own context.
+     *
+     * Exposed here so the canvas can provide both from one hook, but a
+     * column must never reach it through the session: consuming the
+     * session is exactly the subscription this exists to avoid.
+     */
+    rowSearch: ViewRowSearch
 }
 
 
@@ -325,6 +378,22 @@ export function useViewSearchSessionController(
         layers,
     ), [assignments, layers])
 
+    // The columns' slice. Every scoped field collapses to a constant
+    // while the search is view-wide, so this whole object keeps its
+    // identity across a header keystroke — and across the results that
+    // keystroke brings back.
+    const rowScope = quick.scope === 'view' ? null : quick.scope
+    const scopedQuick = rowScope ? quick : null
+    const scopedView = rowScope ? advanced.view : null
+    const scopedMatches = rowScope ? resultMatchesQuick : false
+    const rowSearch = useMemo<ViewRowSearch>(() => ({
+        scope: rowScope,
+        quick: scopedQuick,
+        resultMatchesQuick: scopedMatches,
+        view: scopedView,
+        setQuick, clearScope, openPanel,
+    }), [rowScope, scopedQuick, scopedMatches, scopedView, setQuick, clearScope, openPanel])
+
     return useMemo(() => ({
         viewId,
         quick, setQuick, runNow, clearQuery: teardown, setScope, clearScope,
@@ -332,12 +401,12 @@ export function useViewSearchSessionController(
         refineOpen, refine, closeRefine,
         resultMatchesQuick,
         inputRef, resolveLayer, layers,
-        advanced,
+        advanced, rowSearch,
     }), [
         viewId,
         quick, setQuick, runNow, teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine, closeRefine, resultMatchesQuick,
-        resolveLayer, layers, advanced,
+        resolveLayer, layers, advanced, rowSearch,
     ])
 }

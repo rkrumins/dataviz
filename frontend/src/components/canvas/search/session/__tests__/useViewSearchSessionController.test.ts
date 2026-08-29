@@ -70,7 +70,10 @@ import { SEARCH_OPTIONS } from '@/components/canvas/search/searchOptions'
 import { useSearchStore } from '@/store/searchStore'
 
 import {
+    ROW_SEARCH_IDLE,
+    ViewRowSearchContext,
     ViewSearchSessionContext,
+    useViewRowSearch,
     useViewSearchSession,
     useViewSearchSessionOptional,
 } from '../ViewSearchSessionContext'
@@ -638,5 +641,131 @@ describe('useViewSearchSessionController — resultMatchesQuick', () => {
 
         expect(mocks.runPredicate).not.toHaveBeenCalled()
         expect(result.current.resultMatchesQuick).toBe(false)
+    })
+})
+
+
+// A layer column is not a search surface. It renders a row box, filters
+// its own children by whatever that box holds, and splices in the hits
+// found inside it — all of which is dead weight while the search is
+// view-wide. It reads `rowSearch`, and `rowSearch` is the same object
+// from one header keystroke to the next until a box actually clamps the
+// session to a container. That is the whole point: every column on the
+// board memoises an O(rows) flat tree on it.
+describe('useViewSearchSessionController — rowSearch', () => {
+    it('holds nothing while the search is view-wide', () => {
+        const { result } = renderSession()
+        expect(result.current.rowSearch).toMatchObject({
+            scope: null, quick: null, view: null, resultMatchesQuick: false,
+        })
+    })
+
+    it('does not change identity while the header is typed in at view scope', () => {
+        const { result } = renderSession()
+        const first = result.current.rowSearch
+
+        act(() => { result.current.setQuick({ text: 'c' }) })
+        expect(result.current.rowSearch).toBe(first)
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        expect(result.current.rowSearch).toBe(first)
+        act(() => { result.current.setQuick({ lookIn: 'name', match: 'prefix' }) })
+        expect(result.current.rowSearch).toBe(first)
+    })
+
+    it('does not change identity when a view-wide answer lands, either', () => {
+        const { result, rerender } = renderSession()
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        act(() => { vi.advanceTimersByTime(300) })
+        const first = result.current.rowSearch
+
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+
+        // The results ARE there — the session changed, the columns did not.
+        expect(result.current.advanced.view.kind).toBe('results')
+        expect(result.current.rowSearch).toBe(first)
+    })
+
+    it('carries the scope, the query and the pipeline once a box clamps it', () => {
+        const { result, rerender } = renderSession()
+        const idle = result.current.rowSearch
+
+        act(() => {
+            result.current.setQuick({ text: 'ord', scope: { insideUrn: 'P', label: 'P' } })
+        })
+        expect(result.current.rowSearch).not.toBe(idle)
+        expect(result.current.rowSearch.scope).toEqual({ insideUrn: 'P', label: 'P' })
+        expect(result.current.rowSearch.quick?.text).toBe('ord')
+
+        // Scoped, it tracks the text...
+        const scoped = result.current.rowSearch
+        act(() => { result.current.setQuick({ text: 'orde' }) })
+        expect(result.current.rowSearch).not.toBe(scoped)
+
+        // ...and the answer, which is what puts the hit rows on the tree.
+        const typed = result.current.rowSearch
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: 'other', status: 'done' }
+        rerender()
+        expect(result.current.rowSearch).not.toBe(typed)
+        expect(result.current.rowSearch.view?.kind).toBe('results')
+    })
+
+    it('goes back to holding nothing when the scope is cleared', () => {
+        const { result } = renderSession()
+        const idle = result.current.rowSearch
+
+        act(() => {
+            result.current.setQuick({ text: 'ord', scope: { insideUrn: 'P', label: 'P' } })
+        })
+        act(() => { result.current.clearScope() })
+
+        expect(result.current.rowSearch).toMatchObject({ scope: null, quick: null, view: null })
+        // Not the same object — `idle` was built before the text changed —
+        // but stable again from here.
+        expect(idle.scope).toBeNull()
+        const cleared = result.current.rowSearch
+        act(() => { result.current.setQuick({ text: 'more typing' }) })
+        expect(result.current.rowSearch).toBe(cleared)
+    })
+
+    it('hands the column the callbacks it drives the session with', () => {
+        const { result } = renderSession()
+        const { setQuick, clearScope, openPanel } = result.current.rowSearch
+
+        act(() => { setQuick({ text: 'x', scope: { insideUrn: 'P', label: 'P' } }) })
+        expect(result.current.quick.text).toBe('x')
+        act(() => { clearScope() })
+        expect(result.current.quick.scope).toBe('view')
+        act(() => { openPanel() })
+        expect(result.current.panelOpen).toBe(true)
+    })
+})
+
+
+describe('ViewRowSearchContext', () => {
+    it('reads back the value the canvas provided', () => {
+        const { result: session } = renderSession()
+        const wrapper = ({ children }: { children: ReactNode }) => createElement(
+            ViewRowSearchContext.Provider,
+            { value: session.current.rowSearch },
+            children,
+        )
+        const { result } = renderHook(() => useViewRowSearch(), { wrapper })
+        expect(result.current).toBe(session.current.rowSearch)
+    })
+
+    it('answers with the idle value on the canvases that provide no session', () => {
+        // GraphCanvas / HierarchyCanvas render columns without a session.
+        // Throwing there would be wrong and a null would push the check
+        // into every call site, so the no-provider answer IS a row search
+        // that is simply holding nothing.
+        const { result } = renderHook(() => useViewRowSearch())
+        expect(result.current).toBe(ROW_SEARCH_IDLE)
+        expect(result.current.scope).toBeNull()
+        expect(() => result.current.setQuick({ text: 'x' })).not.toThrow()
+        expect(() => result.current.clearScope()).not.toThrow()
+        expect(() => result.current.openPanel()).not.toThrow()
     })
 })

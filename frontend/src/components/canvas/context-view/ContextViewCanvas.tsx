@@ -170,7 +170,10 @@ import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { SearchMapPanel } from '../search/SearchMapPanel'
-import { ViewSearchSessionContext } from '../search/session/ViewSearchSessionContext'
+import {
+    ViewRowSearchContext,
+    ViewSearchSessionContext,
+} from '../search/session/ViewSearchSessionContext'
 import {
   useViewSearchSessionController,
   type ViewSearchSession,
@@ -4306,9 +4309,13 @@ export function ContextViewCanvas({
       data-trace-active={traceActive ? 'true' : 'false'}
       className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}
     >
-      {/* One session for the whole canvas — the header box, the layer
-          columns and the results panel all read it from here. */}
+      {/* One session for the whole canvas — the header box and the results
+          panel read it from here. The columns read the narrow slice
+          nested inside it: the session changes identity on every
+          character typed in the header, and a column that re-rendered on
+          that rebuilt its whole flat tree per keystroke. */}
       <ViewSearchSessionContext.Provider value={search}>
+      <ViewRowSearchContext.Provider value={search.rowSearch}>
       {/* Row layout: [left rail SearchMapPanel] + canvas column + [right-rail panels].
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
@@ -5242,6 +5249,7 @@ export function ContextViewCanvas({
           onClose={() => setShareSeed(null)}
         />
       )}
+      </ViewRowSearchContext.Provider>
       </ViewSearchSessionContext.Provider>
     </div>
   )

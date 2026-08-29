@@ -13,7 +13,10 @@ import { createRef } from 'react'
 import { vi } from 'vitest'
 
 import { DEFAULT_QUICK } from '@/components/canvas/search/session/quickPredicate'
-import type { ViewSearchSession } from '@/components/canvas/search/session/useViewSearchSessionController'
+import type {
+    ViewRowSearch,
+    ViewSearchSession,
+} from '@/components/canvas/search/session/useViewSearchSessionController'
 import type { UseAdvancedSearchResult } from '@/hooks/useAdvancedSearch'
 
 
@@ -38,8 +41,29 @@ export function stubAdvanced(
 }
 
 
-export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSession {
+/**
+ * The slice a layer column reads — deliberately its own fixture.
+ *
+ * A column subscribes to this and NOT to the session, so a test that
+ * hands it a session field expects nothing to happen. Building it
+ * separately is what makes that visible.
+ */
+export function stubRowSearch(over: Partial<ViewRowSearch> = {}): ViewRowSearch {
     return {
+        scope: null,
+        quick: null,
+        resultMatchesQuick: false,
+        view: null,
+        setQuick: vi.fn(),
+        clearScope: vi.fn(),
+        openPanel: vi.fn(),
+        ...over,
+    }
+}
+
+
+export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSession {
+    const session: ViewSearchSession = {
         viewId: 'view-1',
         quick: DEFAULT_QUICK,
         setQuick: vi.fn(),
@@ -62,6 +86,24 @@ export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSe
         resolveLayer: vi.fn(() => null),
         layers: [],
         advanced: stubAdvanced(),
+        rowSearch: stubRowSearch(),
         ...over,
     }
+    // Mirror the controller: the row slice carries the scoped query and
+    // the pipeline only while a box has actually clamped the session, and
+    // it drives the session through the session's own callbacks. A
+    // fixture that let the two disagree would pass tests the app fails.
+    if (!over.rowSearch) {
+        const scope = session.quick.scope === 'view' ? null : session.quick.scope
+        session.rowSearch = {
+            scope,
+            quick: scope ? session.quick : null,
+            resultMatchesQuick: scope ? session.resultMatchesQuick : false,
+            view: scope ? session.advanced.view : null,
+            setQuick: session.setQuick,
+            clearScope: session.clearScope,
+            openPanel: session.openPanel,
+        }
+    }
+    return session
 }

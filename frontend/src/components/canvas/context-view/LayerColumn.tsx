@@ -35,7 +35,7 @@ import { densityRowHeights } from './density'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
-import { useViewSearchSessionOptional } from '../search/session/ViewSearchSessionContext'
+import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
 import { matchesQuick } from '../search/session/quickPredicate'
 import type { AncestorRef } from '@/types/search'
 
@@ -310,26 +310,33 @@ export const LayerColumn = React.memo(function LayerColumn({
     if (dragScrollRafRef.current != null) cancelAnimationFrame(dragScrollRafRef.current)
   }, [])
 
-  // The view's ONE search session — the same object the header box and the
-  // results panel hold. A row-level search box is a scoped instance of it,
-  // not a search of its own: it clamps the session to one container, and
-  // the answer comes back here as a local filter over the children already
-  // loaded plus the hits the server found deeper inside. Optional because
-  // the other canvases render columns without providing a session.
-  const session = useViewSearchSessionOptional()
-  const quick = session?.quick
-  const advancedView = session?.advanced.view
-  const resultMatchesQuick = session?.resultMatchesQuick ?? false
+  // The view's ONE search, seen through the narrow slice a column reads.
+  // A row-level search box is a scoped instance of that search, not a
+  // search of its own: it clamps the session to one container, and the
+  // answer comes back here as a local filter over the children already
+  // loaded plus the hits the server found deeper inside.
+  //
+  // Deliberately NOT the session. The session changes identity on every
+  // character typed in the header box, and everything below memoises on
+  // what this reads — so subscribing to it rebuilt every column's flat
+  // tree per keystroke with no row box open anywhere. This slice holds
+  // nothing (and keeps its identity) until a box clamps the search, and
+  // it is the same idle object on the canvases that provide no session.
+  const rowSearch = useViewRowSearch()
+  const rowScope = rowSearch.scope
+  const quick = rowSearch.quick
+  const advancedView = rowSearch.view
+  const resultMatchesQuick = rowSearch.resultMatchesQuick
 
   // What THIS row's box holds — read off the session, never a copy of it.
   // There is one query; a per-row copy drifts the moment a second box opens
   // or the header's × clears the search, and then a box goes on filtering
   // with a word the user can no longer see.
   const boxTextFor = useCallback((n: HierarchyNode): string => (
-    quick && quick.scope !== 'view' && quick.scope.insideUrn === (n.urn ?? n.id)
-      ? quick.text
+    rowScope && rowScope.insideUrn === (n.urn ?? n.id)
+      ? (quick?.text ?? '')
       : ''
-  ), [quick])
+  ), [rowScope, quick])
 
   const toggleSearchNode = useCallback((nodeId: string) => {
     setActiveSearchNodes(prev => {
@@ -343,16 +350,16 @@ export const LayerColumn = React.memo(function LayerColumn({
     // so leaving the scope clamped would keep this container's hit rows on
     // screen with nothing left on the row to explain where they came from.
     const closing = activeSearchNodes.has(nodeId)
-    if (closing && quick && quick.scope !== 'view' && quick.scope.insideUrn === nodeId) {
-      session?.setQuick({ text: '' })
-      session?.clearScope()
+    if (closing && rowScope && rowScope.insideUrn === nodeId) {
+      rowSearch.setQuick({ text: '' })
+      rowSearch.clearScope()
     }
 
     // Auto-expand the node so the user immediately sees the search box drop down
     if (!closing && !expandedNodes.has(nodeId)) {
       onToggle(nodeId)
     }
-  }, [activeSearchNodes, expandedNodes, onToggle, quick, session])
+  }, [activeSearchNodes, expandedNodes, onToggle, rowScope, rowSearch])
 
   // Search-driven canvas filter state. ``matchUrnSet`` is the source of
   // truth for "is this row a direct match"; ``ancestorMatchCounts > 0``
@@ -2077,18 +2084,18 @@ export const LayerColumn = React.memo(function LayerColumn({
                               // Clamp the view's one search to this container.
                               // Nothing local is dropped: the children stay,
                               // filtered, and the hits arrive as their own rows.
-                              session?.setQuick({
+                              rowSearch.setQuick({
                                 text: val,
                                 scope: { insideUrn: item.node.urn ?? item.node.id, label: item.node.name },
                               })
                             } else {
                               // Clearing the box unclamps the session. There is
                               // nothing to refetch — nothing was ever removed.
-                              session?.setQuick({ text: '' })
-                              session?.clearScope()
+                              rowSearch.setQuick({ text: '' })
+                              rowSearch.clearScope()
                             }
                           }}
-                          isLoading={session?.advanced.view.kind === 'running'}
+                          isLoading={advancedView?.kind === 'running'}
                           layer={layer}
                         />
                       </div>
@@ -2116,7 +2123,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                           crumbs={item.crumbs}
                           overflow={item.overflow}
                           onReveal={onRevealSearchHit}
-                          onOpenPanel={() => session?.openPanel()}
+                          onOpenPanel={rowSearch.openPanel}
                         />
                       </div>
                     </div>
