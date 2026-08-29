@@ -338,7 +338,6 @@ class AdvancedSearchService:
         client_requested_urns = bool(query.scope.root_urns)
         eff_scope = await self._resolve_scope(query.scope)
         query = _stamp_resolved_scope(query, eff_scope)
-        _reject_unbounded_text_any(query)
 
         # Security guard: if the client passed root_urns but every one
         # was dropped by the resolver (none belonged to this view), we
@@ -360,6 +359,13 @@ class AdvancedSearchService:
                 ],
             )
             return page, eff_scope
+
+        # Runs on the resolved scope, and below the short-circuit above:
+        # a client whose roots were all dropped has an out-of-view
+        # problem, not an unbounded-scan one, and telling them the view
+        # has no boundaries would be wrong — it has roots, just not
+        # theirs.
+        _reject_unbounded_text_any(query)
 
         try:
             page = await self._engine.provider.deep_search(

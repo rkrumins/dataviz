@@ -706,6 +706,57 @@ async def test_service_short_circuits_when_all_client_urns_dropped(
     assert eff_scope.dropped_urns == ("urn:hostile:somewhere-else",)
 
 
+async def test_all_client_urns_dropped_text_any_returns_empty_page(
+    db_session: AsyncSession,
+):
+    """The out-of-view short-circuit outranks the unbounded-scan guard.
+
+    A client that sends only out-of-view roots gets the empty page and
+    its diagnostics note — the honest answer, "no matches in this
+    view" — never a "this view has no boundaries yet" rejection, which
+    would describe a view that in fact has roots.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchOptions, SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [{"urn": "urn:domain:Customers"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(
+            view_id=view.id,
+            root_urns=["urn:hostile:somewhere-else"],
+        ),
+        options=SearchOptions(results="both"),
+    )
+    page, eff_scope = await svc.search(query)
+
+    assert page.candidate_count == 0
+    assert page.hits == []
+    assert eff_scope.dropped_urns == ("urn:hostile:somewhere-else",)
+
+
 async def test_service_passes_resolved_scope_to_provider(
     db_session: AsyncSession,
 ):
