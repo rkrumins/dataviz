@@ -84,6 +84,20 @@ function normalizeTraceV2(raw: RawTraceV2Result): TraceV2Result {
 
 const API_BASE = '/api/v1'
 
+
+/** An HTTP failure from the API, carrying the status that produced it. */
+export interface ApiStatusError extends Error {
+    status: number
+}
+
+/** The HTTP status behind a rejection, or null when it did not come from
+ *  one (an abort, a timeout, a parse failure). */
+export function httpStatusOf(err: unknown): number | null {
+    if (!(err instanceof Error)) return null
+    const status = (err as Partial<ApiStatusError>).status
+    return typeof status === 'number' ? status : null
+}
+
 export interface RemoteGraphProviderOptions {
     /** Workspace ID. When set, routes through /v1/{ws_id}/graph/... */
     workspaceId?: string
@@ -280,7 +294,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
             if (!response.ok) {
                 const errorText = await response.text()
-                const error = new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+                // The status rides along on the error. Callers that need
+                // to tell "you are not allowed this here" apart from "the
+                // backend is broken" — a share link hitting /search/discover
+                // is the live case — cannot get that out of a message.
+                const error: ApiStatusError = Object.assign(
+                    new Error(`API Error ${response.status}: ${errorText || response.statusText}`),
+                    { status: response.status },
+                )
                 // 5xx errors indicate provider/backend failure — feed circuit breaker
                 if (response.status >= 500) {
                     // Honor Retry-After header from backend (sent on 503 ProviderUnavailable)
