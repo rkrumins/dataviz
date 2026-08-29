@@ -5185,7 +5185,7 @@ export function ContextViewCanvas({
       {/* Quick create now lives in the Hierarchy Builder right rail
           (opened via useHierarchyBuilderStore). */}
 
-      {/* Command Palette - Press Cmd+K */}
+      {/* Command Palette - Press Cmd+Shift+P */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}

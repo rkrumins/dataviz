@@ -1,6 +1,6 @@
 /**
  * useCanvasKeyboard - Keyboard shortcuts for canvas operations
- * 
+ *
  * Provides a consistent keyboard experience across all canvas views:
  * - Delete/Backspace: Delete selected nodes/edges
  * - Cmd/Ctrl+D: Duplicate selected nodes
@@ -12,6 +12,10 @@
  * - Escape: Clear selection / Cancel operation
  * - T: Trace lineage from selected node
  * - N: Create new node
+ * - /: Focus the view search box
+ * - Cmd/Ctrl+Shift+F: Toggle the search results panel
+ * - Cmd/Ctrl+Shift+P: Open the canvas action palette (Cmd/Ctrl+K is the
+ *   app-wide palette only — see layout/CommandPalette.tsx)
  */
 
 import { useEffect, useCallback, useRef } from 'react'
@@ -52,11 +56,9 @@ export interface CanvasKeyboardHandlers {
     onZoomPreset?: (level: 1 | 2 | 3) => void
     /** Open the Lineage Lens on the selected node (F) */
     onFocusLens?: () => void
-    /** Focus the view search box (/). Declared, not yet bound — the
-     *  binding lands with the shortcut rework. */
+    /** Focus the view search box (/). */
     onFocusSearch?: () => void
-    /** Toggle the search results panel (Cmd/Ctrl+Shift+F). Declared, not
-     *  yet bound. */
+    /** Toggle the search results panel (Cmd/Ctrl+Shift+F). */
     onToggleSearchPanel?: () => void
 }
 
@@ -120,14 +122,29 @@ export function useCanvasKeyboard({
         
         const isMod = e.metaKey || e.ctrlKey
         const isShift = e.shiftKey
-        
-        // Command Palette: Cmd/Ctrl + K
-        if (isMod && e.key === 'k') {
+
+        // Focus search: / (no modifier)
+        if (e.key === '/' && !isMod) {
+            e.preventDefault()
+            handlersRef.current.onFocusSearch?.()
+            return
+        }
+
+        // Toggle search results panel: Cmd/Ctrl + Shift + F
+        if (isMod && isShift && e.key.toLowerCase() === 'f') {
+            e.preventDefault()
+            handlersRef.current.onToggleSearchPanel?.()
+            return
+        }
+
+        // Canvas action palette: Cmd/Ctrl + Shift + P (Cmd/Ctrl+K is the
+        // app-wide palette only — see layout/CommandPalette.tsx)
+        if (isMod && isShift && e.key.toLowerCase() === 'p') {
             e.preventDefault()
             handlersRef.current.onCommandPalette?.()
             return
         }
-        
+
         // Fit to width: Cmd/Ctrl + 0
         if (isMod && e.key === '0') {
             e.preventDefault()
@@ -257,7 +274,9 @@ export function useCanvasKeyboard({
 // ============================================
 
 export const KEYBOARD_SHORTCUTS = [
-    { key: '⌘/Ctrl + K', action: 'Command Palette' },
+    { key: '⌘/Ctrl + ⇧ + P', action: 'Command Palette' },
+    { key: '/', action: 'Search this view' },
+    { key: '⌘/Ctrl + ⇧ + F', action: 'Search results panel' },
     { key: '⌘/Ctrl + A', action: 'Select All' },
     { key: '⌘/Ctrl + C', action: 'Copy URN' },
     { key: '⌘/Ctrl + D', action: 'Duplicate' },
