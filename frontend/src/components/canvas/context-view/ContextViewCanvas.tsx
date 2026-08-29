@@ -62,12 +62,14 @@ import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
-import { EdgeLegend } from '../EdgeLegend'
+import { ConnectionsPanel } from './connections/ConnectionsPanel'
+import { buildConnectionModel } from './connections/connectionModel'
+import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation } from './useBandReservation'
 
 import { useUnifiedTrace, type UseUnifiedTraceResult, type TraceResult } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
-import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
+import { getEdgeTypeDefinition, getEdgeTypeFromSchema } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
@@ -142,6 +144,9 @@ const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
 /** The native trace draws through the overlay, never through the browse
  *  hierarchy filter — so the filter is fed nothing and stays pass-through. */
 const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
+/** "Nothing hidden" for the edge projection while the OVERLAY draws: a
+ *  trace's hidden types are its own, ephemeral set — never browse's. */
+const EMPTY_TYPE_SET: ReadonlySet<string> = new Set<string>()
 /** Fed to the edge projection while the OVERLAY is drawing: the trace's wires
  *  come from its own ledger, so the browse lineage has nothing to say and
  *  projecting it only produces noise (see the call site). */
@@ -292,6 +297,10 @@ export function ContextViewCanvas({
   const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
+  // Connections panel: which connection types this user has hidden, per
+  // view. Kept in localStorage keyed by view id, never in the view itself.
+  const connectionsViewId = activeView?.id ?? ''
+  const connectionVisibility = useConnectionVisibility(connectionsViewId)
   const provider = useGraphProvider()
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
@@ -1237,16 +1246,37 @@ export function ContextViewCanvas({
     )
   }, [edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
 
-  // Schema-driven edge color resolver — used by LineageFlowOverlay
-  // Resolves edge type → color from backend schema, falling back to defaults
-  const resolveEdgeColor = useCallback((edgeType: string) => {
-    return getEdgeTypeDefinition(
+  // Schema-driven edge type resolver — one lookup, three readers: the
+  // Connections panel (label, description, colour, stroke style), the
+  // overlay's colour, and the overlay's dash.
+  // Resolves edge type → definition from backend schema, falling back to defaults
+  const resolveConnectionType = useCallback((edgeType: string) => {
+    const def = getEdgeTypeDefinition(
       edgeType,
       relationshipTypes,
       containmentEdgeTypes,
       ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
-    ).color
+    )
+    // getEdgeTypeDefinition FABRICATES a description when the ontology has
+    // none — "Edge type: Flows To", "Data flow relationship: Flows To",
+    // "Parent-child containment relationship". The panel prints its
+    // description line only when it is non-empty, so hand it the ontology's
+    // own words or nothing at all, never a sentence nobody wrote.
+    const metadata = ontologyMetadata.edgeTypeMetadata as Record<string, { description?: string } | undefined>
+    const description =
+      getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description ||
+      metadata[edgeType.toUpperCase()]?.description ||
+      ''
+    return { ...def, description }
   }, [relationshipTypes, containmentEdgeTypes, ontologyMetadata])
+
+  const resolveEdgeColor = useCallback((edgeType: string) => {
+    return resolveConnectionType(edgeType).color
+  }, [resolveConnectionType])
+
+  const resolveEdgeStrokeStyle = useCallback((edgeType: string) => {
+    return resolveConnectionType(edgeType).strokeStyle
+  }, [resolveConnectionType])
 
   // Double-click handler: inline edit (default) or trace (shift+double-click)
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
@@ -1388,6 +1418,8 @@ export function ContextViewCanvas({
   // The edge legend reserves the band it is docked in — its header only,
   // so opening it does not shove the columns up.
   const edgeLegendRef = useRef<HTMLDivElement>(null)
+  // The variable keeps its name; what it measures is now the Connections
+  // panel's header (CanvasStatusChips and the columns read it by that name).
   useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
@@ -3726,6 +3758,11 @@ export function ContextViewCanvas({
     browseBundleParentMap: parentMap,
     browseBundleFanInThreshold: lineageBundleFanIn,
     nodeLayerIndexMap,
+    // Hiding a type is real: the projection drops those relationships per
+    // group member. While the OVERLAY draws it is already fed EMPTY_EDGES,
+    // and the trace's own hidden set is ephemeral, so browse's persisted
+    // set has no say there.
+    hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
   })
 
   // THE TRACE'S OWN WIRES: one line per flow, at the one grain the reader's
@@ -3740,6 +3777,10 @@ export function ContextViewCanvas({
       edgeCount: w.edgeCount,
       isBundled: w.isBundled,
       kind: w.kind,
+      // A trace wire carries no types yet — P7 stamps them from the wire
+      // ledger. Until then the Connections panel counts these wires in its
+      // total and lists no rows for them, rather than reading `undefined`.
+      types: [] as string[],
     }))
   }, [overlay.active, overlay.view, browseVisibleLineageEdges])
 
@@ -3839,6 +3880,13 @@ export function ContextViewCanvas({
     }
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
+
+  // The panel reads the SAME array the overlay is handed, so "in view"
+  // means post-budget and the drawn set is a subset of the model.
+  const connectionModel = useMemo(
+    () => buildConnectionModel(effectiveLineageEdges),
+    [effectiveLineageEdges]
+  )
 
   // Flow ribbons — macro volume per (layer → layer) pair, aggregated over
   // EVERY projected edge (not just the budgeted subset) so the bands show
@@ -4261,6 +4309,26 @@ export function ContextViewCanvas({
   const mergedHighlightNodes = isClickHighlightActive ? highlightState.nodes : hoverHighlight.nodes
   const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
 
+  // The Connections panel's highlight is a deliberate gesture on the panel,
+  // so while it is active it wins over hover/click — on the OVERLAY only.
+  // It carries edge ids and no nodes; routed to the columns as well, an
+  // active highlight with an empty node set would dim every card.
+  const [connectionHighlight, setConnectionHighlight] = useState<ReadonlySet<string> | null>(null)
+  // A highlight must not outlive what it pointed at: switching view or
+  // entering/leaving a trace replaces the board under it. Reconciled as the
+  // change ARRIVES — React's "adjusting state when a prop changes", the same
+  // idiom the panel uses, not an effect, which would paint the stale
+  // highlight for one committed frame first.
+  const [highlightScope, setHighlightScope] = useState({ viewId: connectionsViewId, tracing: traceActive })
+  if (highlightScope.viewId !== connectionsViewId || highlightScope.tracing !== traceActive) {
+    setHighlightScope({ viewId: connectionsViewId, tracing: traceActive })
+    setConnectionHighlight(null)
+  }
+  const overlayHighlightEdges = useMemo(
+    () => (connectionHighlight ? new Set(connectionHighlight) : mergedHighlightEdges),
+    [connectionHighlight, mergedHighlightEdges]
+  )
+
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
   // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
@@ -4680,7 +4748,7 @@ export function ContextViewCanvas({
           }
         }} />
 
-        {/* Edge Legend — docked bottom-right in the reserved band, never
+        {/* Connections panel — docked bottom-right in the reserved band, never
             over rows: it publishes its collapsed (header) height as
             --edge-legend-height and the columns area pads for it; opening
             it grows upward as a transient overlay. Right-rail panels are
@@ -4694,7 +4762,17 @@ export function ContextViewCanvas({
             right: '1rem',
           }}
         >
-          <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
+          <ConnectionsPanel
+            key={connectionsViewId}
+            model={connectionModel}
+            hiddenTypes={connectionVisibility.hiddenTypes}
+            resolveType={resolveConnectionType}
+            lineageOn={showLineageFlow}
+            onToggleType={connectionVisibility.toggle}
+            onSoloType={connectionVisibility.solo}
+            onShowAll={connectionVisibility.showAll}
+            onHighlight={setConnectionHighlight}
+          />
         </div>
 
         {/* Status chips — loaded-but-hidden data (unresolved edges,
@@ -4929,9 +5007,10 @@ export function ContextViewCanvas({
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}
-              highlightedEdges={mergedHighlightEdges}
-              isHighlightActive={isHighlightActive}
+              highlightedEdges={overlayHighlightEdges}
+              isHighlightActive={connectionHighlight !== null || isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
+              resolveEdgeStrokeStyle={resolveEdgeStrokeStyle}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
               expandingEdgeIds={expandingEdgeIds}
