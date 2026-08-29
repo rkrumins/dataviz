@@ -755,10 +755,26 @@ class TestCompilerLeaves:
 
     def test_property_with_leading_digit_compiles_safely(self):
         """Backticked identifiers may begin with a digit; common in
-        year-prefixed property names (``2024_revenue``)."""
+        year-prefixed property names (``2024_revenue``). ``value=100``
+        is an int, so ``eq`` does NOT case-fold — raw indexed compare."""
         c = _Compiler()
         where = c.compile(PropertyPredicate(key="2024_revenue", op="eq", value=100))
-        assert where == "toLower(toString(n.`2024_revenue`)) = $p0"
+        assert where == "n.`2024_revenue` = $p0"
+        assert c.params == {"p0": 100}
+
+    def test_property_eq_neq_non_string_values_stay_raw(self):
+        """Only string values case-fold for eq/neq (see
+        ``test_property_eq`` / ``test_property_neq_case_folds_by_default``).
+        Typed values — int, float, None, list — must compile to the
+        original raw ``col <op> $p`` with the value passed through
+        untouched, so they stay index-eligible and keep their type's
+        own equality semantics instead of being silently stringified."""
+        for op, symbol in (("eq", "="), ("neq", "<>")):
+            for value in (100, 1.5, None, ["a"]):
+                c = _Compiler()
+                where = c.compile(PropertyPredicate(key="k", op=op, value=value))
+                assert where == f"n.`k` {symbol} $p0"
+                assert c.params == {"p0": value}
 
     def test_tag_has(self):
         c = _Compiler()

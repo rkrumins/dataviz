@@ -107,9 +107,12 @@ class PropertyPredicate(_Base):
     """Typed comparison against a single user-property.
 
     After the storage refactor, user properties are native FalkorDB
-    fields, so these compile to indexed ``WHERE n.<key> <op> $val`` —
-    no Python post-filter. ``between`` expects ``value`` to be a
-    two-element list ``[lo, hi]``.
+    fields, so these compile to ``WHERE n.<key> <op> $val`` — no Python
+    post-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))
+    <op> toLower($val)``) when ``value`` is a string and
+    ``case_sensitive`` is false; a non-string value (or
+    ``case_sensitive=True``) keeps the raw, indexed column comparison.
+    ``between`` expects ``value`` to be a two-element list ``[lo, hi]``.
     """
     kind: Literal["property"] = "property"
     key: str = Field(min_length=1, max_length=128)

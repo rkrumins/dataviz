@@ -189,6 +189,32 @@ async def test_property_predicate_eq(stub):
 
 
 @pytest.mark.asyncio
+async def test_property_predicate_eq_case_folds_strings_not_typed_values():
+    """Mirrors the compiler's ``_visit_property`` case-fold rule: eq/neq
+    fold ONLY when the predicate value is a string — 'STRING' eq
+    matches the stored 'STRING' via 'string', but an int property must
+    NOT be coerced to a string for the comparison (an int eq does not
+    match the string '100')."""
+    nodes = [{
+        "urn": "urn:dataset:x",
+        "entityType": "dataset",
+        "logicalType": "STRING",
+        "rowCount": 100,
+    }]
+    stub = StubDeepSearchProvider(nodes=nodes)
+
+    string_match = await stub.deep_search(
+        _query(PropertyPredicate(key="logicalType", op="eq", value="string"))
+    )
+    assert string_match.candidate_count == 1
+
+    typed_mismatch = await stub.deep_search(
+        _query(PropertyPredicate(key="rowCount", op="eq", value="100"))
+    )
+    assert typed_mismatch.candidate_count == 0
+
+
+@pytest.mark.asyncio
 async def test_property_predicate_gt(stub):
     query = _query(PropertyPredicate(key="rowCount", op="gt", value=1_000_000))
     page = await stub.deep_search(query)

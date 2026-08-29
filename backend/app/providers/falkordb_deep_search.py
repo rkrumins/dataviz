@@ -376,20 +376,21 @@ class _Compiler:
     def _visit_property(self, p) -> str:
         col = f"n.{_safe_property_name(p.key)}"
         op = p.op
-
-        def case_fold(value):
-            # Same case-fold helper the contains/startsWith/endsWith
-            # branch uses: stringify, then toLower(toString(col)) unless
-            # case_sensitive bypasses the wrap.
-            v = "" if value is None else str(value)
-            if p.case_sensitive:
-                return col, v
-            return f"toLower(toString({col}))", v.lower()
-
         if op in ("eq", "neq"):
             symbol = {"eq": "=", "neq": "<>"}[op]
             pn = self._next()
-            col_expr, self.params[pn] = case_fold(p.value)
+            # Case-fold ONLY when the value is a string (and not
+            # case_sensitive) — a typed comparison (int/float/bool/None/
+            # list) must keep its raw column reference and untouched
+            # value so it stays index-eligible and keeps its original
+            # type semantics (e.g. numeric equality, not a stringified
+            # one).
+            if isinstance(p.value, str) and not p.case_sensitive:
+                col_expr = f"toLower(toString({col}))"
+                self.params[pn] = p.value.lower()
+            else:
+                col_expr = col
+                self.params[pn] = p.value
             return f"{col_expr} {symbol} ${pn}"
         if op in ("gt", "gte", "lt", "lte"):
             symbol = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[op]
@@ -398,7 +399,13 @@ class _Compiler:
             return f"{col} {symbol} ${pn}"
         if op in ("contains", "startsWith", "endsWith"):
             pn = self._next()
-            col_expr, self.params[pn] = case_fold(p.value)
+            v = "" if p.value is None else str(p.value)
+            if p.case_sensitive:
+                self.params[pn] = v
+                col_expr = col
+            else:
+                self.params[pn] = v.lower()
+                col_expr = f"toLower(toString({col}))"
             keyword = {"contains": "CONTAINS",
                        "startsWith": "STARTS WITH",
                        "endsWith": "ENDS WITH"}[op]

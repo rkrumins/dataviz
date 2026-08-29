@@ -333,10 +333,17 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
         v = node.get(predicate.key)
         op = predicate.op
         target = predicate.value
-        if op == "eq":
-            return v == target
-        if op == "neq":
-            return v != target
+        if op in ("eq", "neq"):
+            # Mirror the compiler's case-fold rule (falkordb_deep_search.py
+            # ``_visit_property``): fold both sides only when the
+            # predicate value is a string and not case_sensitive — a
+            # typed comparison keeps its raw equality semantics.
+            if isinstance(target, str) and not predicate.case_sensitive:
+                lhs = v.lower() if isinstance(v, str) else v
+                rhs = target.lower()
+            else:
+                lhs, rhs = v, target
+            return (lhs == rhs) if op == "eq" else (lhs != rhs)
         if op == "gt":
             return v is not None and v > target
         if op == "gte":
