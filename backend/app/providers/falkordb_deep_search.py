@@ -2273,20 +2273,26 @@ async def execute_deep_search(
                 await _read_match_set(provider, query)
                 if query.options.cursor else None
             )
-            if cached is not None:
-                (
-                    hits, hits_offset_after, hits_total_sorted,
-                ) = await _hits_from_match_set(
-                    provider, query, cached["urns"],
-                    timeout_s=remaining(),
-                )
-                # The page reports the numbers the scan that filled the
-                # cache measured, so page 2 can't contradict page 1.
-                candidate_count = cached["candidate_count"]
-                truncated = cached["truncated"]
-                total_count = cached["total_count"]
-                cache_hit = True
-            else:
+
+            async def _hits_branch() -> None:
+                nonlocal hits, hits_offset_after, hits_total_sorted
+                nonlocal sorted_urns, candidate_count, truncated
+                nonlocal total_count, cache_hit, deadline_exceeded
+                if cached is not None:
+                    (
+                        hits, hits_offset_after, hits_total_sorted,
+                    ) = await _hits_from_match_set(
+                        provider, query, cached["urns"],
+                        timeout_s=remaining(),
+                    )
+                    # The page reports the numbers the scan that filled
+                    # the cache measured, so page 2 can't contradict
+                    # page 1.
+                    candidate_count = cached["candidate_count"]
+                    truncated = cached["truncated"]
+                    total_count = cached["total_count"]
+                    cache_hit = True
+                    return
                 result = await provider._ro_query(
                     cand_cypher + " RETURN n",
                     params=base_params, timeout=timeout_s,
@@ -2345,7 +2351,9 @@ async def execute_deep_search(
                             "returning hits without a total: %r",
                             elapsed_ms, exc,
                         )
-            if shape == "both" and aggs:
+
+            async def _aggs_branch() -> None:
+                nonlocal aggregates
                 aggregates = []
                 for spec in aggs:
                     buckets = await _run_aggregation(
@@ -2354,6 +2362,37 @@ async def execute_deep_search(
                         uncapped_cypher=uncapped_cypher,
                     )
                     aggregates.append(buckets)
+
+            if shape == "both" and aggs:
+                # The two branches read the same candidate set through
+                # two independent queries and neither needs the other's
+                # answer, so running them one after the other charged
+                # every ``both`` request the SUM of two latencies where
+                # the max would do. FalkorDB executes reads in parallel
+                # and the provider's pool (24, capped to 20 in flight)
+                # has room for both. It is also where the win is largest:
+                # most of the hits branch's cost is Python — decoding the
+                # rows and scoring them — which now runs while FalkorDB
+                # is busy with the aggregation instead of after it.
+                #
+                # Each branch opens on what is LEFT of the one deadline
+                # at the moment it starts, so neither is charged for the
+                # other's wall time.
+                hits_outcome, aggs_outcome = await asyncio.gather(
+                    _hits_branch(), _aggs_branch(), return_exceptions=True,
+                )
+                # Hits first, and only then the aggregation's failure:
+                # ``_hits_branch`` has already published its page through
+                # the enclosing scope, so re-raising here lands in the
+                # handler below with the hits intact — the degrade this
+                # path has always had (buckets are forfeit, a page never
+                # is).
+                if isinstance(hits_outcome, BaseException):
+                    raise hits_outcome
+                if isinstance(aggs_outcome, BaseException):
+                    raise aggs_outcome
+            else:
+                await _hits_branch()
     except asyncio.TimeoutError:
         deadline_exceeded = True
         truncated = True

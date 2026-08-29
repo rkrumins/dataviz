@@ -4262,3 +4262,152 @@ class TestDiscoverBlobOnlyLabels:
         result = await discover_native_property_keys(prov, include_edges=False)
         assert result["labels"]["dataset"]["keys"] == ["rowCount"]
         assert result["blobOnlyLabels"] == ["dataset"]
+
+
+# ---------------------------------------------------------------------------
+# F4a — a ``both`` request runs its hits scan and its aggregations
+# CONCURRENTLY. They read the same candidate set through two independent
+# queries and neither needs the other's answer, so paying for them one
+# after the other cost every ``both`` request the sum of two latencies
+# where the max would do.
+# ---------------------------------------------------------------------------
+
+class _OverlapProvider(_CountingProvider):
+    """Records how many queries are in flight at once.
+
+    ``max_inflight`` is the whole proof: sequential code can never get
+    past 1, no matter how the awaits are arranged. Each query yields to
+    the loop while "running" so a concurrent peer has a real chance to
+    enter — without that a fast fake could complete before its sibling
+    is ever scheduled and under-report.
+    """
+
+    def __init__(self, *, agg_error=None, **kwargs):
+        super().__init__(**kwargs)
+        self.inflight = 0
+        self.max_inflight = 0
+        self.inflight_labels = set()
+        self.concurrent_labels = set()
+        self._agg_error = agg_error
+
+    @staticmethod
+    def _label(cypher: str) -> str:
+        if cypher.endswith("RETURN count(n) AS c"):
+            return "count"
+        if cypher.endswith("RETURN n") or " RETURN n." in cypher:
+            return "hits"
+        return "agg"
+
+    async def _ro_query(self, cypher, *, params=None, timeout=None):
+        label = self._label(cypher)
+        self.inflight += 1
+        self.inflight_labels.add(label)
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        if self.inflight > 1:
+            self.concurrent_labels |= self.inflight_labels
+        try:
+            # Two yields: one to let a sibling task enter, one to let it
+            # be observed here before this query finishes.
+            await asyncio.sleep(0.01)
+            await asyncio.sleep(0.01)
+            self.max_inflight = max(self.max_inflight, self.inflight)
+            if self.inflight > 1:
+                self.concurrent_labels |= self.inflight_labels
+            if label == "agg" and self._agg_error is not None:
+                raise self._agg_error
+            return await super()._ro_query(cypher, params=params,
+                                           timeout=timeout)
+        finally:
+            self.inflight -= 1
+            self.inflight_labels.discard(label)
+
+
+def _both_query(**opts) -> SearchQuery:
+    opts.setdefault("results", "both")
+    opts.setdefault("candidateCap", 100)
+    opts.setdefault("pageSize", 10)
+    opts.setdefault("aggregations", [AggregationSpec(by="entityType")])
+    return SearchQuery(
+        predicate=TextPredicate(value="customer", target="name"),
+        scope=_TEST_SCOPE,
+        options=SearchOptions(**opts),
+    )
+
+
+class TestBothRunsHitsAndAggregatesConcurrently:
+    @pytest.mark.asyncio
+    async def test_hits_and_aggregation_are_in_flight_together(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _OverlapProvider(hit_rows=30, total=30)
+        page = await execute_deep_search(prov, _both_query())
+
+        assert prov.max_inflight >= 2, (
+            "the hits scan and the aggregation ran one after the other"
+        )
+        assert {"hits", "agg"} <= prov.concurrent_labels
+        # ...and the page is still whole.
+        assert len(page.hits) == 10
+        assert page.aggregates is not None and len(page.aggregates) == 1
+
+    @pytest.mark.asyncio
+    async def test_aggregates_only_shape_is_unaffected(self):
+        """No hits branch to overlap with — one query at a time."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _OverlapProvider(hit_rows=30, total=30)
+        page = await execute_deep_search(
+            prov, _both_query(results="aggregates"),
+        )
+        assert page.hits is None
+        assert page.aggregates is not None and len(page.aggregates) == 1
+
+    @pytest.mark.asyncio
+    async def test_hits_only_shape_starts_no_aggregation(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _OverlapProvider(hit_rows=30, total=30)
+        page = await execute_deep_search(
+            prov, _both_query(results="hits", aggregations=None),
+        )
+        assert page.aggregates is None
+        assert len(page.hits) == 10
+        assert "agg" not in prov.concurrent_labels
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_aggregation_still_returns_the_hits(self):
+        """Today's degrade semantics, kept: the aggregation branch may
+        cost the caller their buckets, never their hits."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _OverlapProvider(hit_rows=30, total=30,
+                                agg_error=asyncio.TimeoutError())
+        page = await execute_deep_search(prov, _both_query())
+
+        assert len(page.hits) == 10
+        assert page.deadline_exceeded is True
+        assert page.candidate_count == 30
+
+    @pytest.mark.asyncio
+    async def test_each_branch_gets_its_own_budget(self):
+        """Concurrency means neither branch is charged for the other's
+        wall time — both are handed what is LEFT of the one deadline at
+        the moment they start, not a budget the sibling already spent."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _OverlapProvider(hit_rows=30, total=30)
+        await execute_deep_search(prov, _both_query(softDeadlineMs=5000))
+
+        budgets = {}
+        for cypher, _params, timeout in prov.calls:
+            budgets.setdefault(_OverlapProvider._label(cypher), []).append(
+                timeout,
+            )
+        # Both branches opened on essentially the full budget.
+        assert budgets["hits"][0] > 4.0
+        assert budgets["agg"][0] > 4.0
