@@ -110,6 +110,8 @@ export type ComputedEdge = {
   isGhost: boolean
   isBundled: boolean
   edgeCount: number
+  /** SVG `stroke-dasharray` for this edge — see `edgeDash.ts`. */
+  dashArray: string
   sx: number
   sy: number
   tx: number

@@ -91,6 +91,12 @@ export interface UseEdgeProjectionOptions {
    * renderer to route reverse-flow edges through a dedicated lane.
    */
   nodeLayerIndexMap?: Map<string, number>
+  /**
+   * UPPERCASE type keys the user has hidden for this view. Applied per
+   * GROUP MEMBER in Finalize, so a bundle whose members all carry only
+   * hidden types disappears and a mixed bundle keeps a reduced edgeCount.
+   */
+  hiddenEdgeTypes?: ReadonlySet<string>
 }
 
 // ============================================
@@ -206,6 +212,7 @@ export function useEdgeProjection({
   browseBundleParentMap,
   browseBundleFanInThreshold = 1,
   nodeLayerIndexMap,
+  hiddenEdgeTypes,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
@@ -340,10 +347,13 @@ export function useEdgeProjection({
 
     const edgeGroups = new Map<string, any[]>()
 
-    const addEdgeToGroup = (sourceId: string, targetId: string, edge: any, type: string) => {
+    // `lifted` = the endpoints this member is filed under are NOT the ones the
+    // edge itself names — it was resolved up to an ancestor. That, and only
+    // that, is what makes a raw edge a roll-up (see isGhost in Finalize).
+    const addEdgeToGroup = (sourceId: string, targetId: string, edge: any, type: string, lifted = false) => {
       const groupKey = `${sourceId}->${targetId}`
       if (!edgeGroups.has(groupKey)) edgeGroups.set(groupKey, [])
-      edgeGroups.get(groupKey)!.push({ ...edge, source: sourceId, target: targetId, originalType: type })
+      edgeGroups.get(groupKey)!.push({ ...edge, source: sourceId, target: targetId, originalType: type, _lifted: lifted })
     }
 
     // A. Aggregated Edges
@@ -462,7 +472,10 @@ export function useEdgeProjection({
             && String((edge.data?.edgeType) ?? '').toUpperCase() === 'AGGREGATED'
             && suppressedAggEdgeKeys?.has(`${edge.source}->${edge.target}`)
           ) return
-          addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, normalizeEdgeType(edge))
+          // After both the ancestorMap resolution and the trace-level rollup:
+          // different endpoints than the edge names ⇒ lifted to an ancestor.
+          const lifted = sId !== edge.source || tId !== edge.target
+          addEdgeToGroup(sId, tId, { ...edge, data: edge.data || {} }, normalizeEdgeType(edge), lifted)
         } else if (!sId || !tId) {
           // Endpoint resolves to nothing on canvas (unloaded or unassigned
           // entity) — the edge is hidden. Count it; sId === tId self-rollup
@@ -479,10 +492,15 @@ export function useEdgeProjection({
         const sId = ancestorMap.get(edge.sourceUrn)
         const tId = ancestorMap.get(edge.targetUrn)
         if (sId && tId && sId !== tId) {
+          // Endpoints here are urns — compare against the node each urn owns,
+          // not the urn itself. An unknown urn never asserts "lifted".
+          const ownS = urnToIdMap.get(edge.sourceUrn)
+          const ownT = urnToIdMap.get(edge.targetUrn)
+          const lifted = (ownS !== undefined && ownS !== sId) || (ownT !== undefined && ownT !== tId)
           addEdgeToGroup(sId, tId, {
             id: edge.id,
             data: { edgeType: edge.edgeType, relationship: edge.edgeType, confidence: edge.confidence }
-          }, edge.edgeType)
+          }, edge.edgeType, lifted)
         } else if (!sId || !tId) {
           unresolvedThisPass++
         }
@@ -570,34 +588,55 @@ export function useEdgeProjection({
       }
     }
 
+    // The types one group member carries. `data.edgeTypes` was previously
+    // tested for truthiness alone, so an empty-but-present array skipped the
+    // originalType fallback and the member vanished from the bundle's types
+    // while still counting toward edgeCount.
+    const memberTypes = (e: any): string[] => {
+      const arr = e.data?.edgeTypes
+      if (Array.isArray(arr) && arr.length > 0) return arr
+      return e.originalType ? [e.originalType] : []
+    }
+
     // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
     const projected: any[] = []
     edgeGroups.forEach((groupEdges, key) => {
+      // Hidden types are applied per MEMBER, not per group: grouping stayed
+      // identical above so meta-bundling and the bidirectional collapse behave
+      // exactly as before, and only the finalized bundle changes.
+      const members = hiddenEdgeTypes && hiddenEdgeTypes.size > 0
+        ? groupEdges.filter((e: any) => {
+            const ts = memberTypes(e)
+            // A member with no type at all is never hidden — we cannot filter
+            // on something the data does not say.
+            return ts.length === 0 || ts.some(t => !hiddenEdgeTypes.has(t.toUpperCase()))
+          })
+        : groupEdges
+      if (members.length === 0) return
+
       const distinctTypes = new Set<string>()
-      let isGhost = false
       let isAggregated = false
       let isBrowseBundle = false
       let maxConfidence = 0
 
-      const sourceId = groupEdges[0].source
-      const targetId = groupEdges[0].target
+      const sourceId = members[0].source
+      const targetId = members[0].target
 
-      if (groupEdges.some((e: any) => e.target !== e.originalTargetId || e.source !== e.originalSourceId)) {
-        isGhost = true
-      }
-
-      groupEdges.forEach(e => {
+      members.forEach(e => {
         if (e.data?.isAggregated) isAggregated = true
         if (e._browseBundled) isBrowseBundle = true
-        if (e.data?.edgeTypes) {
-          e.data.edgeTypes.forEach((et: string) => distinctTypes.add(et))
-        } else if (e.originalType) {
-          distinctTypes.add(e.originalType)
-        }
+        memberTypes(e).forEach((et: string) => {
+          if (hiddenEdgeTypes?.has(et.toUpperCase())) return
+          distinctTypes.add(et)
+        })
         maxConfidence = Math.max(maxConfidence, e.data?.confidence ?? 1)
       })
 
-      const edgeCount = groupEdges.length
+      // A bundle is a roll-up when it summarises something other than the raw
+      // relationship between the two cards it touches.
+      const isGhost = isAggregated || isBrowseBundle || members.some((e: any) => e._lifted === true)
+
+      const edgeCount = members.length
       const typesArray = Array.from(distinctTypes)
 
       // Reverse-flow annotation: layer-index of target strictly less than
@@ -665,7 +704,9 @@ export function useEdgeProjection({
           target: t,
           isBundled: true,
           isBrowseBundle: fwd.isBrowseBundle || rev.isBrowseBundle,
-          isGhost: fwd.isGhost && rev.isGhost,
+          // A pair that summarises anything in either direction IS a summary —
+          // matching the OR its isBrowseBundle/isAggregated siblings already use.
+          isGhost: fwd.isGhost || rev.isGhost,
           edgeCount,
           types: typesArr,
           confidence: Math.max(fwd.confidence, rev.confidence),
@@ -683,7 +724,7 @@ export function useEdgeProjection({
 
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, expandedNodes, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, browseBundleEnabled, browseBundleParentMap, browseBundleFanInThreshold, nodeLayerIndexMap, hiddenEdgeTypes])
 
   const projectedEdges = projection.edges
 

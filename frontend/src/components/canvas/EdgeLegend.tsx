@@ -1,11 +1,10 @@
 /**
  * EdgeLegend - Displays a legend explaining edge types, colors, and meanings
  *
- * Operates in two modes:
- * - Canvas mode (no visibleEdges prop): uses raw canvas store edges
- * - Context View mode (visibleEdges provided): uses projected/aggregated edges
- *   from the canvas render pipeline, which have a different data structure
- *   (edge.types[] array + edge.edgeCount bundle count)
+ * GraphCanvas only: the Context View draws its own Connections panel
+ * (context-view/connections/ConnectionsPanel.tsx) instead. `visibleEdges` is
+ * therefore required, and the store-backed "Canvas mode" branches that
+ * nothing could reach are gone.
  */
 
 import { useState, useMemo } from 'react'
@@ -21,17 +20,28 @@ import { generateEdgeColorFromType } from '@/lib/type-visuals'
 // ─── Data-shape helpers ───────────────────────────────────────────────────────
 // Projected edges (from useEdgeProjection) carry a `types: string[]` array and
 // an `edgeCount` representing how many underlying lineage edges are bundled.
-// Canvas store edges carry `data.edgeType` (string) and count as 1 each.
+// Canvas edges carry `data.edgeType`; an AGGREGATED summary edge carries its
+// bundled count in `data.edgeCount` (GraphCanvas.tsx), which is the badge the
+// canvas itself draws — so that is read too.
 
-function edgeTypesOf(edge: any): string[] {
+/** What the legend can read off an edge, in either shape it is handed. */
+export interface LegendEdge {
+    id: string
+    types?: string[]
+    edgeCount?: number
+    data?: { edgeType?: string; edgeTypes?: string[]; edgeCount?: number }
+}
+
+function edgeTypesOf(edge: LegendEdge): string[] {
     if (Array.isArray(edge.types) && edge.types.length > 0) return edge.types
     if (Array.isArray(edge.data?.edgeTypes) && edge.data.edgeTypes.length > 0) return edge.data.edgeTypes
     const normalized = normalizeEdgeType(edge)
     return normalized ? [normalized] : []
 }
 
-function edgeBundleCount(edge: any): number {
-    return typeof edge.edgeCount === 'number' && edge.edgeCount > 0 ? edge.edgeCount : 1
+function edgeBundleCount(edge: LegendEdge): number {
+    const n = edge.edgeCount ?? edge.data?.edgeCount
+    return typeof n === 'number' && n > 0 ? n : 1
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -40,12 +50,10 @@ interface EdgeLegendProps {
     className?: string
     defaultExpanded?: boolean
     /**
-     * Projected/rendered edges for this view (from useEdgeProjection).
-     * When provided, the legend enters Context View mode and derives all type
-     * discovery, counts, and highlighting from these edges instead of the
-     * raw canvas store.
+     * The edges rendered on this canvas. Type discovery, counts and
+     * highlighting all come from them, never from the raw canvas store.
      */
-    visibleEdges?: any[]
+    visibleEdges: LegendEdge[]
 }
 
 export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }: EdgeLegendProps) {
@@ -63,10 +71,6 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
         toggleFilter,
     } = useEdgeFiltersStore()
 
-    // In Context View mode we work from projected edges; otherwise raw store edges.
-    const isProjectedMode = visibleEdges !== undefined
-    const activeEdges = isProjectedMode ? (visibleEdges ?? []) : storeEdges
-
     // Edge type metadata (color, label, icon, stroke style) always comes from
     // the store — the schema-driven definitions live there regardless of mode.
     const edgeTypeDefinitions = useMemo(() => {
@@ -77,12 +81,12 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
         )
     }, [storeEdges, relationshipTypes, containmentEdgeTypes])
 
-    // Per-type counts from the *active* edge list.
+    // Per-type counts from the edges this canvas is rendering.
     // For projected edges each entry may represent multiple underlying edges
     // (edge.edgeCount), so we sum those to get meaningful counts.
     const countsByType = useMemo(() => {
         const counts: Record<string, number> = {}
-        activeEdges.forEach(edge => {
+        visibleEdges.forEach(edge => {
             const types = edgeTypesOf(edge)
             const n = edgeBundleCount(edge)
             types.forEach(t => {
@@ -91,34 +95,29 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
             })
         })
         return counts
-    }, [activeEdges])
+    }, [visibleEdges])
 
-    // Types present in the active edge set.
-    // In projected mode we build rows from countsByType directly — the projected
-    // edges may include synthetic types (e.g. "AGGREGATED") that have no entry in
-    // the schema-based edgeTypeDefinitions.  Building from countsByType guarantees
-    // that sum(row counts) == header total.
+    // Types present in that same edge set.
+    // Rows are built from countsByType directly — the rendered edges may include
+    // synthetic types (e.g. "AGGREGATED") that have no entry in the schema-based
+    // edgeTypeDefinitions.  Building from countsByType guarantees that
+    // sum(row counts) == header total.
     const activeEdgeTypes = useMemo(() => {
-        if (isProjectedMode) {
-            return Object.entries(countsByType).map(([typeKey]) => {
-                const schemaDef = edgeTypeDefinitions.find(
-                    d => d.type.toUpperCase() === typeKey
-                )
-                return schemaDef ?? {
-                    type: typeKey,
-                    label: typeKey,
-                    color: generateEdgeColorFromType(typeKey),
-                    description: `Relationship type: ${typeKey}`,
-                    strokeStyle: 'solid' as const,
-                    animated: false,
-                    icon: null,
-                }
-            }).sort((a, b) => (countsByType[b.type.toUpperCase()] ?? 0) - (countsByType[a.type.toUpperCase()] ?? 0))
-        }
-        return edgeTypeDefinitions.filter(
-            def => (countsByType[def.type.toUpperCase()] ?? 0) > 0
-        )
-    }, [isProjectedMode, edgeTypeDefinitions, countsByType])
+        return Object.entries(countsByType).map(([typeKey]) => {
+            const schemaDef = edgeTypeDefinitions.find(
+                d => d.type.toUpperCase() === typeKey
+            )
+            return schemaDef ?? {
+                type: typeKey,
+                label: typeKey,
+                color: generateEdgeColorFromType(typeKey),
+                description: `Relationship type: ${typeKey}`,
+                strokeStyle: 'solid' as const,
+                animated: false,
+                icon: null,
+            }
+        }).sort((a, b) => (countsByType[b.type.toUpperCase()] ?? 0) - (countsByType[a.type.toUpperCase()] ?? 0))
+    }, [edgeTypeDefinitions, countsByType])
 
     // Total = sum of all type row counts — always consistent with what the rows show.
     const totalOnScreen = useMemo(
@@ -129,7 +128,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
     // Click a type row → highlight all edges of that type in the overlay.
     const handleHighlightType = (type: string) => {
         const upper = type.toUpperCase()
-        const matchingIds = activeEdges
+        const matchingIds = visibleEdges
             .filter(e => edgeTypesOf(e).some(t => t.toUpperCase() === upper))
             .map(e => e.id)
 
@@ -143,7 +142,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
 
     const isTypeHighlighted = (type: string) => {
         const upper = type.toUpperCase()
-        return activeEdges
+        return visibleEdges
             .filter(e => edgeTypesOf(e).some(t => t.toUpperCase() === upper))
             .some(e => highlightedEdgeIds.has(e.id))
     }
@@ -154,20 +153,17 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
     }
 
     // ─── Header summary string ────────────────────────────────────────────────
-    // Context View: "X relationships on screen" (sum of bundled counts)
-    // Canvas mode:  "X edges" (raw count)
-    const headerSummary = isProjectedMode
-        ? totalOnScreen === 0
-            ? 'No edges on screen'
-            : `${totalOnScreen.toLocaleString()} on screen`
-        : `${storeEdges.length} edges`
+    // "X on screen" — the sum of the bundled counts the rows show.
+    const headerSummary = totalOnScreen === 0
+        ? 'No edges on screen'
+        : `${totalOnScreen.toLocaleString()} on screen`
 
     // An opaque elevated panel, not glass: this card animates its height
     // when it opens, and a blurred-backdrop surface that changes size
     // ghosts a mis-placed tile over its rows (the "white strip").
     // Opacity gives the same separation without the mechanism.
     return (
-        <div className={cn("bg-canvas-elevated/95 border border-glass-border shadow-lg rounded-xl overflow-hidden", className)}>
+        <div className={cn("bg-canvas-elevated border border-glass-border shadow-lg rounded-xl overflow-hidden", className)}>
             {/* Header */}
             <button
                 onClick={() => setIsExpanded(!isExpanded)}
@@ -199,7 +195,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
                         <div className="px-3 pb-3 space-y-1.5">
                             {activeEdgeTypes.length === 0 ? (
                                 <p className="text-xs text-ink-muted py-3 text-center">
-                                    {isProjectedMode ? 'No edges visible in this view' : 'No edges to display'}
+                                    No edges visible in this view
                                 </p>
                             ) : (
                                 activeEdgeTypes.map(def => {
