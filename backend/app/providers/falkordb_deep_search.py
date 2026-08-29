@@ -1656,6 +1656,7 @@ async def discover_native_property_keys(
           "blobOnlyLabels": ["domain", ...],
           "missingContainment": bool,
           "tagValues": {"PII": 482, "GDPR": 39, "deprecated": 12, ...},
+          "missingSearchableText": int,
           "edges": {
             "TRANSFORMS":  {"keys": ["confidence","discoveredBy"], "sampled": 1240,
                             "valueSamplesByKey": {"discoveredBy": ["manual","auto"]}},
@@ -1667,6 +1668,15 @@ async def discover_native_property_keys(
     ``valueSamplesByKey``, ``tagValues``, and ``edges`` are added for the
     UI's autocomplete pickers. They can be skipped via the
     ``include_*`` flags when only the legacy key list is needed.
+
+    ``missingSearchableText`` counts the SAMPLED nodes (same sample as
+    everything else here, not the whole graph) that carry no
+    ``n.searchableText``. That blob is the only column a
+    ``text(target='any')`` search reads, so on a graph the backfill
+    never touched "search everything" returns nothing at all, silently
+    — the count is what lets the caller name
+    ``python -m backend.scripts.migrate_native_properties
+    --searchable-text`` instead of shrugging.
     """
     _s = get_deep_search_settings()
     t0 = time.monotonic()
@@ -1677,6 +1687,7 @@ async def discover_native_property_keys(
     # we parse them in Python here rather than relying on FalkorDB's
     # JSON-string handling at query time.
     tag_value_counts: Dict[str, int] = {}
+    missing_searchable_text = 0
 
     # Step 1: list labels (FalkorDB supports CALL db.labels())
     try:
@@ -1726,6 +1737,10 @@ async def discover_native_property_keys(
         for row in rows:
             node = row[0] if row else None
             props = getattr(node, "properties", None) or {}
+            if not props.get("searchableText"):
+                # Absent OR empty — an empty blob matches nothing, so
+                # it is just as unsearchable as a missing one.
+                missing_searchable_text += 1
             for k, v in props.items():
                 if k in _DISCOVER_RESERVED_KEYS and k != "tags":
                     # Reserved keys are stripped from the user-facing
@@ -1807,6 +1822,7 @@ async def discover_native_property_keys(
         "blobOnlyLabels": sorted(blob_only),
         "missingContainment": missing_containment,
         "tagValues": tag_values_payload,
+        "missingSearchableText": missing_searchable_text,
         "edges": edges_payload,
         "elapsedMs": int((time.monotonic() - t0) * 1000),
     }

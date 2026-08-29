@@ -489,3 +489,28 @@ async def test_stub_reports_the_exact_total(stub):
     )
     assert page.total_count == page.candidate_count
     assert page.total_count == 3
+
+
+# ---------------------------------------------------------------------------
+# missingSearchableText — the stub mirrors the FalkorDB diagnostic.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discover_counts_fixture_nodes_missing_searchable_text(stub):
+    """The fixture predates the searchableText backfill, so every one of
+    its four nodes is missing the blob ``text(target='any')`` reads."""
+    result = await stub.deep_search_discover(sample_per_label=200)
+    assert result["missingSearchableText"] == 4
+
+
+@pytest.mark.asyncio
+async def test_discover_counts_only_the_nodes_without_a_blob():
+    nodes = [
+        {"urn": "urn:a", "entityType": "dataset", "searchableText": "a"},
+        {"urn": "urn:b", "entityType": "dataset"},
+        {"urn": "urn:c", "entityType": "domain", "searchableText": ""},
+    ]
+    stub = StubDeepSearchProvider(nodes=nodes, edges=[])
+    result = await stub.deep_search_discover(sample_per_label=200)
+    assert result["missingSearchableText"] == 2

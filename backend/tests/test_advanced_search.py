@@ -3817,3 +3817,82 @@ class TestMatchSetCache:
         assert page.aggregates is not None
         assert len(prov.calls) == 1
         assert not prov.calls[0][0].endswith("RETURN n")
+
+
+# ---------------------------------------------------------------------------
+# missingSearchableText — the "search everything found nothing" diagnostic
+# ---------------------------------------------------------------------------
+
+from backend.app.providers.falkordb_deep_search import (  # noqa: E402
+    discover_native_property_keys,
+)
+
+
+class _SampledNode:
+    """A FalkorDB node row carries its props under ``.properties``."""
+
+    def __init__(self, properties: dict):
+        self.properties = properties
+
+
+class _DiscoverProvider:
+    """Scripted provider for ``discover_native_property_keys``.
+
+    Answers ``CALL db.labels()`` with the fixture's labels and each
+    per-label sample query with that label's nodes. The tests switch
+    edge discovery off, so no edge scan reaches ``_ro_query``.
+    """
+
+    def __init__(self, nodes_by_label: dict):
+        self._nodes_by_label = nodes_by_label
+
+    async def _ro_query(self, cypher, *, params=None, timeout=None):
+        if cypher.startswith("CALL db.labels()"):
+            return _Rows([[label] for label in self._nodes_by_label])
+        for label, props in self._nodes_by_label.items():
+            if f"(n:`{label}`)" in cypher:
+                return _Rows([[_SampledNode(p)] for p in props])
+        return _Rows([])
+
+    def _get_containment_edge_types(self):
+        return ["CONTAINS"]
+
+
+class TestDiscoverMissingSearchableText:
+    """``text(target='any')`` reads ``n.searchableText`` and nothing
+    else, so on a graph the backfill never touched a "search everything"
+    query returns nothing at all — silently, with no error to read.
+    Discover counts the sampled nodes that carry no blob, which is what
+    lets the zero-results panel name the backfill command instead of
+    shrugging."""
+
+    @pytest.mark.asyncio
+    async def test_counts_sampled_nodes_with_no_searchable_text(self):
+        prov = _DiscoverProvider({"dataset": [
+            {"urn": "urn:a", "displayName": "A", "searchableText": "a orders"},
+            {"urn": "urn:b", "displayName": "B"},
+            # An empty blob matches nothing, so it is missing too.
+            {"urn": "urn:c", "displayName": "C", "searchableText": ""},
+        ]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["missingSearchableText"] == 2
+
+    @pytest.mark.asyncio
+    async def test_zero_when_every_sampled_node_carries_one(self):
+        prov = _DiscoverProvider({"dataset": [
+            {"urn": "urn:a", "searchableText": "a"},
+            {"urn": "urn:b", "searchableText": "b"},
+        ]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["missingSearchableText"] == 0
+
+    @pytest.mark.asyncio
+    async def test_counts_across_every_sampled_label(self):
+        """The backfill is per-graph, not per-label — the count is the
+        whole sample's, so one migrated label can't hide the rest."""
+        prov = _DiscoverProvider({
+            "dataset": [{"urn": "urn:a", "searchableText": "a"}],
+            "column": [{"urn": "urn:b"}, {"urn": "urn:c"}],
+        })
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["missingSearchableText"] == 2

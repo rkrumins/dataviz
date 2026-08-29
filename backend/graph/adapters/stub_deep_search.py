@@ -153,6 +153,7 @@ class StubDeepSearchProvider:
         # top-N when a label exceeds the per-label cap — mirrors the
         # FalkorDB discover behaviour (W1.1a).
         labels: Dict[str, Dict[str, Any]] = {}
+        missing_searchable_text = 0
         for n in self._nodes[: max(1, sample_per_label) * 32]:
             label = n.get("entityType")
             if not label:
@@ -165,6 +166,10 @@ class StubDeepSearchProvider:
             if entry["sampled"] >= sample_per_label:
                 continue
             entry["sampled"] += 1
+            if not n.get("searchableText"):
+                # Mirrors the FalkorDB discover diagnostic: absent or
+                # empty is unsearchable either way by text(target='any').
+                missing_searchable_text += 1
             for k, v in n.items():
                 if k in {"urn", "entityType", "tags", "ancestorUrns"}:
                     continue
@@ -247,6 +252,7 @@ class StubDeepSearchProvider:
             "blobOnlyLabels": [],
             "missingContainment": False,
             "tagValues": tag_values,
+            "missingSearchableText": missing_searchable_text,
             "edges": edges_out,
             "elapsedMs": int((time.monotonic() - start) * 1000),
         }

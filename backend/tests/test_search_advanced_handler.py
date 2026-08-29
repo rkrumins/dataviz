@@ -403,3 +403,80 @@ async def test_explain_maps_a_refusal_to_501(monkeypatch):
 
     assert exc.value.status_code == 501
     assert exc.value.detail == REFUSAL
+
+
+# ---------------------------------------------------------------------------
+# /search/discover — whole-graph diagnostics, and the same 501 arm
+# ---------------------------------------------------------------------------
+
+def _patch_discover(monkeypatch, result=None, raises=None):
+    """Replace ``AdvancedSearchService.discover`` with a recorder.
+
+    Returns the call list so a test can assert the provider was never
+    sampled — a guard that refuses only after the scan has already run
+    has leaked the answer it was meant to withhold.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    calls: list = []
+
+    async def _fake_discover(self, *, sample_per_label=200):
+        calls.append(sample_per_label)
+        if raises is not None:
+            raise raises
+        return result if result is not None else {}
+
+    monkeypatch.setattr(AdvancedSearchService, "discover", _fake_discover)
+    return calls
+
+
+async def test_discover_refuses_a_capability_identity(monkeypatch):
+    """Discover reports the labels, property keys and tag values of the
+    WHOLE graph — there is no scope that narrows it to the granted view,
+    so a share-link identity is refused outright rather than by mode."""
+    calls = _patch_discover(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_discover(
+            request=_request(view_capability="view-1"),
+            samplePerLabel=200,
+            engine=_FakeEngine(),
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "This link can only search inside its view."
+    assert calls == [], "must refuse before the graph is sampled"
+
+
+async def test_discover_reports_missing_searchable_text(monkeypatch):
+    """A membership identity gets the payload, including the count that
+    tells the zero-results panel the backfill hasn't run."""
+    calls = _patch_discover(monkeypatch, result={
+        "labels": {}, "missingSearchableText": 7,
+    })
+
+    result = await graph_mod.search_discover(
+        request=_request(),
+        samplePerLabel=200,
+        engine=_FakeEngine(),
+    )
+
+    assert result["missingSearchableText"] == 7
+    assert calls == [200]
+
+
+async def test_discover_maps_a_refusal_to_501(monkeypatch):
+    """A draft over a stale main reaches discover too; without this arm
+    its refusal escaped as a 500 with FalkorDB internals in the body."""
+    _patch_discover(monkeypatch, raises=NotImplementedError(REFUSAL))
+
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_discover(
+            request=_request(),
+            samplePerLabel=200,
+            engine=_FakeEngine(),
+        )
+
+    assert exc.value.status_code == 501
+    assert exc.value.detail == REFUSAL

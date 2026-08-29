@@ -1019,6 +1019,15 @@ class SearchDiscoverResult(_Base):
             "edge-aware path-query value pickers."
         ),
     )
+    missing_searchable_text: int = Field(
+        0,
+        alias="missingSearchableText",
+        description=(
+            "Sampled nodes with no n.searchableText — run "
+            "`python -m backend.scripts.migrate_native_properties "
+            "--searchable-text`."
+        ),
+    )
     elapsed_ms: int = Field(0, alias="elapsedMs", description="Discovery query duration in milliseconds.")
 
 

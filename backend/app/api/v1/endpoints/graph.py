@@ -1441,7 +1441,9 @@ def _map_not_implemented(
     )
 
 
-def _guard_capability_scope(request: Request, query: SearchQuery) -> None:
+def _guard_capability_scope(
+    request: Request, query: Optional[SearchQuery] = None,
+) -> None:
     """Keep a share-link identity inside the view it was granted.
 
     ``capability_gate`` stamps ``request.state.view_capability`` when the
@@ -1452,10 +1454,15 @@ def _guard_capability_scope(request: Request, query: SearchQuery) -> None:
     the CLIENT-supplied ``visibleUrns`` list. ``view`` mode resolves
     against the view's own authorised roots, so it stays open. Membership
     callers are unaffected.
+
+    ``query=None`` is ``/search/discover``, which takes no query at all:
+    it reports the whole graph's labels, property keys and tag values,
+    and nothing narrows that to the granted view — so every capability
+    identity is refused there.
     """
     if not getattr(request.state, "view_capability", None):
         return
-    if query.scope.scope_mode in ("data_source", "visible"):
+    if query is None or query.scope.scope_mode in ("data_source", "visible"):
         raise HTTPException(
             status_code=403,
             detail="This link can only search inside its view.",
@@ -1586,6 +1593,7 @@ async def search_explain(
 
 @router.get("/search/discover")
 async def search_discover(
+    request: Request,
     samplePerLabel: int = Query(
         200, ge=1, le=2000,
         description="How many nodes to sample per label before "
@@ -1607,12 +1615,25 @@ async def search_discover(
     pre-W1 blob storage and need the migration script
     (``python -m backend.scripts.migrate_native_properties``) to be
     queryable by property.
+
+    ``missingSearchableText`` is the same signal for the *text* path:
+    sampled nodes with no ``n.searchableText``, the only column a
+    "search everything" query reads.
+
+    Whole-graph diagnostics, so a share-link identity is refused — see
+    ``_guard_capability_scope``.
     """
+    _guard_capability_scope(request)
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService,
     )
     svc = AdvancedSearchService.for_diagnostics(engine)
-    return await svc.discover(sample_per_label=samplePerLabel)
+    try:
+        return await svc.discover(sample_per_label=samplePerLabel)
+    except NotImplementedError as exc:
+        # Same refusal arm as the other two search routes: a branch /
+        # stale-main provider means its message for the caller.
+        raise _map_not_implemented(engine, exc) from exc
 
 
 # Process-level cache of the SearchQuery JSON Schema. It's static
