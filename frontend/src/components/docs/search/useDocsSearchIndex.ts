@@ -37,9 +37,14 @@ export interface DocsSearchResult {
   score: number
 }
 
-// ── Internal index shape ───────────────────────────────────────────
+// ── Index shape ────────────────────────────────────────────────────
 
-interface IndexEntry {
+/**
+ * One indexed document. Exported alongside `getIndex`/`runSearch` so a
+ * caller that owns its own caching — the ⌘K palette drives them from a
+ * react-query rather than mounting the hook — can name what it holds.
+ */
+export interface IndexEntry {
   area: DocsSearchArea
   slug: string
   title: string
@@ -138,7 +143,7 @@ async function buildIndex(): Promise<IndexEntry[]> {
 }
 
 /** Kick off (or reuse) the single build. Guards against double-loading. */
-function getIndex(): Promise<IndexEntry[]> {
+export function getIndex(): Promise<IndexEntry[]> {
   if (!indexPromise) {
     indexPromise = buildIndex().then((idx) => {
       cachedIndex = idx
@@ -257,7 +262,7 @@ function buildSnippet(body: string, bodyLower: string, terms: string[]): Snippet
 
 const MAX_RESULTS = 20
 
-function runSearch(index: IndexEntry[], rawQuery: string): DocsSearchResult[] {
+export function runSearch(index: IndexEntry[], rawQuery: string): DocsSearchResult[] {
   const terms = tokenize(rawQuery)
   if (terms.length === 0) return []
 
