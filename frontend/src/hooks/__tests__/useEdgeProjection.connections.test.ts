@@ -46,6 +46,16 @@ const aggEntry = (id: string, sourceUrn: string, targetUrn: string, edgeTypes: s
   },
 ])
 
+/** One EXPANDED entry — its `detailedEdges` take the urn-keyed case-C path. */
+const expandedEntry = (id: string, detailedEdges: Array<{ id: string; sourceUrn: string; targetUrn: string; edgeType: string }>) => ([
+  id,
+  {
+    state: 'expanded',
+    detailedEdges,
+    aggregated: { id, sourceUrn: detailedEdges[0].sourceUrn, targetUrn: detailedEdges[0].targetUrn, edgeCount: detailedEdges.length, edgeTypes: [], confidence: 1 },
+  },
+])
+
 function run(opts: {
   edges?: ReturnType<typeof edge>[]
   roots: HierarchyNode[]
@@ -93,6 +103,7 @@ type Projected = {
   isGhost: boolean
   isBrowseBundle: boolean
   isAggregated: boolean
+  isBidirectional: boolean
   edgeCount: number
   types: string[]
 }
@@ -142,6 +153,46 @@ describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
     expect(sp).toBeDefined()
     expect(sp!.isBrowseBundle).toBe(true)
     expect(sp!.isGhost).toBe(true)
+  })
+
+  it('a bidirectional pair is a roll-up when either direction is', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b')],                                   // forward: raw
+      aggregatedEdges: new Map([aggEntry('agg1', 'b', 'a')] as any),   // reverse: AGGREGATED
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].isBidirectional).toBe(true)
+    expect(bundles(res)[0].isGhost).toBe(true)
+  })
+
+  it('a detailed edge whose endpoint is a collapsed child is a roll-up', () => {
+    const c1 = hNode('c1')
+    c1.depth = 1
+    const res = run({
+      roots: [hNode('p', [c1]), hNode('b')],   // p collapsed → c1 resolves to p
+      aggregatedEdges: new Map([expandedEntry('agg1', [
+        { id: 'd1', sourceUrn: 'c1', targetUrn: 'b', edgeType: 'FLOWS_TO' },
+      ])] as any),
+    })
+    const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
+    expect(pb).toBeDefined()
+    expect(pb!.isGhost).toBe(true)
+  })
+
+  it('a detailed edge whose endpoint urn is unknown is not marked lifted', () => {
+    // c1 owns the urn `urn:c1`, so the edge's `c1` endpoint is absent from
+    // urnToIdMap — the projection must not claim a lift it cannot prove.
+    const c1: HierarchyNode = { ...hNode('c1'), urn: 'urn:c1', depth: 1 }
+    const res = run({
+      roots: [hNode('p', [c1]), hNode('b')],
+      aggregatedEdges: new Map([expandedEntry('agg1', [
+        { id: 'd1', sourceUrn: 'c1', targetUrn: 'b', edgeType: 'FLOWS_TO' },
+      ])] as any),
+    })
+    const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
+    expect(pb).toBeDefined()
+    expect(pb!.isGhost).toBe(false)
   })
 })
 
@@ -199,5 +250,19 @@ describe('useEdgeProjection — hidden connection types', () => {
     expect(before.unresolvedEdgeCount).toBe(1)
     expect(after.unresolvedEdgeCount).toBe(1)
     expect(after.visibleLineageEdges).toHaveLength(0)
+  })
+
+  it('an empty hidden set is a no-op', () => {
+    const edges = [
+      edge('e1', 'a', 'b', 'FLOWS_TO'),
+      edge('e2', 'a', 'b', 'FLOWS_TO'),
+      edge('e3', 'a', 'b', 'DERIVES_FROM'),
+    ]
+    const none = run({ roots: [hNode('a'), hNode('b')], edges })
+    const empty = run({ roots: [hNode('a'), hNode('b')], edges, hiddenEdgeTypes: new Set<string>() })
+    expect(bundles(empty)).toHaveLength(bundles(none).length)
+    expect(bundles(empty)[0].edgeCount).toBe(bundles(none)[0].edgeCount)
+    expect(bundles(empty)[0].types).toEqual(bundles(none)[0].types)
+    expect(bundles(empty)[0].edgeCount).toBe(3)
   })
 })

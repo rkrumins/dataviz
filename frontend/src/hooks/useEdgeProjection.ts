@@ -704,7 +704,9 @@ export function useEdgeProjection({
           target: t,
           isBundled: true,
           isBrowseBundle: fwd.isBrowseBundle || rev.isBrowseBundle,
-          isGhost: fwd.isGhost && rev.isGhost,
+          // A pair that summarises anything in either direction IS a summary —
+          // matching the OR its isBrowseBundle/isAggregated siblings already use.
+          isGhost: fwd.isGhost || rev.isGhost,
           edgeCount,
           types: typesArr,
           confidence: Math.max(fwd.confidence, rev.confidence),
