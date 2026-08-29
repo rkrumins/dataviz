@@ -59,8 +59,9 @@ import logging
 import re
 import time
 from collections import Counter
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
@@ -1412,12 +1413,33 @@ async def _hits_from_match_set(
     """
     offset = max(0, int(decode_cursor(query.options.cursor).get("offset", 0)))
     page_urns = urns[offset : offset + query.options.page_size]
+    hits = await _hydrate_hits(provider, query, page_urns, timeout_s=timeout_s)
+    return hits, offset + len(page_urns), len(urns)
+
+
+async def _hydrate_hits(
+    provider, query: SearchQuery, page_urns: List[str], *, timeout_s: float,
+) -> List[SearchHit]:
+    """Fetch one page's real nodes by URN and score them.
+
+    The only place a whole node is built. Both paths that produce a page
+    end here — the cached cursor slice and the candidate scan — so a hit
+    carries the same node, score, provenance and highlights whichever
+    one served it. Scoring happens against the FULL node, so what the
+    caller reads back is exact even though the ranking that chose these
+    URNs ran on a projection.
+
+    Order is the caller's: ``get_nodes_batch`` answers per label bucket,
+    so its own order means nothing. A URN it cannot answer for was
+    deleted between the scan and this page and is dropped — the caller
+    still advances by the whole slice, or a deleted node would make the
+    next page repeat this one.
+    """
     nodes = []
     if page_urns:
         nodes = await asyncio.wait_for(
             provider.get_nodes_batch(page_urns), timeout=timeout_s,
         )
-    # get_nodes_batch answers per label bucket, so its order is its own.
     by_urn = {n.urn: n for n in nodes}
     leaves = _collect_text_leaves(query.predicate)
     hits: List[SearchHit] = []
@@ -1432,7 +1454,7 @@ async def _hits_from_match_set(
             node=node, score=score, matched_predicates=matched,
             highlights=highlights,
         ))
-    return hits, offset + len(page_urns), len(urns)
+    return hits
 
 
 # ---------------------------------------------------------------------------
@@ -1604,7 +1626,12 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
     return {
         "cypher": cand_cypher,
-        "hits_cypher": cand_cypher + " RETURN n",
+        # The projection the scan really runs — explain exists to show
+        # what search would do, and "RETURN n" stopped being true when
+        # ranking moved onto a projection.
+        "hits_cypher": cand_cypher + " " + _hit_projection(
+            provider, query,
+        ).clause,
         "uncapped_cypher": uncapped_cypher,
         "params": base_params,
         "candidate_cap": effective_candidate_cap,
@@ -2293,16 +2320,29 @@ async def execute_deep_search(
                     total_count = cached["total_count"]
                     cache_hit = True
                     return
+                projection = _hit_projection(provider, query)
                 result = await provider._ro_query(
-                    cand_cypher + " RETURN n",
+                    cand_cypher + " " + projection.clause,
                     params=base_params, timeout=timeout_s,
                 )
                 rows = result.result_set or []
                 candidate_count = len(rows)
                 truncated = candidate_count >= effective_candidate_cap
+                candidates = _rows_to_candidates(
+                    rows,
+                    columns=projection.columns,
+                    property_keys=projection.property_keys,
+                    identity_key=projection.identity_key,
+                    name_key=projection.name_key,
+                )
                 (
-                    hits, hits_offset_after, hits_total_sorted, sorted_urns,
-                ) = _build_hits_from_rows(provider, rows, query)
+                    page_urns, hits_offset_after, hits_total_sorted,
+                    sorted_urns,
+                ) = _rank_candidate_rows(candidates, query)
+                # The page — and only the page — gets real nodes.
+                hits = await _hydrate_hits(
+                    provider, query, page_urns, timeout_s=remaining(),
+                )
                 if not truncated:
                     # The scan returned every match, so the exact total is
                     # already in hand — no second query.
@@ -2913,6 +2953,23 @@ _TIER_SUBSTRING = 20
 
 # Context kept either side of the match in a highlight snippet.
 _SNIPPET_PAD = 40
+
+# What a ``target='any'`` leaf earns on a projected row that matches none
+# of the projected columns: the tier a property value is worth when the
+# needle merely sits inside it. The floor of the range a real property hit
+# spans (10 or 20), so the inference can only ever under-credit.
+_UNATTRIBUTED_MATCH_SCORE = _TIER_SUBSTRING * _FIELD_WEIGHTS["property"]
+
+
+def _is_unattributable(pred) -> bool:
+    """Whether an unmatched leaf could still have matched off-projection.
+
+    Only ``target='any'`` can: it is the one target whose compiled
+    column (``searchableText``) reaches text the projection does not
+    carry. Every other leaf compares a column the projection has, so an
+    unmatched one really did not match.
+    """
+    return (isinstance(pred, TextPredicate) and pred.target == "any")
 _ELLIPSIS = "…"
 
 # Property ops that read as text. Everything else (ordering, ranges,
@@ -3126,7 +3183,7 @@ def _build_highlight(
 
 
 def _score_hit(
-    node, leaves, *, want_highlights: bool,
+    node, leaves, *, want_highlights: bool, projected: bool = False,
 ) -> Tuple[float, List[int], List[SearchHighlight]]:
     """Score one node against the request's textual leaves.
 
@@ -3137,6 +3194,19 @@ def _score_hit(
     field's best match) and are built only when asked: the caller
     scores every candidate row but needs snippets only for the page it
     returns.
+
+    ``projected`` says the row carries only the columns the candidate
+    scan asked for, not every property. A ``target='any'`` leaf that
+    matches none of them still matched the query — the scan compares
+    ``searchableText``, which also covers string PROPERTY values — so
+    the needle can only be living in a property this row didn't bring
+    back, and the leaf is credited the substring-tier property score
+    (``_UNATTRIBUTED_MATCH_SCORE``) rather than being read as a
+    non-match. A property hit that would have earned the word-boundary
+    tier is scored at the substring tier instead; that is the whole of
+    the difference from scoring the full node, and it lands in the tail
+    where the two nodes were adjacent anyway. Provenance never rests on
+    the inference: the page is re-scored from its hydrated nodes.
     """
     score = 0.0
     matched: List[int] = []
@@ -3165,6 +3235,11 @@ def _score_hit(
                     previous = best.get(field)
                     if previous is None or field_score > previous[0]:
                         best[field] = (field_score, text, position, len(needle))
+        if not matched_leaf and projected and _is_unattributable(pred):
+            # The row matched, but not through anything it carries.
+            if _UNATTRIBUTED_MATCH_SCORE > score:
+                score = _UNATTRIBUTED_MATCH_SCORE
+            matched_leaf = True
         if matched_leaf:
             matched.append(index)
 
@@ -3176,18 +3251,178 @@ def _score_hit(
     return score, matched, highlights
 
 
-def _build_hits_from_rows(
-    provider, rows, query: SearchQuery,
-) -> Tuple[List[SearchHit], int, int, List[str]]:
-    """Convert candidate rows to SearchHits, applying sort + cursor-paged
-    slicing in-memory.
+# The columns every candidate needs, whatever the predicate asks. They are
+# what ``_node_from_props`` reads to reconstruct identity, name, and the
+# text ``_scored_fields`` ranks on — ``name``/``title``/``label`` included,
+# because they are the displayName a source without one falls back to.
+_PROJECTION_CORE: Tuple[str, ...] = (
+    "urn", "displayName", "qualifiedName", "description", "tags",
+    "name", "title", "label",
+)
 
-    Returns ``(hits, offset_after, total_sorted, sorted_urns)`` where:
-      * ``hits`` — the page's SearchHits (sliced ``[offset : offset+page_size]``)
-      * ``offset_after`` — the next-cursor offset (offset + len(hits))
+
+class _HitProjection(NamedTuple):
+    """The RETURN clause the candidate scan uses, and how to read it back."""
+    clause: str
+    columns: Tuple[str, ...]
+    property_keys: Tuple[str, ...]
+    identity_key: Optional[str]
+    name_key: Optional[str]
+
+
+@dataclass(slots=True)
+class _CandidateRow:
+    """One scanned candidate, carrying only what ranking reads.
+
+    Named for the attributes ``_score_hit`` and the sorts already look
+    for on a ``GraphNode``, so both work against either without knowing
+    which they were handed.
+    """
+    urn: str
+    display_name: str
+    qualified_name: Optional[str]
+    description: Optional[str]
+    tags: List[str]
+    properties: Dict[str, Any]
+
+
+def _hit_projection(provider, query: SearchQuery) -> _HitProjection:
+    """What to RETURN from the candidate scan.
+
+    ``RETURN n`` handed back every property of every candidate — up to
+    the cap — so that one page of them could be returned. The client
+    decodes each of those values, which on an estate whose nodes carry
+    a dozen properties is most of the scan's cost and all of it wasted:
+    ranking reads six fields, and the page gets its real nodes from
+    ``get_nodes_batch`` afterwards.
+
+    So the scan asks for the core columns plus whatever THIS query
+    ranks on — the key behind every property leaf, and the sort
+    property. A key the predicate can't name is a key the compiler
+    could not have matched on either (``_visit_property`` compares the
+    native column ``n.<key>``), which is why the residual
+    ``propertiesRaw`` blob is not projected: it is invisible to the
+    WHERE clause that selected these rows.
+    """
+    keys: List[str] = []
+
+    def add(key: Optional[str]) -> None:
+        if key and key not in keys:
+            keys.append(key)
+
+    for core in _PROJECTION_CORE:
+        add(core)
+    identity_key = getattr(provider, "_node_identity_property", None)
+    name_key = getattr(provider, "_name_property", None)
+    add(identity_key)
+    add(name_key)
+
+    property_keys: List[str] = []
+
+    def add_property(key: Optional[str]) -> None:
+        if key and key not in property_keys:
+            property_keys.append(key)
+        add(key)
+
+    for _index, leaf in _collect_text_leaves(query.predicate):
+        if isinstance(leaf, PropertyPredicate):
+            add_property(leaf.key)
+        elif getattr(leaf, "target", None) == "property":
+            add_property(leaf.property_key)
+    add_property(query.options.sort_property)
+
+    clause = "RETURN " + ", ".join(
+        f"n.{_safe_property_name(key)}" for key in keys
+    )
+    return _HitProjection(
+        clause=clause,
+        columns=tuple(keys),
+        property_keys=tuple(property_keys),
+        identity_key=identity_key if identity_key != "urn" else None,
+        name_key=name_key,
+    )
+
+
+def _rows_to_candidates(
+    rows,
+    *,
+    columns: Tuple[str, ...],
+    property_keys: Tuple[str, ...],
+    identity_key: Optional[str] = None,
+    name_key: Optional[str] = None,
+) -> List[_CandidateRow]:
+    """Projected rows → rankable candidates.
+
+    Mirrors ``_node_from_props``: the same identity fallback, the same
+    displayName precedence, the same tolerance for ``tags`` arriving as
+    a JSON string. A row with no identity is dropped exactly as an
+    un-hydratable node was.
+
+    FalkorDB answers NULL for a property the node hasn't got, so every
+    absent column arrives as ``None`` and has to stay absent — a
+    stringified ``"None"`` would match needles the node does not
+    contain.
+    """
+    index = {key: i for i, key in enumerate(columns)}
+
+    def cell(row, key: Optional[str]):
+        if not key:
+            return None
+        position = index.get(key)
+        if position is None or position >= len(row):
+            return None
+        return row[position]
+
+    candidates: List[_CandidateRow] = []
+    for row in rows:
+        urn = cell(row, "urn") or cell(row, identity_key)
+        if not urn:
+            continue
+        raw_tags = cell(row, "tags")
+        if isinstance(raw_tags, str):
+            try:
+                tags = json.loads(raw_tags)
+            except (json.JSONDecodeError, TypeError):
+                tags = []
+        else:
+            tags = raw_tags or []
+        properties = {}
+        for key in property_keys:
+            if key in _RESERVED_NODE_KEYS:
+                # A reserved key is not a user property on a hydrated
+                # node either, so scoring must not see one here.
+                continue
+            value = cell(row, key)
+            if value is not None:
+                properties[key] = value
+        candidates.append(_CandidateRow(
+            urn=str(urn),
+            display_name=(
+                cell(row, "displayName")
+                or cell(row, name_key)
+                or cell(row, "name")
+                or cell(row, "title")
+                or cell(row, "label")
+                or ""
+            ),
+            qualified_name=cell(row, "qualifiedName"),
+            description=cell(row, "description"),
+            tags=list(tags) if isinstance(tags, list) else [],
+            properties=properties,
+        ))
+    return candidates
+
+
+def _rank_candidate_rows(
+    candidates: List[_CandidateRow], query: SearchQuery,
+) -> Tuple[List[str], int, int, List[str]]:
+    """Sort the candidate set and slice the requested page out of it.
+
+    Returns ``(page_urns, offset_after, total_sorted, sorted_urns)``:
+      * ``page_urns`` — the URNs this page will hydrate, in page order
+      * ``offset_after`` — the next-cursor offset (offset + page length)
       * ``total_sorted`` — the size of the full sorted candidate set,
-        so the caller can decide whether there are more pages to emit
-        a next-cursor.
+        so the caller can decide whether more pages follow
       * ``sorted_urns`` — every match in sort order, which the caller
         caches so the cursor pages after this one are a slice rather
         than a second scan.
@@ -3204,43 +3439,44 @@ def _build_hits_from_rows(
          the last ranking on the provenance score).
       'depth' is deferred — currently silently coerces to displayName.
 
-    Every row is scored, because relevance sorts the whole candidate set
-    before it is sliced; only the page slice pays for highlights.
+    Every candidate is scored, because relevance sorts the whole set
+    before it is sliced. Highlights are not built here at all: they
+    belong to the page, and the page is scored again from its real
+    nodes once hydrated.
     """
     leaves = _collect_text_leaves(query.predicate)
-    hits: List[SearchHit] = []
-    for row in rows:
-        node = provider._extract_node_from_result(row)
-        if node:
-            score, matched, _ = _score_hit(node, leaves, want_highlights=False)
-            hits.append(SearchHit(
-                node=node, score=score, matched_predicates=matched,
-            ))
+    scored: List[Tuple[_CandidateRow, float]] = [
+        (row, _score_hit(
+            row, leaves, want_highlights=False, projected=True,
+        )[0])
+        for row in candidates
+    ]
 
     sort_dir = query.options.sort_dir
     reverse = (sort_dir == "desc")
 
     if query.options.sort_property:
-        # Reach into node.properties; missing → sort as if value were ""
+        # Reach into properties; missing → sort as if value were ""
         # so absent rows clump consistently at one end.
         prop = query.options.sort_property
 
-        def prop_key(h: SearchHit):
-            v = (h.node.properties or {}).get(prop)
+        def prop_key(entry):
+            v = (entry[0].properties or {}).get(prop)
             # Sort numerics naturally; coerce everything else through str
             if isinstance(v, (int, float, bool)):
                 return (0, v)
             return (1, str(v).lower() if v is not None else "")
 
-        hits.sort(key=prop_key, reverse=reverse)
+        scored.sort(key=prop_key, reverse=reverse)
     else:
         sort_field = query.options.sort
         if sort_field in ("displayName", "qualifiedName"):
-            def key(h: SearchHit):
-                v = (getattr(h.node, "display_name" if sort_field == "displayName"
-                             else "qualified_name") or "")
+            def key(entry):
+                row = entry[0]
+                v = (row.display_name if sort_field == "displayName"
+                     else row.qualified_name) or ""
                 return v.lower()
-            hits.sort(key=key, reverse=reverse)
+            scored.sort(key=key, reverse=reverse)
         elif sort_field == "relevance":
             # Score first, name second. The name pass is always
             # ascending (A→Z), never `sort_dir` — a business user
@@ -3249,22 +3485,16 @@ def _build_hits_from_rows(
             # meaning for the plain name/property sorts above. Two
             # passes, leaning on Python's stable sort, so the name
             # order survives underneath the score order.
-            hits.sort(key=lambda h: (h.node.display_name or "").lower())
-            hits.sort(key=lambda h: -h.score)
+            scored.sort(key=lambda e: (e[0].display_name or "").lower())
+            scored.sort(key=lambda e: -e[1])
 
-    total_sorted = len(hits)
+    sorted_urns = [row.urn for row, _score in scored]
     offset = 0
     if query.options.cursor:
         state = decode_cursor(query.options.cursor)
         offset = max(0, int(state.get("offset", 0)))
-    page = hits[offset : offset + query.options.page_size]
-    if query.options.highlights:
-        for hit in page:
-            _, _, hit.highlights = _score_hit(
-                hit.node, leaves, want_highlights=True,
-            )
-    return (page, offset + len(page), total_sorted,
-            [h.node.urn for h in hits])
+    page_urns = sorted_urns[offset : offset + query.options.page_size]
+    return page_urns, offset + len(page_urns), len(sorted_urns), sorted_urns
 
 
 async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:

@@ -2027,15 +2027,9 @@ class TestSortByProperty:
         assert opts.sort_property == "rowCount"
         assert opts.sort_dir == "desc"
 
-    def test_hits_sorted_by_native_property_descending(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_hits_sorted_by_native_property_descending(self):
         from backend.common.models.graph import GraphNode
-
-        class _MockProv:
-            def _extract_node_from_result(self, n):
-                return n  # rows ARE GraphNodes for the test
 
         rows = [
             GraphNode(urn="urn:a", entityType="dataset", displayName="a",
@@ -2053,18 +2047,12 @@ class TestSortByProperty:
                 "pageSize": 10,
             },
         )
-        hits, _, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _, _ = await _page_from_rows(rows, q)
         assert [h.node.urn for h in hits] == ["urn:b", "urn:c", "urn:a"]
 
-    def test_hits_sorted_by_native_property_ascending(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_hits_sorted_by_native_property_ascending(self):
         from backend.common.models.graph import GraphNode
-
-        class _MockProv:
-            def _extract_node_from_result(self, n):
-                return n
 
         rows = [
             GraphNode(urn="urn:a", entityType="dataset", displayName="a",
@@ -2082,20 +2070,14 @@ class TestSortByProperty:
                 "pageSize": 10,
             },
         )
-        hits, _, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _, _ = await _page_from_rows(rows, q)
         assert [h.node.urn for h in hits] == ["urn:a", "urn:c", "urn:b"]
 
-    def test_missing_property_clumps_consistently(self):
+    @pytest.mark.asyncio
+    async def test_missing_property_clumps_consistently(self):
         # Nodes without the sort property end up grouped at one end —
         # neither randomly interleaved nor dropped from the result.
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
         from backend.common.models.graph import GraphNode
-
-        class _MockProv:
-            def _extract_node_from_result(self, n):
-                return n
 
         rows = [
             GraphNode(urn="urn:a", entityType="dataset", displayName="a",
@@ -2113,7 +2095,7 @@ class TestSortByProperty:
                 "pageSize": 10,
             },
         )
-        hits, _, _, _ = _build_hits_from_rows(_MockProv(), rows, q)
+        hits, _, _, _ = await _page_from_rows(rows, q)
         # All three returned; missing-rowCount node grouped consistently
         assert len(hits) == 3
         urns_with_value = [h.node.urn for h in hits if h.node.properties.get("rowCount") is not None]
@@ -2138,13 +2120,6 @@ class TestCursorPagination:
         ]
 
     @staticmethod
-    def _mock_prov():
-        class _MockProv:
-            def _extract_node_from_result(self, n):
-                return n
-        return _MockProv()
-
-    @staticmethod
     def _query(page_size: int, cursor=None):
         opts = {"sort": "displayName", "sortDir": "asc",
                 "pageSize": page_size}
@@ -2156,50 +2131,34 @@ class TestCursorPagination:
             options=opts,  # type: ignore[arg-type]
         )
 
-    def test_first_page_no_cursor_starts_at_zero(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_first_page_no_cursor_starts_at_zero(self):
         rows = self._mock_rows(30)
-        hits, offset_after, total, _ = _build_hits_from_rows(
-            self._mock_prov(), rows, self._query(page_size=10),
-        )
+        hits, offset_after, total, _ = await _page_from_rows(rows, self._query(page_size=10))
         assert [h.node.urn for h in hits] == [f"urn:{i:03d}" for i in range(10)]
         assert offset_after == 10
         assert total == 30
 
-    def test_cursor_round_trip_advances_offset(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_cursor_round_trip_advances_offset(self):
         rows = self._mock_rows(30)
         # Page 1
-        page1, off1, _, _ = _build_hits_from_rows(
-            self._mock_prov(), rows, self._query(page_size=10),
-        )
+        page1, off1, _, _ = await _page_from_rows(rows, self._query(page_size=10))
         # Encode the next-cursor the way execute_deep_search does
         cursor = encode_cursor({"offset": off1, "q": "irrelevant"})
         # Page 2
-        page2, off2, _, _ = _build_hits_from_rows(
-            self._mock_prov(), rows,
-            self._query(page_size=10, cursor=cursor),
-        )
+        page2, off2, _, _ = await _page_from_rows(rows, self._query(page_size=10, cursor=cursor))
         assert [h.node.urn for h in page2] == [f"urn:{i:03d}" for i in range(10, 20)]
         assert off2 == 20
         # No overlap between page 1 and page 2 URNs
         assert not (set(h.node.urn for h in page1)
                     & set(h.node.urn for h in page2))
 
-    def test_final_page_exhausts_candidate_set(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_final_page_exhausts_candidate_set(self):
         rows = self._mock_rows(30)
         cursor = encode_cursor({"offset": 20})
-        page, off, total, _ = _build_hits_from_rows(
-            self._mock_prov(), rows,
-            self._query(page_size=10, cursor=cursor),
-        )
+        page, off, total, _ = await _page_from_rows(rows, self._query(page_size=10, cursor=cursor))
         # Last page is full but exhausts the set: caller will see
         # offset_after == total_sorted and emit cursor=None.
         assert len(page) == 10
@@ -2207,54 +2166,37 @@ class TestCursorPagination:
         assert total == 30
         assert off == total  # the caller's "stop" signal
 
-    def test_cursor_beyond_end_returns_empty_page(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_cursor_beyond_end_returns_empty_page(self):
         rows = self._mock_rows(30)
         cursor = encode_cursor({"offset": 30})
-        page, off, total, _ = _build_hits_from_rows(
-            self._mock_prov(), rows,
-            self._query(page_size=10, cursor=cursor),
-        )
+        page, off, total, _ = await _page_from_rows(rows, self._query(page_size=10, cursor=cursor))
         assert page == []
         assert off == 30
         assert total == 30
 
-    def test_changed_pagesize_mid_iteration_uses_offset_only(self):
+    @pytest.mark.asyncio
+    async def test_changed_pagesize_mid_iteration_uses_offset_only(self):
         # The cursor stores ``offset`` only — page size is read from the
         # current request, so a caller can re-tune mid-iteration without
         # the cursor going stale.
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
         rows = self._mock_rows(30)
         # Page 1 with size 5
-        _, off1, _, _ = _build_hits_from_rows(
-            self._mock_prov(), rows, self._query(page_size=5),
-        )
+        _, off1, _, _ = await _page_from_rows(rows, self._query(page_size=5))
         assert off1 == 5
         # Page 2 with bumped-up size 15 — should slice [5:20]
         cursor = encode_cursor({"offset": off1})
-        page2, off2, _, _ = _build_hits_from_rows(
-            self._mock_prov(), rows,
-            self._query(page_size=15, cursor=cursor),
-        )
+        page2, off2, _, _ = await _page_from_rows(rows, self._query(page_size=15, cursor=cursor))
         assert [h.node.urn for h in page2] == [f"urn:{i:03d}" for i in range(5, 20)]
         assert off2 == 20
 
-    def test_negative_offset_clamped_to_zero(self):
+    @pytest.mark.asyncio
+    async def test_negative_offset_clamped_to_zero(self):
         # Defensive: a hand-crafted cursor with a negative offset
         # shouldn't slice from the end of the list (Python's [-n:] would).
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
         rows = self._mock_rows(10)
         cursor = encode_cursor({"offset": -5})
-        page, off, total, _ = _build_hits_from_rows(
-            self._mock_prov(), rows,
-            self._query(page_size=10, cursor=cursor),
-        )
+        page, off, total, _ = await _page_from_rows(rows, self._query(page_size=10, cursor=cursor))
         assert [h.node.urn for h in page] == [f"urn:{i:03d}" for i in range(10)]
         assert off == 10
         assert total == 10
@@ -2743,6 +2685,18 @@ class _CountingProvider:
         self._total = total
         self._count_error = count_error
 
+    def _node(self, i: int) -> GraphNode:
+        """The node the scan finds at position ``i``. Subclasses rename
+        them so a predicate can actually match."""
+        return GraphNode(
+            urn=f"urn:n{i}",
+            entityType="dataset",
+            displayName=f"node {i:05d}",
+        )
+
+    def _scan_nodes(self):
+        return [self._node(i) for i in range(self._hit_rows)]
+
     async def _ro_query(self, cypher, *, params=None, timeout=None):
         self.calls.append((cypher, params, timeout))
         # Let the monotonic clock advance by a real interval so the
@@ -2753,28 +2707,28 @@ class _CountingProvider:
             if self._count_error is not None:
                 raise self._count_error
             return _Rows([[self._total]])
-        if cypher.endswith("RETURN n"):
-            return _Rows([[i] for i in range(self._hit_rows)])
+        if " RETURN n." in cypher:
+            # The candidate scan projects columns now; answer whichever
+            # ones this query asked for, in the order it asked.
+            cols = _projected_columns(cypher)
+            return _Rows([
+                [_column_value(n, c) for c in cols]
+                for n in self._scan_nodes()
+            ])
         return _Rows([])  # aggregation pivot — buckets aren't under test
 
     async def _get_ancestor_chain(self, urn):
         return []
 
     async def get_nodes_batch(self, urns):
-        return []
+        known = {n.urn: n for n in self._scan_nodes()}
+        return [known[u] for u in urns if u in known]
 
     def _get_lineage_edge_types(self):
         return ["LINEAGE"]
 
     def _get_containment_edge_types(self):
         return ["CONTAINS"]
-
-    def _extract_node_from_result(self, row):
-        return GraphNode(
-            urn=f"urn:n{row[0]}",
-            entityType="dataset",
-            displayName=f"node {row[0]:05d}",
-        )
 
 
 def _hits_query(**opts) -> SearchQuery:
@@ -2873,10 +2827,11 @@ class TestExactTotalCount:
 
     @pytest.mark.asyncio
     async def test_every_follow_up_shares_one_budget(self, monkeypatch):
-        """The candidate query gets the whole deadline; the count, the
-        aggregation and the ancestor hydration each get what is left of
-        it. Asserted as a strictly descending chain, so restoring
-        ``timeout_s`` at any one of the three sites fails this test."""
+        """The candidate query gets the whole deadline; the aggregation,
+        the page hydration, the count and the ancestor hydration each get
+        what is left of it. Asserted as a strictly descending chain in
+        the order they actually run, so restoring ``timeout_s`` at any
+        one of the four sites fails this test."""
         waits = []
         real_wait_for = asyncio.wait_for
 
@@ -2897,10 +2852,17 @@ class TestExactTotalCount:
         )
         prov = _CountingProvider(hit_rows=100, total=1284)
         page = await execute_deep_search(prov, q)
-        candidate_t, count_t, agg_t = (c[2] for c in prov.calls)
+        # The aggregation is issued second now: it opens as soon as the
+        # candidate scan yields, rather than after the whole hits branch.
+        candidate_t, agg_t, count_t = (c[2] for c in prov.calls)
         assert candidate_t == 30.0, "the candidate scan gets the full deadline"
-        assert len(waits) == 1, "ancestor hydration must run under wait_for"
-        assert candidate_t > count_t > agg_t > waits[0] > 0
+        assert len(waits) == 2, (
+            "the page hydration and the ancestor hydration both run under "
+            "wait_for"
+        )
+        page_hydration_t, ancestor_t = waits
+        assert (candidate_t > agg_t > page_hydration_t > count_t
+                > ancestor_t > 0)
         assert page.total_count == 1284
 
     @pytest.mark.asyncio
@@ -3202,13 +3164,6 @@ class TestHitProvenance:
         kw.setdefault("displayName", "node")
         return GraphNode(**kw)
 
-    @staticmethod
-    def _mock_prov():
-        class _MockProv:
-            def _extract_node_from_result(self, n):
-                return n
-        return _MockProv()
-
     def test_dfs_indices_count_every_leaf_kind(self):
         """``matched_predicates`` indices are a DFS over ALL leaves — a
         non-textual leaf still consumes its index, or the FE maps the
@@ -3310,10 +3265,8 @@ class TestHitProvenance:
         assert matched == [0]
         assert highlights[0].field == "tags"
 
-    def test_relevance_sort_orders_by_score(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_relevance_sort_orders_by_score(self):
         rows = [
             self._node(urn="urn:a", displayName="zeta",
                        description="a customer note"),
@@ -3325,18 +3278,16 @@ class TestHitProvenance:
             scope=_TEST_SCOPE,
             options=SearchOptions(sort="relevance", pageSize=10),
         )
-        hits, _, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
+        hits, _, _, _ = await _page_from_rows(rows, query)
         assert [h.node.urn for h in hits] == ["urn:b", "urn:c", "urn:a"]
         assert hits[0].score == pytest.approx(100.0)  # exact displayName
         assert hits[1].score == pytest.approx(60.0)   # prefix displayName
         assert hits[2].score == pytest.approx(16.0)   # word bdy x desc 0.4
 
-    def test_highlights_are_built_for_a_cursor_page_too(self):
+    @pytest.mark.asyncio
+    async def test_highlights_are_built_for_a_cursor_page_too(self):
         """Highlights are filled for the page slice, not for the first
         page — page 2 of a cursor walk must carry its own snippets."""
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
         rows = [self._node(urn=f"urn:{i:02d}", displayName=f"customer-{i:02d}")
                 for i in range(30)]
         query = SearchQuery(
@@ -3348,9 +3299,7 @@ class TestHitProvenance:
                 cursor=encode_cursor({"offset": 20}),
             ),
         )
-        hits, offset_after, total, _ = _build_hits_from_rows(
-            self._mock_prov(), rows, query,
-        )
+        hits, offset_after, total, _ = await _page_from_rows(rows, query)
         assert offset_after == 30 and total == 30
         assert [h.node.urn for h in hits] == [
             f"urn:{i:02d}" for i in range(20, 30)
@@ -3359,10 +3308,8 @@ class TestHitProvenance:
         assert hits[0].highlights[0].field == "displayName"
         assert all(h.score == pytest.approx(60.0) for h in hits)
 
-    def test_highlights_disabled_still_scores_and_attributes(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_highlights_disabled_still_scores_and_attributes(self):
         rows = [self._node(urn=f"urn:{i:02d}", displayName=f"customer-{i:02d}")
                 for i in range(5)]
         query = SearchQuery(
@@ -3372,7 +3319,7 @@ class TestHitProvenance:
             options=SearchOptions(sort="relevance", pageSize=10,
                                   highlights=False),
         )
-        hits, _, _, _ = _build_hits_from_rows(self._mock_prov(), rows, query)
+        hits, _, _, _ = await _page_from_rows(rows, query)
         assert len(hits) == 5
         assert all(h.highlights == [] for h in hits)
         assert all(h.score == pytest.approx(60.0) for h in hits)
@@ -3533,17 +3480,8 @@ class TestRelevanceOrdering:
         kw.setdefault("displayName", "node")
         return GraphNode(**kw)
 
-    @staticmethod
-    def _mock_prov():
-        class _MockProv:
-            def _extract_node_from_result(self, n):
-                return n
-        return _MockProv()
-
-    def test_displayName_prefix_outranks_qualifiedName_exact(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_displayName_prefix_outranks_qualifiedName_exact(self):
         # Exact qualifiedName hit: tier 100 x weight 0.5 = 50.
         qn_exact = self._node(
             urn="urn:qn", displayName="Unrelated Name",
@@ -3559,17 +3497,13 @@ class TestRelevanceOrdering:
             scope=_TEST_SCOPE,
             options=SearchOptions(sort="relevance", pageSize=10),
         )
-        hits, _, _, _ = _build_hits_from_rows(
-            self._mock_prov(), [qn_exact, name_prefix], query,
-        )
+        hits, _, _, _ = await _page_from_rows([qn_exact, name_prefix], query)
         assert [h.node.urn for h in hits] == ["urn:name", "urn:qn"]
         assert hits[0].score == pytest.approx(60.0)
         assert hits[1].score == pytest.approx(50.0)
 
-    def test_equal_score_ties_order_a_to_z_with_sortDir_unset(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_equal_score_ties_order_a_to_z_with_sortDir_unset(self):
         zeta = self._node(urn="urn:z", displayName="zeta_orders")
         alpha = self._node(urn="urn:a", displayName="alpha_orders")
         query = SearchQuery(
@@ -3577,15 +3511,11 @@ class TestRelevanceOrdering:
             scope=_TEST_SCOPE,
             options=SearchOptions(sort="relevance", pageSize=10),
         )
-        hits, _, _, _ = _build_hits_from_rows(
-            self._mock_prov(), [zeta, alpha], query,
-        )
+        hits, _, _, _ = await _page_from_rows([zeta, alpha], query)
         assert [h.node.urn for h in hits] == ["urn:a", "urn:z"]
 
-    def test_equal_score_ties_order_a_to_z_even_with_sortDir_desc(self):
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
+    @pytest.mark.asyncio
+    async def test_equal_score_ties_order_a_to_z_even_with_sortDir_desc(self):
         zeta = self._node(urn="urn:z", displayName="zeta_orders")
         alpha = self._node(urn="urn:a", displayName="alpha_orders")
         query = SearchQuery(
@@ -3594,18 +3524,14 @@ class TestRelevanceOrdering:
             options=SearchOptions(sort="relevance", sortDir="desc",
                                   pageSize=10),
         )
-        hits, _, _, _ = _build_hits_from_rows(
-            self._mock_prov(), [zeta, alpha], query,
-        )
+        hits, _, _, _ = await _page_from_rows([zeta, alpha], query)
         assert [h.node.urn for h in hits] == ["urn:a", "urn:z"]
 
-    def test_displayName_field_sort_still_honours_sortDir_desc(self):
+    @pytest.mark.asyncio
+    async def test_displayName_field_sort_still_honours_sortDir_desc(self):
         """`sortDir` keeps its ordinary meaning outside relevance — a
         plain displayName sort with `sortDir: 'desc'` still reads
         Z→A."""
-        from backend.app.providers.falkordb_deep_search import (
-            _build_hits_from_rows,
-        )
         zeta = self._node(urn="urn:z", displayName="zeta_orders")
         alpha = self._node(urn="urn:a", displayName="alpha_orders")
         query = SearchQuery(
@@ -3614,9 +3540,7 @@ class TestRelevanceOrdering:
             options=SearchOptions(sort="displayName", sortDir="desc",
                                   pageSize=10),
         )
-        hits, _, _, _ = _build_hits_from_rows(
-            self._mock_prov(), [zeta, alpha], query,
-        )
+        hits, _, _, _ = await _page_from_rows([zeta, alpha], query)
         assert [h.node.urn for h in hits] == ["urn:z", "urn:a"]
 
 
@@ -3808,13 +3732,12 @@ class _CachingProvider(_CountingProvider):
         self.batch_calls = []
         self.vanished = set()
 
-    def _extract_node_from_result(self, row):
-        return _cached_node(row[0])
+    def _node(self, i: int) -> GraphNode:
+        return _cached_node(i)
 
     async def get_nodes_batch(self, urns):
         self.batch_calls.append(list(urns))
-        known = {n.urn: n
-                 for n in (_cached_node(i) for i in range(self._hit_rows))}
+        known = {n.urn: n for n in self._scan_nodes()}
         # Reversed on purpose: the real one answers per label bucket, so
         # its caller may never rely on the order it comes back in.
         return [known[u] for u in reversed(list(urns))
@@ -3880,6 +3803,7 @@ class TestMatchSetCache:
         first = await execute_deep_search(prov, _cache_query())
         assert first.cursor is not None
         prov.calls.clear()
+        prov.batch_calls.clear()  # page 1 hydrated its own slice
 
         q2 = _cache_query(cursor=first.cursor)
         page = await execute_deep_search(prov, q2)
@@ -3911,8 +3835,12 @@ class TestMatchSetCache:
         page = await execute_deep_search(prov, _cache_query(cursor=cursor))
 
         assert len(prov.calls) == 1
-        assert prov.batch_calls == []
         assert page.cache_hit is False
+        # The scan ranked the whole set; only the page it sliced was
+        # fetched as real nodes.
+        assert prov.batch_calls == [
+            [f"urn:n{i:05d}" for i in range(10, 20)]
+        ]
         assert [h.node.urn for h in page.hits] == [
             f"urn:n{i:05d}" for i in range(10, 20)
         ]
@@ -4411,3 +4339,562 @@ class TestBothRunsHitsAndAggregatesConcurrently:
         # Both branches opened on essentially the full budget.
         assert budgets["hits"][0] > 4.0
         assert budgets["agg"][0] > 4.0
+
+
+# ---------------------------------------------------------------------------
+# F4b — the candidate scan projects only what SCORING reads, and the page
+# slice is hydrated afterwards.
+#
+# `RETURN n` handed back every property of up to `candidateCap` full nodes
+# so that a thousand of them could be returned. On a Solidatus estate that
+# is 50,000 whole nodes decoded in the Python client to rank 1,000.
+# ---------------------------------------------------------------------------
+
+def _projected_columns(cypher: str):
+    """The property keys a projected candidate scan asks for, in order."""
+    import re
+    tail = cypher.split(" RETURN ", 1)[1]
+    return re.findall(r"n\.`([^`]+)`", tail)
+
+
+def _column_value(node, key):
+    """What FalkorDB would return for ``n.<key>`` — NULL when absent."""
+    core = {
+        "urn": node.urn,
+        "displayName": node.display_name,
+        "qualifiedName": node.qualified_name,
+        "description": node.description,
+        "tags": list(node.tags) if node.tags else None,
+    }
+    if key in core:
+        return core[key]
+    return (node.properties or {}).get(key)
+
+
+class _ProjectionProvider:
+    """Answers the projected candidate scan, then hydrates by URN.
+
+    Deliberately knows nothing about the column ORDER the executor picked
+    — it reads the keys back out of the Cypher, which is also how the
+    tests below pin what the projection asks for.
+    """
+
+    def __init__(self, *, nodes, total=None, vanished=frozenset()):
+        self.nodes = list(nodes)
+        self.calls = []
+        self.batch_calls = []
+        self.vanished = set(vanished)
+        self._total = len(self.nodes) if total is None else total
+
+    async def _ro_query(self, cypher, *, params=None, timeout=None):
+        self.calls.append((cypher, params, timeout))
+        await asyncio.sleep(0)
+        if cypher.endswith("RETURN count(n) AS c"):
+            return _Rows([[self._total]])
+        if " RETURN n." in cypher:
+            cols = _projected_columns(cypher)
+            return _Rows([
+                [_column_value(n, c) for c in cols] for n in self.nodes
+            ])
+        return _Rows([])
+
+    async def _get_ancestor_chain(self, urn):
+        return []
+
+    async def get_nodes_batch(self, urns):
+        self.batch_calls.append(list(urns))
+        known = {n.urn: n for n in self.nodes}
+        # Reversed on purpose: the real one answers per label bucket, so
+        # its caller may never rely on the order it comes back in.
+        return [known[u] for u in reversed(list(urns))
+                if u in known and u not in self.vanished]
+
+    def _get_lineage_edge_types(self):
+        return ["LINEAGE"]
+
+    def _get_containment_edge_types(self):
+        return ["CONTAINS"]
+
+    def _extract_node_from_result(self, row):
+        raise AssertionError(
+            "the candidate scan must no longer build a whole node per "
+            "candidate row"
+        )
+
+
+def _proj_node(i, **kw):
+    from backend.common.models.graph import GraphNode
+    kw.setdefault("urn", f"urn:n{i:05d}")
+    kw.setdefault("entityType", "dataset")
+    kw.setdefault("displayName", f"customer-{i:05d}")
+    kw.setdefault("properties", {"owner": f"team-{i}", "rowCount": i})
+    return GraphNode(**kw)
+
+
+def _proj_query(predicate=None, **opts):
+    opts.setdefault("results", "hits")
+    opts.setdefault("candidateCap", 100)
+    opts.setdefault("pageSize", 10)
+    return SearchQuery(
+        predicate=predicate or TextPredicate(
+            value="customer", target="name", match="prefix",
+        ),
+        scope=_TEST_SCOPE,
+        options=SearchOptions(**opts),
+    )
+
+
+class TestProjectedCandidateScan:
+    @pytest.mark.asyncio
+    async def test_scan_projects_instead_of_returning_whole_nodes(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(30)])
+        await execute_deep_search(prov, _proj_query())
+
+        scan = prov.calls[0][0]
+        assert not scan.endswith("RETURN n")
+        cols = _projected_columns(scan)
+        # Everything ``_score_hit`` and the sorts read off a candidate.
+        for key in ("urn", "displayName", "qualifiedName", "description",
+                    "tags"):
+            assert key in cols
+
+    @pytest.mark.asyncio
+    async def test_projection_carries_a_property_leafs_key(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(5)])
+        await execute_deep_search(prov, _proj_query(
+            predicate=TextPredicate(
+                value="team", target="property", propertyKey="owner",
+            ),
+        ))
+        assert "owner" in _projected_columns(prov.calls[0][0])
+
+    @pytest.mark.asyncio
+    async def test_projection_carries_a_property_predicates_key(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(5)])
+        await execute_deep_search(prov, _proj_query(
+            predicate=PropertyPredicate(key="owner", op="contains",
+                                        value="team"),
+        ))
+        assert "owner" in _projected_columns(prov.calls[0][0])
+
+    @pytest.mark.asyncio
+    async def test_projection_carries_the_sort_property(self):
+        """Sorting by a native property needs that property in hand for
+        every candidate, not just the ones that reach the page."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(5)])
+        await execute_deep_search(
+            prov, _proj_query(sortProperty="rowCount", sortDir="desc"),
+        )
+        assert "rowCount" in _projected_columns(prov.calls[0][0])
+
+    @pytest.mark.asyncio
+    async def test_page_is_hydrated_by_urn_in_sorted_order(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        nodes = [_proj_node(i) for i in range(30)]
+        prov = _ProjectionProvider(nodes=nodes)
+        page = await execute_deep_search(
+            prov, _proj_query(sort="displayName", sortDir="asc"),
+        )
+        assert prov.batch_calls == [[f"urn:n{i:05d}" for i in range(10)]]
+        assert [h.node.urn for h in page.hits] == [
+            f"urn:n{i:05d}" for i in range(10)
+        ]
+        # Full nodes, not the projection: properties survived the trip.
+        assert page.hits[0].node.properties["owner"] == "team-0"
+        assert page.hits[0].node.entity_type == "dataset"
+
+    @pytest.mark.asyncio
+    async def test_only_the_page_is_hydrated(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(500)])
+        await execute_deep_search(prov, _proj_query(pageSize=10))
+        assert len(prov.batch_calls) == 1
+        assert len(prov.batch_calls[0]) == 10
+
+    @pytest.mark.asyncio
+    async def test_hits_carry_scores_and_highlights_from_the_full_node(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(5)])
+        page = await execute_deep_search(prov, _proj_query(
+            predicate=TextPredicate(
+                value="team", target="property", propertyKey="owner",
+            ),
+            highlights=True,
+        ))
+        assert page.hits
+        hit = page.hits[0]
+        assert hit.score > 0
+        assert hit.matched_predicates == [0]
+        assert hit.highlights[0].field == "property:owner"
+
+    @pytest.mark.asyncio
+    async def test_a_urn_that_vanished_since_the_scan_is_dropped(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        nodes = [_proj_node(i) for i in range(30)]
+        prov = _ProjectionProvider(nodes=nodes, vanished={"urn:n00003"})
+        page = await execute_deep_search(
+            prov, _proj_query(sort="displayName", sortDir="asc"),
+        )
+        assert [h.node.urn for h in page.hits] == [
+            f"urn:n{i:05d}" for i in range(10) if i != 3
+        ]
+        # The walk still advances by the full slice.
+        assert decode_cursor(page.cursor)["offset"] == 10
+
+    @pytest.mark.asyncio
+    async def test_relevance_order_matches_scoring_the_full_nodes(self):
+        """The projection is a cheaper way to compute the SAME ranking —
+        not a different one."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves, _score_hit, execute_deep_search,
+        )
+        from backend.common.models.graph import GraphNode
+
+        nodes = [
+            GraphNode(urn="urn:a", entityType="dataset",
+                      displayName="ledger", description="customer ledger"),
+            GraphNode(urn="urn:b", entityType="dataset",
+                      displayName="customer", qualifiedName="db.customer"),
+            GraphNode(urn="urn:c", entityType="dataset",
+                      displayName="customers-archive"),
+            GraphNode(urn="urn:d", entityType="dataset",
+                      displayName="archive", qualifiedName="db.customers"),
+        ]
+        q = _proj_query(
+            predicate=TextPredicate(value="customer", target="any"),
+            sort="relevance", pageSize=10,
+        )
+        prov = _ProjectionProvider(nodes=nodes)
+        page = await execute_deep_search(prov, q)
+
+        leaves = _collect_text_leaves(q.predicate)
+        expected = sorted(
+            nodes, key=lambda n: (n.display_name or "").lower(),
+        )
+        expected.sort(
+            key=lambda n: -_score_hit(n, leaves, want_highlights=False)[0],
+        )
+        assert [h.node.urn for h in page.hits] == [n.urn for n in expected]
+
+    @pytest.mark.asyncio
+    async def test_absent_projected_columns_are_treated_as_absent(self):
+        """FalkorDB answers NULL for a property the node hasn't got;
+        scoring must read that as 'no text here', never as the string
+        ``'None'`` (which would match a needle like 'on')."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        from backend.common.models.graph import GraphNode
+
+        from backend.app.providers.falkordb_deep_search import (
+            _rows_to_candidates,
+        )
+        nodes = [
+            GraphNode(urn="urn:bare", entityType="dataset",
+                      displayName="customer-bare"),  # no qname/desc/tags
+        ]
+        prov = _ProjectionProvider(nodes=nodes)
+        page = await execute_deep_search(prov, _proj_query(
+            predicate=TextPredicate(value="one", target="any"),
+            highlights=True,
+        ))
+        # 'one' appears in no real field of this node; the only way it
+        # could score is a NULL stringified to "None".
+        assert [h.node.urn for h in page.hits] == ["urn:bare"]
+        assert page.hits[0].score == 0.0
+        assert page.hits[0].matched_predicates == []
+        assert page.hits[0].highlights == []
+        # ...and the candidate the ranking saw carried no ghost text.
+        cands = _rows_to_candidates(
+            [["urn:bare", "customer-bare", None, None, None,
+              None, None, None]],
+            columns=("urn", "displayName", "qualifiedName", "description",
+                     "tags", "name", "title", "label"),
+            property_keys=(),
+        )
+        assert cands[0].qualified_name is None
+        assert cands[0].description is None
+        assert cands[0].tags == []
+
+
+class TestProjectionHelpers:
+    def test_rows_become_candidates_with_the_fields_scoring_reads(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _rows_to_candidates,
+        )
+        cands = _rows_to_candidates(
+            [["urn:a", "Orders", "db.orders", "the ledger", ["pii"],
+              None, None, None, "team-x"]],
+            columns=("urn", "displayName", "qualifiedName", "description",
+                     "tags", "name", "title", "label", "owner"),
+            property_keys=("owner",),
+        )
+        assert len(cands) == 1
+        c = cands[0]
+        assert c.urn == "urn:a"
+        assert c.display_name == "Orders"
+        assert c.qualified_name == "db.orders"
+        assert c.description == "the ledger"
+        assert c.tags == ["pii"]
+        assert c.properties == {"owner": "team-x"}
+
+    def test_display_name_falls_back_the_way_node_hydration_does(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _rows_to_candidates,
+        )
+        cols = ("urn", "displayName", "qualifiedName", "description",
+                "tags", "name", "title", "label")
+        rows = [
+            ["urn:a", None, None, None, None, "by-name", None, None],
+            ["urn:b", None, None, None, None, None, "by-title", None],
+            ["urn:c", None, None, None, None, None, None, "by-label"],
+            ["urn:d", None, None, None, None, None, None, None],
+        ]
+        cands = _rows_to_candidates(rows, columns=cols, property_keys=())
+        assert [c.display_name for c in cands] == [
+            "by-name", "by-title", "by-label", "",
+        ]
+
+    def test_tags_survive_as_a_json_string(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _rows_to_candidates,
+        )
+        cands = _rows_to_candidates(
+            [["urn:a", "n", None, None, '["pii","gdpr"]', None, None, None]],
+            columns=("urn", "displayName", "qualifiedName", "description",
+                     "tags", "name", "title", "label"),
+            property_keys=(),
+        )
+        assert cands[0].tags == ["pii", "gdpr"]
+
+    def test_a_row_without_a_urn_is_dropped(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _rows_to_candidates,
+        )
+        cands = _rows_to_candidates(
+            [[None, "n", None, None, None, None, None, None]],
+            columns=("urn", "displayName", "qualifiedName", "description",
+                     "tags", "name", "title", "label"),
+            property_keys=(),
+        )
+        assert cands == []
+
+
+async def _page_from_rows(rows, query):
+    """Rank candidate rows and hydrate the page they select.
+
+    The two halves of what ``_build_hits_from_rows`` used to do in one
+    step: ranking runs on the projection, and the page slice is scored
+    from its real nodes. Returns the same 4-tuple shape the tests below
+    have always read — hits, offset_after, total_sorted, sorted_urns —
+    so they keep asserting on what a page CONTAINS rather than on which
+    function assembled it.
+    """
+    from backend.app.providers.falkordb_deep_search import (
+        _hydrate_hits, _rank_candidate_rows,
+    )
+    page_urns, offset_after, total, sorted_urns = _rank_candidate_rows(
+        rows, query,
+    )
+    hits = await _hydrate_hits(
+        _ProjectionProvider(nodes=rows), query, page_urns, timeout_s=5.0,
+    )
+    return hits, offset_after, total, sorted_urns
+
+
+# ---------------------------------------------------------------------------
+# The unattributed-match floor.
+#
+# The candidate Cypher only returns rows that matched SOMEWHERE — for a
+# ``target='any'`` leaf that is ``searchableText | displayName |
+# qualifiedName``. So when a projected row matches none of the columns the
+# projection carries, the needle has to be living in a string property, and
+# the leaf is credited the substring-tier property score it would have
+# earned. Without it a property-only match ranks as if it had not matched
+# at all.
+# ---------------------------------------------------------------------------
+
+class TestUnattributedMatchFloor:
+    @staticmethod
+    def _row(**kw):
+        from backend.app.providers.falkordb_deep_search import _CandidateRow
+        kw.setdefault("urn", "urn:a")
+        kw.setdefault("display_name", "gross_profit")
+        kw.setdefault("qualified_name", "gross_profit")
+        kw.setdefault("description", None)
+        kw.setdefault("tags", [])
+        kw.setdefault("properties", {})
+        return _CandidateRow(**kw)
+
+    def test_property_only_match_scores_the_substring_property_tier(self):
+        """20 (substring) x 0.5 (property weight) = 10 — the score the
+        node really earns once its properties are in hand."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves, _score_hit,
+        )
+        # 'e' lives in neither name nor qualifiedName: on the real graph
+        # this row matched through properties={'layer': 'dashboard'}.
+        row = self._row()
+        leaves = _collect_text_leaves(
+            TextPredicate(value="e", target="any"),
+        )
+        score, matched, highlights = _score_hit(
+            row, leaves, want_highlights=False, projected=True,
+        )
+        assert score == pytest.approx(10.0)
+        assert matched == [0]
+        assert highlights == []
+
+    def test_the_floor_is_off_for_a_full_node(self):
+        """A hydrated node carries its properties, so it is scored on
+        what it actually contains — never on an inference."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves, _score_hit,
+        )
+        from backend.common.models.graph import GraphNode
+        node = GraphNode(urn="urn:a", entityType="dataset",
+                         displayName="gross_profit")
+        leaves = _collect_text_leaves(
+            TextPredicate(value="e", target="any"),
+        )
+        assert _score_hit(node, leaves, want_highlights=False) == (0.0, [], [])
+
+    def test_a_projected_field_that_matches_wins_over_the_floor(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves, _score_hit,
+        )
+        row = self._row(display_name="ledger")
+        leaves = _collect_text_leaves(
+            TextPredicate(value="ledger", target="any"),
+        )
+        score, matched, _ = _score_hit(
+            row, leaves, want_highlights=False, projected=True,
+        )
+        assert score == pytest.approx(100.0)  # exact displayName
+        assert matched == [0]
+
+    def test_a_projected_match_is_never_overridden_by_the_floor(self):
+        """The inference is drawn ONLY from a total miss.
+
+        A leaf that matched a projected column — however weakly — is
+        left at what it really earned. The floor could only be reached
+        by assuming a property ALSO holds the needle, which nothing
+        here proves. So a description hit worth 8 stays 8, and a row
+        whose property happens to match too is under-scored: that is
+        the price of never inventing a match.
+        """
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves, _score_hit,
+        )
+        row = self._row(description="a ledger")
+        leaves = _collect_text_leaves(
+            TextPredicate(value="e", target="any"),
+        )
+        score, matched, _ = _score_hit(
+            row, leaves, want_highlights=False, projected=True,
+        )
+        # 'e' sits mid-word in 'ledger': substring 20 x description 0.4.
+        assert score == pytest.approx(8.0)
+        assert matched == [0]
+
+    def test_the_floor_only_applies_to_the_any_target(self):
+        """A leaf aimed at one named column has no hidden place to
+        match — ``target='name'`` compares displayName and nothing
+        else, so an unmatched leaf really did not match."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves, _score_hit,
+        )
+        row = self._row()
+        for target in ("name", "qualifiedName", "description", "tags"):
+            leaves = _collect_text_leaves(
+                TextPredicate(value="zzz", target=target),
+            )
+            assert _score_hit(
+                row, leaves, want_highlights=False, projected=True,
+            ) == (0.0, [], []), target
+
+    def test_an_empty_needle_is_not_floored(self):
+        """An empty needle matches every field trivially and scores
+        nothing today; inferring a property match for it would invent a
+        hit out of an empty string."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves, _score_hit,
+        )
+        row = self._row()
+        leaves = _collect_text_leaves(
+            PropertyPredicate(key="owner", op="contains", value=""),
+        )
+        assert _score_hit(
+            row, leaves, want_highlights=False, projected=True,
+        ) == (0.0, [], [])
+
+    @pytest.mark.asyncio
+    async def test_ranking_floors_a_property_only_row_above_a_non_match(self):
+        """End to end: the row whose only 'e' is in a property outranks
+        one that carries no 'e' at all."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        from backend.common.models.graph import GraphNode
+        nodes = [
+            # Matches only through its description: 'e' mid-word in
+            # 'ledger' is 20 x 0.4 = 8.
+            GraphNode(urn="urn:desc", entityType="dataset",
+                      displayName="gross_profit", description="a ledger"),
+            # Matches only through a property the projection does not
+            # carry: floored to 10.
+            GraphNode(urn="urn:prop", entityType="dataset",
+                      displayName="gross_profit",
+                      properties={"layer": "metric"}),
+        ]
+        prov = _ProjectionProvider(nodes=nodes)
+        page = await execute_deep_search(prov, _proj_query(
+            predicate=TextPredicate(value="e", target="any"),
+            sort="relevance",
+        ))
+        # Without the floor the property-only row scores 0 and sorts last.
+        assert [h.node.urn for h in page.hits] == ["urn:prop", "urn:desc"]
+
+    @pytest.mark.asyncio
+    async def test_the_page_reports_the_real_field_not_the_floor(self):
+        """Provenance for the returned page is computed from the
+        HYDRATED node, so a property-only match names its property and
+        carries a real snippet — the floor never reaches the wire."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        from backend.common.models.graph import GraphNode
+        nodes = [
+            GraphNode(urn="urn:prop", entityType="dataset",
+                      displayName="gross_profit",
+                      properties={"layer": "metric"}),
+        ]
+        prov = _ProjectionProvider(nodes=nodes)
+        page = await execute_deep_search(prov, _proj_query(
+            predicate=TextPredicate(value="e", target="any"),
+            highlights=True,
+        ))
+        hit = page.hits[0]
+        assert hit.matched_predicates == [0]
+        assert hit.highlights[0].field == "property:layer"
+        assert "metric" in hit.highlights[0].snippet
