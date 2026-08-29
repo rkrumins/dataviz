@@ -372,6 +372,27 @@ describe('ConnectionsPanel', () => {
     )
   })
 
+  it('entering or leaving a trace drops the pin and the hover', () => {
+    // The panel is NOT keyed on trace state — entering a trace must not
+    // collapse it out from under the reader. So the pin has to be dropped
+    // here: browse bundle ids mean nothing to the trace's wires, and the
+    // trace's mean nothing to browse. Reconciled as the prop ARRIVES, the
+    // same idiom the model reconciliation uses.
+    const onHighlight = vi.fn()
+    const { update } = mount({ defaultExpanded: true, onHighlight })
+    fireEvent.click(rowFor('FLOWS_TO'))
+    expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
+
+    update({ traceMode: true })
+    expect(lastHighlight(onHighlight)).toBeNull()
+
+    // ...and on the way back out, a hover is dropped just the same.
+    fireEvent.mouseEnter(rowFor('DERIVES_FROM'))
+    expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b3'])
+    update({ traceMode: false })
+    expect(lastHighlight(onHighlight)).toBeNull()
+  })
+
   it('the trace-mode footer says the toggles apply to this trace only', () => {
     const { unmount } = mount({ defaultExpanded: true })
     expect(screen.queryByText('Applies to this trace only.')).toBeNull()

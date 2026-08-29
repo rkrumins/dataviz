@@ -69,6 +69,12 @@ export interface TraceWire {
    *  and residual: ALWAYS false — a coarse wire is a summary of flows nobody
    *  has drilled into, never settled, whatever the ledger says. */
   complete: boolean
+  /** The types the wire carries — empty when the hops name none. Raw: the
+   *  distinct types of the hops it bundles. Rollup/residual: the types of
+   *  the cells authored at its pair. What the Connections panel lists
+   *  mid-trace; NOT a member list, so hiding one type of a multi-type wire
+   *  cannot shrink `edgeCount` (see the panel's row tooltip). */
+  types: string[]
 }
 
 export type PairState = 'complete' | 'partial' | 'none'
@@ -197,20 +203,31 @@ export function buildTraceWires(i: TraceWireInputs): TraceWire[] {
       isBundled: !bundle.isLeafEdge,
       kind: 'raw',
       complete: ledger.state(source, target) === 'complete',
+      types: bundle.edgeTypes,
     })
   }
 
   // ROLLUPS are never re-anchored: a rollup is an authored statement about
   // two specific nodes, so it draws where it was authored or not at all.
   const rollups: RollupCell[] = []
+  // The cells' own types, per pair: the accounting collapses several cells
+  // at one pair into one statement, so the types collapse with them and are
+  // read back by the pair key it emits.
+  const cellTypes = new Map<string, Set<string>>()
   for (const e of model.lineageEdges) {
     if (e.kind !== 'rollup') continue
     if (!visible.has(e.sourceUrn) || !visible.has(e.targetUrn)) continue
     if (nested(e.sourceUrn, e.targetUrn)) continue
     rollups.push({ source: e.sourceUrn, target: e.targetUrn, weight: e.weight ?? 1 })
+    if (e.edgeType) {
+      const key = pairKey(e.sourceUrn, e.targetUrn)
+      const seen = cellTypes.get(key)
+      if (seen) seen.add(e.edgeType)
+      else cellTypes.set(key, new Set([e.edgeType]))
+    }
   }
   for (const [key, w] of accountRollups(rollups, ledger, urn => sg.nodes.get(urn)?.parent ?? null)) {
-    wires.push({ id: `bundle:${key}:${w.kind}`, source: w.source, target: w.target, edgeCount: w.count, isBundled: true, kind: w.kind, complete: false })
+    wires.push({ id: `bundle:${key}:${w.kind}`, source: w.source, target: w.target, edgeCount: w.count, isBundled: true, kind: w.kind, complete: false, types: [...(cellTypes.get(key) ?? [])] })
   }
 
   return wires.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))

@@ -110,6 +110,18 @@ export function ConnectionsPanel({
     if (pinnedType && !model.rows.some((r) => r.type === pinnedType)) setPinnedType(null)
   }
 
+  // Crossing INTO or OUT OF a trace replaces the whole board, and the panel
+  // is deliberately not keyed on that — entering a trace must not collapse
+  // it out from under the reader. So the pin and the hover are dropped
+  // here: a browse bundle id means nothing to the trace's wires, and a
+  // trace's means nothing to browse. Same idiom as the model above.
+  const [seenTraceMode, setSeenTraceMode] = useState(Boolean(traceMode))
+  if (seenTraceMode !== Boolean(traceMode)) {
+    setSeenTraceMode(Boolean(traceMode))
+    setPinnedType(null)
+    setHoveredType(null)
+  }
+
   const activeType = hoveredType ?? pinnedType
   const activeBundleIds = useMemo(() => {
     if (!activeType) return null

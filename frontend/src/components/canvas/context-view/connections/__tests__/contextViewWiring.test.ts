@@ -38,7 +38,12 @@ describe('the Connections panel is wired into the Context View', () => {
     expect(source).toContain('key={connectionsViewId}')
     // getEdgeTypeDefinition fabricates prose when the ontology has none; the
     // resolver overrides it so the panel prints the ontology's words or none.
-    expect(source).toMatch(/return \{ \.\.\.def, description \}/)
+    // The RULE, not its formatting: the schema's own description first, the
+    // ontology metadata's second, and an empty string — never a sentence
+    // nobody wrote — when neither says anything.
+    expect(source).toMatch(
+      /getEdgeTypeFromSchema\([^)]*\)\?\.description\s*\|\|[\s\S]{0,200}?\|\|\s*''/
+    )
   })
 
   it('the panel highlight reaches the overlay only — cards keep their own highlight', () => {
