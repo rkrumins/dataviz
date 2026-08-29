@@ -728,21 +728,25 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             2. Bump blur from ``backdrop-blur-md`` to
                ``backdrop-blur-xl`` so even the fade zone obscures
                any text it overlaps. */}
-      <motion.div
-        initial={false}
-        animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
-        transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+      {/* Visibility is owned by CSS (`group-hover/item`), not by React
+          state: a state-driven overlay stays painted on a row the pointer
+          left without a mouseleave (a row covered by a drawer, scrolled
+          away, or recycled), which read as a "white strip" on the node.
+          The browser never leaves :hover stuck. No blurred backdrop: the
+          gradient is already opaque under the buttons, and a blur surface
+          toggling inside a scroller is the shape that ghosts. */}
+      <div
+        data-row-actions
         className={cn(
           "absolute inset-y-0 flex items-center gap-1 pl-8 pr-1 rounded-l-xl z-[4]",
+          "opacity-0 translate-x-2 pointer-events-none",
+          "transition-[opacity,transform] duration-[180ms] ease-out",
+          "group-hover/item:opacity-100 group-hover/item:translate-x-0 group-hover/item:pointer-events-auto",
+          "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
+          "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
           (ancestorMatchCount > 0 && !isExpanded && hasChildren)
             ? "right-[3.125rem]"
             : "right-2",
-          isHovered && cn(
-            "backdrop-blur-xl",
-            "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
-            "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
-          ),
-          !isHovered && "pointer-events-none"
         )}
       >
         {/* Focus/Drill button */}
@@ -796,7 +800,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             <LucideIcons.Plus className="w-3 h-3 block" />
           </button>
         )}
-      </motion.div>
+      </div>
 
       {/* Hover indicator line */}
       <motion.div

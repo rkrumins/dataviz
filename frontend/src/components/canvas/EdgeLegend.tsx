@@ -162,8 +162,12 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
             : `${totalOnScreen.toLocaleString()} on screen`
         : `${storeEdges.length} edges`
 
+    // An opaque elevated panel, not glass: this card animates its height
+    // when it opens, and a blurred-backdrop surface that changes size
+    // ghosts a mis-placed tile over its rows (the "white strip").
+    // Opacity gives the same separation without the mechanism.
     return (
-        <div className={cn("glass-panel rounded-xl overflow-hidden", className)}>
+        <div className={cn("bg-canvas-elevated/95 border border-glass-border shadow-lg rounded-xl overflow-hidden", className)}>
             {/* Header */}
             <button
                 onClick={() => setIsExpanded(!isExpanded)}
