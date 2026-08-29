@@ -227,6 +227,7 @@ def _empty_page(query: SearchQuery) -> SearchResultPage:
         cursor=None,
         truncated=False,
         candidate_count=0,
+        total_count=0,
         deadline_exceeded=False,
         elapsed_ms=0,
         cache_hit=False,

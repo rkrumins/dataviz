@@ -2639,3 +2639,172 @@ class TestScopeRootUrnsCap:
         from backend.common.models.search import SearchScope
         SearchScope(viewId="v1")  # None
         SearchScope(viewId="v1", rootUrns=[])  # empty list
+
+
+# ---------------------------------------------------------------------------
+# Exact totalCount + per-request remaining budget
+# ---------------------------------------------------------------------------
+
+from backend.app.providers.falkordb_deep_search import (  # noqa: E402
+    execute_deep_search,
+)
+from backend.common.models.graph import GraphNode  # noqa: E402
+
+
+class _Rows:
+    """Minimal stand-in for a FalkorDB result object."""
+
+    def __init__(self, result_set):
+        self.result_set = result_set
+
+
+class _CountingProvider:
+    """Scripted provider for ``execute_deep_search``.
+
+    Answers the ``RETURN n`` candidate query with ``hit_rows`` node rows
+    and the ``RETURN count(n) AS c`` query with ``total`` (or raises
+    ``count_error``). Every call is recorded as
+    ``(cypher, params, timeout)`` so a test can assert on the follow-up
+    query's Cypher and on its share of the deadline budget.
+    """
+
+    _entity_type_levels: dict = {}
+
+    def __init__(self, *, hit_rows=0, total=0, count_error=None):
+        self.calls = []
+        self._hit_rows = hit_rows
+        self._total = total
+        self._count_error = count_error
+
+    async def _ro_query(self, cypher, *, params=None, timeout=None):
+        self.calls.append((cypher, params, timeout))
+        if cypher.endswith("RETURN count(n) AS c"):
+            if self._count_error is not None:
+                raise self._count_error
+            return _Rows([[self._total]])
+        return _Rows([[i] for i in range(self._hit_rows)])
+
+    def _get_lineage_edge_types(self):
+        return ["LINEAGE"]
+
+    def _get_containment_edge_types(self):
+        return ["CONTAINS"]
+
+    def _extract_node_from_result(self, row):
+        return GraphNode(
+            urn=f"urn:n{row[0]}",
+            entityType="dataset",
+            displayName=f"node {row[0]:05d}",
+        )
+
+
+def _hits_query(**opts) -> SearchQuery:
+    return SearchQuery(
+        predicate=TextPredicate(value="customer", target="name"),
+        scope=_TEST_SCOPE,
+        options=SearchOptions(results="hits", candidateCap=100, **opts),
+    )
+
+
+class TestExactTotalCount:
+    """``totalCount`` is the exact number of matches in scope, so the
+    header can say "1,284 matches" instead of a capped lower bound.
+
+    The candidate scan keeps its ``LIMIT`` — only the count is allowed
+    to run uncapped, and only when the cap actually fired.
+    """
+
+    def test_candidate_cypher_omits_limit_when_cap_is_none(self):
+        cypher = _build_candidate_cypher(
+            where_fragment="n.displayName CONTAINS $p0",
+            entity_types_param=False,
+            candidate_cap=None,
+        )
+        assert "LIMIT" not in cypher
+        assert cypher.endswith("WITH n")
+
+    @pytest.mark.asyncio
+    async def test_not_truncated_needs_no_second_query(self):
+        """The scan already returned every match, so the count is free."""
+        prov = _CountingProvider(hit_rows=3)
+        page = await execute_deep_search(prov, _hits_query())
+        assert len(prov.calls) == 1, "an exact count must cost zero extra queries"
+        assert page.candidate_count == 3
+        assert page.total_count == 3
+        assert page.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_truncated_counts_on_the_uncapped_cypher(self):
+        prov = _CountingProvider(hit_rows=100, total=1284)
+        page = await execute_deep_search(prov, _hits_query())
+        assert len(prov.calls) == 2
+        count_cypher, _, count_timeout = prov.calls[1]
+        assert count_cypher.endswith("RETURN count(n) AS c")
+        assert "LIMIT" not in count_cypher
+        # The follow-up runs on what is LEFT of the request's deadline,
+        # not on a fresh copy of it.
+        assert count_timeout <= prov.calls[0][2]
+        assert page.total_count == 1284
+        assert page.candidate_count == 100
+        assert page.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_count_timeout_keeps_the_hits(self):
+        import asyncio
+
+        prov = _CountingProvider(hit_rows=100, count_error=asyncio.TimeoutError())
+        page = await execute_deep_search(prov, _hits_query())
+        assert page.hits is not None and len(page.hits) == 50
+        assert page.total_count is None
+        assert page.deadline_exceeded is True
+        assert page.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_aggregates_only_counts_uncapped(self):
+        q = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                results="aggregates",
+                aggregations=[AggregationSpec(by="entityType")],
+                candidateCap=100,
+            ),
+        )
+        prov = _CountingProvider(total=1284)
+        page = await execute_deep_search(prov, q)
+        # The aggregation still pivots on the CAPPED candidate set.
+        agg_cypher, _, agg_timeout = prov.calls[0]
+        assert "WITH n LIMIT 100" in agg_cypher
+        count_cypher, _, count_timeout = prov.calls[1]
+        assert count_cypher.endswith("RETURN count(n) AS c")
+        assert "LIMIT" not in count_cypher
+        assert count_timeout <= agg_timeout
+        assert page.total_count == 1284
+        assert page.candidate_count == 1284
+        assert page.truncated is True
+
+    @pytest.mark.asyncio
+    async def test_aggregates_only_total_equal_to_cap_is_not_truncated(self):
+        """An uncapped count of exactly the cap means the aggregation saw
+        every match — ``>=`` would report a phantom truncation."""
+        q = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                results="aggregates",
+                aggregations=[AggregationSpec(by="entityType")],
+                candidateCap=100,
+            ),
+        )
+        page = await execute_deep_search(_CountingProvider(total=100), q)
+        assert page.total_count == 100
+        assert page.truncated is False
+
+    @pytest.mark.asyncio
+    async def test_explain_exposes_the_uncapped_cypher(self):
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        explained = explain_deep_search(_CountingProvider(), _hits_query())
+        assert "LIMIT 100" in explained["cypher"]
+        assert "LIMIT" not in explained["uncapped_cypher"]

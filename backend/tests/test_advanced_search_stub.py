@@ -477,3 +477,15 @@ async def test_discovery_truncated_false_when_below_cap(monkeypatch):
     stub = StubDeepSearchProvider(nodes=nodes)
     result = await stub.deep_search_discover(sample_per_label=200)
     assert result["labels"]["dataset"]["truncatedProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_stub_reports_the_exact_total(stub):
+    """The stub evaluates in memory, so every match is already counted —
+    ``totalCount`` is the pre-cap match count, matching the FalkorDB
+    provider's contract."""
+    page = await stub.deep_search(
+        _query(EntityTypePredicate(op="in", values=["dataset"]))
+    )
+    assert page.total_count == page.candidate_count
+    assert page.total_count == 3

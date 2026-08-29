@@ -798,7 +798,7 @@ def _build_candidate_cypher(
     *,
     where_fragment: str,
     entity_types_param: bool,
-    candidate_cap: int,
+    candidate_cap: Optional[int],
     scope_continuation: str = "",
     within_hops_continuation: str = "",
     scope_pre_filter: str = "",
@@ -825,6 +825,10 @@ def _build_candidate_cypher(
     when the predicate is broad. When ``scope_pre_filter`` is set,
     ``scope_continuation`` must be empty (the pre-filter already enforces
     the clamp); the two are mutually exclusive.
+
+    ``candidate_cap=None`` emits no ``LIMIT`` at all. That shape is only
+    for ``RETURN count(n)``: an exact total has to see every match, and a
+    count never materialises rows.
     """
     if scope_pre_filter:
         parts: List[str] = [scope_pre_filter]
@@ -853,7 +857,9 @@ def _build_candidate_cypher(
         where_parts.append(where_fragment)
     if where_parts:
         parts.append("WHERE " + " AND ".join(where_parts))
-    parts.append(f"WITH n LIMIT {candidate_cap}")
+    parts.append(
+        "WITH n" if candidate_cap is None else f"WITH n LIMIT {candidate_cap}"
+    )
     if scope_continuation:
         parts.append(scope_continuation)
     if within_hops_continuation:
@@ -1281,6 +1287,8 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         {
           "cypher": str,        # full candidate cypher (ends WITH n)
           "hits_cypher": str,   # candidate cypher + " RETURN n"
+          "uncapped_cypher": str,  # same prefix without the LIMIT — what
+                                   # the exact-total count runs on
           "params": dict,       # bound parameters that would be sent
           "candidate_cap": int, # the hard cap on candidate rows
           "hoisted_root_urns": list[list[str]],  # scope hoisted from
@@ -1416,6 +1424,13 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
         candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
     )
+    uncapped_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_pre_filter=scope_chain,
+        candidate_cap=None,
+        within_hops_continuation=wh_continuation,
+    )
 
     if query.options.results == "aggregates" and not query.options.aggregations:
         notes.append(
@@ -1427,6 +1442,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     return {
         "cypher": cand_cypher,
         "hits_cypher": cand_cypher + " RETURN n",
+        "uncapped_cypher": uncapped_cypher,
         "params": base_params,
         "candidate_cap": effective_candidate_cap,
         "hoisted_root_urns": [list(s) for s in compiler.hoisted_root_urns],
@@ -1888,6 +1904,18 @@ async def execute_deep_search(
     start = time.monotonic()
     timeout_s = (deadline_ms or query.options.soft_deadline_ms) / 1000.0
 
+    def remaining() -> float:
+        """What is LEFT of the request's deadline.
+
+        Every follow-up query (count, aggregations, ancestor hydration)
+        shares the one budget the client was told about — handing each
+        of them a fresh ``timeout_s`` is how a ``results='both'``
+        request ends up taking k× the deadline it promised. The 0.2s
+        floor keeps an already-spent budget from cancelling a query
+        before it is even sent.
+        """
+        return max(0.2, timeout_s - (time.monotonic() - start))
+
     # 1. Compile predicate → Cypher WHERE fragment + scope/withinHops hoisting
     compiler = _build_compiler_for_provider(provider)
     where_fragment = compiler.compile(query.predicate)
@@ -1977,11 +2005,21 @@ async def execute_deep_search(
         candidate_cap=effective_candidate_cap,
         within_hops_continuation=wh_continuation,
     )
+    # The same prefix without the cap — the only shape that can answer
+    # "how many matches are there really?" once the cap has fired.
+    uncapped_cypher = _build_candidate_cypher(
+        where_fragment=where_fragment,
+        entity_types_param=use_entity_types,
+        scope_pre_filter=scope_chain,
+        candidate_cap=None,
+        within_hops_continuation=wh_continuation,
+    )
 
     # 5. Execute according to requested result shape
     aggregates: Optional[List[List[SearchAggregateBucket]]] = None
     hits: Optional[List[SearchHit]] = None
     candidate_count = 0
+    total_count: Optional[int] = None
     truncated = False
     deadline_exceeded = False
     # Hits-pagination accounting — only populated by the hits branch
@@ -2002,15 +2040,19 @@ async def execute_deep_search(
             for spec in aggs:
                 buckets = await _run_aggregation(
                     provider, cand_cypher, base_params, spec,
-                    query=query, timeout_s=timeout_s,
+                    query=query, timeout_s=remaining(),
+                    uncapped_cypher=uncapped_cypher,
                 )
                 aggregates.append(buckets)
-            candidate_count, truncated_count = await _run_count(
-                provider, cand_cypher, base_params,
-                timeout_s=timeout_s,
-                candidate_cap=effective_candidate_cap,
+            # Counted uncapped: with no hit list to compare against, the
+            # count is the ONLY signal for how much the aggregations
+            # missed, so it has to see past the cap.
+            candidate_count = await _run_count(
+                provider, uncapped_cypher, base_params,
+                timeout_s=remaining(),
             )
-            truncated = truncated_count
+            total_count = candidate_count
+            truncated = candidate_count > effective_candidate_cap
         else:
             # Hits requested (and maybe aggregates too). Materialise the
             # candidate set once; build hits from it, optionally aggregate.
@@ -2024,12 +2066,33 @@ async def execute_deep_search(
             hits, hits_offset_after, hits_total_sorted = _build_hits_from_rows(
                 provider, rows, query,
             )
+            if not truncated:
+                # The scan returned every match, so the exact total is
+                # already in hand — no second query.
+                total_count = candidate_count
+            else:
+                # The cap fired, so ``candidate_count`` is a floor. Pay
+                # for one uncapped count; if it doesn't fit in what's
+                # left of the budget, the page still returns its hits
+                # and the FE renders "N+" instead of an exact total.
+                try:
+                    total_count = await _run_count(
+                        provider, uncapped_cypher, base_params,
+                        timeout_s=remaining(),
+                    )
+                except asyncio.TimeoutError:
+                    deadline_exceeded = True
+                    logger.info(
+                        "deep_search: exact count exceeded the remaining "
+                        "budget; returning hits without a total",
+                    )
             if shape == "both" and aggs:
                 aggregates = []
                 for spec in aggs:
                     buckets = await _run_aggregation(
                         provider, cand_cypher, base_params, spec,
-                        query=query, timeout_s=timeout_s,
+                        query=query, timeout_s=remaining(),
+                        uncapped_cypher=uncapped_cypher,
                     )
                     aggregates.append(buckets)
     except asyncio.TimeoutError:
@@ -2053,9 +2116,21 @@ async def execute_deep_search(
         else:
             raise
 
-    # 6. Optional ancestor hydration for hits
+    # 6. Optional ancestor hydration for hits — inside the same budget,
+    # so a slow ancestor cache can't stretch the request past the
+    # deadline the client was given. Hydration already degrades to an
+    # empty ancestor_path on failure; a timeout is one more such case.
     if hits and query.options.include_ancestor_path:
-        await _hydrate_ancestors(provider, hits)
+        try:
+            await asyncio.wait_for(
+                _hydrate_ancestors(provider, hits), timeout=remaining(),
+            )
+        except asyncio.TimeoutError:
+            deadline_exceeded = True
+            logger.info(
+                "deep_search: ancestor hydration exceeded the remaining "
+                "budget; ancestor_path left empty on this page",
+            )
 
     # Emit a next-cursor whenever the page didn't exhaust the sorted
     # candidate set. The cursor embeds ``query_hash(query)`` so a future
@@ -2073,6 +2148,7 @@ async def execute_deep_search(
         cursor=next_cursor,
         truncated=truncated,
         candidate_count=candidate_count,
+        total_count=total_count,
         deadline_exceeded=deadline_exceeded,
         elapsed_ms=int((time.monotonic() - start) * 1000),
         cache_hit=False,
@@ -2086,6 +2162,7 @@ def _empty_result(shape, start) -> SearchResultPage:
         cursor=None,
         truncated=False,
         candidate_count=0,
+        total_count=0,
         deadline_exceeded=False,
         elapsed_ms=int((time.monotonic() - start) * 1000),
         cache_hit=False,
@@ -2094,17 +2171,14 @@ def _empty_result(shape, start) -> SearchResultPage:
 
 async def _run_count(
     provider, cand_cypher: str, params: Dict[str, Any], *,
-    timeout_s: float, candidate_cap: Optional[int] = None,
-) -> Tuple[int, bool]:
+    timeout_s: float,
+) -> int:
     result = await provider._ro_query(
         cand_cypher + " RETURN count(n) AS c",
         params=params, timeout=timeout_s,
     )
     rs = result.result_set or []
-    n = int(rs[0][0]) if rs and rs[0] else 0
-    cap = candidate_cap if candidate_cap is not None \
-        else get_deep_search_settings().candidate_cap
-    return n, (n >= cap)
+    return int(rs[0][0]) if rs and rs[0] else 0
 
 
 async def _run_aggregation(
@@ -2115,8 +2189,14 @@ async def _run_aggregation(
     *,
     query: SearchQuery,
     timeout_s: float,
+    uncapped_cypher: str = "",
 ) -> List[SearchAggregateBucket]:
-    """Run one aggregation pivoted on the candidate set ``n``."""
+    """Run one aggregation pivoted on the candidate set ``n``.
+
+    ``uncapped_cypher`` is the same candidate prefix without the
+    ``LIMIT``; the kinds below all pivot on the capped set, so only an
+    aggregation that must see every match reaches for it.
+    """
     if spec.by == "ancestorType":
         return await _run_aggregation_ancestor_type(
             provider, cand_cypher, cand_params, spec,

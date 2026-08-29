@@ -886,6 +886,12 @@ class SearchResultPage(_Base):
                     "scope check and aggregation/limit. Useful for showing "
                     "'searching X nodes…' captions in the FE.",
     )
+    total_count: Optional[int] = Field(
+        None, alias="totalCount",
+        description="Exact number of matches in scope, independent of the "
+                    "candidate cap; null when the count timed out (UI "
+                    "shows N+).",
+    )
     deadline_exceeded: bool = Field(False, alias="deadlineExceeded")
     elapsed_ms: int = Field(alias="elapsedMs")
     cache_hit: bool = Field(False, alias="cacheHit")

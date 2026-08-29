@@ -116,6 +116,9 @@ class StubDeepSearchProvider:
             cursor=None,
             truncated=truncated,
             candidate_count=candidate_count,
+            # In-memory evaluation counts every match BEFORE the cap
+            # slice, so the exact total costs nothing extra.
+            total_count=candidate_count,
             deadline_exceeded=False,
             elapsed_ms=elapsed_ms,
             cache_hit=False,
