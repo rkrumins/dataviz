@@ -63,6 +63,7 @@ import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { EdgeLegend } from '../EdgeLegend'
+import { useBandReservation } from './useBandReservation'
 
 import { useUnifiedTrace, type UseUnifiedTraceResult, type TraceResult } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
@@ -265,6 +266,9 @@ function siblingContext(
     layerId,
   }
 }
+
+/** The legend's header row is its collapsed footprint; the opened body is a transient overlay. */
+const measureLegendHeader = (el: HTMLElement): number => el.querySelector<HTMLElement>('button')?.offsetHeight ?? 0
 
 export function ContextViewCanvas({
   className,
@@ -1381,6 +1385,10 @@ export function ContextViewCanvas({
   // below to keep the selected column in the un-occluded region whenever a
   // side panel (EntityDrawer / EdgeDetailPanel) is open.
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null)
+  // The edge legend reserves the band it is docked in — its header only,
+  // so opening it does not shove the columns up.
+  const edgeLegendRef = useRef<HTMLDivElement>(null)
+  useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
   // Zoom changes move every node card, but nothing else forces the edge
@@ -4672,14 +4680,17 @@ export function ContextViewCanvas({
           }
         }} />
 
-        {/* Edge Legend — sits at the bottom-right of the (possibly shrunken)
-            canvas. Right-rail panels are now flex siblings, so the canvas
-            itself shrinks when one opens — the legend doesn't need its own
-            offset logic. Lifts above TraceBottomDock via --trace-dock-height. */}
+        {/* Edge Legend — docked bottom-right in the reserved band, never
+            over rows: it publishes its collapsed (header) height as
+            --edge-legend-height and the columns area pads for it; opening
+            it grows upward as a transient overlay. Right-rail panels are
+            flex siblings, so the canvas itself shrinks when one opens.
+            Lifts above TraceBottomDock via --trace-dock-height. */}
         <div
+          ref={edgeLegendRef}
           className="absolute z-30 w-64 pointer-events-auto transition-all duration-300 ease-out"
           style={{
-            bottom: 'calc(160px + var(--trace-dock-height, 0px))',
+            bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))',
             right: '1rem',
           }}
         >
@@ -4897,10 +4908,10 @@ export function ContextViewCanvas({
           className="flex-1 overflow-auto relative scroll-smooth"
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
-          // dock, layer strip) so a column's last row can always scroll
+          // dock, layer strip, edge legend) so a column's last row can always scroll
           // clear of it — and be clicked. Both variables are published by
           // the chrome itself and are 0 when it is not rendered.
-          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + var(--layer-strip-height, 0px))' }}
+          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px)))' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
