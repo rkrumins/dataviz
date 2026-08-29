@@ -38,6 +38,10 @@ describe('bottom chrome and scroller surfaces carry no backdrop-filter', () => {
     expect(read('../EdgeLegend.tsx').match(BLUR) ?? []).toEqual([])
   })
 
+  it('ConnectionsPanel: an opaque elevated panel, not a glass panel', () => {
+    expect(read('connections/ConnectionsPanel.tsx').match(BLUR) ?? []).toEqual([])
+  })
+
   it('FlatTreeItem: only the card body keeps its subtle blur; the hover overlay has none', () => {
     const src = read('FlatTreeItem.tsx')
     const hits = src.match(BLUR) ?? []

@@ -1,0 +1,290 @@
+/**
+ * ConnectionsPanel — the Context View's bottom-right surface, replacing the
+ * Edge Legend whose eye toggles changed nothing and whose counts were wrong.
+ *
+ * It says three different true things instead of one wrong one:
+ *   - {relationships} connections — the underlying relationships in view,
+ *     each bundle counted exactly once;
+ *   - {drawn} drawn — the lines the overlay is actually painting right now,
+ *     published by the overlay itself (never re-derived here);
+ *   - {types} types — how many kinds of connection are on screen.
+ *
+ * A type carried by a connection that carries two types is counted in BOTH
+ * rows and once in the total; the row tooltip says so, because a reader who
+ * adds the rows up and gets more than the total deserves an explanation.
+ *
+ * Hiding is real: the projection drops those relationships, so a hidden
+ * type's row keeps its name and swatch (to bring it back) but shows NO
+ * count — there is no honest number left to show.
+ *
+ * Surface: an opaque elevated card. This panel animates its height inside
+ * the canvas's bottom band, which is exactly where a blurred-backdrop
+ * surface ghosts a mis-placed translucent tile in Chromium (the "white
+ * strip"). Opacity gives the same separation without the mechanism, and
+ * `noBackdropFilterInScrollers.test.ts` pins it at the source level.
+ */
+import { useEffect, useMemo, useState } from 'react'
+import { motion } from 'framer-motion'
+import { ChevronDown, ChevronUp, Eye, EyeOff, GitBranch } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import type { EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
+import { useDrawnEdgesStore } from '@/store/drawnEdges'
+import { edgeDashArray } from '../edgeDash'
+import type { ConnectionModel } from './connectionModel'
+
+export interface ConnectionsPanelProps {
+  model: ConnectionModel
+  /** UPPERCASE keys currently hidden. The model never contains their
+   *  bundles, so their rows render dimmed and WITHOUT a count. */
+  hiddenTypes: ReadonlySet<string>
+  /** Ontology lookup — label, description, color, strokeStyle. */
+  resolveType: (type: string) => EdgeTypeDefinition
+  /** False → the quiet "Lineage is off" state; no numbers. */
+  lineageOn: boolean
+  /** True during a trace — the footer says the toggles are trace-scoped. */
+  traceMode?: boolean
+  onToggleType: (type: string) => void
+  onSoloType: (type: string, allTypes: string[]) => void
+  onShowAll: () => void
+  /** Bundle ids to highlight, or null to clear. */
+  onHighlight: (bundleIds: ReadonlySet<string> | null) => void
+  className?: string
+  defaultExpanded?: boolean
+}
+
+const DIRECTION_TITLE = '→ flows with the layer order · ← flows back upstream · ⇄ both ways'
+
+function Swatch({ def }: { def: EdgeTypeDefinition }) {
+  return (
+    <svg width="48" height="8" viewBox="0 0 48 8" className="flex-shrink-0" aria-hidden="true">
+      <line
+        x1="0"
+        y1="4"
+        x2="42"
+        y2="4"
+        stroke={def.color}
+        strokeWidth="2"
+        strokeDasharray={edgeDashArray(false, def.strokeStyle)}
+      />
+      <polygon points="42,1 48,4 42,7" fill={def.color} />
+    </svg>
+  )
+}
+
+export function ConnectionsPanel({
+  model,
+  hiddenTypes,
+  resolveType,
+  lineageOn,
+  traceMode,
+  onToggleType,
+  onSoloType,
+  onShowAll,
+  onHighlight,
+  className,
+  defaultExpanded,
+}: ConnectionsPanelProps) {
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded ?? false)
+  const [pinnedType, setPinnedType] = useState<string | null>(null)
+  const [hoveredType, setHoveredType] = useState<string | null>(null)
+  const drawn = useDrawnEdgesStore((s) => s.drawn)
+
+  const activeType = hoveredType ?? pinnedType
+  const activeBundleIds = useMemo(() => {
+    if (!activeType) return null
+    const row = model.rows.find((r) => r.type === activeType)
+    return row ? new Set(row.bundleIds) : null
+  }, [activeType, model])
+
+  useEffect(() => {
+    onHighlight(activeBundleIds)
+  }, [activeBundleIds, onHighlight])
+
+  /** Every type the panel knows about — solo has to hide the hidden ones too. */
+  const allTypes = useMemo(
+    () => [...model.rows.map((r) => r.type), ...hiddenTypes],
+    [model, hiddenTypes],
+  )
+  const hiddenList = useMemo(() => [...hiddenTypes].sort(), [hiddenTypes])
+  const hiddenCount = hiddenTypes.size
+
+  const summary = !lineageOn
+    ? 'Off'
+    : hiddenCount > 0
+      ? `${model.relationships.toLocaleString()} · ${hiddenCount} hidden`
+      : model.relationships.toLocaleString()
+
+  const showFooter = lineageOn && (hiddenCount > 0 || model.untyped > 0 || Boolean(traceMode))
+
+  return (
+    <div
+      className={cn(
+        'bg-canvas-elevated/95 border border-glass-border shadow-lg rounded-xl overflow-hidden',
+        className,
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setIsExpanded((v) => !v)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <GitBranch className="w-4 h-4 text-accent-lineage flex-shrink-0" />
+          <span className="text-sm font-medium text-ink">Connections</span>
+          <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 tabular-nums whitespace-nowrap">
+            {summary}
+          </span>
+        </span>
+        {isExpanded ? (
+          <ChevronUp className="w-4 h-4 text-ink-muted flex-shrink-0" />
+        ) : (
+          <ChevronDown className="w-4 h-4 text-ink-muted flex-shrink-0" />
+        )}
+      </button>
+
+      {isExpanded && (
+        <motion.div
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1 }}
+          transition={{ duration: 0.18 }}
+          className="overflow-hidden"
+        >
+          <div className="px-3 pb-3">
+            {!lineageOn ? (
+              <div className="py-3 text-center">
+                <p className="text-xs font-medium text-ink">Lineage is off</p>
+                <p className="text-2xs text-ink-muted mt-0.5">
+                  Turn Lineage on in the header to see connections.
+                </p>
+              </div>
+            ) : (
+              <>
+                <p className="text-2xs text-ink-muted tabular-nums pb-2">
+                  {`${model.relationships.toLocaleString()} connections · ${drawn.toLocaleString()} drawn · ${model.typeCount} ${model.typeCount === 1 ? 'type' : 'types'}`}
+                </p>
+
+                <div data-connection-rows className="space-y-0.5" onMouseLeave={() => setHoveredType(null)}>
+                  {model.rows.length === 0 && (
+                    <p className="text-xs text-ink-muted py-3 text-center">No connections on screen</p>
+                  )}
+
+                  {model.rows.map((row) => {
+                    const def = resolveType(row.type)
+                    const isPinned = pinnedType === row.type
+                    return (
+                      <div
+                        key={row.type}
+                        data-connection-row={row.type}
+                        title={`${def.label} — ${row.relationships.toLocaleString()} of the connections on screen carry this type. A connection carrying more than one type is counted in each of its types.`}
+                        onMouseEnter={() => setHoveredType(row.type)}
+                        onMouseLeave={() => setHoveredType(null)}
+                        onClick={() => setPinnedType((p) => (p === row.type ? null : row.type))}
+                        className={cn(
+                          'group/row flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors',
+                          'hover:bg-black/5 dark:hover:bg-white/5',
+                          isPinned && 'bg-accent-lineage/10 ring-1 ring-accent-lineage/30',
+                        )}
+                      >
+                        <Swatch def={def} />
+
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-xs font-medium text-ink truncate">{def.label}</span>
+                          <span className="block text-2xs text-ink-muted truncate">{def.description}</span>
+                        </span>
+
+                        <button
+                          type="button"
+                          data-connection-only
+                          title="Show only this type"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onSoloType(row.type, allTypes)
+                          }}
+                          className="flex-shrink-0 text-2xs text-ink-muted hover:text-ink px-1.5 py-0.5 rounded opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-opacity"
+                        >
+                          Only
+                        </button>
+
+                        <span className="flex-shrink-0 text-xs font-semibold text-ink tabular-nums">
+                          {row.relationships.toLocaleString()}
+                        </span>
+
+                        <span
+                          title={DIRECTION_TITLE}
+                          className="flex-shrink-0 text-2xs text-ink-muted tabular-nums whitespace-nowrap min-w-[4.5rem] text-right"
+                        >
+                          {`→ ${row.forward} · ← ${row.backward}`}
+                          {row.bidirectional > 0 ? ` · ⇄ ${row.bidirectional}` : ''}
+                        </span>
+
+                        <button
+                          type="button"
+                          title="Hide this type"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onToggleType(row.type)
+                          }}
+                          className="flex-shrink-0 p-1 rounded text-accent-lineage hover:bg-accent-lineage/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )
+                  })}
+
+                  {hiddenList.map((type) => {
+                    const def = resolveType(type)
+                    return (
+                      <div
+                        key={`hidden-${type}`}
+                        data-connection-row={type}
+                        title={`${def.label} — hidden. Its connections are not drawn and not counted.`}
+                        className="flex items-center gap-2 px-2 py-1.5 rounded-lg opacity-45"
+                      >
+                        <Swatch def={def} />
+                        <span className="flex-1 min-w-0 text-xs font-medium text-ink truncate">{def.label}</span>
+                        <button
+                          type="button"
+                          title="Show this type"
+                          onClick={() => onToggleType(type)}
+                          className="flex-shrink-0 p-1 rounded text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 transition-colors"
+                        >
+                          <EyeOff className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {showFooter && (
+                  <div className="mt-2 pt-2 border-t border-glass-border flex items-center justify-between gap-2">
+                    {hiddenCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={onShowAll}
+                        className="text-2xs font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+                      >
+                        Show all
+                      </button>
+                    ) : (
+                      <span />
+                    )}
+                    <span className="text-2xs text-ink-muted text-right">
+                      {model.untyped > 0 && (
+                        <span className="tabular-nums">{`+${model.untyped.toLocaleString()} with no type`}</span>
+                      )}
+                      {model.untyped > 0 && traceMode && <span> · </span>}
+                      {traceMode && <span>Applies to this trace only.</span>}
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </motion.div>
+      )}
+    </div>
+  )
+}
+
+export default ConnectionsPanel
