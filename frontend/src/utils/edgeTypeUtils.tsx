@@ -12,6 +12,7 @@ import type { LineageEdge } from '@/store/canvas'
 import type { RelationshipTypeSchema } from '@/types/schema'
 import { normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
 import { generateColorFromType } from '@/lib/type-visuals'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 
 export { normalizeEdgeType }
 import {
@@ -160,9 +161,9 @@ export function getEdgeTypeDefinition(
 ): EdgeTypeDefinition {
     const schemaType = getEdgeTypeFromSchema(edgeType, relationshipTypes)
 
-    if (schemaType) {
-        // Use schema definition
-        return {
+    const definition: EdgeTypeDefinition = schemaType
+        ? {
+            // Use schema definition
             type: schemaType.id.toUpperCase(),
             label: schemaType.name,
             description: schemaType.description || `Edge type: ${schemaType.name}`,
@@ -171,10 +172,14 @@ export function getEdgeTypeDefinition(
             animated: schemaType.visual.animated,
             icon: getDefaultIcon(schemaType.id), // Could be enhanced to use schema icon if available
         }
-    }
+        // Create default definition
+        : createDefaultEdgeTypeDefinition(edgeType, containmentEdgeTypes, ontologyMetadata)
 
-    // Create default definition
-    return createDefaultEdgeTypeDefinition(edgeType, containmentEdgeTypes, ontologyMetadata)
+    // Wording this app owns (the system AGGREGATED type) beats both the ontology's
+    // own name and the generated fallback. Applied here, once, so neither branch can
+    // miss it; the visuals are whatever the branch already decided.
+    const copy = edgeTypeCopy(definition.type)
+    return copy ? { ...definition, label: copy.label, description: copy.description } : definition
 }
 
 /**

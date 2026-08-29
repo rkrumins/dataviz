@@ -36,7 +36,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useRelationshipTypes } from '@/store/schema'
-import { relationshipLabel } from '@/lib/relationshipLabel'
+import { relationshipLabel, edgeTypeCopy } from '@/lib/relationshipLabel'
 import type { WalkEntry, LensWalkDir, WalkProgress } from '@/hooks/useLensWalk'
 import { emptyWalkModel, type LensWalkNode } from './lens/closure-adapter'
 import { accountedLineageEdges } from './lens/rollup-accounting'
@@ -1184,7 +1184,11 @@ export function LineageLens({
   const edgeTypeInfo = useMemo<EdgeTypeInfoMap>(() => {
     const m: EdgeTypeInfoMap = new Map()
     for (const rt of relationshipTypes) {
-      m.set(rt.id.toUpperCase(), { label: rt.name || relationshipLabel(rt.id), description: rt.description })
+      const copy = edgeTypeCopy(rt.id)
+      m.set(rt.id.toUpperCase(), {
+        label: copy?.label ?? (rt.name || relationshipLabel(rt.id)),
+        description: copy?.description ?? rt.description,
+      })
     }
     return m
   }, [relationshipTypes])
