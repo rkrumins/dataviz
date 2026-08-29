@@ -23,8 +23,9 @@ export const TOP_MATCHES = 10
 
 /** Above this, the list is a sample rather than an answer. Ten of two
  *  hundred is still a plausible top ten; ten of five thousand is a word
- *  that needs narrowing, not a longer list. */
-export const MANY_MATCHES = 200
+ *  that needs narrowing, not a longer list. Read only by `narrowingHints`
+ *  — the threshold is that answer's business, not a knob for callers. */
+const MANY_MATCHES = 200
 
 
 /**
@@ -195,4 +196,52 @@ export function narrowingHints(
         hints.push({ label: 'Starts with', patch: { match: 'prefix' } })
     }
     return hints
+}
+
+
+/** What the list under the box is a list OF, if anything. */
+export type ListboxKind = 'rows' | 'recents' | 'none'
+
+
+/**
+ * Whether the surface renders a listbox, and which one.
+ *
+ * ONE answer, for two callers who must not disagree. The box advertises a
+ * listbox through `aria-expanded`, `aria-controls` and
+ * `aria-activedescendant`, and the surface decides what to draw; when
+ * each worked it out for itself they came apart on exactly the states
+ * neither had in mind. A failed run over rows the box was still holding,
+ * and a one-character box over the same, both drew a CARD — and the
+ * combobox went on telling a screen reader that a list was open and
+ * naming elements that did not exist.
+ *
+ * The order is the order the surface reads its own state in:
+ *
+ *   * an empty box is answering nothing, so its recents outrank whatever
+ *     the last query left behind;
+ *   * a card — an error, a zero, the keep-typing hint — is not a list,
+ *     and held rows do not turn it into one;
+ *   * otherwise the hits, including hits that answer a slightly older
+ *     word: those are dimmed, not withdrawn.
+ */
+export function listboxKind({ rows, recents, error, oneChar, stale, textEmpty }: {
+    /** How many hit rows the surface would draw. */
+    rows: number
+    /** How many recent searches this view remembers. */
+    recents: number
+    /** The standing run failed. */
+    error: boolean
+    /** The box holds a single character. */
+    oneChar: boolean
+    /** The rows no longer answer the box as it stands. */
+    stale: boolean
+    /** The box is empty. */
+    textEmpty: boolean
+}): ListboxKind {
+    if (textEmpty) return recents > 0 ? 'recents' : 'none'
+    if (error) return 'none'
+    // A box holding one letter has no standing answer worth showing, so
+    // the hint wins over rows left from a longer word.
+    if (oneChar && stale) return 'none'
+    return rows > 0 ? 'rows' : 'none'
 }

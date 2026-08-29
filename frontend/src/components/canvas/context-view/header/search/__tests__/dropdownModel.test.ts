@@ -13,7 +13,8 @@ import type { QuickQuery } from '@/components/canvas/search/session/quickPredica
 import type { AncestorRef, SearchHit } from '@/types/search'
 
 import {
-    TOP_MATCHES, depthNote, formatPath, narrowingHints, topMatches, whyLabel,
+    TOP_MATCHES, depthNote, formatPath, listboxKind, narrowingHints,
+    topMatches, whyLabel,
 } from '../dropdownModel'
 
 
@@ -219,5 +220,60 @@ describe('narrowingHints', () => {
         expect(narrowingHints(5000, {
             ...DEFAULT_QUICK, lookIn: 'name', match: 'prefix',
         })).toEqual([])
+    })
+})
+
+
+/** A box with nothing in it and nothing to say. Each spec turns on the
+ *  one fact it is about. */
+const QUIET = {
+    rows: 0, recents: 0, error: false, oneChar: false, stale: false, textEmpty: true,
+}
+
+describe('listboxKind', () => {
+    it('offers the hits when there are hits', () => {
+        expect(listboxKind({ ...QUIET, textEmpty: false, rows: 4 })).toBe('rows')
+    })
+
+    it('offers them even when they answer a slightly older word', () => {
+        expect(listboxKind({ ...QUIET, textEmpty: false, rows: 4, stale: true }))
+            .toBe('rows')
+    })
+
+    it('offers the recents to an empty box that has some', () => {
+        expect(listboxKind({ ...QUIET, recents: 3 })).toBe('recents')
+    })
+
+    it('has no list for an empty box with no history', () => {
+        expect(listboxKind(QUIET)).toBe('none')
+    })
+
+    // The three that a combobox got wrong by deriving "is there a list?"
+    // in one file and "what do I draw?" in another: each of these draws a
+    // card, not a list, so the box must not claim one is open.
+    it('has no list behind an error card, whatever rows were left over', () => {
+        expect(listboxKind({ ...QUIET, textEmpty: false, rows: 8, error: true }))
+            .toBe('none')
+    })
+
+    it('has no list behind the one-character hint that outranks stale rows', () => {
+        expect(listboxKind({
+            ...QUIET, textEmpty: false, rows: 8, oneChar: true, stale: true,
+        })).toBe('none')
+    })
+
+    it('has no list behind the hint when nothing has come back at all', () => {
+        expect(listboxKind({ ...QUIET, textEmpty: false, oneChar: true })).toBe('none')
+    })
+
+    it('has no list behind a zero — there is nothing to put in it', () => {
+        expect(listboxKind({ ...QUIET, textEmpty: false })).toBe('none')
+    })
+
+    // An empty box is answering nothing, so its recents outrank anything
+    // the last query left behind.
+    it('reads the empty box before it reads what is held', () => {
+        expect(listboxKind({ ...QUIET, rows: 8, recents: 2 })).toBe('recents')
+        expect(listboxKind({ ...QUIET, rows: 8, error: true })).toBe('none')
     })
 })

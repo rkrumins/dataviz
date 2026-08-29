@@ -42,7 +42,7 @@ import type { QuickQuery } from '@/components/canvas/search/session/quickPredica
 import type { SearchHit } from '@/types/search'
 
 import { TopMatchRow } from './TopMatchRow'
-import { TOP_MATCHES, narrowingHints, topMatches, whyLabel } from './dropdownModel'
+import { TOP_MATCHES, listboxKind, narrowingHints, topMatches, whyLabel } from './dropdownModel'
 
 
 /** The row ids the input's `aria-activedescendant` points at. Derived in
@@ -169,10 +169,24 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
     const dimmed = stale || running
     const oneChar = trimmed.length === 1
 
+    // Whether there is a listbox, and which — decided once, by the same
+    // function the box derives its `aria-expanded` and `aria-controls`
+    // from. When each worked it out for itself they came apart on the
+    // states neither had in mind, and the box named elements this surface
+    // had not rendered.
+    const kind = listboxKind({
+        rows: shown.length,
+        recents: recents.length,
+        error: error !== null,
+        oneChar,
+        stale,
+        textEmpty: trimmed === '',
+    })
+
     const body = (() => {
-        if (!trimmed) {
+        if (kind === 'recents') {
             return (
-                <EmptyState
+                <RecentsList
                     listId={listId}
                     recents={recents}
                     activeIndex={activeIndex}
@@ -181,95 +195,97 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
                 />
             )
         }
-        if (error) return <ErrorState message={error} onRetry={onRetry} />
-        if (zero && shown.length === 0) {
-            return <ZeroState text={trimmed} onNarrow={onNarrow} onRefine={onRefine} />
+        if (kind !== 'rows') {
+            // No list. What stands in its place — a card, a line — is a
+            // separate question, and none of these answers may put one
+            // back: `kind` has already told the box there is none.
+            if (trimmed === '') return <Note>{GUIDANCE}</Note>
+            if (error) return <ErrorState message={error} onRetry={onRetry} />
+            if (zero) {
+                return <ZeroState text={trimmed} onNarrow={onNarrow} onRefine={onRefine} />
+            }
+            if (oneChar) {
+                return <Note>{`Keep typing — or press ↵ to search for "${trimmed}"`}</Note>
+            }
+            if (running) return <Note>Searching…</Note>
+            return <Note>{GUIDANCE}</Note>
         }
-        if (shown.length > 0 && !(oneChar && stale)) {
-            return (
-                <>
-                    <div
-                        data-testid="dropdown-header"
-                        className={cn(
-                            'px-3 pt-2 pb-1.5 flex items-baseline gap-2',
-                            dimmed && 'opacity-60',
-                        )}
-                    >
-                        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/70">
-                            {countLabel === null
-                                ? 'Top matches'
-                                : `Top matches · ${countLabel} in this view`}
-                        </span>
-                        <span className="ml-auto shrink-0 hidden sm:flex items-center gap-1 text-[9.5px] text-ink-muted/60">
-                            <kbd className="kbd">↑↓</kbd>
-                            <kbd className="kbd">↵</kbd> reveal
-                            <kbd className="kbd">⌘↵</kbd> all
-                            <kbd className="kbd">esc</kbd>
-                        </span>
-                    </div>
-
-                    {hints.length > 0 && (
-                        <div className="px-3 pb-1.5 flex flex-wrap items-center gap-1.5">
-                            <span className="text-[10.5px] text-ink-muted/70">
-                                Many matches — narrow:
-                            </span>
-                            {hints.map((hint) => (
-                                <Chip key={hint.label} onClick={() => onNarrow(hint.patch)}>
-                                    {hint.label}
-                                </Chip>
-                            ))}
-                        </div>
+        return (
+            <>
+                <div
+                    data-testid="dropdown-header"
+                    className={cn(
+                        'px-3 pt-2 pb-1.5 flex items-baseline gap-2',
+                        dimmed && 'opacity-60',
                     )}
+                >
+                    <span className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/70">
+                        {countLabel === null
+                            ? 'Top matches'
+                            : `Top matches · ${countLabel} in this view`}
+                    </span>
+                    <span className="ml-auto shrink-0 hidden sm:flex items-center gap-1 text-[9.5px] text-ink-muted/60">
+                        <kbd className="kbd">↑↓</kbd>
+                        <kbd className="kbd">↵</kbd> reveal
+                        <kbd className="kbd">⌘↵</kbd> all
+                        <kbd className="kbd">esc</kbd>
+                    </span>
+                </div>
 
-                    <div
-                        role="listbox"
-                        id={listId}
-                        aria-label="Top matches"
-                        data-testid="dropdown-rows"
-                        className={cn(
-                            'px-1.5 pb-1.5 flex flex-col gap-0.5',
-                            'overflow-y-auto custom-scrollbar',
-                            dimmed && 'opacity-60',
-                        )}
-                    >
-                        {shown.map((hit, i) => (
-                            <TopMatchRow
-                                key={hit.node.urn}
-                                hit={hit}
-                                id={optionId(listId, i)}
-                                active={i === activeIndex}
-                                query={quick.text}
-                                why={whyLabel(hit, quick).label}
-                                layer={layerOf(hit)}
-                                onActivate={() => onActivate(i)}
-                                onPick={() => onPick(hit)}
-                                onCrumb={(_, index) => onCrumb(hit, index)}
-                            />
+                {hints.length > 0 && (
+                    <div className="px-3 pb-1.5 flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10.5px] text-ink-muted/70">
+                            Many matches — narrow:
+                        </span>
+                        {hints.map((hint) => (
+                            <Chip key={hint.label} onClick={() => onNarrow(hint.patch)}>
+                                {hint.label}
+                            </Chip>
                         ))}
                     </div>
+                )}
 
-                    <div className={cn(
-                        'flex items-center gap-2 px-3 py-1.5',
-                        'border-t border-black/[0.06] dark:border-white/[0.06]',
-                    )}>
-                        <FooterButton onClick={onSeeAll}>
-                            See all{countLabel ? ` ${countLabel}` : ''} results →
-                        </FooterButton>
-                        <FooterButton onClick={onRefine} accent>
-                            <LucideIcons.Sparkles className="w-3 h-3" strokeWidth={2.4} />
-                            Refine
-                        </FooterButton>
-                    </div>
-                </>
-            )
-        }
-        if (oneChar) {
-            return (
-                <Note>{`Keep typing — or press ↵ to search for "${trimmed}"`}</Note>
-            )
-        }
-        if (running) return <Note>Searching…</Note>
-        return <Note>{GUIDANCE}</Note>
+                <div
+                    role="listbox"
+                    id={listId}
+                    aria-label="Top matches"
+                    data-testid="dropdown-rows"
+                    className={cn(
+                        'px-1.5 pb-1.5 flex flex-col gap-0.5',
+                        'overflow-y-auto custom-scrollbar',
+                        dimmed && 'opacity-60',
+                    )}
+                >
+                    {shown.map((hit, i) => (
+                        <TopMatchRow
+                            key={hit.node.urn}
+                            hit={hit}
+                            id={optionId(listId, i)}
+                            active={i === activeIndex}
+                            query={quick.text}
+                            why={whyLabel(hit, quick).label}
+                            layer={layerOf(hit)}
+                            onActivate={() => onActivate(i)}
+                            onPick={() => onPick(hit)}
+                            onCrumb={(_, index) => onCrumb(hit, index)}
+                        />
+                    ))}
+                </div>
+
+                <div className={cn(
+                    'flex items-center gap-2 px-3 py-1.5',
+                    'border-t border-black/[0.06] dark:border-white/[0.06]',
+                )}>
+                    <FooterButton onClick={onSeeAll}>
+                        See all{countLabel ? ` ${countLabel}` : ''} results →
+                    </FooterButton>
+                    <FooterButton onClick={onRefine} accent>
+                        <LucideIcons.Sparkles className="w-3 h-3" strokeWidth={2.4} />
+                        Refine
+                    </FooterButton>
+                </div>
+            </>
+        )
     })()
 
     return createPortal(
@@ -341,11 +357,12 @@ function Note({ children }: { children: ReactNode }) {
  * The recents are REAL options — same `role`, same listbox, same id
  * scheme as the hit rows — so ↑/↓ and ↵ work on them without the box
  * needing a second keyboard mode, and its `aria-controls` points at one
- * element whichever state is up. With no recents there is no listbox at
- * all: the guidance line is prose, not a choice, and a combobox that
- * claimed an empty popup would send a screen reader looking for one.
+ * element whichever state is up. With no recents `listboxKind` says
+ * 'none' and this is never rendered: the guidance line is prose, not a
+ * choice, and a combobox that claimed an empty popup would send a screen
+ * reader looking for one.
  */
-function EmptyState({ listId, recents, activeIndex, onActivate, onRecent }: {
+function RecentsList({ listId, recents, activeIndex, onActivate, onRecent }: {
     listId: string
     recents: string[]
     activeIndex: number
@@ -354,11 +371,9 @@ function EmptyState({ listId, recents, activeIndex, onActivate, onRecent }: {
 }) {
     return (
         <div className="py-2">
-            {recents.length > 0 && (
-                <>
-                    <div className="px-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/70">
-                        Recent in this view
-                    </div>
+            <div className="px-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/70">
+                Recent in this view
+            </div>
                     <div
                         role="listbox"
                         id={listId}
@@ -387,13 +402,11 @@ function EmptyState({ listId, recents, activeIndex, onActivate, onRecent }: {
                                 />
                                 <span className="truncate">{r}</span>
                             </div>
-                        ))}
-                    </div>
-                </>
-            )}
+                ))}
+            </div>
             <div className={cn(
                 'px-3 pt-1.5 text-[11px] leading-relaxed text-ink-muted/70',
-                recents.length > 0 && 'border-t border-black/[0.06] dark:border-white/[0.06]',
+                'border-t border-black/[0.06] dark:border-white/[0.06]',
             )}>
                 {GUIDANCE}
             </div>

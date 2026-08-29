@@ -52,7 +52,7 @@ import type { QuickLookIn, QuickMatch } from '../../search/session/quickPredicat
 import { useViewSearchSession } from '../../search/session/ViewSearchSessionContext'
 import { hasReportableView } from '../../search/session/useViewSearchSessionController'
 import { SearchDropdown, optionId } from './search/SearchDropdown'
-import { topMatches } from './search/dropdownModel'
+import { listboxKind, topMatches } from './search/dropdownModel'
 
 const FIXED_LOOK_IN: { value: QuickLookIn; label: string }[] = [
   { value: 'everything', label: 'Everything' },
@@ -171,11 +171,24 @@ export function HeaderSearch() {
   // anyone asked about "zzz", is simply false.
   const stale = rows.length > 0 && answer === null
 
-  // The empty box offers its recents, and they are real options: same
-  // role, same listbox, same arrow keys. Two keyboard modes for two
-  // kinds of row is how one of them ends up unreachable.
-  const showingRecents = trimmed === '' && recents.length > 0
-  const optionCount = rows.length > 0 ? rows.length : (showingRecents ? recents.length : 0)
+  // Whether there is a list under the box and what it holds — the SAME
+  // answer the surface draws from. The empty box offers its recents, and
+  // they are real options: same role, same listbox, same arrow keys. Two
+  // keyboard modes for two kinds of row is how one of them ends up
+  // unreachable; two derivations of "is there a list?" is how the box
+  // ends up naming one that was never rendered.
+  const kind = listboxKind({
+    rows: rows.length,
+    recents: recents.length,
+    error: view.kind === 'error',
+    oneChar: trimmed.length === 1,
+    stale,
+    textEmpty: trimmed === '',
+  })
+  const showingRecents = kind === 'recents'
+  const optionCount = kind === 'rows'
+    ? rows.length
+    : kind === 'recents' ? recents.length : 0
 
   // `hasContent` is the third of the open rule: an empty box has recents
   // to offer and one character has a hint, but a half-typed word with
@@ -191,11 +204,10 @@ export function HeaderSearch() {
     ? Math.min(activeAt.index, optionCount - 1)
     : 0
   // A combobox's `aria-controls` promises to name the popup it has open.
-  // The listbox exists only where there are options to put in it, so
-  // where there are none — the guidance line, a zero, an error — the box
-  // says it has nothing open rather than naming an element that is not
-  // there.
-  const hasOptions = open && optionCount > 0
+  // Where `listboxKind` says there is none — the guidance line, a zero,
+  // an error card, the keep-typing hint — the box says it has nothing
+  // open rather than naming an element that is not there.
+  const hasOptions = open && kind !== 'none'
   const setActive = useCallback((index: number) => {
     setActiveAt({ hash: resultsHash, index })
   }, [resultsHash])

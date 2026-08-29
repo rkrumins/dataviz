@@ -387,6 +387,69 @@ describe('HeaderSearch — a standing answer that is no longer the question', ()
     expect(screen.queryByText('Nothing in this view contains "zzz"')).not.toBeInTheDocument()
   })
 
+  // Whether a listbox is on screen and whether the box SAYS one is are
+  // two answers to one question. They were worked out in two files, and
+  // came apart on exactly the states neither had in mind: both of these
+  // draw a card over rows the box was still holding, while the combobox
+  // went on naming elements that were not in the document.
+  it('claims no list when a failed run replaced the rows it held', () => {
+    const answered = answering([hit('orders'), hit('orders_daily')])
+    const { rerender } = renderBox(answered)
+    openList()
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+
+    const failed = stubSession({
+      quick: { ...DEFAULT_QUICK, text: 'orders' },
+      advanced: stubAdvanced({
+        view: {
+          kind: 'error', template: {}, inputs: {}, query: {},
+          message: 'Query deadline exceeded', elapsedMs: 9,
+        } as unknown as PanelView,
+      }),
+    })
+    rerender(boxOf(failed))
+
+    expect(screen.getByText('Query deadline exceeded')).toBeInTheDocument()
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(box().getAttribute('aria-expanded')).toBe('false')
+    expect(box().getAttribute('aria-controls')).toBeNull()
+    expect(box().getAttribute('aria-activedescendant')).toBeNull()
+
+    // The arrows have nothing to walk, and ↵ still asks again — a failed
+    // search stays retryable.
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    expect(box().getAttribute('aria-activedescendant')).toBeNull()
+
+    fireEvent.keyDown(box(), { key: 'Enter' })
+    expect(failed.runNow).toHaveBeenCalledTimes(1)
+    expect(failed.revealHit).not.toHaveBeenCalled()
+  })
+
+  it('claims no list when one character replaced the rows it held', () => {
+    const answered = answering([hit('orders'), hit('orders_daily')])
+    const { rerender } = renderBox(answered)
+    openList()
+
+    const oneChar = stubSession({
+      quick: { ...DEFAULT_QUICK, text: 'o' },
+      resultMatchesQuick: false,
+      advanced: answered.advanced,
+    })
+    rerender(boxOf(oneChar))
+
+    expect(screen.getByText('Keep typing — or press ↵ to search for "o"'))
+      .toBeInTheDocument()
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(box().getAttribute('aria-expanded')).toBe('false')
+    expect(box().getAttribute('aria-controls')).toBeNull()
+    expect(box().getAttribute('aria-activedescendant')).toBeNull()
+
+    fireEvent.keyDown(box(), { key: 'ArrowDown' })
+    fireEvent.keyDown(box(), { key: 'Enter' })
+    expect(oneChar.runNow).toHaveBeenCalledTimes(1)
+    expect(oneChar.revealHit).not.toHaveBeenCalled()
+  })
+
   it('keeps the rows it has, and says they are not the answer yet', () => {
     const answered = answering([hit('orders'), hit('orders_daily')])
     const { rerender } = renderBox(answered)
