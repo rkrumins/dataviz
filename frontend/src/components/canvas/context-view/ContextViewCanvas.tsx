@@ -170,6 +170,11 @@ import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { SearchMapPanel } from '../search/SearchMapPanel'
+import { ViewSearchSessionContext } from '../search/session/ViewSearchSessionContext'
+import {
+  useViewSearchSessionController,
+  type ViewSearchSession,
+} from '../search/session/useViewSearchSessionController'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
@@ -742,10 +747,16 @@ export function ContextViewCanvas({
   // sortedLayers / lens state); ref indirection avoids the TDZ.
   const fitToWidthRef = useRef<(() => void) | null>(null)
   const focusLensRef = useRef<(() => void) | null>(null)
+  const searchRef = useRef<ViewSearchSession | null>(null)
   const zoomShortcutHandlers = useMemo(() => ({
     onFitView: () => fitToWidthRef.current?.(),
     onZoomPreset: (level: 1 | 2 | 3) => setCanvasZoom([0.5, 0.75, 1][level - 1]),
     onFocusLens: () => focusLensRef.current?.(),
+    // Both reach the session through a ref for the same reason the two
+    // above do: it is defined further down, and this object is built
+    // before it exists.
+    onFocusSearch: () => searchRef.current?.inputRef.current?.focus(),
+    onToggleSearchPanel: () => searchRef.current?.togglePanel(),
   }), [setCanvasZoom])
   useCanvasKeyboard({
     enabled: true,
@@ -1031,9 +1042,6 @@ export function ContextViewCanvas({
     return () => clearTimeout(t)
   }, [assignmentStatus, resetAssignmentStatus])
 
-  // Search state
-  const [searchQuery, setSearchQuery] = useState('')
-
   // Entity creation. Every entry point (layer "add" buttons, per-row
   // add-child, right-click create, palette, 'N' key) opens the shared
   // Hierarchy Builder; its store centralizes scope + the ensureDraftOpen
@@ -1141,10 +1149,6 @@ export function ContextViewCanvas({
   }, [activeView?.id])
 
   const relationshipTypes = useViewRelationshipTypes()
-
-  // Advanced Search — production panel for template-driven exploration,
-  // visual predicate builder, raw JSON (Power tools), and Ask (NL2Query).
-  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
 
   // Property Manager — right-side drawer to browse properties + author
   // display-rule tags. The engine recomputes which nodes each enabled
@@ -1382,24 +1386,6 @@ export function ContextViewCanvas({
     return () => cancelAnimationFrame(raf)
   }, [canvasZoom])
 
-  // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
-  // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
-  // via padding — a change that does NOT resize the observed node cards,
-  // so the overlay's ResizeObserver never fires. Without an explicit
-  // nudge the lineage marks stay anchored to their pre-panel positions,
-  // stranding ghost stubs/edges over empty canvas when a panel opens,
-  // closes, or the tree is expanded/collapsed while one is open. Force a
-  // redraw on every panel transition, with trailing settle passes so the
-  // marks land on the post-animation geometry (panels slide ~300–400ms).
-  useEffect(() => {
-    const raf = requestAnimationFrame(() =>
-      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.()),
-    )
-    const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
-    const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
-    return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, advancedSearchOpen, builderOpen, buildOpen])
-
   // Zoom-out mounts ~1/zoom more rows per column (the wrapper's layout
   // pre-compensation enlarges the scroll viewport in layout px), so the
   // extra coverage comes from the larger window — overscan can shrink to
@@ -1559,6 +1545,34 @@ export function ContextViewCanvas({
     () => deriveEntityScope(activeView?.content, activeReferenceLayout),
     [activeView?.content, activeReferenceLayout],
   )
+
+  // The canvas's ONE search session: the header box, the layer columns and
+  // the results panel all read it back off the context below, so they can
+  // no longer disagree about what was searched. Both inputs are memoised
+  // upstream — a per-render layout or layer array would churn the session
+  // and, through it, every consumer of that context.
+  const search = useViewSearchSessionController({
+    viewId: activeView?.id ?? '',
+    layers: sortedLayers,
+    assignments: activeReferenceLayout.assignments,
+  })
+  // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
+  // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
+  // via padding — a change that does NOT resize the observed node cards,
+  // so the overlay's ResizeObserver never fires. Without an explicit
+  // nudge the lineage marks stay anchored to their pre-panel positions,
+  // stranding ghost stubs/edges over empty canvas when a panel opens,
+  // closes, or the tree is expanded/collapsed while one is open. Force a
+  // redraw on every panel transition, with trailing settle passes so the
+  // marks land on the post-animation geometry (panels slide ~300–400ms).
+  useEffect(() => {
+    const raf = requestAnimationFrame(() =>
+      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.()),
+    )
+    const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
+    const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
+    return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
+  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
 
   // ─── Node sort modes ────────────────────────────────────────────────────────
   // Persisted state: view-wide `defaultNodeSortMode` + per-layer `nodeSortMode`
@@ -1836,10 +1850,6 @@ export function ContextViewCanvas({
     if (hydration) {
       for (const id of hydration.loadingNodes) {
         hydration.cancel(id)
-        // `searchChildren` queues under its OWN keyspace while recording the
-        // BARE id in `loadingNodes`, so cancelling the id alone leaves an
-        // in-flight child search running straight into the trace.
-        hydration.cancel(`search:${id}`)
       }
     }
     canvasTrace.start(urn)
@@ -2342,38 +2352,12 @@ export function ContextViewCanvas({
   }, [trace.isTracing, trace.drilldowns, renderMap])
 
 
-  // Search results
-  const searchResults = useMemo(() => {
-    if (!searchQuery.trim()) return []
-    const query = searchQuery.toLowerCase()
-    return displayFlat.filter((node) =>
-      node.name.toLowerCase().includes(query) ||
-      node.typeId.toLowerCase().includes(query)
-    )
-  }, [searchQuery, displayFlat])
-
-  // Advanced-search match URN set (W1 substrate). Subscribed once so a
-  // re-render fires only when the set object identity changes. The
-  // canvas highlights these URNs via the existing `searchResults` prop
-  // on LayerColumn — same visual treatment as the legacy quick-search
-  // fallback, just sourced server-side. Union with the legacy quick-
-  // search hits so both lit at once (legacy is W9 cleanup target).
+  // What the session's last run matched, straight from the store.
+  // Subscribed once so a re-render fires only when the set's identity
+  // changes, and handed to LayerColumn as-is: a canvas node's id IS its
+  // URN (`lib/canvasNodeMapper`), and a Set keeps the per-row membership
+  // test O(1) for a search that matched thousands of nodes.
   const advancedMatchUrns = useMatchUrnSet()
-  const matchedNodeIds = useMemo(() => {
-    const out = new Set<string>(searchResults.map((n) => n.id))
-    if (advancedMatchUrns.size > 0) {
-      for (const node of displayFlat) {
-        const urn = (node as { urn?: string }).urn ?? node.id
-        if (advancedMatchUrns.has(urn) || advancedMatchUrns.has(node.id)) {
-          out.add(node.id)
-        }
-      }
-    }
-    // Kept as a Set: LayerColumn tests membership once per rendered row, and
-    // an advanced search can match thousands of nodes — an array turns that
-    // into an O(matches) scan per row on every render.
-    return out
-  }, [searchResults, advancedMatchUrns, displayFlat])
 
   // Action: Move entity to layer (updated for unified context menu)
   // Stages a `move_to_layer` change instead of immediately persisting via
@@ -2740,7 +2724,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -2775,16 +2759,6 @@ export function ContextViewCanvas({
     void loadMoreRoots()
   }, [loadMoreRoots, traceWriteLocked])
 
-  // Child search REPLACES a parent's loaded children in the store — it
-  // `removeNodes`/`removeEdges` them and `addGraph`s the hits — and records
-  // nothing about what it dropped. A trace that let it run could therefore
-  // never be exited back to the canvas the reader started from. The
-  // magnifier is hidden while tracing (FlatTreeItem); this is the backstop.
-  const searchChildrenGuarded = useCallback((parentId: string, query: string) => {
-    if (traceWriteLocked()) return
-    void searchChildren(parentId, query)
-  }, [searchChildren, traceWriteLocked])
-
   // Arming a connection is the first step of staging an edge: the next click
   // resolves a target, the picker opens, and confirming writes a create_edge
   // into the store. One choke point for both entry points (the 'C' key and
@@ -2800,6 +2774,9 @@ export function ContextViewCanvas({
   useEffect(() => {
     childLoadRef.current = { cancel: cancelChildLoad, loadingNodes }
     renderMapRef.current = renderMap
+    // The keyboard handlers are assembled before the session exists, so
+    // they reach it the same way they reach fit-to-width.
+    searchRef.current = search
   })
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
@@ -4329,6 +4306,9 @@ export function ContextViewCanvas({
       data-trace-active={traceActive ? 'true' : 'false'}
       className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}
     >
+      {/* One session for the whole canvas — the header box, the layer
+          columns and the results panel all read it from here. */}
+      <ViewSearchSessionContext.Provider value={search}>
       {/* Row layout: [left rail SearchMapPanel] + canvas column + [right-rail panels].
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
@@ -4344,32 +4324,15 @@ export function ContextViewCanvas({
           the exit (the unmount races the inner exit animation and can
           strand it). Render persistently; it owns its own presence. */}
       <SearchMapPanel
-        open={advancedSearchOpen}
-        onClose={() => setAdvancedSearchOpen(false)}
+        open={search.panelOpen}
+        onClose={search.closePanel}
         viewId={activeView?.id ?? ''}
+        session={search.advanced}
         onRevealNode={revealSearchHit}
         onFrameMatches={handleFrameMatches}
       />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        searchResults={searchResults}
-        onSearchResultClick={(node) => {
-          selectNode(node.id)
-          // Tracing: the overlay owns expansion (and the hit may be nested
-          // inside a closed card, so open the way to it too). Mid-walk there
-          // is no overlay yet and browse expansion is not restored on exit,
-          // so leave it alone.
-          if (traceWriteLocked()) {
-            if (overlay.active) {
-              expandTraceChain(node.id)
-              overlay.expandPath([node.id])
-            }
-            return
-          }
-          setExpandedNodes((prev) => new Set([...prev, node.id]))
-        }}
         showLineageFlow={showLineageFlow}
         onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
         showEdgeDirection={showEdgeDirection}
@@ -4394,19 +4357,6 @@ export function ContextViewCanvas({
           if (dir === 'upstream') setTraceDepthUp(value)
           else setTraceDepthDown(value)
           recordTraceView(dir === 'upstream' ? { depthUp: value } : { depthDown: value })
-        }}
-        onOpenAdvancedSearch={(seedQuery) => {
-          // Toggle the panel. When the user escalates from the
-          // quick search (passes a seed string), force-open the
-          // panel.
-          if (seedQuery && seedQuery.trim()) {
-            setAdvancedSearchOpen(true)
-            return
-          }
-          // Plain toggle — the search panel lives on the LEFT rail,
-          // so it coexists with selection / edge-panel / creation on
-          // the right.
-          setAdvancedSearchOpen((open) => !open)
         }}
         onTogglePropertyManager={() => setPropertyManagerOpen((open) => !open)}
         propertyManagerOpen={propertyManagerOpen}
@@ -5012,7 +4962,7 @@ export function ContextViewCanvas({
                 isBlankModel={isBlankModel}
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedForRender}
-                searchResults={matchedNodeIds}
+                searchResults={advancedMatchUrns}
                 onSelect={selectNode}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
@@ -5035,7 +4985,6 @@ export function ContextViewCanvas({
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadMoreChildren}
-                onSearchChildren={searchChildrenGuarded}
                 isLoadingChildren={isLoadingChildren}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
@@ -5179,7 +5128,7 @@ export function ContextViewCanvas({
         knownLayers={storeLayers.map((l) => l.name)}
         onSearchPredicate={(p) => {
           useSearchStore.getState().requestSearchRun(p)
-          setAdvancedSearchOpen(true)
+          search.openPanel()
         }}
       />
       </div>{/* end flex-row wrapper */}
@@ -5289,6 +5238,7 @@ export function ContextViewCanvas({
           onClose={() => setShareSeed(null)}
         />
       )}
+      </ViewSearchSessionContext.Provider>
     </div>
   )
 }

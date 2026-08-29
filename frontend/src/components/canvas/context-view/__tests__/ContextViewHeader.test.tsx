@@ -5,18 +5,18 @@
  * draft. These specs pin the mode contract: viewers see zero mutation
  * affordances, managers get a (gateable) Edit entry, and the draft header
  * swaps in the authoring cluster while keeping every comprehension tool.
- * The header is store-free, so everything renders from plain props.
+ * Everything but search renders from plain props; the search box reads the
+ * canvas's one session off a context, so every render here provides a
+ * stub one.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
+import { stubSession } from '@/test/stubSearchSession'
 import { ContextViewHeader, type ContextViewHeaderProps } from '../ContextViewHeader'
 
 function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextViewHeaderProps {
   return {
-    searchQuery: '',
-    onSearchChange: vi.fn(),
-    searchResults: [],
-    onSearchResultClick: vi.fn(),
     showLineageFlow: true,
     onToggleLineageFlow: vi.fn(),
     showEdgeDirection: false,
@@ -62,9 +62,17 @@ function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextView
   }
 }
 
+function renderHeader(props: ContextViewHeaderProps) {
+  return render(
+    <ViewSearchSessionContext.Provider value={stubSession()}>
+      <ContextViewHeader {...props} />
+    </ViewSearchSessionContext.Provider>,
+  )
+}
+
 describe('ContextViewHeader — View mode (Published)', () => {
   it('shows a viewer zero mutation affordances', () => {
-    render(<ContextViewHeader {...baseProps()} />)
+    renderHeader(baseProps())
 
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Undo' })).not.toBeInTheDocument()
@@ -76,7 +84,7 @@ describe('ContextViewHeader — View mode (Published)', () => {
 
   it('gives a manager the Edit entry and fires onEnterEdit on click', () => {
     const props = baseProps({ canManage: true, canEnterEdit: true })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
 
     const edit = screen.getByRole('button', { name: 'Edit' })
     fireEvent.click(edit)
@@ -85,7 +93,7 @@ describe('ContextViewHeader — View mode (Published)', () => {
 
   it('disables Edit with an explanation when version control is not set up', () => {
     const props = baseProps({ canManage: true, canEnterEdit: false })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
 
     const edit = screen.getByRole('button', { name: 'Edit' })
     expect(edit).toBeDisabled()
@@ -97,7 +105,7 @@ describe('ContextViewHeader — View mode (Published)', () => {
 
 describe('ContextViewHeader — Edit mode (on a draft)', () => {
   it('swaps in the authoring cluster and keeps every comprehension tool', () => {
-    render(<ContextViewHeader {...baseProps({ isDraft: true, canManage: true })} />)
+    renderHeader(baseProps({ isDraft: true, canManage: true }))
 
     // Authoring cluster present
     expect(screen.getByRole('button', { name: 'Undo' })).toBeInTheDocument()
@@ -119,7 +127,7 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
 
   it('disables Review & Save at zero pending changes', () => {
     const props = baseProps({ isDraft: true, pendingChangeCount: 0 })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
 
     const review = screen.getByRole('button', { name: /review & save/i })
     expect(review).toBeDisabled()
@@ -129,7 +137,7 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
 
   it('shows the count chip and opens the review panel when changes are pending', () => {
     const props = baseProps({ isDraft: true, pendingChangeCount: 3 })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
 
     const review = screen.getByRole('button', { name: /review & save/i })
     expect(review).not.toBeDisabled()
@@ -140,7 +148,7 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
 
   it('fires onExitEdit from Done (the pending-edits guard lives in the canvas wiring)', () => {
     const props = baseProps({ isDraft: true })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
 
     fireEvent.click(screen.getByRole('button', { name: 'Done' }))
     expect(props.onExitEdit).toHaveBeenCalledTimes(1)
@@ -151,28 +159,28 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
 describe('ContextViewHeader — blueprint sync subline', () => {
   it('offers a retry affordance on sync error', () => {
     const props = baseProps({ syncStatus: 'error' })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
 
     fireEvent.click(screen.getByRole('button', { name: /sync issue — retry/i }))
     expect(props.onRetrySync).toHaveBeenCalledTimes(1)
   })
 
   it('folds the context model name into the subline', () => {
-    render(<ContextViewHeader {...baseProps()} />)
+    renderHeader(baseProps())
     expect(screen.getByText('4 types · Enterprise Blueprint')).toBeInTheDocument()
   })
 })
 
 describe('ContextViewHeader — view title (calm-view default)', () => {
   it('renders a plain title with no view-options menu when no view capability is granted', () => {
-    render(<ContextViewHeader {...baseProps()} />)
+    renderHeader(baseProps())
 
     expect(screen.getByText('Data Landscape')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'View options' })).not.toBeInTheDocument()
   })
 
   it('surfaces the view-options chevron once a view capability is granted', () => {
-    render(<ContextViewHeader {...baseProps({ canEditView: true })} />)
+    renderHeader(baseProps({ canEditView: true }))
     expect(screen.getByRole('button', { name: 'View options' })).toBeInTheDocument()
   })
 })
@@ -183,13 +191,13 @@ describe('ContextViewHeader — Trace Lineage launcher (history)', () => {
   ]
 
   it('with no selection and no history, the button stays disabled', () => {
-    render(<ContextViewHeader {...baseProps({ canTrace: false })} />)
+    renderHeader(baseProps({ canTrace: false }))
     expect(screen.getByRole('button', { name: /trace lineage/i })).toBeDisabled()
   })
 
   it('with no selection but history, the button is ENABLED and opens the launcher', () => {
     const props = baseProps({ canTrace: false, traceHistory: history, onResumeTraceHistory: vi.fn() })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
     const btn = screen.getByRole('button', { name: /trace lineage/i })
     expect(btn).toBeEnabled()
     fireEvent.click(btn)
@@ -201,7 +209,7 @@ describe('ContextViewHeader — Trace Lineage launcher (history)', () => {
 
   it('with a selection, the main zone traces and the chevron opens the launcher', () => {
     const props = baseProps({ canTrace: true, traceHistory: history, onResumeTraceHistory: vi.fn() })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
     fireEvent.click(screen.getByRole('button', { name: /trace lineage/i }))
     expect(props.onStartTrace).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: /trace history/i }))
@@ -212,21 +220,21 @@ describe('ContextViewHeader — Trace Lineage launcher (history)', () => {
 describe('ContextViewHeader — Focus Lens launcher', () => {
   it('with a selection, Focus Lens opens the lens on it', () => {
     const props = baseProps({ canTrace: true, onOpenLens: vi.fn() })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
     fireEvent.click(screen.getByRole('button', { name: /focus lens/i }))
     expect(props.onOpenLens).toHaveBeenCalledTimes(1)
   })
 
   it('without a selection, Focus Lens is disabled with guidance', () => {
     const props = baseProps({ canTrace: false, onOpenLens: vi.fn() })
-    render(<ContextViewHeader {...props} />)
+    renderHeader(props)
     const btn = screen.getByRole('button', { name: /focus lens/i })
     expect(btn).toBeDisabled()
     expect(btn).toHaveAttribute('title', expect.stringMatching(/select a single entity/i))
   })
 
   it('hosts that do not wire the lens see no button', () => {
-    render(<ContextViewHeader {...baseProps()} />)
+    renderHeader(baseProps())
     expect(screen.queryByRole('button', { name: /focus lens/i })).toBeNull()
   })
 })

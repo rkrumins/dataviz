@@ -92,6 +92,10 @@ export interface ViewSearchSessionOptions {
 }
 
 export interface ViewSearchSession {
+    /** The view every query in this session is scoped to. The surfaces
+     *  that need it — the header's property-key menu — read it here
+     *  rather than reaching for the schema store on their own. */
+    viewId: string
     /** What the header box holds right now. */
     quick: QuickQuery
     /** Patch one or more fields; a text change starts the debounce. */
@@ -247,12 +251,14 @@ export function useViewSearchSessionController(
     ), [assignments, layers])
 
     return useMemo(() => ({
+        viewId,
         quick, setQuick, runNow, clearQuery: teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine,
         inputRef, resolveLayer,
         advanced,
     }), [
+        viewId,
         quick, setQuick, runNow, teardown, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine, resolveLayer, advanced,

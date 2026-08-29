@@ -52,6 +52,12 @@ export interface CanvasKeyboardHandlers {
     onZoomPreset?: (level: 1 | 2 | 3) => void
     /** Open the Lineage Lens on the selected node (F) */
     onFocusLens?: () => void
+    /** Focus the view search box (/). Declared, not yet bound — the
+     *  binding lands with the shortcut rework. */
+    onFocusSearch?: () => void
+    /** Toggle the search results panel (Cmd/Ctrl+Shift+F). Declared, not
+     *  yet bound. */
+    onToggleSearchPanel?: () => void
 }
 
 export interface UseCanvasKeyboardOptions {
