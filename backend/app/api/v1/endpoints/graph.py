@@ -1610,11 +1610,11 @@ async def search_discover(
     predicates returning 0 results (the user picks a key that doesn't
     exist on natively-stored nodes).
 
-    A label with sampled > 0 nodes but zero user-keys appears in
-    ``blobOnlyLabels`` — strong signal that those nodes are still on
-    pre-W1 blob storage and need the migration script
-    (``python -m backend.scripts.migrate_native_properties``) to be
-    queryable by property.
+    A label with a sampled node still carrying the pre-W1
+    ``n.properties`` JSON blob appears in ``blobOnlyLabels`` — those
+    values stay invisible to property predicates until the migration
+    script (``python -m backend.scripts.migrate_native_properties``)
+    lifts them into native fields.
 
     ``missingSearchableText`` is the same signal for the *text* path:
     sampled nodes with no ``n.searchableText``, the only column a

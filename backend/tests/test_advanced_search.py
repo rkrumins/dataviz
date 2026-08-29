@@ -3931,3 +3931,90 @@ class TestDiscoverStripsProviderOwnedFields:
         assert list(
             result["labels"]["dataset"]["valueSamplesByKey"],
         ) == ["rowCount"]
+
+
+class TestDiscoverTagValues:
+    """Tags are the one reserved key discover still mines: they never
+    belong in the property list (you filter by tag, not by a property
+    called `tags`), but their distinct values feed the tag picker."""
+
+    @pytest.mark.asyncio
+    async def test_tags_are_mined_not_listed_as_a_property(self):
+        prov = _DiscoverProvider({"dataset": [{
+            "urn": "urn:a",
+            "tags": '["PII","GDPR"]',
+            "rowCount": 12,
+        }]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["labels"]["dataset"]["keys"] == ["rowCount"]
+        assert result["tagValues"] == {"PII": 1, "GDPR": 1}
+
+    @pytest.mark.asyncio
+    async def test_tag_counts_accumulate_across_labels(self):
+        prov = _DiscoverProvider({
+            "dataset": [
+                {"urn": "urn:a", "tags": '["PII"]'},
+                {"urn": "urn:b", "tags": '["PII","GDPR"]'},
+            ],
+            "column": [{"urn": "urn:c", "tags": '["PII"]'}],
+        })
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["tagValues"] == {"PII": 3, "GDPR": 1}
+
+    @pytest.mark.asyncio
+    async def test_include_tag_values_false_skips_the_mining(self):
+        prov = _DiscoverProvider({"dataset": [
+            {"urn": "urn:a", "tags": '["PII"]'},
+        ]})
+        result = await discover_native_property_keys(
+            prov, include_edges=False, include_tag_values=False,
+        )
+        assert result["tagValues"] == {}
+        assert result["labels"]["dataset"]["keys"] == []
+
+
+class TestDiscoverBlobOnlyLabels:
+    """`blobOnlyLabels` answers one question — "which labels still carry
+    the pre-W1 `n.properties` JSON blob?" — because the answer names a
+    migration the operator must run. A label that simply has no user
+    properties has nothing to migrate and must not be listed."""
+
+    @pytest.mark.asyncio
+    async def test_a_label_with_no_user_keys_is_not_blob_only(self):
+        prov = _DiscoverProvider({"domain": [
+            {"urn": "urn:d", "displayName": "Customers", "level": 0},
+        ]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["labels"]["domain"]["keys"] == []
+        assert result["blobOnlyLabels"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_empty_blob_is_not_a_migration(self):
+        """A pre-refactor node with no user properties serialises its
+        blob as "{}" — present, but nothing to migrate."""
+        prov = _DiscoverProvider({"domain": [
+            {"urn": "urn:d", "properties": "{}"},
+        ]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["blobOnlyLabels"] == []
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_blob_is_blob_only(self):
+        prov = _DiscoverProvider({"dataset": [
+            {"urn": "urn:a", "properties": '{"owner":"data-platform"}'},
+        ]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["blobOnlyLabels"] == ["dataset"]
+
+    @pytest.mark.asyncio
+    async def test_native_keys_do_not_excuse_a_blob(self):
+        """Half-migrated is the case that matters: native keys present
+        AND a blob still carrying the rest. The old rule ("no user
+        keys") missed exactly this label."""
+        prov = _DiscoverProvider({"dataset": [
+            {"urn": "urn:a", "rowCount": 12,
+             "properties": '{"owner":"data-platform"}'},
+        ]})
+        result = await discover_native_property_keys(prov, include_edges=False)
+        assert result["labels"]["dataset"]["keys"] == ["rowCount"]
+        assert result["blobOnlyLabels"] == ["dataset"]

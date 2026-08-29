@@ -996,7 +996,7 @@ class SearchDiscoverResult(_Base):
     Used to populate every autocomplete picker in the visual builder.
     """
     labels: Dict[str, SearchDiscoverLabelInfo] = Field(default_factory=dict)
-    blob_only_labels: List[str] = Field(default_factory=list, alias="blobOnlyLabels", description="Labels whose sampled nodes have no native keys (still on pre-W1 blob storage; need migration).")
+    blob_only_labels: List[str] = Field(default_factory=list, alias="blobOnlyLabels", description="Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.")
     missing_containment: bool = Field(False, alias="missingContainment", description="True when the provider has no containment edge types configured — ancestor-based queries will return empty.")
     tag_values: Dict[str, int] = Field(
         default_factory=dict,

@@ -1370,7 +1370,7 @@
       "description": "Response shape for ``GET /search/discover``.\n\nTells the FE/AI-agent what's actually queryable in the current view:\nwhich entity-type labels exist, which native property keys + value\nsamples are present on them, what tag values exist across the\nsample, and what edge types + properties traversal can filter on.\nUsed to populate every autocomplete picker in the visual builder.",
       "properties": {
         "blobOnlyLabels": {
-          "description": "Labels whose sampled nodes have no native keys (still on pre-W1 blob storage; need migration).",
+          "description": "Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.",
           "items": {
             "type": "string"
           },

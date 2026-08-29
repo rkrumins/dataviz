@@ -1669,6 +1669,14 @@ async def discover_native_property_keys(
     UI's autocomplete pickers. They can be skipped via the
     ``include_*`` flags when only the legacy key list is needed.
 
+    ``blobOnlyLabels`` names the labels with at least one sampled node
+    still carrying the pre-W1 ``n.properties`` JSON blob — values a
+    property predicate cannot see until the migration lifts them into
+    native fields. It is NOT "labels with no native keys": a label whose
+    nodes simply have no user properties has nothing to migrate, and a
+    half-migrated label (native keys AND a blob) is exactly the one that
+    matters.
+
     ``missingSearchableText`` counts the SAMPLED nodes (same sample as
     everything else here, not the whole graph) that carry no
     ``n.searchableText``. That blob is the only column a
@@ -1729,6 +1737,7 @@ async def discover_native_property_keys(
         # Pathological schemas (1000+ properties on one label) would
         # otherwise blow up the response payload.
         key_counts: Counter = Counter()
+        has_legacy_blob = False
         value_samples: Dict[str, list] = {}
         # Track seen values per key as a set when hashable; lists when
         # not. We never let a per-key sample grow past the cap.
@@ -1741,12 +1750,20 @@ async def discover_native_property_keys(
                 # Absent OR empty — an empty blob matches nothing, so
                 # it is just as unsearchable as a missing one.
                 missing_searchable_text += 1
+            legacy_blob = props.get("properties")
+            if isinstance(legacy_blob, str) \
+               and legacy_blob.strip() not in ("", "{}"):
+                # A pre-W1 node with no user properties still serialises
+                # its blob as "{}" — present, but nothing to migrate.
+                has_legacy_blob = True
             for k, v in props.items():
-                if k in _DISCOVER_RESERVED_KEYS and k != "tags":
+                if k in _DISCOVER_RESERVED_KEYS:
                     # Reserved keys are stripped from the user-facing
                     # key list — except ``tags`` which we still mine
                     # for distinct values via the top-level tagValues
-                    # block.
+                    # block. (The exclusion used to sit in this
+                    # condition, which made the mining below
+                    # unreachable AND listed ``tags`` as a property.)
                     if k == "tags" and include_tag_values:
                         _accumulate_tag_values(v, tag_value_counts)
                     continue
@@ -1795,7 +1812,7 @@ async def discover_native_property_keys(
                 k: sorted(value_samples[k], key=lambda x: (str(type(x)), str(x)))
                 for k in sorted(value_samples.keys() & top_keys)
             }
-        if sampled_count > 0 and not top_keys:
+        if has_legacy_blob:
             blob_only.append(label)
 
     missing_containment = False

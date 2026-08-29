@@ -38,7 +38,7 @@ export type Lineageedgetypes = string[]
  */
 export type Notes = string[]
 /**
- * Labels whose sampled nodes have no native keys (still on pre-W1 blob storage; need migration).
+ * Labels with a sampled node still carrying the pre-W1 `n.properties` JSON blob; those values stay invisible to property predicates until the native-property migration runs.
  */
 export type Blobonlylabels = string[]
 /**
