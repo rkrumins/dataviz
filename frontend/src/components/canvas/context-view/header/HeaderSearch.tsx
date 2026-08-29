@@ -28,7 +28,9 @@ import {
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useDiscovery } from '../../search/builder/useDiscovery'
 import { TEXT_MATCH_OPTIONS } from '../../search/panel/ConditionRow'
 import type { QuickLookIn, QuickMatch } from '../../search/session/quickPredicate'
@@ -65,7 +67,7 @@ export function HeaderSearch() {
   const scope = quick.scope
 
   return (
-    <div data-tour="canvas-search" className="justify-self-center w-full max-w-md">
+    <div data-tour="canvas-search" className="justify-self-center w-full max-w-xl">
       <div className="relative group">
         {/* Accent halo on focus — soft glow behind the field that lifts
             it off the header gradient. Pure decoration; sits behind via
@@ -109,7 +111,7 @@ export function HeaderSearch() {
           <input
             ref={inputRef}
             type="text"
-            placeholder="Search this view — names, descriptions, properties…"
+            placeholder="Search this view…"
             value={quick.text}
             onChange={(e) => setQuick({ text: e.target.value })}
             onKeyDown={(e) => {
@@ -151,7 +153,12 @@ export function HeaderSearch() {
             </span>
           )}
 
-          <AnchoredMenu label={lookInLabel(quick.lookIn)} ariaLabel="Look in">
+          <AnchoredMenu
+            icon={LucideIcons.ScanSearch}
+            current={lookInLabel(quick.lookIn)}
+            label="Look in"
+            active={quick.lookIn !== 'everything'}
+          >
             {(close) => (
               <LookInItems
                 viewId={viewId}
@@ -162,8 +169,10 @@ export function HeaderSearch() {
           </AnchoredMenu>
 
           <AnchoredMenu
-            label={MATCH_OPTIONS.find((o) => o.value === quick.match)?.label ?? 'Contains'}
-            ariaLabel="Match"
+            icon={LucideIcons.WholeWord}
+            current={MATCH_OPTIONS.find((o) => o.value === quick.match)?.label ?? 'Contains'}
+            label="Match"
+            active={quick.match !== 'substring'}
           >
             {(close) => (
               <>
@@ -320,7 +329,7 @@ function MenuItem({ label, selected, onPick }: {
 }
 
 /**
- * A label ▾ trigger and the list it anchors, portalled to the body.
+ * An icon trigger and the list it anchors, portalled to the body.
  *
  * The header creates a stacking context (it has a backdrop-filter), so a
  * list rendered inline would be layered under the canvas. No
@@ -333,10 +342,17 @@ function MenuItem({ label, selected, onPick }: {
  * (the list is portalled to the end of `document.body`, so otherwise a
  * keyboard user reaches it only by tabbing past the whole app) and goes
  * back to the trigger when it closes, so it is never simply dropped.
+ *
+ * The trigger is a bare icon — a `HoverTip` carries the "{label}: {current}"
+ * text a visible chip used to show, and a small accent dot marks it when
+ * `current` has moved off the default so the setting isn't invisible when
+ * closed.
  */
-function AnchoredMenu({ label, ariaLabel, children }: {
-  label: string
-  ariaLabel: string
+function AnchoredMenu({ icon: Icon, current, label, active, children }: {
+  icon: LucideIcon
+  current: string
+  label: 'Look in' | 'Match'
+  active: boolean
   children: (close: () => void) => ReactNode
 }) {
   const [open, setOpen] = useState(false)
@@ -415,28 +431,32 @@ function AnchoredMenu({ label, ariaLabel, children }: {
 
   return (
     <>
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={() => { if (open) close(); else setOpen(true) }}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={`${ariaLabel} · ${label}`}
-        className={cn(
-          'shrink-0 hidden sm:inline-flex items-center gap-0.5 pl-1.5 pr-1 py-1 rounded-md',
-          'text-[10.5px] font-medium max-w-[92px]',
-          'transition-colors',
-          open
-            ? 'text-ink bg-black/[0.07] dark:bg-white/[0.09]'
-            : 'text-ink-muted/80 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]',
-        )}
-      >
-        <span className="truncate">{label}</span>
-        <LucideIcons.ChevronDown
-          className={cn('w-3 h-3 shrink-0 transition-transform duration-200', open && 'rotate-180')}
-          strokeWidth={2.4}
-        />
-      </button>
+      <HoverTip label={`${label}: ${current}`}>
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={() => { if (open) close(); else setOpen(true) }}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-label={`${label}: ${current}`}
+          className={cn(
+            'relative shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md',
+            'transition-colors',
+            open
+              ? 'text-ink bg-black/[0.07] dark:bg-white/[0.09]'
+              : 'text-ink-muted/80 hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]',
+          )}
+        >
+          <Icon className="w-3.5 h-3.5" strokeWidth={2.2} />
+          {active && (
+            <span
+              aria-hidden
+              data-testid="narrowed-dot"
+              className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent-lineage"
+            />
+          )}
+        </button>
+      </HoverTip>
 
       {typeof document !== 'undefined' && createPortal(
         <>
@@ -447,7 +467,7 @@ function AnchoredMenu({ label, ariaLabel, children }: {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ duration: 0.13, ease: 'easeOut' }}
               role="dialog"
-              aria-label={ariaLabel}
+              aria-label={label}
               style={{
                 position: 'fixed',
                 top: anchor.top,
@@ -457,6 +477,9 @@ function AnchoredMenu({ label, ariaLabel, children }: {
               }}
               className="min-w-[180px] overflow-y-auto custom-scrollbar p-1 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40"
             >
+              <div className="pt-0.5 px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/60">
+                {label} · {current}
+              </div>
               {children(close)}
             </motion.div>
           )}

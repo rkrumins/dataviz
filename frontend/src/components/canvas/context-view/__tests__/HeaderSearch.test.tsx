@@ -80,7 +80,7 @@ describe('HeaderSearch', () => {
     const session = stubSession()
     renderBox(session)
 
-    fireEvent.click(screen.getByRole('button', { name: /match/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Match: Contains' }))
     fireEvent.click(screen.getByRole('button', { name: 'Starts with' }))
 
     expect(session.setQuick).toHaveBeenCalledWith({ match: 'prefix' })
@@ -92,19 +92,51 @@ describe('HeaderSearch', () => {
   it('moves focus into the menu when it opens', () => {
     renderBox(stubSession())
 
-    fireEvent.click(screen.getByRole('button', { name: /match/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Match: Contains' }))
 
     expect(screen.getByRole('button', { name: 'Contains' })).toHaveFocus()
   })
 
   it('returns focus to the trigger when an item is chosen', () => {
     renderBox(stubSession())
-    const trigger = screen.getByRole('button', { name: /match/i })
+    const trigger = screen.getByRole('button', { name: 'Match: Contains' })
 
     fireEvent.click(trigger)
     fireEvent.click(screen.getByRole('button', { name: 'Starts with' }))
 
     expect(trigger).toHaveFocus()
+  })
+
+  it('shows the wider box placeholder', () => {
+    renderBox(stubSession())
+
+    expect(screen.getByPlaceholderText('Search this view…')).toBeInTheDocument()
+  })
+
+  it('renders Look in and Match as icon triggers labelled with their current value', () => {
+    renderBox(stubSession())
+
+    expect(screen.getByRole('button', { name: 'Look in: Everything' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Match: Contains' })).toBeInTheDocument()
+  })
+
+  it('flags a narrowed Match with a dot, and leaves the default Look in bare', () => {
+    const session = stubSession({ quick: { ...DEFAULT_QUICK, match: 'prefix' } })
+    renderBox(session)
+
+    const matchTrigger = screen.getByRole('button', { name: 'Match: Starts with' })
+    expect(matchTrigger.querySelector('[data-testid="narrowed-dot"]')).not.toBeNull()
+
+    const lookInTrigger = screen.getByRole('button', { name: 'Look in: Everything' })
+    expect(lookInTrigger.querySelector('[data-testid="narrowed-dot"]')).toBeNull()
+  })
+
+  it('states the current value in the popover header', () => {
+    renderBox(stubSession())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Match: Contains' }))
+
+    expect(screen.getByText('Match · Contains')).toBeInTheDocument()
   })
 
   it('opens the builder from Refine', () => {
