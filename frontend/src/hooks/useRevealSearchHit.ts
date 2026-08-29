@@ -25,7 +25,7 @@ import { useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { toCanvasNode, toCanvasEdge } from '@/hooks/useGraphHydration'
 import { useViewContainmentEdgeTypes } from '@/hooks/useViewSchema'
-import type { GraphDataProvider, GraphEdge } from '@/providers/GraphDataProvider'
+import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { AncestorRef } from '@/types/search'
 
 
@@ -77,42 +77,53 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
         // entities are in the canvas store after hydration. Each
         // subsequent ancestor (and the hit itself) must be materialized
         // before the spine walk can find them. One getNodes call covers
-        // the whole chain regardless of depth.
+        // the whole chain regardless of depth. `viaReveal` marks these
+        // out-of-band nodes so `loadChildren` doesn't count them as a
+        // loaded page (see useGraphHydration).
         const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
-        const missingUrns = spineUrns.filter((u) => !useCanvasStore.getState()._nodeIndex.has(u))
+        const loadedUrns = useCanvasStore.getState()._nodeIndex
+        const missingUrns = spineUrns.filter((u) => !loadedUrns.has(u))
         if (missingUrns.length > 0) {
             try {
                 const fetched = await provider.getNodes({ urns: missingUrns as any[] })
                 if (fetched.length > 0) {
-                    // The containment edges too: `loadChildren` only ever
-                    // fetches a parent's FIRST child page, so a hit that is
-                    // the 300th child would arrive as an orphan node and
-                    // never render. `viaReveal` marks these out-of-band
-                    // nodes so `loadChildren` doesn't count them as a
-                    // loaded page (see useGraphHydration).
-                    // Its own catch: an edge fetch that fails costs the hit
-                    // its attachment, not the whole reveal — the nodes still
-                    // commit, which is what the walk below needs to get one
-                    // level deeper than it otherwise could.
-                    let edges: GraphEdge[] = []
-                    try {
-                        edges = await provider.getEdgesBetween(spineUrns as any[], containmentEdgeTypes)
-                    } catch (e) {
-                        console.warn('[reveal] spine edge priming failed', e)
-                    }
                     const { addGraph } = useCanvasStore.getState()
                     addGraph(
                         fetched.map((n) => {
                             const node = toCanvasNode(n)
                             return { ...node, data: { ...node.data, viaReveal: true } }
                         }),
-                        edges.map((e) => toCanvasEdge(e)),
+                        [],
                     )
                 }
             } catch (e) {
                 console.warn('[reveal] spine priming failed', e)
                 // Continue — the spine walk will fall back to the
                 // deepest reachable ancestor.
+            }
+        }
+
+        // The containment edges, on EVERY reveal: `loadChildren` only ever
+        // fetches a parent's FIRST child page, so a hit that is the 300th
+        // child stays an orphan node that renders nowhere. The missing
+        // NODES are not the condition — a spine whose nodes all arrived on
+        // an earlier reveal that lost its edges would otherwise never get
+        // them, and no amount of re-clicking would fix it. `addGraph`
+        // dedupes and /edges/between is response-cached, so the repeat is
+        // cheap. A failure costs the hit its attachment, not the reveal.
+        // A top-level hit has no spine to attach to — asking for the edges
+        // within a single URN can only ever answer nothing.
+        if (spineUrns.length > 1) {
+            try {
+                const edges = await provider.getEdgesBetween(
+                    spineUrns as any[],
+                    containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined,
+                )
+                if (edges.length > 0) {
+                    useCanvasStore.getState().addGraph([], edges.map((e) => toCanvasEdge(e)))
+                }
+            } catch (e) {
+                console.warn('[reveal] spine edge priming failed', e)
             }
         }
 

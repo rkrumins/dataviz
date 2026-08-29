@@ -117,10 +117,12 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
       ['CONTAINS'],
     )
 
+    // The edge and the flag are the load-bearing assertions: before this
+    // change the hit was primed as an orphan node with no containment edge,
+    // so it was selected but never rendered under its parent.
     const { nodes, edges } = useCanvasStore.getState()
     expect(edges.map((e) => `${e.source}>${e.target}`)).toContain(`${PARENT}>${HIT}`)
     expect(nodes.find((n) => n.id === HIT)?.data.viaReveal).toBe(true)
-    // Old behaviour selected the deepest reachable ancestor (PARENT).
     expect(selectNode).toHaveBeenCalledWith(HIT)
   })
 
@@ -147,6 +149,64 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
     const { nodes, edges } = useCanvasStore.getState()
     expect(nodes.map((n) => n.id).sort()).toEqual([ROOT, PARENT, HIT].sort())
     expect(edges).toHaveLength(0)
+    expect(selectNode).toHaveBeenCalledWith(HIT)
+  })
+
+  it('re-primes the spine edges on a retry, when no node is missing any more', async () => {
+    // The first reveal commits the nodes and loses the edges. That is a
+    // TERMINAL state if the edge fetch is gated on missing nodes: the retry
+    // finds nothing missing, skips priming, and selects an orphan forever.
+    const getEdgesBetween = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('502'))
+      .mockResolvedValueOnce([
+        { id: 'e:P>H', sourceUrn: PARENT, targetUrn: HIT, edgeType: 'CONTAINS' },
+      ])
+    const provider = {
+      getNodes: vi.fn(async () => [
+        makeGraphNode(PARENT, 'table'),
+        makeGraphNode(HIT, 'column'),
+      ]),
+      getEdgesBetween,
+    } as unknown as GraphDataProvider
+    const loadChildren = vi.fn().mockResolvedValue(undefined)
+
+    const { result } = renderHook(() =>
+      useRevealSearchHit({ setExpandedNodes: vi.fn(), loadChildren, provider }),
+    )
+
+    await act(async () => {
+      await result.current(HIT, SPINE)
+    })
+    expect(useCanvasStore.getState().edges).toHaveLength(0)
+
+    await act(async () => {
+      await result.current(HIT, SPINE)
+    })
+
+    expect(getEdgesBetween).toHaveBeenCalledTimes(2)
+    // The nodes were already there — only the edges needed re-fetching.
+    expect(provider.getNodes).toHaveBeenCalledTimes(1)
+    expect(useCanvasStore.getState().edges.map((e) => `${e.source}>${e.target}`))
+      .toContain(`${PARENT}>${HIT}`)
+    expect(selectNode).toHaveBeenLastCalledWith(HIT)
+  })
+
+  it('asks for no edges when the hit is top-level (a one-URN spine has none)', async () => {
+    const provider = makeProvider()
+    const { result } = renderHook(() =>
+      useRevealSearchHit({
+        setExpandedNodes: vi.fn(),
+        loadChildren: vi.fn().mockResolvedValue(undefined),
+        provider,
+      }),
+    )
+
+    await act(async () => {
+      await result.current(HIT, [])
+    })
+
+    expect(provider.getEdgesBetween).not.toHaveBeenCalled()
     expect(selectNode).toHaveBeenCalledWith(HIT)
   })
 
