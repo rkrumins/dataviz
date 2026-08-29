@@ -60,14 +60,7 @@ const BUCKET: SearchAggregateBucket = {
     ancestorDepthFromScopeRoot: 0,
     matchCount: 42,
     sampleHits: [],
-    subBuckets: [{
-        ancestorUrn: 'A',
-        ancestorDisplayName: 'A',
-        ancestorEntityType: 'column',
-        ancestorDepthFromScopeRoot: 1,
-        matchCount: 42,
-        sampleHits: [],
-    }],
+    typeCounts: { column: 42 },
 }
 
 function page(over: Partial<SearchResultPage>): SearchResultPage {
@@ -159,6 +152,24 @@ describe('useAdvancedSearch — exact ancestor counts from the aggregation', () 
 
         expect(useSearchStore.getState().ancestorMatchCounts.get('A')).toBe(1)
     })
+
+    it('no longer treats a plain `parent` facet as ancestor counts', async () => {
+        searchAdvanced.mockResolvedValue(page({
+            hits: [HIT], aggregates: [[BUCKET]],
+        }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, {
+                ...SEARCH_OPTIONS,
+                aggregations: [{ by: 'parent', maxBuckets: 200 }],
+            })
+        })
+
+        // The facet is 'parent', not 'ancestor', so the bucket's 42 is
+        // ignored and the store falls back to the page-derived rollup.
+        expect(useSearchStore.getState().ancestorMatchCounts.get('A')).toBe(1)
+    })
 })
 
 
@@ -178,7 +189,7 @@ describe('useAdvancedSearch — the shared search options reach the wire', () =>
         expect(SEARCH_OPTIONS).toEqual({
             results: 'both',
             pageSize: 1000,
-            aggregations: [{ by: 'parent', maxBuckets: 200, sampleHitsPerBucket: 3 }],
+            aggregations: [{ by: 'ancestor', maxBuckets: 20000, sampleHitsPerBucket: 0 }],
             includeAncestorPath: true,
             candidateCap: 50000,
             softDeadlineMs: 20000,

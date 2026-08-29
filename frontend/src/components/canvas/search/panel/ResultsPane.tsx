@@ -44,14 +44,14 @@ import { findScopeCondition } from './predicateComposition'
 /**
  * Which aggregations still deserve a bucket CARD.
  *
- * The container roll-up (``by: 'parent'``, and ``by: 'ancestor'`` once
- * the backend ships it) is what makes the canvas badges and the panel's
- * per-container counts exact — up to 20 000 buckets of it. On a canvas
- * with a session those numbers are already rendered, in place, by the
- * layer › container grouping below; painting them again as a wall of
- * cards buries the results the user asked for. So there they are
- * badge-only, and every other facet (type, tag, property) still gets its
- * card.
+ * The container roll-up (``by: 'ancestor'``) is what makes the canvas
+ * badges and the panel's per-container counts exact — up to 20 000
+ * buckets of it. On a canvas with a session those numbers are already
+ * rendered, in place, by the layer › container grouping below; painting
+ * them again as a wall of cards buries the results the user asked for.
+ * So that facet is badge-only, and every other facet (type, tag,
+ * property, or an ordinary ``parent`` facet built in Refine) still gets
+ * its card.
  *
  * The canvases whose only search IS this panel have no such grouping,
  * and their bucket cards ARE the orientation step — they keep the lot.
@@ -70,10 +70,7 @@ export function visibleFacetBuckets(
     if (!hasSession) return lists.flat()
     const specs = query.options?.aggregations ?? []
     return lists
-        .filter((_, i) => {
-            const by = specs[i]?.by
-            return by !== 'parent' && by !== 'ancestor'
-        })
+        .filter((_, i) => specs[i]?.by !== 'ancestor')
         .flat()
 }
 
@@ -341,10 +338,8 @@ function ResultsContent({
     // full set, so per-group numbers stay exact regardless of paging.
     // ``totalCount`` is the server's exact size of the whole match set and
     // outranks ``candidateCount`` (what the scan had to consider) wherever
-    // the backend sends it. Read off-type: the schema regen that declares
-    // it is a separate step, and a panel that waited for it would keep
-    // reporting the scan size as the total.
-    const totalCount = (result as { totalCount?: number | null }).totalCount ?? null
+    // the backend sends it.
+    const totalCount = result.totalCount ?? null
     const candidateCount = result.candidateCount ?? null
     const totalMatches = totalCount ?? candidateCount ?? hits.length
     // The hit list is a page; the counts are not. Say so, rather than letting

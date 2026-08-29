@@ -180,24 +180,19 @@ function collectAncestorPaths(result: SearchResultPage): AncestorPathInfo[] {
 }
 
 
-// The two helpers below are the ONLY place the ancestor facet is named, so
-// that adopting the backend's dedicated `ancestor` aggregation is a two-line
-// change: `by === 'ancestor'` and a breakdown read from `bucket.typeCounts`.
-// It isn't in the generated contract yet; until it is we use `parent`, whose
-// buckets are equally exact but credit only a match's IMMEDIATE parent — a
-// collapsed grandparent keeps the page-derived rollup `setResult` overlays
-// these onto, and `subBuckets` stays empty because the request sends no
-// sub-aggregation.
+// The two helpers below are the ONLY place the ancestor facet is named —
+// the seam B4b flips onto the backend's dedicated `ancestor` aggregation,
+// whose buckets count a match under EVERY ancestor, not just its parent.
 
 /** Does this facet carry per-ancestor match counts? */
 const isAncestorFacet = (spec: AggregationSpec | undefined): boolean =>
-    spec?.by === 'parent'
+    spec?.by === 'ancestor'
 
 /** The facet's per-entityType split of one bucket's matches. */
 const facetBreakdown = (
     bucket: SearchAggregateBucket,
 ): ReadonlyArray<[string, number]> =>
-    (bucket.subBuckets ?? []).map((b) => [b.ancestorEntityType, b.matchCount])
+    Object.entries(bucket.typeCounts ?? {})
 
 
 /**

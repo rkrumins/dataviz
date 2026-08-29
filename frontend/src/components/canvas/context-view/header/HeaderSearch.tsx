@@ -233,10 +233,8 @@ function StatusLine() {
     if (view.kind !== 'results') return null
     const result = view.result
     // `totalCount` is the exact size of the candidate set when the server
-    // could count it; `candidateCount` is what this page saw. Read
-    // defensively — the generated types trail the server.
-    const count = (result as { totalCount?: number | null }).totalCount
-      ?? result.candidateCount
+    // could count it; `candidateCount` is what this page saw.
+    const count = result.totalCount ?? result.candidateCount
     const layers = new Set(
       (result.hits ?? [])
         .map((hit) => s.resolveLayer(hit))

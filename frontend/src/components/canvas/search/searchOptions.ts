@@ -35,9 +35,11 @@ const SEARCH_PAGE_SIZE = 1000
  * SEARCH_PAGE_SIZE. Further hits are pulled on demand via the cursor
  * (useAdvancedSearch.loadMore).
  *
- * NOTE on `by: 'parent'`: buckets group by IMMEDIATE parent, so a match that is
- * itself a root has no bucket. The buckets therefore need not sum to
- * candidateCount — don't render them as a partition of the total.
+ * The `ancestor` facet counts a match under EVERY ancestor, not just its
+ * immediate parent — so a collapsed grandparent still gets an exact badge.
+ * It's badge-only (rendered as canvas/panel counts, never as bucket cards),
+ * so it asks for zero sample hits; one bucket per collapsible container in
+ * the view is why `maxBuckets` goes as high as 20000.
  *
  * `candidateCap` is raised over the deployment default (10 000) so a broad
  * word in a large view still counts every match rather than reporting a
@@ -47,9 +49,7 @@ const SEARCH_PAGE_SIZE = 1000
 export const SEARCH_OPTIONS: SearchQuery['options'] = {
     results: 'both',
     pageSize: SEARCH_PAGE_SIZE,
-    // 3 sample hits per bucket: AggregateBucketCard previews them as chips, which
-    // is what makes a group card worth reading ("what's actually in here?").
-    aggregations: [{ by: 'parent', maxBuckets: 200, sampleHitsPerBucket: 3 }],
+    aggregations: [{ by: 'ancestor', maxBuckets: 20000, sampleHitsPerBucket: 0 }],
     includeAncestorPath: true,
     candidateCap: 50000,
     softDeadlineMs: 20000,
