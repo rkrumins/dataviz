@@ -30,6 +30,7 @@ from backend.app.services.advanced_search_service import (
     MAX_TREE_DEPTH,
     ValidationError,
     _count_and_validate,
+    _reject_unbounded_text_any,
 )
 from backend.common.models.search import (
     AggregationSpec,
@@ -344,13 +345,17 @@ class TestServiceValidator:
         """A standalone ``text(target='any')`` with no scope clamp
         triggers a full-graph CONTAINS scan. Service rejects it so
         the user gets a clear remediation message instead of a
-        candidate-cap timeout."""
+        candidate-cap timeout.
+
+        The guard runs on the RESOLVED scope (after the view's own
+        roots have been stamped in), so these unit tests call it
+        directly rather than through ``_count_and_validate``."""
         q = SearchQuery(
             predicate=TextPredicate(value="snowflake", target="any"),
             scope=_TEST_SCOPE,  # view_id only, no root_urns / entity_types
         )
-        with pytest.raises(ValidationError, match="target='any'.*filter"):
-            _count_and_validate(q)
+        with pytest.raises(ValidationError, match="no boundaries yet"):
+            _reject_unbounded_text_any(q)
 
     def test_text_any_or_text_any_without_scope_rejected(self):
         """An OR group of two text-any predicates is also unbounded."""
@@ -361,8 +366,8 @@ class TestServiceValidator:
             ]),
             scope=_TEST_SCOPE,
         )
-        with pytest.raises(ValidationError, match="target='any'"):
-            _count_and_validate(q)
+        with pytest.raises(ValidationError, match="no boundaries yet"):
+            _reject_unbounded_text_any(q)
 
     def test_text_any_with_entity_type_filter_allowed(self):
         """A text-any predicate combined with a bounding leaf is
@@ -376,10 +381,10 @@ class TestServiceValidator:
             scope=_TEST_SCOPE,
         )
         # No exception expected.
-        _count_and_validate(q)
+        _reject_unbounded_text_any(q)
 
     def test_text_any_with_scope_root_urns_allowed(self):
-        """Scope-level root URNs bound the scan; predicate guard
+        """Resolved root URNs bound the scan; predicate guard
         bypassed even if the predicate is purely text-any."""
         scope_with_roots = _TEST_SCOPE.model_copy(
             update={"root_urns": ["urn:dataset:orders"]},
@@ -388,10 +393,10 @@ class TestServiceValidator:
             predicate=TextPredicate(value="snowflake", target="any"),
             scope=scope_with_roots,
         )
-        _count_and_validate(q)
+        _reject_unbounded_text_any(q)
 
     def test_text_any_with_scope_entity_types_allowed(self):
-        """Scope-level entity_types clamp the candidate scan; bare
+        """Resolved entity_types clamp the candidate scan; bare
         text-any is acceptable in that case."""
         scope_with_types = _TEST_SCOPE.model_copy(
             update={"entity_types": ["dataset"]},
@@ -400,7 +405,7 @@ class TestServiceValidator:
             predicate=TextPredicate(value="snowflake", target="any"),
             scope=scope_with_types,
         )
-        _count_and_validate(q)
+        _reject_unbounded_text_any(q)
 
     def test_text_specific_field_without_scope_allowed(self):
         """``text(target='qualifiedName')`` hits an indexed column —
@@ -411,7 +416,34 @@ class TestServiceValidator:
             ),
             scope=_TEST_SCOPE,
         )
-        _count_and_validate(q)
+        _reject_unbounded_text_any(q)
+
+    def test_visible_mode_with_urns_allowed(self):
+        """``scope_mode='visible'`` with a non-empty ``visible_urns``
+        list is its own clamp — the candidate scan is filtered to the
+        URNs the canvas just rendered, so bare text-any is bounded."""
+        visible_scope = _TEST_SCOPE.model_copy(
+            update={"scope_mode": "visible", "visible_urns": ["urn:a"]},
+        )
+        q = SearchQuery(
+            predicate=TextPredicate(value="snowflake", target="any"),
+            scope=visible_scope,
+        )
+        _reject_unbounded_text_any(q)
+
+    def test_visible_mode_without_urns_rejected(self):
+        """``scope_mode='visible'`` with an empty URN list is NOT a
+        clamp — the compiler falls back to view semantics, so the
+        guard must still fire."""
+        visible_scope = _TEST_SCOPE.model_copy(
+            update={"scope_mode": "visible"},
+        )
+        q = SearchQuery(
+            predicate=TextPredicate(value="snowflake", target="any"),
+            scope=visible_scope,
+        )
+        with pytest.raises(ValidationError, match="no boundaries yet"):
+            _reject_unbounded_text_any(q)
 
     def test_sub_aggregation_rejected_until_executor_lands(self):
         """W1.2: sub_aggregation is accepted by the contract but the

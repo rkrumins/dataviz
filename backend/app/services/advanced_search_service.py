@@ -108,7 +108,6 @@ def _count_and_validate(query: SearchQuery) -> int:
         raise ValidationError(
             f"predicate has {leaves} leaves (max {max_leaves})"
         )
-    _reject_unbounded_text_any(query)
     _reject_unsupported_sub_aggregation(query)
     return leaves
 
@@ -175,10 +174,20 @@ def _is_unbounded_text_any(predicate) -> bool:
 def _reject_unbounded_text_any(query: SearchQuery) -> None:
     """Reject queries that would force a full-graph CONTAINS scan.
 
+    Runs on the RESOLVED scope — after ``_stamp_resolved_scope`` has
+    written the view's own roots and entity types into the query. A
+    plain word typed into a view that bounds something is the most
+    ordinary search there is; only a view that bounds nothing leaves
+    the scan unclamped.
+
     Bypass conditions (any one is sufficient to bound the scan):
       * ``scope.root_urns`` set — search anchors on a known subtree.
       * ``scope.entity_types`` set — candidate scan restricts to a
         bounded label list.
+      * ``scope_mode='visible'`` with a non-empty ``visible_urns`` —
+        the candidate scan is filtered to the URNs the canvas
+        rendered. (An empty list is no clamp: the compiler falls
+        back to view semantics.)
       * Predicate tree contains at least one non-text-any leaf — the
         compiler routes the bounding leaf to an indexed Cypher path
         and the text filter applies only to that pre-filtered set.
@@ -192,12 +201,15 @@ def _reject_unbounded_text_any(query: SearchQuery) -> None:
         return
     if query.scope.entity_types:
         return
+    if query.scope.scope_mode == "visible" and query.scope.visible_urns:
+        return
     if not _is_unbounded_text_any(query.predicate):
         return
     raise ValidationError(
-        "Text search with target='any' must be combined with another "
-        "filter (entity type, tag, property, layer, or path) when the "
-        "view doesn't restrict scope. Add a filter to bound the scan."
+        "This view has no boundaries yet, so searching for a word on "
+        "its own would have to read the entire data source. Add "
+        "entities to the view, or narrow the search by entity type, "
+        "tag, property, layer, or path."
     )
 
 
@@ -307,6 +319,7 @@ class AdvancedSearchService:
         client_requested_urns = bool(query.scope.root_urns)
         eff_scope = await self._resolve_scope(query.scope)
         query = _stamp_resolved_scope(query, eff_scope)
+        _reject_unbounded_text_any(query)
 
         # Security guard: if the client passed root_urns but every one
         # was dropped by the resolver (none belonged to this view), we
@@ -361,6 +374,7 @@ class AdvancedSearchService:
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
         query = _stamp_resolved_scope(query, eff_scope)
+        _reject_unbounded_text_any(query)
         try:
             result = await self._engine.provider.deep_search_explain(query)
         except CompileError as exc:

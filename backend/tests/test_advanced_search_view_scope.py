@@ -786,6 +786,125 @@ async def test_service_rejects_view_from_other_workspace(db_session: AsyncSessio
         await svc.search(query)
 
 
+async def test_bare_text_any_uses_view_roots(db_session: AsyncSession):
+    """The canvas header box sends a plain word and no client roots —
+    the view's own roots are the clamp. The unbounded-scan guard must
+    therefore run on the RESOLVED scope, after the view's roots have
+    been stamped in, or this everyday search is rejected as 400.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [
+                        {"urn": "urn:domain:A"},
+                        {"urn": "urn:domain:B"},
+                    ],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(view_id=view.id),  # no client root_urns
+    )
+    await svc.search(query)
+
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert sorted(stamped_query.scope.root_urns or []) == [
+        "urn:domain:A", "urn:domain:B",
+    ]
+
+
+async def test_bare_text_any_on_unscoped_view_still_400(db_session: AsyncSession):
+    """A view that bounds nothing gives the resolver no roots and no
+    entity types, so a plain word would scan the whole data source.
+    That request is still rejected — before the provider is touched.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(db_session, ws, view_type="graph", config={})
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(view_id=view.id),
+    )
+    with pytest.raises(ValidationError, match="no boundaries yet"):
+        await svc.search(query)
+
+
+async def test_visible_mode_with_urns_bypasses_guard(db_session: AsyncSession):
+    """``scope_mode='visible'`` carries its own clamp: the candidate
+    scan is filtered to the URNs the canvas rendered. A plain word is
+    bounded by that list even when the resolved scope stamps no roots.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(
+            view_id=view.id,
+            scope_mode="visible",
+            visible_urns=["urn:domain:A:orders"],
+        ),
+    )
+    await svc.search(query)
+
+    assert len(engine.provider.calls) == 1
+
+
 async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSession):
     # The `updated_at` of the view is part of the scope hash, so editing
     # a view invalidates any cache entry keyed by the previous hash.
