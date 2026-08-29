@@ -45,6 +45,9 @@ function subscribeViewport(onChange: () => void): () => void {
     }
 }
 const getViewportTick = () => viewportTick
+// Once the hint is gone for good there is nothing to place: subscribe to
+// nothing, so the button stops re-rendering on every scroll in the app.
+const subscribeNothing = () => () => {}
 
 
 export interface PropertyManagerButtonProps {
@@ -64,7 +67,7 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
     // coachmark's position is derived from its rect at render time —
     // re-derived when the viewport ticks. No state is written in effects.
     const [triggerEl, setTriggerEl] = useState<HTMLButtonElement | null>(null)
-    useSyncExternalStore(subscribeViewport, getViewportTick, getViewportTick) // re-render on resize/scroll
+    useSyncExternalStore(hintArmed ? subscribeViewport : subscribeNothing, getViewportTick, getViewportTick) // re-render on resize/scroll while the hint can show
     const rect = hintVisible && triggerEl ? triggerEl.getBoundingClientRect() : null
     const anchor = rect ? { top: rect.bottom + 8, left: rect.left } : null
 
