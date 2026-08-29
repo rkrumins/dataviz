@@ -248,7 +248,6 @@ export function ConnectionsPanel({
                           <button
                             type="button"
                             aria-pressed={isPinned}
-                            aria-label={def.label}
                             onClick={(e) => {
                               e.stopPropagation()
                               togglePin(row.type)

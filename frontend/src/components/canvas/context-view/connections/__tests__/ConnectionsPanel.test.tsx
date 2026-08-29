@@ -336,7 +336,7 @@ describe('ConnectionsPanel', () => {
     const row = rowFor('FLOWS_TO')
     expect(row.getAttribute('tabindex')).toBeNull()
 
-    const pin = within(row).getByRole('button', { name: 'Flows to' })
+    const pin = within(row).getByRole('button', { name: /^Flows to/ })
     expect(pin.getAttribute('aria-pressed')).toBe('false')
 
     // Focus counts as hover — which is also what reveals the Only control.
@@ -366,7 +366,7 @@ describe('ConnectionsPanel', () => {
     // would pin and immediately unpin.
     const onHighlight = vi.fn()
     mount({ defaultExpanded: true, onHighlight })
-    const pin = within(rowFor('FLOWS_TO')).getByRole('button', { name: 'Flows to' })
+    const pin = within(rowFor('FLOWS_TO')).getByRole('button', { name: /^Flows to/ })
 
     fireEvent.click(pin)
     expect(pin.getAttribute('aria-pressed')).toBe('true')
