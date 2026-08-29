@@ -120,7 +120,13 @@ export function HeaderSearch() {
   // (E-b), and the session must not care whether anything is on screen.
   const [focused, setFocused] = useState(false)
   const [dismissed, setDismissed] = useState(false)
-  const [activeIndex, setActiveIndex] = useState(0)
+  // The highlighted row, carrying the answer it was chosen IN. A new
+  // answer re-ranks the list, so the highlight goes back to the top —
+  // and it does so because the hash no longer matches, not because an
+  // effect noticed and reset it a render later.
+  const [activeAt, setActiveAt] = useState<{ hash: string | null; index: number }>(
+    { hash: null, index: 0 },
+  )
   // Where a reveal actually landed, when that is not where it was aimed.
   // The producer is the reveal walk itself (E4); the slot, its expiry and
   // its place in the status line are here.
@@ -152,13 +158,12 @@ export function HeaderSearch() {
 
   // Held across the next run so the rows dim rather than vanish. Emptied
   // when the box is, because then they answer a question nobody is
-  // asking any more.
-  const standingRef = useRef<StandingAnswer>(NO_ANSWER)
-  if (!trimmed) standingRef.current = NO_ANSWER
-  else if (answer) standingRef.current = answer
-  const standing = standingRef.current
-  const rows = standing.rows
-  const active = rows.length > 0 ? Math.min(activeIndex, rows.length - 1) : 0
+  // asking any more. Adjusted during render rather than in an effect: an
+  // effect would paint one frame of an empty list first.
+  const [standing, setStanding] = useState<StandingAnswer>(NO_ANSWER)
+  const holds = !trimmed ? NO_ANSWER : (answer ?? standing)
+  if (holds !== standing) setStanding(holds)
+  const rows = holds.rows
 
   // `hasContent` is the third of the open rule: an empty box has recents
   // to offer and one character has a hint, but a half-typed word with
@@ -166,18 +171,26 @@ export function HeaderSearch() {
   const hasContent = trimmed === '' || trimmed.length === 1 || hasReportableView(view)
   const open = focused && !dismissed && hasContent
 
-  // A new answer re-ranks the list, so the highlight goes back to the
-  // top. Closing and re-opening does not — the user left it where they
-  // left it (E-b).
   const resultsHash = view.kind === 'results' ? (advanced.runState?.hash ?? null) : null
-  useEffect(() => { setActiveIndex(0) }, [resultsHash])
+  // Closing and re-opening the list does NOT move the highlight — the
+  // user left it where they left it (E-b) — so this is keyed on the
+  // answer, not on whether anything is on screen.
+  const active = activeAt.hash === resultsHash && rows.length > 0
+    ? Math.min(activeAt.index, rows.length - 1)
+    : 0
+  const setActive = useCallback((index: number) => {
+    setActiveAt({ hash: resultsHash, index })
+  }, [resultsHash])
 
   // Recents are what was SEARCHED, not what was typed: a query recorded
   // per keystroke would fill the list with five prefixes of one word.
   // A run that found nothing is not worth offering back either.
   const foundCount = view.kind === 'results' ? (view.result.candidateCount ?? 0) : 0
+  // Read through a ref, and synced in an effect declared BEFORE the one
+  // that reads it: recording has to depend on the RUN, not on the text,
+  // or every keystroke after an answer would record a new prefix.
   const textRef = useRef(quick.text)
-  textRef.current = quick.text
+  useEffect(() => { textRef.current = quick.text })
   useEffect(() => {
     if (resultsHash === null || foundCount <= 0) return
     record(textRef.current)
@@ -242,12 +255,11 @@ export function HeaderSearch() {
       || e.key === 'Home' || e.key === 'End') {
       if (!open || rows.length === 0) return
       e.preventDefault()
-      setActiveIndex((prev) => {
-        const from = Math.min(prev, rows.length - 1)
-        if (e.key === 'ArrowDown') return (from + 1) % rows.length
-        if (e.key === 'ArrowUp') return (from - 1 + rows.length) % rows.length
-        return e.key === 'Home' ? 0 : rows.length - 1
-      })
+      const to = e.key === 'ArrowDown' ? (active + 1) % rows.length
+        : e.key === 'ArrowUp' ? (active - 1 + rows.length) % rows.length
+          : e.key === 'Home' ? 0
+            : rows.length - 1
+      setActive(to)
       return
     }
     if (e.key === 'Enter') {
@@ -282,7 +294,8 @@ export function HeaderSearch() {
     }
     if (e.key === 'Tab') setDismissed(true)
   }, [
-    open, rows, active, view, resultMatchesQuick, pick, runNow, openPanel, clearQuery,
+    open, rows, active, setActive, view, resultMatchesQuick,
+    pick, runNow, openPanel, clearQuery,
   ])
 
   // Which layer column a hit badges under, by NAME — the row shows the
@@ -477,12 +490,12 @@ export function HeaderSearch() {
             activeIndex={active}
             running={view.kind === 'running'}
             error={view.kind === 'error' ? view.message : null}
-            zero={standing.answered && rows.length === 0}
-            count={standing.count}
-            plus={standing.plus}
+            zero={holds.answered && rows.length === 0}
+            count={holds.count}
+            plus={holds.plus}
             recents={recents}
             layerOf={layerOf}
-            onActivate={setActiveIndex}
+            onActivate={setActive}
             onPick={pick}
             onCrumb={pickCrumb}
             onRecent={(text) => { setQuick({ text }); runNow() }}
