@@ -15,7 +15,7 @@
  * - The header button is the FIRST button in the panel — the canvas
  *   reserves the bottom band from `el.querySelector('button').offsetHeight`.
  */
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, createEvent, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionsPanel, type ConnectionsPanelProps } from '../ConnectionsPanel'
 import type { ConnectionModel, ConnectionTypeRow } from '../connectionModel'
@@ -89,8 +89,19 @@ function mount(over: Partial<ConnectionsPanelProps> = {}) {
     ...over,
   }
   const utils = render(<ConnectionsPanel {...props} />)
-  return { ...utils, props }
+  const update = (next: Partial<ConnectionsPanelProps>) =>
+    utils.rerender(<ConnectionsPanel {...props} {...next} />)
+  return { ...utils, props, update }
 }
+
+/** A model built from rows alone — for the pin-reconciliation tests. */
+const modelOf = (rows: ConnectionModel['rows']): ConnectionModel => ({
+  rows,
+  relationships: rows.reduce((n, r) => n + r.relationships, 0),
+  bundles: rows.reduce((n, r) => n + r.bundles, 0),
+  typeCount: rows.length,
+  untyped: 0,
+})
 
 const headerButton = () => screen.getByRole('button', { name: /connections/i })
 const rowFor = (type: string) =>
@@ -229,5 +240,144 @@ describe('ConnectionsPanel', () => {
     const { container } = mount({ hiddenTypes: new Set(['OWNS']), defaultExpanded: true })
     const first = container.querySelector('button')
     expect(first).toBe(headerButton())
+  })
+
+  // ─── Fix round 1 ───────────────────────────────────────────────────────────
+
+  it('collapsing the panel clears a hovered highlight', () => {
+    // React fires no mouseleave when the row list unmounts, so a pointer
+    // resting on a row while the panel is collapsed by keyboard would leave
+    // the board dimmed behind a closed panel.
+    const onHighlight = vi.fn()
+    mount({ defaultExpanded: true, onHighlight })
+    fireEvent.mouseEnter(rowFor('FLOWS_TO'))
+    expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
+
+    fireEvent.click(headerButton())
+    expect(lastHighlight(onHighlight)).toBeNull()
+  })
+
+  it('a pin whose type leaves the model is dropped, not re-lit later', () => {
+    const onHighlight = vi.fn()
+    const { update } = mount({ defaultExpanded: true, onHighlight })
+    fireEvent.click(rowFor('FLOWS_TO'))
+    expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
+
+    // The type is hidden / the view is switched / a trace begins.
+    update({ model: modelOf([MODEL.rows[1]]) })
+    expect(lastHighlight(onHighlight)).toBeNull()
+
+    // The type comes back (Show all). Nothing the user did asks for it to be
+    // lit again, so the panel must stay quiet.
+    onHighlight.mockClear()
+    update({ model: MODEL })
+    expect(onHighlight.mock.calls.every(([ids]) => ids === null)).toBe(true)
+  })
+
+  it('the row list is height-capped and scrolls on its own', () => {
+    mount({ defaultExpanded: true })
+    expect(rowList().className).toMatch(/max-h-\[45vh\]/)
+    expect(rowList().className).toMatch(/overflow-y-auto/)
+  })
+
+  it('Only never passes the same type twice', () => {
+    const onSoloType = vi.fn()
+    // A transient where the projection has not yet dropped the hidden type.
+    mount({ hiddenTypes: new Set(['FLOWS_TO']), defaultExpanded: true, onSoloType })
+    fireEvent.click(rowFor('FLOWS_TO').querySelector<HTMLElement>('[data-connection-only]')!)
+    const [, allTypes] = onSoloType.mock.calls[0] as [string, string[]]
+    expect(allTypes.length).toBe(new Set(allTypes).size)
+  })
+
+  it('hidden rows sort by the label the reader sees, not the key', () => {
+    const labels: Record<string, string> = { ALPHA: 'Zulu link', ZULU: 'Alpha link' }
+    mount({
+      model: modelOf([]),
+      hiddenTypes: new Set(['ALPHA', 'ZULU']),
+      defaultExpanded: true,
+      resolveType: (type) => ({ ...resolveType(type), label: labels[type] ?? type }),
+    })
+    const order = [...document.querySelectorAll('[data-connection-row]')].map(
+      (el) => el.getAttribute('data-connection-row'),
+    )
+    expect(order).toEqual(['ZULU', 'ALPHA'])
+  })
+
+  it('the direction split is formatted like every other number on the surface', () => {
+    mount({
+      model: modelOf([
+        typeRow({ type: 'FLOWS_TO', relationships: 15650, bundles: 9, forward: 12000, backward: 3400, bidirectional: 250 }),
+      ]),
+      defaultExpanded: true,
+    })
+    const split = within(rowFor('FLOWS_TO')).getByTitle(
+      '→ flows with the layer order · ← flows back upstream · ⇄ both ways',
+    )
+    expect(split.textContent).toBe(
+      `→ ${(12000).toLocaleString()} · ← ${(3400).toLocaleString()} · ⇄ ${(250).toLocaleString()}`,
+    )
+  })
+
+  it('the header button reports whether it is expanded', () => {
+    mount()
+    expect(headerButton().getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(headerButton())
+    expect(headerButton().getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('a focused row emits its bundle ids; Enter pins it and Enter again clears it', () => {
+    const onHighlight = vi.fn()
+    mount({ defaultExpanded: true, onHighlight })
+    const row = rowFor('FLOWS_TO')
+    expect(row.getAttribute('tabindex')).toBe('0')
+
+    fireEvent.focus(row)
+    expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
+
+    // Enter pins it — the highlight then survives focus leaving the row.
+    fireEvent.keyDown(row, { key: 'Enter' })
+    fireEvent.blur(row)
+    expect([...(lastHighlight(onHighlight) ?? [])]).toEqual(['b1', 'b2'])
+
+    fireEvent.focus(row)
+    fireEvent.keyDown(row, { key: 'Enter' })
+    fireEvent.blur(row)
+    expect(lastHighlight(onHighlight)).toBeNull()
+
+    // Space must not scroll the canvas out from under the reader.
+    const space = createEvent.keyDown(row, { key: ' ' })
+    fireEvent(row, space)
+    expect(space.defaultPrevented).toBe(true)
+  })
+
+  it('says what a row does, whenever there is a row to do it to', () => {
+    const hint = 'Hover a row to spotlight its connections · click to keep it lit.'
+    const { unmount } = mount({ defaultExpanded: true })
+    expect(screen.getByText(hint)).toBeTruthy()
+    unmount()
+
+    mount({ model: modelOf([]), hiddenTypes: new Set(['OWNS']), defaultExpanded: true })
+    expect(screen.queryByText(hint)).toBeNull()
+  })
+
+  it('drops the description line when the ontology has nothing to say', () => {
+    mount({
+      defaultExpanded: true,
+      resolveType: (type) =>
+        type === 'FLOWS_TO' ? { ...resolveType(type), description: '' } : resolveType(type),
+    })
+    expect(rowFor('FLOWS_TO').querySelector('[data-connection-description]')).toBeNull()
+    expect(rowFor('DERIVES_FROM').querySelector('[data-connection-description]')?.textContent).toBe(
+      'Built out of another dataset',
+    )
+  })
+
+  it('the trace-mode footer says the toggles apply to this trace only', () => {
+    const { unmount } = mount({ defaultExpanded: true })
+    expect(screen.queryByText('Applies to this trace only.')).toBeNull()
+    unmount()
+
+    mount({ defaultExpanded: true, traceMode: true })
+    expect(screen.getByText('Applies to this trace only.')).toBeTruthy()
   })
 })

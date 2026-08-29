@@ -33,6 +33,8 @@ import { edgeDashArray } from '../edgeDash'
 import type { ConnectionModel } from './connectionModel'
 
 export interface ConnectionsPanelProps {
+  /** Must be referentially stable (`useMemo` in the parent); a fresh identity
+   *  each render re-emits the highlight. */
   model: ConnectionModel
   /** UPPERCASE keys currently hidden. The model never contains their
    *  bundles, so their rows render dimmed and WITHOUT a count. */
@@ -53,6 +55,13 @@ export interface ConnectionsPanelProps {
 }
 
 const DIRECTION_TITLE = '→ flows with the layer order · ← flows back upstream · ⇄ both ways'
+const ROW_HINT = 'Hover a row to spotlight its connections · click to keep it lit.'
+
+/** A row is not a <button>: it holds the Eye and Only buttons (nesting is
+ *  invalid), and the collapsed header must stay the FIRST button in the root.
+ *  So it earns its keyboard the long way — focusable, Enter/Space pins, and
+ *  focus counts as hover, which is also what reveals the Only control. */
+const ROW_KEYS = new Set(['Enter', ' ', 'Spacebar'])
 
 function Swatch({ def }: { def: EdgeTypeDefinition }) {
   return (
@@ -89,6 +98,18 @@ export function ConnectionsPanel({
   const [hoveredType, setHoveredType] = useState<string | null>(null)
   const drawn = useDrawnEdgesStore((s) => s.drawn)
 
+  // A pin must not outlive the thing it pinned. Hiding the type, switching
+  // view or entering a trace all replace the model without remounting the
+  // panel; without this the key survives and silently re-lights the board
+  // the moment a same-named type comes back. Reconciled as the model
+  // ARRIVES — React's "adjusting state when a prop changes", not an effect,
+  // which would emit the stale highlight for one committed frame first.
+  const [seenModel, setSeenModel] = useState(model)
+  if (seenModel !== model) {
+    setSeenModel(model)
+    if (pinnedType && !model.rows.some((r) => r.type === pinnedType)) setPinnedType(null)
+  }
+
   const activeType = hoveredType ?? pinnedType
   const activeBundleIds = useMemo(() => {
     if (!activeType) return null
@@ -100,12 +121,17 @@ export function ConnectionsPanel({
     onHighlight(activeBundleIds)
   }, [activeBundleIds, onHighlight])
 
+  const togglePin = (type: string) => setPinnedType((p) => (p === type ? null : type))
+
   /** Every type the panel knows about — solo has to hide the hidden ones too. */
   const allTypes = useMemo(
-    () => [...model.rows.map((r) => r.type), ...hiddenTypes],
+    () => [...new Set([...model.rows.map((r) => r.type), ...hiddenTypes])],
     [model, hiddenTypes],
   )
-  const hiddenList = useMemo(() => [...hiddenTypes].sort(), [hiddenTypes])
+  const hiddenList = useMemo(
+    () => [...hiddenTypes].sort((a, b) => resolveType(a).label.localeCompare(resolveType(b).label)),
+    [hiddenTypes, resolveType],
+  )
   const hiddenCount = hiddenTypes.size
 
   const summary = !lineageOn
@@ -125,7 +151,13 @@ export function ConnectionsPanel({
     >
       <button
         type="button"
-        onClick={() => setIsExpanded((v) => !v)}
+        aria-expanded={isExpanded}
+        onClick={() => {
+          // React fires no mouseleave when the row list unmounts, so a hover
+          // left standing here would dim the board behind a closed panel.
+          setHoveredType(null)
+          setIsExpanded((v) => !v)
+        }}
         className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
       >
         <span className="flex items-center gap-2 min-w-0">
@@ -163,7 +195,11 @@ export function ConnectionsPanel({
                   {`${model.relationships.toLocaleString()} connections · ${drawn.toLocaleString()} drawn · ${model.typeCount} ${model.typeCount === 1 ? 'type' : 'types'}`}
                 </p>
 
-                <div data-connection-rows className="space-y-0.5" onMouseLeave={() => setHoveredType(null)}>
+                <div
+                  data-connection-rows
+                  className="space-y-0.5 max-h-[45vh] overflow-y-auto custom-scrollbar"
+                  onMouseLeave={() => setHoveredType(null)}
+                >
                   {model.rows.length === 0 && (
                     <p className="text-xs text-ink-muted py-3 text-center">No connections on screen</p>
                   )}
@@ -176,12 +212,21 @@ export function ConnectionsPanel({
                         key={row.type}
                         data-connection-row={row.type}
                         title={`${def.label} — ${row.relationships.toLocaleString()} of the connections on screen carry this type. A connection carrying more than one type is counted in each of its types.`}
+                        tabIndex={0}
                         onMouseEnter={() => setHoveredType(row.type)}
                         onMouseLeave={() => setHoveredType(null)}
-                        onClick={() => setPinnedType((p) => (p === row.type ? null : row.type))}
+                        onFocus={() => setHoveredType(row.type)}
+                        onBlur={() => setHoveredType(null)}
+                        onClick={() => togglePin(row.type)}
+                        onKeyDown={(e) => {
+                          if (!ROW_KEYS.has(e.key)) return
+                          e.preventDefault()
+                          togglePin(row.type)
+                        }}
                         className={cn(
                           'group/row flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer transition-colors',
                           'hover:bg-black/5 dark:hover:bg-white/5',
+                          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                           isPinned && 'bg-accent-lineage/10 ring-1 ring-accent-lineage/30',
                         )}
                       >
@@ -189,7 +234,11 @@ export function ConnectionsPanel({
 
                         <span className="flex-1 min-w-0">
                           <span className="block text-xs font-medium text-ink truncate">{def.label}</span>
-                          <span className="block text-2xs text-ink-muted truncate">{def.description}</span>
+                          {def.description && (
+                            <span data-connection-description className="block text-2xs text-ink-muted truncate">
+                              {def.description}
+                            </span>
+                          )}
                         </span>
 
                         <button
@@ -213,8 +262,8 @@ export function ConnectionsPanel({
                           title={DIRECTION_TITLE}
                           className="flex-shrink-0 text-2xs text-ink-muted tabular-nums whitespace-nowrap min-w-[4.5rem] text-right"
                         >
-                          {`→ ${row.forward} · ← ${row.backward}`}
-                          {row.bidirectional > 0 ? ` · ⇄ ${row.bidirectional}` : ''}
+                          {`→ ${row.forward.toLocaleString()} · ← ${row.backward.toLocaleString()}`}
+                          {row.bidirectional > 0 ? ` · ⇄ ${row.bidirectional.toLocaleString()}` : ''}
                         </span>
 
                         <button
@@ -256,26 +305,33 @@ export function ConnectionsPanel({
                   })}
                 </div>
 
-                {showFooter && (
-                  <div className="mt-2 pt-2 border-t border-glass-border flex items-center justify-between gap-2">
-                    {hiddenCount > 0 ? (
-                      <button
-                        type="button"
-                        onClick={onShowAll}
-                        className="text-2xs font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
-                      >
-                        Show all
-                      </button>
-                    ) : (
-                      <span />
+                {(showFooter || model.rows.length > 0) && (
+                  <div className="mt-2 pt-2 border-t border-glass-border space-y-1">
+                    {showFooter && (
+                      <div className="flex items-center justify-between gap-2">
+                        {hiddenCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={onShowAll}
+                            className="text-2xs font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded"
+                          >
+                            Show all
+                          </button>
+                        ) : (
+                          <span />
+                        )}
+                        <span className="text-2xs text-ink-muted text-right">
+                          {model.untyped > 0 && (
+                            <span className="tabular-nums">{`+${model.untyped.toLocaleString()} with no type`}</span>
+                          )}
+                          {model.untyped > 0 && traceMode && <span> · </span>}
+                          {traceMode && <span>Applies to this trace only.</span>}
+                        </span>
+                      </div>
                     )}
-                    <span className="text-2xs text-ink-muted text-right">
-                      {model.untyped > 0 && (
-                        <span className="tabular-nums">{`+${model.untyped.toLocaleString()} with no type`}</span>
-                      )}
-                      {model.untyped > 0 && traceMode && <span> · </span>}
-                      {traceMode && <span>Applies to this trace only.</span>}
-                    </span>
+                    {model.rows.length > 0 && (
+                      <p className="text-[10px] text-ink-muted/60">{ROW_HINT}</p>
+                    )}
                   </div>
                 )}
               </>
