@@ -1450,6 +1450,10 @@ async def search_advanced(
     ``X-Search-Dropped-URNs`` response header so the FE can log /
     diagnose.
 
+    The search itself runs inside the per-(provider, graph) concurrency
+    slot, so a search-as-you-type keystroke storm sheds load with 429 +
+    Retry-After instead of pegging the graph's single Cypher thread.
+
     See ``backend/common/models/search.py`` for the full contract and
     ``docs/api/advanced-search.md`` for the AI-agent iterative-drill
     pattern.
@@ -1471,7 +1475,9 @@ async def search_advanced(
         branch_id=branchId,
     )
     try:
-        page, eff_scope = await svc.search(query)
+        page, eff_scope = await _bounded_compute(
+            engine, lambda: svc.search(query),
+        )()
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
