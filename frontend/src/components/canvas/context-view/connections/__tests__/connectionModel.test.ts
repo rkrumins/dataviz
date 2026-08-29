@@ -21,7 +21,7 @@ describe('buildConnectionModel', () => {
     const model = buildConnectionModel([
       B({ id: 'a', edgeCount: 2, types: ['ZETA'] }),
       B({ id: 'b', edgeCount: 5, types: ['ALPHA'] }),
-      B({ id: 'c', edgeCount: 2, types: ['ALPHA'] }), // ties with 'a' at relationships 4 vs... see below
+      B({ id: 'c', edgeCount: 2, types: ['ALPHA'] }),
     ])
     // ALPHA: bundles b (5) + c (2) = 7; ZETA: bundle a (2) = 2
     expect(model.rows.map((r) => r.type)).toEqual(['ALPHA', 'ZETA'])
