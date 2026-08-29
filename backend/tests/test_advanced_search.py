@@ -3124,7 +3124,11 @@ class TestAggregationAncestor:
         await execute_deep_search(prov, q)
         assert len(prov.calls) == 2
         hits_cypher = prov.calls[0][0]
-        assert "WITH n LIMIT 100 RETURN n" in hits_cypher
+        assert "WITH n LIMIT 100 RETURN n.`urn`" in hits_cypher
+        # ...and not the whole-node scan it replaced. Worth pinning
+        # separately: the projection begins "RETURN n.`urn`", so the old
+        # substring assertion stayed true and could no longer fail.
+        assert not hits_cypher.endswith("RETURN n")
         agg_cypher = prov.calls[1][0]
         assert "MATCH (anc)-[:CONTAINS*1..12]->(n)" in agg_cypher
         assert "LIMIT 100" not in agg_cypher
@@ -4836,7 +4840,15 @@ class TestUnattributedMatchFloor:
     def test_an_empty_needle_is_not_floored(self):
         """An empty needle matches every field trivially and scores
         nothing today; inferring a property match for it would invent a
-        hit out of an empty string."""
+        hit out of an empty string.
+
+        The needle guard is unreachable from a `target='any'` leaf and
+        this test does not exercise it: ``TextPredicate.value`` is
+        ``min_length=1``, so the only predicate that can carry an empty
+        needle is a PropertyPredicate — which ``_is_unattributable``
+        already excludes. What is pinned here is the outcome, from the
+        one direction the wire can reach it.
+        """
         from backend.app.providers.falkordb_deep_search import (
             _collect_text_leaves, _score_hit,
         )
@@ -4898,3 +4910,84 @@ class TestUnattributedMatchFloor:
         assert hit.matched_predicates == [0]
         assert hit.highlights[0].field == "property:layer"
         assert "metric" in hit.highlights[0].snippet
+
+
+class _CachingProjectionProvider(_ProjectionProvider):
+    """``_ProjectionProvider`` with the Redis the match-set cache needs."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._redis = _FakeRedis()
+        self._cache_ns = "h:1:g"
+
+
+class TestScanPageHydrationBudget:
+    """The scan path's twin of
+    ``TestMatchSetCache.test_the_node_fetch_runs_inside_the_request_budget``.
+
+    Page 1 ranks the whole candidate set and then hydrates one slice of
+    it. Those are two steps, and the pagination the first one computes
+    describes a page the second one may never deliver — so the cursor
+    must not be minted until the page exists. A next-cursor handed out
+    for a page the caller never received skips those rows for good: the
+    client asks for offset 10 and rows 0-9 are gone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_page_hydration_mints_no_cursor(self):
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(30)])
+
+        async def _slow(urns):
+            await asyncio.sleep(5)
+            return []
+
+        prov.get_nodes_batch = _slow
+        page = await execute_deep_search(
+            prov, _proj_query(pageSize=10, softDeadlineMs=200),
+        )
+        # The same shape a timed-out candidate scan yields.
+        assert page.deadline_exceeded is True
+        assert page.truncated is True
+        assert page.hits is None
+        assert page.cursor is None, (
+            "a cursor was minted for a page the caller never received — "
+            "following it would skip the rows this page owed them"
+        )
+        assert page.elapsed_ms < 2000
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_page_hydration_caches_no_match_set(self):
+        """A match set written here would freeze this truncation in for
+        the whole TTL."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _CachingProjectionProvider(
+            nodes=[_proj_node(i) for i in range(30)],
+        )
+
+        async def _slow(urns):
+            await asyncio.sleep(5)
+            return []
+
+        prov.get_nodes_batch = _slow
+        page = await execute_deep_search(
+            prov, _proj_query(pageSize=10, softDeadlineMs=200),
+        )
+        assert page.deadline_exceeded is True
+        assert prov._redis.set_calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_page_that_hydrates_in_time_still_pages(self):
+        """The guard must not cost the ordinary path its cursor."""
+        from backend.app.providers.falkordb_deep_search import (
+            execute_deep_search,
+        )
+        prov = _ProjectionProvider(nodes=[_proj_node(i) for i in range(30)])
+        page = await execute_deep_search(prov, _proj_query(pageSize=10))
+        assert page.deadline_exceeded is False
+        assert len(page.hits) == 10
+        assert decode_cursor(page.cursor)["offset"] == 10

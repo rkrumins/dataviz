@@ -1874,6 +1874,7 @@
             }
           ],
           "default": null,
+          "description": "Ordered by server relevance; do not re-sort by `score`. Ranking runs over the whole candidate set before this page is sliced from it, so `score` is a per-hit annotation, not the key the list is in.",
           "title": "Hits"
         },
         "paths": {

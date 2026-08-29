@@ -1471,7 +1471,8 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
 
         {
           "cypher": str,        # full candidate cypher (ends WITH n)
-          "hits_cypher": str,   # candidate cypher + " RETURN n"
+          "hits_cypher": str,   # candidate cypher + the scan's
+                                # projected RETURN clause
           "uncapped_cypher": str,  # same prefix without the LIMIT — what
                                    # the exact-total count runs on
           "params": dict,       # bound parameters that would be sent
@@ -2336,13 +2337,28 @@ async def execute_deep_search(
                     name_key=projection.name_key,
                 )
                 (
-                    page_urns, hits_offset_after, hits_total_sorted,
-                    sorted_urns,
+                    page_urns, page_offset_after, page_total_sorted,
+                    page_sorted_urns,
                 ) = _rank_candidate_rows(candidates, query)
                 # The page — and only the page — gets real nodes.
+                #
+                # Ranking and hydration are two steps, and the pagination
+                # the first one computes describes a page the second one
+                # may not deliver: ``get_nodes_batch`` carries its own 15s
+                # children-query timeout, so it is held to what is left of
+                # the request's budget and can time out. Publishing the
+                # offsets before that returned left a next-cursor pointing
+                # PAST a page the caller never got — follow it and the rows
+                # this page owed them are skipped for good. So they are
+                # assigned only once the hits are in hand, which is how
+                # the cached path has always behaved (its tuple unpack
+                # simply never runs when the fetch raises).
                 hits = await _hydrate_hits(
                     provider, query, page_urns, timeout_s=remaining(),
                 )
+                hits_offset_after = page_offset_after
+                hits_total_sorted = page_total_sorted
+                sorted_urns = page_sorted_urns
                 if not truncated:
                     # The scan returned every match, so the exact total is
                     # already in hand — no second query.
@@ -2425,8 +2441,12 @@ async def execute_deep_search(
                 # ``_hits_branch`` has already published its page through
                 # the enclosing scope, so re-raising here lands in the
                 # handler below with the hits intact — the degrade this
-                # path has always had (buckets are forfeit, a page never
-                # is).
+                # path has always had. What that buys is one-directional:
+                # an aggregation can never cost the caller a page that is
+                # already built. It does NOT mean a page always survives —
+                # the hits branch has its own failures (the scan, the page
+                # hydration), and those forfeit the page, and the cursor
+                # with it.
                 if isinstance(hits_outcome, BaseException):
                     raise hits_outcome
                 if isinstance(aggs_outcome, BaseException):
@@ -2956,8 +2976,18 @@ _SNIPPET_PAD = 40
 
 # What a ``target='any'`` leaf earns on a projected row that matches none
 # of the projected columns: the tier a property value is worth when the
-# needle merely sits inside it. The floor of the range a real property hit
-# spans (10 or 20), so the inference can only ever under-credit.
+# needle merely sits inside it — the floor of the range a real property
+# hit spans (10 or 20).
+#
+# "Under-credit" is the ordinary case, not a guarantee. The scan proves
+# the row matched ``searchableText``, and two things can put a needle
+# there that no single property holds: the blob joins its parts, so a
+# needle spanning a join boundary matches it and nothing else; and the
+# blob is lower-cased, so a ``case_sensitive`` leaf can match it while
+# the property it came from differs in case. Either way the row is
+# credited 10 for a property hit that is not there. Both are bounded to
+# the smallest non-zero score in the system, and neither reaches the
+# wire — the page is re-scored from its hydrated nodes.
 _UNATTRIBUTED_MATCH_SCORE = _TIER_SUBSTRING * _FIELD_WEIGHTS["property"]
 
 
@@ -2970,6 +3000,8 @@ def _is_unattributable(pred) -> bool:
     unmatched one really did not match.
     """
     return (isinstance(pred, TextPredicate) and pred.target == "any")
+
+
 _ELLIPSIS = "…"
 
 # Property ops that read as text. Everything else (ordering, ranges,
@@ -3202,10 +3234,11 @@ def _score_hit(
     the needle can only be living in a property this row didn't bring
     back, and the leaf is credited the substring-tier property score
     (``_UNATTRIBUTED_MATCH_SCORE``) rather than being read as a
-    non-match. A property hit that would have earned the word-boundary
-    tier is scored at the substring tier instead; that is the whole of
-    the difference from scoring the full node, and it lands in the tail
-    where the two nodes were adjacent anyway. Provenance never rests on
+    non-match. Usually that under-credits — a property hit worth the
+    word-boundary tier is scored at the substring tier — but not always:
+    see ``_UNATTRIBUTED_MATCH_SCORE`` for the two ways the blob can hold
+    a needle no single property does. Either way the difference is the
+    smallest non-zero score in the system, and provenance never rests on
     the inference: the page is re-scored from its hydrated nodes.
     """
     score = 0.0
@@ -3375,6 +3408,13 @@ def _rows_to_candidates(
 
     candidates: List[_CandidateRow] = []
     for row in rows:
+        # ``identity_key`` mirrors ``_node_from_props``, but it cannot
+        # actually fire here: the page is hydrated by ``get_nodes_batch``,
+        # which matches on ``n.urn``, so a graph whose nodes carry only an
+        # alternative identity property would rank rows it could never
+        # fetch. An id-keyed source is not a supported configuration for
+        # deep search; the fallback is kept only so this reader and node
+        # hydration cannot disagree about what identity means.
         urn = cell(row, "urn") or cell(row, identity_key)
         if not urn:
             continue

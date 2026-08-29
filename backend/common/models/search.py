@@ -893,7 +893,13 @@ class SearchResultPage(_Base):
     """Provider + service response. One inner list in ``aggregates`` per
     requested AggregationSpec."""
     aggregates: Optional[List[List[SearchAggregateBucket]]] = None
-    hits: Optional[List[SearchHit]] = None
+    hits: Optional[List[SearchHit]] = Field(
+        None,
+        description="Ordered by server relevance; do not re-sort by "
+                    "`score`. Ranking runs over the whole candidate set "
+                    "before this page is sliced from it, so `score` is a "
+                    "per-hit annotation, not the key the list is in.",
+    )
     paths: Optional[List[PathHit]] = Field(
         None,
         description="Populated when the request's predicate contains a "

@@ -560,6 +560,11 @@ class AdvancedSearchService:
         a search whose source we can name are compared; anything less is
         an unknown, and a guard that guesses is worse than none.
         """
+        # Scope note: this rejects a mismatch under EVERY scope mode,
+        # including ``data_source``. That is right today — the roots
+        # still come from the view — but a future source switcher, where
+        # a view of A is deliberately pointed at B to compare the two,
+        # would be legitimate and would need this gated on scope mode.
         view_ds = eff_scope.view_data_source_id
         if not view_ds:
             return
