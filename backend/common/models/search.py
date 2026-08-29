@@ -446,6 +446,7 @@ GroupPredicate.model_rebuild()
 AggregationKind = Literal[
     "ancestorType",   # group by the closest ancestor whose type ∈ ancestor_entity_types
     "ancestorLevel",  # group by the ancestor at a given hierarchy depth from scope root
+    "ancestor",       # credit EVERY containment ancestor of every match, uncapped
     "parent",         # group by direct parent (containment edge)
     "tag",            # group by tag value
     "entityType",     # group by the hit's own entity type
@@ -477,7 +478,12 @@ class AggregationSpec(_Base):
                     "property whose values become the bucket keys "
                     "(e.g. 'layer' → one bucket per layer value).",
     )
-    max_buckets: int = Field(50, alias="maxBuckets", ge=1, le=500)
+    max_buckets: int = Field(
+        50, alias="maxBuckets", ge=1, le=20000,
+        description="Bucket ceiling. The headroom above a facet-sized "
+                    "list is for by='ancestor', which needs one bucket "
+                    "per container the canvas can collapse.",
+    )
     sample_hits_per_bucket: int = Field(
         3, alias="sampleHitsPerBucket", ge=0, le=20,
         description="Tiny preview list shown next to each bucket — for the UI's "
@@ -782,6 +788,13 @@ class SearchAggregateBucket(_Base):
     ancestor_entity_type: str = Field(alias="ancestorEntityType")
     ancestor_depth_from_scope_root: int = Field(alias="ancestorDepthFromScopeRoot")
     match_count: int = Field(alias="matchCount")
+    type_counts: Optional[Dict[str, int]] = Field(
+        None, alias="typeCounts",
+        description="Per-entity-type breakdown of ``match_count`` — e.g. "
+                    "``{'Column': 12, 'Table': 3}``. Populated by "
+                    "by='ancestor'; None for the kinds that don't "
+                    "compute one.",
+    )
     sample_hits: List[SearchHit] = Field(
         default_factory=list, alias="sampleHits",
     )

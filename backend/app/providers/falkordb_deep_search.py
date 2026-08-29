@@ -2257,11 +2257,16 @@ async def _run_aggregation(
             provider, cand_cypher, cand_params, spec,
             query=query, timeout_s=timeout_s,
         )
+    if spec.by == "ancestor":
+        return await _run_aggregation_ancestor(
+            provider, uncapped_cypher, cand_params, spec,
+            query=query, timeout_s=timeout_s,
+        )
     raise CompileError(
         f"aggregation by={spec.by!r} is not yet supported in v1. "
         "Use 'ancestorType', 'entityType', 'property', 'layer', "
-        "'parent', or 'ancestorLevel'. ('tag' deferred until tags are a "
-        "native array field.)"
+        "'parent', 'ancestorLevel', or 'ancestor'. ('tag' deferred "
+        "until tags are a native array field.)"
     )
 
 
@@ -2484,6 +2489,69 @@ async def _run_aggregation_ancestor_level(
         agg_cypher, params=cand_params, timeout=timeout_s,
     )
     return _rows_to_buckets(provider, result.result_set or [])
+
+
+async def _run_aggregation_ancestor(
+    provider, uncapped_cypher, cand_params, spec, *, query, timeout_s,
+):
+    """Credit EVERY containment ancestor of every match, exactly.
+
+    ``ancestorType`` credits only ancestors whose type the caller named
+    and ``parent`` only the immediate one; a collapsed container on the
+    canvas has to show the count for ITSELF, whatever its type and
+    however deep below it the match sits.
+
+    This is also the one kind that pivots on ``uncapped_cypher``: "N
+    matches inside" is a number the user counts against, and the
+    candidate cap would silently turn it into a lower bound.
+
+    Two-stage aggregation — per (ancestor, entity type) first, then the
+    per-ancestor roll-up — so ``max_buckets`` bounds ancestors rather
+    than (ancestor, type) rows. There is no samples column, so
+    ``sample_hits_per_bucket`` is ignored.
+
+    Empty containment-edge-type set short-circuits (consistent with
+    ancestorType / parent).
+    """
+    try:
+        ctypes = list(provider._get_containment_edge_types())
+    except Exception:
+        ctypes = []
+    if not ctypes:
+        logger.warning(
+            "deep_search: ancestor aggregation requested but containment "
+            "edge types are not configured; returning empty buckets",
+        )
+        return []
+    rel = "|".join(_sanitize_label(t) for t in ctypes)
+    max_depth = query.scope.max_depth or 12
+
+    agg_cypher = (
+        uncapped_cypher + " "
+        f"MATCH (anc)-[:{rel}*1..{int(max_depth)}]->(n) "
+        "WITH anc, labels(n)[0] AS et, count(DISTINCT n) AS c "
+        "WITH anc, sum(c) AS mc, collect([et, c]) AS breakdown "
+        "RETURN anc.urn AS urn, anc.displayName AS name, "
+        "labels(anc)[0] AS etype, mc, breakdown "
+        f"ORDER BY mc DESC LIMIT {int(spec.max_buckets)}"
+    )
+    result = await provider._ro_query(
+        agg_cypher, params=cand_params, timeout=timeout_s,
+    )
+    buckets: List[SearchAggregateBucket] = []
+    for row in result.result_set or []:
+        urn, name, etype, mc, breakdown = (
+            row[0], row[1], row[2], row[3], row[4],
+        )
+        buckets.append(SearchAggregateBucket(
+            ancestor_urn=urn or "",
+            ancestor_display_name=name or "",
+            ancestor_entity_type=etype or "",
+            ancestor_depth_from_scope_root=0,  # v1: not computed
+            match_count=int(mc),
+            type_counts={et: int(c) for et, c in (breakdown or [])},
+        ))
+    return buckets
 
 
 def _rows_to_buckets(provider, rows) -> List[SearchAggregateBucket]:

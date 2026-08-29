@@ -2909,3 +2909,184 @@ class TestExactTotalCount:
         explained = explain_deep_search(_CountingProvider(), _hits_query())
         assert "LIMIT 100" in explained["cypher"]
         assert "LIMIT" not in explained["uncapped_cypher"]
+
+
+# ---------------------------------------------------------------------------
+# AggregationKind 'ancestor' — exact per-ancestor counts, uncapped
+# ---------------------------------------------------------------------------
+
+class _AncestorAggProvider:
+    """Capturing provider for the ``ancestor`` aggregation.
+
+    Records every query and answers it with ``rows``. ``containment=()``
+    reproduces a graph whose ontology declares no containment edges.
+    Deliberately has no ``_extract_node_from_result``: this kind returns
+    no samples column, so reaching for one is a bug.
+    """
+
+    def __init__(self, rows=None, containment=("CONTAINS",)):
+        self.calls = []
+        self._rows = list(rows or [])
+        self._containment = list(containment)
+
+    async def _ro_query(self, cypher, *, params=None, timeout=None):
+        self.calls.append((cypher, params, timeout))
+        return _Rows(self._rows)
+
+    def _get_containment_edge_types(self):
+        return self._containment
+
+
+class _TwoFacetProvider(_CountingProvider):
+    """Answers the ``entityType`` and ``ancestor`` pivots with rows that
+    can be told apart, so the response's facet order is observable."""
+
+    async def _ro_query(self, cypher, *, params=None, timeout=None):
+        self.calls.append((cypher, params, timeout))
+        if "collect([et, c]) AS breakdown" in cypher:
+            return _Rows([["urn:d1", "Domain 1", "Domain", 7, [["Column", 7]]]])
+        if "labels(n)[0] AS etype" in cypher:
+            return _Rows([["", "Column", "Column", 5, []]])
+        return _Rows([])
+
+
+def _ancestor_spec(**kwargs) -> AggregationSpec:
+    return AggregationSpec(
+        by="ancestor", maxBuckets=20000, sampleHitsPerBucket=0, **kwargs,
+    )
+
+
+class TestAggregationAncestor:
+    """A collapsed container says "N matches inside". That N has to
+    credit the container for EVERY match below it, at any depth, and it
+    has to be the real number rather than what fit under the candidate
+    cap — so this kind alone pivots on the uncapped candidate prefix.
+    """
+
+    UNCAPPED = "MATCH (n) WHERE n.displayName CONTAINS $p0 WITH n"
+
+    def _query(self) -> SearchQuery:
+        return SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+        )
+
+    def test_spec_accepts_the_kind_and_the_wider_bucket_bound(self):
+        spec = _ancestor_spec()
+        assert spec.by == "ancestor"
+        assert spec.max_buckets == 20000
+
+    def test_bucket_serialises_type_counts_as_typeCounts(self):
+        from backend.common.models.search import SearchAggregateBucket
+        bucket = SearchAggregateBucket(
+            ancestorUrn="urn:t1", ancestorDisplayName="T1",
+            ancestorEntityType="Table", ancestorDepthFromScopeRoot=0,
+            matchCount=3, typeCounts={"Column": 2, "View": 1},
+        )
+        assert bucket.model_dump(by_alias=True)["typeCounts"] == {
+            "Column": 2, "View": 1,
+        }
+
+    @pytest.mark.asyncio
+    async def test_pivots_on_the_uncapped_cypher_in_two_stages(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_ancestor,
+        )
+        prov = _AncestorAggProvider()
+        await _run_aggregation_ancestor(
+            prov, self.UNCAPPED, {"p0": "customer"}, _ancestor_spec(),
+            query=self._query(), timeout_s=3.0,
+        )
+        assert len(prov.calls) == 1
+        cypher, params, timeout = prov.calls[0]
+        assert cypher.startswith(self.UNCAPPED)
+        assert "MATCH (anc)-[:CONTAINS*1..12]->(n)" in cypher
+        # Two stages: per-(ancestor, type) counts first, then the
+        # per-ancestor roll-up — so the bucket LIMIT bounds ANCESTORS
+        # rather than (ancestor, type) rows.
+        assert "labels(n)[0] AS et, count(DISTINCT n) AS c" in cypher
+        assert "sum(c) AS mc" in cypher
+        assert "collect([et, c]) AS breakdown" in cypher
+        assert "ORDER BY mc DESC LIMIT 20000" in cypher
+        # The candidate cap would silently undercount "N matches
+        # inside" — the ONLY LIMIT here is the bucket one.
+        assert cypher.count("LIMIT") == 1
+        assert params == {"p0": "customer"}
+        assert timeout == 3.0
+
+    @pytest.mark.asyncio
+    async def test_rows_map_to_match_count_and_type_counts(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_ancestor,
+        )
+        prov = _AncestorAggProvider(
+            rows=[["urn:t1", "T1", "Table", 3, [["Column", 2], ["View", 1]]]],
+        )
+        buckets = await _run_aggregation_ancestor(
+            prov, self.UNCAPPED, {}, _ancestor_spec(),
+            query=self._query(), timeout_s=3.0,
+        )
+        assert len(buckets) == 1
+        bucket = buckets[0]
+        assert bucket.ancestor_urn == "urn:t1"
+        assert bucket.ancestor_display_name == "T1"
+        assert bucket.ancestor_entity_type == "Table"
+        assert bucket.ancestor_depth_from_scope_root == 0
+        assert bucket.match_count == 3
+        assert bucket.type_counts == {"Column": 2, "View": 1}
+        # No samples column — sampleHitsPerBucket is ignored by this kind.
+        assert bucket.sample_hits == []
+
+    @pytest.mark.asyncio
+    async def test_no_containment_edge_types_returns_no_buckets(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _run_aggregation_ancestor,
+        )
+        prov = _AncestorAggProvider(containment=())
+        buckets = await _run_aggregation_ancestor(
+            prov, self.UNCAPPED, {}, _ancestor_spec(),
+            query=self._query(), timeout_s=3.0,
+        )
+        assert buckets == []
+        assert prov.calls == [], "a flat graph must cost zero queries"
+
+    @pytest.mark.asyncio
+    async def test_execute_aggregates_uncapped_while_hits_stay_capped(self):
+        q = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                results="both",
+                aggregations=[_ancestor_spec()],
+                candidateCap=100,
+            ),
+        )
+        prov = _CountingProvider(hit_rows=3)
+        await execute_deep_search(prov, q)
+        assert len(prov.calls) == 2
+        hits_cypher = prov.calls[0][0]
+        assert "WITH n LIMIT 100 RETURN n" in hits_cypher
+        agg_cypher = prov.calls[1][0]
+        assert "MATCH (anc)-[:CONTAINS*1..12]->(n)" in agg_cypher
+        assert "LIMIT 100" not in agg_cypher
+
+    @pytest.mark.asyncio
+    async def test_facet_order_follows_the_request_spec_order(self):
+        """``result.aggregates[i]`` is ``options.aggregations[i]`` — the
+        FE indexes into it positionally, so a kind that reorders its
+        facet hands every bucket to the wrong reader."""
+        q = SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(
+                results="both",
+                aggregations=[AggregationSpec(by="entityType"), _ancestor_spec()],
+                candidateCap=100,
+            ),
+        )
+        page = await execute_deep_search(_TwoFacetProvider(), q)
+        assert page.aggregates is not None and len(page.aggregates) == 2
+        assert page.aggregates[0][0].ancestor_entity_type == "Column"
+        assert page.aggregates[0][0].type_counts is None
+        assert page.aggregates[1][0].ancestor_urn == "urn:d1"
+        assert page.aggregates[1][0].type_counts == {"Column": 7}
