@@ -1,10 +1,18 @@
 """Handler-direct tests for ``POST /search/advanced``.
 
-The bulkhead is a route-layer concern no service test can reach: the
-compute must run inside the per-(provider, graph) concurrency slot, so a
-keystroke storm from search-as-you-type sheds load (429 + Retry-After)
-instead of pegging FalkorDB's single Cypher thread — the same treatment
-every other heavy graph route already gets from ``_bounded_compute``.
+Two route-layer concerns no service test can reach:
+
+1. **Bulkhead.** The compute must run inside the per-(provider, graph)
+   concurrency slot, so a keystroke storm from search-as-you-type sheds
+   load (429 + Retry-After) instead of pegging FalkorDB's single Cypher
+   thread — the same treatment every other heavy graph route already
+   gets from ``_bounded_compute``.
+
+2. **Capability guard.** The view scope IS the RBAC boundary for a
+   share-link identity. ``scopeMode='data_source'`` drops the view's
+   root clamp outright, and ``scopeMode='visible'``'s only clamp is the
+   CLIENT-supplied URN list — either one lets a capability identity read
+   outside the view it was granted.
 
 The handler is called directly (no TestClient), matching the project's
 existing route-test style — see ``test_search_schema_endpoint.py``.
@@ -15,6 +23,7 @@ import asyncio
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 from starlette.responses import Response
 
 from backend.app.api.v1.endpoints import graph as graph_mod
@@ -22,10 +31,14 @@ from backend.app.services.view_scope import EffectiveViewScope
 from backend.common.models.search import SearchQuery, SearchResultPage
 
 
-def _query() -> SearchQuery:
+def _query(scope_mode: str = "view") -> SearchQuery:
     return SearchQuery.model_validate({
         "predicate": {"kind": "text", "value": "orders"},
-        "scope": {"viewId": "view-1", "rootUrns": ["urn:root"]},
+        "scope": {
+            "viewId": "view-1",
+            "scopeMode": scope_mode,
+            "rootUrns": ["urn:root"],
+        },
     })
 
 
@@ -64,6 +77,13 @@ class _FakeEngine:
 
     def __init__(self, *, cache_key=("prov-1", "graph-1")) -> None:
         self.provider = _Provider(cache_key=cache_key)
+
+
+def _request(*, view_capability: str | None = None) -> Request:
+    state: dict = {}
+    if view_capability is not None:
+        state["view_capability"] = view_capability
+    return Request({"type": "http", "headers": [], "state": state})
 
 
 @pytest.fixture
@@ -109,12 +129,17 @@ def slot(monkeypatch):
     return {"sem": sem, "acquisitions": acquisitions}
 
 
+# ---------------------------------------------------------------------------
+# Bulkhead
+# ---------------------------------------------------------------------------
+
 async def test_search_runs_inside_the_provider_slot(slot, patched_search):
     """The search compute is wrapped in the per-(provider, graph) slot:
     acquired once with the provider's cache key, released on the way
     out."""
     await graph_mod.search_advanced(
         query=_query(),
+        request=_request(),
         response=Response(),
         ws_id="ws-1",
         engine=_FakeEngine(),
@@ -141,6 +166,7 @@ async def test_slot_is_held_while_the_search_runs(slot, monkeypatch):
 
     await graph_mod.search_advanced(
         query=_query(),
+        request=_request(),
         response=Response(),
         ws_id="ws-1",
         engine=_FakeEngine(),
@@ -165,6 +191,7 @@ async def test_slot_released_when_the_search_raises(slot, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await graph_mod.search_advanced(
             query=_query(),
+            request=_request(),
             response=Response(),
             ws_id="ws-1",
             engine=_FakeEngine(),
@@ -181,6 +208,7 @@ async def test_provider_without_cache_key_is_unbounded(slot, patched_search):
     degrade to unbounded rather than borrowing another graph's slot."""
     page = await graph_mod.search_advanced(
         query=_query(),
+        request=_request(),
         response=Response(),
         ws_id="ws-1",
         engine=_FakeEngine(cache_key=None),
@@ -190,3 +218,188 @@ async def test_provider_without_cache_key_is_unbounded(slot, patched_search):
     assert slot["acquisitions"] == []
     assert page is not None
     assert len(patched_search) == 1
+
+
+# ---------------------------------------------------------------------------
+# Capability guard
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("scope_mode", ["data_source", "visible"])
+async def test_capability_identity_cannot_leave_its_view(
+    scope_mode, slot, patched_search,
+):
+    """A share-link identity is authorised for ONE view. ``data_source``
+    drops the view clamp and ``visible`` clamps only to client-supplied
+    URNs — both are refused, before any provider work."""
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_advanced(
+            query=_query(scope_mode),
+            request=_request(view_capability="view-1"),
+            response=Response(),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "This link can only search inside its view."
+    assert patched_search == [], "must refuse before running the search"
+    assert slot["acquisitions"] == []
+
+
+async def test_capability_identity_may_search_its_view(slot, patched_search):
+    """``view`` mode is the capability's own scope — always allowed."""
+    page = await graph_mod.search_advanced(
+        query=_query("view"),
+        request=_request(view_capability="view-1"),
+        response=Response(),
+        ws_id="ws-1",
+        engine=_FakeEngine(),
+        session=None,
+    )
+
+    assert page is not None
+    assert len(patched_search) == 1
+
+
+@pytest.mark.parametrize("scope_mode", ["data_source", "visible", "view"])
+async def test_full_permission_user_is_unaffected(
+    scope_mode, slot, patched_search,
+):
+    """No capability marker on the request → membership identity → every
+    scope mode stays available."""
+    page = await graph_mod.search_advanced(
+        query=_query(scope_mode),
+        request=_request(),
+        response=Response(),
+        ws_id="ws-1",
+        engine=_FakeEngine(),
+        session=None,
+    )
+
+    assert page is not None
+    assert len(patched_search) == 1
+
+
+# ---------------------------------------------------------------------------
+# The same guard on /search/explain
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("scope_mode", ["data_source", "visible"])
+async def test_explain_applies_the_same_capability_guard(
+    scope_mode, monkeypatch,
+):
+    """``/search/explain`` returns the compiled Cypher plus the resolved
+    scope — the same read boundary, so the same refusal."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    calls: list = []
+
+    async def _fake_explain(self, query):
+        calls.append(query)
+        return {}
+
+    monkeypatch.setattr(AdvancedSearchService, "explain", _fake_explain)
+
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_explain(
+            query=_query(scope_mode),
+            request=_request(view_capability="view-1"),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 403
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# A provider that cannot search says so as a 501
+# ---------------------------------------------------------------------------
+
+REFUSAL = (
+    "Search isn't available while the published graph is catching up — "
+    "try again in a moment."
+)
+
+
+async def test_provider_refusal_becomes_the_501_body(slot, monkeypatch):
+    """The branch/stale-main reader refuses with product copy meant for
+    the caller. The route must pass it through — a message the user
+    never sees is not a user-facing message."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    async def _refuse(self, query):
+        raise NotImplementedError(REFUSAL)
+
+    monkeypatch.setattr(AdvancedSearchService, "search", _refuse)
+
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_advanced(
+            query=_query(),
+            request=_request(),
+            response=Response(),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 501
+    assert exc.value.detail == REFUSAL
+
+
+async def test_bare_refusal_keeps_the_provider_fallback(slot, monkeypatch):
+    """A provider that simply has no deep-search implementation raises a
+    bare NotImplementedError and still gets the developer-facing
+    fallback naming it — that diagnostic is not lost."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    async def _refuse(self, query):
+        raise NotImplementedError
+
+    monkeypatch.setattr(AdvancedSearchService, "search", _refuse)
+
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_advanced(
+            query=_query(),
+            request=_request(),
+            response=Response(),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 501
+    assert "_Provider" in exc.value.detail
+
+
+async def test_explain_maps_a_refusal_to_501(monkeypatch):
+    """``/search/explain`` had no NotImplementedError arm at all, so the
+    same refusal escaped as a 500 — the exact failure mode this change
+    removes from ``/search/advanced``."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    async def _refuse(self, query):
+        raise NotImplementedError(REFUSAL)
+
+    monkeypatch.setattr(AdvancedSearchService, "explain", _refuse)
+
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_explain(
+            query=_query(),
+            request=_request(),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 501
+    assert exc.value.detail == REFUSAL

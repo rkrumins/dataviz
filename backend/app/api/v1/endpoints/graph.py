@@ -1419,12 +1419,56 @@ def _map_validation_error(detail: str) -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
 
 
+def _map_not_implemented(
+    engine: ContextEngine, exc: NotImplementedError,
+) -> HTTPException:
+    """Map a provider's deep-search refusal to 501.
+
+    A provider that refuses WITH a message means it for the caller — the
+    branch/stale-main reader's "the published graph is catching up" is
+    product copy, and swallowing it would leave the user reading about
+    FalkorDB. A bare ``NotImplementedError`` (a provider that simply has
+    no deep-search implementation) keeps the developer-facing fallback
+    naming the provider.
+    """
+    return HTTPException(
+        status_code=501,
+        detail=str(exc) or (
+            f"deep_search not implemented on the active provider "
+            f"({type(engine.provider).__name__}). Only FalkorDB is "
+            f"supported in this workstream."
+        ),
+    )
+
+
+def _guard_capability_scope(request: Request, query: SearchQuery) -> None:
+    """Keep a share-link identity inside the view it was granted.
+
+    ``capability_gate`` stamps ``request.state.view_capability`` when the
+    caller reached this route through a view capability rather than
+    ``workspace:datasource:read`` membership. For that identity the view
+    IS the RBAC boundary, and two scope modes escape it: ``data_source``
+    drops the view's root clamp outright, and ``visible``'s only clamp is
+    the CLIENT-supplied ``visibleUrns`` list. ``view`` mode resolves
+    against the view's own authorised roots, so it stays open. Membership
+    callers are unaffected.
+    """
+    if not getattr(request.state, "view_capability", None):
+        return
+    if query.scope.scope_mode in ("data_source", "visible"):
+        raise HTTPException(
+            status_code=403,
+            detail="This link can only search inside its view.",
+        )
+
+
 @router.post(
     "/search/advanced",
     response_model_by_alias=True,
 )
 async def search_advanced(
     query: SearchQuery,
+    request: Request,
     response: Response,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
@@ -1463,6 +1507,7 @@ async def search_advanced(
             status_code=400,
             detail="workspace_id is required (path param ws_id)",
         )
+    _guard_capability_scope(request, query)
     # Lazy imports keep this route free of overhead when feature isn't used.
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
@@ -1481,14 +1526,7 @@ async def search_advanced(
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                f"deep_search not implemented on the active provider "
-                f"({type(engine.provider).__name__}). Only FalkorDB is "
-                f"supported in this workstream."
-            ),
-        ) from exc
+        raise _map_not_implemented(engine, exc) from exc
 
     if eff_scope.dropped_urns:
         response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
@@ -1499,6 +1537,7 @@ async def search_advanced(
 @router.post("/search/explain")
 async def search_explain(
     query: SearchQuery,
+    request: Request,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
@@ -1524,6 +1563,7 @@ async def search_explain(
             status_code=400,
             detail="workspace_id is required (path param ws_id)",
         )
+    _guard_capability_scope(request, query)
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
@@ -1538,6 +1578,10 @@ async def search_explain(
         return await svc.explain(query)
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        # Same refusal as search_advanced's — a draft over a stale main
+        # reaches this route too, and without this arm it escaped as 500.
+        raise _map_not_implemented(engine, exc) from exc
 
 
 @router.get("/search/discover")
