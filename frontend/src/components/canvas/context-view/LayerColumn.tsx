@@ -1262,7 +1262,7 @@ export const LayerColumn = React.memo(function LayerColumn({
             onResizeLayer?.(layer.id, null)
           }}
           title={`${customWidth !== null ? 'Your personal width' : "This view's authored width"} (${effectiveWidth}px). Click to reset to the default — or double-click the drag handle on the column edge.`}
-          className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 backdrop-blur-sm border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
+          className="absolute top-[52px] right-1.5 z-30 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold tracking-wide text-ink-muted/80 hover:text-ink bg-canvas-elevated/85 border border-white/10 shadow-sm opacity-0 group-hover/column:opacity-100 transition-opacity"
         >
           <LucideIcons.RotateCcw className="w-2.5 h-2.5" />
           Reset width · {effectiveWidth}px
@@ -1276,14 +1276,17 @@ export const LayerColumn = React.memo(function LayerColumn({
           digit count or icon size. */}
       <div
         className={cn(
-          "sticky top-0 z-10 backdrop-blur-xl border-b cursor-pointer transition-all duration-200",
+          "sticky top-0 z-10 border-b cursor-pointer transition-all duration-200",
           isCollapsed ? "flex-1 px-2 py-4" : "flex-shrink-0 px-4 py-3",
           isDragOver
             ? "border-white/30"
             : "border-white/[0.08] dark:border-white/[0.05]"
         )}
         style={{
-          background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%)`,
+          // Tint over an opaque elevated base: legibility over the rows that
+          // scroll beneath comes from opacity, not a blurred backdrop (a sticky
+          // blur surface inside a scroller ghosts as white strips on rows).
+          background: `linear-gradient(135deg, ${layer.color}12 0%, ${layer.color}05 100%), var(--nx-bg-elevated)`,
           boxShadow: isDragOver ? `inset 0 0 0 2px ${layer.color}80, 0 0 20px ${layer.color}20` : undefined,
         }}
         onClick={() => isCollapsed && setIsCollapsed(false)}
@@ -1319,7 +1322,7 @@ export const LayerColumn = React.memo(function LayerColumn({
             className="absolute inset-0 flex items-center justify-center rounded-sm pointer-events-none"
             style={{ backgroundColor: `${layer.color}15` }}
           >
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/40 border border-white/20 backdrop-blur-sm">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-black/40 border border-white/20">
               <LucideIcons.MoveRight className="w-3.5 h-3.5" style={{ color: layer.color }} />
               <span className="text-xs font-medium" style={{ color: layer.color }}>
                 {dragKind === 'layer' ? 'Drop to reorder here' : `Move to ${layer.name}`}
@@ -1461,7 +1464,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     initial={{ opacity: 0, scale: 0.92 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.92 }}
-                    className="flex items-center gap-1.5 px-2 py-1 rounded-full backdrop-blur-sm border"
+                    className="flex items-center gap-1.5 px-2 py-1 rounded-full border"
                     style={{
                       backgroundColor: `${layer.color}1a`,
                       borderColor: `${layer.color}40`,
@@ -1473,7 +1476,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   </motion.div>
                 ) : (
                   <div
-                    className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] backdrop-blur-sm border border-white/[0.08]"
+                    className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] border border-white/[0.08]"
                     title={isTracing
                       ? onLineageLabel
                       : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${totalCount.toLocaleString()} loaded in this layer (collapsed children included — expand rows to reveal them)`}
@@ -1679,8 +1682,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                     type="button"
                     data-canvas-interactive
                     onClick={() => scrollToFlatIndex(0, 'start')}
-                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
-                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                    className="pointer-events-auto absolute top-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, background: `linear-gradient(${layer.color}14, ${layer.color}14), var(--nx-bg-elevated)` }}
                   >
                     <LucideIcons.ChevronUp className="w-3 h-3" />
                     {overflowCounts.above > 0 && (
@@ -1748,8 +1751,8 @@ export const LayerColumn = React.memo(function LayerColumn({
                     type="button"
                     data-canvas-interactive
                     onClick={() => scrollToFlatIndex(flatTree.length - 1, 'end')}
-                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold backdrop-blur-sm border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
-                    style={{ color: layer.color, backgroundColor: `${layer.color}14` }}
+                    className="pointer-events-auto absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-[3px] rounded-full text-[10.5px] font-semibold border border-black/10 dark:border-white/10 shadow-sm hover:scale-105 active:scale-95 transition-transform whitespace-nowrap"
+                    style={{ color: layer.color, background: `linear-gradient(${layer.color}14, ${layer.color}14), var(--nx-bg-elevated)` }}
                   >
                     <LucideIcons.ChevronDown className="w-3 h-3" />
                     {overflowCounts.below > 0 && (
@@ -1790,7 +1793,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyReveal?.(p.nodeId) }}
                   title={`${proxyLabel(p.nodeId)} — off-screen ${p.direction === 'up' ? 'above' : 'below'}. Click to scroll it into view.`}
-                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
+                  className="pointer-events-auto w-full flex items-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/95 border border-black/10 dark:border-white/10 shadow-md text-[11px] font-medium text-ink hover:scale-[1.02] active:scale-[0.98] transition-transform min-w-0"
                   style={{ borderLeft: `2px solid ${p.color}` }}
                 >
                   {p.direction === 'up'
@@ -1809,7 +1812,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyMore() }}
                   title="Every connection of the selected entity, grouped and searchable"
-                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 backdrop-blur-md border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
+                  className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
                   +{anchorProxies.moreCount} more · Open lens
@@ -1909,7 +1912,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               until the user dismisses it (preferences-flagged, once ever). */}
           {reorderEnabled && !customOrderHintDismissed && flatTree.length > 0 && (
             <div
-              className="flex items-center gap-2 px-3 py-2 mx-1 mt-2 mb-1 rounded-lg backdrop-blur-sm border"
+              className="flex items-center gap-2 px-3 py-2 mx-1 mt-2 mb-1 rounded-lg border"
               style={{ backgroundColor: `${layer.color}10`, borderColor: `${layer.color}25` }}
             >
               <LucideIcons.ListOrdered className="w-3.5 h-3.5 flex-shrink-0" style={{ color: layer.color }} />
@@ -1940,7 +1943,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   {/* Clear caption — removes any ambiguity about whether the
                       ghost cards mean "loading" or "empty layer". */}
                   <div
-                    className="flex items-center gap-2 px-3 py-2 mx-1 mb-1 rounded-lg backdrop-blur-sm border"
+                    className="flex items-center gap-2 px-3 py-2 mx-1 mb-1 rounded-lg border"
                     style={{
                       backgroundColor: `${layer.color}10`,
                       borderColor: `${layer.color}25`,
@@ -2424,7 +2427,7 @@ function LayerHeaderTitle({
                 width: TITLE_POPOVER_WIDTH,
                 zIndex: 1000,
               }}
-              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
+              className="rounded-xl bg-canvas-elevated/95 border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
             >
               <div
                 className="px-3 py-2 border-b border-black/[0.06] dark:border-white/[0.04]"

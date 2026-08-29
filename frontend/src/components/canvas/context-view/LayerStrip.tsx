@@ -17,9 +17,10 @@
  * - "Fit" runs fit-to-width, so orientation and the way back to
  *   see-everything live on the same surface.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useBandReservation } from './useBandReservation'
 
 export interface LayerStripLayer {
   id: string
@@ -42,6 +43,13 @@ export function LayerStrip({
 }) {
   // Layer ids whose columns are currently (mostly) inside the viewport.
   const [visibleIds, setVisibleIds] = useState<Set<string>>(() => new Set())
+
+  // The strip floats over the bottom of the columns. Reserve the band it
+  // occupies (the way TraceBottomDock reserves `--trace-dock-height`) so a
+  // column's last row is never under the pills — a click there would jump
+  // layers instead, and nothing could scroll the row clear.
+  const barRef = useRef<HTMLDivElement>(null)
+  useBandReservation(barRef, '--layer-strip-height')
 
   useEffect(() => {
     const el = scrollRef.current
@@ -87,11 +95,15 @@ export function LayerStrip({
 
   return (
     <div
-      className="absolute left-1/2 -translate-x-1/2 z-30 pointer-events-none"
+      // Width-capped against the canvas frame so the bar never reaches the
+      // edge legend docked at the frame's right (16rem wide, 1rem in), with
+      // a 12rem floor (clear of the legend down to a ~46rem frame); the bar
+      // scrolls inside the cap.
+      className="absolute left-1/2 -translate-x-1/2 z-30 pointer-events-none max-w-[max(12rem,calc(100%-36rem))]"
       style={{ bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))' }}
       data-canvas-interactive
     >
-      <div className="pointer-events-auto flex items-center gap-1 px-1.5 py-1 rounded-full backdrop-blur-md border border-black/10 dark:border-white/10 shadow-lg bg-canvas-elevated/90 max-w-[70vw] overflow-x-auto custom-scrollbar">
+      <div ref={barRef} className="pointer-events-auto flex items-center gap-1 px-1.5 py-1 rounded-full backdrop-blur-md border border-black/10 dark:border-white/10 shadow-lg bg-canvas-elevated/90 max-w-full overflow-x-auto custom-scrollbar">
         {layers.map(layer => {
           const active = visibleIds.has(layer.id)
           return (
