@@ -1305,6 +1305,15 @@ def decode_cursor(s: str) -> Dict[str, Any]:
 # can never answer another's.
 # ---------------------------------------------------------------------------
 
+# Above this many matches the envelope stops being worth storing: 50k
+# URNs serialise to ~3.5 MB of JSON, and the cache Redis is SHARED with
+# every other provider-level cache (urn→label, ancestor chains, stats).
+# Sits between the default candidate cap (10k, ~0.7 MB) and the
+# per-request maximum (100k, ~7 MB) a caller can opt into; a search
+# above it pages exactly as it did before this cache existed.
+_MATCH_SET_CACHE_MAX_URNS = 50_000
+
+
 def _match_set_key(ns: str, query: SearchQuery) -> str:
     return f"{ns}:dsearch:{match_hash(query)}"
 
@@ -1327,10 +1336,13 @@ async def _read_match_set(
             return None
         data = json.loads(raw)
         # An envelope this build doesn't recognise — a shape change
-        # deployed inside the TTL window — is a miss, not a 500.
-        if not isinstance(data, dict) or not {
-            "urns", "candidate_count", "truncated", "total_count",
-        } <= data.keys():
+        # deployed inside the TTL window — is a miss, not a 500. The
+        # names alone aren't enough: a future ``urns`` that is a dict
+        # would slice into a TypeError.
+        if (not isinstance(data, dict)
+                or not {"urns", "candidate_count", "truncated",
+                        "total_count"} <= data.keys()
+                or not isinstance(data["urns"], list)):
             return None
         return data
     except Exception as exc:
@@ -1355,7 +1367,7 @@ async def _write_match_set(
 
 
 async def _hits_from_match_set(
-    provider, query: SearchQuery, urns: List[str],
+    provider, query: SearchQuery, urns: List[str], *, timeout_s: float,
 ) -> Tuple[List[SearchHit], int, int]:
     """Build one page of hits from a cached URN list.
 
@@ -1367,10 +1379,20 @@ async def _hits_from_match_set(
     ``offset_after`` advances by the SLICE, not by the hits that
     survived it: a node deleted since the scan must not make the next
     page repeat this one.
+
+    The node fetch runs under what is LEFT of the request's deadline:
+    ``get_nodes_batch`` carries its own 15s children-query timeout, so
+    unwrapped it would hand a client who asked for 1s a page ~18s
+    later — the very thing ``remaining()`` exists to prevent. A
+    timeout here degrades exactly as a timed-out candidate scan does.
     """
     offset = max(0, int(decode_cursor(query.options.cursor).get("offset", 0)))
     page_urns = urns[offset : offset + query.options.page_size]
-    nodes = await provider.get_nodes_batch(page_urns) if page_urns else []
+    nodes = []
+    if page_urns:
+        nodes = await asyncio.wait_for(
+            provider.get_nodes_batch(page_urns), timeout=timeout_s,
+        )
     # get_nodes_batch answers per label bucket, so its order is its own.
     by_urn = {n.urn: n for n in nodes}
     leaves = _collect_text_leaves(query.predicate)
@@ -2200,6 +2222,7 @@ async def execute_deep_search(
                     hits, hits_offset_after, hits_total_sorted,
                 ) = await _hits_from_match_set(
                     provider, query, cached["urns"],
+                    timeout_s=remaining(),
                 )
                 # The page reports the numbers the scan that filled the
                 # cache measured, so page 2 can't contradict page 1.
@@ -2302,9 +2325,11 @@ async def execute_deep_search(
     # no cursor, so its entry could only ever be dead weight. A page
     # cut short by the deadline holds a PARTIAL match set; caching it
     # would freeze that truncation in for the whole TTL. Nothing here
-    # may cost the caller their page (see ``_write_match_set``).
+    # may cost the caller their page (see ``_write_match_set``), and a
+    # match set past ``_MATCH_SET_CACHE_MAX_URNS`` isn't stored at all.
     if (hits is not None and not cache_hit and not deadline_exceeded
-            and hits_offset_after < hits_total_sorted):
+            and hits_offset_after < hits_total_sorted
+            and len(sorted_urns) <= _MATCH_SET_CACHE_MAX_URNS):
         await _write_match_set(
             provider, query,
             {

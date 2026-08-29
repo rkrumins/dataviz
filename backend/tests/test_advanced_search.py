@@ -2651,6 +2651,7 @@ class TestScopeRootUrnsCap:
 # ---------------------------------------------------------------------------
 
 from backend.app.providers.falkordb_deep_search import (  # noqa: E402
+    _MATCH_SET_CACHE_MAX_URNS,
     execute_deep_search,
 )
 from backend.common.models.graph import GraphNode  # noqa: E402
@@ -3581,11 +3582,12 @@ def _cache_query(**opts) -> SearchQuery:
     opts.setdefault("sort", "displayName")
     opts.setdefault("sortDir", "asc")
     opts.setdefault("pageSize", 10)
+    opts.setdefault("candidateCap", 100)
     return SearchQuery(
         predicate=TextPredicate(value="customer", target="name",
                                 match="prefix"),
         scope=_TEST_SCOPE,
-        options=SearchOptions(candidateCap=100, **opts),
+        options=SearchOptions(**opts),
     )
 
 
@@ -3708,6 +3710,92 @@ class TestMatchSetCache:
         # The walk still advances by the full slice — a deleted node
         # must not make the next page repeat this one.
         assert decode_cursor(page.cursor)["offset"] == 20
+
+    @pytest.mark.asyncio
+    async def test_the_node_fetch_runs_inside_the_request_budget(self):
+        """``get_nodes_batch`` carries its own 15s children-query
+        timeout, so a cached page that awaited it unwrapped would hand
+        a client who asked for 200ms a page ~15s later."""
+        prov = _CachingProvider(hit_rows=30)
+        first = await execute_deep_search(
+            prov, _cache_query(softDeadlineMs=200),
+        )
+
+        async def _slow(urns):
+            await asyncio.sleep(5)
+            return []
+
+        prov.get_nodes_batch = _slow
+        prov.calls.clear()
+
+        page = await execute_deep_search(
+            prov, _cache_query(softDeadlineMs=200, cursor=first.cursor),
+        )
+        # The same shape a timed-out candidate scan yields today.
+        assert page.deadline_exceeded is True
+        assert page.truncated is True
+        assert page.hits is None
+        assert page.cursor is None
+        assert page.elapsed_ms < 2000
+
+    @pytest.mark.asyncio
+    async def test_a_match_set_at_the_ceiling_is_cached(self):
+        prov = _CachingProvider(hit_rows=_MATCH_SET_CACHE_MAX_URNS)
+        await execute_deep_search(prov, _cache_query(candidateCap=100000))
+
+        assert len(prov._redis.set_calls) == 1
+        envelope = json.loads(prov._redis.set_calls[0][1])
+        assert len(envelope["urns"]) == _MATCH_SET_CACHE_MAX_URNS
+
+    @pytest.mark.asyncio
+    async def test_a_match_set_above_the_ceiling_is_not_cached(self):
+        """~3.5 MB of JSON per entry on a cache Redis shared with every
+        other provider cache is worth more than the re-scan it saves."""
+        prov = _CachingProvider(hit_rows=_MATCH_SET_CACHE_MAX_URNS + 1)
+        page = await execute_deep_search(
+            prov, _cache_query(candidateCap=100000),
+        )
+        assert prov._redis.set_calls == []
+        # It still pages — by re-scanning, exactly as it did before.
+        assert page.cursor is not None
+
+    @pytest.mark.asyncio
+    async def test_a_cache_read_that_raises_falls_through_to_the_scan(self):
+        class _BrokenRedis(_FakeRedis):
+            async def get(self, key):
+                raise ConnectionError("cache down")
+
+        prov = _CachingProvider(hit_rows=30)
+        prov._redis = _BrokenRedis()
+        cursor = encode_cursor(
+            {"offset": 10, "q": match_hash(_cache_query())},
+        )
+        page = await execute_deep_search(prov, _cache_query(cursor=cursor))
+
+        assert len(prov.calls) == 1
+        assert page.cache_hit is False
+        assert [h.node.urn for h in page.hits] == [
+            f"urn:n{i:05d}" for i in range(10, 20)
+        ]
+
+    @pytest.mark.parametrize("stored", [
+        '{"urns": []}',  # an older build's envelope: no counters
+        '{"urns": {}, "candidate_count": 0, "truncated": false, '
+        '"total_count": 0}',  # every name present, wrong type
+        'not json at all',
+    ])
+    @pytest.mark.asyncio
+    async def test_an_unrecognised_envelope_is_a_miss(self, stored):
+        prov = _CachingProvider(hit_rows=30)
+        q = _cache_query(cursor=encode_cursor(
+            {"offset": 10, "q": match_hash(_cache_query())},
+        ))
+        prov._redis.store[f"h:1:g:dsearch:{match_hash(q)}"] = stored
+        page = await execute_deep_search(prov, q)
+
+        assert page.cache_hit is False
+        assert len(prov.calls) == 1
+        assert len(page.hits) == 10
 
     @pytest.mark.asyncio
     async def test_both_shape_still_aggregates_on_a_cached_page(self):
