@@ -383,8 +383,13 @@ function PanelInner({
         && frameTargetUrns.length > 0
         && Boolean(onFrameMatches)
 
+    // Same order the results list and the canvas header use.
+    // ``totalCount`` is the server's exact size of the match set;
+    // ``candidateCount`` is only what the scan had to consider, and it
+    // stops at the candidate cap — so on any query that hit the cap this
+    // headline disagreed with the list six inches below it.
     const resultsCount = view.kind === 'results'
-        ? (view.result.candidateCount || view.result.hits?.length || 0)
+        ? (view.result.totalCount ?? view.result.candidateCount ?? view.result.hits?.length ?? 0)
         : null
     const elapsedMs = view.kind === 'results' ? view.elapsedMs : null
     const truncated = view.kind === 'results' && view.result.truncated === true
