@@ -15,6 +15,7 @@ import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useSearchStore } from '@/store/searchStore'
 import type {
     Predicate,
@@ -77,9 +78,27 @@ function page(over: Partial<SearchResultPage>): SearchResultPage {
     } as SearchResultPage
 }
 
+/** A top-level container on the canvas: no containment edge points at
+ *  it, so the old client-side hint would have called it a view root. */
+function canvasNode(urn: string): LineageNode {
+    return {
+        id: urn,
+        position: { x: 0, y: 0 },
+        data: { label: urn, urn, type: 'table' },
+    }
+}
+
+/** The scope the hook stamped onto the Nth request. */
+function scopeOf(callIndex: number): Record<string, unknown> {
+    return searchAdvanced.mock.calls[callIndex][0].scope
+}
+
 beforeEach(() => {
     searchAdvanced.mockReset()
     useSearchStore.getState().clear()
+    // `clear()` deliberately keeps the user's scope mode, so reset it here.
+    useSearchStore.getState().setScopeMode('view')
+    useCanvasStore.setState({ nodes: [], edges: [] })
     provider = Object.assign(
         Object.create(RemoteGraphProvider.prototype),
         { searchAdvanced },
@@ -154,6 +173,7 @@ describe('useAdvancedSearch — the shared search options reach the wire', () =>
 
         expect(searchAdvanced).toHaveBeenCalledWith(
             expect.objectContaining({ options: SEARCH_OPTIONS }),
+            { signal: expect.any(AbortSignal) },
         )
         expect(SEARCH_OPTIONS).toEqual({
             results: 'both',
@@ -163,5 +183,122 @@ describe('useAdvancedSearch — the shared search options reach the wire', () =>
             candidateCap: 50000,
             softDeadlineMs: 20000,
         })
+    })
+})
+
+
+describe('useAdvancedSearch — what the stamped scope carries', () => {
+    it('sends no rootUrns in view mode: the server resolves the view roots', async () => {
+        // Two unparented containers — the client used to walk exactly
+        // these and ship them as the scope hint.
+        useCanvasStore.setState({ nodes: [canvasNode('A'), canvasNode('B')], edges: [] })
+        searchAdvanced.mockResolvedValue(page({ hits: [] }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+
+        const scope = scopeOf(0)
+        expect(scope.viewId).toBe('view-1')
+        expect(scope.scopeMode).toBe('view')
+        expect('rootUrns' in scope).toBe(false)
+    })
+
+    it('sends the canvas URNs in visible mode', async () => {
+        useCanvasStore.setState({ nodes: [canvasNode('A'), canvasNode('B')], edges: [] })
+        useSearchStore.getState().setScopeMode('visible')
+        searchAdvanced.mockResolvedValue(page({ hits: [] }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+
+        const scope = scopeOf(0)
+        expect(scope.scopeMode).toBe('visible')
+        expect(scope.visibleUrns).toEqual(['A', 'B'])
+        expect('rootUrns' in scope).toBe(false)
+    })
+})
+
+
+describe('useAdvancedSearch — a new run supersedes the one in flight', () => {
+    it('aborts the first request and ignores its late answer', async () => {
+        let answerFirst: (p: SearchResultPage) => void = () => {}
+        searchAdvanced.mockImplementationOnce(
+            () => new Promise<SearchResultPage>((resolve) => { answerFirst = resolve }),
+        )
+        searchAdvanced.mockResolvedValueOnce(page({
+            hits: [{
+                node: {
+                    urn: 'hit-2', displayName: 'customer_name',
+                    entityType: 'column', properties: {},
+                },
+            }],
+        }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        let firstRun!: Promise<void>
+        await act(async () => {
+            firstRun = result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+
+        // The request must be cancellable at all — the signal has to
+        // reach the provider, not just the hook's own aborted-check.
+        const firstSignal = searchAdvanced.mock.calls[0][1]?.signal as AbortSignal
+        expect(firstSignal).toBeInstanceOf(AbortSignal)
+        expect(firstSignal.aborted).toBe(false)
+
+        await act(async () => {
+            await result.current.runPredicate(
+                { kind: 'group', op: 'and', children: [
+                    { kind: 'text', target: 'any', match: 'substring', value: 'order' },
+                ] },
+                SEARCH_OPTIONS,
+            )
+        })
+        expect(firstSignal.aborted).toBe(true)
+
+        // The superseded request answers late. It owns nothing now.
+        await act(async () => {
+            answerFirst(page({ hits: [HIT] }))
+            await firstRun
+        })
+        const view = result.current.view
+        expect(view.kind).toBe('results')
+        expect(view.kind === 'results' && view.result.hits?.[0]?.node?.urn).toBe('hit-2')
+        expect(useSearchStore.getState().matchUrnSet.has('hit-1')).toBe(false)
+    })
+})
+
+
+describe('useAdvancedSearch — clearOnUnmount', () => {
+    it('wipes the published matches on unmount by default', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [HIT] }))
+
+        const { result, unmount } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        expect(useSearchStore.getState().matchUrnSet.size).toBe(1)
+
+        unmount()
+        expect(useSearchStore.getState().matchUrnSet.size).toBe(0)
+    })
+
+    it('keeps them when clearOnUnmount is false', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [HIT] }))
+
+        const { result, unmount } = renderHook(
+            () => useAdvancedSearch('view-1', { clearOnUnmount: false }),
+        )
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+
+        unmount()
+        expect(useSearchStore.getState().matchUrnSet.size).toBeGreaterThan(0)
+        expect(useSearchStore.getState().matchUrnSet.has('hit-1')).toBe(true)
     })
 })
