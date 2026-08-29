@@ -130,7 +130,18 @@ export function HeaderSearch() {
   // Where a reveal actually landed, when that is not where it was aimed.
   // The producer is the reveal walk itself (E4); the slot, its expiry and
   // its place in the status line are here.
-  const [landingNote, setLandingNote] = useState<string | null>(null)
+  //
+  // Carried as an EVENT (`seq`), not as its text: two identical near-misses
+  // produce the same sentence, and a note keyed on the string alone leaves
+  // the FIRST one's timer running — so the second is swept away early, on a
+  // clock the reader never saw start.
+  const [landingNote, setLandingNote] = useState<{ text: string; seq: number } | null>(null)
+  const landingSeqRef = useRef(0)
+  const noteLanding = useCallback((text: string | null) => {
+    if (text === null) { setLandingNote(null); return }
+    landingSeqRef.current += 1
+    setLandingNote({ text, seq: landingSeqRef.current })
+  }, [])
   const boxRef = useRef<HTMLDivElement>(null)
   const listId = useId()
   const { recents, record } = useRecentSearches(`nexus.viewSearch.recent.${viewId}`)
@@ -232,6 +243,7 @@ export function HeaderSearch() {
     return () => window.clearTimeout(timer)
   }, [landingNote])
 
+
   // Warm the spine of the row the user has SETTLED on. Arrowing through
   // a list would otherwise fire ten requests to answer one ↵.
   useEffect(() => {
@@ -268,16 +280,21 @@ export function HeaderSearch() {
       // Where the walk actually landed, when that is not where it aimed.
       // A hit under a level that would not open is a near-miss, and a
       // near-miss that says nothing reads as a click that did nothing.
-      if (outcome.landedOn !== 'ancestor') return
-      setLandingNote(outcome.displayName
+      // A pick that DID land clears any standing note: it describes a
+      // canvas the reader has since left.
+      if (outcome.landedOn !== 'ancestor') { noteLanding(null); return }
+      noteLanding(outcome.displayName
         ? `Showing ${outcome.displayName} — ${hit.node.displayName} couldn't be opened`
         : `${hit.node.displayName} couldn't be opened`)
+    }).catch(() => {
+      // A reveal that threw has already logged; the box stays quiet rather
+      // than reporting a landing that never happened.
     })
     // The text and the canvas highlights stay: the user picked ONE of
     // several matches, and the others are still worth seeing (E-b).
     setDismissed(true)
     record(textRef.current)
-  }, [revealHit, record])
+  }, [revealHit, record, noteLanding])
 
   // `runNow({ text })`, not a bare `runNow()`: the session's `quick` is
   // still the empty box this render was built from, and a run of THAT
@@ -557,7 +574,7 @@ export function HeaderSearch() {
           />
         )}
       </div>
-      <StatusLine landingNote={landingNote} />
+      <StatusLine landingNote={landingNote?.text ?? null} />
     </div>
   )
 }

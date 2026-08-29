@@ -50,7 +50,8 @@ import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import {
-  useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, type RevealSearchHit,
+  useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
+  type RevealSearchHit,
 } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
@@ -1566,8 +1567,7 @@ export function ContextViewCanvas({
   const revealHitForSearch = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
     // No walk wired yet (first render) is a reveal that opened nothing,
     // and the box says so rather than swallowing the click.
-    return (await revealSearchHitRef.current?.(urn, ancestorPath))
-      ?? { landedOn: 'ancestor', urn: '', displayName: '' }
+    return (await revealSearchHitRef.current?.(urn, ancestorPath)) ?? LANDED_NOWHERE
   }, [])
   const prefetchSpine = usePrefetchSearchHitSpine(provider)
   // A warm-up is still a write. While a trace owns the canvas the store is
@@ -3089,7 +3089,7 @@ export function ContextViewCanvas({
       // Drawing: the overlay opens its own chain. Still walking: there is
       // nothing on screen to land on yet, and saying so beats a click
       // that looks like it did nothing.
-      if (!expandTraceChain(urn)) return { landedOn: 'ancestor', urn: '', displayName: '' }
+      if (!expandTraceChain(urn)) return LANDED_NOWHERE
       scrollHitIntoView(urn)
       return { landedOn: 'hit', urn, displayName: canvasDisplayName(urn) }
     }

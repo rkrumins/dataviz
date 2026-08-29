@@ -118,8 +118,11 @@ export interface RevealOutcome {
 /** The reveal callback signature consumed by SearchMapPanel and friends. */
 export type RevealSearchHit = (urn: string, ancestorPath: AncestorRef[]) => Promise<RevealOutcome>
 
-/** Nothing on the spine could be opened — there is no level to name. */
-const LANDED_NOWHERE: RevealOutcome = { landedOn: 'ancestor', urn: '', displayName: '' }
+/** Nothing on the spine could be opened — there is no level to name.
+ *  Exported because the canvas's trace-aware wrapper reaches the same
+ *  dead end (a walk still in flight has nothing on screen to land on),
+ *  and two hand-written copies of one outcome drift. */
+export const LANDED_NOWHERE: RevealOutcome = { landedOn: 'ancestor', urn: '', displayName: '' }
 
 
 export function useRevealSearchHit({ setExpandedNodes, provider, scrollIntoView }: UseRevealSearchHitDeps): RevealSearchHit {

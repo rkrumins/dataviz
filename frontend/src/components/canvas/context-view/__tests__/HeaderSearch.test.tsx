@@ -652,6 +652,51 @@ describe('HeaderSearch — where the reveal landed', () => {
     expect(screen.queryByText(/couldn't be opened/)).not.toBeInTheDocument()
   })
 
+  it('clears a standing note when the next pick reaches its hit', async () => {
+    const session = answering([hit('customer_id', [anc('crm')])])
+    session.revealHit = vi.fn()
+      .mockResolvedValueOnce({ landedOn: 'ancestor', urn: 'urn:crm', displayName: 'crm' })
+      .mockResolvedValueOnce({ landedOn: 'hit', urn: 'urn:customer_id', displayName: 'customer_id' })
+    renderBox(session)
+    openList()
+
+    await act(async () => { fireEvent.click(screen.getAllByRole('option')[0]) })
+    expect(screen.getByText(/couldn't be opened/)).toBeInTheDocument()
+
+    openList()
+    await act(async () => { fireEvent.click(screen.getAllByRole('option')[0]) })
+
+    // A note that outlives the miss it describes is a lie about where the
+    // canvas is standing.
+    expect(screen.queryByText(/couldn't be opened/)).not.toBeInTheDocument()
+  })
+
+  it('restarts the four seconds when the same near-miss repeats', async () => {
+    vi.useFakeTimers()
+    const session = answering([hit('customer_id', [anc('crm')])])
+    session.revealHit = vi.fn(async () => ({
+      landedOn: 'ancestor' as const, urn: 'urn:crm', displayName: 'crm',
+    }))
+    renderBox(session)
+    openList()
+
+    await act(async () => { fireEvent.click(screen.getAllByRole('option')[0]) })
+    await act(async () => { vi.advanceTimersByTime(3000) })
+    expect(screen.getByText(/couldn't be opened/)).toBeInTheDocument()
+
+    openList()
+    await act(async () => { fireEvent.click(screen.getAllByRole('option')[0]) })
+    await act(async () => { vi.advanceTimersByTime(3000) })
+
+    // Identical TEXT, so a note keyed on the string alone never re-armed
+    // its timer: the first one expired on schedule and took the second
+    // with it, one second after the reader had earned a fresh four.
+    expect(screen.getByText(/couldn't be opened/)).toBeInTheDocument()
+
+    await act(async () => { vi.advanceTimersByTime(1100) })
+    expect(screen.queryByText(/couldn't be opened/)).not.toBeInTheDocument()
+  })
+
   // Nothing on the spine opened — there is no level to name, and
   // "Showing  — …" is not a sentence.
   it('names no level when the walk opened none', async () => {
