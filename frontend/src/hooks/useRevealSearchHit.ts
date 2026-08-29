@@ -25,7 +25,7 @@ import { useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { toCanvasNode, toCanvasEdge } from '@/hooks/useGraphHydration'
 import { useViewContainmentEdgeTypes } from '@/hooks/useViewSchema'
-import type { GraphDataProvider } from '@/providers/GraphDataProvider'
+import type { GraphDataProvider, GraphEdge } from '@/providers/GraphDataProvider'
 import type { AncestorRef } from '@/types/search'
 
 
@@ -90,7 +90,16 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
                     // never render. `viaReveal` marks these out-of-band
                     // nodes so `loadChildren` doesn't count them as a
                     // loaded page (see useGraphHydration).
-                    const edges = await provider.getEdgesBetween(spineUrns as any[], containmentEdgeTypes)
+                    // Its own catch: an edge fetch that fails costs the hit
+                    // its attachment, not the whole reveal — the nodes still
+                    // commit, which is what the walk below needs to get one
+                    // level deeper than it otherwise could.
+                    let edges: GraphEdge[] = []
+                    try {
+                        edges = await provider.getEdgesBetween(spineUrns as any[], containmentEdgeTypes)
+                    } catch (e) {
+                        console.warn('[reveal] spine edge priming failed', e)
+                    }
                     const { addGraph } = useCanvasStore.getState()
                     addGraph(
                         fetched.map((n) => {

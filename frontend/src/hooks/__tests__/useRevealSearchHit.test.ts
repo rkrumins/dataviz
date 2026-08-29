@@ -124,6 +124,32 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
     expect(selectNode).toHaveBeenCalledWith(HIT)
   })
 
+  it('still primes the nodes when the edge fetch REJECTS', async () => {
+    // A failed edge fetch costs the hit its attachment, not the whole
+    // reveal: without the nodes the walk cannot even reach the parent.
+    const provider = {
+      getNodes: vi.fn(async () => [
+        makeGraphNode(PARENT, 'table'),
+        makeGraphNode(HIT, 'column'),
+      ]),
+      getEdgesBetween: vi.fn().mockRejectedValue(new Error('502')),
+    } as unknown as GraphDataProvider
+    const loadChildren = vi.fn().mockResolvedValue(undefined)
+
+    const { result } = renderHook(() =>
+      useRevealSearchHit({ setExpandedNodes: vi.fn(), loadChildren, provider }),
+    )
+
+    await act(async () => {
+      await result.current(HIT, SPINE)
+    })
+
+    const { nodes, edges } = useCanvasStore.getState()
+    expect(nodes.map((n) => n.id).sort()).toEqual([ROOT, PARENT, HIT].sort())
+    expect(edges).toHaveLength(0)
+    expect(selectNode).toHaveBeenCalledWith(HIT)
+  })
+
   it('still reveals when the provider has no getEdgesBetween (harness stub)', async () => {
     const provider = {
       getNodes: vi.fn(async () => [makeGraphNode(PARENT, 'table')]),
@@ -138,7 +164,9 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
       await result.current(HIT, SPINE)
     })
 
-    // Falls back to the deepest reachable ancestor rather than throwing.
-    expect(selectNode).toHaveBeenCalledWith(ROOT)
+    // The node still commits, so the walk gets one level deeper than the
+    // root: the fallback lands on the deepest REACHABLE ancestor.
+    expect(useCanvasStore.getState()._nodeIndex.has(PARENT)).toBe(true)
+    expect(selectNode).toHaveBeenCalledWith(PARENT)
   })
 })
