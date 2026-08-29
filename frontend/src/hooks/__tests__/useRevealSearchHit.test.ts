@@ -98,13 +98,10 @@ beforeEach(() => {
 describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
   it('primes the spine edges so the hit attaches, marks it viaReveal, selects it', async () => {
     const provider = makeProvider()
-    // The real page-1 behaviour: the hit is the 300th child, so the page
-    // this resolves carries siblings 1..100 — never the hit itself.
-    const loadChildren = vi.fn().mockResolvedValue(undefined)
     const setExpandedNodes = vi.fn()
 
     const { result } = renderHook(() =>
-      useRevealSearchHit({ setExpandedNodes, loadChildren, provider }),
+      useRevealSearchHit({ setExpandedNodes, provider }),
     )
 
     await act(async () => {
@@ -136,10 +133,9 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
       ]),
       getEdgesBetween: vi.fn().mockRejectedValue(new Error('502')),
     } as unknown as GraphDataProvider
-    const loadChildren = vi.fn().mockResolvedValue(undefined)
 
     const { result } = renderHook(() =>
-      useRevealSearchHit({ setExpandedNodes: vi.fn(), loadChildren, provider }),
+      useRevealSearchHit({ setExpandedNodes: vi.fn(), provider }),
     )
 
     await act(async () => {
@@ -169,10 +165,9 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
       ]),
       getEdgesBetween,
     } as unknown as GraphDataProvider
-    const loadChildren = vi.fn().mockResolvedValue(undefined)
 
     const { result } = renderHook(() =>
-      useRevealSearchHit({ setExpandedNodes: vi.fn(), loadChildren, provider }),
+      useRevealSearchHit({ setExpandedNodes: vi.fn(), provider }),
     )
 
     await act(async () => {
@@ -197,7 +192,6 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
     const { result } = renderHook(() =>
       useRevealSearchHit({
         setExpandedNodes: vi.fn(),
-        loadChildren: vi.fn().mockResolvedValue(undefined),
         provider,
       }),
     )
@@ -214,10 +208,9 @@ describe('useRevealSearchHit — hit beyond the parent\'s first page', () => {
     const provider = {
       getNodes: vi.fn(async () => [makeGraphNode(PARENT, 'table')]),
     } as unknown as GraphDataProvider
-    const loadChildren = vi.fn().mockResolvedValue(undefined)
 
     const { result } = renderHook(() =>
-      useRevealSearchHit({ setExpandedNodes: vi.fn(), loadChildren, provider }),
+      useRevealSearchHit({ setExpandedNodes: vi.fn(), provider }),
     )
 
     await act(async () => {

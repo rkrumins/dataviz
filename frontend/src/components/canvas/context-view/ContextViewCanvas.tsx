@@ -50,7 +50,7 @@ import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import {
-  useRevealSearchHit, usePrefetchSearchHitSpine, type RevealSearchHit,
+  useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, type RevealSearchHit,
 } from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
@@ -1564,9 +1564,19 @@ export function ContextViewCanvas({
   // the provider is resolved at the top of the file.
   const revealSearchHitRef = useRef<RevealSearchHit | null>(null)
   const revealHitForSearch = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
-    await revealSearchHitRef.current?.(urn, ancestorPath)
+    // No walk wired yet (first render) is a reveal that opened nothing,
+    // and the box says so rather than swallowing the click.
+    return (await revealSearchHitRef.current?.(urn, ancestorPath))
+      ?? { landedOn: 'ancestor', urn: '', displayName: '' }
   }, [])
-  const prefetchSearchHitSpine = usePrefetchSearchHitSpine(provider)
+  const prefetchSpine = usePrefetchSearchHitSpine(provider)
+  // A warm-up is still a write. While a trace owns the canvas the store is
+  // read-only (`traceWriteLocked`), and a spine primed behind the overlay
+  // would surface the moment the trace closed — nodes nobody expanded.
+  const prefetchSearchHitSpine = useCallback<typeof prefetchSpine>(async (urn, ancestorPath) => {
+    if (traceWriteLocked()) return
+    await prefetchSpine(urn, ancestorPath)
+  }, [prefetchSpine, traceWriteLocked])
 
   // The canvas's ONE search session: the header box, the layer columns and
   // the results panel all read it back off the context below, so they can
@@ -3071,16 +3081,19 @@ export function ContextViewCanvas({
   // coexist with the entity-drawer reveal hook above).
   const revealSearchHitBrowse = useRevealSearchHit({
     setExpandedNodes,
-    loadChildren: loadChildrenSorted,
     provider,
     scrollIntoView: scrollHitIntoView,
   })
-  const revealSearchHit = useCallback(async (urn: string, ancestorPath: Parameters<typeof revealSearchHitBrowse>[1]) => {
+  const revealSearchHit = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
     if (traceWriteLocked()) {
-      if (expandTraceChain(urn)) scrollHitIntoView(urn)
-      return
+      // Drawing: the overlay opens its own chain. Still walking: there is
+      // nothing on screen to land on yet, and saying so beats a click
+      // that looks like it did nothing.
+      if (!expandTraceChain(urn)) return { landedOn: 'ancestor', urn: '', displayName: '' }
+      scrollHitIntoView(urn)
+      return { landedOn: 'hit', urn, displayName: canvasDisplayName(urn) }
     }
-    await revealSearchHitBrowse(urn, ancestorPath)
+    return revealSearchHitBrowse(urn, ancestorPath)
   }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
 
   // Close the loop on the wrapper the search session was handed above.

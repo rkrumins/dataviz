@@ -291,7 +291,7 @@ export function GraphCanvas({ className }: { className?: string }) {
 
   // Reveal a search hit on this canvas — same flow as ContextViewCanvas
   // (walk ancestor chain, expand each step, then select + scroll).
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // 8. Trace system (shared hook)
   const trace = useCanvasTrace({

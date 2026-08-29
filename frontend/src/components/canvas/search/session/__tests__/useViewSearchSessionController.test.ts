@@ -110,7 +110,9 @@ function resultsView(elapsedMs = 12): PanelView {
  *  Both are the canvas's — they need its expansion state and hydration —
  *  so the session only carries them. */
 const canvas = {
-    revealHit: vi.fn(async () => {}),
+    revealHit: vi.fn(async (urn: string) => ({
+        landedOn: 'hit' as const, urn, displayName: urn,
+    })),
     prefetchHit: vi.fn(async () => {}),
 }
 

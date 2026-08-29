@@ -110,7 +110,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Property Manager display-rule engine — publishes match sets so the
   // HierarchyContainer rows render tag chips.
   useDisplayRuleEngine(activeView?.id ?? null)
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
   // 400px rail from the wider Build Mode panel — only one mounts at a time.

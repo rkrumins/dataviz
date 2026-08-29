@@ -85,7 +85,12 @@ export function stubSession(over: Partial<ViewSearchSession> = {}): ViewSearchSe
         inputRef: createRef<HTMLInputElement>(),
         resolveLayer: vi.fn(() => null),
         layers: [],
-        revealHit: vi.fn(async () => {}),
+        // The reveal ANSWERS: where it landed is what the box reads back
+        // to decide whether to say anything. A stub that answered nothing
+        // would let a surface pass while ignoring a near-miss.
+        revealHit: vi.fn(async (urn: string) => ({
+            landedOn: 'hit' as const, urn, displayName: urn,
+        })),
         prefetchHit: vi.fn(async () => {}),
         advanced: stubAdvanced(),
         rowSearch: stubRowSearch(),
