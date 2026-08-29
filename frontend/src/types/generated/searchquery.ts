@@ -347,7 +347,7 @@ export type Layerassignment1 = string | null
  */
 export type Maxdepth1 = number | null
 /**
- * Optional narrowing hint. Each URN must be a descendant of (or equal to) one of the view's allowed roots; URNs that fail validation are dropped server-side. Capped at DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 256). The cap exists to bound the Cypher IN-list size + containment expansion fanout on multi-domain views with many top-level containers.
+ * Optional narrowing hint. Each URN must be a descendant of (or equal to) one of the view's allowed roots; URNs that fail validation are dropped server-side. Capped at DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 5000). The cap exists to bound the Cypher IN-list size + containment expansion fanout on multi-domain views with many top-level containers.
  */
 export type Rooturns = string[] | null
 /**
@@ -415,6 +415,9 @@ export type Candidatecount = number
 export type Cursor1 = string | null
 export type Deadlineexceeded = boolean
 export type Elapsedms1 = number
+/**
+ * Ordered by server relevance; do not re-sort by `score`. Ranking runs over the whole candidate set before this page is sliced from it, so `score` is a per-hit annotation, not the key the list is in.
+ */
 export type Hits = SearchHit[] | null
 /**
  * Populated when the request's predicate contains a PathPredicate and options.results='paths'. Ordered node→edge→node sequences from source to target.

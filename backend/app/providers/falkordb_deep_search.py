@@ -1397,9 +1397,9 @@ async def _hits_from_match_set(
     """Build one page of hits from a cached URN list.
 
     Returns ``(hits, offset_after, total)`` — the same accounting
-    ``_build_hits_from_rows`` reports, so the caller's cursor logic
-    doesn't care which path produced the page. Scores and highlights
-    are computed by the same ``_score_hit`` the scan path uses.
+    ``_rank_candidate_rows``/``_hydrate_hits`` report, so the caller's
+    cursor logic doesn't care which path produced the page. Scores and
+    highlights are computed by the same ``_score_hit`` the scan path uses.
 
     ``offset_after`` advances by the SLICE, not by the hits that
     survived it: a node deleted since the scan must not make the next

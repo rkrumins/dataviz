@@ -2106,7 +2106,7 @@ class TestSortByProperty:
 # Cursor pagination — backend-driven paging for the panel's single-shot
 # matchUrnSet round-trip + AI-agent iteration. The codec itself is
 # round-tripped in TestCursor above; these tests pin the slice/offset
-# semantics inside ``_build_hits_from_rows``.
+# semantics inside ``_rank_candidate_rows``/``_hydrate_hits``.
 # ---------------------------------------------------------------------------
 
 class TestCursorPagination:
@@ -3581,6 +3581,49 @@ class TestCursorValidation:
         with_highlights = _hits_query(highlights=True)
         without_highlights = _hits_query(highlights=False)
         assert match_hash(with_highlights) == match_hash(without_highlights)
+
+    @pytest.mark.parametrize("build_query, expect_change", [
+        (lambda: SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(results="hits", candidateCap=250),
+        ), True),
+        (lambda: _hits_query(sortDir="asc"), True),
+        (lambda: _hits_query(sortProperty="rowCount"), True),
+        (lambda: SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE.model_copy(update={"max_depth": 5}),
+            options=SearchOptions(results="hits", candidateCap=100),
+        ), True),
+        (lambda: _hits_query(highlights=False), False),
+        (lambda: _hits_query(includeAncestorPath=True), False),
+        (lambda: _hits_query(softDeadlineMs=5000), False),
+        (lambda: _hits_query(pageSize=200), False),
+        (lambda: SearchQuery(
+            predicate=TextPredicate(value="customer", target="name"),
+            scope=_TEST_SCOPE,
+            options=SearchOptions(results="both", candidateCap=100),
+        ), False),
+        (lambda: _hits_query(aggregations=[_ancestor_spec()]), False),
+    ], ids=[
+        "candidateCap_changes_hash", "sortDir_changes_hash",
+        "sortProperty_changes_hash", "maxDepth_changes_hash",
+        "highlights_does_not", "includeAncestorPath_does_not",
+        "softDeadlineMs_does_not", "pageSize_does_not",
+        "results_does_not", "aggregations_does_not",
+    ])
+    def test_match_hash_include_list_is_exact(self, build_query, expect_change):
+        """``match_hash``'s include list (``predicate``, ``scope``,
+        ``options.{sort,sort_dir,sort_property,candidate_cap}``) is the
+        contract that decides which options changes may reuse an open
+        cursor. This pins every field named in that list — plus the
+        presentation/paging fields the docstring says must NOT
+        invalidate one — against the real hash, not just the ones the
+        older cursor tests happened to touch (predicate, roots,
+        highlights)."""
+        base = match_hash(_hits_query())
+        changed = match_hash(build_query())
+        assert (changed != base) is expect_change
 
     @pytest.mark.asyncio
     async def test_fe_load_more_shape_is_accepted(self):

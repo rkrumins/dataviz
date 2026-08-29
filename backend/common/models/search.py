@@ -571,7 +571,7 @@ class SearchScope(_Base):
             "Optional narrowing hint. Each URN must be a descendant of "
             "(or equal to) one of the view's allowed roots; URNs that "
             "fail validation are dropped server-side. Capped at "
-            "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 256). The "
+            "DEEP_SEARCH_SCOPE_ROOT_URNS_CAP entries (default 5000). The "
             "cap exists to bound the Cypher IN-list size + containment "
             "expansion fanout on multi-domain views with many top-level "
             "containers."

@@ -172,7 +172,9 @@ def _is_unbounded_text_any(predicate) -> bool:
     return False
 
 
-def _reject_unbounded_text_any(query: SearchQuery) -> None:
+def _reject_unbounded_text_any(
+    query: SearchQuery, *, entity_types_capped: bool = False,
+) -> None:
     """Reject queries that would force a full-graph CONTAINS scan.
 
     Runs on the RESOLVED scope — after ``_stamp_resolved_scope`` has
@@ -197,6 +199,13 @@ def _reject_unbounded_text_any(query: SearchQuery) -> None:
     a million-node graph hangs until the candidate cap fires. Better
     to reject up-front with a clear remediation message than to let
     the user wait 30s for a truncated result.
+
+    ``entity_types_capped`` — the caller's ``_stamp_resolved_scope``
+    call dropped the entity-type gate because the view's own ontology
+    exceeded ``SEARCH_SCOPE_ENTITY_TYPES_MAX``, not because the view
+    has no roots. When that's *why* the scope arrived unbounded, "this
+    view has no boundaries yet" is false (the view may have hundreds of
+    declared types); the message instead names the real cause.
     """
     if query.scope.root_urns:
         return
@@ -206,6 +215,14 @@ def _reject_unbounded_text_any(query: SearchQuery) -> None:
         return
     if not _is_unbounded_text_any(query.predicate):
         return
+    if entity_types_capped:
+        raise ValidationError(
+            "This view's ontology has more entity types than a "
+            "free-text search can carry, so the entity-type limit "
+            "could not be used to bound the scan. Narrow the search "
+            "with Look in: Name, or by a type, tag, or property "
+            "filter."
+        )
     raise ValidationError(
         "This view has no boundaries yet, so searching for a word on "
         "its own would have to read the entire data source. Add "
@@ -392,7 +409,9 @@ class AdvancedSearchService:
         # problem, not an unbounded-scan one, and telling them the view
         # has no boundaries would be wrong — it has roots, just not
         # theirs.
-        _reject_unbounded_text_any(query)
+        _reject_unbounded_text_any(
+            query, entity_types_capped=entity_types_note is not None,
+        )
 
         try:
             page = await self._engine.provider.deep_search(
@@ -429,8 +448,10 @@ class AdvancedSearchService:
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
         await self._guard_view_data_source(eff_scope)
-        query, _entity_types_note = _stamp_resolved_scope(query, eff_scope)
-        _reject_unbounded_text_any(query)
+        query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
+        _reject_unbounded_text_any(
+            query, entity_types_capped=entity_types_note is not None,
+        )
         try:
             result = await self._engine.provider.deep_search_explain(query)
         except CompileError as exc:

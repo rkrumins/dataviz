@@ -1195,6 +1195,77 @@ async def test_service_drops_entity_type_gate_when_ontology_exceeds_cap(
     )
 
 
+async def test_bare_text_any_on_capped_entity_type_view_names_the_limit(
+    db_session: AsyncSession,
+):
+    """An OPEN view (no root assignments) whose ontology has 600 entity
+    types is above the 512-item field cap, so ``_stamp_resolved_scope``
+    drops the entity-type gate (``entity_types=None``) rather than crash.
+    A plain ``target='any'`` word is still rejected — the scan really is
+    unclamped — but the message must name the real cause (the ontology
+    exceeds the search's entity-type limit), not claim "this view has no
+    boundaries yet", which is false: the view declares 600 types.
+
+    An indexed-leaf predicate (``TagPredicate``) on the same view is
+    unaffected: it still proceeds with the gate dropped and the note.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate, TextPredicate,
+    )
+
+    entity_types = [f"Type{i:04d}" for i in range(600)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    # No entityAssignments — an open view, no roots.
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    text_query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(view_id=view.id),
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        await svc.search(text_query)
+    message = str(excinfo.value)
+    assert "no boundaries yet" not in message
+    assert "limit" in message
+
+    engine2 = _FakeEngine(raise_on_provider_call=False)
+    svc2 = AdvancedSearchService(
+        engine2, session=db_session, workspace_id=ws.id,
+    )
+    tag_query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    page, eff_scope = await svc2.search(tag_query)
+    assert len(engine2.provider.calls) == 1
+    stamped_query, _ = engine2.provider.calls[0]
+    assert stamped_query.scope.entity_types is None
+    assert page.scope_diagnostics is not None
+    assert any(
+        "entity-type gate was dropped" in n
+        for n in page.scope_diagnostics.notes
+    )
+
+
 async def test_explain_takes_the_same_path_for_large_entity_type_allow_list(
     db_session: AsyncSession,
 ):
