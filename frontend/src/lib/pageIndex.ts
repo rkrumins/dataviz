@@ -73,17 +73,6 @@ export const PAGE_INDEX: PageEntry[] = [
         gate: { kind: 'sidebar', key: 'explore' },
     },
     {
-        // Kept because links and bookmarks still point here; the route
-        // redirects to Explorer.
-        id: 'views',
-        category: 'Page',
-        title: 'Views',
-        description: 'The saved-views gallery',
-        keywords: ['views', 'gallery', 'saved', 'diagrams', 'canvas'],
-        path: '/views',
-        gate: { kind: 'sidebar', key: 'explore' },
-    },
-    {
         id: 'workspaces',
         category: 'Page',
         title: 'Workspaces',

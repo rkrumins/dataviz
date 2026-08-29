@@ -14,6 +14,7 @@ import {
   Clock,
   Globe,
   Database,
+  FileText,
   LayoutTemplate,
   BookOpen,
   Loader2,
@@ -41,19 +42,25 @@ interface CommandPaletteProps {
 }
 
 const CATEGORY_ICONS: Record<SearchCategory, React.ComponentType<{ className?: string }>> = {
+  Page: FileText,
   Workspace: Globe,
   'Data Source': Database,
   View: Eye,
   Template: LayoutTemplate,
   'Semantic Layer': BookOpen,
+  Setting: Settings,
+  Doc: BookOpen,
 }
 
 const CATEGORY_HEADINGS: Record<SearchCategory, string> = {
+  Page: 'Pages',
   Workspace: 'Workspaces',
   'Data Source': 'Data Sources',
   View: 'Views',
   Template: 'Templates',
   'Semantic Layer': 'Semantic Layers',
+  Setting: 'Settings',
+  Doc: 'Docs & guides',
 }
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {

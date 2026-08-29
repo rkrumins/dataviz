@@ -56,6 +56,7 @@ const UNAUTHENTICATED = new Set([
 const NOT_A_DESTINATION = new Set([
     '/', // index-redirects to /dashboard
     'admin', // layout route; index-redirects to /admin/overview
+    'views', // ViewsGallery redirects to /explorer — indexing it would offer the same screen twice
 ])
 
 /** Routes the index is expected to carry. */
