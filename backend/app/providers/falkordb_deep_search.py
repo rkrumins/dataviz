@@ -2711,12 +2711,22 @@ def _scored_fields(node, pred) -> List[Tuple[str, str, float]]:
     read. ``any`` expands to what feeds ``n.searchableText`` — name,
     qualifiedName, description, tags and string-valued properties; the
     blob itself is not a field a reader can be pointed at.
+
+    Naming the field is only half of it: ``any`` and ``tags`` reach
+    most of these fields through a *different* column, so how well
+    they matched is capped separately — see ``_tier_ceiling``.
     """
     if isinstance(pred, PropertyPredicate):
+        # The compiled column is ``toLower(toString(n.<key>))`` for the
+        # textual ops, so a non-string scalar is matchable: ``version:
+        # 3`` really does satisfy ``op='eq', value='3'``. Coerce it the
+        # same way the compiler does rather than dropping the
+        # provenance of a row the query already returned.
         value = (node.properties or {}).get(pred.key)
-        if not isinstance(value, str) or not value:
+        text = "" if value is None else str(value)
+        if not text:
             return []
-        return [(f"property:{pred.key}", value, _FIELD_WEIGHTS["property"])]
+        return [(f"property:{pred.key}", text, _FIELD_WEIGHTS["property"])]
 
     fields: List[Tuple[str, str, float]] = []
 
@@ -2745,6 +2755,40 @@ def _scored_fields(node, pred) -> List[Tuple[str, str, float]]:
             if isinstance(value, str):
                 add(f"property:{key}", value, "property")
     return fields
+
+
+def _tier_ceiling(pred, field: str) -> int:
+    """The best tier a hit on this field is allowed to claim.
+
+    A tier above the substring floor is a claim about *where in a
+    column* the value sat, and it is only honest when the compiler
+    compared that column. Two targets don't:
+
+      * ``any`` compares ``searchableText``, ``displayName`` and
+        ``qualifiedName`` — a description, tag or property hit rode in
+        on the blob, not on its own column;
+      * ``tags`` compares the JSON-stringified array, in which an
+        individual tag is by construction a fragment (which is why
+        ``target='tags', match='exact'`` can essentially never be true
+        in Cypher, yet used to be scored 100 here).
+
+    So under those two targets a non-name field may never report exact
+    or prefix. Under ``substring`` the compiler did prove containment
+    in text that holds the field verbatim, so the word-boundary tier is
+    still re-derivable from the field itself; under ``exact`` /
+    ``prefix`` / ``suffix`` it compared a different string entirely and
+    all that is honestly known is that the value is in there.
+
+    Every other target — and every ``PropertyPredicate`` — compares its
+    own column directly and keeps the full range.
+    """
+    if isinstance(pred, PropertyPredicate):
+        return _TIER_EXACT
+    if field in ("displayName", "qualifiedName"):
+        return _TIER_EXACT
+    if pred.target not in ("any", "tags"):
+        return _TIER_EXACT
+    return _TIER_WORD if pred.match == "substring" else _TIER_SUBSTRING
 
 
 def _match_tier(haystack: str, needle: str, mode: str) -> Tuple[int, int]:
@@ -2823,8 +2867,10 @@ def _score_hit(
         matched_leaf = False
         for field, text, weight in _scored_fields(node, pred):
             haystack = text if pred.case_sensitive else text.lower()
+            ceiling = _tier_ceiling(pred, field)
             for needle in needles:
                 tier, position = _match_tier(haystack, needle, mode)
+                tier = min(tier, ceiling)
                 if not tier:
                     continue
                 matched_leaf = True

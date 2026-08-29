@@ -3349,3 +3349,103 @@ class TestHitProvenance:
             PropertyPredicate(key="owner", op="contains", value=""),
         )
         assert _score_hit(node, leaves, want_highlights=True) == (0.0, [], [])
+
+    def test_property_predicate_matches_a_non_string_node_value(self):
+        """``toLower(toString(n.rowCount)) = $v`` matches ``rowCount:
+        100`` against '100' — the row comes back from Cypher, so it has
+        to arrive carrying the provenance that says why."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(properties={"rowCount": 100})
+        leaves = _collect_text_leaves(
+            PropertyPredicate(key="rowCount", op="eq", value="100"),
+        )
+        score, matched, highlights = _score_hit(
+            node, leaves, want_highlights=True,
+        )
+        assert matched == [0]
+        assert score == pytest.approx(50.0)  # exact 100 x property 0.5
+        assert highlights[0].field == "property:rowCount"
+
+    def test_exact_mode_never_earns_the_substring_tier(self):
+        """An `exact` predicate asked about the whole field. A haystack
+        that merely contains the needle did not answer that question."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(displayName="customer orders")
+        leaves = _collect_text_leaves(
+            TextPredicate(value="customer", target="name", match="exact"),
+        )
+        assert _score_hit(node, leaves, want_highlights=True) == (0.0, [], [])
+
+    def test_suffix_mode_floors_to_the_substring_tier(self):
+        """A needle that is also a prefix must not collect the prefix
+        tier — the query asked about the tail."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(displayName="orders_orders")
+        leaves = _collect_text_leaves(
+            TextPredicate(value="orders", target="name", match="suffix"),
+        )
+        score, matched, _ = _score_hit(node, leaves, want_highlights=False)
+        assert score == pytest.approx(20.0)  # substring floor x name 1.0
+        assert matched == [0]
+
+    def test_case_sensitive_predicate_needs_the_case_to_match(self):
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        node = self._node(displayName="Customer")
+        sensitive = _collect_text_leaves(
+            TextPredicate(value="customer", target="name", match="exact",
+                          caseSensitive=True),
+        )
+        assert _score_hit(node, sensitive, want_highlights=False)[0] == 0.0
+        insensitive = _collect_text_leaves(
+            TextPredicate(value="customer", target="name", match="exact"),
+        )
+        assert _score_hit(
+            node, insensitive, want_highlights=False,
+        )[0] == pytest.approx(100.0)
+
+    def test_blob_targets_cannot_claim_a_direct_comparison(self):
+        """``any`` compares searchableText/displayName/qualifiedName and
+        ``tags`` compares a JSON-stringified array. A description or tag
+        hit under those targets rode in on a different column, so it may
+        not report itself as an exact match on its own."""
+        from backend.app.providers.falkordb_deep_search import (
+            _collect_text_leaves,
+            _score_hit,
+        )
+        any_exact = _collect_text_leaves(
+            TextPredicate(value="ledger", target="any", match="exact"),
+        )
+        # The description equals the value, but `any` never compared
+        # n.description — floor, not 100 x 0.4.
+        desc_node = self._node(displayName="orders", description="ledger")
+        score, matched, _ = _score_hit(
+            desc_node, any_exact, want_highlights=False,
+        )
+        assert score == pytest.approx(8.0)  # floor 20 x description 0.4
+        assert matched == [0]
+
+        tag_node = self._node(displayName="orders", tags=["pii"])
+        tags_exact = _collect_text_leaves(
+            TextPredicate(value="pii", target="tags", match="exact"),
+        )
+        assert _score_hit(
+            tag_node, tags_exact, want_highlights=False,
+        )[0] == pytest.approx(12.0)  # floor 20 x tags 0.6
+
+        # displayName IS one of the columns `any` compares — full tier.
+        name_node = self._node(displayName="ledger")
+        assert _score_hit(
+            name_node, any_exact, want_highlights=False,
+        )[0] == pytest.approx(100.0)
