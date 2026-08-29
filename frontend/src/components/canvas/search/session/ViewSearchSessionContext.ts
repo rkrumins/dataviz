@@ -1,7 +1,8 @@
 /**
  * How the header box, the layer columns and the results panel reach the
  * canvas's one search session without a prop drilled through six levels
- * of canvas layout.
+ * of canvas layout. The session itself is built by
+ * `useViewSearchSessionController`.
  *
  * Two readers, because two kinds of consumer exist:
  *   * `useViewSearchSession` — for the surfaces that only ever render
@@ -14,7 +15,7 @@
  */
 import { createContext, useContext } from 'react'
 
-import type { ViewSearchSession } from './useViewSearchSession'
+import type { ViewSearchSession } from './useViewSearchSessionController'
 
 
 export const ViewSearchSessionContext = createContext<ViewSearchSession | null>(null)

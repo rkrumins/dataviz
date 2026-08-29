@@ -1,7 +1,7 @@
 /**
  * The one search session a canvas owns.
  *
- * `useViewSearchSession` doesn't run anything itself — it composes
+ * `useViewSearchSessionController` doesn't run anything itself — it composes
  * `useAdvancedSearch`, which already owns the request pipeline (abort on
  * restart, superseded-response drops, cursor paging). What this hook adds
  * is everything the header box needs on top, and these tests pin the four
@@ -71,10 +71,10 @@ import { useSearchStore } from '@/store/searchStore'
 
 import {
     ViewSearchSessionContext,
-    useViewSearchSession as useProvidedSession,
+    useViewSearchSession,
     useViewSearchSessionOptional,
 } from '../ViewSearchSessionContext'
-import { useViewSearchSession } from '../useViewSearchSession'
+import { useViewSearchSessionController } from '../useViewSearchSessionController'
 
 
 const VIEW_ID = 'view-1'
@@ -106,7 +106,7 @@ function renderSession(
     layers: ViewLayerConfig[] = [],
     assignments: Record<string, LayerAssignmentEntry> = {},
 ) {
-    return renderHook(() => useViewSearchSession({ viewId: VIEW_ID, layers, assignments }))
+    return renderHook(() => useViewSearchSessionController({ viewId: VIEW_ID, layers, assignments }))
 }
 
 
@@ -125,7 +125,7 @@ afterEach(() => {
 })
 
 
-describe('useViewSearchSession — composition', () => {
+describe('useViewSearchSessionController — composition', () => {
     it('binds the pipeline to the view and keeps highlights when the panel unmounts', () => {
         renderSession()
         expect(mocks.composedWith.viewId).toBe(VIEW_ID)
@@ -143,7 +143,7 @@ describe('useViewSearchSession — composition', () => {
 })
 
 
-describe('useViewSearchSession — debounced dispatch', () => {
+describe('useViewSearchSessionController — debounced dispatch', () => {
     it('runs once, at 300 ms, with the text leaf and the shared options', () => {
         const { result } = renderSession()
 
@@ -225,7 +225,7 @@ describe('useViewSearchSession — debounced dispatch', () => {
 })
 
 
-describe('useViewSearchSession — runNow', () => {
+describe('useViewSearchSessionController — runNow', () => {
     it('runs immediately and the debounce behind it does not repeat the query', () => {
         const { result, rerender } = renderSession()
 
@@ -262,7 +262,7 @@ describe('useViewSearchSession — runNow', () => {
 })
 
 
-describe('useViewSearchSession — panel', () => {
+describe('useViewSearchSessionController — panel', () => {
     it('auto-opens on the first result set for a query, once', () => {
         const { result, rerender } = renderSession()
         expect(result.current.panelOpen).toBe(false)
@@ -316,7 +316,7 @@ describe('useViewSearchSession — panel', () => {
 })
 
 
-describe('useViewSearchSession — clearQuery', () => {
+describe('useViewSearchSessionController — clearQuery', () => {
     it('resets the quick query and tears the run down', () => {
         const { result } = renderSession()
 
@@ -353,7 +353,7 @@ describe('useViewSearchSession — clearQuery', () => {
 })
 
 
-describe('useViewSearchSession — resolveLayer', () => {
+describe('useViewSearchSessionController — resolveLayer', () => {
     it('resolves a hit against the layers and assignments it was handed', () => {
         const layers: ViewLayerConfig[] = [{ id: 'L1', name: 'L1', entityTypes: [], order: 0 }]
         const assignments: Record<string, LayerAssignmentEntry> = {
@@ -387,7 +387,7 @@ describe('useViewSearchSession — resolveLayer', () => {
 describe('ViewSearchSessionContext', () => {
     it('the required reader throws when no canvas provided a session', () => {
         const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
-        expect(() => renderHook(() => useProvidedSession())).toThrow(/ViewSearchSession/)
+        expect(() => renderHook(() => useViewSearchSession())).toThrow(/ViewSearchSession/)
         errors.mockRestore()
     })
 
@@ -403,13 +403,13 @@ describe('ViewSearchSessionContext', () => {
             { value: session.current },
             children,
         )
-        const { result } = renderHook(() => useProvidedSession(), { wrapper })
+        const { result } = renderHook(() => useViewSearchSession(), { wrapper })
         expect(result.current).toBe(session.current)
     })
 })
 
 
-describe('useViewSearchSession — view lifetime', () => {
+describe('useViewSearchSessionController — view lifetime', () => {
     it('clears the published result-set when the session goes away', () => {
         const { result, unmount } = renderSession()
 

@@ -3,7 +3,9 @@
  *
  * ContextViewCanvas calls this hook and puts the result on
  * `ViewSearchSessionContext`; the header box, the layer columns and the
- * results panel all read the same object. One session means one query,
+ * results panel read the same object back through that module's
+ * `useViewSearchSession()`. Hence "controller": this side BUILDS the
+ * session, the context side READS it. One session means one query,
  * one result set and one set of highlights — the header box and the panel
  * can no longer disagree about what was searched.
  *
@@ -101,7 +103,7 @@ export interface ViewSearchSession {
 }
 
 
-export function useViewSearchSession(
+export function useViewSearchSessionController(
     { viewId, layers, assignments }: ViewSearchSessionOptions,
 ): ViewSearchSession {
     const advanced = useAdvancedSearch(viewId, { clearOnUnmount: false })
