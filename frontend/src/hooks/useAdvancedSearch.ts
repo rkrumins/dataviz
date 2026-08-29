@@ -33,10 +33,17 @@ import { rememberUrnLabels } from '@/lib/urnLabels'
 import { useCanvasStore } from '@/store/canvas'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useSchemaStore } from '@/store/schema'
-import { DEFAULT_DRAFT_OPTIONS, useSearchStore, type AncestorPathInfo } from '@/store/searchStore'
+import {
+    DEFAULT_DRAFT_OPTIONS,
+    useSearchStore,
+    type AncestorCountInfo,
+    type AncestorPathInfo,
+} from '@/store/searchStore'
 import type {
+    AggregationSpec,
     AncestorRef,
     Predicate,
+    SearchAggregateBucket,
     SearchQuery,
     SearchResultPage,
     SearchScope,
@@ -165,6 +172,60 @@ function collectAncestorPaths(result: SearchResultPage): AncestorPathInfo[] {
         }
     }
     return paths
+}
+
+
+// The two helpers below are the ONLY place the ancestor facet is named, so
+// that adopting the backend's dedicated `ancestor` aggregation is a two-line
+// change: `by === 'ancestor'` and a breakdown read from `bucket.typeCounts`.
+// It isn't in the generated contract yet; until it is we use `parent`, whose
+// buckets are equally exact but credit only a match's IMMEDIATE parent — a
+// collapsed grandparent therefore shows no badge where the page-derived
+// rollup used to guess one, and `subBuckets` stays empty because the request
+// sends no sub-aggregation.
+
+/** Does this facet carry per-ancestor match counts? */
+const isAncestorFacet = (spec: AggregationSpec | undefined): boolean =>
+    spec?.by === 'parent'
+
+/** The facet's per-entityType split of one bucket's matches. */
+const facetBreakdown = (
+    bucket: SearchAggregateBucket,
+): ReadonlyArray<[string, number]> =>
+    (bucket.subBuckets ?? []).map((b) => [b.ancestorEntityType, b.matchCount])
+
+
+/**
+ * The server's exact per-ancestor match counts, or undefined when this
+ * query didn't ask for them (path mode, an explicit hits-only override).
+ *
+ * Buckets carry no `by`, so a facet is identified positionally:
+ * ``result.aggregates[i]`` answers ``query.options.aggregations[i]``.
+ * Undefined — not an empty list — is what makes ``setResult`` fall back
+ * to the page-derived rollup; an empty list is a real answer ("nothing
+ * has matches inside it").
+ */
+function collectAncestorCounts(
+    query: SearchQuery,
+    result: SearchResultPage,
+): AncestorCountInfo[] | undefined {
+    const specs = query.options?.aggregations
+    if (!specs || !result.aggregates) return undefined
+    let asked = false
+    const counts: AncestorCountInfo[] = []
+    result.aggregates.forEach((facet, i) => {
+        if (!isAncestorFacet(specs[i])) return
+        asked = true
+        for (const bucket of facet) {
+            const breakdown = facetBreakdown(bucket)
+            counts.push({
+                urn: bucket.ancestorUrn,
+                count: bucket.matchCount,
+                breakdown: breakdown.length > 0 ? new Map(breakdown) : undefined,
+            })
+        }
+    })
+    return asked ? counts : undefined
 }
 
 
@@ -505,6 +566,7 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 viewId,
                 matchUrns,
                 ancestorPaths,
+                ancestorCounts: collectAncestorCounts(query, result),
                 queryHash: JSON.stringify(query),
             })
             // Auto-save the dispatched predicate to per-view Recent.
@@ -662,6 +724,10 @@ export function useAdvancedSearch(viewId: string): UseAdvancedSearchResult {
                 viewId,
                 matchUrns: collectMatchUrns(merged),
                 ancestorPaths: collectAncestorPaths(merged),
+                // ``merged`` keeps page 1's aggregates (nextQuery drops
+                // them), so the badges stay exact instead of regressing
+                // to a rollup over a now-longer hit list.
+                ancestorCounts: collectAncestorCounts(view.query, merged),
                 queryHash: JSON.stringify(view.query),
             })
         } catch (e) {
