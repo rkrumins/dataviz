@@ -386,7 +386,7 @@ function diagnose(result: SearchResultPage, query: SearchQuery): Cause[] {
             body: 'Nothing narrowed it to one part of the hierarchy, so an '
                 + 'empty result is not a scope problem — the word really '
                 + 'isn\'t here. To look inside one container instead, use '
-                + 'the search box on its row, or search inside a result group.',
+                + 'the search box on its row.',
         })
     }
 

@@ -71,7 +71,7 @@ export function visibleFacetBuckets(
     const specs = query.options?.aggregations ?? []
     return lists
         .filter((_, i) => {
-            const by = specs[i]?.by as string | undefined
+            const by = specs[i]?.by
             return by !== 'parent' && by !== 'ancestor'
         })
         .flat()
