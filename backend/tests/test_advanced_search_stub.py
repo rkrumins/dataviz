@@ -189,12 +189,13 @@ async def test_property_predicate_eq(stub):
 
 
 @pytest.mark.asyncio
-async def test_property_predicate_eq_case_folds_strings_not_typed_values():
-    """Mirrors the compiler's ``_visit_property`` case-fold rule: eq/neq
-    fold ONLY when the predicate value is a string — 'STRING' eq
-    matches the stored 'STRING' via 'string', but an int property must
-    NOT be coerced to a string for the comparison (an int eq does not
-    match the string '100')."""
+async def test_property_predicate_eq_case_folds_strings_and_coerces_stored_type():
+    """Mirrors the compiler's ``_visit_property`` case-fold rule: once
+    the fold triggers (predicate value is a string, not case_sensitive),
+    the compiler wraps the STORED column unconditionally in
+    toLower(toString(col)) — so a stored int 100 DOES match predicate
+    value '100' (toString(100) == '100'), same as 'STRING' eq matching
+    'string'."""
     nodes = [{
         "urn": "urn:dataset:x",
         "entityType": "dataset",
@@ -208,10 +209,10 @@ async def test_property_predicate_eq_case_folds_strings_not_typed_values():
     )
     assert string_match.candidate_count == 1
 
-    typed_mismatch = await stub.deep_search(
+    int_coerced_to_string_match = await stub.deep_search(
         _query(PropertyPredicate(key="rowCount", op="eq", value="100"))
     )
-    assert typed_mismatch.candidate_count == 0
+    assert int_coerced_to_string_match.candidate_count == 1
 
 
 @pytest.mark.asyncio

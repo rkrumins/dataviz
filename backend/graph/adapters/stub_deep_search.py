@@ -335,11 +335,16 @@ def _matches(node: Dict[str, Any], predicate) -> bool:
         target = predicate.value
         if op in ("eq", "neq"):
             # Mirror the compiler's case-fold rule (falkordb_deep_search.py
-            # ``_visit_property``): fold both sides only when the
-            # predicate value is a string and not case_sensitive — a
-            # typed comparison keeps its raw equality semantics.
+            # ``_visit_property``): once the fold triggers (predicate
+            # value is a string, not case_sensitive), the compiler
+            # wraps the STORED column unconditionally in
+            # toLower(toString(col)) — so a stored int 100 matches
+            # predicate value "100". Coerce any non-None stored value
+            # to str before lowering to match. ``toString(NULL)`` is
+            # NULL in Cypher, so a None stored value stays None (no
+            # match for eq; neq's None handling is unchanged below).
             if isinstance(target, str) and not predicate.case_sensitive:
-                lhs = v.lower() if isinstance(v, str) else v
+                lhs = str(v).lower() if v is not None else None
                 rhs = target.lower()
             else:
                 lhs, rhs = v, target
