@@ -623,6 +623,13 @@ class _RecordingProvider:
             deadline_exceeded=False, elapsed_ms=1, cache_hit=False,
         )
 
+    async def deep_search_explain(self, query):
+        # Minimal stand-in for the real compile-only path
+        # (falkordb_deep_search.explain_deep_search) — just enough shape
+        # for AdvancedSearchService.explain() to attach resolvedScope.
+        self.calls.append((query, None))
+        return {"cypher": "MATCH (n) RETURN n", "params": {}, "notes": []}
+
 
 class _FakeEngine:
     """Just enough surface to satisfy AdvancedSearchService.__init__ and
@@ -1072,6 +1079,164 @@ async def test_service_data_source_mode_ignores_root_cap(
     assert len(engine.provider.calls) == 1
     stamped_query, _ = engine.provider.calls[0]
     assert stamped_query.scope.root_urns is None
+
+
+# ---------------------------------------------------------------------------
+# _stamp_resolved_scope — a view's own ontology is never too big to search
+#
+# ``SearchScope.entity_types`` caps *client* input (default 512, raised
+# from 32). A view's resolved entity-type allow list is server-derived,
+# not client input, and must never trip that cap into an unhandled
+# pydantic 500 (the same class of bug as the root_urns cap, fixed
+# separately in ``_stamp_resolved_scope``'s root-cap branch above).
+# ---------------------------------------------------------------------------
+
+
+async def test_service_stamps_large_entity_type_allow_list_through(
+    db_session: AsyncSession,
+):
+    """A view whose ontology has 35 entity types (below the 512 cap, but
+    above the old 32 cap) must stamp through in full — the provider sees
+    every one of the 35 types, not a truncated or dropped set."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    entity_types = [f"Type{i:03d}" for i in range(35)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    page, eff_scope = await svc.search(query)
+
+    assert len(eff_scope.entity_type_allow_list) == 35
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert stamped_query.scope.entity_types == sorted(entity_types)
+    # No degradation note — the allow-list stamped through untouched.
+    notes = page.scope_diagnostics.notes if page.scope_diagnostics else []
+    assert not any("entity-type gate was dropped" in n for n in notes)
+
+
+async def test_service_drops_entity_type_gate_when_ontology_exceeds_cap(
+    db_session: AsyncSession,
+):
+    """A view whose ontology has 600 entity types is above the field's
+    512-item cap. The service must fall back to an unfiltered search
+    (``entity_types=None`` — "every label", exactly what the cap-busting
+    allow list already meant) rather than crash. The diagnostics note
+    explains why the label gate is missing.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    entity_types = [f"Type{i:04d}" for i in range(600)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    page, eff_scope = await svc.search(query)
+
+    assert len(eff_scope.entity_type_allow_list) == 600
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert stamped_query.scope.entity_types is None
+    assert page.scope_diagnostics is not None
+    assert any(
+        "entity-type gate was dropped" in n
+        for n in page.scope_diagnostics.notes
+    )
+
+
+async def test_explain_takes_the_same_path_for_large_entity_type_allow_list(
+    db_session: AsyncSession,
+):
+    """``explain()`` resolves scope through the same ``_stamp_resolved_scope``
+    call as ``search()``. A 35-type ontology must not raise there either —
+    it should return the normal explain-result shape."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    entity_types = [f"Type{i:03d}" for i in range(35)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    result = await svc.explain(query)
+
+    assert result["resolvedScope"]["entityTypes"] == sorted(entity_types)
+    assert "cypher" in result
 
 
 async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSession):

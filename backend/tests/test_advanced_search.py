@@ -2683,6 +2683,30 @@ class TestScopeRootUrnsCap:
         SearchScope(viewId="v1", rootUrns=[])  # empty list
 
 
+class TestScopeEntityTypesCap:
+    """Verify the static cap on ``SearchScope.entity_types``.
+
+    Raised from 32 to 512: a view's own resolved ontology allow-list
+    (stamped server-side by ``_stamp_resolved_scope``) can legitimately
+    have more than 32 labels on a graph with a large ontology, and that
+    is client input to the *model*, not to a user — the cap still has
+    to be high enough that no real view's ontology trips it.
+    """
+
+    def test_512_entity_types_validates(self):
+        from backend.common.models.search import SearchScope
+        types = [f"Type{i}" for i in range(512)]
+        scope = SearchScope(viewId="v1", entityTypes=types)
+        assert len(scope.entity_types) == 512
+
+    def test_513_entity_types_rejected(self):
+        from backend.common.models.search import SearchScope
+        from pydantic import ValidationError as PydanticValidationError
+        types = [f"Type{i}" for i in range(513)]
+        with pytest.raises(PydanticValidationError, match="512"):
+            SearchScope(viewId="v1", entityTypes=types)
+
+
 # ---------------------------------------------------------------------------
 # Exact totalCount + per-request remaining budget
 # ---------------------------------------------------------------------------

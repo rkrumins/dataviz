@@ -35,6 +35,7 @@ from backend.app.services.view_scope import (
 )
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.models.search import (
+    SEARCH_SCOPE_ENTITY_TYPES_MAX,
     GroupPredicate,
     ScopeDiagnostics,
     SearchQuery,
@@ -236,7 +237,7 @@ def _empty_page(query: SearchQuery) -> SearchResultPage:
 
 def _stamp_resolved_scope(
     query: SearchQuery, eff_scope: EffectiveViewScope,
-) -> SearchQuery:
+) -> Tuple[SearchQuery, Optional[str]]:
     """Overwrite ``query.scope`` with the server-resolved values.
 
     The compiler reads ``query.scope.root_urns`` and ``query.scope.entity_types``
@@ -251,6 +252,11 @@ def _stamp_resolved_scope(
     Pydantic models are immutable-by-convention (``Config.frozen`` is not
     set, but mutating fields can confuse caches). We construct a new
     ``SearchScope`` and use ``model_copy`` to swap it in.
+
+    Returns the stamped query plus an optional diagnostics note — set
+    when the resolved entity-type allow-list itself exceeds
+    ``SearchScope.entity_types``'s cap (a view's own ontology, never a
+    client input) and had to be dropped rather than stamped.
     """
     root_urns = None
     if query.scope.scope_mode == "view" and eff_scope.root_urns:
@@ -266,6 +272,26 @@ def _stamp_resolved_scope(
                 f"an administrator to raise the limit."
             )
         root_urns = list(eff_scope.root_urns)
+
+    entity_types = None
+    entity_types_note = None
+    if eff_scope.entity_type_allow_list:
+        sorted_types = sorted(eff_scope.entity_type_allow_list)
+        # ``SearchScope.entity_types`` caps client input; the view's own
+        # ontology is never "too big to search". Above the cap, drop the
+        # label gate entirely (the compiler's full-ontology fallback —
+        # semantically "every label") instead of raising a 500.
+        if len(sorted_types) > SEARCH_SCOPE_ENTITY_TYPES_MAX:
+            entity_types_note = (
+                f"This view's ontology has {len(sorted_types)} entity "
+                f"types, above the search field's limit of "
+                f"{SEARCH_SCOPE_ENTITY_TYPES_MAX}. The entity-type gate "
+                f"was dropped for this search — every type in the view "
+                f"is included."
+            )
+        else:
+            entity_types = sorted_types
+
     new_scope = SearchScope(
         view_id=eff_scope.view_id,
         scope_mode=query.scope.scope_mode,
@@ -275,14 +301,10 @@ def _stamp_resolved_scope(
         ),
         root_urns=root_urns,
         max_depth=eff_scope.max_depth,
-        entity_types=(
-            sorted(eff_scope.entity_type_allow_list)
-            if eff_scope.entity_type_allow_list
-            else None
-        ),
+        entity_types=entity_types,
         layer_assignment=query.scope.layer_assignment,
     )
-    return query.model_copy(update={"scope": new_scope})
+    return query.model_copy(update={"scope": new_scope}), entity_types_note
 
 
 class AdvancedSearchService:
@@ -338,7 +360,7 @@ class AdvancedSearchService:
 
         client_requested_urns = bool(query.scope.root_urns)
         eff_scope = await self._resolve_scope(query.scope)
-        query = _stamp_resolved_scope(query, eff_scope)
+        query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
 
         # Security guard: if the client passed root_urns but every one
         # was dropped by the resolver (none belonged to this view), we
@@ -351,13 +373,16 @@ class AdvancedSearchService:
                 eff_scope.view_id, eff_scope.workspace_id,
                 len(eff_scope.dropped_urns),
             )
+            extra_notes = [
+                "All client-supplied root URNs were dropped — none "
+                "belonged to this view. Search short-circuited to "
+                "an empty page (security guard).",
+            ]
+            if entity_types_note:
+                extra_notes.append(entity_types_note)
             page = _empty_page(query)
             page.scope_diagnostics = self._build_scope_diagnostics(
-                eff_scope, extra_notes=[
-                    "All client-supplied root URNs were dropped — none "
-                    "belonged to this view. Search short-circuited to "
-                    "an empty page (security guard).",
-                ],
+                eff_scope, extra_notes=extra_notes,
             )
             return page, eff_scope
 
@@ -372,7 +397,10 @@ class AdvancedSearchService:
             page = await self._engine.provider.deep_search(
                 query, deadline_ms=deadline_ms,
             )
-            page.scope_diagnostics = self._build_scope_diagnostics(eff_scope)
+            page.scope_diagnostics = self._build_scope_diagnostics(
+                eff_scope,
+                extra_notes=[entity_types_note] if entity_types_note else None,
+            )
             return page, eff_scope
         except CompileError as exc:
             # Cypher-compilation rejections (e.g. fulltext without index,
@@ -399,7 +427,7 @@ class AdvancedSearchService:
         """
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
-        query = _stamp_resolved_scope(query, eff_scope)
+        query, _entity_types_note = _stamp_resolved_scope(query, eff_scope)
         _reject_unbounded_text_any(query)
         try:
             result = await self._engine.provider.deep_search_explain(query)

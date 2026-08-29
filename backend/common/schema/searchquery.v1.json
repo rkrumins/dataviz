@@ -1950,7 +1950,7 @@
               "items": {
                 "type": "string"
               },
-              "maxItems": 32,
+              "maxItems": 512,
               "type": "array"
             },
             {

@@ -509,6 +509,13 @@ ResultShape = Literal["aggregates", "hits", "both", "paths"]
 ScopeMode = Literal["visible", "view", "data_source"]
 
 
+# Client-input cap on ``SearchScope.entity_types``. Raised from 32 to
+# 512 (a view's own resolved ontology allow-list can legitimately
+# exceed 32 labels — see ``_stamp_resolved_scope``, which falls back
+# to an unfiltered ``None`` rather than ever raising over this cap).
+SEARCH_SCOPE_ENTITY_TYPES_MAX = 512
+
+
 class SearchScope(_Base):
     """Bounds the search.
 
@@ -575,7 +582,7 @@ class SearchScope(_Base):
         description="Clamped to min(client, view.maxDepth) by the resolver.",
     )
     entity_types: Optional[List[str]] = Field(
-        None, alias="entityTypes", max_length=32,
+        None, alias="entityTypes", max_length=SEARCH_SCOPE_ENTITY_TYPES_MAX,
         description=(
             "Optional. Must be ⊆ view's visibleEntityTypes; out-of-set "
             "values cause the request to be rejected with 400."
