@@ -9,16 +9,15 @@
  * INTERMEDIATE_T1, INTERMEDIATE_T2, GOLD, REPORTING, Tableau, etc.
  *
  * Used by two consumers:
- *   1. ``useAdvancedSearch.stampScope`` — when scope_mode = 'view'
- *      and the view's persisted ``rootUrns`` are empty, the FE
- *      attaches these as the scope-narrowing hint so the BE applies
- *      its containment-expansion clamp instead of running unscoped.
- *      Fixes the bug where "All nodes in this view" was returning
- *      results from outside the view (e.g. Legacy_Archive nodes).
- *
- *   2. The "Root nodes in view" filter (renamed from "Layer") — the
+ *   1. The "Root nodes in view" filter (renamed from "Layer") — the
  *      filter editor lists these URNs by display name; selecting one
  *      or more emits a DescendantOf predicate.
+ *
+ *   2. ``displayRuleEval`` — the same boundary, evaluated client-side.
+ *
+ * Search is NOT one of them any more: ``useAdvancedSearch`` used to ship
+ * these URNs as ``scope.rootUrns``, but the backend resolves the view's
+ * roots from ``scope.viewId`` itself.
  *
  * The logic mirrors EntityAssignmentPanel.tsx (the view wizard's
  * assignment step), which is the canonical place where the
@@ -50,8 +49,8 @@ export interface CanvasViewRoot {
 
 /**
  * Pure helper — used both by the hook (React render path) and by
- * ``useAdvancedSearch.stampScope`` which reads canvas state inside a
- * ``useCallback`` and therefore can't call hooks.
+ * ``displayRuleEval`` which reads canvas state inside a callback and
+ * therefore can't call hooks.
  */
 export function computeViewRoots(
     nodes: ReadonlyArray<LineageNode>,

@@ -759,10 +759,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
-        {/* Search children button. Hidden while tracing: child search
-            REPLACES a parent's loaded children in the canvas store, which a
-            trace can never undo on exit, so the handler refuses it — and an
-            affordance that does nothing is worse than no affordance. */}
+        {/* Search children button. Hidden while tracing: the box scopes the
+            VIEW's search to this container, and a trace's tree is a filtered
+            overlay the store never sees — so its hits would be rows the trace
+            had deliberately left out, arriving from underneath it. An
+            affordance that answers the wrong question is worse than none.
+            A harness test pins the withdrawal. */}
         {hasChildren && onToggleSearch && !isTracing && (
           <button
             onClick={(e) => {

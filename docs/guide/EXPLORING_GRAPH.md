@@ -20,12 +20,14 @@ filtering freely. Unlike opening a saved View, here *you* drive.
 Open **Explore** from the sidebar. An empty (or lightly seeded) canvas appears.
 Begin with **search**:
 
-- Use the on-canvas **search box** to find any node by name.
-- Or press `⌘K` / `Ctrl-K` to open the **Command Palette** and search from
-  anywhere.
+- Use the on-canvas **search box** to find any node by name — press `/`
+  anywhere on the canvas to jump straight into it.
+- Or press `⌘K` / `Ctrl-K` to open the **Command Palette** and jump to
+  another view, page or workspace from anywhere. It deliberately does not
+  reach the data *inside* a view; `/` does that.
 
-Click a result to drop it onto the canvas as your anchor. From there, everything
-is about following connections.
+Click a search-box result to drop it onto the canvas as your anchor. From
+there, everything is about following connections.
 
 ---
 
@@ -165,11 +167,20 @@ The canvas itself has a control cluster (usually bottom-corner):
 
 ---
 
-## The Command Palette (`⌘K` / `Ctrl-K`)
+## The palettes (`⌘⇧P` on a canvas, `⌘K` anywhere)
 
-The Command Palette is the fastest way to do almost anything without hunting
-through menus: search for nodes, start a trace, apply a filter, or jump to
-another part of the app. If you remember one shortcut, make it this one.
+There are two, and the difference is what each one can reach.
+
+- `⌘⇧P` / `Ctrl-Shift-P` opens the **canvas action palette**: start a
+  trace, apply a filter, change the layout — the things you do *to* the
+  canvas you are on. If you remember one shortcut on a canvas, make it this
+  one.
+- `⌘K` / `Ctrl-K` opens the app-wide **Command Palette**: views,
+  workspaces, pages, settings and documentation, from anywhere in the
+  product. It never searches the data inside a view.
+
+To find something *in* the view in front of you, press `/` to focus its
+search box, and `⌘⇧F` / `Ctrl-Shift-F` to show or hide the results panel.
 
 ---
 

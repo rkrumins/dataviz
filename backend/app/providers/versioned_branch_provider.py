@@ -29,6 +29,14 @@ from backend.common.models.graph import (
 )
 
 
+#: Surfaced verbatim as the 501 body, so it is product copy: what
+#: happened and that waiting fixes it — no provider names, no internals.
+_NO_DEEP_SEARCH = (
+    "Search isn't available while the published graph is catching up — "
+    "try again in a moment."
+)
+
+
 def _node_payload(node: GraphNode) -> dict:
     return node.model_dump(by_alias=True, exclude_none=True)
 
@@ -357,6 +365,29 @@ class VersionedBranchProvider:
         (shared by main and every branch) and passes edge-type sets into each call. Raising here
         makes ``ContextEngine._resolve_ontology``'s graceful-degradation explicit."""
         raise NotImplementedError("VersionedBranchProvider does not introspect ontology")
+
+    # ---- deep search: no engine to run it, and nothing to delegate to ---- #
+    async def deep_search(self, query, *, deadline_ms=None):
+        """Advanced search has no implementation over composed branch state.
+
+        The predicate tree compiles to Cypher against the FalkorDB
+        projection; this provider reads Postgres graph-version rows and —
+        unlike :class:`DraftOverlayProvider` — wraps no graph provider to
+        hand the query to. ``NotImplementedError`` is deliberate: the
+        route maps it to 501, whereas simply not having the method (the
+        state this replaces) surfaced as ``AttributeError`` → 500.
+
+        Only reached while the projection lags a commit — a fresh main,
+        and every draft overlaid on one, searches FalkorDB directly."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_explain(self, query):
+        """Compile-only path — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
+    async def deep_search_discover(self, *, sample_per_label: int = 200):
+        """Schema discovery — same gap as :meth:`deep_search`."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
 
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:

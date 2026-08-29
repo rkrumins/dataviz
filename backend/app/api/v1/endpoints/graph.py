@@ -1419,12 +1419,70 @@ def _map_validation_error(detail: str) -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
 
 
+def _map_not_implemented(
+    engine: ContextEngine, exc: NotImplementedError,
+) -> HTTPException:
+    """Map a provider's deep-search refusal to 501.
+
+    A provider that refuses WITH a message means it for the caller — the
+    branch/stale-main reader's "the published graph is catching up" is
+    product copy, and swallowing it would leave the user reading about
+    FalkorDB. A bare ``NotImplementedError`` (a provider that simply has
+    no deep-search implementation) keeps the developer-facing fallback
+    naming the provider.
+    """
+    return HTTPException(
+        status_code=501,
+        detail=str(exc) or (
+            f"deep_search not implemented on the active provider "
+            f"({type(engine.provider).__name__}). Only FalkorDB is "
+            f"supported in this workstream."
+        ),
+    )
+
+
+def _guard_capability_scope(
+    request: Request, query: Optional[SearchQuery] = None,
+) -> None:
+    """Keep a share-link identity inside the view it was granted.
+
+    ``capability_gate`` stamps ``request.state.view_capability`` when the
+    caller reached this route through a view capability rather than
+    ``workspace:datasource:read`` membership. For that identity the view
+    IS the RBAC boundary, and three things escape it: ``data_source``
+    drops the view's root clamp outright, ``visible``'s only clamp is
+    the CLIENT-supplied ``visibleUrns`` list, and — because the capability
+    is authorised via the ``?viewId=`` query param while the search body
+    carries its OWN ``scope.viewId`` — a caller could otherwise name a
+    DIFFERENT view in the body and have it resolved as if the capability
+    covered it. ``view`` mode against the capability's OWN view resolves
+    against the view's own authorised roots, so that alone stays open.
+    Membership callers are unaffected.
+
+    ``query=None`` is ``/search/discover``, which takes no query at all:
+    it reports the whole graph's labels, property keys and tag values,
+    and nothing narrows that to the granted view — so every capability
+    identity is refused there.
+    """
+    cap_view_id = getattr(request.state, "view_capability", None)
+    if not cap_view_id:
+        return
+    if (query is None
+            or query.scope.scope_mode in ("data_source", "visible")
+            or query.scope.view_id != cap_view_id):
+        raise HTTPException(
+            status_code=403,
+            detail="This link can only search inside its view.",
+        )
+
+
 @router.post(
     "/search/advanced",
     response_model_by_alias=True,
 )
 async def search_advanced(
     query: SearchQuery,
+    request: Request,
     response: Response,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
@@ -1450,15 +1508,19 @@ async def search_advanced(
     ``X-Search-Dropped-URNs`` response header so the FE can log /
     diagnose.
 
-    See ``backend/common/models/search.py`` for the full contract and
-    ``docs/api/advanced-search.md`` for the AI-agent iterative-drill
-    pattern.
+    The search itself runs inside the per-(provider, graph) concurrency
+    slot, so a search-as-you-type keystroke storm sheds load with 429 +
+    Retry-After instead of pegging the graph's single Cypher thread.
+
+    See ``backend/common/models/search.py`` for the full contract,
+    including the AI-agent iterative-drill / facet-discovery pattern.
     """
     if not ws_id:
         raise HTTPException(
             status_code=400,
             detail="workspace_id is required (path param ws_id)",
         )
+    _guard_capability_scope(request, query)
     # Lazy imports keep this route free of overhead when feature isn't used.
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
@@ -1471,18 +1533,13 @@ async def search_advanced(
         branch_id=branchId,
     )
     try:
-        page, eff_scope = await svc.search(query)
+        page, eff_scope = await _bounded_compute(
+            engine, lambda: svc.search(query),
+        )()
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
     except NotImplementedError as exc:
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                f"deep_search not implemented on the active provider "
-                f"({type(engine.provider).__name__}). Only FalkorDB is "
-                f"supported in this workstream."
-            ),
-        ) from exc
+        raise _map_not_implemented(engine, exc) from exc
 
     if eff_scope.dropped_urns:
         response.headers["X-Search-Dropped-URNs"] = str(len(eff_scope.dropped_urns))
@@ -1493,6 +1550,7 @@ async def search_advanced(
 @router.post("/search/explain")
 async def search_explain(
     query: SearchQuery,
+    request: Request,
     ws_id: Optional[str] = None,
     dataSourceId: Optional[str] = Query(None),
     branchId: Optional[str] = Query(None),
@@ -1518,6 +1576,7 @@ async def search_explain(
             status_code=400,
             detail="workspace_id is required (path param ws_id)",
         )
+    _guard_capability_scope(request, query)
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService, ValidationError,
     )
@@ -1532,10 +1591,15 @@ async def search_explain(
         return await svc.explain(query)
     except ValidationError as exc:
         raise _map_validation_error(str(exc)) from exc
+    except NotImplementedError as exc:
+        # Same refusal as search_advanced's — a draft over a stale main
+        # reaches this route too, and without this arm it escaped as 500.
+        raise _map_not_implemented(engine, exc) from exc
 
 
 @router.get("/search/discover")
 async def search_discover(
+    request: Request,
     samplePerLabel: int = Query(
         200, ge=1, le=2000,
         description="How many nodes to sample per label before "
@@ -1552,17 +1616,30 @@ async def search_discover(
     predicates returning 0 results (the user picks a key that doesn't
     exist on natively-stored nodes).
 
-    A label with sampled > 0 nodes but zero user-keys appears in
-    ``blobOnlyLabels`` — strong signal that those nodes are still on
-    pre-W1 blob storage and need the migration script
-    (``python -m backend.scripts.migrate_native_properties``) to be
-    queryable by property.
+    A label with a sampled node still carrying the pre-W1
+    ``n.properties`` JSON blob appears in ``blobOnlyLabels`` — those
+    values stay invisible to property predicates until the migration
+    script (``python -m backend.scripts.migrate_native_properties``)
+    lifts them into native fields.
+
+    ``missingSearchableText`` is the same signal for the *text* path:
+    sampled nodes with no ``n.searchableText``, the only column a
+    "search everything" query reads.
+
+    Whole-graph diagnostics, so a share-link identity is refused — see
+    ``_guard_capability_scope``.
     """
+    _guard_capability_scope(request)
     from backend.app.services.advanced_search_service import (
         AdvancedSearchService,
     )
     svc = AdvancedSearchService.for_diagnostics(engine)
-    return await svc.discover(sample_per_label=samplePerLabel)
+    try:
+        return await svc.discover(sample_per_label=samplePerLabel)
+    except NotImplementedError as exc:
+        # Same refusal arm as the other two search routes: a branch /
+        # stale-main provider means its message for the caller.
+        raise _map_not_implemented(engine, exc) from exc
 
 
 # Process-level cache of the SearchQuery JSON Schema. It's static

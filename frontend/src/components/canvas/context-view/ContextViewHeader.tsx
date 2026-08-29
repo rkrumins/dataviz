@@ -1,8 +1,11 @@
 /**
  * ContextViewHeader - Layout shell for the Context View's toolbar.
  *
- * Receives all state as props from ContextViewCanvas — no store access here.
- * Keeps the orchestrator lean and makes the header independently testable.
+ * Receives its state as props from ContextViewCanvas, which keeps the
+ * orchestrator lean and the header independently testable. The one
+ * exception is the search box, which reads the canvas's search session off
+ * a context — a query, its results and its highlights are one thing shared
+ * by three surfaces, and drilling it through here would only pass it on.
  *
  * The header is partitioned by mode. Published is strictly read-only for
  * everybody; "edit mode" IS being on a draft (no separate flag):
@@ -20,21 +23,14 @@
  */
 
 import { motion, AnimatePresence } from 'framer-motion'
-import type { HierarchyNode } from './types'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
-import { HeaderSearch, HeaderSearchResults } from './header/HeaderSearch'
+import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
 import { ViewTitleMenu } from './header/ViewTitleMenu'
 
 export interface ContextViewHeaderProps {
-  // Search
-  searchQuery: string
-  onSearchChange: (q: string) => void
-  searchResults: HierarchyNode[]
-  onSearchResultClick: (node: HierarchyNode) => void
-
   // Lineage flow
   showLineageFlow: boolean
   onToggleLineageFlow: () => void
@@ -86,18 +82,6 @@ export interface ContextViewHeaderProps {
   canEnterEdit: boolean
   onEnterEdit: () => void
   onExitEdit: () => void
-
-  // Advanced search panel (G2 production UX surface).
-  //
-  // When invoked WITH a ``seedQuery`` (the current quick-search
-  // value), the parent should:
-  //   * clear the quick-search input so the no-match escalation
-  //     card vanishes,
-  //   * seed the Advanced Search panel's draft predicate with a
-  //     ``TextPredicate{target:'name', value: seedQuery}`` so the
-  //     user picks up where they left off without retyping.
-  // When invoked WITHOUT a seedQuery, just toggle the panel.
-  onOpenAdvancedSearch?: (seedQuery?: string) => void
 
   // Property Manager — opens the reusable right-side drawer for browsing
   // properties and authoring display-rule tags. Optional so canvases that
@@ -157,10 +141,6 @@ export interface ContextViewHeaderProps {
 }
 
 export function ContextViewHeader({
-  searchQuery,
-  onSearchChange,
-  searchResults,
-  onSearchResultClick,
   showLineageFlow,
   onToggleLineageFlow,
   showEdgeDirection,
@@ -185,7 +165,6 @@ export function ContextViewHeader({
   canEnterEdit,
   onEnterEdit,
   onExitEdit,
-  onOpenAdvancedSearch,
   onTogglePropertyManager,
   propertyManagerOpen = false,
   viewName,
@@ -306,13 +285,9 @@ export function ContextViewHeader({
           onRetrySync={onRetrySync}
         />
 
-        {/* Zone 2 — Search. See header/HeaderSearch.tsx for the field +
-            helper-row implementation. */}
-        <HeaderSearch
-          searchQuery={searchQuery}
-          onSearchChange={onSearchChange}
-          onOpenAdvancedSearch={onOpenAdvancedSearch}
-        />
+        {/* Zone 2 — Search. Reads the canvas's search session off a
+            context; see header/HeaderSearch.tsx. */}
+        <HeaderSearch />
 
         {/* Zone 3 — Actions. Comprehension tools render identically in
             both modes; only the tail changes (Edit ↔ authoring cluster).
@@ -357,23 +332,6 @@ export function ContextViewHeader({
           )}
         </AnimatePresence>
       </div>
-
-      {/* Search Results — three states drive the row:
-            1. query empty       → nothing rendered
-            2. query + matches   → chip list + a tail "Search entire
-                                   graph" escalation link
-            3. query + no match  → prominent escalation card pointing
-                                   the user at Advanced Search
-          The escalation card makes the empty case the BEST moment to
-          discover Advanced Search — exactly when the user has typed
-          something and the visible canvas couldn't find it.
-          See header/HeaderSearch.tsx for the implementation. */}
-      <HeaderSearchResults
-        searchQuery={searchQuery}
-        searchResults={searchResults}
-        onSearchResultClick={onSearchResultClick}
-        onOpenAdvancedSearch={onOpenAdvancedSearch}
-      />
     </div>
   )
 }

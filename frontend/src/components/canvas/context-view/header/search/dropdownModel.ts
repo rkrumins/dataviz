@@ -1,0 +1,247 @@
+/**
+ * What the "Top matches" list has to work out about a hit, as pure
+ * functions.
+ *
+ * The dropdown is a presentational surface — it draws ten rows and calls
+ * back. Everything it would otherwise have to decide mid-render lives
+ * here: which ten, why each one is in the list, and how to say where it
+ * lives without a path that wraps to three lines.
+ *
+ * The *why* chip is computed on this side deliberately. The backend does
+ * send `highlights`, but it cannot tell the difference between "the name
+ * IS the word you typed" and "the name has the word in it somewhere" —
+ * that distinction is what makes a ranked list legible to someone who
+ * did not write the query language, and it is one string comparison
+ * against text the box already holds. No wire change buys it.
+ */
+import type { QuickQuery } from '@/components/canvas/search/session/quickPredicate'
+import type { AncestorRef, SearchHit } from '@/types/search'
+
+
+/** How many rows the dropdown offers before "See all" is the answer. */
+export const TOP_MATCHES = 10
+
+/** Above this, the list is a sample rather than an answer. Ten of two
+ *  hundred is still a plausible top ten; ten of five thousand is a word
+ *  that needs narrowing, not a longer list. Read only by `narrowingHints`
+ *  — the threshold is that answer's business, not a knob for callers. */
+const MANY_MATCHES = 200
+
+
+/**
+ * The first `n` hits, in the order the server sent them.
+ *
+ * Never re-sorted. The ranking IS the backend's answer — relevance
+ * weights, tie-breaks and all — and a list that quietly re-ordered it
+ * would disagree with the panel showing the same query six inches away.
+ */
+export function topMatches(
+    hits: SearchHit[] | null | undefined,
+    n: number = TOP_MATCHES,
+): SearchHit[] {
+    return (hits ?? []).slice(0, n)
+}
+
+
+/** Anything that is not a letter or a digit separates two words. Data
+ *  names are `_`-, `.`- and `-`-separated far more often than they are
+ *  spaced, and `\b` treats `_` as a letter — so `\border\b` says no to
+ *  `daily_order_v2`, which is exactly the case this tier exists for. */
+const SEPARATOR = /[^a-z0-9]/
+
+
+/** Whether `text` sits in `name` bounded by separators on both sides.
+ *  Both arguments are already lower-cased. */
+function containsWord(name: string, text: string): boolean {
+    for (let from = 0; from <= name.length;) {
+        const at = name.indexOf(text, from)
+        if (at === -1) return false
+        const before = at === 0 || SEPARATOR.test(name[at - 1])
+        const end = at + text.length
+        const after = end === name.length || SEPARATOR.test(name[end])
+        if (before && after) return true
+        from = at + 1
+    }
+    return false
+}
+
+
+/**
+ * Why this hit is in the list, in one chip.
+ *
+ * The name is asked first and in tiers, because that is the ranking the
+ * user can feel: an exact name outranks a prefix outranks a word
+ * outranks a substring, and saying which one landed explains an order
+ * that would otherwise look arbitrary. Only when the name did not match
+ * at all does the answer come from the server's best highlight — the
+ * word was found somewhere the row does not otherwise show.
+ *
+ * `field` is the wire spelling behind the label, so a caller can pair
+ * the chip with the highlight it came from.
+ */
+export function whyLabel(
+    hit: SearchHit, quick: QuickQuery,
+): { label: string; field: string } {
+    const text = quick.text.trim().toLowerCase()
+    const name = (hit.node.displayName ?? '').toLowerCase()
+    if (text && name) {
+        if (name === text) return { label: 'Name is exactly', field: 'displayName' }
+        if (name.startsWith(text)) return { label: 'Name starts with', field: 'displayName' }
+        if (containsWord(name, text)) return { label: 'Name contains the word', field: 'displayName' }
+        if (name.includes(text)) return { label: 'Name contains', field: 'displayName' }
+    }
+
+    const field = hit.highlights?.[0]?.field
+    if (!field) return { label: 'Matched', field: '' }
+    if (field === 'description') return { label: 'In description', field }
+    if (field === 'tags') return { label: 'Tag', field }
+    if (field.startsWith('property:')) {
+        return { label: `Property ${field.slice('property:'.length)}`, field }
+    }
+    if (field === 'qualifiedName') return { label: 'In path', field }
+    return { label: 'Matched', field }
+}
+
+
+/**
+ * One rendered crumb: an ancestor with its place in the WHOLE path, or
+ * the gap where the middle of that path used to be.
+ *
+ * The index travels with the ancestor because revealing a crumb slices
+ * the path at it, and after the elision a renderer cannot count its way
+ * back to the right number — nor search for it, since two containers in
+ * one path are quite often called the same thing.
+ */
+export type PathCrumb =
+    | { ancestor: AncestorRef; index: number }
+    | { ellipsis: true }
+
+export interface FormattedPath {
+    /** Head crumbs, the elision, then tail crumbs — ready to render. */
+    crumbs: PathCrumb[]
+    /** How deep the hit actually is, elision or not. */
+    depth: number
+    /** Every crumb, for the row's `title`: the elision hides names, and
+     *  hovering has to be able to get them back. */
+    full: string
+}
+
+
+/**
+ * The path top-down, short enough to sit on one line.
+ *
+ * Middle-ellipsis rather than a truncated tail: the root says which
+ * system the hit belongs to and the last two say which folder it sits
+ * in, and those are the two ends a person navigates by. The levels
+ * between them are the ones nobody reads.
+ */
+export function formatPath(
+    ancestorPath: AncestorRef[],
+    { head = 1, tail = 2 }: { head?: number; tail?: number } = {},
+): FormattedPath {
+    const depth = ancestorPath.length
+    const full = ancestorPath.map((a) => a.displayName).join(' › ')
+    // At or under the budget an ellipsis would stand in for nothing —
+    // it would cost a crumb to hide none of them.
+    const at = (ancestor: AncestorRef, index: number): PathCrumb => ({ ancestor, index })
+    const crumbs: PathCrumb[] = depth <= head + tail
+        ? ancestorPath.map(at)
+        : [
+            ...ancestorPath.slice(0, head).map(at),
+            { ellipsis: true },
+            ...ancestorPath.slice(depth - tail)
+                .map((ancestor, i) => at(ancestor, depth - tail + i)),
+        ]
+    return { crumbs, depth, full }
+}
+
+
+/**
+ * The quiet "how far in is this" note, or nothing.
+ *
+ * Two levels is a folder and its parent — the crumbs already say that
+ * legibly. From three the path is elided, and the number is what tells
+ * the user the reveal has real work to do.
+ */
+export function depthNote(depth: number): string | null {
+    if (depth < 3) return null
+    return `${depth} levels deep`
+}
+
+
+/**
+ * The one-click narrowings worth offering when a query matched far too
+ * much, in the order they help.
+ *
+ * "See all" is not the answer to five thousand matches — it moves the
+ * same haystack to a bigger rail. These two are: looking only at names
+ * drops every incidental hit in a description or a property value, and
+ * matching the start of a name drops every word that merely contains the
+ * text. Both are one click and both are reversible.
+ *
+ * A narrowing the user has already taken is not offered again: a chip
+ * that does nothing, shown at the exact moment someone is looking for
+ * help, is worse than no chip.
+ */
+export function narrowingHints(
+    count: number | null | undefined,
+    quick: QuickQuery,
+): { label: string; patch: Partial<QuickQuery> }[] {
+    if (count == null || count <= MANY_MATCHES) return []
+    const hints: { label: string; patch: Partial<QuickQuery> }[] = []
+    if (quick.lookIn === 'everything') {
+        hints.push({ label: 'Names only', patch: { lookIn: 'name' } })
+    }
+    if (quick.match === 'substring') {
+        hints.push({ label: 'Starts with', patch: { match: 'prefix' } })
+    }
+    return hints
+}
+
+
+/** What the list under the box is a list OF, if anything. */
+export type ListboxKind = 'rows' | 'recents' | 'none'
+
+
+/**
+ * Whether the surface renders a listbox, and which one.
+ *
+ * ONE answer, for two callers who must not disagree. The box advertises a
+ * listbox through `aria-expanded`, `aria-controls` and
+ * `aria-activedescendant`, and the surface decides what to draw; when
+ * each worked it out for itself they came apart on exactly the states
+ * neither had in mind. A failed run over rows the box was still holding,
+ * and a one-character box over the same, both drew a CARD — and the
+ * combobox went on telling a screen reader that a list was open and
+ * naming elements that did not exist.
+ *
+ * The order is the order the surface reads its own state in:
+ *
+ *   * an empty box is answering nothing, so its recents outrank whatever
+ *     the last query left behind;
+ *   * a card — an error, a zero, the keep-typing hint — is not a list,
+ *     and held rows do not turn it into one;
+ *   * otherwise the hits, including hits that answer a slightly older
+ *     word: those are dimmed, not withdrawn.
+ */
+export function listboxKind({ rows, recents, error, oneChar, stale, textEmpty }: {
+    /** How many hit rows the surface would draw. */
+    rows: number
+    /** How many recent searches this view remembers. */
+    recents: number
+    /** The standing run failed. */
+    error: boolean
+    /** The box holds a single character. */
+    oneChar: boolean
+    /** The rows no longer answer the box as it stands. */
+    stale: boolean
+    /** The box is empty. */
+    textEmpty: boolean
+}): ListboxKind {
+    if (textEmpty) return recents > 0 ? 'recents' : 'none'
+    if (error) return 'none'
+    // A box holding one letter has no standing answer worth showing, so
+    // the hint wins over rows left from a longer word.
+    if (oneChar && stale) return 'none'
+    return rows > 0 ? 'rows' : 'none'
+}

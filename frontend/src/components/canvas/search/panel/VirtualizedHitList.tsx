@@ -22,8 +22,15 @@
  *   * Item size estimate is the natural ``SearchHitRow`` height
  *     (~64px); the virtualizer measures the actual painted row and
  *     refines from there.
+ *
+ * It also serves a second, GROUPED caller. ``HitsByLayer`` flattens its
+ * layer › container tree into one row list — headers and hits together —
+ * and passes it as ``rows`` with a per-kind size and its own painter.
+ * One virtualizer for the whole tree is the point: nesting a second one
+ * per group would mean a scroll element per group, and rendering the
+ * headers outside the window would put the O(N) mount cost back.
  */
-import { type FC, type RefObject, useRef } from 'react'
+import { type FC, type ReactNode, type RefObject, useRef } from 'react'
 
 import { useVirtualizer } from '@tanstack/react-virtual'
 
@@ -33,7 +40,19 @@ import { SearchHitRow } from '../SearchHitRow'
 
 
 export interface VirtualizedHitListProps {
-    hits: SearchHit[]
+    /** Flat-hit mode: HitsByParent's large-page fallback. Every row is a
+     *  ``SearchHitRow`` of the same estimated height. */
+    hits?: SearchHit[]
+    /** Row mode: a pre-flattened list of HETEROGENEOUS rows — group
+     *  headers interleaved with hits (``HitsByLayer.flattenRows``). Only
+     *  the key is read here; the caller owns the size and the paint, so
+     *  a header and a hit can differ in both. Takes precedence over
+     *  ``hits`` when supplied. */
+    rows?: ReadonlyArray<{ key: string }>
+    /** Row mode: estimated painted height of ``rows[index]``, per kind. */
+    estimateRowSize?: (index: number) => number
+    /** Row mode: paint ``rows[index]``. */
+    renderRow?: (index: number) => ReactNode
     /** Ref to the scrollable parent owned by ``ResultsPane``. The
      *  virtualizer measures its viewport from this element and only
      *  paints rows in the visible range + overscan. */
@@ -50,15 +69,24 @@ export interface VirtualizedHitListProps {
 
 
 export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
-    hits, scrollElementRef, onReveal, onOpen,
+    hits, rows, estimateRowSize, renderRow, scrollElementRef, onReveal, onOpen,
     estimatedRowHeightPx = 64, overscan = 6,
 }) => {
     const measureRef = useRef<Map<number, HTMLDivElement>>(new Map())
 
     const virtualizer = useVirtualizer({
-        count: hits.length,
+        count: rows ? rows.length : (hits?.length ?? 0),
         getScrollElement: () => scrollElementRef.current,
-        estimateSize: () => estimatedRowHeightPx,
+        estimateSize: (index) => (rows && estimateRowSize
+            ? estimateRowSize(index)
+            : estimatedRowHeightPx),
+        // Measured sizes are cached under this key, NOT under the index.
+        // Without it, collapsing a layer re-indexes every row below and
+        // the 34px measurement of a group header gets reused for the
+        // 64px hit row that lands on its index.
+        getItemKey: (index) => (rows
+            ? rows[index].key
+            : (hits?.[index]?.node.urn ?? index)),
         overscan,
     })
 
@@ -71,10 +99,10 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
             style={{ height: `${totalSize}px` }}
         >
             {items.map((vRow) => {
-                const hit = hits[vRow.index]
+                const hit = hits?.[vRow.index]
                 return (
                     <div
-                        key={hit.node.urn ?? `v-${vRow.index}`}
+                        key={vRow.key}
                         ref={(el) => {
                             if (el) {
                                 measureRef.current.set(vRow.index, el)
@@ -92,12 +120,16 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
                             transform: `translateY(${vRow.start}px)`,
                         }}
                     >
-                        <SearchHitRow
-                            hit={hit}
-                            index={vRow.index}
-                            onReveal={onReveal}
-                            onOpen={onOpen}
-                        />
+                        {rows && renderRow
+                            ? renderRow(vRow.index)
+                            : hit && (
+                                <SearchHitRow
+                                    hit={hit}
+                                    index={vRow.index}
+                                    onReveal={onReveal}
+                                    onOpen={onOpen}
+                                />
+                            )}
                     </div>
                 )
             })}

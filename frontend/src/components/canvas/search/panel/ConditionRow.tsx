@@ -306,7 +306,9 @@ const TEXT_TARGET_OPTIONS: { value: TextTarget; label: string; description?: str
 // rejects both with CompileError until the server opts them in).
 type TextUiMode = TextMatchMode | 'wildcard'
 
-const TEXT_MATCH_OPTIONS: { value: TextUiMode; label: string; description?: string }[] = [
+/** Shared with the canvas header's Match menu, so one match mode is
+ *  spelled one way across the builder and the quick search box. */
+export const TEXT_MATCH_OPTIONS: { value: TextUiMode; label: string; description?: string }[] = [
     { value: 'substring', label: 'Contains',     description: 'Substring match anywhere in the field' },
     { value: 'prefix',    label: 'Starts with',  description: 'Leading-edge match' },
     { value: 'suffix',    label: 'Ends with',    description: 'Trailing-edge match' },

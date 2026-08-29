@@ -181,7 +181,9 @@ def _node_item(entity_id: str, urn: str, payload: dict,
         "sourceSystem": payload.get("sourceSystem") or "",
         "lastSyncedAt": payload.get("lastSyncedAt") or "",
         "level": lvl,
-        "searchableText": _compute_searchable_text(dn, qn, desc, native),
+        "searchableText": _compute_searchable_text(
+            dn, qn, desc, native, tags=payload.get("tags"),
+        ),
     }
 
 

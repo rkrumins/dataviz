@@ -80,8 +80,8 @@ export interface TraceCanvasHarness {
   /** Click that magnifier, opening the column's inline search box. */
   openChildSearch(id: string): Promise<void>
   /** Type a query into an open child-search box AND SUBMIT it — the real
-   *  keystroke path into the canvas's `onSearchChildren`. The box keeps its
-   *  own local value and only commits on Enter/blur, so a change event alone
+   *  keystroke path into the canvas's search session. The box keeps its own
+   *  local value and only commits on Enter/blur, so a change event alone
    *  reaches nothing. Returns false if no box is open. */
   typeChildSearch(query: string): Promise<boolean>
   /** Click a card's expand chevron. */
@@ -202,7 +202,7 @@ function installClipboard(): void {
   })
 }
 
-function installJsdomLayout(): void {
+export function installJsdomLayout(): void {
   if (typeof globalThis.IntersectionObserver === 'undefined') {
     globalThis.IntersectionObserver = class {
       observe() {}
@@ -666,7 +666,7 @@ export async function renderCanvasWithTrace(
     },
     async typeChildSearch(query: string) {
       // The column's own input, driven the way a reader drives it — no prop
-      // capture, no mock: this is the exact path to `onSearchChildren`.
+      // capture, no mock: this is the exact path into the search session.
       //
       // ENTER IS LOAD-BEARING. SearchBoxItem holds the text in local state
       // and only calls its `onChange` on Enter or blur, so a change event by

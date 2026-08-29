@@ -18,6 +18,8 @@ file proves the resolver alone is correct.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -621,6 +623,13 @@ class _RecordingProvider:
             deadline_exceeded=False, elapsed_ms=1, cache_hit=False,
         )
 
+    async def deep_search_explain(self, query):
+        # Minimal stand-in for the real compile-only path
+        # (falkordb_deep_search.explain_deep_search) — just enough shape
+        # for AdvancedSearchService.explain() to attach resolvedScope.
+        self.calls.append((query, None))
+        return {"cypher": "MATCH (n) RETURN n", "params": {}, "notes": []}
+
 
 class _FakeEngine:
     """Just enough surface to satisfy AdvancedSearchService.__init__ and
@@ -630,6 +639,26 @@ class _FakeEngine:
         self.provider = _RecordingProvider(raise_on_call=raise_on_provider_call)
         self._workspace_id = None
         self._data_source_id = None
+
+
+@contextmanager
+def _root_urns_cap(monkeypatch, value: str):
+    """Run the body with a lowered ``DEEP_SEARCH_SCOPE_ROOT_URNS_CAP``.
+
+    The settings object is lru_cached, so both the override and its
+    removal have to clear the cache — otherwise the lowered cap leaks
+    into every test that runs after this one.
+    """
+    from backend.app.services.deep_search.settings import (
+        get_deep_search_settings,
+    )
+    monkeypatch.setenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", value)
+    get_deep_search_settings.cache_clear()
+    try:
+        yield
+    finally:
+        monkeypatch.delenv("DEEP_SEARCH_SCOPE_ROOT_URNS_CAP", raising=False)
+        get_deep_search_settings.cache_clear()
 
 
 async def test_service_short_circuits_when_all_client_urns_dropped(
@@ -681,6 +710,57 @@ async def test_service_short_circuits_when_all_client_urns_dropped(
     assert page.hits == []
     assert page.aggregates == []
     # Dropped URN was recorded by the resolver
+    assert eff_scope.dropped_urns == ("urn:hostile:somewhere-else",)
+
+
+async def test_all_client_urns_dropped_text_any_returns_empty_page(
+    db_session: AsyncSession,
+):
+    """The out-of-view short-circuit outranks the unbounded-scan guard.
+
+    A client that sends only out-of-view roots gets the empty page and
+    its diagnostics note — the honest answer, "no matches in this
+    view" — never a "this view has no boundaries yet" rejection, which
+    would describe a view that in fact has roots.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchOptions, SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [{"urn": "urn:domain:Customers"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(
+            view_id=view.id,
+            root_urns=["urn:hostile:somewhere-else"],
+        ),
+        options=SearchOptions(results="both"),
+    )
+    page, eff_scope = await svc.search(query)
+
+    assert page.candidate_count == 0
+    assert page.hits == []
     assert eff_scope.dropped_urns == ("urn:hostile:somewhere-else",)
 
 
@@ -786,6 +866,450 @@ async def test_service_rejects_view_from_other_workspace(db_session: AsyncSessio
         await svc.search(query)
 
 
+async def test_bare_text_any_uses_view_roots(db_session: AsyncSession):
+    """The canvas header box sends a plain word and no client roots —
+    the view's own roots are the clamp. The unbounded-scan guard must
+    therefore run on the RESOLVED scope, after the view's roots have
+    been stamped in, or this everyday search is rejected as 400.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [
+                        {"urn": "urn:domain:A"},
+                        {"urn": "urn:domain:B"},
+                    ],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(view_id=view.id),  # no client root_urns
+    )
+    await svc.search(query)
+
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert sorted(stamped_query.scope.root_urns or []) == [
+        "urn:domain:A", "urn:domain:B",
+    ]
+
+
+async def test_bare_text_any_on_unscoped_view_still_400(db_session: AsyncSession):
+    """A view that bounds nothing gives the resolver no roots and no
+    entity types, so a plain word would scan the whole data source.
+    That request is still rejected — before the provider is touched.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(db_session, ws, view_type="graph", config={})
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(view_id=view.id),
+    )
+    with pytest.raises(ValidationError, match="no boundaries yet"):
+        await svc.search(query)
+
+
+async def test_visible_mode_with_urns_bypasses_guard(db_session: AsyncSession):
+    """``scope_mode='visible'`` carries its own clamp: the candidate
+    scan is filtered to the URNs the canvas rendered. A plain word is
+    bounded by that list even when the resolved scope stamps no roots.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TextPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(
+            view_id=view.id,
+            scope_mode="visible",
+            visible_urns=["urn:domain:A:orders"],
+        ),
+    )
+    await svc.search(query)
+
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    # The compiler reads roots in view mode only, so none are stamped.
+    assert stamped_query.scope.root_urns is None
+
+
+async def test_service_root_cap_overflow_is_validation_error(
+    db_session: AsyncSession, monkeypatch,
+):
+    """A view with more top-level containers than the search limit is a
+    caller-facing 400 with an explanation — not the unhandled pydantic
+    error the stamped ``SearchScope`` used to raise (HTTP 500).
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [
+                        {"urn": f"urn:domain:{i}"} for i in range(11)
+                    ],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    with _root_urns_cap(monkeypatch, "10"):
+        with pytest.raises(ValidationError, match="top-level containers"):
+            await svc.search(query)
+
+    assert engine.provider.calls == []
+
+
+async def test_service_data_source_mode_ignores_root_cap(
+    db_session: AsyncSession, monkeypatch,
+):
+    """``scope_mode='data_source'`` searches the whole source — the
+    compiler never reads the view's roots there, so they are neither
+    stamped nor counted against the cap.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityAssignments": [
+                        {"urn": f"urn:domain:{i}"} for i in range(11)
+                    ],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id, scope_mode="data_source"),
+    )
+    with _root_urns_cap(monkeypatch, "10"):
+        await svc.search(query)
+
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert stamped_query.scope.root_urns is None
+
+
+# ---------------------------------------------------------------------------
+# _stamp_resolved_scope — a view's own ontology is never too big to search
+#
+# ``SearchScope.entity_types`` caps *client* input (default 512, raised
+# from 32). A view's resolved entity-type allow list is server-derived,
+# not client input, and must never trip that cap into an unhandled
+# pydantic 500 (the same class of bug as the root_urns cap, fixed
+# separately in ``_stamp_resolved_scope``'s root-cap branch above).
+# ---------------------------------------------------------------------------
+
+
+async def test_service_stamps_large_entity_type_allow_list_through(
+    db_session: AsyncSession,
+):
+    """A view whose ontology has 35 entity types (below the 512 cap, but
+    above the old 32 cap) must stamp through in full — the provider sees
+    every one of the 35 types, not a truncated or dropped set."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    entity_types = [f"Type{i:03d}" for i in range(35)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    page, eff_scope = await svc.search(query)
+
+    assert len(eff_scope.entity_type_allow_list) == 35
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert stamped_query.scope.entity_types == sorted(entity_types)
+    # No degradation note — the allow-list stamped through untouched.
+    notes = page.scope_diagnostics.notes if page.scope_diagnostics else []
+    assert not any("entity-type gate was dropped" in n for n in notes)
+
+
+async def test_service_drops_entity_type_gate_when_ontology_exceeds_cap(
+    db_session: AsyncSession,
+):
+    """A view whose ontology has 600 entity types is above the field's
+    512-item cap. The service must fall back to an unfiltered search
+    (``entity_types=None`` — "every label", exactly what the cap-busting
+    allow list already meant) rather than crash. The diagnostics note
+    explains why the label gate is missing.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    entity_types = [f"Type{i:04d}" for i in range(600)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    page, eff_scope = await svc.search(query)
+
+    assert len(eff_scope.entity_type_allow_list) == 600
+    assert len(engine.provider.calls) == 1
+    stamped_query, _ = engine.provider.calls[0]
+    assert stamped_query.scope.entity_types is None
+    assert page.scope_diagnostics is not None
+    assert any(
+        "entity-type gate was dropped" in n
+        for n in page.scope_diagnostics.notes
+    )
+
+
+async def test_bare_text_any_on_capped_entity_type_view_names_the_limit(
+    db_session: AsyncSession,
+):
+    """An OPEN view (no root assignments) whose ontology has 600 entity
+    types is above the 512-item field cap, so ``_stamp_resolved_scope``
+    drops the entity-type gate (``entity_types=None``) rather than crash.
+    A plain ``target='any'`` word is still rejected — the scan really is
+    unclamped — but the message must name the real cause (the ontology
+    exceeds the search's entity-type limit), not claim "this view has no
+    boundaries yet", which is false: the view declares 600 types.
+
+    An indexed-leaf predicate (``TagPredicate``) on the same view is
+    unaffected: it still proceeds with the gate dropped and the note.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate, TextPredicate,
+    )
+
+    entity_types = [f"Type{i:04d}" for i in range(600)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    # No entityAssignments — an open view, no roots.
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    text_query = SearchQuery(
+        predicate=TextPredicate(value="customer", target="any"),
+        scope=SearchScope(view_id=view.id),
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        await svc.search(text_query)
+    message = str(excinfo.value)
+    assert "no boundaries yet" not in message
+    assert "limit" in message
+
+    engine2 = _FakeEngine(raise_on_provider_call=False)
+    svc2 = AdvancedSearchService(
+        engine2, session=db_session, workspace_id=ws.id,
+    )
+    tag_query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    page, eff_scope = await svc2.search(tag_query)
+    assert len(engine2.provider.calls) == 1
+    stamped_query, _ = engine2.provider.calls[0]
+    assert stamped_query.scope.entity_types is None
+    assert page.scope_diagnostics is not None
+    assert any(
+        "entity-type gate was dropped" in n
+        for n in page.scope_diagnostics.notes
+    )
+
+
+async def test_explain_takes_the_same_path_for_large_entity_type_allow_list(
+    db_session: AsyncSession,
+):
+    """``explain()`` resolves scope through the same ``_stamp_resolved_scope``
+    call as ``search()``. A 35-type ontology must not raise there either —
+    it should return the normal explain-result shape."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        SearchQuery, SearchScope, TagPredicate,
+    )
+
+    entity_types = [f"Type{i:03d}" for i in range(35)]
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(
+        db_session, ws,
+        view_type="reference",
+        config={
+            "layoutType": "reference",
+            "referenceLayout": {
+                "layers": [{
+                    "id": "L1",
+                    "entityTypes": entity_types,
+                    "entityAssignments": [{"urn": "urn:domain:A"}],
+                }],
+            },
+        },
+    )
+
+    engine = _FakeEngine(raise_on_provider_call=False)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+    )
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id=view.id),
+    )
+    result = await svc.explain(query)
+
+    assert result["resolvedScope"]["entityTypes"] == sorted(entity_types)
+    assert "cypher" in result
+
+
 async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSession):
     # The `updated_at` of the view is part of the scope hash, so editing
     # a view invalidates any cache entry keyed by the previous hash.
@@ -883,3 +1407,224 @@ async def test_resolver_branch_effective_config_and_distinct_hash(
     assert published.scope_hash != draft.scope_hash
     assert published.scope_hash != other_draft.scope_hash
     assert draft.scope_hash != other_draft.scope_hash
+
+
+# ---------------------------------------------------------------------------
+# F3 — view ↔ data-source guard.
+#
+# The engine picks its provider from ``?dataSourceId=`` (else the workspace
+# primary); the search's roots come from ``scope.viewId``. Nothing used to
+# check that those two agree, so a view belonging to source A searched with
+# ``?dataSourceId=B`` ran A's root URNs against B's graph and returned 0 —
+# a silent wrong answer, which is worse than an error.
+# ---------------------------------------------------------------------------
+
+_DS_MISMATCH_MESSAGE = (
+    "This view belongs to a different data source than the one being searched."
+)
+
+
+async def _seed_data_source(
+    session: AsyncSession,
+    workspace: WorkspaceORM,
+    *,
+    primary: bool = False,
+    graph_name: str = "g",
+):
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+
+    existing = await session.get(ProviderORM, "prov_ds_guard")
+    if existing is None:
+        session.add(ProviderORM(
+            id="prov_ds_guard", name="P", provider_type="falkordb",
+        ))
+        await session.flush()
+    ds = WorkspaceDataSourceORM(
+        workspace_id=workspace.id,
+        provider_id="prov_ds_guard",
+        graph_name=graph_name,
+        label=f"ds-{graph_name}",
+        is_primary=primary,
+        is_active=True,
+    )
+    session.add(ds)
+    await session.flush()
+    return ds
+
+
+def _ds_query(view_id: str):
+    from backend.common.models.search import (
+        SearchOptions, SearchQuery, SearchScope, TextPredicate,
+    )
+    return SearchQuery(
+        predicate=TextPredicate(value="customer", target="name"),
+        scope=SearchScope(view_id=view_id),
+        options=SearchOptions(results="both"),
+    )
+
+
+async def test_search_rejects_view_from_a_different_data_source(
+    db_session: AsyncSession,
+):
+    """View belongs to source A, request targets source B → 400, and the
+    provider is never asked."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    ds_b = await _seed_data_source(db_session, ws, graph_name="b")
+    view = await _seed_view(db_session, ws, data_source_id=ds_a.id)
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_b.id,
+    )
+    with pytest.raises(ValidationError) as exc:
+        await svc.search(_ds_query(view.id))
+    assert _DS_MISMATCH_MESSAGE in str(exc.value)
+    assert engine.provider.calls == []
+
+
+async def test_explain_rejects_view_from_a_different_data_source(
+    db_session: AsyncSession,
+):
+    """The same guard on the compile-only path — explain must not hand
+    back Cypher for a graph the view does not live in."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    ds_b = await _seed_data_source(db_session, ws, graph_name="b")
+    view = await _seed_view(db_session, ws, data_source_id=ds_a.id)
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_b.id,
+    )
+    with pytest.raises(ValidationError) as exc:
+        await svc.explain(_ds_query(view.id))
+    assert _DS_MISMATCH_MESSAGE in str(exc.value)
+    assert engine.provider.calls == []
+
+
+async def test_search_rejects_when_omitted_source_falls_back_to_primary(
+    db_session: AsyncSession,
+):
+    """The silent case: no ``?dataSourceId=`` in a multi-source workspace.
+
+    The engine took the workspace PRIMARY; the view belongs to the other
+    source. Nothing in the request names a data source, so the guard has
+    to resolve the primary itself to notice.
+    """
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService, ValidationError,
+    )
+
+    ws = await _seed_workspace(db_session)
+    primary = await _seed_data_source(db_session, ws, primary=True, graph_name="p")
+    other = await _seed_data_source(db_session, ws, graph_name="o")
+    view = await _seed_view(db_session, ws, data_source_id=other.id)
+    assert primary.id != other.id
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=None,
+    )
+    with pytest.raises(ValidationError) as exc:
+        await svc.search(_ds_query(view.id))
+    assert _DS_MISMATCH_MESSAGE in str(exc.value)
+    assert engine.provider.calls == []
+
+
+async def test_search_proceeds_when_view_matches_the_searched_source(
+    db_session: AsyncSession,
+):
+    """Matching ids → the search runs as before."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    view = await _seed_view(db_session, ws, data_source_id=ds_a.id)
+
+    engine = _FakeEngine()
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_a.id,
+    )
+    page, _eff = await svc.search(_ds_query(view.id))
+    assert page.candidate_count == 0
+    assert len(engine.provider.calls) == 1
+
+
+async def test_search_proceeds_when_view_matches_the_primary_source(
+    db_session: AsyncSession,
+):
+    """Omitted ``?dataSourceId=`` + a view on the primary → no rejection."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    ws = await _seed_workspace(db_session)
+    primary = await _seed_data_source(db_session, ws, primary=True, graph_name="p")
+    view = await _seed_view(db_session, ws, data_source_id=primary.id)
+
+    engine = _FakeEngine()
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=None,
+    )
+    page, _eff = await svc.search(_ds_query(view.id))
+    assert page.candidate_count == 0
+    assert len(engine.provider.calls) == 1
+
+
+async def test_search_proceeds_when_view_has_no_data_source(
+    db_session: AsyncSession,
+):
+    """A view with no data source of its own is not evidence of a
+    mismatch — the guard stays silent rather than inventing one."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    ws = await _seed_workspace(db_session)
+    ds_a = await _seed_data_source(db_session, ws, graph_name="a")
+    view = await _seed_view(db_session, ws, data_source_id=None)
+
+    engine = _FakeEngine()
+    svc = AdvancedSearchService(
+        engine, session=db_session, workspace_id=ws.id,
+        data_source_id=ds_a.id,
+    )
+    page, _eff = await svc.search(_ds_query(view.id))
+    assert page.candidate_count == 0
+    assert len(engine.provider.calls) == 1
+
+
+async def test_resolver_reports_the_views_own_data_source(
+    db_session: AsyncSession,
+):
+    """``view_data_source_id`` is the VIEW's, never the request's — the
+    existing ``data_source_id`` field is overridden by the caller's and so
+    can never answer 'which source does this view belong to?'.
+    """
+    ws = await _seed_workspace(db_session)
+    view = await _seed_view(db_session, ws, data_source_id="ds_view_owns")
+
+    resolver = ViewScopeResolver(db_session)
+    eff = await resolver.resolve(
+        workspace_id=ws.id,
+        requested=SearchScope(view_id=view.id),
+        data_source_id="ds_the_caller_asked_for",
+    )
+    assert eff.view_data_source_id == "ds_view_owns"
+    assert eff.data_source_id == "ds_the_caller_asked_for"

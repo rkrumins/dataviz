@@ -468,14 +468,21 @@ def _compute_searchable_text(
     qualified_name: Optional[str],
     description: Optional[str],
     user_properties: Optional[Dict[str, Any]],
+    tags: Optional[List[str]] = None,
 ) -> str:
     """Build a lowercased, space-joined searchable string for n.searchableText.
 
-    Includes displayName, qualifiedName, description, and every
+    Includes displayName, qualifiedName, description, tags, and every
     string-valued user property value. Capped at
     ``DeepSearchSettings.searchable_text_cap_bytes`` (env
     ``DEEP_SEARCH_SEARCHABLE_TEXT_CAP``, default 8192) so a node with
     very large string properties can't bloat the denormalised field.
+
+    ``tags`` is normally a list of strings, but some call sites only
+    have the node's JSON-encoded ``n.tags`` string on hand (that's how
+    tags are stored on the FalkorDB node) — a str is parsed via
+    ``json.loads`` and used if it decodes to a list; any other type is
+    ignored.
 
     Truncated at a word boundary when the cap fires so the tail
     doesn't end mid-token (a partial token would defeat
@@ -492,6 +499,14 @@ def _compute_searchable_text(
         for value in user_properties.values():
             if isinstance(value, str):
                 parts.append(value)
+    if isinstance(tags, str):
+        try:
+            parsed_tags = json.loads(tags)
+        except (TypeError, ValueError):
+            parsed_tags = None
+        tags = parsed_tags if isinstance(parsed_tags, list) else None
+    if isinstance(tags, list):
+        parts.extend(t for t in tags if isinstance(t, str) and t)
     result = " ".join(parts).lower()
     # Lazy import to avoid pulling settings into module import time
     # (this helper is hot — called on every write).
@@ -10947,7 +10962,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "level": self._get_node_level(node.entity_type),
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props,
+                    node.description, native_props, tags=node.tags,
                 ),
             })
 
@@ -11110,7 +11125,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "lastSyncedAt": node.last_synced_at or "",
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props,
+                    node.description, native_props, tags=node.tags,
                 ),
             }
             if node.child_count is not None:

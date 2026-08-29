@@ -70,7 +70,8 @@ class DeepSearchProvider(Protocol):
         sample_per_label: int = 200,
     ) -> Dict[str, Any]:
         """Schema discovery. Returns ``{labels, blobOnlyLabels,
-        missingContainment, tagValues, edges, elapsedMs}``. Powers the
-        FE's property / value / tag / edge pickers.
+        missingContainment, tagValues, missingSearchableText, edges,
+        elapsedMs}``. Powers the FE's property / value / tag / edge
+        pickers.
         """
         ...

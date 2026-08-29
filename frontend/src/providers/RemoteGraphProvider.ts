@@ -84,6 +84,20 @@ function normalizeTraceV2(raw: RawTraceV2Result): TraceV2Result {
 
 const API_BASE = '/api/v1'
 
+
+/** An HTTP failure from the API, carrying the status that produced it. */
+export interface ApiStatusError extends Error {
+    status: number
+}
+
+/** The HTTP status behind a rejection, or null when it did not come from
+ *  one (an abort, a timeout, a parse failure). */
+export function httpStatusOf(err: unknown): number | null {
+    if (!(err instanceof Error)) return null
+    const status = (err as Partial<ApiStatusError>).status
+    return typeof status === 'number' ? status : null
+}
+
 export interface RemoteGraphProviderOptions {
     /** Workspace ID. When set, routes through /v1/{ws_id}/graph/... */
     workspaceId?: string
@@ -234,12 +248,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
             }
         }
 
-        // Deduplicate identical in-flight requests
-        const existing = this._inflight.get(cacheKey)
-        if (existing) return existing as Promise<T>
+        // Deduplicate identical in-flight requests — skipped when the
+        // caller supplies an AbortSignal. Sharing one promise would let
+        // aborting a superseded call reject the identical superseding
+        // call too (e.g. search-as-you-type re-firing the same text).
+        if (!fetchOptions.signal) {
+            const existing = this._inflight.get(cacheKey)
+            if (existing) return existing as Promise<T>
+        }
 
         const promise = this._doFetch<T>(url, fetchOptions, method, cacheKey, timeoutMs)
-        this._inflight.set(cacheKey, promise)
+        if (!fetchOptions.signal) {
+            this._inflight.set(cacheKey, promise)
+        }
         return promise
     }
 
@@ -251,7 +272,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             this.workspaceId, this.dataSourceId, classifyEndpoint(url),
         )
         if (!circuitBreaker.canRequest()) {
-            this._inflight.delete(cacheKey)
+            if (!fetchOptions.signal) this._inflight.delete(cacheKey)
             throw new Error('Provider unavailable (circuit open)')
         }
 
@@ -273,7 +294,14 @@ export class RemoteGraphProvider implements GraphDataProvider {
 
             if (!response.ok) {
                 const errorText = await response.text()
-                const error = new Error(`API Error ${response.status}: ${errorText || response.statusText}`)
+                // The status rides along on the error. Callers that need
+                // to tell "you are not allowed this here" apart from "the
+                // backend is broken" — a share link hitting /search/discover
+                // is the live case — cannot get that out of a message.
+                const error: ApiStatusError = Object.assign(
+                    new Error(`API Error ${response.status}: ${errorText || response.statusText}`),
+                    { status: response.status },
+                )
                 // 5xx errors indicate provider/backend failure — feed circuit breaker
                 if (response.status >= 500) {
                     // Honor Retry-After header from backend (sent on 503 ProviderUnavailable)
@@ -326,6 +354,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
             circuitBreaker.recordSuccess()
             return data
         } catch (err) {
+            // A caller-initiated abort (e.g. search-as-you-type superseding
+            // its own previous request) surfaces here as the same generic
+            // "timed out" TypeError a real client-side timeout would raise
+            // — fetchWithTimeout's runOnce links both onto one internal
+            // AbortController and can't tell them apart. It is not a
+            // backend health signal, so it must not feed the breaker.
+            if (fetchOptions.signal?.aborted) {
+                throw err
+            }
             if (err instanceof TypeError) {
                 circuitBreaker.recordFailure()
                 if (err.message.includes('timed out')) {
@@ -334,7 +371,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             }
             throw err
         } finally {
-            this._inflight.delete(cacheKey)
+            if (!fetchOptions.signal) this._inflight.delete(cacheKey)
         }
     }
 
@@ -390,10 +427,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * body which the GET-cache layer can't key on, and the backend will
      * grow its own Redis cache in workstream 3.
      */
-    async searchAdvanced(query: SearchQuery): Promise<SearchResultPage> {
+    async searchAdvanced(query: SearchQuery, opts?: { signal?: AbortSignal }): Promise<SearchResultPage> {
         return await this.fetch<SearchResultPage>('/search/advanced', {
             method: 'POST',
             body: JSON.stringify(query),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
         })
     }
 

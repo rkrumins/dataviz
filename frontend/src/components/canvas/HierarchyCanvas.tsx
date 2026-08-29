@@ -110,7 +110,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Property Manager display-rule engine — publishes match sets so the
   // HierarchyContainer rows render tag chips.
   useDisplayRuleEngine(activeView?.id ?? null)
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
   // 400px rail from the wider Build Mode panel — only one mounts at a time.
@@ -359,7 +359,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Keyboard shortcut for search
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'f') {
         e.preventDefault()
         searchInputRef.current?.focus()
       }
@@ -580,7 +580,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       </AnimatePresence>
 
       {/* Advanced search — same SearchMapPanel surface mounted on every
-          canvas. Trigger handles ⌘K globally; panel is a flex-sibling
+          canvas. Trigger handles ⌘⇧F globally; panel is a flex-sibling
           drawer alongside EntityDrawer. */}
       <CanvasSearchTrigger
         open={advancedSearchOpen}
@@ -653,7 +653,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onCancel={interactions.cancelInlineEdit}
       />
 
-      {/* Command Palette - Press Cmd+K */}
+      {/* Command Palette - Press Cmd+Shift+P */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
