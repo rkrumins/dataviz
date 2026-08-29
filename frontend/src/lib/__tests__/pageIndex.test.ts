@@ -12,7 +12,8 @@
  *   * **A destination that 403s.** The palette must resolve access
  *     exactly as `RequireNav` does, from the same catalogue specs and
  *     the same pure `checkNavPermission`, or it will offer people doors
- *     that slam.
+ *     that slam — and for a nested route like `/admin/:section` that
+ *     means every guard on the way in, not just the innermost one.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -148,9 +149,22 @@ describe('pageAllowed', () => {
         expect(pageAllowed(entry('/admin/audit'), ctx({}))).toBe(false)
     })
 
-    it('opens the audit log to an auditor', () => {
-        const auditor = ctx({ global: ['system:audit:read'] })
-        expect(pageAllowed(entry('/admin/audit'), auditor)).toBe(true)
+    it('needs BOTH gates for an admin section', () => {
+        // `/admin` is a nested route with a guard at each level, so the
+        // section spec on its own is not the door.
+        //
+        // The auditor case is not hypothetical: the seeded `org_auditor`
+        // role (`backend/app/config/rbac_seed.py`) holds
+        // `system:audit:read` and nothing in the parent's anyPerm list,
+        // so it is refused at `/admin` before the audit section is ever
+        // consulted. The palette has to say the same thing.
+        const auditorOnly = ctx({ global: ['system:audit:read'] })
+        const groupsOnly = ctx({ global: ['system:groups:manage'] })
+        const both = ctx({ global: ['system:groups:manage', 'system:audit:read'] })
+
+        expect(pageAllowed(entry('/admin/audit'), auditorOnly)).toBe(false) // parent gate
+        expect(pageAllowed(entry('/admin/audit'), groupsOnly)).toBe(false) // section gate
+        expect(pageAllowed(entry('/admin/audit'), both)).toBe(true)
     })
 
     it('keeps a groups-only admin out of user management', () => {
@@ -168,7 +182,10 @@ describe('pageAllowed', () => {
     })
 
     it('fails closed on a section key the catalogue does not carry', () => {
-        const auditor = ctx({ global: ['system:audit:read'] })
+        // Claims that satisfy the parent `/admin` gate, so the unknown
+        // key is the only thing left that can deny — otherwise this
+        // would pass for the wrong reason.
+        const holder = ctx({ global: ['system:groups:manage'] })
         const unknownAdmin: PageEntry = {
             ...entry('/admin/audit'),
             gate: { kind: 'admin', key: 'no-such-section' },
@@ -178,8 +195,8 @@ describe('pageAllowed', () => {
             gate: { kind: 'sidebar', key: 'no-such-tab' as never },
         }
 
-        expect(pageAllowed(unknownAdmin, auditor)).toBe(false)
-        expect(pageAllowed(unknownSidebar, auditor)).toBe(false)
+        expect(pageAllowed(unknownAdmin, holder)).toBe(false)
+        expect(pageAllowed(unknownSidebar, holder)).toBe(false)
     })
 
     it('follows analyticsAllowed for Analytics and its tabs', () => {

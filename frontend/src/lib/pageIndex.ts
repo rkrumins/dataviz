@@ -27,7 +27,9 @@ import { checkNavPermission, type PermissionClaims } from '@/store/auth'
  *
  *   * `always`   — every authenticated user.
  *   * `sidebar`  — the nav catalogue's spec for that top-level tab.
- *   * `admin`    — the nav catalogue's spec for that `/admin` segment.
+ *   * `admin`    — the sidebar `admin` spec AND the spec for that
+ *     `/admin` segment, because the route is nested inside two guards
+ *     and passing the inner one is not enough. See `pageAllowed`.
  *   * `analytics`— its own kind because `/analytics` is guarded by
  *     `RequireAnalytics`, which is the catalogue spec OR the
  *     `analyticsPublicEnabled` flag. A spec alone would hide the
@@ -420,7 +422,16 @@ export function pageAllowed(entry: PageEntry, ctx: PageAccessContext): boolean {
         case 'sidebar':
             return checkNavPermission(ctx.claims, ctx.sidebar[entry.gate.key] ?? HIDDEN_SPEC)
         case 'admin':
-            return checkNavPermission(ctx.claims, ctx.adminSections[entry.gate.key] ?? HIDDEN_SPEC)
+            // Two guards, not one. `/admin` is a nested route: the parent
+            // is wrapped in <RequireNav group="sidebar" sectionKey="admin">
+            // and each section adds its own <RequireNav group="admin" …>.
+            // Checking only the section spec offers rows that then render
+            // the denied panel at the parent — which is exactly what a
+            // holder of `system:audit:read` alone gets for /admin/audit.
+            return (
+                checkNavPermission(ctx.claims, ctx.sidebar.admin ?? HIDDEN_SPEC) &&
+                checkNavPermission(ctx.claims, ctx.adminSections[entry.gate.key] ?? HIDDEN_SPEC)
+            )
         case 'analytics':
             return ctx.analyticsAllowed
     }
