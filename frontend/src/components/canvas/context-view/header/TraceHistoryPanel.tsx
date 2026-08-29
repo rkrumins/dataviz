@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { ArrowUpLeft, ArrowDownRight, Check, GitBranch, History, Link2, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { relativeTime } from '@/lib/relativeTime'
 
 export interface TraceHistoryPanelEntry {
   /** Index into the underlying history STACK (not the display order). */
@@ -47,16 +48,6 @@ const MODE_GLYPH = {
   down: { Icon: ArrowDownRight, tone: 'text-amber-600 dark:text-amber-400 bg-amber-500/10', title: 'Impact — downstream' },
   both: { Icon: GitBranch, tone: 'text-violet-600 dark:text-violet-400 bg-violet-500/10', title: 'Full Lineage — both directions' },
 } as const
-
-function relativeTime(ts: number): string {
-  const seconds = Math.floor((Date.now() - ts) / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
-}
 
 export function TraceHistoryPanel({
   entries,
