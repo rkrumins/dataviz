@@ -23,7 +23,8 @@
 import { useCallback } from 'react'
 
 import { useCanvasStore } from '@/store/canvas'
-import { toCanvasNode } from '@/hooks/useGraphHydration'
+import { toCanvasNode, toCanvasEdge } from '@/hooks/useGraphHydration'
+import { useViewContainmentEdgeTypes } from '@/hooks/useViewSchema'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { AncestorRef } from '@/types/search'
 
@@ -69,29 +70,35 @@ export type RevealSearchHit = (urn: string, ancestorPath: AncestorRef[]) => Prom
 
 export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, scrollIntoView }: UseRevealSearchHitDeps): RevealSearchHit {
     const selectNode = useCanvasStore((s) => s.selectNode)
+    const containmentEdgeTypes = useViewContainmentEdgeTypes()
 
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]) => {
         // Prime the spine: with lazy children loading, only top-level
         // entities are in the canvas store after hydration. Each
         // subsequent ancestor (and the hit itself) must be materialized
         // before the spine walk can find them. One getNodes call covers
-        // the whole chain regardless of depth; containment edges are
-        // committed by the per-ancestor loadChildren calls below.
+        // the whole chain regardless of depth.
         const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
-        const existingNodes = useCanvasStore.getState().nodes
-        const existingUrns = new Set(
-            existingNodes.flatMap((n) => {
-                const u = n.data?.urn as string | undefined
-                return u ? [n.id, u] : [n.id]
-            }),
-        )
-        const missingUrns = spineUrns.filter((u) => !existingUrns.has(u))
+        const missingUrns = spineUrns.filter((u) => !useCanvasStore.getState()._nodeIndex.has(u))
         if (missingUrns.length > 0) {
             try {
                 const fetched = await provider.getNodes({ urns: missingUrns as any[] })
                 if (fetched.length > 0) {
+                    // The containment edges too: `loadChildren` only ever
+                    // fetches a parent's FIRST child page, so a hit that is
+                    // the 300th child would arrive as an orphan node and
+                    // never render. `viaReveal` marks these out-of-band
+                    // nodes so `loadChildren` doesn't count them as a
+                    // loaded page (see useGraphHydration).
+                    const edges = await provider.getEdgesBetween(spineUrns as any[], containmentEdgeTypes)
                     const { addGraph } = useCanvasStore.getState()
-                    addGraph(fetched.map((n) => toCanvasNode(n)), [])
+                    addGraph(
+                        fetched.map((n) => {
+                            const node = toCanvasNode(n)
+                            return { ...node, data: { ...node.data, viaReveal: true } }
+                        }),
+                        edges.map((e) => toCanvasEdge(e)),
+                    )
                 }
             } catch (e) {
                 console.warn('[reveal] spine priming failed', e)
@@ -103,17 +110,11 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
         // Spine walk: expand each ancestor in turn so the deep hit
         // becomes reachable. Each `loadChildren` is awaited so the
         // canvas store settles before the next ancestor lookup.
-        // We re-read `nodes` via getState() between steps because the
-        // closure-captured `nodes` would be stale relative to
-        // in-flight hydration.
+        // We re-read the index via getState() between steps because a
+        // closure-captured one would be stale relative to in-flight
+        // hydration. Canvas node id === URN (see canvasNodeMapper).
         for (const ancestor of ancestorPath) {
-            const currentNodes = useCanvasStore.getState().nodes
-            const ancNode = currentNodes.find(
-                (n) =>
-                    (n.data?.urn as string) === ancestor.urn ||
-                    n.id === ancestor.urn,
-            )
-            if (!ancNode) {
+            if (!useCanvasStore.getState()._nodeIndex.has(ancestor.urn)) {
                 // Ancestor isn't in the canvas yet — the previous
                 // loadChildren didn't produce it. Stop walking; we'll
                 // select the deepest reachable node below.
@@ -121,11 +122,11 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
             }
             setExpandedNodes((prev) => {
                 const next = new Set(prev)
-                next.add(ancNode.id)
+                next.add(ancestor.urn)
                 return next
             })
             try {
-                await loadChildren(ancNode.id)
+                await loadChildren(ancestor.urn)
             } catch (e) {
                 console.warn('[reveal] loadChildren failed for', ancestor.urn, e)
                 // Keep walking — partial reveal beats no reveal.
@@ -140,26 +141,18 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
         // children synchronously via ``getState()`` (Zustand commits
         // outside React batching), so a single frame is enough.
         await nextFrame()
-        const allNodes = useCanvasStore.getState().nodes
-        const hitNode = allNodes.find(
-            (n) => (n.data?.urn as string) === urn || n.id === urn,
-        )
+        const nodeIndex = useCanvasStore.getState()._nodeIndex
 
-        if (hitNode) {
-            selectNode(hitNode.id)
+        if (nodeIndex.has(urn)) {
+            selectNode(urn)
             // Also expand the hit's immediate parent so the hit row
             // itself renders (containers don't render their children
             // until expanded).
             const parent = ancestorPath[ancestorPath.length - 1]
-            if (parent) {
-                const parentNode = allNodes.find(
-                    (n) => (n.data?.urn as string) === parent.urn,
-                )
-                if (parentNode) {
-                    setExpandedNodes((prev) => new Set([...prev, parentNode.id]))
-                }
+            if (parent && nodeIndex.has(parent.urn)) {
+                setExpandedNodes((prev) => new Set([...prev, parent.urn]))
             }
-            scrollIntoView?.(hitNode.id)
+            scrollIntoView?.(urn)
             return
         }
 
@@ -167,16 +160,13 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
         // selecting the deepest reachable ancestor so the user gets
         // visual confirmation that we landed near the target.
         for (let i = ancestorPath.length - 1; i >= 0; i--) {
-            const ancNode = allNodes.find(
-                (n) => (n.data?.urn as string) === ancestorPath[i].urn,
-            )
-            if (ancNode) {
-                selectNode(ancNode.id)
-                scrollIntoView?.(ancNode.id)
+            if (nodeIndex.has(ancestorPath[i].urn)) {
+                selectNode(ancestorPath[i].urn)
+                scrollIntoView?.(ancestorPath[i].urn)
                 break
             }
         }
-    }, [setExpandedNodes, loadChildren, provider, selectNode, scrollIntoView])
+    }, [setExpandedNodes, loadChildren, provider, selectNode, scrollIntoView, containmentEdgeTypes])
 }
 
 
@@ -197,14 +187,8 @@ export function useRevealSearchHit({ setExpandedNodes, loadChildren, provider, s
 export function usePrefetchSearchHitSpine(provider: GraphDataProvider) {
     return useCallback(async (urn: string, ancestorPath: AncestorRef[]) => {
         const spineUrns = [...ancestorPath.map((a) => a.urn), urn]
-        const existingNodes = useCanvasStore.getState().nodes
-        const existingUrns = new Set(
-            existingNodes.flatMap((n) => {
-                const u = n.data?.urn as string | undefined
-                return u ? [n.id, u] : [n.id]
-            }),
-        )
-        const missingUrns = spineUrns.filter((u) => !existingUrns.has(u))
+        const nodeIndex = useCanvasStore.getState()._nodeIndex
+        const missingUrns = spineUrns.filter((u) => !nodeIndex.has(u))
         if (missingUrns.length === 0) return
         try {
             const fetched = await provider.getNodes({ urns: missingUrns as any[] })

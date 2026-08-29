@@ -35,6 +35,10 @@ export interface LineageNode extends Node {
     /** Reconstructed committed-deletion node (draft-vs-main). Read-only; rendered as a rose ghost
      *  until the draft is merged or the deletion is restored. See features/versioning/canvas/deletionGhosts. */
     isGhost?: boolean
+    /** Primed out of band by a search reveal (`useRevealSearchHit`) rather than
+     *  delivered by a child page. `loadChildren` excludes these from its page
+     *  offset and clears the flag once a real page delivers the child. */
+    viaReveal?: boolean
   }
 }
 
