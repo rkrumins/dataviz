@@ -80,6 +80,9 @@ export function visibleFacetBuckets(
 
 export interface ResultsPaneProps {
     view: PanelView
+    /** The view the search ran in. Only the zero-results card needs it —
+     *  the compiled Cypher it shows is resolved per view. */
+    viewId: string
     onScopeToGroup: (bucket: {
         ancestorUrn: string
         ancestorDisplayName: string
@@ -103,7 +106,7 @@ export interface ResultsPaneProps {
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
-    view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
     onLoadAll, isLoadingAll, onCancelLoadAll,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
@@ -127,6 +130,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
             >
                 <Dispatch
                     view={view}
+                    viewId={viewId}
                     onScopeToGroup={onScopeToGroup}
                     onReveal={onReveal}
                     onOpen={onOpen}
@@ -144,7 +148,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 
 function Dispatch({
-    view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
     onLoadAll, isLoadingAll, onCancelLoadAll, scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
@@ -156,6 +160,7 @@ function Dispatch({
             return (
                 <ResultsContent
                     view={view}
+                    viewId={viewId}
                     onScopeToGroup={onScopeToGroup}
                     onReveal={onReveal}
                     onOpen={onOpen}
@@ -174,10 +179,11 @@ function Dispatch({
 
 
 function ResultsContent({
-    view, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
     onLoadAll, isLoadingAll, onCancelLoadAll, scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
+    viewId: string
     onScopeToGroup: ResultsPaneProps['onScopeToGroup']
     onReveal?: ResultsPaneProps['onReveal']
     onOpen?: ResultsPaneProps['onOpen']
@@ -352,6 +358,7 @@ function ResultsContent({
                     <ZeroResultsDiagnostic
                         result={result}
                         query={view.query}
+                        viewId={viewId}
                         // Switching the match mode re-runs the same word
                         // through the session's own debounce — the panel
                         // never dispatches a second query of its own.

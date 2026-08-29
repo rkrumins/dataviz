@@ -41,6 +41,7 @@ function renderCard(onSwitchMatch?: (m: QuickMatch) => void) {
             <ZeroResultsDiagnostic
                 result={EMPTY}
                 query={QUERY}
+                viewId="view-1"
                 onSwitchMatch={onSwitchMatch}
             />
         </ProviderOverride>,

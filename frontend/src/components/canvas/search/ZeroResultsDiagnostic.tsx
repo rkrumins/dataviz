@@ -56,6 +56,7 @@ import type {
     TextPredicate,
 } from '@/types/search'
 
+import { CypherDisclosure } from './panel/CypherDisclosure'
 import { findScopeCondition } from './panel/predicateComposition'
 import type { QuickMatch } from './session/quickPredicate'
 
@@ -65,6 +66,8 @@ export interface ZeroResultsDiagnosticProps {
     result: SearchResultPage
     /** The query that was executed (so we can inspect predicates). */
     query: SearchQuery
+    /** The view the search ran in — the compiled Cypher is per-view. */
+    viewId: string
     /** Re-run the same word a different way. Absent on the surfaces with
      *  no quick query to switch — the lead then states the miss without
      *  offering the one-click fixes. */
@@ -81,7 +84,7 @@ interface Cause {
 
 
 export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
-    result, query, onSwitchMatch,
+    result, query, viewId, onSwitchMatch,
 }) => {
     const causes = useMemo(() => diagnose(result, query), [result, query])
     const text = useMemo(() => firstTextLeaf(query.predicate), [query.predicate])
@@ -107,6 +110,10 @@ export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
                 {/* Inline graph-contents probe — for "did the entity type
                     I queried even exist?" investigations. */}
                 <DiscoverProbe query={query} />
+
+                {/* The compiled query, which cause 5 sends the user here
+                    to read. */}
+                <CypherDisclosure viewId={viewId} />
             </TechnicalDetails>
         </div>
     )

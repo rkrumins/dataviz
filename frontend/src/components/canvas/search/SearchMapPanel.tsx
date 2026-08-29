@@ -545,6 +545,7 @@ function PanelInner({
                                 />
                                 <ResultsPane
                                     view={view}
+                                    viewId={viewId}
                                     onScopeToGroup={handleScopeToGroup}
                                     onReveal={onRevealNode}
                                     onOpen={onOpenNode}
