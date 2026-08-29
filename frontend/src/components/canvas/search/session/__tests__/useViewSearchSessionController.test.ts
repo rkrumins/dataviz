@@ -346,6 +346,58 @@ describe('useViewSearchSessionController — panel', () => {
         expect(result.current.refineOpen).toBe(false)
     })
 
+    it('a cold open shows the builder — there is no answer to show instead', () => {
+        const { result } = renderSession()
+
+        act(() => { result.current.openPanel() })
+
+        expect(result.current.panelOpen).toBe(true)
+        expect(result.current.refineOpen).toBe(true)
+    })
+
+    it('opening onto a result set opens on the ANSWER, not the builder', () => {
+        const { result, rerender } = renderSession()
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+        act(() => { result.current.closePanel() })
+
+        act(() => { result.current.openPanel() })
+
+        expect(result.current.panelOpen).toBe(true)
+        expect(result.current.refineOpen).toBe(false)
+    })
+
+    it('the builder a cold open showed survives results landing under it', () => {
+        const { result, rerender } = renderSession()
+        act(() => { result.current.openPanel() })
+        expect(result.current.refineOpen).toBe(true)
+
+        // The first runnable value the user types auto-runs 250 ms later.
+        // If the builder's visibility were derived from "are there
+        // results?", it would unmount mid-word.
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+
+        expect(result.current.refineOpen).toBe(true)
+    })
+
+    it('Clear leaves an open panel showing the only thing left to show', () => {
+        const { result, rerender } = renderSession()
+        mocks.state.view = resultsView()
+        mocks.state.runState = { hash: JSON.stringify(LEAF), status: 'done' }
+        rerender()
+        expect(result.current.refineOpen).toBe(false)
+
+        act(() => { result.current.clearQuery() })
+
+        // The results the panel was opened on are gone and the panel is
+        // still open: the builder is now the only content it has.
+        expect(result.current.panelOpen).toBe(true)
+        expect(result.current.refineOpen).toBe(true)
+    })
+
     it('togglePanel flips it both ways, and closing that way also drops Refine', () => {
         const { result } = renderSession()
         act(() => { result.current.togglePanel() })

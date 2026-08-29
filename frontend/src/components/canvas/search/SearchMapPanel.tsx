@@ -395,12 +395,6 @@ function PanelInner({
     const showResultsSection = view.kind === 'running'
         || view.kind === 'results'
         || view.kind === 'error'
-    // Results-first must not mean empty-first. Opened with no search
-    // running — the panel's own shortcut does exactly that — there is no
-    // answer to fold the builder away in favour of, and QueryCard's
-    // empty-state hero is the only thing here that tells the user how to
-    // start.
-    const showBuilder = refineOpen || !showResultsSection
 
     // Resolve the focused match's ancestor path from the current
     // result page. Stepping (J/K) only updates ``focusedMatchIndex``;
@@ -515,7 +509,7 @@ function PanelInner({
                         'flex-1 min-h-0 overflow-y-auto custom-scrollbar',
                         'px-3 py-3 flex flex-col gap-3',
                     )}>
-                        {showBuilder && (
+                        {refineOpen && (
                             <QueryCard
                                 viewId={viewId}
                                 isRunning={view.kind === 'running'}

@@ -184,6 +184,10 @@ export function useViewSearchSessionController(
         // Whatever comes next is a fresh query as far as the panel is
         // concerned, even when it hashes to the same string.
         autoOpenedHashRef.current = null
+        // Same rule `openPanel` applies, applied to the state this just
+        // produced: there are no results any more, so a panel still open
+        // has nothing to report on and the builder is its only content.
+        setRefineOpen(true)
     }, [])
 
     // A view switch is a teardown, not just an un-highlight: this hook
@@ -235,7 +239,15 @@ export function useViewSearchSessionController(
         setPanelOpen(true)
     }, [resultsHash])
 
-    const openPanel = useCallback(() => { setPanelOpen(true) }, [])
+    // Opening decides what the panel opens ON, once, here — rather than
+    // the panel deriving it from "are there results right now?". That
+    // derivation had the builder unmount mid-word: on a cold open it
+    // showed only because no results existed yet, and the first thing the
+    // user typed auto-ran 250 ms later and took it away.
+    const openPanel = useCallback(() => {
+        setPanelOpen(true)
+        setRefineOpen(advancedRef.current.view.kind !== 'results')
+    }, [])
     const closePanel = useCallback(() => {
         setPanelOpen(false)
         // Refine is a mode of the open panel, not a state of its own.
