@@ -4398,16 +4398,8 @@ export function ContextViewCanvas({
         onOpenAdvancedSearch={(seedQuery) => {
           // Toggle the panel. When the user escalates from the
           // quick search (passes a seed string), force-open the
-          // panel + clear the quick-search input (so the no-match
-          // escalation card disappears) + stash the typed query as
-          // a one-shot ``pendingSearchSeed`` (W2.7) so the empty
-          // hero's "Type to search by name across this view…"
-          // input opens pre-filled with the user's text. The hero
-          // consumes + clears the seed on mount.
+          // panel.
           if (seedQuery && seedQuery.trim()) {
-            const trimmed = seedQuery.trim()
-            setSearchQuery('')
-            useSearchStore.getState().setPendingSearchSeed(trimmed)
             setAdvancedSearchOpen(true)
             return
           }

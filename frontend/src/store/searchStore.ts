@@ -232,20 +232,6 @@ interface SearchStoreState {
      * localStorage so they survive page reloads.
      */
     recentQueries: ReadonlyArray<RecentQueryEntry>
-    /**
-     * One-shot seed for the SearchMapPanel's empty-hero quick-search
-     * input (W2.7). When a caller (typically the ContextViewHeader
-     * escalation flow) opens the Advanced Search panel WITH a typed
-     * quick-search query, the empty hero reads + atomically clears
-     * this on mount so the visible input opens pre-filled with the
-     * user's text instead of being bypassed by a silent
-     * draft-predicate seed.
-     *
-     * ``null`` means "nothing pending — render the hero empty as
-     * usual". Always cleared on consume so a subsequent re-open of
-     * the panel doesn't replay the same seed.
-     */
-    pendingSearchSeed: string | null
 
     /**
      * A predicate handed to the Advanced Search panel from OUTSIDE it
@@ -340,6 +326,18 @@ export interface AncestorPathInfo {
     leafEntityType: string
 }
 
+/**
+ * One bucket of the server's ``ancestor`` aggregation: an exact match
+ * count for a single ancestor URN, with an optional per-entityType
+ * breakdown (from ``bucket.typeCounts``). Passed to ``setResult`` in
+ * place of the page-derived ``ancestorPaths`` rollup.
+ */
+export interface AncestorCountInfo {
+    urn: string
+    count: number
+    breakdown?: ReadonlyMap<string, number>
+}
+
 interface SearchStoreActions {
     setResult: (input: {
         viewId: string
@@ -347,8 +345,15 @@ interface SearchStoreActions {
         /** Per-hit ancestor info (path + the entityType of the hit at the
          *  end of that path). Used to derive both ``ancestorMatchCounts``
          *  and ``ancestorMatchTypeBreakdowns`` so the canvas can surface
-         *  roll-up counts AND a per-type breakdown on collapsed nodes. */
+         *  roll-up counts AND a per-type breakdown on collapsed nodes.
+         *  Ignored when ``ancestorCounts`` is provided. */
         ancestorPaths?: Iterable<AncestorPathInfo>
+        /** Exact per-ancestor match counts from the server's ``ancestor``
+         *  aggregation. When provided, REPLACES the page-derived rollup
+         *  from ``ancestorPaths`` — the aggregation covers every match in
+         *  the view, not just the hits on the current page, so it stays
+         *  correct across ``loadMore``. */
+        ancestorCounts?: Iterable<AncestorCountInfo>
         queryHash: string
     }) => void
     /** Replace the draft with a value from outside the builder (template /
@@ -396,13 +401,6 @@ interface SearchStoreActions {
      *  to undo back to their previous draft. */
     clearSearchResults: () => void
     clear: () => void
-    /** Stash a quick-search query for the empty hero to pick up on
-     *  mount. Pass ``null`` to clear without consuming. */
-    setPendingSearchSeed: (seed: string | null) => void
-    /** Atomic read-and-clear. Returns the previously-stashed seed
-     *  (or ``null``) and resets the field in the same set so the
-     *  seed cannot be replayed by a second consumer. */
-    consumePendingSearchSeed: () => string | null
     /** Load a predicate into the builder AND request the panel run it —
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
@@ -486,6 +484,26 @@ function deriveAncestorRollups(infos: Iterable<AncestorPathInfo>): {
                 breakdown.set(leafEntityType, (breakdown.get(leafEntityType) ?? 0) + 1)
             }
         }
+    }
+    return { counts, breakdowns }
+}
+
+/**
+ * Converts the server's exact ``ancestor`` aggregation buckets straight
+ * into the same ``{ counts, breakdowns }`` shape ``deriveAncestorRollups``
+ * produces, so ``setResult`` can treat both sources identically. No
+ * summing needed — each bucket already IS the ancestor's total.
+ */
+function ancestorCountsFromServer(infos: Iterable<AncestorCountInfo>): {
+    counts: Map<string, number>
+    breakdowns: Map<string, Map<string, number>>
+} {
+    const counts = new Map<string, number>()
+    const breakdowns = new Map<string, Map<string, number>>()
+    for (const { urn, count, breakdown } of infos) {
+        if (!urn) continue
+        counts.set(urn, count)
+        if (breakdown) breakdowns.set(urn, new Map(breakdown))
     }
     return { counts, breakdowns }
 }
@@ -604,7 +622,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyPast: EMPTY_HISTORY,
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
-    pendingSearchSeed: null,
     pendingRunPredicate: null,
     // Default to 'view' — searches the full descendant set of the
     // view's top-level containers, including subtrees that haven't
@@ -626,7 +643,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
 
-    setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
+    setResult: ({ viewId, matchUrns, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
         // Build the ordered list and the set in one pass so iteration
         // order from the caller (backend hit order) is preserved for
@@ -641,10 +658,14 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 ordered.push(urn)
             }
         }
-        const { counts, breakdowns } = ancestorPaths
-            ? deriveAncestorRollups(ancestorPaths)
-            : { counts: new Map<string, number>(),
-                breakdowns: new Map<string, Map<string, number>>() }
+        // ancestorCounts (server-exact) takes priority over the
+        // page-derived ancestorPaths rollup when both are supplied.
+        const { counts, breakdowns } = ancestorCounts
+            ? ancestorCountsFromServer(ancestorCounts)
+            : ancestorPaths
+                ? deriveAncestorRollups(ancestorPaths)
+                : { counts: new Map<string, number>(),
+                    breakdowns: new Map<string, Map<string, number>>() }
         set({
             viewId,
             matchUrnSet: next,
@@ -814,16 +835,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
         })
-    },
-
-    setPendingSearchSeed: (seed) => {
-        set({ pendingSearchSeed: seed && seed.trim() ? seed : null })
-    },
-
-    consumePendingSearchSeed: () => {
-        const current = get().pendingSearchSeed
-        if (current !== null) set({ pendingSearchSeed: null })
-        return current
     },
 
     requestSearchRun: (predicate) => {

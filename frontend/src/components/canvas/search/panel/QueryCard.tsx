@@ -319,24 +319,6 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (!complete) setFreshRowKind(predicate.kind ?? null)
     }, [commitDraft])
 
-    // Text escalated from the canvas header's quick search. That path
-    // stashes the typed string and calls "open the panel" — which is a
-    // no-op when the panel is already open, so the old consumer (a
-    // mount-only effect on the empty hero) never ran: the second
-    // escalation appeared to do nothing, and the stale seed resurfaced
-    // later when the hero next mounted. Subscribing to the store means
-    // a seed is taken whenever one arrives, open or not. The nonce
-    // remounts the omnibox so a repeat escalation actually lands.
-    const pendingSeed = useSearchStore((s) => s.pendingSearchSeed)
-    const [seed, setSeed] = useState<{ text: string; nonce: number }>(
-        { text: '', nonce: 0 },
-    )
-    useEffect(() => {
-        if (!pendingSeed) return
-        const taken = useSearchStore.getState().consumePendingSearchSeed()
-        if (taken) setSeed((prev) => ({ text: taken, nonce: prev.nonce + 1 }))
-    }, [pendingSeed])
-
     // Property-value samples, flattened across every discovered key so
     // the omnibox can match a bare token against values as well as
     // names. The corpus is bounded server-side (20 values per key, 64
@@ -382,7 +364,6 @@ export const QueryCard: FC<QueryCardProps> = ({
 
     const omnibox = (
         <SearchOmnibox
-            key={`omnibox-${seed.nonce}`}
             variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
             onBrowseAll={onOpenAdvanced}
@@ -391,7 +372,6 @@ export const QueryCard: FC<QueryCardProps> = ({
             propertyKeys={discovery.allKeys}
             valueSamples={valueSamples}
             layers={discoveredLayers}
-            initialQuery={seed.text}
             discoveryLoading={discovery.isInitialLoading}
             disabled={isRunning}
         />
