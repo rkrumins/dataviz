@@ -20,11 +20,20 @@ import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 import type { AncestorRef } from '@/types/search'
 
 
+/**
+ * @param hasAssignments - whether ``assignments`` has any entry, which is
+ *   what tells a curated view from an open one. Derived here when the
+ *   caller doesn't say, but a caller resolving a whole result page should:
+ *   this is the only O(assignments) step in an otherwise O(path) walk, and
+ *   at a thousand hits over a five-thousand-entry map it is the whole cost
+ *   of the grouping.
+ */
 export function resolveHitLayer(
     hit: { urn: string; entityType: string },
     ancestorPath: ReadonlyArray<AncestorRef>,
     assignments: Record<string, LayerAssignmentEntry>,
     layers: ViewLayerConfig[],
+    hasAssignments: boolean = Object.keys(assignments).length > 0,
 ): string | null {
     const chain = [...ancestorPath, hit]
     for (let i = 0; i < chain.length; i++) {
@@ -35,7 +44,7 @@ export function resolveHitLayer(
         return entry.layerId
     }
 
-    if (Object.keys(assignments).length > 0) return null
+    if (hasAssignments) return null
 
     const topLevel = ancestorPath[0] ?? hit
     const fallback = layers.find((l) => l.entityTypes.includes(topLevel.entityType))

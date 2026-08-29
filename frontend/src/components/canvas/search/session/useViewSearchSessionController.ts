@@ -371,12 +371,16 @@ export function useViewSearchSessionController(
         setRefineOpen(false)
     }, [])
 
+    // Hoisted: `resolveHitLayer`'s only O(assignments) step, paid once per
+    // result page instead of once per hit.
+    const hasAssignments = useMemo(() => Object.keys(assignments).length > 0, [assignments])
     const resolveLayer = useCallback((hit: SearchHit) => resolveHitLayer(
         hit.node,
         hit.ancestorPath ?? [],
         assignments,
         layers,
-    ), [assignments, layers])
+        hasAssignments,
+    ), [assignments, layers, hasAssignments])
 
     // The columns' slice. Every scoped field collapses to a constant
     // while the search is view-wide, so this whole object keeps its
