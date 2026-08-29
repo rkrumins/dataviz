@@ -723,6 +723,12 @@ class SearchHighlight(_Base):
     field: str
     snippet: str
     score: float = 0.0
+    ranges: List[List[int]] = Field(
+        default_factory=list,
+        description="``[start, end]`` offsets within ``snippet`` (not "
+                    "within the original field) — the snippet's leading "
+                    "ellipsis is already counted.",
+    )
 
 
 class AncestorRef(_Base):
