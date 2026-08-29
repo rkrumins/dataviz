@@ -372,7 +372,11 @@ function ResultsContent({
                         facts; "in" would claim a partition that isn't one. */}
                     <p className="text-[13px] font-medium text-ink/90">
                         {totalMatches.toLocaleString()}
-                        {result.truncated ? '+' : ''}
+                        {/* The plus means "more than this", so it belongs
+                            only to a count that is a FLOOR. A run the
+                            server truncated but still counted exactly has
+                            nothing more than its total. */}
+                        {result.truncated && totalCount === null ? '+' : ''}
                         {totalMatches === 1 ? ' match' : ' matches'}
                         {hasAggregates && (
                             <span className="text-ink-muted font-normal">

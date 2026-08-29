@@ -23,6 +23,7 @@ import { ChevronRight, ExternalLink, Sparkles } from 'lucide-react'
 import * as LucideIcons from 'lucide-react'
 import { type FC, useMemo } from 'react'
 
+import { HighlightedText } from '@/components/ui/HighlightedText'
 import { cn } from '@/lib/utils'
 import { useIsFocusedMatch } from '@/store/searchStore'
 import type { AncestorRef, SearchHit } from '@/types/search'
@@ -57,6 +58,43 @@ export function matchedFieldLabel(field: string): string {
         default:
             return field
     }
+}
+
+
+/**
+ * Split a highlight snippet into marked and unmarked runs.
+ *
+ * The backend sends `ranges` — `[start, end]` offsets into the snippet —
+ * and rendering them is the difference between "this row matched
+ * somewhere in a sentence" and "it matched on THIS word". The snippet is
+ * text a person reads, so the arithmetic is defensive about what arrives
+ * on the wire: ranges are sorted, clamped to the snippet and skipped
+ * where they overlap one already taken. Whatever comes in, the parts
+ * concatenate back to exactly the snippet.
+ */
+export function markRanges(
+    snippet: string, ranges?: number[][] | null,
+): { text: string; mark: boolean }[] {
+    const parts: { text: string; mark: boolean }[] = []
+    let cursor = 0
+    const ordered = [...(ranges ?? [])]
+        .map(([start, end]) => [
+            Math.max(0, Math.min(start ?? 0, snippet.length)),
+            Math.max(0, Math.min(end ?? 0, snippet.length)),
+        ])
+        .filter(([start, end]) => end > start)
+        .sort((a, b) => a[0] - b[0])
+
+    for (const [start, end] of ordered) {
+        if (start < cursor) continue
+        if (start > cursor) parts.push({ text: snippet.slice(cursor, start), mark: false })
+        parts.push({ text: snippet.slice(start, end), mark: true })
+        cursor = end
+    }
+    if (cursor < snippet.length) {
+        parts.push({ text: snippet.slice(cursor), mark: false })
+    }
+    return parts.length > 0 ? parts : [{ text: snippet, mark: false }]
 }
 
 
@@ -168,10 +206,14 @@ export interface SearchHitRowProps {
     onOpen?: (urn: string) => void
     /** Click an ancestor chip → re-scope the panel to that ancestor. */
     onAncestorClick?: (ancestor: AncestorRef) => void
+    /** What was searched. Given, the name marks it; withheld, the name is
+     *  drawn plain — a surface that does not know the text should not
+     *  guess at one. */
+    query?: string
 }
 
 export const SearchHitRow: FC<SearchHitRowProps> = ({
-    hit, index, onReveal, onOpen, onAncestorClick,
+    hit, index, onReveal, onOpen, onAncestorClick, query,
 }) => {
     // Per-row focused subscription. Re-renders only when THIS row's
     // focus state flips, not on every MatchBar step — see the
@@ -226,9 +268,11 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
             <div className="flex-1 min-w-0">
                 {/* Row 1: name + type label + tags + action chips */}
                 <div className="flex items-baseline gap-2 min-w-0">
-                    <span className="text-sm font-display font-semibold text-ink truncate">
-                        {hit.node.displayName || '(unnamed)'}
-                    </span>
+                    <HighlightedText
+                        text={hit.node.displayName || '(unnamed)'}
+                        query={query ?? ''}
+                        className="text-sm font-display font-semibold text-ink truncate"
+                    />
                     <span className={cn(
                         "text-[10px] uppercase tracking-[0.1em] font-medium shrink-0",
                         style.accentText,
@@ -301,7 +345,17 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                             className="min-w-0 truncate text-[11px] text-ink-muted"
                             title={highlight.snippet}
                         >
-                            {highlight.snippet}
+                            {markRanges(highlight.snippet, highlight.ranges)
+                                .map((part, i) => (part.mark ? (
+                                    <mark
+                                        key={i}
+                                        className="bg-accent-business/15 text-accent-business font-semibold rounded px-0.5"
+                                    >
+                                        {part.text}
+                                    </mark>
+                                ) : (
+                                    <span key={i}>{part.text}</span>
+                                )))}
                         </span>
                     </div>
                 )}

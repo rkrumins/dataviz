@@ -393,6 +393,11 @@ function PanelInner({
         : null
     const elapsedMs = view.kind === 'results' ? view.elapsedMs : null
     const truncated = view.kind === 'results' && view.result.truncated === true
+    // Whether that count is the server's exact size of the match set. The
+    // truncation warning is about the RUN and stands either way; the
+    // trailing plus is about the NUMBER, and there is nothing more than a
+    // total the server counted.
+    const countIsExact = view.kind === 'results' && view.result.totalCount != null
     const deadlineExceeded = view.kind === 'results'
         && view.result.deadlineExceeded === true
     const candidateCount = view.kind === 'results'
@@ -539,6 +544,7 @@ function PanelInner({
                                     isRunning={view.kind === 'running'}
                                     errorMessage={view.kind === 'error' ? view.message : null}
                                     truncated={truncated}
+                                    countIsExact={countIsExact}
                                     deadlineExceeded={deadlineExceeded}
                                     candidateCount={candidateCount}
                                     onFrame={canFrame
