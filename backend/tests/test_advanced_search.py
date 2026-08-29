@@ -1546,6 +1546,55 @@ class TestTypesDoNotGateDescendants:
         assert "$_scopeEntityTypes" not in result["cypher"]
         assert "_scopeEntityTypes" not in result["params"]
 
+    def test_visible_urns_omit_label_filter(self):
+        """An explicit URN allow-list is a boundary just like a traversal:
+        the FE has already resolved exactly which nodes are in play, so a
+        label filter on top can only subtract from a set the user can see.
+        (``_maybe_add_visible_urns_clause``'s own docstring says the
+        visible filter replaces the entity-type label scan — this is the
+        code catching up with it.)"""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="visible",
+                visible_urns=["urn:a"],
+                entity_types=["dataset"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        cypher = result["cypher"]
+        assert "n.urn IN $_visibleUrns" in cypher
+        assert "$_scopeEntityTypes" not in cypher
+        assert "_scopeEntityTypes" not in result["params"]
+        assert any(
+            "the visible-URN list is the search boundary" in n
+            for n in result["notes"]
+        ), result["notes"]
+
+    def test_visible_mode_without_urns_keeps_label_filter(self):
+        """Empty ``visible_urns`` injects no clause — the mode falls back
+        to view semantics, so there is no boundary and the types stay."""
+        from backend.app.providers.falkordb_deep_search import (
+            explain_deep_search,
+        )
+        q = SearchQuery(
+            predicate=TagPredicate(values=["PII"]),
+            scope=SearchScope(
+                view_id="view_test",
+                scope_mode="visible",
+                visible_urns=[],
+                entity_types=["dataset"],
+            ),
+        )
+        result = explain_deep_search(_StubScopeProvider(), q)
+        assert "$_visibleUrns" not in result["cypher"]
+        assert "$_scopeEntityTypes" in result["cypher"]
+        assert result["params"]["_scopeEntityTypes"] == ["dataset"]
+
 
 # ---------------------------------------------------------------------------
 # Candidate Cypher assembly

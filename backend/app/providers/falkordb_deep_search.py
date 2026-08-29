@@ -1374,6 +1374,15 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
             "entity-type filter not applied: the containment traversal "
             "from the resolved roots is the search boundary"
         )
+    elif visible_clause_added:
+        # Same rule, cheaper boundary: an explicit URN allow-list is as
+        # bounding as a traversal, and the FE has already resolved which
+        # nodes are in play — a label filter could only subtract from a
+        # set the user is looking at.
+        notes.append(
+            "entity-type filter not applied: the visible-URN list is "
+            "the search boundary"
+        )
     else:
         effective_types, et_note = _resolve_entity_types_scope(
             provider, list(query.scope.entity_types or []),
@@ -1919,7 +1928,7 @@ async def execute_deep_search(
     # 3. Scope mode resolution (mirrors explain_deep_search).
     scope_mode = query.scope.scope_mode
     visible_urns_list = list(query.scope.visible_urns or [])
-    where_fragment, _visible_clause_added = _maybe_add_visible_urns_clause(
+    where_fragment, visible_clause_added = _maybe_add_visible_urns_clause(
         where_fragment, scope_mode, visible_urns_list, base_params,
     )
     scope_chain = ""
@@ -1935,13 +1944,13 @@ async def execute_deep_search(
     )
     base_params.update(wh_params)
 
-    # 5. Build the candidate prefix. When a containment traversal bounds
-    #    the scan, the entity types must not gate it as well — see the
-    #    parallel branch in explain_deep_search, which surfaces the same
-    #    decision as a note.
+    # 5. Build the candidate prefix. When a containment traversal or a
+    #    visible-URN allow-list already bounds the scan, the entity types
+    #    must not gate it as well — see the parallel branch in
+    #    explain_deep_search, which surfaces the same decision as a note.
     effective_types: Optional[List[str]] = None
     et_note: Optional[str] = None
-    if not scope_chain:
+    if not scope_chain and not visible_clause_added:
         effective_types, et_note = _resolve_entity_types_scope(
             provider, list(query.scope.entity_types or []),
         )
