@@ -40,6 +40,7 @@
           "enum": [
             "ancestorType",
             "ancestorLevel",
+            "ancestor",
             "parent",
             "tag",
             "entityType",
@@ -50,7 +51,8 @@
         },
         "maxBuckets": {
           "default": 50,
-          "maximum": 500,
+          "description": "Bucket ceiling. The headroom above a facet-sized list is for by='ancestor', which needs one bucket per container the canvas can collapse.",
+          "maximum": 20000,
           "minimum": 1,
           "title": "Maxbuckets",
           "type": "integer"
@@ -515,6 +517,18 @@
         "urn": {
           "title": "Urn",
           "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
         }
       },
       "required": [
@@ -1033,7 +1047,7 @@
       "type": "object"
     },
     "PropertyPredicate": {
-      "description": "Typed comparison against a single user-property.\n\nAfter the storage refactor, user properties are native FalkorDB\nfields, so these compile to indexed ``WHERE n.<key> <op> $val`` \u2014\nno Python post-filter. ``between`` expects ``value`` to be a\ntwo-element list ``[lo, hi]``.",
+      "description": "Typed comparison against a single user-property.\n\nAfter the storage refactor, user properties are native FalkorDB\nfields, so these compile to ``WHERE n.<key> <op> $val`` \u2014 no Python\npost-filter. ``eq``/``neq`` case-fold (``toLower(toString(n.<key>))\n<op> toLower($val)``) when ``value`` is a string and\n``case_sensitive`` is false; a non-string value (or\n``case_sensitive=True``) keeps the raw, indexed column comparison.\n``between`` expects ``value`` to be a two-element list ``[lo, hi]``.",
       "properties": {
         "caseSensitive": {
           "default": false,
@@ -1238,6 +1252,22 @@
           "default": null,
           "description": "Populated when the request's AggregationSpec carried a sub_aggregation.",
           "title": "Subbuckets"
+        },
+        "typeCounts": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-entity-type breakdown of ``match_count`` \u2014 e.g. ``{'Column': 12, 'Table': 3}``. Populated by by='ancestor'; None for the kinds that don't compute one.",
+          "title": "Typecounts"
         }
       },
       "required": [
@@ -1374,6 +1404,12 @@
           "title": "Missingcontainment",
           "type": "boolean"
         },
+        "missingSearchableText": {
+          "default": 0,
+          "description": "Sampled nodes with no n.searchableText \u2014 run `python -m backend.scripts.migrate_native_properties --searchable-text`.",
+          "title": "Missingsearchabletext",
+          "type": "integer"
+        },
         "tagValues": {
           "additionalProperties": {
             "type": "integer"
@@ -1474,6 +1510,17 @@
         "field": {
           "title": "Field",
           "type": "string"
+        },
+        "ranges": {
+          "description": "``[start, end]`` offsets within ``snippet`` (not within the original field) \u2014 the snippet's leading ellipsis is already counted.",
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Ranges",
+          "type": "array"
         },
         "score": {
           "default": 0.0,
@@ -1867,6 +1914,19 @@
           ],
           "default": null,
           "description": "Resolved-scope + ontology diagnostics. Surfaced on every response so the FE can interpret 0-result cases without round-tripping to /search/explain."
+        },
+        "totalCount": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact number of matches in scope, independent of the candidate cap; null when the count timed out (UI shows N+).",
+          "title": "Totalcount"
         },
         "truncated": {
           "default": false,
