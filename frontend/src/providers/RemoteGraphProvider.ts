@@ -234,12 +234,19 @@ export class RemoteGraphProvider implements GraphDataProvider {
             }
         }
 
-        // Deduplicate identical in-flight requests
-        const existing = this._inflight.get(cacheKey)
-        if (existing) return existing as Promise<T>
+        // Deduplicate identical in-flight requests — skipped when the
+        // caller supplies an AbortSignal. Sharing one promise would let
+        // aborting a superseded call reject the identical superseding
+        // call too (e.g. search-as-you-type re-firing the same text).
+        if (!fetchOptions.signal) {
+            const existing = this._inflight.get(cacheKey)
+            if (existing) return existing as Promise<T>
+        }
 
         const promise = this._doFetch<T>(url, fetchOptions, method, cacheKey, timeoutMs)
-        this._inflight.set(cacheKey, promise)
+        if (!fetchOptions.signal) {
+            this._inflight.set(cacheKey, promise)
+        }
         return promise
     }
 
@@ -251,7 +258,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             this.workspaceId, this.dataSourceId, classifyEndpoint(url),
         )
         if (!circuitBreaker.canRequest()) {
-            this._inflight.delete(cacheKey)
+            if (!fetchOptions.signal) this._inflight.delete(cacheKey)
             throw new Error('Provider unavailable (circuit open)')
         }
 
@@ -334,7 +341,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             }
             throw err
         } finally {
-            this._inflight.delete(cacheKey)
+            if (!fetchOptions.signal) this._inflight.delete(cacheKey)
         }
     }
 
@@ -390,10 +397,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * body which the GET-cache layer can't key on, and the backend will
      * grow its own Redis cache in workstream 3.
      */
-    async searchAdvanced(query: SearchQuery): Promise<SearchResultPage> {
+    async searchAdvanced(query: SearchQuery, opts?: { signal?: AbortSignal }): Promise<SearchResultPage> {
         return await this.fetch<SearchResultPage>('/search/advanced', {
             method: 'POST',
             body: JSON.stringify(query),
+            signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
         })
     }
 
