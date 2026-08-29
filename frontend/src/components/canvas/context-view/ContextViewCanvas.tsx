@@ -41,6 +41,7 @@ import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStaged
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -180,7 +181,11 @@ function makeConnectionTypeResolver(
     // words or nothing at all, never a sentence nobody wrote. (The view's
     // edgeTypeMetadata carries no prose — only isContainment / isLineage /
     // direction / category — so there is nothing else to fall back to.)
-    const description = getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description || ''
+    // A system type whose wording this app owns is the one exception: its
+    // copy is a deliberate replacement for the ontology's engineer-speak, so
+    // it outranks the schema rather than being overwritten by it.
+    const description = edgeTypeCopy(edgeType)?.description
+      ?? (getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description || '')
     const resolved = { ...def, description }
     cache.set(edgeType, resolved)
     return resolved

@@ -112,7 +112,7 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
                 type: typeKey,
                 label: edgeTypeCopy(typeKey)?.label ?? typeKey,
                 color: generateEdgeColorFromType(typeKey),
-                description: `Relationship type: ${typeKey}`,
+                description: edgeTypeCopy(typeKey)?.description ?? `Relationship type: ${typeKey}`,
                 strokeStyle: 'solid' as const,
                 animated: false,
                 icon: null,

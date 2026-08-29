@@ -108,7 +108,7 @@ function PathCard({
                     <>
                         <span className="text-ink-muted/50">·</span>
                         <span className="font-mono truncate">
-                            {uniqueEdgeTypes(path).join(' → ')}
+                            {uniqueEdgeTypes(path).map(t => edgeTypeCopy(t)?.label ?? t).join(' → ')}
                         </span>
                     </>
                 )}
