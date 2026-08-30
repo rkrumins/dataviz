@@ -22,7 +22,6 @@ import {
   loadingChildrenMessage,
   openedViewMessage,
   openingViewMessage,
-  summarisedConnectionsMessage,
 } from '../loadMessages'
 
 const types = [
@@ -111,12 +110,6 @@ describe('the rest of the load', () => {
     expect(connectionsLoadedMessage(2048)).toBe(`Connections · ${(2048).toLocaleString()}`)
   })
 
-  it('leaves the batched roll-up countless, so its repeats fold into one row', () => {
-    // It re-runs on every expand and collapse; DataLoadsPanel folds only runs
-    // of the IDENTICAL message, so a count here means a new row every time.
-    expect(summarisedConnectionsMessage()).toBe('Summarised connections')
-  })
-
   it('reports what was placed, and appends the leftovers only when there are some', () => {
     expect(layersPlacedMessage(120, 4, 0)).toBe('Placed 120 items across 4 layers')
     expect(layersPlacedMessage(1200, 4, 3)).toBe(`Placed ${(1200).toLocaleString()} items across 4 layers · 3 unplaced`)
@@ -137,7 +130,6 @@ describe('the vocabulary the user never sees', () => {
       openingViewMessage('V'),
       openedViewMessage('V', 3),
       connectionsLoadedMessage(3),
-      summarisedConnectionsMessage(),
       layersPlacedMessage(3, 1, 1),
     ].join('\n').toLowerCase()
     for (const banned of BANNED) {
@@ -214,8 +206,10 @@ describe('the canvas raises them from the sites that know the subject', () => {
       expect(at).toBeGreaterThan(-1)
       expect(canvas.slice(at, canvas.indexOf('  )', at))).toContain('() =>')
     }
+    // The batched roll-up gets a spinner and NO success message: only
+    // non-loading notifications are recorded, so it never reaches the log.
     const agg = canvas.indexOf("'ctx-agg-edges'")
-    expect(canvas.slice(agg, canvas.indexOf('  )', agg))).toContain('summarisedConnectionsMessage()')
+    expect(canvas.slice(agg, agg + 200)).toContain("'Summarising connections…')")
   })
 
   it('counts the entities load across BOTH of its phases', () => {

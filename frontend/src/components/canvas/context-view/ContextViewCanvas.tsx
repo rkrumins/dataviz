@@ -52,7 +52,7 @@ import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
-  openedViewMessage, openingViewMessage, summarisedConnectionsMessage,
+  openedViewMessage, openingViewMessage,
 } from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import {
@@ -3339,16 +3339,15 @@ export function ContextViewCanvas({
     // the green "Placed 0 items across 6 layers", once per bounded retry.
     assignmentStatus === 'error',
   )
-  // No container is named here on purpose: this request is batched across
-  // EVERY collapsed container at once, so naming one would be a lie — and no
-  // count either: it re-runs on every expand and collapse, and a number that
-  // differs each time is a number the Data loads panel cannot fold.
-  useLoadingNotification(
-    'ctx-agg-edges',
-    isLoadingAggregatedEdges,
-    'Summarising connections…',
-    summarisedConnectionsMessage(),
-  )
+  // A spinner while it works, and NOTHING in the record afterwards. Summarising
+  // is a consequence of expanding something, not a thing the user did: it
+  // re-runs on every expand and collapse, so announcing it put a system line
+  // between every two of the user's own — and interleaved like that the panel's
+  // fold could never collapse them. The count belongs to the Connections panel
+  // directly below, which is where a reader can act on it. Only non-loading
+  // notifications are recorded, so passing no success message keeps the log to
+  // what the user actually did.
+  useLoadingNotification('ctx-agg-edges', isLoadingAggregatedEdges, 'Summarising connections…')
 
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
