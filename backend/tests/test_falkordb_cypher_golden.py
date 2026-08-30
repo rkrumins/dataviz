@@ -46,6 +46,10 @@ recording fakes standing in for every place Cypher can leave the provider:
   unreachable (see ``_redis_available`` in ``_ensure_connected``) — this
   fake exercises exactly that already-supported path instead of raising
   AttributeError on an attribute ``_ensure_connected`` never got to set.
+  A permanent miss is not the same as a REACHABLE-and-WARM cache, though:
+  ``get_stats`` and ``get_ontology_metadata`` both return on a cache HIT
+  before issuing any Cypher at all, so this golden only pins their COLD
+  path — see task-2-report.md.
 
 Every chokepoint call succeeds with an EMPTY result set (test_cypher_shapes.py's
 own default). No driven call needs a populated row to reach ITS OWN Cypher —
@@ -160,10 +164,14 @@ class _FakeGraphHandle:
     ``p._proj_graph``) for the call sites that skip the query chokepoints
     entirely: ``ensure_indices`` and ``_check_levels_backfilled`` call
     ``self._graph.query`` directly; ``_log_aggregation_index_health`` and
-    (dead code — see task-2-report.md) ``_ensure_label_urn_indexes`` call
-    ``self._proj.query`` / ``.ro_query`` directly. ``sink`` names which
-    attribute this instance stands in for, so a bypass call stays
-    distinguishable from a chokepoint call in the recorded golden."""
+    ``_ensure_label_urn_indexes`` call ``self._proj.query`` / ``.ro_query``
+    directly. ``_ensure_label_urn_indexes`` is LIVE (not reached by this
+    script — it fires from ``falkordb_materialize.AggregationPipeline
+    ._write_items`` when aggregation writes hit a new label; see
+    task-2-report.md), not the dead code an earlier version of this file
+    claimed. ``sink`` names which attribute this instance stands in for,
+    so a bypass call stays distinguishable from a chokepoint call in the
+    recorded golden."""
 
     def __init__(self, store: List[Dict[str, Any]], sink: str) -> None:
         self._store = store
