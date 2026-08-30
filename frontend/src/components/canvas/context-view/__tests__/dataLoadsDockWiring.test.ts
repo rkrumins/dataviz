@@ -31,6 +31,11 @@ describe('the Data loads panel is docked with Connections in one bottom-right st
     // A bottom-anchored column: opening either panel grows the stack upward,
     // so neither can ever cover the other.
     expect(block).toMatch(/flex flex-col gap-1\.5/)
+    // 320px — a NotificationCard's exact width. The panel records the very
+    // messages that flew past in that corner, so the two surfaces read as one
+    // column, and at 256px the messages wrapped onto two lines.
+    expect(block).toMatch(/\bw-80\b/)
+    expect(block).not.toMatch(/\bw-64\b/)
   })
 
   it('the band reservation measures every docked header, not just the first button', () => {
@@ -59,12 +64,12 @@ describe('the Data loads panel is docked with Connections in one bottom-right st
   })
 
   it('the status chips clear the dock column instead of sitting under it', () => {
-    // The dock is w-64 at right:1rem — 16px to 272px from the right edge, at
+    // The dock is w-80 at right:1rem — 16px to 336px from the right edge, at
     // z-40, with an opaque body. A chip cluster right-aligned at `right-3`
     // shares that whole x-range, so an expanded panel paints and hit-tests
     // over every chip in it. Clearing it horizontally is the fix; raising its
     // z-tier would only put the chips over the panel's rows.
     expect(chips).not.toMatch(/absolute right-3 z-30/)
-    expect(chips).toMatch(/right:\s*'calc\(1rem \+ 16rem \+ 0\.5rem\)'/)
+    expect(chips).toMatch(/right:\s*'calc\(1rem \+ 20rem \+ 0\.5rem\)'/)
   })
 })

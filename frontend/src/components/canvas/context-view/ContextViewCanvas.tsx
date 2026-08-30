@@ -4956,7 +4956,11 @@ export function ContextViewCanvas({
           // z-40, the floating-chrome tier (trace dock, lens pills): the
           // columns area is `relative z-30` and later in the DOM, so at
           // z-30 the opened panel body painted UNDER the rows it overlaps.
-          className="absolute z-40 w-64 pointer-events-auto flex flex-col gap-1.5 overflow-y-auto overscroll-contain transition-all duration-300 ease-out"
+          // w-80 = 320px, a NotificationCard's exact width. Data loads is the
+          // record of the very messages that just flew past in this corner, so
+          // the two surfaces line up as one column — and at 256px a message
+          // that fit on one line as a notification wrapped onto two here.
+          className="absolute z-40 w-80 pointer-events-auto flex flex-col gap-1.5 overflow-y-auto overscroll-contain transition-all duration-300 ease-out"
           style={{
             bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))',
             right: '1rem',

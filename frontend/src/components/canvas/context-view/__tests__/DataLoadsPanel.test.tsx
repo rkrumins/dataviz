@@ -15,6 +15,10 @@
  * LATEST time; every time carries the absolute clock time in its title; Clear
  * takes the panel with it; and nothing is portaled — the panel renders inside
  * the dock, which is the whole point of moving it there.
+ *
+ * And that each entry is a CARD — the shape of the notification it records —
+ * carrying ONE glyph. The panel used to be flat 12px rows with two indicators
+ * apiece: a timeline rail dot AND a status icon, saying the same thing twice.
  */
 import { render, screen, within, cleanup, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -188,6 +192,83 @@ describe('DataLoadsPanel', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('every entry is a card, with the status as a 2px accent down its left', async () => {
+    const user = userEvent.setup()
+    seed([
+      { type: 'success', message: 'Opened “Customer 360” · 1,204 items', createdAt: Date.now() - 2 * HOUR },
+      { type: 'error', message: 'Snowflake · nothing more to load', createdAt: Date.now() - HOUR },
+    ])
+    render(<DataLoadsPanel />)
+    await user.click(header())
+
+    for (const card of rows()) {
+      // NotificationCard's shape, one size down: its own surface, a hairline
+      // border, and room to breathe.
+      expect(card.className).toMatch(/rounded-lg/)
+      expect(card.className).toMatch(/border-glass-border/)
+      expect(card.className).toMatch(/px-3/)
+      expect(card.className).toMatch(/py-2\.5/)
+      // The notification wears its status as a bar along the bottom; here it
+      // is a 2px stripe down the left.
+      const accent = card.querySelector('[data-accent]') as HTMLElement | null
+      expect(accent).not.toBeNull()
+      expect(accent!.className).toContain('w-0.5')
+    }
+    expect((rows()[0].querySelector('[data-accent]') as HTMLElement).className).toContain('text-emerald-500')
+    expect((rows()[1].querySelector('[data-accent]') as HTMLElement).className).toContain('text-red-500')
+  })
+
+  it('carries ONE glyph per entry — the rail and its dot are gone', async () => {
+    const user = userEvent.setup()
+    seed([
+      { type: 'success', message: 'Connections · 3,918', createdAt: Date.now() - HOUR },
+      { type: 'info', message: 'Placed 1,204 items across 6 layers', createdAt: Date.now() },
+    ])
+    render(<DataLoadsPanel />)
+    await user.click(header())
+
+    for (const card of rows()) {
+      expect(card.querySelectorAll('svg')).toHaveLength(1)
+      // The per-row dot and the newest-row halo were both `rounded-full`.
+      expect(card.querySelectorAll('[class*="rounded-full"]')).toHaveLength(0)
+    }
+    // With cards in order and a time on every one, the rail said nothing the
+    // sequence did not already say.
+    const list = screen.getByRole('list')
+    expect(list.className).not.toMatch(/\brelative\b/)
+    expect(list.querySelectorAll('[class*="w-px"]')).toHaveLength(0)
+  })
+
+  it('marks the newest card, so "where did I get to" needs no reading', async () => {
+    const user = userEvent.setup()
+    seed([
+      { type: 'info', message: 'Opening “Customer 360”…', createdAt: Date.now() - 2 * HOUR },
+      { type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - HOUR },
+    ])
+    render(<DataLoadsPanel />)
+    await user.click(header())
+
+    const list = rows()
+    expect(list[list.length - 1].className).toMatch(/ring-1/)
+    expect(list[0].className).not.toMatch(/ring-1/)
+  })
+
+  it('gives the message room to sit on one line at the notification\'s own width', async () => {
+    const user = userEvent.setup()
+    seed([{ type: 'success', message: 'Snowflake · 5 more (10 of 41)', createdAt: Date.now() }])
+    render(<DataLoadsPanel />)
+    await user.click(header())
+
+    const [card] = rows()
+    // Never truncated — a log whose messages end in "…" answers nothing.
+    const message = screen.getByText(/Snowflake · 5 more/)
+    expect(message.className).toContain('text-[13px]')
+    expect(message.className).not.toMatch(/truncate|text-ellipsis/)
+    const time = card.querySelector('time') as HTMLElement
+    expect(time.className).toContain('text-[11px]')
+    expect(time.className).toContain('tabular-nums')
   })
 
   it('the count is announced as messages, and the sequence is a list', () => {

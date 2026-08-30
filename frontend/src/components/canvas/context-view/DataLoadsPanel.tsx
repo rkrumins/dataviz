@@ -22,10 +22,17 @@
  * header that is the panel's whole footprint, and an entrance-only animation
  * with no exit to strand a click-blocker.
  *
- * Order is OLDEST FIRST — a sequence, read down a timeline rail, with the
- * newest at the bottom where the scroller opens. Scope is the open view:
+ * Order is OLDEST FIRST — a sequence, with the newest at the bottom where the
+ * scroller opens and the only card wearing a ring. Scope is the open view:
  * CanvasRouter clears the log whenever the active view or branch changes, and
  * nothing is persisted — a refresh starts clean.
+ *
+ * Each entry is a CARD, deliberately shaped like the NotificationCard it
+ * records — the same 320px column, the same status colour, the same message
+ * on one line — one size down. It used to be a flat 12px row in a 256px box
+ * carrying TWO indicators: a timeline rail dot AND a status icon, saying the
+ * same thing twice. With the cards in order and a time on every one, the rail
+ * said nothing the sequence did not, so it is gone and the icon stayed.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { motion } from 'framer-motion'
@@ -176,37 +183,34 @@ export function DataLoadsPanel({ className }: { className?: string }) {
         >
           <div id={bodyId} role="region" aria-label="Data loads" className="px-3 pb-3">
             <div ref={openAtNewest} className="max-h-52 overflow-y-auto custom-scrollbar">
-              <ol role="list" className="relative pl-1">
-                {/* The rail the dots hang on. */}
-                <span aria-hidden className="absolute left-[7px] top-2 bottom-2 w-px bg-glass-border" />
+              <ol role="list" className="flex flex-col gap-1.5">
                 {rows.map(({ entry, count, at }, i) => {
                   const Icon = iconComponents[entry.type]
                   const isNewest = i === rows.length - 1
                   return (
                     <li
                       key={entry.id}
-                      className="relative flex items-start gap-2 pl-5 pr-1 py-1.5 rounded-lg hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
-                    >
-                      {/* The newest event wears a halo, so "where did I get to"
-                          is answerable at a glance without reading a time. */}
-                      {isNewest && (
-                        <span
-                          aria-hidden
-                          className={cn(
-                            'absolute -left-[3px] top-2 w-3 h-3 rounded-full bg-current opacity-20',
-                            iconColors[entry.type],
-                          )}
-                        />
+                      className={cn(
+                        'relative overflow-hidden rounded-lg border border-glass-border px-3 py-2.5',
+                        'flex items-start gap-2.5 transition-colors',
+                        // The newest card is the answer to "where did I get
+                        // to" — a ring, readable without reading a time.
+                        isNewest
+                          ? 'bg-black/[0.05] dark:bg-white/[0.07] ring-1 ring-inset ring-glass-border'
+                          : 'bg-black/[0.02] dark:bg-white/[0.03] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]',
                       )}
+                    >
+                      {/* A notification wears its status as a bar along the
+                          bottom; at this scale it is a 2px stripe down the
+                          left. `bg-current` takes the colour from the same
+                          `iconColors` the card uses. */}
                       <span
                         aria-hidden
-                        className={cn(
-                          'absolute left-0 top-[11px] w-1.5 h-1.5 rounded-full bg-current',
-                          iconColors[entry.type],
-                        )}
+                        data-accent
+                        className={cn('absolute inset-y-0 left-0 w-0.5 bg-current', iconColors[entry.type])}
                       />
-                      <Icon className={cn('w-3 h-3 mt-0.5 flex-shrink-0', iconColors[entry.type])} />
-                      <span className="flex-1 min-w-0 text-xs leading-snug text-ink break-words">
+                      <Icon className={cn('w-4 h-4 mt-px flex-shrink-0', iconColors[entry.type])} />
+                      <span className="flex-1 min-w-0 text-[13px] leading-snug text-ink break-words">
                         {entry.message}
                         {count > 1 && (
                           <span className="ml-1.5 inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-bold bg-black/5 dark:bg-white/10 text-ink-muted align-middle">
@@ -217,7 +221,7 @@ export function DataLoadsPanel({ className }: { className?: string }) {
                       <time
                         dateTime={new Date(at).toISOString()}
                         title={new Date(at).toLocaleTimeString()}
-                        className="flex-shrink-0 text-[10px] tabular-nums text-ink-muted whitespace-nowrap"
+                        className="flex-shrink-0 mt-0.5 text-[11px] tabular-nums text-ink-muted whitespace-nowrap"
                       >
                         {relativeTime(at)}
                       </time>

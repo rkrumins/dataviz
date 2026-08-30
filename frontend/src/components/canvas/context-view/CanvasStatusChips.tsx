@@ -106,17 +106,17 @@ export function CanvasStatusChips({
     // to the first layer column's cards, and a status surface must never
     // occlude data.
     //
-    // Clear of the dock horizontally, not merely under it: the dock is w-64
-    // at right:1rem (16px–272px from the edge) and paints an opaque body at
+    // Clear of the dock horizontally, not merely under it: the dock is w-80
+    // at right:1rem (16px–336px from the edge) and paints an opaque body at
     // z-40, so a cluster right-aligned at right-3 was covered chip-for-chip
     // — 'Load more' and the unassigned-entities popover both dead — whenever
     // a panel was open. z-50 would not fix it; the chips would then paint
-    // over the panel's own rows. 1rem dock offset + 16rem width + 0.5rem gap.
+    // over the panel's own rows. 1rem dock offset + 20rem width + 0.5rem gap.
     <div
       className="absolute z-30 flex flex-col items-end gap-1.5 pointer-events-none"
       style={{
         bottom: 'calc(0.5rem + var(--edge-legend-height, 0px) + var(--trace-dock-height, 0px))',
-        right: 'calc(1rem + 16rem + 0.5rem)',
+        right: 'calc(1rem + 20rem + 0.5rem)',
       }}
       data-canvas-interactive
     >
