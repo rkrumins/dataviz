@@ -23,6 +23,9 @@ from ..config.resilience import (
     TRACE_TIMEOUT_SECS,
 )
 from backend.common.adapters import ProviderUnavailable
+from backend.common.interfaces.provider import (
+    ProviderFeature, await_optional, call_optional, supports_feature,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -352,47 +355,58 @@ class ContextEngine:
             and any(s in ("assigned", "system_default")
                     for s in resolved.resolution_sources.values())
         )
-        if hasattr(self.provider, 'set_containment_edge_types'):
-            self.provider.set_containment_edge_types(
-                resolved.containment_edge_types,
-                from_ontology=has_real_ontology,
-            )
-        if hasattr(self.provider, 'set_ontology_rules'):
-            # Rich commit-boundary rules for the versioned write-through —
-            # only when an EXPLICITLY ASSIGNED ontology contributed (the
-            # system-default/introspection layers must not gate legacy data).
-            from backend.app.ontology.rules import resolved_ontology_to_rules
-            has_assigned = any(
-                s == "assigned"
-                for s in (resolved.resolution_sources or {}).values())
-            self.provider.set_ontology_rules(
-                resolved_ontology_to_rules(resolved) if has_assigned else None)
-        if hasattr(self.provider, 'set_resolved_edge_metadata'):
-            self.provider.set_resolved_edge_metadata(
-                resolved.edge_type_metadata,
-                resolved.lineage_edge_types,
-            )
-        if hasattr(self.provider, 'set_entity_type_levels'):
-            # Build entity-type → hierarchy.level mapping. Single
-            # source of truth shared with the backfill script via
-            # ``derive_level_map``: declared ``hierarchy.level``
-            # takes precedence, with ``can_contain`` /
-            # ``can_be_contained_by`` as fallback. Runtime and
-            # backfill must agree on this map or the digest stamps
-            # will look stale to each other.
-            from .ontology_levels import derive_level_map
-            levels = derive_level_map(resolved)
-            self.provider.set_entity_type_levels(levels)
+        # Every concrete GraphDataProvider subclass has this (base-class
+        # default; see the ABC's "Ontology Injection Lifecycle" section) and
+        # so do the two plain-class wrappers reachable here
+        # (VersionedBranchProvider, DraftOverlayProvider) — a direct call
+        # fails loudly if that ever stops being true.
+        self.provider.set_containment_edge_types(
+            resolved.containment_edge_types,
+            from_ontology=has_real_ontology,
+        )
+        # Rich commit-boundary rules for the versioned write-through — only
+        # when an EXPLICITLY ASSIGNED ontology contributed (the
+        # system-default/introspection layers must not gate legacy data).
+        # call_optional: VersionedBranchProvider and DraftOverlayProvider
+        # don't forward this — ontology_rules reaches their write path as an
+        # apply_ops parameter, not a setter.
+        from backend.app.ontology.rules import resolved_ontology_to_rules
+        has_assigned = any(
+            s == "assigned"
+            for s in (resolved.resolution_sources or {}).values())
+        call_optional(
+            self.provider, "set_ontology_rules",
+            resolved_ontology_to_rules(resolved) if has_assigned else None)
+        # call_optional: VersionedBranchProvider doesn't forward this
+        # (DraftOverlayProvider does).
+        call_optional(
+            self.provider, "set_resolved_edge_metadata",
+            resolved.edge_type_metadata,
+            resolved.lineage_edge_types,
+        )
+        # Build entity-type → hierarchy.level mapping. Single source of
+        # truth shared with the backfill script via ``derive_level_map``:
+        # declared ``hierarchy.level`` takes precedence, with
+        # ``can_contain`` / ``can_be_contained_by`` as fallback. Runtime and
+        # backfill must agree on this map or the digest stamps will look
+        # stale to each other. call_optional: VersionedBranchProvider
+        # doesn't forward this (DraftOverlayProvider does).
+        from .ontology_levels import derive_level_map
+        levels = derive_level_map(resolved)
+        call_optional(self.provider, "set_entity_type_levels", levels)
 
     def _inject_alignment(self, alignment) -> None:
         """Inject the per-source vocabulary alias maps ("always reset"
-        contract — an empty map is meaningful)."""
-        if hasattr(self.provider, "set_source_type_aliases"):
-            if alignment is not None:
-                self.provider.set_source_type_aliases(
-                    alignment.rel_alias_map(), alignment.entity_alias_map())
-            else:
-                self.provider.set_source_type_aliases({}, {})
+        contract — an empty map is meaningful).
+
+        call_optional: VersionedBranchProvider doesn't forward this
+        (DraftOverlayProvider does)."""
+        if alignment is not None:
+            call_optional(
+                self.provider, "set_source_type_aliases",
+                alignment.rel_alias_map(), alignment.entity_alias_map())
+        else:
+            call_optional(self.provider, "set_source_type_aliases", {}, {})
 
     def _inject_identity(self, identity) -> None:
         """Inject the resolved node-identity mapping (same "always reset"
@@ -403,12 +417,14 @@ class ContextEngine:
         until someone re-ran aggregation. Injecting it here is what makes a
         newly-declared mapping take effect on the very next read.
         """
-        if hasattr(self.provider, "set_node_identity"):
-            if identity is not None:
-                self.provider.set_node_identity(
-                    identity.identity_property, identity.name_property)
-            else:
-                self.provider.set_node_identity(None, None)
+        # call_optional: VersionedBranchProvider doesn't forward this
+        # (DraftOverlayProvider does).
+        if identity is not None:
+            call_optional(
+                self.provider, "set_node_identity",
+                identity.identity_property, identity.name_property)
+        else:
+            call_optional(self.provider, "set_node_identity", None, None)
 
     async def _resolve_node_identity(self):
         """The data source's effective mapping across all four scopes.
@@ -526,9 +542,13 @@ class ContextEngine:
                     # Ensure indices exist for all ontology-defined entity types.
                     # Runs only on this full-resolution path (once per
                     # generation per pod) — a shared-cache hit skips the DDL.
-                    if hasattr(self.provider, 'ensure_indices') and resolved.entity_type_definitions:
+                    # await_optional: VersionedBranchProvider and
+                    # DraftOverlayProvider don't forward this.
+                    if resolved.entity_type_definitions:
                         try:
-                            await self.provider.ensure_indices(list(resolved.entity_type_definitions.keys()))
+                            await await_optional(
+                                self.provider, "ensure_indices",
+                                list(resolved.entity_type_definitions.keys()))
                         except Exception:
                             pass  # best-effort, don't block resolution
                     # Per-source vocabulary alignment (Task E): reconcile the ontology's
@@ -605,8 +625,9 @@ class ContextEngine:
         # method in a swallow-all try/except, so a failure below must not leave stale
         # cross-ontology aliases on the provider (honours the setter's "always reset"
         # contract). The success path resets them to the computed map at the end.
-        if hasattr(self.provider, "set_source_type_aliases"):
-            self.provider.set_source_type_aliases({}, {})
+        # call_optional: VersionedBranchProvider doesn't forward this
+        # (DraftOverlayProvider does).
+        call_optional(self.provider, "set_source_type_aliases", {}, {})
 
         declared_rel = (set(resolved.containment_edge_types or [])
                         | set(resolved.lineage_edge_types or [])
@@ -651,9 +672,11 @@ class ContextEngine:
                 logger.debug("source alignment DB step skipped (non-fatal): %s", exc)
 
         self._source_alignment = alignment
-        if hasattr(self.provider, "set_source_type_aliases"):
-            self.provider.set_source_type_aliases(
-                alignment.rel_alias_map(), alignment.entity_alias_map())
+        # call_optional: VersionedBranchProvider doesn't forward this
+        # (DraftOverlayProvider does).
+        call_optional(
+            self.provider, "set_source_type_aliases",
+            alignment.rel_alias_map(), alignment.entity_alias_map())
 
     async def get_source_alignment(self):
         """Public accessor for the per-source vocabulary alignment (drift surface).
@@ -851,11 +874,26 @@ class ContextEngine:
         """Trigger batch materialization of AGGREGATED edges.
 
         Returns stats dict. Only supported on FalkorDB providers; raises
-        ValueError for other provider types.
+        ValueError for other provider types — including a wrapper (e.g. a
+        draft) that does not forward this maintenance operation to its base,
+        even when the base itself is FalkorDB.
+
+        Two independent checks, for two independent failure modes:
+        ``supports_feature`` rejects a concrete adapter that fundamentally
+        can't do this (Neo4j, Spanner — both now inherit a base default
+        that would otherwise raise ProviderFeatureUnsupportedError, the
+        wrong exception type here, if actually called); the
+        ``callable(fn)`` check rejects a wrapper in hand (e.g.
+        DraftOverlayProvider) that has no forwarder for this method at all
+        — which ``supports_feature`` alone would miss, since it resolves
+        capability from the UNWRAPPED base, not the object being called.
         """
-        if not hasattr(self.provider, "materialize_aggregated_edges_batch"):
+        fn = getattr(self.provider, "materialize_aggregated_edges_batch", None)
+        if not callable(fn) or not supports_feature(
+            self.provider, ProviderFeature.AGGREGATION_MATERIALIZATION
+        ):
             raise ValueError("Materialization only supported for FalkorDB provider")
-        return await self.provider.materialize_aggregated_edges_batch(
+        return await fn(
             batch_size=batch_size,
             containment_edge_types=containment_edge_types,
             lineage_edge_types=lineage_edge_types,

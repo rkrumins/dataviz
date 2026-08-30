@@ -219,6 +219,12 @@ class _OldSignatureProvider:
     async def get_ontology_metadata(self) -> OntologyMetadata:
         return _ontology_meta()
 
+    def set_containment_edge_types(self, edge_types, from_ontology: bool = False) -> None:
+        """No-op: both real classes this fake mimics implement this setter
+        (T-C made ContextEngine._inject_resolved call it directly, no
+        longer hasattr-gated), so a faithful stand-in must have it too."""
+        pass
+
     async def get_top_level_or_orphan_nodes(
         self, *, root_entity_types=None, entity_types=None, search_query=None,
         limit: int = 100, cursor=None, include_child_count: bool = True,

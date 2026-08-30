@@ -21,6 +21,11 @@ class _StubProvider:
     async def get_ontology_metadata(self) -> OntologyMetadata:
         return self._metadata
 
+    def set_containment_edge_types(self, types, from_ontology: bool = False) -> None:
+        """No-op: ContextEngine._inject_resolved calls this directly (T-C,
+        no longer hasattr-gated) on every resolution path this stub exercises."""
+        pass
+
 
 class _StubOntologyService:
     def __init__(self, resolved: ResolvedOntology) -> None:

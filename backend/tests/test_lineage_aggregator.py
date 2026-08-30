@@ -20,7 +20,7 @@ from backend.common.models.graph import (
     EdgeQuery,
     OntologyMetadata,
 )
-from backend.app.services.lineage_aggregator import LineageAggregator
+from backend.app.services.lineage_aggregator import LineageAggregator, get_aggregator
 
 
 # ---------------------------------------------------------------------------
@@ -156,3 +156,56 @@ class TestLineageAggregatorEdgeCases:
         await aggregator.materialize_lineage("urn:a", "urn:a", "TRANSFORMS")
 
         assert len(provider.materialize_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests — get_aggregator() factory function
+#
+# Plan §1.5 D6 / T-C: this used to be `isinstance(provider, FalkorDBProvider)`
+# — a name-based check that could never recognize a second provider with the
+# same capability. Now it's `supports_feature(provider, AGGREGATION_
+# MATERIALIZATION)`, keyed off the catalog's `provider_type`, same as
+# `ContextEngine.materialize_aggregated_edges`'s gate. `_StubFalkorDBProvider`
+# (used above) predates `provider_type` and deliberately doesn't set it, so
+# these tests use their own fakes that do.
+# ---------------------------------------------------------------------------
+
+
+class _TypedProvider(_StubFalkorDBProvider):
+    """`_StubFalkorDBProvider` plus a catalog `provider_type` — what
+    `supports_feature` actually keys off, replacing the old class-identity
+    check."""
+    provider_type = "falkordb"
+
+
+class _TypedProviderWithoutTheFeature(_StubFalkorDBProvider):
+    """A registered provider type that does NOT support batch materialization
+    (see the plan §2.3 feature matrix: neo4j has no AGGREGATION_MATERIALIZATION)."""
+    provider_type = "neo4j"
+
+
+class TestGetAggregator:
+
+    def test_returns_an_aggregator_for_a_provider_typed_falkordb(self):
+        # Registers "falkordb" in backend.common.providers.catalog (see that
+        # package's __init__ docstring: FalkorDB self-registers from there,
+        # not from the kernel, so nothing has necessarily imported it yet in
+        # a unit-test process). Without this, supports_feature sees an
+        # unregistered type and falls back to the safe default (unsupported).
+        import backend.app.providers.falkordb_provider  # noqa: F401
+        provider = _TypedProvider()
+        aggregator = get_aggregator(provider)
+
+        assert isinstance(aggregator, LineageAggregator)
+        assert aggregator.provider is provider
+
+    def test_returns_none_for_a_registered_type_without_the_feature(self):
+        assert get_aggregator(_TypedProviderWithoutTheFeature()) is None
+
+    def test_returns_none_for_an_untyped_provider(self):
+        """A provider with no `provider_type` at all (e.g. an old-style
+        stub, or a test double) — unknown types default to unsupported."""
+        assert get_aggregator(_StubFalkorDBProvider()) is None
+
+    def test_returns_none_for_none(self):
+        assert get_aggregator(None) is None
