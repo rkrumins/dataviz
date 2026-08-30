@@ -93,7 +93,8 @@ export function NotificationBell() {
       <Popover.Trigger asChild>
         <button
           className="btn btn-ghost p-2 rounded-lg relative"
-          title={unread > 0 ? `${unread} new since you last looked` : 'Notifications'}
+          aria-label={unread > 0 ? `Invite activity, ${unread} new` : 'Invite activity'}
+          title={unread > 0 ? `${unread} new since you last looked` : 'Invite activity'}
         >
           <Bell className="w-5 h-5 text-ink-secondary" />
           {unread > 0 && (
