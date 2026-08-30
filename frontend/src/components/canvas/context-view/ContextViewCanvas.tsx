@@ -5205,7 +5205,15 @@ export function ContextViewCanvas({
         {/* Layer Columns. */}
         <div
           ref={horizontalScrollRef}
-          className="flex-1 overflow-auto relative scroll-smooth"
+          // `custom-scrollbar`: an author-styled scrollbar is a CLASSIC one
+          // in both Chromium and WebKit — always drawn, and claiming its own
+          // strip of layout rather than floating over the last row. The macOS
+          // overlay bar it replaces fades out entirely when idle, which left
+          // the sideways run of the canvas with no affordance at all. The
+          // height it claims (11px in Chromium, which honours
+          // `scrollbar-width: thin` over the rule's 6px) is already measured
+          // into --canvas-hsb, so the columns still end at the visible edge.
+          className="flex-1 overflow-auto relative scroll-smooth custom-scrollbar"
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
           // dock, layer strip, edge legend) so a column's last row can always scroll
