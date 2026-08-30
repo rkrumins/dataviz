@@ -137,6 +137,12 @@ export function useAppNotifications() {
   return { notify, showLoading, hideLoading, dismiss }
 }
 
+/** A message, or a message computed at the moment it is shown. */
+export type NotificationMessage = string | (() => string)
+
+const resolveMessage = (message: NotificationMessage) =>
+  typeof message === 'function' ? message() : message
+
 /**
  * Declarative loading notification — shows while `isLoading` is true, hides
  * when false. Call at the top of a component to bind a loading operation to
@@ -146,12 +152,17 @@ export function useAppNotifications() {
  * `isLoading: true → false` transition (4.5s auto-dismiss). This gives the
  * user explicit confirmation that the operation completed rather than the
  * loading notification just silently disappearing.
+ *
+ * Either message may be a function instead of a string, and it is called AT
+ * the transition. A message that reports what a load produced — "Opened
+ * “Customer 360” · 1,204 items" — has to read those counts at the moment the
+ * load finishes, not on the render that happened to declare the hook.
  */
 export function useLoadingNotification(
   key: string,
   isLoading: boolean,
-  message: string,
-  successMessage?: string,
+  message: NotificationMessage,
+  successMessage?: NotificationMessage,
   /** When true at the loading→done transition, hide the loading notification
    *  WITHOUT showing the success message — for when the operation ended in failure
    *  (e.g. hydration errored) so we never report "Entities loaded" over an
@@ -164,20 +175,36 @@ export function useLoadingNotification(
   // want to fire success on a genuine true → false transition (not on the
   // initial render where isLoading happens to be false).
   const wasLoadingRef = useRef(false)
+  // Latest-value ref, written in its own effect (writing it during render is a
+  // `react-hooks/refs` error here). A computed message is an inline closure
+  // with a fresh identity every render; as a dependency it would re-run the
+  // transition effect on every render, and `showLoading` would replace the
+  // live card each time — a loading notification that restarts continuously.
+  // Declared FIRST so React runs it before the transition effect below, which
+  // therefore always reads the values of the render it fired on.
+  const latestRef = useRef({ message, successMessage, suppressSuccess })
+  useEffect(() => {
+    latestRef.current = { message, successMessage, suppressSuccess }
+  })
+  // A STRING message still updates the live notification when it changes —
+  // CanvasRouter reworded its loading notification per hydration phase long
+  // before this hook could take a function, and that behaviour stays.
+  const staticMessage = typeof message === 'string' ? message : null
 
   useEffect(() => {
+    const { message: current, successMessage: done, suppressSuccess: skip } = latestRef.current
     if (isLoading) {
-      showLoading(key, message)
+      showLoading(key, resolveMessage(current))
       wasLoadingRef.current = true
     } else {
       hideLoading(key)
-      if (wasLoadingRef.current && successMessage && !suppressSuccess) {
-        notify('success', successMessage)
+      if (wasLoadingRef.current && done && !skip) {
+        notify('success', resolveMessage(done))
       }
       wasLoadingRef.current = false
     }
     return () => hideLoading(key)
-  }, [isLoading, key, message, successMessage, suppressSuccess, showLoading, hideLoading, notify])
+  }, [isLoading, key, staticMessage, showLoading, hideLoading, notify])
 }
 
 // ─── Visual constants ─────────────────────────────────────────────────────

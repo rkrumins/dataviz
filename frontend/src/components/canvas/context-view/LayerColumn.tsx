@@ -76,7 +76,7 @@ interface LayerColumnProps {
   isHighlightActive?: boolean
   isHoverHighlight?: boolean
   onAnimationComplete?: () => void
-  onLoadMore?: (parentId: string) => void
+  onLoadMore?: (parentId: string, auto?: boolean) => void
   /** Walk a search hit's ancestors open and scroll to it. The inline hit
    *  rows are pointers into the result set — the entity itself may be
    *  nowhere near loaded — so clicking one has to go through the canvas's
@@ -653,8 +653,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   // Fetch the next page of a parent's children. Stable identity — the row that
   // calls this used to be an IntersectionObserver sentinel whose one-shot latch
   // was reset every time this callback's identity churned.
-  const handleLoadMore = useCallback((nodeId: string) => {
-    onLoadMore?.(nodeId)
+  const handleLoadMore = useCallback((nodeId: string, auto?: boolean) => {
+    onLoadMore?.(nodeId, auto)
   }, [onLoadMore])
 
   // Handle focus (zoom into subtree)
@@ -2173,7 +2173,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentIsLast={item.parentIsLast}
                         count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
-                        onLoadMore={() => handleLoadMore(item.node.id)}
+                        onLoadMore={(auto) => handleLoadMore(item.node.id, auto)}
                         // One-page-ahead auto-load — OFF in Isolate/Hide
                         // filter modes, where freshly-loaded children are
                         // filtered out of the tree and the pinned row

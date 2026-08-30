@@ -151,7 +151,7 @@ describe('LayerColumn — the "N more" row after a reveal', () => {
 
         dwellInView()
 
-        expect(onLoadMore).toHaveBeenCalledWith('P')
+        expect(onLoadMore).toHaveBeenCalledWith('P', true)
     })
 
     it('resumes once a real page joins the revealed child', () => {
@@ -163,6 +163,6 @@ describe('LayerColumn — the "N more" row after a reveal', () => {
 
         dwellInView()
 
-        expect(onLoadMore).toHaveBeenCalledWith('P')
+        expect(onLoadMore).toHaveBeenCalledWith('P', true)
     })
 })

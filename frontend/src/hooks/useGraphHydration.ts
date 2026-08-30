@@ -60,6 +60,28 @@ interface LoadChildrenOptions {
     sortDirection?: 'asc' | 'desc'
 }
 
+/**
+ * What one child page actually delivered. Returned by `loadChildren` so the
+ * CALLER can decide whether to say something about it and in what words — the
+ * hook itself stays silent, because GraphCanvas and HierarchyCanvas share it
+ * and neither announces a load. Only ContextViewCanvas's two user-initiated
+ * call sites (expand, "Load N more") speak.
+ */
+export interface ChildLoadSummary {
+    /** The container's display name — the subject of the message. */
+    parentLabel: string
+    /** The container's entity type id. */
+    parentType?: string
+    /** Children this page returned. Zero = nothing more to load. */
+    arrived: number
+    /** Children already loaded before this page — 0 means this was page 1. */
+    offset: number
+    /** The container's declared total, when it has one. */
+    total?: number
+    /** Distinct entity types among this page's children — one means the message can use its schema noun. */
+    childTypes: string[]
+}
+
 export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
 
 /**
@@ -90,7 +112,7 @@ class HydrationLoadError extends Error {
 
 export interface UseGraphHydrationResult {
     /** Load children for a node (empty string = load roots). */
-    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<void>
+    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<ChildLoadSummary | undefined>
     /**
      * Cancel a pending or in-flight `loadChildren` for the given parent.
      * Queued tasks are dropped silently; in-flight network requests
@@ -872,7 +894,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setRootsLoaded(0)
             setRootsHaveMore(false)
 
-            return submitRootPage(0)
+            await submitRootPage(0)
+            return
         }
 
         // ── Handle child loading (specific parentId) ────────────────
@@ -913,7 +936,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // If we have all children, don't refetch
         if (currentChildrenCount >= childCount && childCount > 0) return
 
-        return queueRef.current.submit(parentId, async (signal) => {
+        let summary: ChildLoadSummary | undefined
+        await queueRef.current.submit(parentId, async (signal) => {
             setFailedNodes(prev => { const next = new Set(prev); next.delete(parentId); return next })
             setLoadingNodes(prev => new Set(prev).add(parentId))
             try {
@@ -994,6 +1018,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     console.log(`[useGraphHydration] Loaded ${nodesToAdd.length} children for ${parentId}`)
                 }
+
+                // The facts about this page, for whoever asked for it. Set
+                // only on a page that actually completed — an aborted or
+                // failed load has nothing true to say.
+                summary = {
+                    parentLabel: String(parentNode.data.label ?? ''),
+                    parentType: parentNode.data.type as string | undefined,
+                    arrived: result.children.length,
+                    offset: currentChildrenCount,
+                    total: childCount,
+                    childTypes: [...new Set(result.children.map(c => c.entityType).filter(Boolean))],
+                }
             } catch (err) {
                 console.error(`[useGraphHydration] Failed to load children for ${parentId}`, err)
                 setFailedNodes(prev => new Set(prev).add(parentId))
@@ -1005,6 +1041,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 })
             }
         })
+        // Undefined when the queue collapsed this call onto an in-flight one
+        // with the same key (the task never ran), and when the load aborted
+        // or failed — in every one of those cases there is nothing to report.
+        return summary
     }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes, submitRootPage])
 
     /**

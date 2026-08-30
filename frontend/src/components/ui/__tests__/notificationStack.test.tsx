@@ -10,12 +10,12 @@
  * the stack starts above whatever is reserved. Everywhere else the variable is
  * absent and the stack sits where it always did.
  */
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, renderHook, screen, cleanup } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { NotificationStack, useNotificationStore } from '../notifications'
+import { NotificationStack, useLoadingNotification, useNotificationStore } from '../notifications'
 
 afterEach(() => {
   cleanup()
@@ -73,5 +73,77 @@ describe('the stack stays organised', () => {
     // measures narrower than the space it occupies.
     expect(src).toMatch(/initial=\{\{ opacity: 0, y: 16 \}\}/)
     expect(src).not.toMatch(/scale: 0\.95/)
+  })
+})
+
+describe('a loading notification can compute its own words', () => {
+  const live = () => useNotificationStore.getState().notifications
+  const said = () => useNotificationStore.getState().history.map(h => h.message)
+
+  it('calls the success message ONCE, at the falling edge — not on every render', () => {
+    // The whole point of a function: "Opened “X” · 1,204 items" has to read
+    // the count at the moment the load finishes. Evaluated at declaration it
+    // would report whatever the canvas held when the load STARTED — zero.
+    let items = 0
+    const success = vi.fn(() => `Opened · ${items} items`)
+    const { rerender } = renderHook(
+      ({ isLoading }: { isLoading: boolean }) => useLoadingNotification('k', isLoading, 'Opening…', success),
+      { initialProps: { isLoading: true } },
+    )
+
+    expect(success).not.toHaveBeenCalled()
+    items = 1204
+    rerender({ isLoading: true })
+    rerender({ isLoading: true })
+    expect(success).not.toHaveBeenCalled()
+
+    rerender({ isLoading: false })
+    expect(success).toHaveBeenCalledTimes(1)
+    expect(said()).toEqual(['Opened · 1204 items'])
+  })
+
+  it('resolves a computed loading message when the load starts', () => {
+    const loading = vi.fn(() => 'Loading Snowflake…')
+    renderHook(() => useLoadingNotification('k', true, loading))
+    expect(loading).toHaveBeenCalledTimes(1)
+    expect(live().map(t => t.message)).toEqual(['Loading Snowflake…'])
+  })
+
+  it('does not replace the live card while a fresh closure arrives every render', () => {
+    // An inline `() => ...` has a new identity on every render. In the dep
+    // array that re-ran the effect each time and `showLoading` swapped the
+    // notification for a new one — a card that restarts continuously.
+    const { rerender } = renderHook(
+      ({ n }: { n: number }) => useLoadingNotification('k', true, () => `Loading ${n}…`),
+      { initialProps: { n: 1 } },
+    )
+    const id = live()[0].id
+    rerender({ n: 2 })
+    rerender({ n: 3 })
+    expect(live()).toHaveLength(1)
+    expect(live()[0].id).toBe(id)
+  })
+
+  it('still says nothing when the load ended in failure', () => {
+    const success = vi.fn(() => 'Opened · 3 items')
+    const { rerender } = renderHook(
+      ({ isLoading }: { isLoading: boolean }) =>
+        useLoadingNotification('k', isLoading, 'Opening…', success, true),
+      { initialProps: { isLoading: true } },
+    )
+    rerender({ isLoading: false })
+    expect(success).not.toHaveBeenCalled()
+    expect(said()).toEqual([])
+  })
+
+  it('a plain string message still follows its own changes while loading', () => {
+    const { rerender } = renderHook(
+      ({ phase }: { phase: string }) => useLoadingNotification('k', true, phase),
+      { initialProps: { phase: 'Opening…' } },
+    )
+    expect(live()[0].message).toBe('Opening…')
+    rerender({ phase: 'Loading connections…' })
+    expect(live()).toHaveLength(1)
+    expect(live()[0].message).toBe('Loading connections…')
   })
 })

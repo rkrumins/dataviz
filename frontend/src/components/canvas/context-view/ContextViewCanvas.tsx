@@ -50,6 +50,10 @@ import { LayerStrip } from './LayerStrip'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
+import {
+  childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
+  openedViewMessage, openingViewMessage, summarisedConnectionsMessage,
+} from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
@@ -2847,7 +2851,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -2866,13 +2870,47 @@ export function ContextViewCanvas({
     [loadChildren, layerSortDirectionFor],
   )
 
+  /**
+   * The same load, but it says what it did — "Snowflake · 5 datasets", named
+   * from the summary `loadChildren` hands back.
+   *
+   * Only the two loads the USER asked for come through here: opening a
+   * container and "Load N more". Every other caller of `loadChildrenSorted`
+   * stays silent — the auto-first-page effect, a search reveal walking a hit's
+   * ancestors, the column's paging sentinel. None of those is something the
+   * user did, and announcing them is the noise this replaces.
+   *
+   * Keyed per container, so two containers opened at once are two named
+   * messages rather than one that outlives the other.
+   */
+  const { notify: notifyChildLoad, showLoading: showChildLoad, hideLoading: hideChildLoad } = useAppNotifications()
+  const announceChildLoad = useCallback(async (parentId: string) => {
+    const key = `ctx-children:${parentId}`
+    // Read at click time rather than through a dependency: `displayMap`
+    // changes with every graph write, and this callback is handed to
+    // LayerColumn's memo.
+    const label = String(useCanvasStore.getState().nodes.find(n => n.id === parentId)?.data?.label ?? '')
+    showChildLoad(key, loadingChildrenMessage(label))
+    try {
+      const summary = await loadChildrenSorted(parentId)
+      // Undefined when nothing ran (already fully loaded, or collapsed onto an
+      // in-flight load) or when the load failed — nothing true to report.
+      if (summary) notifyChildLoad('success', childLoadMessage(summary, schema?.entityTypes))
+    } finally {
+      hideChildLoad(key)
+    }
+  }, [loadChildrenSorted, schema, showChildLoad, hideChildLoad, notifyChildLoad])
+
   // "Load N more" from a column. In trace mode the walk model IS the set of
   // children that carry lineage, so there is nothing more to fetch — and a
   // fetch would write the store the overlay deliberately leaves alone.
-  const loadMoreChildren = useCallback(async (parentId: string) => {
+  //
+  // `auto` = LoadMoreItem's one-page-ahead sentinel, which pages because the
+  // row drifted into view. Nobody asked for it, so it loads without a word.
+  const loadMoreChildren = useCallback(async (parentId: string, auto?: boolean) => {
     if (traceWriteLocked()) return
-    await loadChildrenSorted(parentId)
-  }, [loadChildrenSorted, traceWriteLocked])
+    await (auto ? loadChildrenSorted(parentId) : announceChildLoad(parentId))
+  }, [announceChildLoad, loadChildrenSorted, traceWriteLocked])
 
   // Same for another page of ROOTS — reachable from the status chip and from
   // scrolling a column to its end, neither of which means "grow the browse
@@ -3247,7 +3285,6 @@ export function ContextViewCanvas({
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
   const hydrationStatus = useCanvasStore((s) => s.hydrationStatus)
   const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'unavailable'
-  const regionCount = useCanvasStore((s) => s.loadingRegions.size)
   const isHydratingInitial = hydrationPhase !== 'complete'
 
   // Floating loading notifications — keep the full set so every long-running operation
@@ -3257,12 +3294,45 @@ export function ContextViewCanvas({
   // global one has a single key that recycles between phases, so users with the
   // canvas focused want a sticky in-context indicator that the entities AND
   // edges loads both happened — even if hydration is fast.
-  useLoadingNotification('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded', hydrationFailed)
-  useLoadingNotification('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded', hydrationFailed)
-  useLoadingNotification('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments', 'Layer assignments ready')
-  useLoadingNotification('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges', 'Aggregated edges loaded')
-  useLoadingNotification('ctx-children', isLoadingChildren, 'Loading child entities', 'Child entities loaded')
-  useLoadingNotification('ctx-regions', regionCount > 0, 'Loading region data', 'Region data loaded')
+  //
+  // Every success message is a FUNCTION, evaluated at the loading→done
+  // transition: it reports what the load produced, and the counts only exist
+  // once it has. Read from the store rather than a render-scope value where
+  // the phase is what publishes the result — `nodes`/`edges` are authoritative
+  // the moment the phase leaves 'roots' / 'edges'.
+  //
+  // Expanding a container is NOT here: `isLoadingChildren` was
+  // `loadingNodes.size > 0`, a global "≥1 container busy" boolean that could
+  // never name which one. That message moved to `announceChildLoad`, at the
+  // two call sites where the container is known.
+  useLoadingNotification(
+    'ctx-hydrating-entities',
+    hydrationPhase === 'roots',
+    openingViewMessage(activeView?.name),
+    () => openedViewMessage(activeView?.name, useCanvasStore.getState().nodes.length),
+    hydrationFailed,
+  )
+  useLoadingNotification(
+    'ctx-hydrating-edges',
+    hydrationPhase === 'edges',
+    'Loading connections…',
+    () => connectionsLoadedMessage(useCanvasStore.getState().edges.length),
+    hydrationFailed,
+  )
+  useLoadingNotification(
+    'ctx-assignments',
+    assignmentStatus === 'loading',
+    'Arranging layers…',
+    () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.length),
+  )
+  // No container is named here on purpose: this request is batched across
+  // EVERY collapsed container at once, so naming one would be a lie.
+  useLoadingNotification(
+    'ctx-agg-edges',
+    isLoadingAggregatedEdges,
+    'Summarising connections…',
+    () => summarisedConnectionsMessage(aggregatedEdges.size),
+  )
 
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
@@ -3574,7 +3644,7 @@ export function ContextViewCanvas({
         // density-tier renderer + browse-mode bundling now absorb the
         // result; the historical reason this was disabled (canvas
         // overload) no longer applies.
-        await loadChildrenSorted(nodeId)
+        await announceChildLoad(nodeId)
         if (trace.isTracing) {
           // Fire-and-forget: drill runs in the background and merges into
           // the canvas as it returns. No await — the children are already
@@ -3739,7 +3809,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
+  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
 
 
 
