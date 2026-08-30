@@ -423,18 +423,6 @@ class Neo4jProvider(GraphDataProvider):
             return _node_from_props(record_value)
         return None
 
-    # ------------------------------------------------------------------ #
-    # Containment edge type resolution                                     #
-    # ------------------------------------------------------------------ #
-
-    def set_containment_edge_types(self, types: List[str]) -> None:
-        """Called by ContextEngine after ontology resolution.
-
-        An empty list is valid — it means no containment types (flat graph).
-        """
-        self._resolved_containment_types: Set[str] = {t.upper() for t in types}
-        self._resolved_containment_types_set = True  # sentinel: distinguishes "set to empty" from "never set"
-
     def set_entity_type_levels(self, mapping: Dict[str, int]) -> None:
         """Inject entity-type → hierarchy.level mapping. Used both at write
         time (writes ``n.level`` for the level index) and at read time

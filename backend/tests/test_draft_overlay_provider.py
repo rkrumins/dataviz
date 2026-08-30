@@ -202,6 +202,66 @@ def test_set_node_identity_reaches_the_base_provider():
     assert base.identity == (None, None)
 
 
+class _RecordingBase:
+    """A minimal ``_base`` that records every ontology-lifecycle setter call it
+    receives, with nothing else implemented — proves ``DraftOverlayProvider``
+    forwards each one rather than a wrapper method silently missing."""
+
+    def __init__(self):
+        self.calls = {}
+
+    def set_containment_edge_types(self, edge_types, from_ontology=False):
+        self.calls["set_containment_edge_types"] = (edge_types, from_ontology)
+
+    def set_node_identity(self, identity_property=None, name_property=None):
+        self.calls["set_node_identity"] = (identity_property, name_property)
+
+    def set_entity_type_levels(self, mapping):
+        self.calls["set_entity_type_levels"] = (mapping,)
+
+    def set_resolved_edge_metadata(self, edge_type_metadata, lineage_edge_types):
+        self.calls["set_resolved_edge_metadata"] = (edge_type_metadata, lineage_edge_types)
+
+    def set_source_type_aliases(self, relationship_aliases, entity_aliases=None):
+        self.calls["set_source_type_aliases"] = (relationship_aliases, entity_aliases)
+
+    def set_admission_controller(self, controller):
+        self.calls["set_admission_controller"] = (controller,)
+
+
+def test_all_six_ontology_setters_reach_the_base_provider():
+    """Same defect class as set_node_identity above: each of these six is
+    hasattr-gated somewhere in ContextEngine or the aggregation worker, so a
+    wrapper method that forgets to forward is indistinguishable from a
+    provider with nothing to inject — no error, just a silently-stale base.
+    Drive each setter through DraftOverlayProvider with the exact call shape
+    its real caller uses and confirm the fake ``_base`` recorded all six.
+    Before the four new forwarders existed, this failed with an
+    AttributeError the moment any of them was called — not a silent skip.
+    """
+    base = _RecordingBase()
+    p = DraftOverlayProvider(base, svc=FakeSvc(_EMPTY), graph_id="g", branch_id="d")
+
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p.set_node_identity("asset_id", "asset_name")
+    p.set_entity_type_levels({"Table": 0, "Column": 1})
+    p.set_resolved_edge_metadata({"LINEAGE": {"kind": "lineage"}}, ["LINEAGE"])
+    p.set_source_type_aliases({"HAS": ["has"]}, {"Table": ["table"]})
+    controller = object()
+    p.set_admission_controller(controller)
+
+    assert set(base.calls) == {
+        "set_containment_edge_types", "set_node_identity", "set_entity_type_levels",
+        "set_resolved_edge_metadata", "set_source_type_aliases", "set_admission_controller",
+    }
+    assert base.calls["set_containment_edge_types"] == (["CONTAINS"], True)
+    assert base.calls["set_node_identity"] == ("asset_id", "asset_name")
+    assert base.calls["set_entity_type_levels"] == ({"Table": 0, "Column": 1},)
+    assert base.calls["set_resolved_edge_metadata"] == ({"LINEAGE": {"kind": "lineage"}}, ["LINEAGE"])
+    assert base.calls["set_source_type_aliases"] == ({"HAS": ["has"]}, {"Table": ["table"]})
+    assert base.calls["set_admission_controller"] == (controller,)
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
     print("draft overlay invariant + sparse delta: OK")
