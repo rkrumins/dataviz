@@ -22,12 +22,41 @@
  * CanvasRouter clears the log whenever the active view or branch changes, and
  * nothing is persisted — a refresh starts clean.
  */
-import { useCallback, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { motion } from 'framer-motion'
 import { ChevronDown, ChevronUp, History, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { relativeTime } from '@/lib/relativeTime'
 import { iconColors, iconComponents, useToastStore, type ToastHistoryEntry } from '@/components/ui/toast'
+
+/**
+ * A coarse clock for the open panel. `relativeTime` is computed at render, so
+ * without this a panel left open reads "just now" forever — on the one surface
+ * whose job is answering "how long ago?". Ticking every 30s keeps the minute
+ * boundary honest; nothing subscribes while the panel is closed.
+ */
+let clockTick = 0
+const clockSubscribers = new Set<() => void>()
+let clockTimer: ReturnType<typeof setInterval> | null = null
+
+function subscribeClock(onChange: () => void): () => void {
+  clockSubscribers.add(onChange)
+  if (clockTimer === null) {
+    clockTimer = setInterval(() => {
+      clockTick += 1
+      clockSubscribers.forEach(fn => fn())
+    }, 30_000)
+  }
+  return () => {
+    clockSubscribers.delete(onChange)
+    if (clockSubscribers.size === 0 && clockTimer !== null) {
+      clearInterval(clockTimer)
+      clockTimer = null
+    }
+  }
+}
+const getClockTick = () => clockTick
+const subscribeNothing = () => () => {}
 
 interface ActivityRow {
   entry: ToastHistoryEntry
@@ -68,9 +97,24 @@ export function ActivityPanel({ className }: { className?: string }) {
   // A callback ref on the scroller does it as the element mounts — there is
   // no state here, and `react-hooks/set-state-in-effect` is an error in this
   // repo for good reason.
+  const scrollerRef = useRef<HTMLDivElement | null>(null)
   const openAtNewest = useCallback((el: HTMLDivElement | null) => {
+    scrollerRef.current = el
     if (el) el.scrollTop = el.scrollHeight
   }, [])
+
+  // Times must keep counting while the panel is open, or the answer to "how
+  // long ago?" freezes at whatever it was when the log was opened.
+  useSyncExternalStore(isExpanded ? subscribeClock : subscribeNothing, getClockTick, getClockTick)
+
+  // A message arriving while the log is open lands below the fold. Follow it —
+  // but only for a reader who was already at the bottom; never yank someone who
+  // has scrolled up to read. A DOM write in an effect, not a state update.
+  useEffect(() => {
+    const el = scrollerRef.current
+    if (!el) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 24) el.scrollTop = el.scrollHeight
+  }, [rows])
 
   // Nothing to show — and the panel must not survive the emptying. The panel
   // unmounts but the component instance does not (the dock keeps it rendered
@@ -101,7 +145,10 @@ export function ActivityPanel({ className }: { className?: string }) {
         <span className="flex items-center gap-2 min-w-0">
           <History className="w-4 h-4 text-accent-lineage flex-shrink-0" />
           <span className="text-sm font-medium text-ink">Activity</span>
-          <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 tabular-nums whitespace-nowrap">
+          <span
+            aria-label={`${history.length.toLocaleString()} ${history.length === 1 ? 'message' : 'messages'}`}
+            className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 tabular-nums whitespace-nowrap"
+          >
             {history.length.toLocaleString()}
           </span>
         </span>
@@ -121,9 +168,9 @@ export function ActivityPanel({ className }: { className?: string }) {
         >
           <div id={bodyId} role="region" aria-label="Activity" className="px-3 pb-3">
             <div ref={openAtNewest} className="max-h-[40vh] overflow-y-auto custom-scrollbar">
-              <ol className="relative">
+              <ol role="list" className="relative pl-1">
                 {/* The rail the dots hang on. */}
-                <span aria-hidden className="absolute left-[3px] top-2 bottom-2 w-px bg-glass-border" />
+                <span aria-hidden className="absolute left-[7px] top-2 bottom-2 w-px bg-glass-border" />
                 {rows.map(({ entry, count, at }, i) => {
                   const Icon = iconComponents[entry.type]
                   const isNewest = i === rows.length - 1

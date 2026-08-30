@@ -15,9 +15,9 @@
  * takes the panel with it; and nothing is portaled — the panel renders inside
  * the dock, which is the whole point of moving it there.
  */
-import { render, screen, within, cleanup } from '@testing-library/react'
+import { render, screen, within, cleanup, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { ActivityPanel } from '../ActivityPanel'
 import { useToastStore, type ToastHistoryEntry } from '@/components/ui/toast'
 
@@ -168,5 +168,36 @@ describe('ActivityPanel', () => {
     const region = screen.getByRole('region', { name: /activity/i })
     expect(screen.getByTestId('dock')).toContainElement(region)
     expect(container).toContainElement(region)
+  })
+
+
+  it('keeps counting while the log is open — a minute-old message stops saying "just now"', () => {
+    vi.useFakeTimers()
+    try {
+      const start = Date.now()
+      seed([{ type: 'success', message: 'Entities loaded', createdAt: start }])
+      render(<ActivityPanel />)
+      fireEvent.click(header())
+      expect(screen.getByText('just now')).toBeInTheDocument()
+      // Past the minute boundary, with the panel still open and untouched.
+      vi.setSystemTime(start + 61_000)
+      act(() => { vi.advanceTimersByTime(30_000) })
+      expect(screen.queryByText('just now')).toBeNull()
+      expect(screen.getByText('1m ago')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the count is announced as messages, and the sequence is a list', () => {
+    const now = Date.now()
+    seed([
+      { type: 'success', message: 'Entities loaded', createdAt: now - 2000 },
+      { type: 'success', message: 'Edges loaded', createdAt: now - 1000 },
+    ])
+    render(<ActivityPanel />)
+    expect(screen.getByLabelText('2 messages')).toBeInTheDocument()
+    fireEvent.click(header())
+    expect(screen.getByRole('list')).toBeInTheDocument()
   })
 })
