@@ -126,7 +126,11 @@ export function LayerStrip({
       ro?.disconnect()
       if (raf !== null) cancelAnimationFrame(raf)
     }
-  }, [layers, scrollRef])
+    // `scrollWidth` is not read in here: it is the SIGNAL that a column's
+    // width changed — collapsed, expanded — which is exactly when the columns
+    // move under a still canvas and the lit pills would otherwise go on
+    // pointing at where they used to be. Scrolling never changes it.
+  }, [layers, scrollRef, scrollWidth])
 
   const jumpTo = (layerId: string) => {
     const col = scrollRef.current?.querySelector(`[data-layer-id="${CSS.escape(layerId)}"]`)
@@ -176,16 +180,27 @@ export function LayerStrip({
     el.scrollTo({ left, behavior: 'auto' })
   }
 
+  // The drag is bound to the WINDOW — a 1px rail loses the pointer at once —
+  // so the binding has to come off again for EVERY way the stream can end.
+  // `pointerup` is only one of them: `pointercancel` fires instead of it when
+  // the UA takes the gesture over (a native drag, a lost pointer), and
+  // entering trace mode unmounts the strip mid-drag. Anything missed leaves
+  // every mouse move on the page scrubbing the canvas with no button held,
+  // until a reload. One AbortController drops all three from either end.
+  const scrubRef = useRef<AbortController | null>(null)
+  useEffect(() => () => scrubRef.current?.abort(), [])
+
   const startScrub = (e: React.PointerEvent<HTMLDivElement>) => {
     const rail = e.currentTarget
     scrubTo(e.clientX, rail)
-    const move = (ev: PointerEvent) => scrubTo(ev.clientX, rail)
-    const end = () => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', end)
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', end)
+    scrubRef.current?.abort()
+    const ac = new AbortController()
+    scrubRef.current = ac
+    const { signal } = ac
+    const end = () => ac.abort()
+    window.addEventListener('pointermove', ev => scrubTo(ev.clientX, rail), { signal })
+    window.addEventListener('pointerup', end, { signal })
+    window.addEventListener('pointercancel', end, { signal })
   }
 
   if (layers.length < 2 && !onAddLayer) return null

@@ -1730,23 +1730,6 @@ export function ContextViewCanvas({
     horizontalScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' })
   }, [setCanvasZoom, sortedLayers.length])
 
-  // Measure the outer container's CLASSIC horizontal scrollbar into
-  // --canvas-hsb (0 for macOS overlay scrollbars). Percentage heights
-  // ignore scrollbar gutters, so without this the columns overflow the
-  // visible area by the scrollbar height and their bottom edge (and the
-  // bottom periphery scrims) clips below the fold.
-  useEffect(() => {
-    const el = horizontalScrollRef.current
-    if (!el) return
-    const update = () => {
-      el.style.setProperty('--canvas-hsb', `${Math.max(0, el.offsetHeight - el.clientHeight)}px`)
-    }
-    update()
-    if (typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(update)
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
@@ -5214,9 +5197,10 @@ export function ContextViewCanvas({
           // strip of layout rather than floating over the last row. The macOS
           // overlay bar it replaces fades out entirely when idle, which left
           // the sideways run of the canvas with no affordance at all. The
-          // height it claims (11px in Chromium, which honours
-          // `scrollbar-width: thin` over the rule's 6px) is already measured
-          // into --canvas-hsb, so the columns still end at the visible edge.
+          // strip it claims (11px in Chromium, which honours
+          // `scrollbar-width: thin` over the rule's 6px) comes out of
+          // clientHeight, so a percentage-height child inside already stops
+          // above it and the columns still end at the visible edge.
           className="flex-1 min-h-0 overflow-auto relative scroll-smooth custom-scrollbar"
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
@@ -5320,17 +5304,19 @@ export function ContextViewCanvas({
               // scrolls chained into that ghost area instead of the
               // columns' internal lists.
               //
-              // --canvas-hsb: measured height of the container's CLASSIC
-              // horizontal scrollbar (0 for macOS overlay scrollbars).
-              // Percentage heights resolve against a box that ignores
-              // the scrollbar, so a plain 100% overflows the visible
-              // area by the scrollbar height — clipping the columns'
-              // bottom edge (and the bottom periphery scrims) below the
-              // fold. Subtracting the measured gutter makes the column
-              // bottom land exactly at the visible edge at every zoom.
+              // The height is the container's CONTENT box, undone by the
+              // zoom the same way the width is. A percentage already
+              // resolves against that box, which excludes BOTH the
+              // reserved padding band below and the classic scrollbar's
+              // strip — measured in Chromium: scroller offsetHeight 583,
+              // clientHeight 572, padding-bottom 86, and a 100%-tall
+              // child paints 486 with its bottom exactly on the band.
+              // Subtracting the scrollbar as well (this once did) left
+              // every column, its bottom periphery scrim and its
+              // end-of-list sentinel 11px short of the visible edge.
               zoom: canvasZoom !== 1 ? canvasZoom : undefined,
               width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
-              height: `calc((100% - var(--canvas-hsb, 0px)) / ${canvasZoom})`,
+              height: `calc(100% / ${canvasZoom})`,
             }}
           >
             {sortedLayers.map((layer) => (

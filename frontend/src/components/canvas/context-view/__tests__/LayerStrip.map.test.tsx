@@ -7,7 +7,7 @@
  * Both are conditional on the canvas actually overflowing — a view whose
  * layers all fit gets the strip it has always had.
  */
-import { render, cleanup, fireEvent } from '@testing-library/react'
+import { render, cleanup, fireEvent, act, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LayerStrip } from '../LayerStrip'
 
@@ -21,6 +21,26 @@ const LAYERS = [
 const OFFSETS = [60, 430, 800, 1170]
 const SCROLL_WIDTH = 2000
 const CLIENT_WIDTH = 500
+const COLUMN_WIDTH = 320
+/** LayerColumn's collapsed rail. */
+const COLLAPSED_WIDTH = 60
+
+/**
+ * A ResizeObserver that actually fires, and only for the elements it was
+ * asked to watch — jsdom has none, and the global stub (src/test/setup.ts)
+ * never calls back, so "watched" and "ignored" would look identical.
+ */
+class FiringResizeObserver {
+  static live: FiringResizeObserver[] = []
+  targets = new Set<Element>()
+  constructor(readonly cb: () => void) { FiringResizeObserver.live.push(this) }
+  observe(el: Element) { this.targets.add(el) }
+  unobserve(el: Element) { this.targets.delete(el) }
+  disconnect() { this.targets.clear() }
+}
+const resize = (el: Element) => act(() => {
+  for (const ro of FiringResizeObserver.live) if (ro.targets.has(el)) ro.cb()
+})
 
 const rect = (left: number, width: number): DOMRect => ({
   left, right: left + width, width, top: 0, bottom: 400, height: 400, x: left, y: 0, toJSON: () => ({}),
@@ -33,11 +53,18 @@ function mount({ scrollLeft = 0, scrollWidth = SCROLL_WIDTH, clientWidth = CLIEN
   Object.defineProperty(el, 'scrollWidth', { configurable: true, get: () => g.scrollWidth })
   Object.defineProperty(el, 'clientWidth', { configurable: true, get: () => g.clientWidth })
   el.getBoundingClientRect = () => rect(0, g.clientWidth)
-  LAYERS.forEach((layer, i) => {
+  // The columns sit in a wrapper inside the scroller, as they do on the
+  // canvas: the wrapper is 100% wide, so a collapse moves nothing but the
+  // columns themselves.
+  const geo = OFFSETS.map(left => ({ left, width: COLUMN_WIDTH }))
+  const wrapper = document.createElement('div')
+  el.appendChild(wrapper)
+  const cols = LAYERS.map((layer, i) => {
     const col = document.createElement('div')
     col.setAttribute('data-layer-id', layer.id)
-    col.getBoundingClientRect = () => rect(OFFSETS[i] - g.scrollLeft, 320)
-    el.appendChild(col)
+    col.getBoundingClientRect = () => rect(geo[i].left - g.scrollLeft, geo[i].width)
+    wrapper.appendChild(col)
+    return col
   })
   const scrollTo = vi.fn()
   el.scrollTo = scrollTo as unknown as HTMLDivElement['scrollTo']
@@ -62,8 +89,30 @@ function mount({ scrollLeft = 0, scrollWidth = SCROLL_WIDTH, clientWidth = CLIEN
     prev: () => q<HTMLButtonElement>('button[aria-label="Previous layer"]'),
     next: () => q<HTMLButtonElement>('button[aria-label="Next layer"]'),
     scroll: (left: number) => { g.scrollLeft = left; fireEvent.scroll(el) },
+    lit: () => [...host.querySelectorAll('[aria-current="true"]')].map(n => n.textContent),
+    /**
+     * Collapse a column to its rail, the way LayerColumn's own state does:
+     * the run shortens and everything after it slides left, while the
+     * scroller and the wrapper measure exactly what they did before — and
+     * at scrollLeft 0 there is nothing to clamp, so nothing scrolls.
+     */
+    collapse: (i: number) => {
+      const shrink = geo[i].width - COLLAPSED_WIDTH
+      geo[i].width = COLLAPSED_WIDTH
+      for (let j = i + 1; j < geo.length; j++) geo[j].left -= shrink
+      g.scrollWidth -= shrink
+      return resize(cols[i])
+    },
   }
 }
+
+let originalRO: typeof globalThis.ResizeObserver
+beforeEach(() => {
+  originalRO = globalThis.ResizeObserver
+  FiringResizeObserver.live = []
+  globalThis.ResizeObserver = FiringResizeObserver as unknown as typeof globalThis.ResizeObserver
+})
+afterEach(() => { globalThis.ResizeObserver = originalRO })
 
 describe('LayerStrip position rail', () => {
   afterEach(() => { cleanup(); document.body.replaceChildren() })
@@ -96,6 +145,28 @@ describe('LayerStrip position rail', () => {
     expect(scrollTo).toHaveBeenCalledWith({ left: 750, behavior: 'auto' })
   })
 
+  it('a cancelled drag does not leave the whole page scrubbing', () => {
+    const { rail, scrollTo } = mount()
+    rail()!.getBoundingClientRect = () => rect(0, 200)
+    fireEvent.pointerDown(rail()!, { clientX: 100 })
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+    // The UA takes the gesture over — a native drag, a lost pointer — so the
+    // stream ends in `pointercancel` and `pointerup` never comes. Left bound,
+    // every mouse move on the page would scroll the canvas, no button held.
+    fireEvent.pointerCancel(window)
+    fireEvent.pointerMove(window, { clientX: 150 })
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+  })
+
+  it('unmounting mid-drag takes the listeners with it', () => {
+    const { rail, scrollTo, unmount } = mount()
+    rail()!.getBoundingClientRect = () => rect(0, 200)
+    fireEvent.pointerDown(rail()!, { clientX: 100 })
+    unmount() // entering trace mode unmounts the strip
+    fireEvent.pointerMove(window, { clientX: 150 })
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+  })
+
   it('lives inside the element whose height the band reserves', () => {
     const { rail, body } = mount()
     expect(rail()!.closest('[data-layer-strip-bar]')).not.toBeNull()
@@ -126,6 +197,24 @@ describe('LayerStrip step controls', () => {
     scroll(1500) // 2000 - 500: nothing further right
     expect(prev()!.disabled).toBe(false)
     expect(next()!.disabled).toBe(true)
+  })
+})
+
+describe('LayerStrip when a column collapses', () => {
+  afterEach(() => { cleanup(); document.body.replaceChildren() })
+
+  it('re-sizes the rail window to the shorter run', async () => {
+    const { window: railWindow, collapse } = mount()
+    expect(railWindow()!.style.width).toBe('25%')
+    await collapse(1) // 2000 - 260 = 1740 of run, still 500 on screen
+    expect(railWindow()!.style.width).toBe('28.74%')
+  })
+
+  it('relights the pills for the columns the collapse brought into view', async () => {
+    const { lit, collapse } = mount()
+    await waitFor(() => expect(lit()).toEqual(['Source']))
+    await collapse(1)
+    await waitFor(() => expect(lit()).toEqual(['Source', 'Staging']))
   })
 })
 

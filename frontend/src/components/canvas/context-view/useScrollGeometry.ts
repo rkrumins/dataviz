@@ -30,14 +30,28 @@ export function useScrollGeometry(ref: RefObject<HTMLElement | null>): ScrollGeo
     if (!el) return () => {}
     el.addEventListener('scroll', onChange, { passive: true })
     // The container's own box changes on a window resize; the scrollable
-    // WIDTH changes when the content does (a layer added, the zoom
-    // changed), which only the children report — so watch both.
+    // WIDTH changes when a COLUMN's does — collapsed, expanded, dragged
+    // wider — and no box pinned to the container reports that: the
+    // scroller and the columns wrapper both stay 100% wide while the
+    // columns overflow them. At scrollLeft 0 nothing needs clamping
+    // either, so no scroll event fires. So watch the columns themselves.
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onChange) : null
     ro?.observe(el)
     for (const child of Array.from(el.children)) ro?.observe(child)
+    const columns = () => el.querySelectorAll<HTMLElement>('[data-layer-id]')
+    const watchColumns = () => { for (const col of columns()) ro?.observe(col) }
+    watchColumns()
+    // Columns come and go — a layer added, a view switched — and this
+    // subscription outlives them, so re-observe when the wrapper's
+    // children change.
+    const mo = typeof MutationObserver !== 'undefined'
+      ? new MutationObserver(() => { watchColumns(); onChange() })
+      : null
+    mo?.observe(columns()[0]?.parentElement ?? el, { childList: true })
     return () => {
       el.removeEventListener('scroll', onChange)
       ro?.disconnect()
+      mo?.disconnect()
     }
   }, [ref])
 
