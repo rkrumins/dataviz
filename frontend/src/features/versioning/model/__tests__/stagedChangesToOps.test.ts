@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { stagedChangesToOps } from '../stagedChangesToOps'
+import { stagedChangesToOps, unsavedNodeFields } from '../stagedChangesToOps'
 import type { StagedChange } from '@/store/stagedChangesStore'
 
 const sc = (over: Partial<StagedChange>): StagedChange => ({
@@ -111,5 +111,87 @@ describe('stagedChangesToOps', () => {
       { op: 'delete', kind: 'edge', id: 'e9' },
       { op: 'create', kind: 'edge', id: 'staged-edge-3', payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:real:a', targetEntityId: 'urn:b' } },
     ])
+  })
+})
+
+/**
+ * The drawer edits `description`, `qualifiedName` and `sourceSystem` as TOP-LEVEL node fields
+ * (EntityDrawer's Description / Metadata inputs). They are real `GraphNode` fields — the backend
+ * merges them onto the entity's current payload and the projector writes them onto the FalkorDB
+ * node (`n.description` / `n.qualifiedName` / `n.sourceSystem`, and into `searchableText`), so they
+ * round-trip. Until this mapping existed they were dropped here, which — because an edit to only
+ * those fields maps to an EMPTY payload, and an empty payload was skipped entirely — meant the user
+ * saw a green "saved" over a save that made no request at all.
+ */
+describe('stagedChangesToOps — the descriptive fields the entity drawer edits', () => {
+  it('carries a description edit to the backend', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:d', before: { description: '' }, after: { description: 'What this table is for' } }),
+    ])
+    expect(ops).toEqual([
+      { op: 'update', kind: 'node', id: 'urn:d', payload: { description: 'What this table is for' } },
+    ])
+  })
+
+  it('carries qualifiedName and sourceSystem too', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:e', after: { qualifiedName: 'analytics.public.orders', sourceSystem: 'snowflake' } }),
+    ])
+    expect(ops[0].payload).toEqual({ qualifiedName: 'analytics.public.orders', sourceSystem: 'snowflake' })
+  })
+
+  it('carries a description alongside the fields it already mapped', () => {
+    const ops = stagedChangesToOps([
+      sc({ type: 'update_entity', targetUrn: 'urn:f', after: { label: 'Orders', description: 'd', properties: { x: 1 } } }),
+    ])
+    expect(ops[0].payload).toEqual({ displayName: 'Orders', description: 'd', properties: { x: 1 } })
+  })
+})
+
+describe('unsavedNodeFields — what a staged entity edit CANNOT carry to the backend', () => {
+  it('names a changed field the mapper does not send', () => {
+    expect(unsavedNodeFields(sc({
+      type: 'update_entity', targetUrn: 'urn:g',
+      before: { label: 'A', retentionDays: 30 },
+      after: { label: 'A', retentionDays: 90 },
+    }))).toEqual(['retentionDays'])
+  })
+
+  it('names them even when the rest of the edit DOES map — the op is sent, that field is not', () => {
+    expect(unsavedNodeFields(sc({
+      type: 'update_entity', targetUrn: 'urn:h',
+      before: { description: '', owner: 'ana' },
+      after: { description: 'd', owner: 'bo' },
+    }))).toEqual(['owner'])
+  })
+
+  it('says nothing about the descriptive fields now that they are carried', () => {
+    expect(unsavedNodeFields(sc({
+      type: 'update_entity', targetUrn: 'urn:i',
+      before: { description: '', qualifiedName: '', sourceSystem: '' },
+      after: { description: 'd', qualifiedName: 'q', sourceSystem: 's' },
+    }))).toEqual([])
+  })
+
+  it('says nothing about backend-managed fields the mapper deliberately never sends', () => {
+    expect(unsavedNodeFields(sc({
+      type: 'update_entity', targetUrn: 'urn:j',
+      before: { childCount: 1, lastSyncedAt: 'a', version: 'v1', layerAssignment: 'raw', urn: 'urn:j' },
+      after: { childCount: 2, lastSyncedAt: 'b', version: 'v2', layerAssignment: 'gold', urn: 'urn:j' },
+    }))).toEqual([])
+  })
+
+  it('says nothing about a field that did not change', () => {
+    expect(unsavedNodeFields(sc({
+      type: 'update_entity', targetUrn: 'urn:k',
+      before: { owner: 'ana', label: 'A' },
+      after: { owner: 'ana', label: 'B' },
+    }))).toEqual([])
+  })
+
+  it('is empty for change types that are not node updates', () => {
+    expect(unsavedNodeFields(sc({ type: 'assign_layer', targetId: 'n', after: { layerId: 'L1' } }))).toEqual([])
+    expect(unsavedNodeFields(sc({ type: 'delete_entity', targetId: 'n' }))).toEqual([])
+    expect(unsavedNodeFields(sc({ type: 'create_entity', targetUrn: 'urn:new', after: { owner: 'ana' } }))).toEqual([])
   })
 })

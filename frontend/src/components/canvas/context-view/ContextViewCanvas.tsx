@@ -4890,7 +4890,7 @@ export function ContextViewCanvas({
           const bs = useBranchStore.getState()
           if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
             try {
-              await saveStagedChangesToDraft(stagedChangeList, {
+              const { commitId, unsaved } = await saveStagedChangesToDraft(stagedChangeList, {
                 wsId: bs.workspaceId ?? scopeWsId,
                 dataSourceId: bs.dataSourceId,
                 branchId: bs.currentBranchId,
@@ -4920,7 +4920,17 @@ export function ContextViewCanvas({
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
               await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
               closeStagedChangesPanel()
-              notify('success', 'Saved to draft.')
+              // Only claim what was written. `unsaved` names node fields the op mapper cannot carry
+              // (the entity drawer's schema-property inputs, a raw-JSON edit) — an edit made only of
+              // those sends no ops at all, and a zero-op save resolves exactly like a commit. A green
+              // "Saved to draft." over that is the lie this reports instead.
+              if (unsaved.length > 0) {
+                notify('warning', commitId
+                  ? `Saved, except ${unsaved.join(', ')} — the app can't store ${unsaved.length === 1 ? 'that field' : 'those fields'} on an entity yet.`
+                  : `Nothing was saved — the app can't store ${unsaved.join(', ')} on an entity yet.`)
+              } else {
+                notify('success', 'Saved to draft.')
+              }
             } catch (e) {
               notify('error', (e as Error).message)
             }
