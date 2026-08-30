@@ -6,7 +6,6 @@ Implements GraphDataProvider interface using FalkorDB async client and Cypher qu
 import asyncio
 import base64
 import json
-import logging
 import os
 import time
 from collections import defaultdict, deque
@@ -30,7 +29,7 @@ class AggRunMeta(NamedTuple):
     max_depth: Optional[int]
     last_materialized_at: Optional[str]
 
-from ..models.graph import (
+from backend.app.models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats,
     PropertyFilter, TagFilter, TextFilter, FilterOperator,
@@ -42,10 +41,10 @@ from ..models.graph import (
 )
 # The closure-walk models are not carried by the app-level re-export above.
 from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
-from .base import GraphDataProvider
+from backend.app.providers.base import GraphDataProvider
 from backend.common.interfaces.provider import ProviderConfigurationError
 
-logger = logging.getLogger(__name__)
+from backend.app.providers.falkordb._log import logger
 
 # Per-server (host, port) facts we only need to discover / report ONCE, so onboarding
 # many graphs against the same FalkorDB doesn't re-probe and re-log the same thing on
@@ -457,7 +456,7 @@ def resolve_falkordb_target(host: Optional[str], port: Optional[int]) -> Tuple[s
     target in every process, so the read instance and the projection
     instance can no longer drift apart.
     """
-    from .manager import apply_local_dev_falkordb_override
+    from backend.app.providers.manager import apply_local_dev_falkordb_override
     host, port = apply_local_dev_falkordb_override(host, port)
     host = _normalize_falkordb_host(host)
     return host, port
@@ -1580,7 +1579,7 @@ class FalkorDBProvider(GraphDataProvider):
     # Sourced from app.config.resilience so a single env var
     # (FALKORDB_QUERY_TIMEOUT / FALKORDB_WRITE_TIMEOUT) tunes every
     # consumer rather than each module reading os.getenv directly.
-    from ..config import resilience as _resilience
+    from backend.app.config import resilience as _resilience
     _READ_TIMEOUT = _resilience.FALKORDB_QUERY_TIMEOUT_SECS
     _WRITE_TIMEOUT = _resilience.FALKORDB_WRITE_TIMEOUT_SECS
     _EDGES_BETWEEN_TIMEOUT = _resilience.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS
@@ -1597,7 +1596,7 @@ class FalkorDBProvider(GraphDataProvider):
     # parameter value cannot exceed the TIMEOUT_MAX configuration parameter".
     @staticmethod
     def _db_timeout_ms(seconds: float) -> int:
-        from ..config import resilience
+        from backend.app.config import resilience
         ms = max(500, int(seconds * 1000) - 500)
         cap = resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS
         if cap > 0:
@@ -1616,7 +1615,7 @@ class FalkorDBProvider(GraphDataProvider):
         bounds every call at its own (much smaller) budget regardless of
         socket state.
         """
-        from ..config import resilience
+        from backend.app.config import resilience
         configured = (
             (self._conn_cfg.socket_timeout if self._conn_cfg else None)
             or float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
@@ -1832,7 +1831,7 @@ class FalkorDBProvider(GraphDataProvider):
         shape. Zero overhead below the threshold beyond three monotonic
         reads; never raises from the logging path.
         """
-        from ..config.resilience import FALKORDB_SLOW_QUERY_MS
+        from backend.app.config.resilience import FALKORDB_SLOW_QUERY_MS
 
         queued_at = time.monotonic()
         async with self._query_semaphore:
@@ -3336,20 +3335,20 @@ class FalkorDBProvider(GraphDataProvider):
         imports from this one's read-path helpers indirectly via
         ``_extract_node_from_result`` and friends).
         """
-        from .falkordb_deep_search import execute_deep_search
+        from backend.app.providers.falkordb_deep_search import execute_deep_search
         await self._ensure_connected()
         return await execute_deep_search(self, query, deadline_ms=deadline_ms)
 
     async def deep_search_explain(self, query):
         """Compile-only path. Mirrors ``deep_search`` (lazy import to
         avoid the circular load order)."""
-        from .falkordb_deep_search import explain_deep_search
+        from backend.app.providers.falkordb_deep_search import explain_deep_search
         await self._ensure_connected()
         return explain_deep_search(self, query)
 
     async def deep_search_discover(self, *, sample_per_label: int = 200):
         """Schema discovery. Mirrors ``deep_search`` (lazy import)."""
-        from .falkordb_deep_search import discover_native_property_keys
+        from backend.app.providers.falkordb_deep_search import discover_native_property_keys
         await self._ensure_connected()
         return await discover_native_property_keys(
             self, sample_per_label=sample_per_label,
@@ -3535,7 +3534,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"RETURN c, count(gc) as childCount"
             )
 
-        from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        from backend.app.config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
         # Align the entity-type post-filter to the graph's observed label spelling (Task E),
         # so a declared `Table` still matches a TABLE-graph node. Identity for governed graphs.
@@ -3644,7 +3643,7 @@ class FalkorDBProvider(GraphDataProvider):
             f"RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops"
         )
 
-        from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        from backend.app.config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
         result = await self._ro_query(cypher, params=params, timeout=FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS, op="children.page")
 
         children: List[GraphNode] = []
@@ -3815,7 +3814,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         sort_direction = _validate_sort_direction(sort_direction)
 
-        from ..config.resilience import (
+        from backend.app.config.resilience import (
             FALKORDB_TOP_LEVEL_COUNT_TIMEOUT_SECS,
             FALKORDB_TOP_LEVEL_QUERY_TIMEOUT_SECS,
         )
@@ -5879,7 +5878,7 @@ class FalkorDBProvider(GraphDataProvider):
         so the caller knows to trigger a backfill.
         """
         from fastapi import HTTPException
-        from ..config.resilience import (
+        from backend.app.config.resilience import (
             AGGREGATED_EDGE_PAGE_SIZE,
             AGGREGATED_EDGE_RESULT_CAP,
             AGGREGATED_SOURCE_URN_BATCH_SIZE,
@@ -6169,7 +6168,7 @@ class FalkorDBProvider(GraphDataProvider):
                 reason = "legacy_cells"
             return rows, [], False, reason
 
-        from ..config.resilience import (
+        from backend.app.config.resilience import (
             AGGREGATED_EDGE_RESULT_CAP,
             AGGREGATED_SOURCE_URN_BATCH_SIZE,
         )
@@ -6502,7 +6501,7 @@ class FalkorDBProvider(GraphDataProvider):
         (raw lineage lives there even in dedicated projection mode) with
         a URN-index-driven MATCH, grouped server-side.
         """
-        from ..config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
+        from backend.app.config.resilience import AGGREGATED_SOURCE_URN_BATCH_SIZE
 
         ltypes = self._alias_rel_types(
             [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
@@ -6564,7 +6563,7 @@ class FalkorDBProvider(GraphDataProvider):
         regime: Optional[str] = None,
     ) -> AggregatedEdgeResult:
         """Convert raw Cypher result rows into AggregatedEdgeResult."""
-        from ..config.resilience import AGGREGATED_EDGE_RESULT_CAP
+        from backend.app.config.resilience import AGGREGATED_EDGE_RESULT_CAP
         aggregated = []
         total_edges = 0
         for row in rows:
@@ -10047,7 +10046,7 @@ class FalkorDBProvider(GraphDataProvider):
         """
         if not urns:
             return []
-        from ..config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
+        from backend.app.config.resilience import FALKORDB_CHILDREN_QUERY_TIMEOUT_SECS
 
         # Per-label urn-index seeks via the warmed urn→label cache; the
         # unlabeled IN-list form survives only for the unresolved-label
