@@ -19,7 +19,7 @@ mixed-depth synthesis alike). ``tests/test_falkordb_ondemand_pairs.py``
 regex-matches the on-demand synthesis path's Cypher text directly, so it
 is a second Cypher golden for this area — any rewording of a query it
 covers, even a semantically identical one, fails it by design. See
-carve-protocol.md in ``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/``
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
 for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio

@@ -12,8 +12,7 @@ the urn→label cache and the aggregation-run-metadata / storage-regime
 memoization built on top of it. ``physical_graph_id`` is reached from
 outside the provider (``app/api/v1/endpoints/graph.py`` via ``getattr``,
 and ``app/services/graph_cache.py``, which hashes it into cache keys), so
-it stays a public method on the composed class. See carve-protocol.md in
-``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/`` for why this has
+it stays a public method on the composed class. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
 to be a mixin rather than a delegate/helper object.
 """
 import os

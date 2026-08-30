@@ -9,8 +9,7 @@ former ``falkordb_provider.py`` (lines 49-54 as of the package move).
 ``ensure_projections`` through ``_log_aggregation_index_health`` (lines
 2149-2332, including their "Projection / Materialization Lifecycle Hooks"
 comment header) — about 1,800 lines apart in the original file. The mixin
-is the sole reader of both memo sets below; see carve-protocol.md in
-``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/`` for why this has
+is the sole reader of both memo sets below; see ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
 to be a mixin rather than a delegate/helper object.
 """
 import asyncio

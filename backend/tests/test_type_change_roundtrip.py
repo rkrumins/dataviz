@@ -87,7 +87,7 @@ class _LabelAwareFakeGraph:
 
 
 def test_projector_leaves_stale_duplicate_node_on_entity_type_change():
-    """DOCUMENTS A GAP — see task-2-report.md for the BLOCKED write-up. Not fixed here.
+    """DOCUMENTS A GAP. Not fixed here.
 
     Re-projecting the SAME node ("A" / urn:x) after its entityType changes from "dataset"
     to "container" emits a MERGE under a NEW label. A correct re-kind would leave exactly

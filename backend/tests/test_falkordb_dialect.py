@@ -16,8 +16,9 @@ docstring for exactly which fields those are and why.
 builder that PARSES a response rather than rendering a fixed string, no
 test anywhere pinned its behaviour before this task, and the caller
 (``SchemaMixin._log_aggregation_index_health``) never raises on a bad
-parse -- a wrong column read produces a plausible wrong log line and nothing
-goes red. See task-14-brief.md's "parse_index_rows is the riskiest item".
+parse -- a wrong column read produces a plausible wrong log line and
+nothing goes red. That combination makes it the riskiest builder in this
+file, hence the extra coverage.
 """
 from __future__ import annotations
 
@@ -199,9 +200,10 @@ def test_label_union_single_label():
 
 # ---------------------------------------------------------------------------
 # no_incoming_pattern -- anchored on the bound variable (left side), not
-# the equally-correct-looking NOT ()-[:T]->(n) -- see task-14-brief.md's
-# "no_incoming_pattern encodes a performance decision" for why the anchor
-# side is load-bearing for FalkorDB's planner, not stylistic.
+# the equally-correct-looking NOT ()-[:T]->(n) -- see this module's own
+# ``_no_incoming_pattern`` docstring for why the anchor side is
+# load-bearing for FalkorDB's planner (an O(N) full-graph scan avoided),
+# not stylistic.
 # ---------------------------------------------------------------------------
 
 

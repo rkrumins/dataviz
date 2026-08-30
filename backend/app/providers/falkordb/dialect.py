@@ -29,9 +29,9 @@ The four **expression** builders (``first_label_expr``, ``node_id_expr``,
 ``edge_id_expr``, ``edge_type_expr``) and ``edge_id_cursor_page`` are
 likewise defined but not wired to their ~110 call sites
 (``labels(x)[0]`` x49, ``id(r)``/``ID(n)`` x13, ``type(r)`` x49) --
-explicitly out of scope for this task (see task-14-brief.md: "the least
-reviewable commit in the whole plan", left for the PR that lifts those
-modules wholesale). Their FalkorDB values below are still real, not
+explicitly out of scope for this task ("the least reviewable commit in
+the whole plan" -- ~110 mechanical edits across 9 modules -- left for the
+PR that lifts those modules wholesale). Their FalkorDB values below are still real, not
 placeholders: ``ID(n)`` (uppercase) for nodes and ``id(r)``/``type(r)``
 (lowercase) for edges match the casing actually used throughout
 ``trace.py`` / ``drill.py`` / ``closure.py`` / ``schema.py`` today.
@@ -134,11 +134,11 @@ def _create_node_index(label: str, prop: str) -> str:
 def _create_edge_index(rel_type: str, props: Sequence[str]) -> str:
     # Renders ONE statement; the caller (schema.py's ensure_indices) keeps
     # the list of six calls and their order -- composite first, singles
-    # after -- because that order encodes a version-compatibility
-    # fallback, not a seek-shape optimization. See schema.py:242-258's own
-    # comment for why, and task-14-brief.md's "Correcting my own note" for
-    # why that -- not "FalkorDB won't use a composite index for a single
-    # seek" -- is the real reason.
+    # after -- because that order encodes a version-compatibility fallback
+    # (older FalkorDB releases may not support a composite edge index, so
+    # the singles are the working fallback -- see schema.py:242-258's own
+    # comment), NOT a seek-shape optimization -- "FalkorDB won't use a
+    # composite index for a single seek" is not the reason.
     cols = ", ".join(f"r.{p}" for p in props)
     return f"CREATE INDEX FOR ()-[r:{rel_type}]-() ON ({cols})"
 

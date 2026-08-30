@@ -499,10 +499,10 @@ def test_guard5_no_deep_relative_imports_anywhere():
 # Guard 6 -- shim/package export identity.
 # ===========================================================================
 
-# The measured union export-surface.md computed the shim must satisfy
-# (AST pass over all of backend/ at commit d7e57103): every name the repo
-# imports from the shim by name or reads off the module object, plus the
-# plan's defensive additions. Deliberately NOT derived from either
+# The measured union the shim must satisfy (an AST pass over all of
+# backend/ at commit d7e57103): every name the repo imports from the shim
+# by name or reads off the module object, plus the plan's defensive
+# additions. Deliberately NOT derived from either
 # module's own __all__ -- that would make this guard blind to exactly the
 # failure it exists to catch, one of the two __all__ lists quietly losing
 # a name.
@@ -523,7 +523,7 @@ _EXPORT_SURFACE: Tuple[str, ...] = (
 
 
 def test_guard6_export_list_identity():
-    """For every name ``export-surface.md`` measured as required, the shim
+    """For every name in ``_EXPORT_SURFACE`` above, the shim
     and the package must hand back the SAME object, not an equal copy --
     what makes ``fp._BULK_CREATE_KNOBS_CACHE.clear()`` (an existing test)
     reset the cache the real code actually reads, instead of a re-exported

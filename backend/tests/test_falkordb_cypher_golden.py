@@ -49,7 +49,7 @@ recording fakes standing in for every place Cypher can leave the provider:
   A permanent miss is not the same as a REACHABLE-and-WARM cache, though:
   ``get_stats`` and ``get_ontology_metadata`` both return on a cache HIT
   before issuing any Cypher at all, so this golden only pins their COLD
-  path — see task-2-report.md.
+  path.
 
 Every chokepoint call succeeds with an EMPTY result set (test_cypher_shapes.py's
 own default). No driven call needs a populated row to reach ITS OWN Cypher —
@@ -57,8 +57,7 @@ every call attempts its query regardless of what comes back — so the walks in
 trace_at_level / trace_closure / trace_closure_coarse / expand_aggregated
 terminate after their first wave instead of hydrating a synthetic graph. What
 this golden pins is the SHAPE of the question each surface asks first, not an
-exhaustive walk of every internal branch a populated graph could reach — see
-task-2-report.md for what that does and doesn't cover.
+exhaustive walk of every internal branch a populated graph could reach.
 
 Determinism
 -----------
@@ -167,9 +166,9 @@ class _FakeGraphHandle:
     ``_ensure_label_urn_indexes`` call ``self._proj.query`` / ``.ro_query``
     directly. ``_ensure_label_urn_indexes`` is LIVE (not reached by this
     script — it fires from ``falkordb_materialize.AggregationPipeline
-    ._write_items`` when aggregation writes hit a new label; see
-    task-2-report.md), not the dead code an earlier version of this file
-    claimed. ``sink`` names which attribute this instance stands in for,
+    ._write_items`` when aggregation writes hit a new label), not the dead
+    code an earlier version of this file claimed. ``sink`` names which
+    attribute this instance stands in for,
     so a bypass call stays distinguishable from a chokepoint call in the
     recorded golden."""
 

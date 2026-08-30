@@ -16,8 +16,7 @@ is exactly why ``get_stats`` is the slow one), ``get_ontology_metadata``,
 ``prime_stats_cache`` are reached via ``getattr`` from the insights
 collector and the reconcile sweeper; ``get_node_degrees`` from
 ``ContextEngine`` — all public, all must stay reachable, and none of
-``get_counts_fast``'s queries may gain a projection. See carve-protocol.md
-in ``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/`` for why this
+``get_counts_fast``'s queries may gain a projection. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this
 has to be a mixin rather than a delegate/helper object.
 """
 import json

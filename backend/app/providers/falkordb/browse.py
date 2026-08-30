@@ -12,8 +12,7 @@ behaviour that costs nothing to defend against.
 ``get_top_level_or_orphan_nodes`` accepts ``known_total_count`` and
 ``query_timeout`` kwargs that ``ContextEngine`` passes only when the
 signature has them (it inspects), so the signature is unchanged here.
-See carve-protocol.md in
-``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/`` for why this has
+See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
 to be a mixin rather than a delegate/helper object.
 """
 import asyncio

@@ -14,7 +14,7 @@ and silently dropping it while reporting success), ``save_custom_graph``,
 and the single-node/edge ``create_node`` / ``create_edge`` / ``update_edge``
 / ``delete_edge`` mutations. ``list_graphs`` and ``close`` are not here —
 they moved with ``ConnectionMixin`` in an earlier task. See
-carve-protocol.md in ``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/``
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
 for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio

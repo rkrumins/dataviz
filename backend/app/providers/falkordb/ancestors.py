@@ -11,8 +11,7 @@ resolved containment types, so a containment reclassification routes
 reads to a fresh cache namespace with no manual invalidation —
 ``tests/test_falkordb_ancestors_cache_reset.py`` pins that behaviour and
 builds the provider via ``FalkorDBProvider.__new__``, so nothing here may
-assume ``__init__`` ran. See carve-protocol.md in
-``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/`` for why this has
+assume ``__init__`` ran. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
 to be a mixin rather than a delegate/helper object.
 """
 import asyncio
