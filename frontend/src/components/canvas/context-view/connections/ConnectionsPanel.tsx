@@ -2,16 +2,17 @@
  * ConnectionsPanel — the Context View's bottom-right surface, replacing the
  * Edge Legend whose eye toggles changed nothing and whose counts were wrong.
  *
- * It says three different true things instead of one wrong one:
- *   - {relationships} connections — the underlying relationships in view,
- *     each bundle counted exactly once;
- *   - {drawn} drawn — the lines the overlay is actually painting right now,
- *     published by the overlay itself (never re-derived here);
- *   - {types} types — how many kinds of connection are on screen.
+ * It says three different true things instead of one wrong one, and NAMES
+ * the unit of each (`connectionUnits.ts` owns the words):
+ *   - {n} underlying relationships — every relationship in view, a bundle
+ *     contributing all of the relationships it stands for;
+ *   - {d} lines drawn — the lines the overlay is actually painting right
+ *     now, published by the overlay itself (never re-derived here);
+ *   - {t} types — how many kinds of connection are on screen.
  *
- * A type carried by a connection that carries two types is counted in BOTH
- * rows and once in the total; the row tooltip says so, because a reader who
- * adds the rows up and gets more than the total deserves an explanation.
+ * A type carried by a line that carries two types is counted in BOTH rows
+ * and once in the total; the row tooltip says so, because a reader who adds
+ * the rows up and gets more than the total deserves an explanation.
  *
  * Hiding is real: the projection drops those relationships, so a hidden
  * type's row keeps its name and swatch (to bring it back) but shows NO
@@ -37,6 +38,7 @@ import type { EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
 import { edgeDashArray } from '../edgeDash'
 import type { ConnectionModel } from './connectionModel'
+import { formatUnitCount, unitMeaning, unitNoun } from './connectionUnits'
 
 export interface ConnectionsPanelProps {
   /** Must be referentially stable (`useMemo` in the parent); a fresh identity
@@ -67,8 +69,8 @@ const DIRECTION_TITLE = '→ flows with the layer order · ← flows back upstre
  *  visible one stays on the board at its full count. Said plainly on the row
  *  rather than left for the reader to notice as a number that will not move. */
 const TRACE_COUNT_NOTE =
-  ' During a trace, a connection that carries several types keeps its full count when one of them is hidden.'
-const ROW_HINT = 'Hover a row to spotlight its connections · click to keep it lit.'
+  ' During a trace, a line that carries several types keeps its full underlying-relationship count when one of them is hidden.'
+const ROW_HINT = 'Hover a row to spotlight its lines · click to keep it lit.'
 
 function Swatch({ def }: { def: EdgeTypeDefinition }) {
   return (
@@ -211,8 +213,11 @@ export function ConnectionsPanel({
               </div>
             ) : (
               <>
-                <p className="text-2xs text-ink-muted tabular-nums pb-2">
-                  {`${model.relationships.toLocaleString()} connections · ${drawn.toLocaleString()} drawn · ${model.typeCount} ${model.typeCount === 1 ? 'type' : 'types'}`}
+                <p
+                  className="text-2xs text-ink-muted tabular-nums pb-2"
+                  title={`${unitMeaning('relationships')} ${unitMeaning('lines')}`}
+                >
+                  {`${formatUnitCount(model.relationships, 'relationships')} · ${drawn.toLocaleString()} ${unitNoun(drawn, 'lines')} drawn · ${model.typeCount} ${model.typeCount === 1 ? 'type' : 'types'}`}
                 </p>
 
                 <div
@@ -231,7 +236,7 @@ export function ConnectionsPanel({
                       <div
                         key={row.type}
                         data-connection-row={row.type}
-                        title={`${def.label} — ${row.relationships.toLocaleString()} of the connections in view carry this type. A connection carrying more than one type is counted in each of its types.${traceMode ? TRACE_COUNT_NOTE : ''}`}
+                        title={`${def.label} — ${formatUnitCount(row.relationships, 'relationships')} in view carry this type. A line carrying more than one type is counted in each of its types. ${unitMeaning('relationships')}${traceMode ? TRACE_COUNT_NOTE : ''}`}
                         onMouseEnter={() => setHoveredType(row.type)}
                         onMouseLeave={() => setHoveredType(null)}
                         onClick={() => togglePin(row.type)}

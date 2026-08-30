@@ -12,6 +12,9 @@
  *  - "Showing X of Y connections" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
  *
+ * Every count here names its unit; the words come from
+ * `connections/connectionUnits.ts` so no two chips can drift apart.
+ *
  * Visual language matches the column overflow chips: rounded-full glass,
  * backdrop blur, soft border, quiet colors.
  */
@@ -20,6 +23,7 @@ import * as PopoverPrimitive from '@radix-ui/react-popover'
 import { Unlink, Layers, ListPlus, GitBranch, Focus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
@@ -195,11 +199,12 @@ export function CanvasStatusChips({
             <div>
               <p className="font-semibold mb-1">Adaptive edge density</p>
               <p className="text-ink-muted">
-                Showing the {adaptiveShown!.toLocaleString()} strongest flows of{' '}
-                {adaptiveTotal!.toLocaleString()} on this canvas. The in/out markers on
-                each entity summarize the rest — hover or select an entity to focus its
-                connections, or show everything.
+                Showing the {adaptiveShown!.toLocaleString()} strongest{' '}
+                {unitNoun(adaptiveTotal!, 'lines')} of {adaptiveTotal!.toLocaleString()} on
+                this canvas. The in/out markers on each entity summarize the rest — hover
+                or select an entity to focus it, or show everything.
               </p>
+              <p className="text-ink-muted/70 mt-1">{unitMeaning('lines')}</p>
             </div>
           }
         >
@@ -207,7 +212,8 @@ export function CanvasStatusChips({
             <GitBranch className="w-3 h-3 text-accent-lineage/80" />
             <span>
               Top <span className="tabular-nums">{adaptiveShown!.toLocaleString()}</span> of{' '}
-              <span className="tabular-nums">{adaptiveTotal!.toLocaleString()}</span> flows
+              <span className="tabular-nums">{adaptiveTotal!.toLocaleString()}</span>{' '}
+              {unitNoun(adaptiveTotal!, 'lines')}
             </span>
             {onShowAllEdges && (
               <button
@@ -229,10 +235,12 @@ export function CanvasStatusChips({
             <div>
               <p className="font-semibold mb-1">Large connection fan</p>
               <p className="text-ink-muted">
-                This entity has {focusTotal!.toLocaleString()} connections — showing the{' '}
+                This entity touches {focusTotal!.toLocaleString()}{' '}
+                {unitNoun(focusTotal!, 'lines')} — showing the{' '}
                 {focusShown!.toLocaleString()} strongest on canvas. The Lens lists every
-                connection, grouped and searchable.
+                one, grouped and searchable.
               </p>
+              <p className="text-ink-muted/70 mt-1">{unitMeaning('lines')}</p>
             </div>
           }
         >
@@ -240,7 +248,8 @@ export function CanvasStatusChips({
             <Focus className="w-3 h-3 text-accent-lineage/80" />
             <span>
               Strongest <span className="tabular-nums">{focusShown!.toLocaleString()}</span> of{' '}
-              <span className="tabular-nums">{focusTotal!.toLocaleString()}</span>
+              <span className="tabular-nums">{focusTotal!.toLocaleString()}</span>{' '}
+              {unitNoun(focusTotal!, 'lines')}
             </span>
             {onOpenFocusLens && (
               <button

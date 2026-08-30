@@ -34,6 +34,7 @@ import { SearchHitInlineRow } from './SearchHitInlineRow'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights, TECHNICAL_LINE_HEIGHT } from './density'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
@@ -1677,7 +1678,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       {(periphery?.upEdges ?? 0) > 0 && (
                         <>
                           <p className="text-ink-muted">
-                            {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'} from
+                            {periphery!.upEdges.toLocaleString()} {unitNoun(periphery!.upEdges, 'lines')} from
                             entities on screen lead up there:
                           </p>
                           <div className="mt-1">
@@ -1693,6 +1694,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                               </p>
                             )}
                           </div>
+                          <p className="mt-1 text-ink-muted/70">{unitMeaning('lines')}</p>
                         </>
                       )}
                       <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll up</p>
@@ -1714,7 +1716,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <>
                         {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
                         <span className="tabular-nums opacity-80">
-                          {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
+                          {periphery!.upEdges.toLocaleString()} {unitNoun(periphery!.upEdges, 'lines')}
                         </span>
                       </>
                     )}
@@ -1746,7 +1748,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       {(periphery?.downEdges ?? 0) > 0 && (
                         <>
                           <p className="text-ink-muted">
-                            {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'} from
+                            {periphery!.downEdges.toLocaleString()} {unitNoun(periphery!.downEdges, 'lines')} from
                             entities on screen lead down there:
                           </p>
                           <div className="mt-1">
@@ -1762,6 +1764,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                               </p>
                             )}
                           </div>
+                          <p className="mt-1 text-ink-muted/70">{unitMeaning('lines')}</p>
                         </>
                       )}
                       <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll down</p>
@@ -1783,7 +1786,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <>
                         {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
                         <span className="tabular-nums opacity-80">
-                          {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
+                          {periphery!.downEdges.toLocaleString()} {unitNoun(periphery!.downEdges, 'lines')}
                         </span>
                       </>
                     )}

@@ -42,6 +42,7 @@ import { cn } from '@/lib/utils'
 import { withTimeout, TimeoutError } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
+import { formatUnitCount, unitMeaning, unitNoun } from '@/components/canvas/context-view/connections/connectionUnits'
 import { resolveEntityName } from '@/lib/entityDisplayName'
 
 interface LineageNeighborsProps {
@@ -203,8 +204,8 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
             />
           )}
           {totalCount > 0 && (
-            <span>
-              {directTotal} connection{directTotal === 1 ? '' : 's'}
+            <span title={unitMeaning('neighbors')}>
+              {formatUnitCount(directTotal, 'neighbors')}
               {rollupTotal > 0 && ` · ${rollupTotal} rolled-up`}
             </span>
           )}
@@ -249,7 +250,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
         <DirectionCard
           direction="incoming"
           label="Data Sources"
-          subLabel="Upstream connections"
+          subLabel={`Upstream ${unitNoun(incomingCount, 'neighbors')}`}
           count={incomingCount}
           records={incomingRecords}
           fetchState={fetchState}
@@ -263,7 +264,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
         <DirectionCard
           direction="outgoing"
           label="Data Consumers"
-          subLabel="Downstream connections"
+          subLabel={`Downstream ${unitNoun(outgoingCount, 'neighbors')}`}
           count={outgoingCount}
           records={outgoingRecords}
           fetchState={fetchState}

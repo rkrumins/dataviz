@@ -22,6 +22,7 @@ import { ConnectionsPanel, type ConnectionsPanelProps } from '../ConnectionsPane
 import type { ConnectionModel, ConnectionTypeRow } from '../connectionModel'
 import type { EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
+import { unitMeaning } from '../connectionUnits'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -135,10 +136,22 @@ describe('ConnectionsPanel', () => {
     expect(headerButton().textContent).toMatch(/47 · 2 hidden/)
   })
 
-  it('the expanded header reads {n} connections · {d} drawn · {t} types', () => {
+  it('the expanded header names the unit of every number it shows', () => {
+    // The total and the drawn count are DIFFERENT units — the whole reason
+    // the two numbers disagree. Each says which it is, and the line carries
+    // both definitions for the reader who wants them.
     useDrawnEdgesStore.setState({ drawn: 12 })
     mount({ defaultExpanded: true })
-    expect(screen.getByText('47 connections · 12 drawn · 2 types')).toBeTruthy()
+    const line = screen.getByText('47 underlying relationships · 12 lines drawn · 2 types')
+    expect(line.getAttribute('title')).toContain(unitMeaning('relationships'))
+    expect(line.getAttribute('title')).toContain(unitMeaning('lines'))
+  })
+
+  it('a row says its count is in underlying relationships', () => {
+    mount({ defaultExpanded: true })
+    const title = rowFor('FLOWS_TO').getAttribute('title') ?? ''
+    expect(title).toContain('30 underlying relationships in view carry this type')
+    expect(title).toContain(unitMeaning('relationships'))
   })
 
   it('Lineage off shows "Lineage is off" and renders no totals', () => {
@@ -376,7 +389,7 @@ describe('ConnectionsPanel', () => {
   })
 
   it('says what a row does, whenever there is a row to do it to', () => {
-    const hint = 'Hover a row to spotlight its connections · click to keep it lit.'
+    const hint = 'Hover a row to spotlight its lines · click to keep it lit.'
     const { unmount } = mount({ defaultExpanded: true })
     expect(screen.getByText(hint)).toBeTruthy()
     unmount()
@@ -423,7 +436,7 @@ describe('ConnectionsPanel', () => {
     // per member. A trace cannot: its lines carry a total, not a list, so
     // the reader is told rather than left to wonder why nothing moved.
     const clause =
-      'During a trace, a connection that carries several types keeps its full count when one of them is hidden.'
+      'During a trace, a line that carries several types keeps its full underlying-relationship count when one of them is hidden.'
     const { unmount } = mount({ defaultExpanded: true })
     expect(rowFor('FLOWS_TO').getAttribute('title')).not.toMatch(/During a trace/)
     unmount()

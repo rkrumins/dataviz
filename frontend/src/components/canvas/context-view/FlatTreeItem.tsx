@@ -14,6 +14,7 @@ import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
@@ -863,7 +864,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
             opacity: 0.6 + lineageIntensityIn * 0.4,
           }}
-          title={`${lineageIn.toLocaleString()} incoming connection${lineageIn === 1 ? '' : 's'}`}
+          title={`${lineageIn.toLocaleString()} incoming ${unitNoun(lineageIn, 'lines')} on this canvas — ${unitMeaning('lines')}`}
         />
       )}
       {lineageOut > 0 && (
@@ -873,21 +874,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
             opacity: 0.6 + lineageIntensityOut * 0.4,
           }}
-          title={`${lineageOut.toLocaleString()} outgoing connection${lineageOut === 1 ? '' : 's'}`}
+          title={`${lineageOut.toLocaleString()} outgoing ${unitNoun(lineageOut, 'lines')} on this canvas — ${unitMeaning('lines')}`}
         />
       )}
       {externalIn > 0 && (
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming connection${externalIn === 1 ? '' : 's'} outside this view`}
+          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'relationships')} lead outside this view — ${unitMeaning('relationships')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing connection${externalOut === 1 ? '' : 's'} outside this view`}
+          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'relationships')} lead outside this view — ${unitMeaning('relationships')}`}
         />
       )}
     </div>
