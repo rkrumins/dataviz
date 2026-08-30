@@ -1,18 +1,24 @@
-"""Covering tests for `_runner._call_optional` — no live FalkorDB needed.
+"""Covering tests for `_runner._call_optional` / `_runner._pin` — no live
+FalkorDB needed.
 
-Every concrete provider that exists today (FalkorDB, Neo4j, Spanner) happens
-to implement get_nodes_batch / get_node_degrees / preflight, so the live
-contract run (test_falkordb_provider_contract.py) can only prove "no
-regression when the method is present". It can never exercise "tolerance
-when the method is absent" — the actual bug a prior review caught: building
-`call=provider.some_method(...)` evaluates the attribute access eagerly, so
-a provider missing the method raised AttributeError before `_pin`'s
-`except NotImplementedError` ever got a chance to run. A stub that
-genuinely lacks the method is the only way to exercise that branch.
+`_call_optional` is `_runner`'s tolerance helper for a method that isn't
+guaranteed to exist on whatever's in hand. Its only caller today is
+`preflight` (required by convention, not the ABC — every concrete
+provider that exists happens to implement it, so the live contract run
+alone can never exercise "tolerance when the method is absent"). Before
+T-A landed base-class defaults, `get_nodes_batch` / `get_node_degrees`
+needed the same tolerance too; `run_all` now calls both directly. Either
+way, the actual bug a prior review caught applies to any such call:
+building `call=provider.some_method(...)` evaluates the attribute access
+eagerly, so a provider missing the method raised AttributeError before
+`_pin`'s `except NotImplementedError` ever got a chance to run. A stub
+that genuinely lacks the method is the only way to exercise that branch.
 """
 from __future__ import annotations
 
 import pytest
+
+from backend.common.interfaces.provider import ProviderFeature, ProviderFeatureUnsupportedError
 
 from . import _runner
 
@@ -64,4 +70,31 @@ async def test_pin_snapshots_the_tolerant_sentinel_for_a_missing_method(monkeypa
         "provider": "stub",
         "name": "get_node_degrees_datasets",
         "actual": "NotImplementedError",
+    }
+
+
+@pytest.mark.asyncio
+async def test_pin_snapshots_unsupported_sentinel_for_a_declared_unsupported_feature(monkeypatch):
+    """`ProviderFeatureUnsupportedError` is a `NotImplementedError` subclass
+    but a more specific signal -- "this provider will never support this",
+    not "not built out yet" -- and `_pin` must tell the two apart in the
+    snapshot rather than collapsing both to the same sentinel string.
+    """
+    captured = {}
+    monkeypatch.setattr(
+        _runner,
+        "assert_snapshot",
+        lambda *, provider, name, actual: captured.update(
+            provider=provider, name=name, actual=actual
+        ),
+    )
+
+    async def _raises_unsupported():
+        raise ProviderFeatureUnsupportedError.for_feature(ProviderFeature.TRACE_CLOSURE, "stub")
+
+    await _runner._pin(snapshot_label="stub", name="trace_closure_d2_one_hop", call=_raises_unsupported())
+    assert captured == {
+        "provider": "stub",
+        "name": "trace_closure_d2_one_hop",
+        "actual": "unsupported",
     }

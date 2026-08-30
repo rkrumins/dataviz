@@ -11,6 +11,16 @@ This test only covers **Mode A — owned schema** (canonical
 when the provider's Phase 5 wiring lands (separate fixture, separate
 snapshot directory).
 
+Built through the catalog (``create_provider_instance``), like the
+FalkorDB and Neo4j contract tests, but NOT through
+``_runner.make_contract_test``: that factory's skip-gate and
+``ProviderSpec`` fields are host:port-shaped, and Spanner is not --
+it addresses a database by project/instance/database (in
+``extra_config``), and ``catalog/spanner.py``'s own ``_validate``
+rejects a request that sets host/port at all. This fixture keeps its
+own resource-path-based skip gate and env vars, and hand-builds the
+``ProviderSpec`` from them.
+
 Run::
 
     # Capture baseline (one-time, against a real Enterprise instance):
@@ -30,7 +40,6 @@ re-capture the baseline and code-review the snapshot diff.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
@@ -38,6 +47,9 @@ from typing import Optional
 
 import pytest
 import pytest_asyncio
+
+from backend.common.providers.catalog import create_provider_instance
+from backend.common.providers.catalog.descriptor import ProviderSpec
 
 from . import _runner
 
@@ -84,14 +96,13 @@ skip_if_no_real_spanner = pytest.mark.skipif(
 
 
 # ───────────────────────────────────────────────────────────────────
-# Fixture — fresh provider against a real Spanner database
+# Fixture — fresh provider against a real Spanner database, built
+# through the catalog
 # ───────────────────────────────────────────────────────────────────
 
 
 @pytest_asyncio.fixture
 async def provider():
-    from backend.graph.adapters.spanner_provider import SpannerProvider
-
     target = _real_spanner_target()
     assert target, "skip marker should have prevented this"
     # Parse the projects/.../databases/... path back into the three IDs.
@@ -109,15 +120,27 @@ async def provider():
             )
         creds_json = p.read_text()
 
-    p = SpannerProvider(
-        project_id=project_id,
-        instance_id=instance_id,
-        database_id=database_id,
-        graph_name=graph_name,
-        credentials_json=creds_json,
-        use_emulator=False,
-        extra_config={},
+    # Same construction path production uses: create_provider_instance ->
+    # catalog/spanner.py's _build. host/port are omitted -- Spanner has no
+    # such concept (_build ignores them; _validate, which
+    # create_provider_instance does not call, would reject them if set).
+    # project/instance/database and the graph name all ride extra_config,
+    # matching exactly what _build reads them from.
+    spec = ProviderSpec(
+        "spanner",
+        host=None,
+        port=None,
+        graph_name=None,
+        tls_enabled=False,
+        credentials={"service_account_json": creds_json} if creds_json else {},
+        extra_config={
+            "projectId": project_id,
+            "instanceId": instance_id,
+            "databaseId": database_id,
+            "graphName": graph_name,
+        },
     )
+    p = create_provider_instance(spec)
     # Ensure schema is bootstrapped (idempotent on Enterprise; recreates
     # the v2 schema first time, no-op afterwards). Phase 1's substrate
     # bounds this with a deadline.
@@ -134,7 +157,7 @@ async def provider():
         pass
 
     await _runner.seed(p)
-    yield p
+    yield p, graph_name
 
     # Cleanup: purge the AGGREGATED sidecar so back-to-back runs don't
     # accumulate test contributions. Schema-level cleanup is left to
@@ -158,4 +181,5 @@ async def test_spanner_provider_contract_mode_a(provider):
     and Neo4j contract tests; same harness, same fixture, same
     assertions. The snapshot label scopes the baseline to its own
     directory so Mode B (when added) can capture a parallel set."""
-    await _runner.run_all(provider, snapshot_label="spanner_owned")
+    p, graph_name = provider
+    await _runner.run_all(p, snapshot_label="spanner_owned", graph_name=graph_name)
