@@ -16,42 +16,43 @@ by attribute), plus the plan's defensive additions. Mutable module state
 never copied — tests mutate them in place via ``.clear()`` and expect the
 real state to change.
 
-``provider.py`` now holds only ``class FalkorDBProvider`` plus whatever
-module-level names its own body still references; the pre-class helpers
-that name imports for its own use were dissolved into leaf modules
-(``errors.py``, ``hosts.py``, ``knobs.py``, ``rowmap.py``, ``schema.py``,
-``aggregation.py``, ``closure.py``, ``cursors.py``). A handful of exported
-names are not referenced anywhere in the class body, so they are imported
-below directly from the leaf module that now defines them rather than
-from ``.provider``.
+``provider.py`` now holds only ``class FalkorDBProvider`` and its bases
+tuple — the last carve emptied the class body, so ``FalkorDBProvider`` is
+the only name still sourced from ``.provider``; every other exported name
+below comes straight from the leaf module that defines it rather than
+from ``.provider`` (``errors.py``, ``hosts.py``, ``knobs.py``,
+``rowmap.py``, ``schema.py``, ``aggregation.py``, ``closure.py``,
+``cursors.py``).
 """
 import asyncio
 
-from .provider import (
-    # Section A of export-surface.md — imported by name at 104 call sites.
-    FalkorDBProvider,
-    _sanitize_label,
-    _split_user_properties,
-    _compute_searchable_text,
-    _decode_keyset_cursor,
-    _edge_from_row,
-    _is_transient_connection_error,
-    _is_loading_error,
-    _keyset_sort,
-    _validate_sort_direction,
-    # Section B — read off the module object by two tests; must stay the
-    # same object (mutated or monkeypatched in place), never a copy.
-    logger,
-)
+from .provider import FalkorDBProvider
 
 # The rest of the export list: names ``provider.py`` no longer imports for
 # its own use (its class body never references them), so they come
 # straight from the leaf module that defines them. Same objects either
 # way — the split above is purely about which module happens to import
 # them first, not about identity.
-from .rowmap import _RESERVED_NODE_KEYS, _sanitize_node_properties, _node_from_props
+from ._log import logger
+from .rowmap import (
+    _RESERVED_NODE_KEYS,
+    _sanitize_node_properties,
+    _node_from_props,
+    _sanitize_label,
+    _split_user_properties,
+    _compute_searchable_text,
+    _edge_from_row,
+)
 from .hosts import resolve_falkordb_target, _normalize_falkordb_host
-from .cursors import CursorMismatchError, _keyset_sort_key, _CURSOR_PREFIX, _encode_keyset_cursor
+from .cursors import (
+    CursorMismatchError,
+    _keyset_sort_key,
+    _CURSOR_PREFIX,
+    _encode_keyset_cursor,
+    _decode_keyset_cursor,
+    _keyset_sort,
+    _validate_sort_direction,
+)
 from .knobs import (
     _BULK_CREATE_KNOBS_CACHE,
     _BULK_CREATE_BATCH_DEFAULT,
@@ -71,6 +72,8 @@ from .errors import (
     _is_cluster_routing_error,
     _is_null_handle_error,
     _is_missing_graph_error,
+    _is_transient_connection_error,
+    _is_loading_error,
     _EmptyResult,
     _TRANSIENT_RETRY_BACKOFFS,
 )
