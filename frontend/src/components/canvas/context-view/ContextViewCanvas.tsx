@@ -47,6 +47,7 @@ import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
+import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
@@ -5202,7 +5203,10 @@ export function ContextViewCanvas({
         )}
 
 
-        {/* Layer Columns. */}
+        {/* Layer Columns. The wrapper exists so the edge fades can be
+            anchored to the SCROLLER's box rather than to canvas-body,
+            whose in-flow banners would otherwise offset them. */}
+        <div className="relative flex-1 min-h-0 flex flex-col">
         <div
           ref={horizontalScrollRef}
           // `custom-scrollbar`: an author-styled scrollbar is a CLASSIC one
@@ -5213,7 +5217,7 @@ export function ContextViewCanvas({
           // height it claims (11px in Chromium, which honours
           // `scrollbar-width: thin` over the rule's 6px) is already measured
           // into --canvas-hsb, so the columns still end at the visible edge.
-          className="flex-1 overflow-auto relative scroll-smooth custom-scrollbar"
+          className="flex-1 min-h-0 overflow-auto relative scroll-smooth custom-scrollbar"
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
           // dock, layer strip, edge legend) so a column's last row can always scroll
@@ -5414,6 +5418,12 @@ export function ContextViewCanvas({
           </div>
 
 
+        </div>
+        {/* "There is more this way" — a fade on whichever side still has
+            content. Pure decoration: pointer-events-none, and painted
+            under the layer strip and the bottom-right dock, which are
+            later siblings of this wrapper. */}
+        <CanvasEdgeFades scrollRef={horizontalScrollRef} />
         </div>
       </div>
       </div>{/* end canvas column */}
