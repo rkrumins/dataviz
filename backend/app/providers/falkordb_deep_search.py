@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
-from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+from backend.common.providers.rowmap import RESERVED_NODE_KEYS as _RESERVED_NODE_KEYS
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.common.models.search import (
     AggregationSpec,

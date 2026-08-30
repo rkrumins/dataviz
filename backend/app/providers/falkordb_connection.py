@@ -1377,7 +1377,7 @@ def _is_retryable_client_error(exc: BaseException) -> bool:
     classifiers verbatim so both paths agree on what is retryable (imported
     lazily: ``falkordb_provider`` imports this module)."""
     try:
-        from backend.app.providers.falkordb_provider import (
+        from backend.app.providers.falkordb.errors import (
             _is_cluster_routing_error,
             _is_null_handle_error,
             _is_transient_connection_error,
