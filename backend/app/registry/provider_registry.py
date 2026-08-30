@@ -22,6 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.common.adapters import CircuitBreakerProxy
 from backend.common.interfaces.provider import GraphDataProvider
 
+# Eager, not lazy: see the identical import + comment in manager.py. Added
+# here too, independently, so this module's own dispatch does not silently
+# depend on its unrelated bottom-of-file `from ...manager import
+# provider_manager` re-export to get "falkordb" registered as a side effect.
+from backend.app.providers.falkordb import catalog_descriptor  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -298,101 +304,11 @@ class ProviderRegistry:
         extra_config: Optional[dict] = None,
         provider_id: Optional[str] = None,
     ) -> GraphDataProvider:
-        """Dispatch to the correct provider constructor."""
-        ptype = provider_type.lower()
-
-        if ptype == "falkordb":
-            from backend.app.providers.falkordb_provider import FalkorDBProvider, resolve_falkordb_target
-            # Mirror ProviderManager._create_provider_instance: this path
-            # (used by ContextEngine / the stats collector / the viz read +
-            # trace path) previously dropped credentials AND extra_config,
-            # so FalkorDB auth and Sentinel/Cluster topology never reached
-            # the provider on the read side. Plumb them through. The SINGLE
-            # shared resolver (local-dev override + host normalization)
-            # guarantees this read path resolves the SAME instance as the
-            # projection — no future drift can reintroduce read≠projection.
-            host, port = resolve_falkordb_target(host, port)
-            creds = credentials or {}
-            _falkor_conn = (extra_config or {}).get("falkordbConnection")
-            # Per-provider auth gate (default enabled). When false, the
-            # provider nulls the graph credentials so no AUTH leaks to an
-            # unauthenticated FalkorDB.
-            _auth_enabled = (_falkor_conn or {}).get("authEnabled", True)
-            return FalkorDBProvider(
-                host=host or "localhost",
-                port=port or 6379,
-                graph_name=graph_name or "nexus_lineage",
-                username=creds.get("username"),
-                password=creds.get("password"),
-                connection_config=_falkor_conn,
-                # Deprecated alias — folded into credentials["cache_redis_url"].
-                cache_redis_url=creds.get("cache_redis_url"),
-                auth_enabled=_auth_enabled,
-                tls_enabled=tls_enabled,
-                # The CACHE role's per-provider override (extra_config.cacheConnection
-                # + the decrypted cache_* credentials) — resolved centrally by
-                # build_cache_client, never inherited from the graph connection.
-                provider_id=provider_id,
-                extra_config=extra_config,
-                credentials=creds,
-            )
-
-        elif ptype == "neo4j":
-            from backend.graph.adapters.neo4j_provider import Neo4jProvider
-            return Neo4jProvider(
-                uri=f"{'bolt+s' if tls_enabled else 'bolt'}://{host}:{port or 7687}",
-                username=credentials.get("username", "neo4j"),
-                password=credentials.get("password", ""),
-                database=graph_name or "neo4j",
-                extra_config=extra_config,
-                # The CACHE role's per-provider override (extra_config.cacheConnection
-                # + the decrypted cache_* credentials, including the legacy
-                # extra_config.redisUrl alias) — resolved centrally by
-                # build_neo4j_cache_client, never inherited from the Bolt credentials.
-                provider_id=provider_id,
-                credentials=credentials or {},
-            )
-
-        elif ptype == "datahub":
-            from backend.graph.adapters.datahub_provider import DataHubGraphQLProvider
-            return DataHubGraphQLProvider(
-                base_url=host or "",
-                token=credentials.get("token"),
-            )
-
-        elif ptype == "spanner":
-            import os as _os
-            from backend.graph.adapters.spanner_provider import SpannerProvider
-            cfg = dict(extra_config or {})
-            use_emulator = bool(cfg.get("useEmulator", False))
-            # Mirror of the manager.py guard: emulator mode requires an
-            # explicit opt-in env var so a crafted payload cannot route a
-            # real provider at localhost:9010 in production.
-            if use_emulator and not _os.getenv("SYNODIC_ALLOW_SPANNER_EMULATOR"):
-                raise ValueError(
-                    "Spanner emulator mode (extra_config.useEmulator=true) is "
-                    "disabled by default. Set SYNODIC_ALLOW_SPANNER_EMULATOR=1 "
-                    "in the backend environment to enable it for local development."
-                )
-            project_id = cfg.get("projectId") or credentials.get("project_id")
-            instance_id = cfg.get("instanceId")
-            database_id = cfg.get("databaseId") or graph_name
-            if not project_id or not instance_id or not database_id:
-                raise ValueError(
-                    "Spanner provider requires extra_config.projectId, "
-                    "extra_config.instanceId, and (extra_config.databaseId or graph_name)."
-                )
-            return SpannerProvider(
-                project_id=project_id,
-                instance_id=instance_id,
-                database_id=database_id,
-                graph_name=cfg.get("graphName") or "UniViz",
-                credentials_json=credentials.get("service_account_json"),
-                use_emulator=use_emulator,
-                extra_config=cfg,
-            )
-
-        raise ValueError(f"Unknown provider_type: {ptype!r}")
+        """Dispatch to the catalog via ProviderManager._create_provider_instance."""
+        from backend.app.providers.manager import ProviderManager
+        return ProviderManager._create_provider_instance(
+            provider_type, host, port, graph_name, tls_enabled, credentials, extra_config, provider_id,
+        )
 
 # Module-level singleton — used by FastAPI dependency and ContextEngine.
 # DEPRECATED: Use provider_manager from backend.app.providers.manager instead.

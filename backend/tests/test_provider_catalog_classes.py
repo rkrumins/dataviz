@@ -112,3 +112,37 @@ def test_importing_catalog_does_not_import_backend_app():
         f"types, got {registered!r} -- if falkordb is now in this set, something "
         "reintroduced a backend.app import into the kernel"
     )
+
+
+def test_importing_manager_registers_falkordb():
+    """PR 2 T-F: ProviderManager._create_provider_instance now delegates to
+    create_provider_instance(spec) instead of importing FalkorDBProvider
+    itself inline, so nothing about the dispatch method forces "falkordb" to
+    be registered anymore. Importing backend.app.providers.manager alone
+    must still register it (manager.py's eager `from
+    backend.app.providers.falkordb import catalog_descriptor`) -- without
+    that import, the FIRST "falkordb" dispatch in a fresh process raises
+    Unknown provider_type: 'falkordb'. Regression pin for exactly that bug."""
+    stdout = _run_fresh_import(
+        "import backend.app.providers.manager\n"
+        "from backend.common.providers.catalog import descriptor_for\n"
+        "print('REGISTERED=' + str(descriptor_for('falkordb') is not None))\n"
+    )
+    line = next(l for l in stdout.splitlines() if l.startswith("REGISTERED="))
+    assert line == "REGISTERED=True"
+
+
+def test_importing_provider_registry_registers_falkordb():
+    """Same guarantee for the other dispatcher (backend.app.registry.
+    provider_registry) -- checked as its own fresh-process import, not
+    layered onto the test above, so removing either module's own eager
+    import is caught even though provider_registry.py also imports
+    manager.py (for an unrelated re-export) and so would otherwise get this
+    for free."""
+    stdout = _run_fresh_import(
+        "import backend.app.registry.provider_registry\n"
+        "from backend.common.providers.catalog import descriptor_for\n"
+        "print('REGISTERED=' + str(descriptor_for('falkordb') is not None))\n"
+    )
+    line = next(l for l in stdout.splitlines() if l.startswith("REGISTERED="))
+    assert line == "REGISTERED=True"

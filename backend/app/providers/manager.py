@@ -49,6 +49,16 @@ from backend.common.interfaces.preflight import (
 
 from .state import ProbeOutcome, ProviderState
 
+# Eager, not lazy: backend.common.providers.catalog (the dependency-free kernel
+# _create_provider_instance below delegates to) can never self-register
+# "falkordb" -- its concrete class lives under backend.app, which the kernel's
+# purity guard forbids the kernel from importing (catalog/__init__.py's
+# docstring). FalkorDB's descriptor registers itself only when this package is
+# imported. Without this line, the catalog import inside the method is not
+# enough: the FIRST "falkordb" dispatch in a process that hasn't separately
+# imported it raises Unknown provider_type: 'falkordb'.
+from backend.app.providers.falkordb import catalog_descriptor  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -1160,117 +1170,12 @@ class ProviderManager:
         extra_config: Optional[dict] = None,
         provider_id: Optional[str] = None,
     ) -> GraphDataProvider:
-        """Dispatch to the correct provider constructor."""
-        ptype = provider_type.lower()
-        creds = credentials or {}
-
-        if ptype == "falkordb":
-            from backend.app.providers.falkordb_provider import (
-                FalkorDBProvider,
-                resolve_falkordb_target,
-            )
-            host, port = resolve_falkordb_target(host, port)
-            # P1.6 — credentials previously dropped here, causing NOAUTH
-            # errors to be mis-classified as network failures and tripping
-            # the breaker for what is actually a configuration problem.
-            # Passing username/password through means the driver issues
-            # AUTH on every new connection and the breaker only fires for
-            # real downstream failures.
-            # Connection topology (standalone / sentinel / cluster) rides
-            # extra_config["falkordbConnection"]. None / absent → the
-            # legacy single-host path. Previously extra_config was dropped
-            # on the FalkorDB branch (only Neo4j/Spanner consumed it).
-            _falkor_conn = (extra_config or {}).get("falkordbConnection")
-            # Per-provider auth gate (extra_config.falkordbConnection.authEnabled,
-            # default true). When false, the provider nulls the graph
-            # credentials at a single chokepoint so no AUTH leaks to an
-            # unauthenticated FalkorDB (a dedicated cache_redis_url keeps its
-            # own embedded auth).
-            _auth_enabled = (_falkor_conn or {}).get("authEnabled", True)
-            return FalkorDBProvider(
-                host=host or "localhost",
-                port=port or 6379,
-                graph_name=graph_name or "nexus_lineage",
-                username=creds.get("username"),
-                password=creds.get("password"),
-                connection_config=_falkor_conn,
-                # Per-provider dedicated cache Redis (encrypted credential;
-                # deprecated alias — folded into credentials["cache_redis_url"]).
-                cache_redis_url=creds.get("cache_redis_url"),
-                auth_enabled=_auth_enabled,
-                # Connection-level TLS (the falkordbConnection.tls object adds
-                # CA/client-cert/verify mode). Previously dropped for FalkorDB.
-                tls_enabled=tls_enabled,
-                # The CACHE role's per-provider override (extra_config.cacheConnection
-                # + the decrypted cache_* credentials) — resolved centrally by
-                # build_cache_client, never inherited from the graph connection.
-                provider_id=provider_id,
-                extra_config=extra_config,
-                credentials=creds,
-            )
-
-        elif ptype == "neo4j":
-            from backend.graph.adapters.neo4j_provider import Neo4jProvider
-            return Neo4jProvider(
-                uri=f"{'bolt+s' if tls_enabled else 'bolt'}://{host}:{port or 7687}",
-                username=creds.get("username", "neo4j"),
-                password=creds.get("password", ""),
-                database=graph_name or "neo4j",
-                extra_config=extra_config,
-                # The CACHE role's per-provider override (extra_config.cacheConnection
-                # + the decrypted cache_* credentials, including the legacy
-                # extra_config.redisUrl alias) — resolved centrally by
-                # build_neo4j_cache_client, never inherited from the Bolt credentials.
-                provider_id=provider_id,
-                credentials=creds,
-            )
-
-        elif ptype == "datahub":
-            from backend.graph.adapters.datahub_provider import DataHubGraphQLProvider
-            return DataHubGraphQLProvider(
-                base_url=host or "",
-                token=creds.get("token"),
-            )
-
-        elif ptype == "spanner":
-            # Spanner uses GCP project/instance/database identifiers rather
-            # than host/port. They live on extra_config; credentials carry
-            # the service-account JSON.
-            import os as _os
-            from backend.graph.adapters.spanner_provider import SpannerProvider
-            cfg = dict(extra_config or {})
-            use_emulator = bool(cfg.get("useEmulator", False))
-            # Prevent the cloud-spanner-emulator from ever being selected
-            # outside an explicitly opted-in dev environment. The FE wizard
-            # already hides the toggle in production builds; this is the
-            # corresponding server-side defense so a hand-crafted payload
-            # cannot route a real provider at localhost:9010.
-            if use_emulator and not _os.getenv("SYNODIC_ALLOW_SPANNER_EMULATOR"):
-                raise ValueError(
-                    "Spanner emulator mode (extra_config.useEmulator=true) is "
-                    "disabled by default. Set SYNODIC_ALLOW_SPANNER_EMULATOR=1 "
-                    "in the backend environment to enable it for local development."
-                )
-            project_id = cfg.get("projectId") or creds.get("project_id")
-            instance_id = cfg.get("instanceId")
-            database_id = cfg.get("databaseId") or graph_name
-            if not project_id or not instance_id or not database_id:
-                raise ValueError(
-                    "Spanner provider requires extra_config.projectId, "
-                    "extra_config.instanceId, and (extra_config.databaseId or graph_name). "
-                    f"Got project={project_id!r} instance={instance_id!r} database={database_id!r}."
-                )
-            return SpannerProvider(
-                project_id=project_id,
-                instance_id=instance_id,
-                database_id=database_id,
-                graph_name=cfg.get("graphName") or "UniViz",
-                credentials_json=creds.get("service_account_json"),
-                use_emulator=use_emulator,
-                extra_config=cfg,
-            )
-
-        raise ValueError(f"Unknown provider_type: {ptype!r}")
+        """Dispatch to the catalog. Signature frozen (tests + 6 callers)."""
+        from backend.common.providers.catalog import ProviderSpec, create_provider_instance
+        return create_provider_instance(ProviderSpec(
+            provider_type=provider_type, host=host, port=port, graph_name=graph_name,
+            tls_enabled=tls_enabled, credentials=credentials or {}, extra_config=extra_config,
+            provider_id=provider_id))
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
