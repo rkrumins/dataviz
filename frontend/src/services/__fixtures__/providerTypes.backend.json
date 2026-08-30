@@ -1,0 +1,146 @@
+[
+  {
+    "adminVisible": true,
+    "capabilities": {
+      "features": [],
+      "fullCrud": false,
+      "isExternal": true,
+      "supportsCopy": false,
+      "writable": false
+    },
+    "connectionShape": {
+      "auth": "token",
+      "databaseField": null,
+      "defaultPort": 8080,
+      "extraConfigKeys": [],
+      "fields": [],
+      "kind": "generic",
+      "secretCredentialKeys": [
+        "token"
+      ],
+      "tls": "none",
+      "usesHostPort": true
+    },
+    "description": "DataHub metadata platform via its GraphQL API (read-only).",
+    "docsUrl": null,
+    "family": "graphql",
+    "id": "datahub",
+    "label": "DataHub"
+  },
+  {
+    "adminVisible": true,
+    "capabilities": {
+      "features": [
+        "aggregation_materialization",
+        "blank_models",
+        "coarse_trace",
+        "deep_search",
+        "multi_graph",
+        "trace_closure"
+      ],
+      "fullCrud": true,
+      "isExternal": false,
+      "supportsCopy": true,
+      "writable": true
+    },
+    "connectionShape": {
+      "auth": "basic",
+      "databaseField": null,
+      "defaultPort": 6379,
+      "extraConfigKeys": [
+        "falkordbConnection",
+        "cacheConnection"
+      ],
+      "fields": [],
+      "kind": "falkordb",
+      "secretCredentialKeys": [
+        "username",
+        "password",
+        "cache_username",
+        "cache_password",
+        "cache_sentinel_username",
+        "cache_sentinel_password",
+        "sentinel_username",
+        "sentinel_password",
+        "cache_redis_url"
+      ],
+      "tls": "flag",
+      "usesHostPort": true
+    },
+    "description": "FalkorDB -- the primary, in-house-managed graph engine.",
+    "docsUrl": null,
+    "family": "cypher",
+    "id": "falkordb",
+    "label": "FalkorDB"
+  },
+  {
+    "adminVisible": true,
+    "capabilities": {
+      "features": [
+        "multi_graph",
+        "schema_discovery"
+      ],
+      "fullCrud": false,
+      "isExternal": false,
+      "supportsCopy": false,
+      "writable": true
+    },
+    "connectionShape": {
+      "auth": "basic",
+      "databaseField": null,
+      "defaultPort": 7687,
+      "extraConfigKeys": [
+        "schemaMapping"
+      ],
+      "fields": [],
+      "kind": "generic",
+      "secretCredentialKeys": [],
+      "tls": "flag",
+      "usesHostPort": true
+    },
+    "description": "Neo4j graph database via the official Bolt driver.",
+    "docsUrl": null,
+    "family": "cypher",
+    "id": "neo4j",
+    "label": "Neo4j"
+  },
+  {
+    "adminVisible": true,
+    "capabilities": {
+      "features": [
+        "multi_graph",
+        "schema_discovery"
+      ],
+      "fullCrud": true,
+      "isExternal": false,
+      "supportsCopy": false,
+      "writable": true
+    },
+    "connectionShape": {
+      "auth": "service_account",
+      "databaseField": null,
+      "defaultPort": null,
+      "extraConfigKeys": [
+        "projectId",
+        "instanceId",
+        "databaseId",
+        "graphName",
+        "useEmulator",
+        "schemaMapping"
+      ],
+      "fields": [],
+      "kind": "spanner",
+      "secretCredentialKeys": [
+        "project_id",
+        "service_account_json"
+      ],
+      "tls": "none",
+      "usesHostPort": false
+    },
+    "description": "Google Cloud Spanner Graph (property-graph schema).",
+    "docsUrl": null,
+    "family": "gql",
+    "id": "spanner",
+    "label": "Google Spanner"
+  }
+]

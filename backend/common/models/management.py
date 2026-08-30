@@ -557,6 +557,80 @@ class ProviderResponse(BaseModel):
         populate_by_name = True
 
 
+class ProviderTypeField(BaseModel):
+    """One connection-form field a provider type's shape declares. Used by
+    the ``generic`` connection shape (the bespoke falkordb/spanner panels
+    render their own fields; ``fields`` is informational for them)."""
+    key: str
+    label: str
+    kind: str
+    location: str
+    required: bool = False
+    secret: bool = False
+    default: Optional[Any] = None
+    placeholder: Optional[str] = None
+    help: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
+
+
+class ProviderTypeCapabilities(BaseModel):
+    writable: bool
+    full_crud: bool = Field(alias="fullCrud")
+    is_external: bool = Field(alias="isExternal")
+    supports_copy: bool = Field(alias="supportsCopy")
+    features: List[str]
+
+    class Config:
+        populate_by_name = True
+
+
+class ProviderTypeConnectionShape(BaseModel):
+    kind: str
+    uses_host_port: bool = Field(alias="usesHostPort")
+    default_port: Optional[int] = Field(None, alias="defaultPort")
+    tls: str
+    auth: str
+    database_field: Optional[ProviderTypeField] = Field(None, alias="databaseField")
+    fields: List[ProviderTypeField] = []
+    secret_credential_keys: List[str] = Field(alias="secretCredentialKeys")
+    extra_config_keys: List[str] = Field(alias="extraConfigKeys")
+
+    class Config:
+        populate_by_name = True
+
+
+class ProviderTypeInfo(BaseModel):
+    """Non-secret provider-type metadata served by ``GET
+    /admin/providers/types`` — the catalog's ``ProviderDescriptor``
+    (``backend.common.providers.catalog``), reshaped for the wire. Gated on
+    the read permission, not ``system:admin``: the view-wizard's scope step
+    and other non-admin surfaces render these labels."""
+    id: str
+    label: str
+    description: str
+    docs_url: Optional[str] = Field(None, alias="docsUrl")
+    family: str
+    capabilities: ProviderTypeCapabilities
+    connection_shape: ProviderTypeConnectionShape = Field(alias="connectionShape")
+    admin_visible: bool = Field(True, alias="adminVisible")
+
+    class Config:
+        populate_by_name = True
+
+
+class SchemaDiscoveryRequest(BaseModel):
+    """Body for ``POST /admin/providers/discover-schema`` — an UNSAVED
+    provider payload to probe directly, so the onboarding wizard no longer
+    has to create a throwaway provider row just to discover its schema."""
+    provider: ProviderCreateRequest
+    asset_name: Optional[str] = Field(None, alias="assetName")
+
+    class Config:
+        populate_by_name = True
+
+
 # ============================================
 # Ontology Definition Models (standalone, versioned)
 # ============================================

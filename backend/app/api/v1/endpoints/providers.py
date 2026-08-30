@@ -22,13 +22,20 @@ from backend.app.providers.manager import provider_manager as provider_registry 
 from backend.app.providers.reachability import resolve_provider_status
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.workspace_visibility import compute_visible_provider_ids
+from backend.common.interfaces.provider import ProviderFeature, capability_for
 from backend.common.models.management import (
     ProviderCreateRequest,
     ProviderUpdateRequest,
     ProviderResponse,
     ConnectionTestResult,
     ProviderImpactResponse,
+    ProviderTypeCapabilities,
+    ProviderTypeConnectionShape,
+    ProviderTypeField,
+    ProviderTypeInfo,
+    SchemaDiscoveryRequest,
 )
+from backend.common.providers.catalog import PROVIDER_CATALOG, ProviderRequestError, descriptor_for
 
 router = APIRouter()
 
@@ -121,18 +128,15 @@ async def _run_connectivity_probe(
     With ``preflight()``, the probe finishes in ≤2.5s for an unreachable
     host, and ≤500ms for a reachable one.
     """
-    PREFLIGHT_DEADLINE_S = 2.0
-    # A provider configured for a slow cross-cluster hop raises its own
-    # budget via falkordbConnection.probeDeadlineS — the fixed default must
+    descriptor = descriptor_for(_provider_type_value(provider_type))
+    if descriptor is None:
+        return ConnectionTestResult(success=False, error="provider_unsupported")
+
+    # Each provider type owns its own probe-deadline extension (e.g.
+    # FalkorDB's falkordbConnection.probeDeadlineS) — the fixed default must
     # extend, never clip, or the Test button false-fails the exact providers
     # the knob exists for.
-    _probe_deadline = (
-        (extra_config or {}).get("falkordbConnection") or {}
-    ).get("probeDeadlineS")
-    try:
-        PREFLIGHT_DEADLINE_S = max(PREFLIGHT_DEADLINE_S, float(_probe_deadline))
-    except (TypeError, ValueError):
-        pass
+    PREFLIGHT_DEADLINE_S = descriptor.probe_deadline_s(extra_config, 2.0)
     PROBE_WALL_CLOCK_S = PREFLIGHT_DEADLINE_S + 0.5  # + small slack
     # Sentinel/Cluster resolution (discover master / slot map) needs more
     # than the fast single-host preflight budget.
@@ -152,11 +156,7 @@ async def _run_connectivity_probe(
     # is not representative (host/port may be unset; routing is driven by the
     # node lists). Exercise the real connection path instead — it resolves
     # the master / owning node and runs RETURN 1.
-    fmode = ((extra_config or {}).get("falkordbConnection") or {}).get("mode")
-    use_full_connect = (
-        str(_provider_type_value(provider_type)).lower() == "falkordb"
-        and fmode in ("sentinel", "cluster")
-    )
+    use_full_connect = descriptor.probe_strategy(extra_config) == "full_connect"
     preflight = None if use_full_connect else getattr(instance, "preflight", None)
 
     t0 = time.monotonic()
@@ -292,6 +292,73 @@ async def list_provider_statuses(
     return [_resolve_status(p) for p in providers]
 
 
+def _provider_type_field_info(f) -> ProviderTypeField:
+    return ProviderTypeField(
+        key=f.key, label=f.label, kind=f.kind, location=f.location,
+        required=f.required, secret=f.secret, default=f.default,
+        placeholder=f.placeholder, help=f.help,
+    )
+
+
+def _provider_type_info(d) -> ProviderTypeInfo:
+    conn = d.connection
+    return ProviderTypeInfo(
+        id=d.id,
+        label=d.label,
+        description=d.description,
+        docs_url=d.docs_url,
+        family=d.family,
+        capabilities=ProviderTypeCapabilities(
+            writable=d.capability.writable,
+            full_crud=d.capability.full_crud,
+            is_external=d.capability.is_external,
+            supports_copy=d.capability.supports_copy,
+            # Sorted: `features` is a frozenset, and str-Enum hashing is
+            # randomized per-process (PYTHONHASHSEED) — an unsorted dump
+            # would make this response, and the fixture generated from it,
+            # non-deterministic across separate process runs.
+            features=sorted(f.value for f in d.capability.features),
+        ),
+        connection_shape=ProviderTypeConnectionShape(
+            kind=conn.kind,
+            uses_host_port=conn.uses_host_port,
+            default_port=conn.default_port,
+            tls=conn.tls,
+            auth=conn.auth,
+            database_field=(
+                _provider_type_field_info(conn.database_field)
+                if conn.database_field else None
+            ),
+            fields=[_provider_type_field_info(f) for f in conn.fields],
+            secret_credential_keys=list(conn.secret_credential_keys),
+            extra_config_keys=list(conn.extra_config_keys),
+        ),
+        admin_visible=d.admin_visible,
+    )
+
+
+@router.get("/types", response_model=List[ProviderTypeInfo])
+async def list_provider_types(
+    _auth=Depends(_REQUIRES_PROVIDER_READ),
+):
+    """Provider-type metadata for the catalog: capabilities, connection
+    shape, family. MUST be declared before ``GET /{provider_id}`` — FastAPI
+    matches routes in declaration order, so declared later this would
+    resolve as ``provider_id="types"`` and 404.
+
+    Pure and zero I/O: reads ``PROVIDER_CATALOG``, touches no database and
+    no provider. This is non-secret metadata (no credentials, no live
+    connection state) — the view-wizard's scope step and other non-admin
+    surfaces render these labels, so the gate is the read permission, not
+    ``system:admin``.
+    """
+    return [
+        _provider_type_info(d)
+        for d in sorted(PROVIDER_CATALOG.values(), key=lambda d: d.id)
+        if d.admin_visible
+    ]
+
+
 def _iso_timestamp(epoch_seconds: float | None) -> str | None:
     if epoch_seconds is None:
         return None
@@ -322,6 +389,47 @@ async def list_providers(
     return [p for p in providers if p.id in visible_ids]
 
 
+def _require_descriptor_or_422(provider_type):
+    """Resolve the catalog descriptor for ``provider_type`` or raise the
+    structured 422 the frontend's ``friendlyError`` already understands.
+
+    In practice every value ``ProviderCreateRequest.provider_type`` can hold
+    is a registered catalog type (the enum and the catalog are kept in sync
+    by ``test_provider_catalog_sync.py``) — this guards the one path where a
+    type can legitimately be unregistered: an existing row whose stored
+    ``provider_type`` is a ``LEGACY_DB_ONLY_TYPES`` value like ``"mock"``.
+    """
+    ptype = _provider_type_value(provider_type)
+    descriptor = descriptor_for(ptype)
+    if descriptor is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "type": "provider_unsupported",
+                "providerType": ptype,
+                "message": f"Provider type {ptype!r} is not supported.",
+            },
+        )
+    return descriptor
+
+
+def _validate_or_422(descriptor, req) -> None:
+    """Run the descriptor's structural validation (e.g. Spanner's host/port
+    rejection); translate a failure into the 422 shape shared by
+    ``/test-connection`` and ``create_provider``."""
+    try:
+        descriptor.validate(req)
+    except ProviderRequestError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "type": "provider_config_invalid",
+                "providerType": _provider_type_value(req.provider_type),
+                "message": str(exc),
+            },
+        )
+
+
 @router.post("/test-connection", response_model=ConnectionTestResult)
 async def test_unsaved_provider_connection(
     req: ProviderCreateRequest = Body(...),
@@ -334,21 +442,8 @@ async def test_unsaved_provider_connection(
     the correct target for create forms AND for edit forms validating a
     pending change before saving.
     """
-    # Spanner is a managed gRPC service keyed on project / instance /
-    # database (in extra_config). It does NOT use host/port. Reject
-    # ambiguous requests so a misconfigured client doesn't silently
-    # bypass the project/instance/database addressing — emulator mode
-    # is opt-in via extra_config.useEmulator, not via host=localhost.
-    if (req.provider_type or "").lower() == "spanner":
-        if req.host or req.port:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Spanner is a managed service; host/port are not used. "
-                    "Provide projectId, instanceId, databaseId via extra_config; "
-                    "for the cloud-spanner-emulator set extra_config.useEmulator=true."
-                ),
-            )
+    descriptor = _require_descriptor_or_422(req.provider_type)
+    _validate_or_422(descriptor, req)
     creds = req.credentials.model_dump() if req.credentials else None
     return await _run_connectivity_probe(
         provider_type=req.provider_type,
@@ -367,7 +462,60 @@ async def create_provider(
     _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Register a new provider (database server)."""
+    descriptor = _require_descriptor_or_422(req.provider_type)
+    _validate_or_422(descriptor, req)
     return await provider_repo.create_provider(session, req)
+
+
+@router.post("/discover-schema")
+async def discover_schema_unsaved(
+    req: SchemaDiscoveryRequest = Body(...),
+    _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
+):
+    """Introspect an asset's schema for an UNSAVED provider payload.
+
+    The onboarding wizard used to create a throwaway provider row, discover
+    its schema, then delete the row — a write to satisfy a read. This
+    probes the submitted payload directly; nothing is persisted. Declared
+    alongside ``/test-connection``, before ``/{provider_id}``, mirroring
+    that endpoint's unsaved-payload relationship to ``/{provider_id}/test``.
+    """
+    provider_req = req.provider
+    descriptor = _require_descriptor_or_422(provider_req.provider_type)
+    _validate_or_422(descriptor, provider_req)
+    ptype = _provider_type_value(provider_req.provider_type)
+    if not descriptor.capability.supports(ProviderFeature.SCHEMA_DISCOVERY):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "type": "provider_unsupported",
+                "providerType": ptype,
+                "message": f"{ptype} providers do not support schema discovery.",
+            },
+        )
+    creds = provider_req.credentials.model_dump() if provider_req.credentials else None
+    instance = provider_registry._create_provider_instance(
+        ptype,
+        provider_req.host,
+        provider_req.port,
+        req.asset_name,
+        provider_req.tls_enabled,
+        creds,
+        extra_config=provider_req.extra_config,
+    )
+    try:
+        return await asyncio.wait_for(instance.discover_schema(), timeout=15)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Provider timed out while discovering schema")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        close = getattr(instance, "close", None)
+        if callable(close):
+            try:
+                await asyncio.wait_for(close(), timeout=0.5)
+            except Exception:
+                pass
 
 
 @router.get("/{provider_id}", response_model=ProviderResponse)
@@ -629,6 +777,20 @@ async def discover_schema(
     _auth=Depends(_REQUIRES_SYSTEM_ADMIN),
 ):
     """Introspect an asset's schema. Short-session pattern."""
+    async with with_short_session() as session:
+        prov_row = await provider_repo.get_provider_orm(session, provider_id)
+        if not prov_row:
+            raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+        ptype = prov_row.provider_type
+    if not capability_for(ptype).supports(ProviderFeature.SCHEMA_DISCOVERY):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "type": "provider_unsupported",
+                "providerType": ptype,
+                "message": f"{ptype} providers do not support schema discovery.",
+            },
+        )
     instance = await _load_provider_for_outbound(provider_id, asset_name)
     try:
         schema = await asyncio.wait_for(instance.discover_schema(), timeout=15)
