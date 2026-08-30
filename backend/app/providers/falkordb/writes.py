@@ -60,10 +60,13 @@ class WriteMixin:
         rels: Dict[str, str] = {}
         labels: Dict[str, str] = {}
         try:
+            # Bare form deliberate (not the dialect's YIELD/RETURN form) --
+            # both are pinned separately in the golden; see falkordb/dialect.py.
             res = await self._ro_query("CALL db.relationshipTypes()")
             for row in (res.result_set or []):
                 if row and row[0]:
                     rels.setdefault(str(row[0]).casefold(), str(row[0]))
+            # Bare form deliberate here too -- see the comment above.
             res = await self._ro_query("CALL db.labels()")
             for row in (res.result_set or []):
                 if row and row[0]:
