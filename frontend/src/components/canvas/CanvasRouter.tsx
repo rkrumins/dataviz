@@ -69,9 +69,9 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   useLoadingNotification(
     'hydration',
     isInitialLoad && hydrationStatus === 'loading',
-    hydrationPhase === 'roots' ? 'Loading entities' : hydrationPhase === 'edges' ? 'Loading edges' : 'Preparing view',
-    'Canvas ready',
-    // Never announce "Canvas ready" when the load ended warming/unavailable.
+    hydrationPhase === 'roots' ? 'Opening this view…' : hydrationPhase === 'edges' ? 'Loading connections…' : 'Preparing view',
+    'View ready',
+    // Never announce "View ready" when the load ended warming/unavailable.
     hydrationStatus === 'warming' || hydrationStatus === 'unavailable',
   )
 

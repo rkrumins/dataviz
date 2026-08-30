@@ -109,7 +109,12 @@ describe('opening a view', () => {
 describe('the rest of the load', () => {
   it('counts connections rather than naming edges', () => {
     expect(connectionsLoadedMessage(2048)).toBe(`Connections · ${(2048).toLocaleString()}`)
-    expect(summarisedConnectionsMessage(30)).toBe('Summarised connections · 30')
+  })
+
+  it('leaves the batched roll-up countless, so its repeats fold into one row', () => {
+    // It re-runs on every expand and collapse; DataLoadsPanel folds only runs
+    // of the IDENTICAL message, so a count here means a new row every time.
+    expect(summarisedConnectionsMessage()).toBe('Summarised connections')
   })
 
   it('reports what was placed, and appends the leftovers only when there are some', () => {
@@ -117,6 +122,10 @@ describe('the rest of the load', () => {
     expect(layersPlacedMessage(1200, 4, 3)).toBe(`Placed ${(1200).toLocaleString()} items across 4 layers · 3 unplaced`)
   })
 })
+
+const BANNED = ['entit', 'edge', 'hydrat', 'aggregat', 'child entities']
+
+const canvas = readFileSync(resolve(__dirname, '../ContextViewCanvas.tsx'), 'utf8')
 
 describe('the vocabulary the user never sees', () => {
   it('never says entity, edge, hydration or aggregated', () => {
@@ -128,11 +137,42 @@ describe('the vocabulary the user never sees', () => {
       openingViewMessage('V'),
       openedViewMessage('V', 3),
       connectionsLoadedMessage(3),
-      summarisedConnectionsMessage(3),
+      summarisedConnectionsMessage(),
       layersPlacedMessage(3, 1, 1),
     ].join('\n').toLowerCase()
-    for (const banned of ['entit', 'edge', 'hydrat', 'aggregat', 'child entities']) {
+    for (const banned of BANNED) {
       expect(all).not.toContain(banned)
+    }
+  })
+
+  /**
+   * The same words, on the same screen, from the notifications these do NOT
+   * build. CanvasRouter raises its own hydration card for every canvas type,
+   * and it said "Loading entities" / "Canvas ready" alongside the reworded
+   * ones — and "Canvas ready", being a success, was written into the Data
+   * loads log right beside them. A test that only reads this module's return
+   * values passes while all of that is on screen.
+   */
+  it('nor do the notifications the canvas and the router raise directly', () => {
+    // Every quoted literal, then the ones that read as a sentence — the
+    // identifiers ('roots', 'warning', …) that share these call expressions
+    // carry no space. Pairing must run over WHOLE literals, or a scan resumes
+    // on a closing quote and reads the code between two of them as a string.
+    const sentences = (src: string) =>
+      (src.match(/'[^'\n]*'|`[^`\n]*`/g) ?? []).filter(lit => /\s/.test(lit.slice(1, -1)))
+
+    const router = readFileSync(resolve(__dirname, '../../CanvasRouter.tsx'), 'utf8')
+    const at = router.indexOf("useLoadingNotification(\n    'hydration'")
+    expect(at).toBeGreaterThan(-1)
+    const said = [
+      ...sentences(router.slice(at, router.indexOf('\n  )', at))),
+      // Every notify(...) the canvas raises itself, ternary branches included.
+      ...canvas.split('\n').filter(l => /\bnotify\w*\(/.test(l)).flatMap(sentences),
+    ].join('\n').toLowerCase()
+
+    expect(said).toContain('opening this view')
+    for (const banned of BANNED) {
+      expect(said).not.toContain(banned)
     }
   })
 })
@@ -143,8 +183,6 @@ describe('the vocabulary the user never sees', () => {
  * silently undo — the idiom of `dataLoadsDockWiring.test.ts`.
  */
 describe('the canvas raises them from the sites that know the subject', () => {
-  const canvas = readFileSync(resolve(__dirname, '../ContextViewCanvas.tsx'), 'utf8')
-
   it('no longer keeps a notification that cannot name what is loading', () => {
     // `ctx-children` ran off `loadingNodes.size > 0` — a global "≥1 container
     // busy" boolean, so three containers expanded gave three identical
@@ -164,13 +202,37 @@ describe('the canvas raises them from the sites that know the subject', () => {
     expect(canvas.match(/await announceChildLoad\(|: announceChildLoad\(/g) ?? []).toHaveLength(2)
     expect(canvas).toMatch(/loadMoreChildren = useCallback\(async \(parentId: string, auto\?: boolean\)/)
     expect(canvas).toMatch(/auto \? loadChildrenSorted\(parentId\) : announceChildLoad\(parentId\)/)
+    // …and it names an unnamed container by its id, never with nothing at all.
+    expect(canvas).toMatch(/\?\.data\?\.label \|\| parentId\)/)
   })
 
-  it('computes every success message at the transition, never at declaration', () => {
-    for (const call of ['ctx-hydrating-entities', 'ctx-hydrating-edges', 'ctx-assignments', 'ctx-agg-edges']) {
+  it('computes every counting success message at the transition, never at declaration', () => {
+    // `ctx-agg-edges` is not here: its message carries no count, so there is
+    // nothing to read late — see the fold rule above.
+    for (const call of ['ctx-hydrating-entities', 'ctx-hydrating-edges', 'ctx-assignments']) {
       const at = canvas.indexOf(`'${call}'`)
       expect(at).toBeGreaterThan(-1)
       expect(canvas.slice(at, canvas.indexOf('  )', at))).toContain('() =>')
     }
+    const agg = canvas.indexOf("'ctx-agg-edges'")
+    expect(canvas.slice(agg, canvas.indexOf('  )', agg))).toContain('summarisedConnectionsMessage()')
+  })
+
+  it('counts the entities load across BOTH of its phases', () => {
+    // An open-scope view loads by type: 'roots', then 'children' for the
+    // remaining visible types, and only THEN are the nodes committed. Gating
+    // on 'roots' alone put the falling edge before that write, so the success
+    // message read an empty store and said "· 0 items".
+    // (Behaviour: useGraphHydration.openedCount.test.tsx.)
+    const at = canvas.indexOf("'ctx-hydrating-entities'")
+    expect(canvas.slice(at, canvas.indexOf('  )', at)))
+      .toContain("hydrationPhase === 'roots' || hydrationPhase === 'children'")
+  })
+
+  it('never reports a placement for an assignment pass that failed', () => {
+    // `effectiveAssignments` keeps its previous value on error — an empty Map
+    // on a first load — so an unsuppressed success says "Placed 0 items".
+    const at = canvas.indexOf("'ctx-assignments'")
+    expect(canvas.slice(at, canvas.indexOf('  )', at))).toContain("assignmentStatus === 'error'")
   })
 })

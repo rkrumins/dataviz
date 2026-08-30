@@ -1023,7 +1023,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 // only on a page that actually completed — an aborted or
                 // failed load has nothing true to say.
                 summary = {
-                    parentLabel: String(parentNode.data.label ?? ''),
+                    // `|| urn`, not `?? ''`: a container whose backend
+                    // displayName is "" would otherwise be announced as
+                    // " · 5 datasets" — a message with no subject.
+                    parentLabel: String(parentNode.data.label || urn),
                     parentType: parentNode.data.type as string | undefined,
                     arrived: result.children.length,
                     offset: currentChildrenCount,

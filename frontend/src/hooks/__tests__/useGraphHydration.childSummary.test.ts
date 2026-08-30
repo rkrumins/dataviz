@@ -173,6 +173,24 @@ describe('loadChildren hands back what the page delivered', () => {
     expect(summary?.offset).toBe(5)
   })
 
+  it('falls back to the container URN when the backend gave it no name', async () => {
+    // `?? ''` guarded only null/undefined, so a container whose displayName is
+    // "" was left out of its own messages: "Loading …", then " · 5 datasets".
+    seedCanvas(41, 0)
+    useCanvasStore.setState((s) => ({
+      nodes: s.nodes.map((n) => (n.id === PARENT ? { ...n, data: { ...n.data, label: '' } } : n)),
+    }))
+    mockProvider.getChildrenWithEdges.mockResolvedValueOnce(
+      page([0, 1].map((i) => ({ urn: childUrn(i), entityType: 'dataset' }))),
+    )
+    const { result } = renderHook(() => useGraphHydration())
+
+    let summary: Awaited<ReturnType<typeof result.current.loadChildren>>
+    await act(async () => { summary = await result.current.loadChildren(PARENT) })
+
+    expect(summary?.parentLabel).toBe(PARENT)
+  })
+
   it('reports nothing when no fetch ran — every child is already loaded', async () => {
     seedCanvas(5, 5)
     const { result } = renderHook(() => useGraphHydration())

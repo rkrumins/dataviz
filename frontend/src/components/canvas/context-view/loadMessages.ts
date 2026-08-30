@@ -73,9 +73,16 @@ export function connectionsLoadedMessage(count: number): string {
   return `Connections · ${n(count)}`
 }
 
-/** The batched roll-up across every collapsed container — it names no one container, because it covers them all. */
-export function summarisedConnectionsMessage(count: number): string {
-  return `Summarised connections · ${n(count)}`
+/**
+ * The batched roll-up across every collapsed container — it names no one
+ * container, because it covers them all, and carries no count either. It
+ * re-runs on every expand and collapse, so a count would differ every time,
+ * and DataLoadsPanel folds only runs of the IDENTICAL message: a browsing
+ * session would fill the 100-entry log with roll-up chatter and evict the
+ * named, user-initiated messages the log exists for.
+ */
+export function summarisedConnectionsMessage(): string {
+  return 'Summarised connections'
 }
 
 export function layersPlacedMessage(placed: number, layers: number, unplaced: number): string {

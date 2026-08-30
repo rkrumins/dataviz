@@ -2889,7 +2889,9 @@ export function ContextViewCanvas({
     // Read at click time rather than through a dependency: `displayMap`
     // changes with every graph write, and this callback is handed to
     // LayerColumn's memo.
-    const label = String(useCanvasStore.getState().nodes.find(n => n.id === parentId)?.data?.label ?? '')
+    // `|| parentId`, not `?? ''`: a container whose backend displayName is ""
+    // would otherwise give "Loading …", a message with no subject at all.
+    const label = String(useCanvasStore.getState().nodes.find(n => n.id === parentId)?.data?.label || parentId)
     showChildLoad(key, loadingChildrenMessage(label))
     try {
       const summary = await loadChildrenSorted(parentId)
@@ -3299,15 +3301,23 @@ export function ContextViewCanvas({
   // transition: it reports what the load produced, and the counts only exist
   // once it has. Read from the store rather than a render-scope value where
   // the phase is what publishes the result — `nodes`/`edges` are authoritative
-  // the moment the phase leaves 'roots' / 'edges'.
+  // the moment the phase leaves the roots/children pair / 'edges'.
   //
   // Expanding a container is NOT here: `isLoadingChildren` was
   // `loadingNodes.size > 0`, a global "≥1 container busy" boolean that could
   // never name which one. That message moved to `announceChildLoad`, at the
   // two call sites where the container is known.
+  //
+  // 'roots' AND 'children' — the entities load spans BOTH phases, and only the
+  // transition out of the pair is behind `setGraph`. An open-scope view loads
+  // by type: roots first, then 'children' for the remaining visible types
+  // (useGraphHydration), and the nodes are committed after that second fetch.
+  // Gating on 'roots' alone put the falling edge at the roots→children hop —
+  // before the write, on a store that hydration had just emptied — so every
+  // such view was announced as "· 0 items".
   useLoadingNotification(
     'ctx-hydrating-entities',
-    hydrationPhase === 'roots',
+    hydrationPhase === 'roots' || hydrationPhase === 'children',
     openingViewMessage(activeView?.name),
     () => openedViewMessage(activeView?.name, useCanvasStore.getState().nodes.length),
     hydrationFailed,
@@ -3324,14 +3334,20 @@ export function ContextViewCanvas({
     assignmentStatus === 'loading',
     'Arranging layers…',
     () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.length),
+    // An errored pass leaves `effectiveAssignments` at its previous value —
+    // an empty Map on a first load — so without this a provider blip reports
+    // the green "Placed 0 items across 6 layers", once per bounded retry.
+    assignmentStatus === 'error',
   )
   // No container is named here on purpose: this request is batched across
-  // EVERY collapsed container at once, so naming one would be a lie.
+  // EVERY collapsed container at once, so naming one would be a lie — and no
+  // count either: it re-runs on every expand and collapse, and a number that
+  // differs each time is a number the Data loads panel cannot fold.
   useLoadingNotification(
     'ctx-agg-edges',
     isLoadingAggregatedEdges,
     'Summarising connections…',
-    () => summarisedConnectionsMessage(aggregatedEdges.size),
+    summarisedConnectionsMessage(),
   )
 
   // Warn the user once when any child fetch fails — gives them an explicit
@@ -3341,7 +3357,7 @@ export function ContextViewCanvas({
   useEffect(() => {
     const count = failedNodes?.size ?? 0
     if (count > lastFailedCountRef.current) {
-      notify('warning', count === 1 ? '1 entity failed to load' : `${count} entities failed to load`)
+      notify('warning', count === 1 ? '1 item failed to load' : `${count} items failed to load`)
     }
     lastFailedCountRef.current = count
   }, [failedNodes, notify])
