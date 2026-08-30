@@ -6,29 +6,6 @@ exceptions by name or message rather than isinstance where the underlying
 client library is optional at import time, so this module has no hard
 dependency on ``redis`` beyond the try/except imports below.
 """
-# Exception class names that indicate a Redis Cluster routing change (the
-# slot moved to another node) or a transient connection drop where a
-# single client rebuild + retry is the right response. Matched by name so
-# we don't hard-import redis cluster exceptions at module load.
-_CLUSTER_REDIRECT_EXC_NAMES = frozenset({
-    "MovedError", "AskError", "ClusterDownError", "TryAgainError",
-    "ConnectionError", "TimeoutError",
-})
-
-
-def _is_cluster_redirect(exc: BaseException) -> bool:
-    """True when *exc* (or its cause) looks like a cluster redirect /
-    transient connection error worth one transparent rebuild + retry."""
-    seen = exc
-    for _ in range(4):  # walk a short __cause__/__context__ chain
-        if seen is None:
-            break
-        if type(seen).__name__ in _CLUSTER_REDIRECT_EXC_NAMES:
-            return True
-        seen = seen.__cause__ or seen.__context__
-    return False
-
-
 # Names that indicate a Redis Cluster *routing* change (the slot moved) —
 # these require rebuilding the single-node client, not just a retry.
 _CLUSTER_ROUTING_EXC_NAMES = frozenset({
