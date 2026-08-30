@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 
@@ -54,6 +55,14 @@ def _classify(exc: BaseException) -> str:
         return "dns_unresolvable"
     if isinstance(exc, ConnectionRefusedError):
         return "tcp_refused"
+    if isinstance(exc, ssl.SSLError):
+        # A TLS-capable peer answered but the handshake itself failed (bad/
+        # untrusted cert, protocol mismatch, ...). ssl.SSLError IS an OSError
+        # subclass, so this must be checked before the generic OSError catch
+        # below or it falls into the opaque `os_error: ...` bucket —
+        # indistinguishable from a routing failure, when it is actually a
+        # reachable-but-misconfigured TLS endpoint.
+        return "tls_handshake"
     if isinstance(exc, OSError):
         # No route to host, network unreachable, etc.
         return f"os_error: {exc.strerror or exc!r}"[:120]
@@ -352,6 +361,66 @@ async def http_head_preflight(
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         return PreflightResult.success(
             peer=str(response.url), elapsed_ms=elapsed_ms,
+        )
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        return PreflightResult.failure(reason=_classify(exc), elapsed_ms=elapsed_ms)
+
+
+def _sent_credentials(headers: dict | None) -> bool:
+    """Case-insensitive check for a non-empty ``Authorization`` header —
+    the HTTP-transport analogue of ``redis_ping_preflight``'s ``had_password``:
+    whether credentials were sent at all decides ``auth_required`` vs.
+    ``auth_failed`` on a 401."""
+    if not headers:
+        return False
+    return any(k.lower() == "authorization" and v for k, v in headers.items())
+
+
+async def http_json_preflight(
+    url: str,
+    *,
+    deadline_s: float,
+    headers: dict | None = None,
+    expect_status: int = 200,
+) -> PreflightResult:
+    """Issue an HTTP GET against ``url`` within ``deadline_s`` and require the
+    response status to equal ``expect_status`` for success.
+
+    Unlike ``http_head_preflight`` (any status code counts as reachable),
+    this is for JSON readiness endpoints (e.g. ArcadeDB's ``GET
+    /api/v1/ready``) where failing to report ready IS a preflight failure,
+    not just evidence of reachability.
+
+    A ``401`` is classified as ``auth_required`` (no ``Authorization`` header
+    was sent) or ``auth_failed`` (one was sent and rejected) — the same
+    reachable-but-misconfigured distinction ``redis_ping_preflight`` draws
+    for Redis AUTH, so callers can tell "wrong credentials" from "network
+    down" the same way across every provider transport. Any other
+    non-matching status fails with ``http_status_<nnn>``.
+    """
+    t0 = time.monotonic()
+    try:
+        import httpx  # local import — ArcadeDB-only dep
+    except ImportError:
+        return PreflightResult.failure(
+            reason="httpx_not_installed", elapsed_ms=0,
+        )
+    try:
+        async with httpx.AsyncClient(timeout=deadline_s, follow_redirects=False) as client:
+            response = await client.get(url, headers=headers or {})
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        if response.status_code == expect_status:
+            return PreflightResult.success(
+                peer=str(response.url), elapsed_ms=elapsed_ms,
+            )
+        if response.status_code == 401:
+            reason = "auth_failed" if _sent_credentials(headers) else "auth_required"
+            return PreflightResult.failure(reason=reason, elapsed_ms=elapsed_ms)
+        return PreflightResult.failure(
+            reason=f"http_status_{response.status_code}", elapsed_ms=elapsed_ms,
         )
     except asyncio.CancelledError:
         raise
