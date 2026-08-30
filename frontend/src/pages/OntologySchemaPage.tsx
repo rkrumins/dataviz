@@ -41,6 +41,7 @@ import {
   canonicalizeEntityDefsForSave,
 } from '@/features/ontology/lib/caseFold'
 import { DEFAULT_REL_VISUAL, type OntologyTab, type EditorPanel, type RelTypeWithClassifications } from '@/features/ontology/lib/ontology-types'
+import { appOwnedStrokeStyle } from '@/utils/edgeTypeUtils'
 
 import { OntologyDetailHeader } from '@/features/ontology/components/OntologyDetailHeader'
 import { OntologySidebar } from '@/features/ontology/components/OntologySidebar'
@@ -1911,7 +1912,13 @@ export function OntologySchemaPage() {
                           siblingTypes={relTypes.map(rt => ({
                             id: rt.id,
                             name: rt.name,
-                            visual: { strokeColor: rt.visual.strokeColor, strokeStyle: rt.visual.strokeStyle },
+                            // What the CANVAS draws, not only what the ontology declares — a
+                            // system type whose stroke this app owns (the AGGREGATED roll-up)
+                            // would otherwise be named as a solid twin of every solid type.
+                            visual: {
+                              strokeColor: rt.visual.strokeColor,
+                              strokeStyle: appOwnedStrokeStyle(rt.id) ?? rt.visual.strokeStyle,
+                            },
                           }))}
                           readOnly={isLocked || !!editorPanel.data?.isSystem}
                           onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}

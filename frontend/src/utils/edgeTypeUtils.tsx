@@ -124,6 +124,16 @@ const SYSTEM_EDGE_STROKE_STYLE: Readonly<Record<string, 'solid' | 'dashed' | 'do
     AGGREGATED: 'dashed',
 }
 
+/** The stroke style this app owns for an edge type id, or null when it has no opinion
+ *  and the ontology's declared stroke should stand. Case-insensitive on the id.
+ *
+ *  Exported for the ontology editor's line-style advisory, which describes what the
+ *  CANVAS draws: reading the declared value there would name AGGREGATED as a solid
+ *  twin of every other solid type, when the canvas dashes it. */
+export function appOwnedStrokeStyle(edgeType: string): 'solid' | 'dashed' | 'dotted' | null {
+    return SYSTEM_EDGE_STROKE_STYLE[(edgeType ?? '').toUpperCase()] ?? null
+}
+
 /**
  * Determine default stroke style — the fallback branch only, for a type the
  * ontology has never heard of. (A system type's dash is applied later, to both
@@ -205,7 +215,7 @@ export function getEdgeTypeDefinition(
     // Everything not listed on lines 1 — colour, animation, and every non-system
     // type's stroke — is whatever the branch already decided.
     const copy = edgeTypeCopy(definition.type)
-    const ownedStrokeStyle = SYSTEM_EDGE_STROKE_STYLE[definition.type]
+    const ownedStrokeStyle = appOwnedStrokeStyle(definition.type)
     if (!copy && !ownedStrokeStyle) return definition
     return {
         ...definition,

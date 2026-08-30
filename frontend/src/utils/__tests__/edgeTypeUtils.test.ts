@@ -11,7 +11,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { RelationshipTypeSchema } from '@/types/schema'
-import { getEdgeTypeDefinition } from '../edgeTypeUtils'
+import { getEdgeTypeDefinition, appOwnedStrokeStyle } from '../edgeTypeUtils'
 
 const rel = (over: Partial<RelationshipTypeSchema>): RelationshipTypeSchema => ({
   id: 'AGGREGATED',
@@ -90,5 +90,23 @@ describe('getEdgeTypeDefinition — AGGREGATED stroke is app-owned', () => {
 
     const solid = rel({ id: 'PRODUCES', name: 'Produces', visual: { ...rel({}).visual, strokeStyle: 'solid' } })
     expect(getEdgeTypeDefinition('PRODUCES', [solid], []).strokeStyle).toBe('solid')
+  })
+})
+
+/**
+ * The same ownership, readable from outside — the ontology editor's line-style
+ * advisory describes what the CANVAS draws, so it has to resolve AGGREGATED the
+ * way the canvas does rather than reading the ontology's declared `solid` and
+ * naming it as a solid twin of everything else.
+ */
+describe('appOwnedStrokeStyle', () => {
+  it('claims the system roll-up', () => {
+    expect(appOwnedStrokeStyle('AGGREGATED')).toBe('dashed')
+    expect(appOwnedStrokeStyle('aggregated')).toBe('dashed')
+  })
+
+  it('claims nothing else, so the ontology s declared stroke stands', () => {
+    expect(appOwnedStrokeStyle('FLOWS_TO')).toBeNull()
+    expect(appOwnedStrokeStyle('')).toBeNull()
   })
 })
