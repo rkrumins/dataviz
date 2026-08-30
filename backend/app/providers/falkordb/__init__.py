@@ -42,7 +42,6 @@ from .provider import (
     # Section B — read off the module object by two tests; must stay the
     # same object (mutated or monkeypatched in place), never a copy.
     CLOSURE_QUERY_CAP_SECS,
-    _BULK_CREATE_BATCH_DEFAULT,
     logger,
     # Not imported anywhere today, but named by the plan as defensive
     # exports — costs nothing, protects a future in-repo import.
@@ -63,6 +62,7 @@ from .hosts import resolve_falkordb_target, _normalize_falkordb_host
 from .cursors import CursorMismatchError, _keyset_sort_key, _CURSOR_PREFIX, _encode_keyset_cursor
 from .knobs import (
     _BULK_CREATE_KNOBS_CACHE,
+    _BULK_CREATE_BATCH_DEFAULT,
     _BULK_CREATE_TIMEOUT_DEFAULT,
     _resolve_bulk_create_knobs,
 )

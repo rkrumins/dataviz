@@ -26,7 +26,6 @@ from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.app.providers.falkordb._log import logger
 
 from backend.app.providers.falkordb.aggregation import AggregationMixin, _completed
-from backend.app.providers.falkordb.knobs import _BULK_CREATE_BATCH_DEFAULT
 from backend.app.providers.falkordb.rowmap import (
     _sanitize_label,
     _compute_searchable_text,
