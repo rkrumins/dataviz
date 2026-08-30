@@ -40,12 +40,17 @@ _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 # Every module that writes Cypher against the projection graphs. The
 # projector was the audit's biggest offender: its edge merges ran the
 # antipattern for EVERY projected edge of a full seed.
-SCANNED_PATHS = (
-    _APP_DIR / "providers" / "falkordb_provider.py",
+#
+# The former single-file falkordb_provider.py is now a package (its old
+# path is a compatibility shim with no Cypher in it, so scanning it would
+# pass while checking nothing) -- glob every module carved out of it.
+SCANNED_PATHS = tuple(
+    sorted((_APP_DIR / "providers" / "falkordb").glob("*.py"))
+) + (
     _APP_DIR / "services" / "versioning" / "projection.py",
 )
 
-PROVIDER_PATH = SCANNED_PATHS[0]
+PROVIDER_PATH = _APP_DIR / "providers" / "falkordb" / "provider.py"
 
 
 import pytest
