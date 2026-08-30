@@ -863,3 +863,91 @@ Point 3 is the structural change; points 1 and 2 are what stop the next engine r
 same class of defect. Together they are why ontology belongs in the contract work rather than in
 a follow-up: an ArcadeDB provider written against a contract that leaves ontology implicit will
 be flat, and it will look like an ArcadeDB bug.
+
+---
+
+## 10. Pre-flight corrections (read before executing §7 — these supersede)
+
+A conflict scan against the live tree at `ccbb1855` found six things wrong with this plan. They
+are corrected here rather than edited in place, so the record shows what was found. **Where §10
+disagrees with anything above, §10 governs.**
+
+### 10.1 Sequencing: T-E must follow T-A (§7's parallelism claim is wrong)
+
+§7 says "T-A/T-B/T-E can run in parallel". T-E's descriptors construct
+`ProviderCapability(features={ProviderFeature...})` and rewrite `capability_for` — both symbols
+T-A introduces, in the same file. **T-E depends on T-A.** T-B remains genuinely parallel.
+
+**T-P is missing from §7's dependency sentence entirely.** It builds providers through the
+catalog and drops `hasattr` guards, so it depends on **T-E and T-A**. Corrected order:
+
+```
+T-A ──┬── T-C
+      ├── T-E ──┬── T-F
+      │         ├── T-G ── T-J..T-N
+      │         └── T-P
+      └── (T-B, T-D independent)
+```
+
+### 10.2 T-J cannot start from a fixture that does not exist yet
+
+§7 says T-J "can start from the fixture JSON", and T-J's file list claims authorship of
+`providerTypes.backend.json`. But §6's F1/F8 generate that fixture from **T-G's** backend test
+(`UPDATE_PROVIDER_TYPES_FIXTURE=1`). Ownership is double-assigned and the dependency is real.
+**Ruling: T-G owns the fixture and generates it; T-J consumes it.** T-J starts after T-G.
+
+### 10.3 Stale `falkordb_provider.py` citations — that file is now a 163-line shim
+
+PR 1 split the monolith; every logic citation below points into a file that no longer contains
+it. **Use this table, not the line numbers above.** Re-grep before editing — a search string is
+a fact, a line number is a snapshot.
+
+| This plan says | It actually lives at |
+|---|---|
+| `CursorMismatchError` at `falkordb_provider.py:182-185` (§1.1, §2.1) | defined `backend/common/providers/cursors.py:39`; re-exported via `falkordb/cursors.py` → `falkordb/__init__.py` → shim. §2.1 wants it in `backend.common.interfaces.provider` — reconcile with the **kernel** module, not the monolith, and keep the same object identity |
+| the six setters, `falkordb_provider.py:2319-2622` (§2.2) | `backend/app/providers/falkordb/ontology.py`: `set_containment_edge_types`:39, `set_entity_type_levels`:64, `set_admission_controller`:276, `set_resolved_edge_metadata`:282, `set_source_type_aliases`:296, `set_node_identity`:316 |
+| "verbatim L2614-2622" (node-identity lazy import) | `ontology.py:316-343` |
+| `provider_type` ClassVar "next to `name`, L2316" (§2.2/§3.4/T-A) | `name` is `ontology.py:36`; the composed class is `falkordb/provider.py:25` |
+| `clear_content_caches` override "L5610" (§2.4) | `falkordb/aggregation.py:1071` |
+| level-digest re-probe "L2344-2370" (§7.3) | inside `ontology.py:64-93` |
+| `inflight_ops` "L1079-1082" (§7.3) | `falkordb/connection.py:312` |
+| `get_nodes_batch` "FalkorDB L10038" (§1.2) | `falkordb/drill.py:696` |
+
+### 10.4 §6.4's justification is factually wrong (the conclusion survives)
+
+§6.4 defers conformance-kit parts (1) and (3) on the grounds that the `CypherExecutor` /
+`CypherDialect` types "do not exist yet (verified: no cypher/dialect/executor module under
+`backend/graph/adapters` or `backend/app/providers`)". **They exist**, at
+`backend/common/providers/cypher/{executor,dialect}.py` — PR 1 created them; the grep checked
+two directories and the answer was in a third.
+
+The practical conclusion still holds — PR 2 cannot write `CypherGraphProvider`-based tests
+because that **base class** does not exist until PR 3 — but the stated evidence was wrong.
+Restate the reason as the base class, not the seam types. This plan's own §2.7 demands claims be
+verified rather than inferred; that applies to the plan itself.
+
+### 10.5 NEW TASK T-Q — land the ontology cache fix
+
+§2.7 documents a verified fix held as `ontology-cache-fix.patch` in this plan's SDD workspace,
+and says PR 2 lands it. **No task in §7 does.** `grep` finds zero references to `stats.py`,
+`ontology_cache` or the patch outside §2.7 — and because §2.7 was appended after §8 and §9, a
+task author reading in order meets the task list long before meeting it.
+
+**T-Q** | Apply the held patch: capture `containment_configured` at the
+`ProviderConfigurationError` fallback in `get_ontology_metadata` and gate the shared-cache write
+on it, so a provisional classification is returned to its caller but never written to the shared
+key | `backend/app/providers/falkordb/stats.py` (the fallback ~:366 and the cache write ~:505 —
+re-grep, do not trust these) | targeted set + required lane; and re-run the reproduction in
+`ontology-cache-fix.patch`'s companion probe: an injected reader after an uninjected cache warm
+must see `containment=['HAS']`, hierarchy 4, roots `['layer']`, and
+`cache_carries_first_callers_state` must be **false** |
+
+T-Q depends on nothing and can run first. It is the only task in this PR that changes runtime
+behaviour deliberately — keep it in its own commit so it can be reverted or cherry-picked
+independently of the contract work.
+
+### 10.6 D9 has no test either way
+
+§9's D9 (`search_nodes` gains `offset`) is "include only if it costs nothing", and §6 gates
+neither choice. **Ruling: drop D9 from this PR.** An optional change nothing verifies is a
+change nobody can review; if the offset is wanted, it deserves its own task with a test.
