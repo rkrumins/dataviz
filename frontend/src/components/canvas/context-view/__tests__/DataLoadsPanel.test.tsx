@@ -10,7 +10,7 @@
  *
  * Under test: it stays out of the way when there is nothing to show; its
  * collapsed header is the first button and carries the band-reservation hook
- * (`data-dock-header`); the log reads OLDEST FIRST — the order things actually
+ * (`data-dock-header`); the log reads NEWEST FIRST — what you just did is what
  * happened; runs of the identical message fold into one ×N row that keeps the
  * LATEST time; every time carries the absolute clock time in its title; Clear
  * takes the panel with it; and nothing is portaled — the panel renders inside
@@ -70,7 +70,7 @@ describe('DataLoadsPanel', () => {
     expect(screen.queryAllByRole('listitem')).toHaveLength(0)
   })
 
-  it('lists every message OLDEST FIRST — the order things actually happened', async () => {
+  it('lists every message NEWEST FIRST — what just happened needs no scrolling', async () => {
     const user = userEvent.setup()
     seed([
       { type: 'success', message: 'View saved', createdAt: Date.now() - 3 * HOUR },
@@ -82,9 +82,9 @@ describe('DataLoadsPanel', () => {
     await user.click(header())
     expect(header()).toHaveAttribute('aria-expanded', 'true')
     expect(rows().map(r => r.textContent)).toEqual([
-      expect.stringContaining('View saved'),
-      expect.stringContaining('Some edges were skipped'),
       expect.stringContaining('Load failed'),
+      expect.stringContaining('Some edges were skipped'),
+      expect.stringContaining('View saved'),
     ])
     // The header stays the first button even opened — the band depends on it.
     expect(screen.getByRole('region', { name: /data loads/i })).toBeInTheDocument()
@@ -107,13 +107,13 @@ describe('DataLoadsPanel', () => {
 
     const list = rows()
     expect(list).toHaveLength(2)
-    expect(list[0].textContent).toContain('Loading more')
-    expect(list[0].textContent).toContain('×3')
-    expect(list[1].textContent).toContain('View saved')
-    expect(list[1].textContent).not.toContain('×')
+    expect(list[0].textContent).toContain('View saved')
+    expect(list[0].textContent).not.toContain('×')
+    expect(list[1].textContent).toContain('Loading more')
+    expect(list[1].textContent).toContain('×3')
 
     // The run happened three times; the row answers "when did it last happen?"
-    expect(within(list[0]).getByTitle(new Date(latest).toLocaleTimeString())).toHaveTextContent('1h ago')
+    expect(within(list[1]).getByTitle(new Date(latest).toLocaleTimeString())).toHaveTextContent('1h ago')
   })
 
   it('every row hands over the absolute clock time on hover', async () => {
@@ -128,8 +128,9 @@ describe('DataLoadsPanel', () => {
 
     await user.click(header())
     const list = rows()
-    expect(within(list[0]).getByTitle(new Date(saved).toLocaleTimeString())).toBeInTheDocument()
-    expect(within(list[1]).getByTitle(new Date(failed).toLocaleTimeString())).toBeInTheDocument()
+    // Newest first: the failure (1h ago) is above the save (2h ago).
+    expect(within(list[0]).getByTitle(new Date(failed).toLocaleTimeString())).toBeInTheDocument()
+    expect(within(list[1]).getByTitle(new Date(saved).toLocaleTimeString())).toBeInTheDocument()
   })
 
   it('Clear empties the log, which takes the panel with it', async () => {
@@ -216,8 +217,9 @@ describe('DataLoadsPanel', () => {
       expect(accent).not.toBeNull()
       expect(accent!.className).toContain('w-0.5')
     }
-    expect((rows()[0].querySelector('[data-accent]') as HTMLElement).className).toContain('text-emerald-500')
-    expect((rows()[1].querySelector('[data-accent]') as HTMLElement).className).toContain('text-red-500')
+    // Newest first: the failure (1h ago) leads, the success (2h ago) follows.
+    expect((rows()[0].querySelector('[data-accent]') as HTMLElement).className).toContain('text-red-500')
+    expect((rows()[1].querySelector('[data-accent]') as HTMLElement).className).toContain('text-emerald-500')
   })
 
   it('carries ONE glyph per entry — the rail and its dot are gone', async () => {
@@ -251,8 +253,9 @@ describe('DataLoadsPanel', () => {
     await user.click(header())
 
     const list = rows()
-    expect(list[list.length - 1].className).toMatch(/ring-1/)
-    expect(list[0].className).not.toMatch(/ring-1/)
+    // Newest first, so the marked card is the one at the top.
+    expect(list[0].className).toMatch(/ring-1/)
+    expect(list[list.length - 1].className).not.toMatch(/ring-1/)
   })
 
   it('gives the message room to sit on one line at the notification\'s own width', async () => {

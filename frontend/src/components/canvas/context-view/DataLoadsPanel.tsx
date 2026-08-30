@@ -22,7 +22,7 @@
  * header that is the panel's whole footprint, and an entrance-only animation
  * with no exit to strand a click-blocker.
  *
- * Order is OLDEST FIRST — a sequence, with the newest at the bottom where the
+ * Order is NEWEST FIRST — the thing you just did is the thing you look for, and
  * scroller opens and the only card wearing a ring. Scope is the open view:
  * CanvasRouter clears the log whenever the active view or branch changes, and
  * nothing is persisted — a refresh starts clean.
@@ -34,7 +34,7 @@
  * same thing twice. With the cards in order and a time on every one, the rail
  * said nothing the sequence did not, so it is gone and the icon stayed.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { motion } from 'framer-motion'
 import { ChevronDown, ChevronUp, History, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -80,15 +80,15 @@ interface DataLoadRow {
 /**
  * Fold runs of the identical adjacent message into one row. The same message
  * fired five times is one thing that happened five times, not five things.
- * The input is oldest-first, so the run's last entry is its newest.
+ * The input is newest-first, so a run's FIRST entry is its newest — which is
+ * the time the row shows.
  */
-function foldRuns(oldestFirst: NotificationHistoryEntry[]): DataLoadRow[] {
+function foldRuns(newestFirst: NotificationHistoryEntry[]): DataLoadRow[] {
   const rows: DataLoadRow[] = []
-  for (const entry of oldestFirst) {
+  for (const entry of newestFirst) {
     const last = rows[rows.length - 1]
     if (last && last.entry.message === entry.message && last.entry.type === entry.type) {
       last.count += 1
-      last.at = entry.createdAt
     } else {
       rows.push({ entry, count: 1, at: entry.createdAt })
     }
@@ -102,33 +102,28 @@ export function DataLoadsPanel({ className }: { className?: string }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const bodyId = useId()
 
-  // The store keeps the log newest-first; the sequence reads the other way.
-  const rows = useMemo(() => foldRuns([...history].reverse()), [history])
+  // The store already keeps the log newest-first, and so does this panel: the
+  // newest is what a reader came for, and having to scroll to reach it is the
+  // one thing a log must never make you do. It also matches the live stack,
+  // where the newest card sits on top.
+  const rows = useMemo(() => foldRuns(history), [history])
 
   // Capped at ~7 rows (max-h-52): a load can raise dozens of messages, and a
   // log tall enough to span the canvas is a wall, not a surface. The rest is
-  // one scroll away.
-  // The newest row is at the BOTTOM, so that is where an opened log starts.
-  // A callback ref on the scroller does it as the element mounts — there is
-  // no state here, and `react-hooks/set-state-in-effect` is an error in this
-  // repo for good reason.
+  // one scroll away — and because the newest is first, an opened log already
+  // shows it without scrolling anywhere.
   const scrollerRef = useRef<HTMLDivElement | null>(null)
-  const openAtNewest = useCallback((el: HTMLDivElement | null) => {
-    scrollerRef.current = el
-    if (el) el.scrollTop = el.scrollHeight
-  }, [])
 
   // Times must keep counting while the panel is open, or the answer to "how
   // long ago?" freezes at whatever it was when the log was opened.
   useSyncExternalStore(isExpanded ? subscribeClock : subscribeNothing, getClockTick, getClockTick)
 
-  // A message arriving while the log is open lands below the fold. Follow it —
-  // but only for a reader who was already at the bottom; never yank someone who
-  // has scrolled up to read. A DOM write in an effect, not a state update.
+  // A message arriving while the log is open lands at the TOP. Follow it — but
+  // only for a reader who was already there; never yank someone who has
+  // scrolled down to read. A DOM write in an effect, not a state update.
   useEffect(() => {
     const el = scrollerRef.current
-    if (!el) return
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 24) el.scrollTop = el.scrollHeight
+    if (el && el.scrollTop < 24) el.scrollTop = 0
   }, [rows])
 
   // Nothing to show — and the panel must not survive the emptying. The panel
@@ -182,11 +177,11 @@ export function DataLoadsPanel({ className }: { className?: string }) {
           className="overflow-hidden"
         >
           <div id={bodyId} role="region" aria-label="Data loads" className="px-3 pb-3">
-            <div ref={openAtNewest} className="max-h-52 overflow-y-auto custom-scrollbar">
+            <div ref={scrollerRef} className="max-h-52 overflow-y-auto custom-scrollbar">
               <ol role="list" className="flex flex-col gap-1.5">
                 {rows.map(({ entry, count, at }, i) => {
                   const Icon = iconComponents[entry.type]
-                  const isNewest = i === rows.length - 1
+                  const isNewest = i === 0
                   return (
                     <li
                       key={entry.id}
