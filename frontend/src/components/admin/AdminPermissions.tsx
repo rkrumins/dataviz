@@ -1849,12 +1849,16 @@ export function RoleEditorDrawer({
 
     return (
         <>
-            <AnimatePresence>
+            {/* Entrance-only, and no <AnimatePresence>: this drawer is mounted
+                only while a role is being edited, so the presence tree unmounted
+                with it and the `exit` never ran. A full-height edge panel inside
+                a presence tree is the shape that strands a click-blocker down
+                the right of the page when an exit is interrupted — rows and
+                buttons under that band go dead until a reload. */}
                 <motion.aside
                     key="role-editor-drawer"
                     initial={{ x: '100%' }}
                     animate={{ x: 0 }}
-                    exit={{ x: '100%' }}
                     transition={{ type: 'spring', damping: 30, stiffness: 280 }}
                     onClick={(e) => e.stopPropagation()}
                     className="fixed right-0 top-0 h-full w-full max-w-md z-[51] bg-canvas-elevated border-l border-glass-border shadow-2xl flex flex-col"
@@ -2072,8 +2076,7 @@ export function RoleEditorDrawer({
                     </button>
                 </div>
                 </motion.aside>
-            </AnimatePresence>
-
+            
             {/* Phase 4.4 — impact preview gates the destructive write. */}
             <ImpactPreviewModal
                 open={previewState !== null}

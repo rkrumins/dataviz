@@ -29,9 +29,10 @@ const SRC = resolve(__dirname, '..')
 const ALLOWED = new Map<string, string>([
   [
     'features/reviews/components/ConflictResolver.tsx',
-    'Its `fixed inset-0` node IS the scrim — it carries click-to-cancel and '
-      + 'WRAPS the presence tree rather than sitting inside it, so framer cannot '
-      + 'strand it. Converting it means moving that click onto a <Backdrop> sibling.',
+    'Its `fixed inset-0` node is a click-to-cancel catcher that WRAPS the '
+      + 'presence tree rather than sitting inside it, so framer cannot strand it; '
+      + 'the scrim itself is already a <Backdrop> sibling. Converting it means '
+      + 'moving that click onto the Backdrop.',
   ],
 ])
 
@@ -86,16 +87,39 @@ function openingTags(src: string): string[] {
   return tags
 }
 
+/** A wrapper that covers the whole viewport. It is chrome, so it must be inert. */
+function coversWholeViewport(tag: string): boolean {
+  if (!/\bfixed\b/.test(tag)) return false
+  return /\binset-0\b/.test(tag) || /\binset-x-0\b/.test(tag) || /\binset-y-0\b/.test(tag)
+}
+
 /** The shapes that cover the viewport — or a full-height edge of it. */
 function coversViewport(tag: string): boolean {
   if (!/\bfixed\b/.test(tag)) return false
-  if (/\binset-0\b/.test(tag) || /\binset-x-0\b/.test(tag)) return true
-  return /\bright-0\b/.test(tag) && /\btop-0\b/.test(tag) && /\bh-full\b/.test(tag)
+  if (coversWholeViewport(tag)) return true
+  // An edge drawer is a full-height click-blocker over the band it occupies,
+  // which is how the last one presented: rows under the right edge went dead
+  // while the rest of the canvas kept working.
+  return /\b(?:right-0|left-0)\b/.test(tag) && /\btop-0\b/.test(tag) && /\b(?:h-full|h-screen)\b/.test(tag)
 }
 
-const portals = tsxFiles(SRC)
-  .map((file) => ({ rel: relative(SRC, file), src: readFileSync(file, 'utf8') }))
-  .filter(({ src }) => src.includes('createPortal'))
+/**
+ * Inert means inert in EVERY state. A wrapper that switches to
+ * `pointer-events-auto` while open is interactive in exactly the state an
+ * interrupted exit strands it in, so a conditional class does not count.
+ */
+function isInert(tag: string): boolean {
+  return tag.includes('pointer-events-none') && !tag.includes('pointer-events-auto')
+}
+
+const sources = tsxFiles(SRC).map((file) => ({ rel: relative(SRC, file), src: readFileSync(file, 'utf8') }))
+const portals = sources.filter(({ src }) => src.includes('createPortal'))
+/**
+ * Everything that animates presence, portaled or not. A drawer does not need a
+ * portal to strand — `AdminPermissions` renders a `fixed right-0 top-0 h-full`
+ * aside straight into the page, and framer can leave that behind just the same.
+ */
+const animating = sources.filter(({ src }) => src.includes('<AnimatePresence') && /\bexit=/.test(src))
 
 describe('portaled overlays cannot strand a click-blocker', () => {
   // A guard that scans nothing passes forever. Pin that the walk still finds
@@ -115,15 +139,17 @@ describe('portaled overlays cannot strand a click-blocker', () => {
     }
   })
 
-  it('every viewport-covering node in an animating portal is inert', () => {
+  it('every viewport-covering node in an animating surface is inert', () => {
     const offenders: string[] = []
-    for (const { rel, src } of portals) {
+    for (const { rel, src } of animating) {
       if (ALLOWED.has(rel)) continue
-      // Only an `exit` inside a presence tree can be interrupted, and only then
-      // is there anything to strand.
-      if (!src.includes('<AnimatePresence') || !/\bexit=/.test(src)) continue
       for (const tag of openingTags(src)) {
-        if (!coversViewport(tag) || tag.includes('pointer-events-none')) continue
+        if (!coversViewport(tag) || isInert(tag)) continue
+        // A whole-viewport node is chrome: it must be inert, always, because
+        // anything it covers is everything. An edge drawer is content and may
+        // take clicks — what it may not do is carry the `exit` that strands it
+        // as an interactive band down the side of the page.
+        if (!coversWholeViewport(tag) && !/\bexit=/.test(tag)) continue
         offenders.push(`${rel} — ${tag.replace(/\s+/g, ' ').slice(0, 120)}`)
       }
     }
@@ -155,6 +181,9 @@ describe('portaled overlays cannot strand a click-blocker', () => {
     // node it holds is the one that strands when it does run.
     for (const { rel, src } of portals) {
       expect(src, `${rel}: ${HOW_TO_FIX}`).not.toMatch(/return createPortal\(\s*<AnimatePresence[\s>]/)
+      // …and the same thing written through a hoisted constant, which is the
+      // idiom HelpPanel uses.
+      expect(src, `${rel}: ${HOW_TO_FIX}`).not.toMatch(/=\s*\(\s*<AnimatePresence[\s>]/)
     }
   })
 })
