@@ -44,7 +44,7 @@ import { DEFAULT_REL_VISUAL, type OntologyTab, type EditorPanel, type RelTypeWit
 
 import { OntologyDetailHeader } from '@/features/ontology/components/OntologyDetailHeader'
 import { OntologySidebar } from '@/features/ontology/components/OntologySidebar'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { CreateOntologyDialog } from '@/features/ontology/components/dialogs/CreateOntologyDialog'
 import { SchemaPanel } from '@/features/ontology/components/panels/SchemaPanel'
 import { HierarchyPanel } from '@/features/ontology/components/panels/HierarchyPanel'
@@ -215,7 +215,7 @@ export function OntologySchemaPage() {
 
   // ── Local state ────────────────────────────────────────────────────
   const [editorPanel, setEditorPanel] = useState<EditorPanel>(null)
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const [search, setSearch] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [isSuggesting, setIsSuggesting] = useState(false)
@@ -503,11 +503,11 @@ export function OntologySchemaPage() {
       }
 
       await mutations.update.mutateAsync({ id: selectedOntology.id, req })
-      showToast('success', 'All changes saved — views on this semantic layer will pick them up automatically')
+      notify('success', 'All changes saved — views on this semantic layer will pick them up automatically')
       doDiscard()
       return true
     } catch (err: unknown) {
-      showToast('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Failed to save: ${err instanceof Error ? err.message : 'Unknown error'}`)
       return false
     } finally {
       setIsSaving(false)
@@ -665,10 +665,10 @@ export function OntologySchemaPage() {
       })
       await loadWorkspaces()
       invalidateGraphSchema()
-      showToast('success', 'Schema assigned to data source')
+      notify('success', 'Schema assigned to data source')
       return true
     } catch (err: unknown) {
-      showToast('error', `Assignment failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Assignment failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
       return false
     } finally {
       setIsAssigning(false)
@@ -697,10 +697,10 @@ export function OntologySchemaPage() {
       await workspaceService.updateDataSource(unassignTarget.wsId, unassignTarget.dsId, { ontologyId: '' })
       await loadWorkspaces()
       invalidateGraphSchema()
-      showToast('success', 'Schema unassigned from data source')
+      notify('success', 'Schema unassigned from data source')
       setUnassignTarget(null)
     } catch (err: unknown) {
-      showToast('error', `Unassign failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Unassign failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
       setIsAssigning(false)
     }
@@ -721,12 +721,12 @@ export function OntologySchemaPage() {
       invalidateGraphSchema()
       const ok = results.filter(r => r.status === 'fulfilled').length
       if (ok === targets.length) {
-        showToast('success', `Unassigned ${ok} data source${ok !== 1 ? 's' : ''}`)
+        notify('success', `Unassigned ${ok} data source${ok !== 1 ? 's' : ''}`)
       } else {
         const failed = targets
           .filter((_, i) => results[i].status === 'rejected')
           .map(t => t.dataSourceLabel)
-        showToast('error',
+        notify('error',
           `Unassigned ${ok} of ${targets.length} — failed: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}`)
       }
       setBulkUnassignTargets(null)
@@ -737,7 +737,7 @@ export function OntologySchemaPage() {
 
   /** Roll out the current ontology to ALL data sources in a workspace.
    *  Settled batch: one failing source no longer hides the ones that
-   *  succeeded — the toast reports the real count. */
+   *  succeeded — the notification reports the real count. */
   async function handleRollOutToWorkspace(workspaceId: string) {
     if (!selectedOntology) return
     const ws = workspaces.find(w => w.id === workspaceId)
@@ -751,12 +751,12 @@ export function OntologySchemaPage() {
       invalidateGraphSchema()
       const ok = results.filter(r => r.status === 'fulfilled').length
       if (ok === targets.length) {
-        showToast('success', `Schema rolled out to all ${ok} data source${ok !== 1 ? 's' : ''} in "${ws.name}"`)
+        notify('success', `Schema rolled out to all ${ok} data source${ok !== 1 ? 's' : ''} in "${ws.name}"`)
       } else {
         const failed = targets
           .filter((_, i) => results[i].status === 'rejected')
           .map(ds => ds.label || ds.id)
-        showToast('error',
+        notify('error',
           `Rolled out to ${ok} of ${targets.length} in "${ws.name}" — failed: ${failed.slice(0, 3).join(', ')}${failed.length > 3 ? '…' : ''}`)
       }
     } finally {
@@ -766,7 +766,7 @@ export function OntologySchemaPage() {
 
   function handleSaveEntityType(entityType: EntityTypeSchema) {
     if (!selectedOntology || !workingEntityDefs) return
-    if (isLocked) { showToast('warning', 'Clone this semantic layer to make edits'); return }
+    if (isLocked) { notify('warning', 'Clone this semantic layer to make edits'); return }
 
     const currentDefs = { ...(workingEntityDefs as Record<string, Record<string, unknown>>) }
 
@@ -821,18 +821,18 @@ export function OntologySchemaPage() {
     }
 
     setWorkingEntityDefs(updatedDefs)
-    showToast('info', `"${entityType.name}" updated — save to persist`)
+    notify('info', `"${entityType.name}" updated — save to persist`)
     setEditorPanel(null)
   }
 
   function handleSaveRelType(relType: RelTypeWithClassifications) {
     if (!selectedOntology || !workingRelDefs) return
     if (relType.isSystem) {
-      showToast('info', `"${relType.name}" is a built-in edge maintained by the platform — it can't be edited.`)
+      notify('info', `"${relType.name}" is a built-in edge maintained by the platform — it can't be edited.`)
       setEditorPanel(null)
       return
     }
-    if (isLocked) { showToast('warning', 'Clone this semantic layer to make edits'); return }
+    if (isLocked) { notify('warning', 'Clone this semantic layer to make edits'); return }
 
     // Type ids are opaque identifiers — preserve the declared casing verbatim. Normalizing
     // here (previously .toUpperCase()) corrupted any ontology whose ids aren't uppercase:
@@ -861,7 +861,7 @@ export function OntologySchemaPage() {
     setWorkingRelDefs(updatedRelDefs)
     setWorkingContainment(containment)
     setWorkingLineage(lineage)
-    showToast('info', `"${relType.name}" updated — save to persist`)
+    notify('info', `"${relType.name}" updated — save to persist`)
     setEditorPanel(null)
   }
 
@@ -877,7 +877,7 @@ export function OntologySchemaPage() {
     const defs = { ...base }
     delete defs[id]
     setWorkingEntityDefs(defs)
-    showToast('info', `"${name}" removed — save to persist`, {
+    notify('info', `"${name}" removed — save to persist`, {
       label: 'Undo',
       onClick: () => setWorkingEntityDefs(prev => ({ ...(prev ?? {}), [id]: removedDef })),
     })
@@ -890,7 +890,7 @@ export function OntologySchemaPage() {
     const defs = { ...base }
     delete defs[id]
     setWorkingRelDefs(defs)
-    showToast('info', `"${name}" removed — save to persist`, {
+    notify('info', `"${name}" removed — save to persist`, {
       label: 'Undo',
       onClick: () => setWorkingRelDefs(prev => ({ ...(prev ?? {}), [id]: removedDef })),
     })
@@ -998,7 +998,7 @@ export function OntologySchemaPage() {
       invalidateGraphSchema()
       return true
     } catch (err: unknown) {
-      showToast('error', `Could not assign to the data source: ${err instanceof Error ? err.message : 'unknown error'}`)
+      notify('error', `Could not assign to the data source: ${err instanceof Error ? err.message : 'unknown error'}`)
       return false
     }
   }
@@ -1012,11 +1012,11 @@ export function OntologySchemaPage() {
       ? workspaces.flatMap(ws => ws.dataSources ?? []).find(ds => ds.id === targetDsId)?.label || targetDsId
       : null
     if (assigned && dsLabel) {
-      showToast('success', `Assigned to "${dsLabel}" and navigated to the semantic layer`)
+      notify('success', `Assigned to "${dsLabel}" and navigated to the semantic layer`)
     } else if (!targetDsId) {
-      showToast('success', 'Navigated to the matching semantic layer')
+      notify('success', 'Navigated to the matching semantic layer')
     }
-    // A picked-but-failed assignment already surfaced an error toast above —
+    // A picked-but-failed assignment already surfaced an error notification above —
     // don't paper over it with a success message.
 
     // Don't throw away the classification Suggest computed: if this layer leaves edges in "Other"
@@ -1057,7 +1057,7 @@ export function OntologySchemaPage() {
     if (target.isSystem || target.isPublished) return
 
     const n = toClassify.length
-    showToast('info',
+    notify('info',
       `This layer leaves ${n} edge${n !== 1 ? 's' : ''} the graph uses in "Other" — apply the suggested classification?`,
       {
         label: 'Apply',
@@ -1078,9 +1078,9 @@ export function OntologySchemaPage() {
             }
             await mutations.update.mutateAsync({ id: ontologyId, req })
             invalidateGraphSchema()
-            showToast('success', `Classified ${n} edge${n !== 1 ? 's' : ''} — aggregation and lineage will use them now`)
+            notify('success', `Classified ${n} edge${n !== 1 ? 's' : ''} — aggregation and lineage will use them now`)
           } catch (err: unknown) {
-            showToast('error', `Could not apply classification: ${err instanceof Error ? err.message : 'unknown error'}`)
+            notify('error', `Could not apply classification: ${err instanceof Error ? err.message : 'unknown error'}`)
           }
         },
       },
@@ -1094,11 +1094,11 @@ export function OntologySchemaPage() {
       const cloned = await mutations.clone.mutateAsync(ontologyId)
       const assigned = await assignOntologyToTarget(cloned.id, targetWsId, targetDsId)
       navigate(schemaUrl(cloned.id, 'schema'))
-      showToast('success', assigned
+      notify('success', assigned
         ? 'Cloned and assigned — now editing a new draft'
         : 'Cloned — now editing a new draft')
     } catch (err: unknown) {
-      showToast('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -1109,7 +1109,7 @@ export function OntologySchemaPage() {
       // Reached "Create from Graph" without an analysis run (e.g. after "Skip
       // Analysis"): there is no suggested schema to build from. Tell the user
       // instead of silently doing nothing.
-      showToast('error', 'Analyze the graph first to create a draft from it.')
+      notify('error', 'Analyze the graph first to create a draft from it.')
       return
     }
     setIsSuggesting(true)
@@ -1126,11 +1126,11 @@ export function OntologySchemaPage() {
       const assigned = await assignOntologyToTarget(created.id, targetWsId, targetDsId)
       setShowSuggestDialog(false)
       navigate(schemaUrl(created.id, 'schema'))
-      showToast('info', assigned
+      notify('info', assigned
         ? 'Draft created and assigned — review types and publish when ready'
         : 'Draft created — review types and publish when ready')
     } catch (err: unknown) {
-      showToast('error', `Failed to create draft: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Failed to create draft: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
       setIsSuggesting(false)
     }
@@ -1141,9 +1141,9 @@ export function OntologySchemaPage() {
     try {
       const cloned = await mutations.clone.mutateAsync(selectedOntology.id)
       navigate(schemaUrl(cloned.id))
-      showToast('success', 'Cloned — now editing an independent copy')
+      notify('success', 'Cloned — now editing an independent copy')
     } catch (err: unknown) {
-      showToast('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Clone failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -1152,9 +1152,9 @@ export function OntologySchemaPage() {
     try {
       const newVersion = await mutations.createNewVersion.mutateAsync(selectedOntology.id)
       navigate(schemaUrl(newVersion.id))
-      showToast('success', `Draft v${newVersion.version} created — now editing`)
+      notify('success', `Draft v${newVersion.version} created — now editing`)
     } catch (err: unknown) {
-      showToast('error', `Failed to create new version: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Failed to create new version: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -1163,9 +1163,9 @@ export function OntologySchemaPage() {
     try {
       const result = await mutations.validate.mutateAsync(selectedOntology.id)
       setValidationResult(result)
-      if (result.isValid) showToast('success', 'Semantic layer is valid')
+      if (result.isValid) notify('success', 'Semantic layer is valid')
     } catch (err: unknown) {
-      showToast('error', `Validation failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Validation failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -1183,7 +1183,7 @@ export function OntologySchemaPage() {
     ])
     if (impactRes.status === 'rejected') {
       const err = impactRes.reason
-      showToast('error', `Failed to check impact: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Failed to check impact: ${err instanceof Error ? err.message : 'Unknown error'}`)
       return
     }
 
@@ -1229,13 +1229,13 @@ export function OntologySchemaPage() {
     setIsPublishing(true)
     try {
       await mutations.publish.mutateAsync({ id: selectedOntology.id, force })
-      showToast('success', force
+      notify('success', force
         ? 'Force-published — breaking-change protection was overridden'
         : 'Published — active for all assigned data sources')
       setValidationResult(null)
       setPublishImpact(null)
     } catch (err: unknown) {
-      showToast('error', `Publish failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Publish failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
       setIsPublishing(false)
     }
@@ -1255,7 +1255,7 @@ export function OntologySchemaPage() {
       a.remove()
       URL.revokeObjectURL(url)
     } catch (err: unknown) {
-      showToast('error', `Export failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Export failed: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -1270,15 +1270,15 @@ export function OntologySchemaPage() {
       try {
         const parsed = JSON.parse(event.target?.result as string)
         if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-          showToast('error', 'Invalid file: expected a JSON object')
+          notify('error', 'Invalid file: expected a JSON object')
           return
         }
         setImportData(parsed)
       } catch {
-        showToast('error', 'Invalid file: could not parse JSON')
+        notify('error', 'Invalid file: could not parse JSON')
       }
     }
-    reader.onerror = () => showToast('error', 'Failed to read file')
+    reader.onerror = () => notify('error', 'Failed to read file')
     reader.readAsText(file)
   }
 
@@ -1293,7 +1293,7 @@ export function OntologySchemaPage() {
       updated: `Updated draft with imported changes`,
       new_version: `Created new draft v${result.ontology.version} from import`,
     }
-    showToast('success', messages[result.status] || result.summary)
+    notify('success', messages[result.status] || result.summary)
   }
 
   async function handleCreateDraft(name: string, prePopulate: boolean) {
@@ -1306,9 +1306,9 @@ export function OntologySchemaPage() {
         const response = await ontologyDefinitionService.suggest(stats as unknown as Record<string, unknown>)
         const created = await mutations.create.mutateAsync({ ...response.suggested, name })
         navigate(schemaUrl(created.id, 'schema'))
-        showToast('success', `"${name}" created with ${Object.keys(created.entityTypeDefinitions ?? {}).length} entity types from your graph`)
+        notify('success', `"${name}" created with ${Object.keys(created.entityTypeDefinitions ?? {}).length} entity types from your graph`)
       } catch (err: unknown) {
-        showToast('error', `Failed to create: ${err instanceof Error ? err.message : 'Unknown error'}`)
+        notify('error', `Failed to create: ${err instanceof Error ? err.message : 'Unknown error'}`)
       } finally {
         setIsSuggesting(false)
       }
@@ -1318,9 +1318,9 @@ export function OntologySchemaPage() {
         // Empty drafts land where the schema is BUILT (the from-graph path
         // already does) — Overview is a dead end with zero types.
         navigate(schemaUrl(created.id, 'schema'))
-        showToast('success', 'New draft created')
+        notify('success', 'New draft created')
       } catch (err: unknown) {
-        showToast('error', `Failed to create: ${err instanceof Error ? err.message : 'Unknown error'}`)
+        notify('error', `Failed to create: ${err instanceof Error ? err.message : 'Unknown error'}`)
       }
     }
   }
@@ -1339,21 +1339,21 @@ export function OntologySchemaPage() {
       await mutations.remove.mutateAsync(deletedId)
       const remaining = ontologies.filter(x => x.id !== deletedId)
       navigate(remaining.length > 0 ? schemaUrl(remaining[0].id) : '/schema', { replace: true })
-      showToast('success', `"${deletedName}" deleted`, {
+      notify('success', `"${deletedName}" deleted`, {
         label: 'Undo',
         onClick: async () => {
           try {
             await ontologyDefinitionService.restore(deletedId)
             mutations.invalidateAll()
             navigate(schemaUrl(deletedId))
-            showToast('success', `"${deletedName}" restored`)
+            notify('success', `"${deletedName}" restored`)
           } catch {
-            showToast('error', 'Failed to restore')
+            notify('error', 'Failed to restore')
           }
         },
       })
     } catch (err: unknown) {
-      showToast('error', `Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -1362,9 +1362,9 @@ export function OntologySchemaPage() {
     try {
       await ontologyDefinitionService.restore(selectedOntology.id)
       mutations.invalidateAll()
-      showToast('success', `"${selectedOntology.name}" restored`)
+      notify('success', `"${selectedOntology.name}" restored`)
     } catch (err: unknown) {
-      showToast('error', `Failed to restore: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      notify('error', `Failed to restore: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
   }
 
@@ -1411,7 +1411,7 @@ export function OntologySchemaPage() {
     const msg = parentId === childId
       ? `"${humanizeId(childId)}" can now contain itself — save to persist`
       : `"${humanizeId(childId)}" also contained under "${humanizeId(parentId)}" — save to persist`
-    showToast('info', msg)
+    notify('info', msg)
   }
 
   function handleRemoveContainmentEdge(childId: string, parentId: string) {
@@ -1439,7 +1439,7 @@ export function OntologySchemaPage() {
     }
 
     setWorkingEntityDefs(defs)
-    showToast('info', `Removed "${humanizeId(childId)}" from "${humanizeId(parentId)}" — save to persist`)
+    notify('info', `Removed "${humanizeId(childId)}" from "${humanizeId(parentId)}" — save to persist`)
   }
 
   function handleMakeRootType(childId: string) {
@@ -1463,7 +1463,7 @@ export function OntologySchemaPage() {
     defs[childId] = { ...defs[childId], hierarchy: { ...((defs[childId].hierarchy as Record<string, unknown>) ?? {}), can_be_contained_by: [] } }
 
     setWorkingEntityDefs(defs)
-    showToast('info', `"${humanizeId(childId)}" is now a root type — save to persist`)
+    notify('info', `"${humanizeId(childId)}" is now a root type — save to persist`)
   }
 
   function handleUpdateContainmentEdgeTypes(newList: string[]) {
@@ -1486,7 +1486,7 @@ export function OntologySchemaPage() {
       })
     )
     setWorkingRelDefs(syncedDefs)
-    showToast('info', 'Containment edge types updated — save to persist')
+    notify('info', 'Containment edge types updated — save to persist')
   }
 
   // ── Editor panel title helper ──────────────────────────────────────

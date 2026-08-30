@@ -5,7 +5,7 @@
  * - Real-time polling when any job is pending/running
  * - Interactive status filter chips
  * - Inline active-job progress bars
- * - Loading states on action buttons with toast feedback
+ * - Loading states on action buttons with notification feedback
  * - Drift detection indicators
  */
 

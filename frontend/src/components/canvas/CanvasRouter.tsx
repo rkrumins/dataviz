@@ -19,7 +19,7 @@ import { useGraphProviderContext } from '@/providers/GraphProviderContext'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
-import { useLoadingToast, useToastStore } from '@/components/ui/toast'
+import { useLoadingNotification, useNotificationStore } from '@/components/ui/notifications'
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
@@ -66,7 +66,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // without hydration (loadChildren/searchChildren only).
   const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
-  useLoadingToast(
+  useLoadingNotification(
     'hydration',
     isInitialLoad && hydrationStatus === 'loading',
     hydrationPhase === 'roots' ? 'Loading entities' : hydrationPhase === 'edges' ? 'Loading edges' : 'Preparing view',
@@ -76,7 +76,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   )
 
   // Mirror hydration phase + status into the canvas store so downstream
-  // components (ContextViewCanvas empty-state/toasts, LayerColumn ghost cards,
+  // components (ContextViewCanvas empty-state/notifications, LayerColumn ghost cards,
   // GhostLineageOverlay) derive their UI from ONE authoritative source and
   // never render a failed/loading load as an empty graph.
   const setHydrationPhase = useCanvasStore((s) => s.setHydrationPhase)
@@ -104,11 +104,11 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     const { clearTrace, resetAddedEdgeIds } = useTraceStore.getState()
     clearTrace()
     resetAddedEdgeIds()
-    // Same reasoning for the toast message log the status chips surface: it is
+    // Same reasoning for the notification message log the status chips surface: it is
     // an app singleton, so without this the messages raised while view A was
     // open would be listed as view B's. In memory only — no persistence, so a
     // refresh starts clean too.
-    useToastStore.getState().clearHistory()
+    useNotificationStore.getState().clearHistory()
   }, [activeViewId, currentBranchId])
 
   // Scope staged changes to the active (workspace, data source, branch). Staged edits belong to

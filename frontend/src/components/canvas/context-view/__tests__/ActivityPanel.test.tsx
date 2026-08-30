@@ -1,7 +1,7 @@
 /**
- * ActivityPanel — "what did that toast say?", docked where it can be clicked.
+ * ActivityPanel — "what did that notification say?", docked where it can be clicked.
  *
- * Toasts live 4.5 seconds and the app fires hundreds of them; a user who looked
+ * Notifications live 4.5 seconds and the app fires hundreds of them; a user who looked
  * away has no way back. The messages this view raised now live in a panel
  * docked directly above Connections in the canvas's bottom-right stack — the
  * chip that used to open them sat in the status cluster and the expanded
@@ -19,21 +19,21 @@ import { render, screen, within, cleanup, fireEvent, act } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { ActivityPanel } from '../ActivityPanel'
-import { useToastStore, type ToastHistoryEntry } from '@/components/ui/toast'
+import { useNotificationStore, type NotificationHistoryEntry } from '@/components/ui/notifications'
 
 const HOUR = 60 * 60 * 1000
 
 beforeEach(() => {
-  useToastStore.setState({ toasts: [], history: [], _nextId: 1 })
+  useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
 })
 afterEach(cleanup)
 
-type Seed = Pick<ToastHistoryEntry, 'type' | 'message' | 'createdAt'>
+type Seed = Pick<NotificationHistoryEntry, 'type' | 'message' | 'createdAt'>
 
-/** Seed the store the way addToast does — NEWEST first — from an oldest-first list. */
+/** Seed the store the way add does — NEWEST first — from an oldest-first list. */
 function seed(oldestFirst: Seed[]) {
   const history = oldestFirst.map((e, i) => ({ id: i + 1, ...e })).reverse()
-  useToastStore.setState({ history, _nextId: oldestFirst.length + 1 })
+  useNotificationStore.setState({ history, _nextId: oldestFirst.length + 1 })
 }
 
 const header = () => screen.getByRole('button', { name: /activity/i })
@@ -135,7 +135,7 @@ describe('ActivityPanel', () => {
     await user.click(header())
     await user.click(screen.getByRole('button', { name: /clear/i }))
 
-    expect(useToastStore.getState().history).toEqual([])
+    expect(useNotificationStore.getState().history).toEqual([])
     expect(container).toBeEmptyDOMElement()
   })
 
@@ -148,7 +148,7 @@ describe('ActivityPanel', () => {
     await user.click(screen.getByRole('button', { name: /clear/i }))
 
     // The panel unmounted but its instance did not — the dock keeps it
-    // rendered. The next toast must bring back a CLOSED panel, not one the
+    // rendered. The next notification must bring back a CLOSED panel, not one the
     // user never asked for, grown up over the canvas.
     seed([{ type: 'info', message: 'Saved to draft.', createdAt: Date.now() }])
     expect(await screen.findByRole('button', { name: /activity/i })).toHaveAttribute('aria-expanded', 'false')

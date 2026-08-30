@@ -172,7 +172,7 @@ function getItemKey(item: FlatTreeNode, _index: number): string {
  * scrolls the hit into view — which drops that row into the viewport for
  * every ancestor on the spine without the reader having scrolled at all.
  * Each one then pages itself, which is exactly the cost the reveal exists to
- * avoid (three `children-with-edges` and three toasts for one three-deep
+ * avoid (three `children-with-edges` and three notifications for one three-deep
  * hit). Being carried somewhere is not the same as scrolling there, so the
  * sentinel stays disarmed until the container holds something the reader
  * actually asked for. The button is unaffected.

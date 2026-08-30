@@ -6,7 +6,7 @@ import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, RefreshCw, RotateCcw, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { freshnessService } from '@/services/freshnessService'
 import type { FreshnessRow, RefreshScope } from '@/services/freshnessService'
 import { FAILURE_CATEGORY_LABEL, asFailureCategory, countFailuresByCategory } from './failureGuidance'
@@ -23,7 +23,7 @@ export function BulkRetryBar({
     onClear: () => void
     onDone: () => void
 }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const [running, setRunning] = useState(false)
     const [confirming, setConfirming] = useState<null | 'retry' | 'rebuild'>(null)
     const [progress, setProgress] = useState<{ done: number; total: number; errors: number } | null>(null)
@@ -63,7 +63,7 @@ export function BulkRetryBar({
         })
         await Promise.all(workers)
         setRunning(false)
-        showToast(
+        notify(
             errors === 0 ? 'success' : 'error',
             errors === 0
                 ? ok

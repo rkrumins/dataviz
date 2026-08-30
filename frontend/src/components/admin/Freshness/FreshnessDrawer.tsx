@@ -18,7 +18,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { usePermission } from '@/store/auth'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import { DurationField, formatDuration } from '@/components/ui/DurationField'
@@ -29,7 +29,7 @@ import {
     FRESHNESS_KEYS,
     useReconcileNow, useRefreshSource, useSetFreshnessSettings, useSourceFreshness,
 } from './useFreshness'
-import { checkNowToast } from './reconcileHealth'
+import { checkNowMessage } from './reconcileHealth'
 import { DRIFT_SPEC, DriftStateBadge, REASON_LABEL, type DriftState } from './DriftStateBadge'
 import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, ReconcileWhy, reconcileEvidenceRows } from './reconcileEvidence'
@@ -149,7 +149,7 @@ function CadenceEditor({
     saveLabel: string
     onSave: (secs: number | null) => void
 }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const [value, setValue] = useState<number | null>(stored ?? null)
     const label = CADENCE_LABEL[stage]
 
@@ -157,7 +157,7 @@ function CadenceEditor({
         if (value != null && (!Number.isFinite(value) || value < min || value > max)) {
             // formatDuration, not fmtInterval: this is a bound, and a floor of
             // zero reads "0s" here rather than "Off (rebuild every change)".
-            showToast('error',
+            notify('error',
                 `Choose a time between ${formatDuration(min)} and ${formatDuration(max)}.`)
             return
         }
@@ -208,7 +208,7 @@ function CadenceEditor({
  * turn detection off for the whole fleet.
  */
 function DetectSection({ doc }: { doc: FreshnessDoc }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const setSettings = useSetFreshnessSettings()
 
@@ -219,8 +219,8 @@ function DetectSection({ doc }: { doc: FreshnessDoc }) {
 
     const patch = (body: FreshnessSettingsPatch, ok: string) => {
         setSettings.mutate({ dsId: doc.dataSourceId, ...body }, {
-            onSuccess: () => showToast('success', ok),
-            onError: (e) => showToast('error', e.message || 'Could not update the setting.'),
+            onSuccess: () => notify('success', ok),
+            onError: (e) => notify('error', e.message || 'Could not update the setting.'),
         })
     }
 
@@ -349,7 +349,7 @@ function SnoozeRow({ doc, pausedFor, pending, onPatch }: {
  * section never recomputes it, and the freshness read path makes no graph call.
  */
 function CheckSection({ doc }: { doc: FreshnessDoc }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const isAdmin = usePermission('system:admin')
     const setSettings = useSetFreshnessSettings()
@@ -475,10 +475,10 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
                             // settings we did not mean to touch.
                             { dsId: doc.dataSourceId, reconcileCheckIntervalSecs: secs },
                             {
-                                onSuccess: () => showToast('success', secs == null
+                                onSuccess: () => notify('success', secs == null
                                     ? 'Check frequency reset to the default.'
                                     : 'Check frequency updated.'),
-                                onError: (e) => showToast('error',
+                                onError: (e) => notify('error',
                                     e.message || 'Could not update the check frequency.'),
                             },
                         )}
@@ -490,8 +490,8 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
                             onClick={() => reconcileNow.mutate(
                                 { dataSourceIds: [doc.dataSourceId] },
                                 {
-                                    onSuccess: (res) => showToast('success', checkNowToast(res)),
-                                    onError: (e) => showToast('error',
+                                    onSuccess: (res) => notify('success', checkNowMessage(res)),
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not run reconciliation.'),
                                 },
                             )}
@@ -518,7 +518,7 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
  * the snooze is the third face of it: a hold rather than an opt-out.
  */
 function ActSection({ doc }: { doc: FreshnessDoc }) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const setSettings = useSetFreshnessSettings()
 
@@ -569,10 +569,10 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                             onChange={(next) => setSettings.mutate(
                                 { dsId: doc.dataSourceId, autoReconcileEnabled: next },
                                 {
-                                    onSuccess: () => showToast('success', next
+                                    onSuccess: () => notify('success', next
                                         ? 'Automatic reconciliation on for this source.'
                                         : 'Automatic reconciliation off for this source.'),
-                                    onError: (e) => showToast('error',
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not update the setting.'),
                                 },
                             )}
@@ -601,10 +601,10 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                             onSave={(secs) => setSettings.mutate(
                                 { dsId: doc.dataSourceId, rebuildMinIntervalSecs: secs },
                                 {
-                                    onSuccess: () => showToast('success', secs == null
+                                    onSuccess: () => notify('success', secs == null
                                         ? 'Rebuild cadence reset to the default.'
                                         : 'Rebuild cadence updated.'),
-                                    onError: (e) => showToast('error',
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not update rebuild cadence.'),
                                 },
                             )}
@@ -622,8 +622,8 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                             onPatch={(body, ok) => setSettings.mutate(
                                 { dsId: doc.dataSourceId, ...body },
                                 {
-                                    onSuccess: () => showToast('success', ok),
-                                    onError: (e) => showToast('error',
+                                    onSuccess: () => notify('success', ok),
+                                    onError: (e) => notify('error',
                                         e.message || 'Could not update the setting.'),
                                 },
                             )}
@@ -941,7 +941,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
         void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
     }, [probe, probing, error, doc?.liveFingerprint, qc])
 
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc?.workspaceId ?? undefined)
     const isAdmin = usePermission('system:admin')
     const refresh = useRefreshSource()
@@ -954,23 +954,23 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const doClear = () => {
         if (!dsId) return
         refresh.mutate({ dsId, scope: 'clear' }, {
-            onSuccess: () => showToast('success', `Cache cleared for ${name}.`),
-            onError: (e) => showToast('error', e.message || 'Could not clear the cache.'),
+            onSuccess: () => notify('success', `Cache cleared for ${name}.`),
+            onError: (e) => notify('error', e.message || 'Could not clear the cache.'),
         })
     }
     const doRetry = () => {
         if (!dsId) return
         refresh.mutate({ dsId, scope: 'rollups' }, {
-            onSuccess: () => showToast('success', `Lineage rebuild queued for ${name}.`),
-            onError: (e) => showToast('error', e.message || 'Could not start the rebuild.'),
+            onSuccess: () => notify('success', `Lineage rebuild queued for ${name}.`),
+            onError: (e) => notify('error', e.message || 'Could not start the rebuild.'),
         })
         setRetryOpen(false)
     }
     const doRebuildLineage = () => {
         if (!dsId) return
         refresh.mutate({ dsId, scope: 'rollups' }, {
-            onSuccess: () => showToast('success', `Lineage rebuild queued for ${name}.`),
-            onError: (e) => showToast('error', e.message || 'Could not start the rebuild.'),
+            onSuccess: () => notify('success', `Lineage rebuild queued for ${name}.`),
+            onError: (e) => notify('error', e.message || 'Could not start the rebuild.'),
         })
     }
     const doReconcileThisSource = () => {
@@ -978,8 +978,8 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
         reconcileNow.mutate(
             { dataSourceIds: [dsId] },
             {
-                onSuccess: (res) => showToast('success', checkNowToast(res)),
-                onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
+                onSuccess: (res) => notify('success', checkNowMessage(res)),
+                onError: (e) => notify('error', e.message || 'Could not run reconciliation.'),
             },
         )
     }

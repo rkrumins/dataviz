@@ -20,14 +20,14 @@ import { useCanvasStore } from '@/store/canvas'
 import { useViewEntityTypes, useViewRelationshipTypes, useViewContainmentEdgeTypes } from '@/hooks/useViewSchema'
 import { deriveConnectableEdges, connectedEdgeTypes, type AllowedEdgeOption } from '@/services/ontologyPreflightService'
 import { relationshipLabel } from '@/lib/relationshipLabel'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { EntityTypeSchema } from '@/types/schema'
 import { useCreateLinkStore } from './createLinkStore'
 
 export interface CreateLinkPopoverProps {
   /** Stage a RAW lineage edge (source urn → target urn) of the chosen type.
    *  Returns the staged temp edge id, or `null` when the ontology gate rejects
-   *  it (the gate shows its own error toast). */
+   *  it (the gate shows its own error notification). */
   onCreateLink: (sourceUrn: string, targetUrn: string, edgeType: string) => string | null
 }
 
@@ -71,7 +71,7 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
   const entityTypes = useViewEntityTypes()
   const relationshipTypes = useViewRelationshipTypes()
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
 
   const ref = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -228,14 +228,14 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
 
   const confirm = useCallback(() => {
     if (!sourceUrn || !targetUrn || !chosenEdgeType) return
-    // stageEdgeCreate returns null when its ontology gate rejects (it toasts
+    // stageEdgeCreate returns null when its ontology gate rejects (it notifies
     // its own error) — only claim success for an actually-staged edge.
     const staged = onCreateLink(sourceUrn, targetUrn, chosenEdgeType)
     if (staged !== null) {
-      showToast('success', `Linked ${sourceName} → ${targetName} — save when you're done`)
+      notify('success', `Linked ${sourceName} → ${targetName} — save when you're done`)
     }
     close()
-  }, [sourceUrn, targetUrn, chosenEdgeType, onCreateLink, showToast, sourceName, targetName, close])
+  }, [sourceUrn, targetUrn, chosenEdgeType, onCreateLink, notify, sourceName, targetName, close])
 
   if (!isOpen || !sourceUrn || !sourceNode || !anchor) return null
 

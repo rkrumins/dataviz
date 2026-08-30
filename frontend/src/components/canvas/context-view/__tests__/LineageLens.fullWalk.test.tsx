@@ -149,7 +149,7 @@ describe('LineageLens — the two valves', () => {
 })
 
 describe('LineageLens — the capsule says it is calculating (2026-08-22)', () => {
-  // The header narration is 10px of muted text and a bottom toast was
+  // The header narration is 10px of muted text and a bottom notification was
   // easy to miss: "the user might confuse that for nothing happening".
   // From the moment Focus opens, the board carries the same capsule the
   // canvas trace uses — headline, ticking counts, the sounding line.

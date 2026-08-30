@@ -64,7 +64,7 @@ export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete
 
 /**
  * Authoritative hydration state machine. ALL terminal canvas UI (empty state,
- * provider overlay, success toasts) derives from this single value so the
+ * provider overlay, success notifications) derives from this single value so the
  * "genuinely empty" and "failed/loading" cases can never be confused — not
  * even transiently during an auto-retry. Transitions:
  *   loading → ready        (a fetch SUCCEEDED — canvas renders; empty-state

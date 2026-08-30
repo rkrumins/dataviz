@@ -1,7 +1,7 @@
 /**
- * ActivityPanel — the toasts you missed, in the order they happened.
+ * ActivityPanel — the notifications you missed, in the order they happened.
  *
- * A toast lives 4.5 seconds and the app fires hundreds of them; a user who
+ * A notification lives 4.5 seconds and the app fires hundreds of them; a user who
  * looked away, or who was reading the canvas when three fired at once, has no
  * way back to what they said. This panel is that way back.
  *
@@ -27,7 +27,7 @@ import { motion } from 'framer-motion'
 import { ChevronDown, ChevronUp, History, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { relativeTime } from '@/lib/relativeTime'
-import { iconColors, iconComponents, useToastStore, type ToastHistoryEntry } from '@/components/ui/toast'
+import { iconColors, iconComponents, useNotificationStore, type NotificationHistoryEntry } from '@/components/ui/notifications'
 
 /**
  * A coarse clock for the open panel. `relativeTime` is computed at render, so
@@ -59,7 +59,7 @@ const getClockTick = () => clockTick
 const subscribeNothing = () => () => {}
 
 interface ActivityRow {
-  entry: ToastHistoryEntry
+  entry: NotificationHistoryEntry
   count: number
   /** The run's LATEST occurrence — the row answers "when did this last happen?" */
   at: number
@@ -70,7 +70,7 @@ interface ActivityRow {
  * fired five times is one thing that happened five times, not five things.
  * The input is oldest-first, so the run's last entry is its newest.
  */
-function foldRuns(oldestFirst: ToastHistoryEntry[]): ActivityRow[] {
+function foldRuns(oldestFirst: NotificationHistoryEntry[]): ActivityRow[] {
   const rows: ActivityRow[] = []
   for (const entry of oldestFirst) {
     const last = rows[rows.length - 1]
@@ -85,8 +85,8 @@ function foldRuns(oldestFirst: ToastHistoryEntry[]): ActivityRow[] {
 }
 
 export function ActivityPanel({ className }: { className?: string }) {
-  const history = useToastStore(s => s.history)
-  const clearHistory = useToastStore(s => s.clearHistory)
+  const history = useNotificationStore(s => s.history)
+  const clearHistory = useNotificationStore(s => s.clearHistory)
   const [isExpanded, setIsExpanded] = useState(false)
   const bodyId = useId()
 
@@ -122,7 +122,7 @@ export function ActivityPanel({ className }: { className?: string }) {
   // Nothing to show — and the panel must not survive the emptying. The panel
   // unmounts but the component instance does not (the dock keeps it rendered
   // beside Connections), so an `isExpanded` left standing would spring the log
-  // back open over the canvas the moment the next toast refills it. Reset
+  // back open over the canvas the moment the next notification refills it. Reset
   // during render, not in an effect.
   if (history.length === 0) {
     if (isExpanded) setIsExpanded(false)

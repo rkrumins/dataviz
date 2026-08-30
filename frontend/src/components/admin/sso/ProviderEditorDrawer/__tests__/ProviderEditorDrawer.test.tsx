@@ -40,9 +40,9 @@ vi.mock('@/services/ssoAdminService', async () => {
     }
 })
 
-const showToast = vi.fn()
-vi.mock('@/components/ui/toast', () => ({
-    useToast: () => ({ showToast }),
+const notify = vi.fn()
+vi.mock('@/components/ui/notifications', () => ({
+    useAppNotifications: () => ({ notify }),
 }))
 
 vi.mock('@/components/help/DocsLink', () => ({

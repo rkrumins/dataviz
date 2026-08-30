@@ -59,7 +59,7 @@ export function TraceHistoryPanel({
 }: TraceHistoryPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   /** Which row just yielded a link, and whether the clipboard took it. The
-   *  confirmation lives on the row itself: a toast for a two-word answer is
+   *  confirmation lives on the row itself: a notification for a two-word answer is
    *  more interruption than the gesture is worth. */
   const [copied, setCopied] = useState<{ index: number; ok: boolean } | null>(null)
   const copy = async (index: number) => {

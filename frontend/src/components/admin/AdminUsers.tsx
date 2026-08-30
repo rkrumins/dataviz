@@ -820,7 +820,7 @@ export function AdminUsers() {
                 )}
             </AnimatePresence>
 
-            {/* Success toast */}
+            {/* Success notification */}
             <AnimatePresence>
                 {successMsg && (
                     <motion.div

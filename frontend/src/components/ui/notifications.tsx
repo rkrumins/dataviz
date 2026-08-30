@@ -1,18 +1,18 @@
 /**
- * App-wide toast notification system.
+ * App-wide notification system.
  *
  * Three exports:
- *   - useToast()         — hook: returns { showToast, dismissToast, showLoading, hideLoading }
- *   - useToastStore      — Zustand store (for direct access outside React)
- *   - <ToastContainer /> — render once in AppLayout; animates all active toasts
+ *   - useAppNotifications()  — hook: { notify, dismiss, showLoading, hideLoading }
+ *   - useNotificationStore   — Zustand store (for direct access outside React)
+ *   - <NotificationStack />  — render once in AppLayout; animates all active ones
  *
- * Toast types:
+ * Notification types:
  *   - success / error / warning / info  — auto-dismiss after 4.5s
  *   - loading                           — persists until explicitly dismissed via hideLoading(key)
  *
  * Usage:
- *   const { showToast, showLoading, hideLoading } = useToast()
- *   showToast('success', 'View saved')
+ *   const { notify, showLoading, hideLoading } = useAppNotifications()
+ *   notify('success', 'View saved')
  *   showLoading('assignments', 'Computing layer assignments')
  *   hideLoading('assignments')
  */
@@ -25,140 +25,141 @@ import { cn } from '@/lib/utils'
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
-export type ToastType = 'success' | 'error' | 'warning' | 'info' | 'loading'
+export type NotificationType = 'success' | 'error' | 'warning' | 'info' | 'loading'
 
-export interface Toast {
+export interface AppNotification {
   id: number
-  type: ToastType
+  type: NotificationType
   message: string
-  /** Stable key for loading toasts — used by hideLoading() to dismiss. */
+  /** Stable key for loading notifications — used by hideLoading() to dismiss. */
   key?: string
   action?: { label: string; onClick: () => void }
-  /** Epoch-ms at which the toast was added — drives the progress bar and
+  /** Epoch-ms at which the notification was added — drives the progress bar and
    * dismiss timer against an immutable reference time so sibling removals
-   * never restart this toast's countdown. */
+   * never restart this notification's countdown. */
   createdAt: number
 }
 
 /**
- * A toast that already came and went. A toast lives 4.5s; the user who looked
- * away has no way back to it, so every non-loading toast is also written to a
- * capped, newest-first log (`history`) that the canvas surfaces on demand.
- * Loading toasts are excluded — they are transient progress whose outcome
- * arrives as its own success/error toast.
+ * A notification that already came and went. One lives 4.5s; the user who
+ * looked away has no way back to it, so every non-loading notification is also
+ * written to a capped, newest-first log (`history`) that the canvas surfaces on
+ * demand. Loading notifications are excluded — they are transient progress
+ * whose outcome arrives as its own success/error notification.
  */
-export interface ToastHistoryEntry {
+export interface NotificationHistoryEntry {
   id: number
-  type: Exclude<ToastType, 'loading'>
+  type: Exclude<NotificationType, 'loading'>
   message: string
   createdAt: number
 }
 
 /** Oldest entries fall off the end past this. In memory only — a refresh starts clean. */
-export const TOAST_HISTORY_LIMIT = 100
+export const NOTIFICATION_HISTORY_LIMIT = 100
 
 // ─── Store ────────────────────────────────────────────────────────────────
 
-interface ToastState {
-  toasts: Toast[]
-  /** Newest first, capped at TOAST_HISTORY_LIMIT. Independent of `toasts`:
-   *  dismissing a live toast never removes its history entry. Cleared per
+interface NotificationState {
+  notifications: AppNotification[]
+  /** Newest first, capped at NOTIFICATION_HISTORY_LIMIT. Independent of `notifications`:
+   *  dismissing a live notification never removes its history entry. Cleared per
    *  view by CanvasRouter so the log always describes the open view. */
-  history: ToastHistoryEntry[]
+  history: NotificationHistoryEntry[]
   _nextId: number
-  addToast: (toast: Omit<Toast, 'id' | 'createdAt'>) => number
-  removeToast: (id: number) => void
+  add: (notification: Omit<AppNotification, 'id' | 'createdAt'>) => number
+  remove: (id: number) => void
   removeByKey: (key: string) => void
   clearHistory: () => void
 }
 
-export const useToastStore = create<ToastState>((set, get) => ({
-  toasts: [],
+export const useNotificationStore = create<NotificationState>((set, get) => ({
+  notifications: [],
   history: [],
   _nextId: 1,
-  addToast: (toast) => {
+  add: (notification) => {
     const id = get()._nextId
     const createdAt = Date.now()
-    // For loading toasts with a key, replace any existing toast with that key
-    // so we don't stack duplicates for the same operation.
+    // For loading notifications with a key, replace any existing one with that
+    // key so we don't stack duplicates for the same operation.
     set(state => ({
       _nextId: state._nextId + 1,
-      toasts: [
-        ...state.toasts.filter(t => !(toast.key && t.key === toast.key)),
-        { ...toast, id, createdAt },
+      notifications: [
+        ...state.notifications.filter(t => !(notification.key && t.key === notification.key)),
+        { ...notification, id, createdAt },
       ],
-      history: toast.type === 'loading'
+      history: notification.type === 'loading'
         ? state.history
         : [
-            { id, type: toast.type, message: toast.message, createdAt },
+            { id, type: notification.type, message: notification.message, createdAt },
             ...state.history,
-          ].slice(0, TOAST_HISTORY_LIMIT),
+          ].slice(0, NOTIFICATION_HISTORY_LIMIT),
     }))
     return id
   },
-  removeToast: (id) => set(state => ({
-    toasts: state.toasts.filter(t => t.id !== id),
+  remove: (id) => set(state => ({
+    notifications: state.notifications.filter(t => t.id !== id),
   })),
   removeByKey: (key) => set(state => ({
-    toasts: state.toasts.filter(t => t.key !== key),
+    notifications: state.notifications.filter(t => t.key !== key),
   })),
   clearHistory: () => set({ history: [] }),
 }))
 
 // ─── Hook ─────────────────────────────────────────────────────────────────
 
-export function useToast() {
-  const addToast = useToastStore(s => s.addToast)
-  const removeToast = useToastStore(s => s.removeToast)
-  const removeByKey = useToastStore(s => s.removeByKey)
+export function useAppNotifications() {
+  const add = useNotificationStore(s => s.add)
+  const remove = useNotificationStore(s => s.remove)
+  const removeByKey = useNotificationStore(s => s.removeByKey)
 
-  const showToast = useCallback((
-    type: Exclude<ToastType, 'loading'>,
+  const notify = useCallback((
+    type: Exclude<NotificationType, 'loading'>,
     message: string,
     action?: { label: string; onClick: () => void },
   ) => {
-    return addToast({ type, message, action })
-  }, [addToast])
+    return add({ type, message, action })
+  }, [add])
 
-  /** Show a persistent loading toast. Stays until hideLoading(key) is called. */
+  /** Show a persistent loading notification. Stays until hideLoading(key) is called. */
   const showLoading = useCallback((key: string, message: string) => {
-    return addToast({ type: 'loading', message, key })
-  }, [addToast])
+    return add({ type: 'loading', message, key })
+  }, [add])
 
-  /** Dismiss a loading toast by key. */
+  /** Dismiss a loading notification by key. */
   const hideLoading = useCallback((key: string) => {
     removeByKey(key)
   }, [removeByKey])
 
-  const dismissToast = useCallback((id: number) => {
-    removeToast(id)
-  }, [removeToast])
+  const dismiss = useCallback((id: number) => {
+    remove(id)
+  }, [remove])
 
-  return { showToast, showLoading, hideLoading, dismissToast }
+  return { notify, showLoading, hideLoading, dismiss }
 }
 
 /**
- * Declarative loading toast — shows while `isLoading` is true, hides when false.
- * Call at the top of a component to bind a loading operation to the toast system.
+ * Declarative loading notification — shows while `isLoading` is true, hides
+ * when false. Call at the top of a component to bind a loading operation to
+ * the notification system.
  *
- * If `successMessage` is provided, a green success toast fires on the
+ * If `successMessage` is provided, a green success notification fires on the
  * `isLoading: true → false` transition (4.5s auto-dismiss). This gives the
  * user explicit confirmation that the operation completed rather than the
- * loading toast just silently disappearing.
+ * loading notification just silently disappearing.
  */
-export function useLoadingToast(
+export function useLoadingNotification(
   key: string,
   isLoading: boolean,
   message: string,
   successMessage?: string,
-  /** When true at the loading→done transition, hide the loading toast WITHOUT
-   *  showing the success message — for when the operation ended in failure
+  /** When true at the loading→done transition, hide the loading notification
+   *  WITHOUT showing the success message — for when the operation ended in failure
    *  (e.g. hydration errored) so we never report "Entities loaded" over an
    *  empty/errored canvas. */
   suppressSuccess?: boolean,
 ) {
-  const { showLoading, hideLoading, showToast } = useToast()
-  // Tracks whether we previously showed a loading toast for this key.
+  const { showLoading, hideLoading, notify } = useAppNotifications()
+  // Tracks whether we previously showed a loading notification for this key.
   // Needed because the effect runs on every dependency change, but we only
   // want to fire success on a genuine true → false transition (not on the
   // initial render where isLoading happens to be false).
@@ -171,19 +172,19 @@ export function useLoadingToast(
     } else {
       hideLoading(key)
       if (wasLoadingRef.current && successMessage && !suppressSuccess) {
-        showToast('success', successMessage)
+        notify('success', successMessage)
       }
       wasLoadingRef.current = false
     }
     return () => hideLoading(key)
-  }, [isLoading, key, message, successMessage, suppressSuccess, showLoading, hideLoading, showToast])
+  }, [isLoading, key, message, successMessage, suppressSuccess, showLoading, hideLoading, notify])
 }
 
 // ─── Visual constants ─────────────────────────────────────────────────────
 
 const DURATION = 4500
 
-const accentColors: Record<ToastType, string> = {
+const accentColors: Record<NotificationType, string> = {
   success: 'bg-emerald-500',
   error: 'bg-red-500',
   warning: 'bg-amber-500',
@@ -191,7 +192,7 @@ const accentColors: Record<ToastType, string> = {
   loading: 'bg-indigo-500',
 }
 
-export const iconColors: Record<ToastType, string> = {
+export const iconColors: Record<NotificationType, string> = {
   success: 'text-emerald-500',
   error: 'text-red-500',
   warning: 'text-amber-500',
@@ -199,7 +200,7 @@ export const iconColors: Record<ToastType, string> = {
   loading: 'text-indigo-500',
 }
 
-export const iconComponents: Record<ToastType, React.ComponentType<{ className?: string }>> = {
+export const iconComponents: Record<NotificationType, React.ComponentType<{ className?: string }>> = {
   success: CheckCircle2,
   error: AlertCircle,
   warning: AlertTriangle,
@@ -207,28 +208,29 @@ export const iconComponents: Record<ToastType, React.ComponentType<{ className?:
   loading: Loader2,
 }
 
-// ─── Single Toast ─────────────────────────────────────────────────────────
+// ─── Single notification ──────────────────────────────────────────────────
 
-function ToastItem({ toast }: { toast: Toast }) {
-  const removeToast = useToastStore(s => s.removeToast)
-  const isLoading = toast.type === 'loading'
-  const id = toast.id
-  const createdAt = toast.createdAt
+function NotificationCard({ notification }: { notification: AppNotification }) {
+  const remove = useNotificationStore(s => s.remove)
+  const isLoading = notification.type === 'loading'
+  const id = notification.id
+  const createdAt = notification.createdAt
 
   // The bar is a CSS animation, not React state.
   //
   // It used to be a `setInterval(..., 30)` calling `setProgress` — ~33 re-renders
   // a second, on a `<motion.div layout>`, which makes framer-motion re-measure
-  // layout on every one of them. `ToastContainer` is always mounted and
-  // `CanvasRouter` raises a hydration toast during EVERY canvas load, so that ran
-  // at exactly the moment the canvas was busiest. Handing the interpolation to
-  // the compositor costs zero renders.
+  // layout on every one of them. `NotificationStack` is always mounted and
+  // `CanvasRouter` raises a hydration notification during EVERY canvas load,
+  // so that ran at exactly the moment the canvas was busiest. Handing the
+  // interpolation to the compositor costs zero renders.
   //
   // Both values are computed from the immutable `createdAt`, so a remount (React
   // StrictMode, or the parent re-rendering for an unrelated reason) resumes the
   // bar where it should be rather than snapping back to 100%.
-  // Computed once at mount, in a state initializer — `createdAt` is immutable for
-  // a given toast and `ToastItem` is keyed by id, so there is nothing to recompute.
+  // Computed once at mount, in a state initializer — `createdAt` is immutable
+  // for a given notification and `NotificationCard` is keyed by id, so there is
+  // nothing to recompute.
   const [{ fromPercent, remainingMs }] = useState(() => {
     const elapsed = Date.now() - createdAt
     return {
@@ -238,24 +240,24 @@ function ToastItem({ toast }: { toast: Toast }) {
   })
 
   useEffect(() => {
-    // Loading toasts don't auto-dismiss.
+    // Loading notifications don't auto-dismiss.
     if (isLoading) return
 
     // Anchor both the dismiss timer and the progress bar on the immutable
     // createdAt timestamp. Previously the timer was restarted from "now"
-    // whenever this effect re-ran (e.g. because a sibling toast dismissed
+    // whenever this effect re-ran (e.g. because a sibling notification dismissed
     // and the parent's onDismiss closure changed), which gave the user the
-    // misleading impression that the remaining toasts had reset.
-    const timer = setTimeout(() => removeToast(id), Math.max(0, DURATION - (Date.now() - createdAt)))
+    // misleading impression that the remaining notifications had reset.
+    const timer = setTimeout(() => remove(id), Math.max(0, DURATION - (Date.now() - createdAt)))
 
     return () => {
       clearTimeout(timer)
     }
-  }, [createdAt, id, isLoading, removeToast])
+  }, [createdAt, id, isLoading, remove])
 
-  const onDismiss = useCallback(() => removeToast(id), [removeToast, id])
+  const onDismiss = useCallback(() => remove(id), [remove, id])
 
-  const Icon = iconComponents[toast.type]
+  const Icon = iconComponents[notification.type]
 
   return (
     <motion.div
@@ -268,11 +270,12 @@ function ToastItem({ toast }: { toast: Toast }) {
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: 8 }}
       transition={{ type: 'spring', damping: 22, stiffness: 320 }}
-      // The card itself never takes a click. A toast is a passing remark laid
-      // over the app's bottom-right corner — on a canvas that is the right-hand
-      // column, and while three or four of these were up, a business user could
-      // not click the rows underneath: the left of a row worked and the rest was
-      // dead, for a few seconds at a time, over and over as children loaded.
+      // The card itself never takes a click. A notification is a passing remark
+      // laid over the app's bottom-right corner — on a canvas that is the
+      // right-hand column, and while three or four of these were up, a business
+      // user could not click the rows underneath: the left of a row worked and
+      // the rest was dead, for a few seconds at a time, over and over as
+      // children loaded.
       // Only the controls below opt back in, so the message can still be
       // dismissed or actioned, and everything else passes straight through.
       className={cn(
@@ -284,16 +287,16 @@ function ToastItem({ toast }: { toast: Toast }) {
       <div className="flex items-center gap-3 px-4 py-3.5">
         <Icon className={cn(
           'w-4.5 h-4.5 flex-shrink-0',
-          iconColors[toast.type],
+          iconColors[notification.type],
           isLoading && 'animate-spin',
         )} />
-        <span className="flex-1 text-sm text-ink leading-snug">{toast.message}</span>
-        {toast.action && (
+        <span className="flex-1 text-sm text-ink leading-snug">{notification.message}</span>
+        {notification.action && (
           <button
-            onClick={() => { toast.action!.onClick(); onDismiss() }}
+            onClick={() => { notification.action!.onClick(); onDismiss() }}
             className="pointer-events-auto flex-shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
           >
-            {toast.action.label}
+            {notification.action.label}
           </button>
         )}
         {!isLoading && (
@@ -306,11 +309,11 @@ function ToastItem({ toast }: { toast: Toast }) {
         )}
       </div>
 
-      {/* Progress bar — only for auto-dismissing toasts */}
+      {/* Progress bar — only for auto-dismissing notifications */}
       {!isLoading && (
         <div className="h-0.5 w-full bg-black/5 dark:bg-white/5">
           <div
-            className={cn('h-full transition-none rounded-r-full', accentColors[toast.type])}
+            className={cn('h-full transition-none rounded-r-full', accentColors[notification.type])}
             style={{
               width: `${fromPercent}%`,
               opacity: 0.6,
@@ -320,11 +323,11 @@ function ToastItem({ toast }: { toast: Toast }) {
         </div>
       )}
 
-      {/* Indeterminate bar for loading toasts */}
+      {/* Indeterminate bar for loading notifications */}
       {isLoading && (
         <div className="h-0.5 w-full bg-black/5 dark:bg-white/5 overflow-hidden">
           <div
-            className={cn('h-full w-1/3 rounded-full', accentColors[toast.type])}
+            className={cn('h-full w-1/3 rounded-full', accentColors[notification.type])}
             style={{
               opacity: 0.6,
               animation: 'toast-indeterminate 1.5s ease-in-out infinite',
@@ -340,22 +343,22 @@ function ToastItem({ toast }: { toast: Toast }) {
 // ─── Container ────────────────────────────────────────────────────────────
 
 /**
- * Render once at the app root (e.g. AppLayout). Displays all active toasts
+ * Render once at the app root (e.g. AppLayout). Displays all active notifications
  * in a fixed stack at the bottom-right.
  */
-export function ToastContainer() {
-  const toasts = useToastStore(s => s.toasts)
+export function NotificationStack() {
+  const notifications = useNotificationStore(s => s.notifications)
 
   return (
     <div
-      // Toasts share the bottom-right corner with the canvas dock (the
+      // Notifications share the bottom-right corner with the canvas dock (the
       // Activity and Connections panels), which sits BELOW them at z-40 —
-      // a visible toast used to sit on top of the dock's headers and eat
+      // a visible notification used to sit on top of the dock's headers and eat
       // the click that collapses them. Surfaces that reserve that corner
       // publish their height as `--canvas-dock-height` on the document
       // element; the stack starts above whatever is reserved, and the var
       // is absent (0px) everywhere else in the app.
-      data-testid="toast-stack"
+      data-testid="notification-stack"
       style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px))' }}
       // `items-end` pins every card's right edge, so the column reads as one
       // stack however wide a message makes a card.
@@ -369,8 +372,8 @@ export function ToastContainer() {
           takes an exiting card out of the flow at once and the rest close up
           (each card carries `layout`, so they slide rather than jump). */}
       <AnimatePresence mode="popLayout">
-        {toasts.map(toast => (
-          <ToastItem key={toast.id} toast={toast} />
+        {notifications.map(notification => (
+          <NotificationCard key={notification.id} notification={notification} />
         ))}
       </AnimatePresence>
     </div>

@@ -236,7 +236,7 @@ import {
 } from '../search/session/useViewSearchSessionController'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
-import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
+import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
@@ -1465,7 +1465,7 @@ export function ContextViewCanvas({
   // — Activity's header plus Connections' (CanvasStatusChips and the columns
   // read it by that name).
   useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
-  // ...and the dock's FULL height to the document, so the app's toast stack
+  // ...and the dock's FULL height to the document, so the app's notification stack
   // (bottom-right, z-80) starts above it instead of covering its headers and
   // eating the clicks that collapse them.
   useViewportReservation(edgeLegendRef, '--canvas-dock-height')
@@ -2653,7 +2653,7 @@ export function ContextViewCanvas({
       const prefs = usePreferencesStore.getState()
       if (!prefs.onboardingCompletedSteps.includes('custom-order-toast')) {
         prefs.completeOnboardingStep('custom-order-toast')
-        useToastStore.getState().addToast({
+        useNotificationStore.getState().add({
           type: 'info',
           message: `Custom order — drag cards to arrange “${layer.name}”`,
         })
@@ -3157,7 +3157,7 @@ export function ContextViewCanvas({
     scrollHitIntoView,
     getElementById: (id) => document.getElementById(`layer-node-${id}`),
     getScrollContainer: () => horizontalScrollRef.current,
-    showToast: (type, message) => { useToastStore.getState().addToast({ type, message }) },
+    notify: (type, message) => { useNotificationStore.getState().add({ type, message }) },
   })
 
   // Reveal callback for advanced-search hits and pin clicks. Walks the
@@ -3250,35 +3250,35 @@ export function ContextViewCanvas({
   const regionCount = useCanvasStore((s) => s.loadingRegions.size)
   const isHydratingInitial = hydrationPhase !== 'complete'
 
-  // Floating loading toasts — keep the full set so every long-running operation
+  // Floating loading notifications — keep the full set so every long-running operation
   // is explicitly announced. Wording is centralised here.
-  // Two phase-explicit toasts ('ctx-hydrating-entities' / 'ctx-hydrating-edges')
-  // duplicate the global 'hydration' toast from CanvasRouter intentionally: the
+  // Two phase-explicit notifications ('ctx-hydrating-entities' / 'ctx-hydrating-edges')
+  // duplicate the global 'hydration' notification from CanvasRouter intentionally: the
   // global one has a single key that recycles between phases, so users with the
   // canvas focused want a sticky in-context indicator that the entities AND
   // edges loads both happened — even if hydration is fast.
-  useLoadingToast('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded', hydrationFailed)
-  useLoadingToast('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded', hydrationFailed)
-  useLoadingToast('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments', 'Layer assignments ready')
-  useLoadingToast('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges', 'Aggregated edges loaded')
-  useLoadingToast('ctx-children', isLoadingChildren, 'Loading child entities', 'Child entities loaded')
-  useLoadingToast('ctx-regions', regionCount > 0, 'Loading region data', 'Region data loaded')
+  useLoadingNotification('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded', hydrationFailed)
+  useLoadingNotification('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded', hydrationFailed)
+  useLoadingNotification('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments', 'Layer assignments ready')
+  useLoadingNotification('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges', 'Aggregated edges loaded')
+  useLoadingNotification('ctx-children', isLoadingChildren, 'Loading child entities', 'Child entities loaded')
+  useLoadingNotification('ctx-regions', regionCount > 0, 'Loading region data', 'Region data loaded')
 
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const lastFailedCountRef = useRef(0)
   useEffect(() => {
     const count = failedNodes?.size ?? 0
     if (count > lastFailedCountRef.current) {
-      showToast('warning', count === 1 ? '1 entity failed to load' : `${count} entities failed to load`)
+      notify('warning', count === 1 ? '1 entity failed to load' : `${count} entities failed to load`)
     }
     lastFailedCountRef.current = count
-  }, [failedNodes, showToast])
+  }, [failedNodes, notify])
 
   // View/Edit mode transitions (header Edit / Done). Entering edit =
   // opening/resuming a draft; the versioning bar tints amber and the header
-  // morphs — that IS the success feedback, so no toast on the happy path.
+  // morphs — that IS the success feedback, so no notification on the happy path.
   // Entering Edit no longer silently resumes/creates a draft. The user explicitly continues an
   // existing draft OR names a new branch in StartEditingDialog (which then switchToDrafts). The
   // shared `ensureDraftOpen` stays the path for the OTHER authoring entry points (create-link,
@@ -3290,18 +3290,18 @@ export function ContextViewCanvas({
   const handleExitEdit = useCallback(() => {
     if (stagedChangeList.length > 0) {
       openStagedChangesPanel()
-      showToast('warning', 'Review your pending edits — save or discard them before leaving the draft.')
+      notify('warning', 'Review your pending edits — save or discard them before leaving the draft.')
       return
     }
     useBranchStore.getState().switchToMain()
-  }, [stagedChangeList.length, openStagedChangesPanel, showToast])
+  }, [stagedChangeList.length, openStagedChangesPanel, notify])
 
   // ── View-metadata actions (title menu) ──────────────────────────────
   // All read the live view from the store at call time so they carry no
   // stale-closure risk and keep their dep lists minimal.
 
   // Inline rename — optimistic: patch the store immediately (header updates
-  // instantly), persist, and on failure revert to the previous name + toast.
+  // instantly), persist, and on failure revert to the previous name + notification.
   const handleRenameView = useCallback((name: string) => {
     const view = useSchemaStore.getState().getActiveView()
     if (!view?.id) return
@@ -3310,9 +3310,9 @@ export function ContextViewCanvas({
     useSchemaStore.getState().updateView(viewId, { name })
     updateView(viewId, { name }).catch(err => {
       useSchemaStore.getState().updateView(viewId, { name: previousName })
-      showToast('error', err instanceof Error ? err.message : 'Failed to rename view')
+      notify('error', err instanceof Error ? err.message : 'Failed to rename view')
     })
-  }, [showToast])
+  }, [notify])
 
   const handleEditViewDetails = useCallback(() => setViewDetailsOpen(true), [])
 
@@ -3346,9 +3346,9 @@ export function ContextViewCanvas({
       setShareSeed({ id: full.id, name: full.name, visibility: full.visibility })
       setViewVisibility(full.visibility)
     } catch (err) {
-      showToast('error', err instanceof Error ? err.message : 'Failed to open sharing')
+      notify('error', err instanceof Error ? err.message : 'Failed to open sharing')
     }
-  }, [showToast])
+  }, [notify])
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
@@ -4851,9 +4851,9 @@ export function ContextViewCanvas({
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
               await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
               closeStagedChangesPanel()
-              showToast('success', 'Saved to draft.')
+              notify('success', 'Saved to draft.')
             } catch (e) {
-              showToast('error', (e as Error).message)
+              notify('error', (e as Error).message)
             }
             return
           }

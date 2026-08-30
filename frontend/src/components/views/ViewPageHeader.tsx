@@ -19,7 +19,7 @@
  *
  * It renders ABOVE the canvas rather than over it. The canvas corners are already
  * spoken for (search trigger top-right at z-30, minimap and controls, transient
- * toasts at top-20), so a floating cluster would have landed on top of something.
+ * notifications at top-20), so a floating cluster would have landed on top of something.
  *
  * Both panels are the SHARED components — EditDetailsPanel (lifted out of
  * ExplorerPreviewDrawer, where it was private) and ViewActivityDrawer. One

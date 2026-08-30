@@ -37,7 +37,7 @@ import { usePermission, useAuthStore } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
 
@@ -60,7 +60,7 @@ function Section({ icon: Icon, title, right, children }: {
 export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: string; onClose: () => void }) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const user = useAuthStore((s) => s.user)
   const switchToMain = useBranchStore((s) => s.switchToMain)
@@ -99,8 +99,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     update.mutate(
       { prId, graphId: pr.graphId, title: editTitle, description: editDesc },
       {
-        onSuccess: () => { setEditing(false); showToast('success', 'Updated.') },
-        onError: (e) => showToast('error', (e as Error).message),
+        onSuccess: () => { setEditing(false); notify('success', 'Updated.') },
+        onError: (e) => notify('error', (e as Error).message),
       },
     )
   }
@@ -145,7 +145,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       })
       setConflicts(null)
       setResolverError(null)
-      // The receipt is the confirmation, and it survives the navigation below — a toast would not.
+      // The receipt is the confirmation, and it survives the navigation below — a notification would not.
       setReceipt({
         commitId: res.commitId, graphId: pr.graphId,
         counts: changeSet?.counts ?? { added: 0, modified: 0, removed: 0 }, via: 'review',
@@ -164,7 +164,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     } catch (e) {
       if (e instanceof NotUpToDateError) {
         setNeedsPull(true)
-        showToast('error', 'This draft is out of date — pull the latest changes before merging.')
+        notify('error', 'This draft is out of date — pull the latest changes before merging.')
         return
       }
       if (e instanceof MergeConflictError) {
@@ -177,7 +177,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         ? 'This PR needs approval from its reviewers before it can be merged.'
         : msg
       if (resolutions) setResolverError(friendly)
-      else showToast('error', friendly)
+      else notify('error', friendly)
     }
   }
 
@@ -198,10 +198,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           if (res.incoming && res.incoming.commitCount > 0) {
             setIncoming(res.incoming)
           } else {
-            showToast('info', 'Already up to date — you can merge now.')
+            notify('info', 'Already up to date — you can merge now.')
           }
         },
-        onError: (e) => showToast('error', (e as Error).message),
+        onError: (e) => notify('error', (e as Error).message),
       },
     )
   }
@@ -450,8 +450,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             {showApprove && (
               <button
                 onClick={() => approve.mutate({ prId, graphId: pr.graphId }, {
-                  onSuccess: () => showToast('success', 'Approved.'),
-                  onError: (e) => showToast('error', (e as Error).message),
+                  onSuccess: () => notify('success', 'Approved.'),
+                  onError: (e) => notify('error', (e as Error).message),
                 })}
                 disabled={busy}
                 title="Sign off on these changes so they can be merged"
@@ -507,8 +507,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             <div className="flex items-center gap-2">
               <button
                 onClick={() => closePr.mutate({ prId, graphId: pr.graphId }, {
-                  onSuccess: () => { showToast('success', 'Request dismissed — no changes applied.'); onClose() },
-                  onError: (e) => { showToast('error', (e as Error).message); setDismissing(false) },
+                  onSuccess: () => { notify('success', 'Request dismissed — no changes applied.'); onClose() },
+                  onError: (e) => { notify('error', (e as Error).message); setDismissing(false) },
                 })}
                 disabled={busy}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-rose-500 hover:bg-rose-600 shadow-sm disabled:opacity-60"

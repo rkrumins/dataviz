@@ -33,7 +33,7 @@ import {
 import { cn } from '@/lib/utils'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { formatUtc, timeAgo, toUtcDate } from '@/lib/timeAgo'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 
 /**
@@ -283,7 +283,7 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
     const [rotatedUrl, setRotatedUrl] = useState<string | null>(null)
     const [rotatedCopied, setRotatedCopied] = useState(false)
     const [busyId, setBusyId] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // A counter rather than calling a fetch function directly: it keeps
     // every setState inside the effect on the far side of an await, and
@@ -379,7 +379,7 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
         try {
             await adminUserService.revokeInvite(invite.id)
             setConfirming(null)
-            showToast(
+            notify(
                 'success',
                 invite.useCount > 0
                     ? `Link revoked. It had already been used ${invite.useCount} time${invite.useCount === 1 ? '' : 's'}.`
@@ -389,7 +389,7 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
         } catch (err: unknown) {
             const msg = messageOf(err, 'Could not revoke this link')
             setError(msg)
-            showToast('error', msg)
+            notify('error', msg)
         } finally {
             setRevoking(null)
         }
@@ -404,7 +404,7 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
                 // one would silently impose a limit that was never there.
                 additionalUses: invite.maxUses === null ? null : 5,
             })
-            showToast(
+            notify(
                 'success',
                 invite.maxUses === null
                     ? 'Link extended by 30 days. The URL you shared still works.'
@@ -412,7 +412,7 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
             )
             reload()
         } catch (err: unknown) {
-            showToast('error', messageOf(err, 'Could not extend this link'))
+            notify('error', messageOf(err, 'Could not extend this link'))
         } finally {
             setBusyId(null)
         }
@@ -426,10 +426,10 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
             })
             setRotating(null)
             setRotatedUrl(`${window.location.origin}/signup?invite=${fresh.inviteToken}`)
-            showToast('success', 'New link created. Every previous URL has stopped working.')
+            notify('success', 'New link created. Every previous URL has stopped working.')
             reload()
         } catch (err: unknown) {
-            showToast('error', messageOf(err, 'Could not regenerate this link'))
+            notify('error', messageOf(err, 'Could not regenerate this link'))
         } finally {
             setBusyId(null)
         }

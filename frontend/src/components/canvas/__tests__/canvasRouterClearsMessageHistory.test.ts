@@ -1,5 +1,5 @@
 /**
- * The toast message log is scoped to the OPEN VIEW, and this is the only
+ * The notification message log is scoped to the OPEN VIEW, and this is the only
  * thing that makes that true: CanvasRouter's view/branch-change effect clears
  * it alongside the trace state. Without the call the log is an app singleton —
  * messages from view A would be listed as view B's, which is exactly the lie
@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest'
 
 const src = readFileSync(resolve(__dirname, '../CanvasRouter.tsx'), 'utf8')
 
-describe('CanvasRouter scopes the toast message history to the active view', () => {
+describe('CanvasRouter scopes the notification message history to the active view', () => {
   it('clears the history in the same effect that clears the trace', () => {
     // The effect body between the trace clear and its [activeViewId, currentBranchId] deps.
     const effect = src.match(
@@ -25,7 +25,7 @@ describe('CanvasRouter scopes the toast message history to the active view', () 
     expect(effect![0]).toMatch(/clearHistory\(\)/)
   })
 
-  it('reaches the history through the toast store', () => {
-    expect(src).toMatch(/useToastStore/)
+  it('reaches the history through the notification store', () => {
+    expect(src).toMatch(/useNotificationStore/)
   })
 })

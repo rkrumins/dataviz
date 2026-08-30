@@ -26,7 +26,7 @@ import {
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     buildDataSourceLookup,
     filtersToParams, paramsToFilters,
@@ -141,7 +141,7 @@ export function RegistryJobHistory() {
     const [searchInput, setSearchInput] = useState(filters.search ?? '')
     const [, setTick] = useState(0)
     const [, startTransition] = useTransition()
-    const { showToast, showLoading, hideLoading } = useToast()
+    const { notify, showLoading, hideLoading } = useAppNotifications()
     const searchTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
     // Sync filters -> URL. Wrapped in startTransition for the same reason as
@@ -342,15 +342,15 @@ export function RegistryJobHistory() {
         setActionLoading(jobId)
         try {
             await fn()
-            showToast('success', successMsg)
+            notify('success', successMsg)
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
-            showToast('error', err?.message ?? 'Action failed')
+            notify('error', err?.message ?? 'Action failed')
         } finally {
             setActionLoading(null)
         }
-    }, [showToast, fetchJobs])
+    }, [notify, fetchJobs])
 
     const handleCancel = useCallback((job: AggregationJobResponse) =>
         withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled'),
@@ -403,16 +403,16 @@ export function RegistryJobHistory() {
         try {
             await action()
             hideLoading(loadingKey)
-            showToast('success', successMsg)
+            notify('success', successMsg)
             setViewMode('flat')  // ensure user lands somewhere they can see the new job
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
             hideLoading(loadingKey)
-            showToast('error', err?.message ?? 'Action failed')
+            notify('error', err?.message ?? 'Action failed')
             throw err
         }
-    }, [showLoading, hideLoading, showToast, setViewMode, fetchJobs])
+    }, [showLoading, hideLoading, notify, setViewMode, fetchJobs])
 
     const handleConfirmRetrigger = useCallback(async (overrides: AggregationOverridesValue) => {
         if (!retriggerCtx) return
@@ -451,15 +451,15 @@ export function RegistryJobHistory() {
         setActionLoading(job.id)
         try {
             const result = await aggregationService.purgeAggregation(job.dataSourceId)
-            showToast('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
+            notify('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
-            showToast('error', err?.message ?? 'Purge failed')
+            notify('error', err?.message ?? 'Purge failed')
         } finally {
             setActionLoading(null)
         }
-    }, [showToast, fetchJobs])
+    }, [notify, fetchJobs])
 
     // Data source-level actions (for grouped view) — opens the overrides dialog.
     // startTransition rationale: same as handleResume/handleRetrigger above.
@@ -479,15 +479,15 @@ export function RegistryJobHistory() {
         setActionLoading(dataSourceId)
         try {
             const result = await aggregationService.purgeAggregation(dataSourceId)
-            showToast('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
+            notify('success', `Purged ${result.deletedEdges.toLocaleString()} aggregated edges`)
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
-            showToast('error', err?.message ?? 'Purge failed')
+            notify('error', err?.message ?? 'Purge failed')
         } finally {
             setActionLoading(null)
         }
-    }, [showToast, fetchJobs])
+    }, [notify, fetchJobs])
 
     // "Show all jobs" for a specific data source (switches to flat view with filter)
     const handleShowAllJobs = useCallback((dataSourceId: string) => {

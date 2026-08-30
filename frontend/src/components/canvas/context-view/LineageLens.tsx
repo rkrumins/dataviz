@@ -2168,7 +2168,7 @@ export function LineageLens({
               />
               {/* THE CAPSULE — the board says it is calculating, from the
                   moment Focus opens (2026-08-22: the header's narration and
-                  a toast at the foot of the board were missed — "the user
+                  a notification at the foot of the board were missed — "the user
                   might confuse that for nothing happening"). The same
                   capsule the canvas trace uses: headline, ticking counts,
                   the sounding line; it leaves by itself a beat after the

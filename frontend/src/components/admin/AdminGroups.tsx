@@ -23,7 +23,7 @@ import {
     type GroupMemberResponse,
 } from '@/services/groupsService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
@@ -146,12 +146,12 @@ export function AdminGroups() {
     const [modal, setModal] = useState<ModalType>(null)
     const [page, setPage] = useState(0)
     const PAGE_SIZE = 25
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // The whole page requires ``system:groups:manage`` on the
     // backend; show the actions to viewers as disabled-with-tooltip
     // so they understand WHY they can't act, rather than letting them
-    // click into a 403 toast.
+    // click into a 403 notification.
     const canManageGroups = usePermission('system:groups:manage')
 
 
@@ -235,12 +235,12 @@ export function AdminGroups() {
         setError(null)
         try {
             const result = await fn()
-            if (successMsg) showToast('success', successMsg)
+            if (successMsg) notify('success', successMsg)
             await fetchGroups()
             return result
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Action failed'
-            showToast('error', message)
+            notify('error', message)
             setError(message)
             return undefined
         } finally {
@@ -343,7 +343,7 @@ export function AdminGroups() {
                 )}
             </AnimatePresence>
 
-            {/* Error banner (in addition to toast) */}
+            {/* Error banner (in addition to notification) */}
             <AnimatePresence>
                 {error && (
                     <motion.div
@@ -818,7 +818,7 @@ function ManageMembersModal({
     const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
     const [busy, setBusy] = useState<string | null>(null)
     const [search, setSearch] = useState('')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
         try {
@@ -829,9 +829,9 @@ function ManageMembersModal({
             setMembers(m)
             setUsers(u)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to load members')
+            notify('error', err instanceof Error ? err.message : 'Failed to load members')
         }
-    }, [group.id, showToast])
+    }, [group.id, notify])
 
     useEffect(() => { void refresh() }, [refresh])
 
@@ -927,9 +927,9 @@ function ManageMembersModal({
                                                         await groupsService.removeMember(group.id, member.userId)
                                                         await refresh()
                                                         onChange()
-                                                        showToast('success', `Removed ${name}`)
+                                                        notify('success', `Removed ${name}`)
                                                     } catch (err) {
-                                                        showToast('error', err instanceof Error ? err.message : 'Remove failed')
+                                                        notify('error', err instanceof Error ? err.message : 'Remove failed')
                                                     } finally {
                                                         setBusy(null)
                                                     }
@@ -996,9 +996,9 @@ function ManageMembersModal({
                                                     await groupsService.addMember(group.id, u.id)
                                                     await refresh()
                                                     onChange()
-                                                    showToast('success', `Added ${u.displayName}`)
+                                                    notify('success', `Added ${u.displayName}`)
                                                 } catch (err) {
-                                                    showToast('error', err instanceof Error ? err.message : 'Add failed')
+                                                    notify('error', err instanceof Error ? err.message : 'Add failed')
                                                 } finally {
                                                     setBusy(null)
                                                 }

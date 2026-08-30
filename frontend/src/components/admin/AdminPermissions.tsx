@@ -42,7 +42,7 @@ import {
     type WorkspaceMemberResponse,
 } from '@/services/workspaceMembersService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
@@ -794,7 +794,7 @@ function PermissionDetailDrawer({
     const [editLong, setEditLong] = useState(permission.longDescription ?? '')
     const [editExamples, setEditExamples] = useState((permission.examples ?? []).join('\n'))
     const [saving, setSaving] = useState(false)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const startEdit = () => {
         setEditDescription(permission.description)
@@ -808,7 +808,7 @@ function PermissionDetailDrawer({
     const handleSave = async () => {
         const trimmed = editDescription.trim()
         if (!trimmed) {
-            showToast('error', 'Short description is required.')
+            notify('error', 'Short description is required.')
             return
         }
         setSaving(true)
@@ -822,11 +822,11 @@ function PermissionDetailDrawer({
                 longDescription: editLong.trim() || '',
                 examples,
             })
-            showToast('success', `Updated ${permission.id}`)
+            notify('success', `Updated ${permission.id}`)
             setEditing(false)
             onUpdated(updated)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Save failed')
+            notify('error', err instanceof Error ? err.message : 'Save failed')
         } finally {
             setSaving(false)
         }
@@ -1244,7 +1244,7 @@ function ByUserTab({
     const [access, setAccess] = useState<UserAccessResponse | null>(null)
     const [loadingAccess, setLoadingAccess] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // Initial user list
     useEffect(() => {
@@ -1252,10 +1252,10 @@ function ByUserTab({
             try {
                 setUsers(await adminUserService.listUsers())
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load users')
+                notify('error', err instanceof Error ? err.message : 'Failed to load users')
             }
         })()
-    }, [showToast])
+    }, [notify])
 
     // Fetch selected user's access
     useEffect(() => {
@@ -1450,17 +1450,17 @@ function ByWorkspaceTab({
     const [members, setMembers] = useState<WorkspaceMemberResponse[] | null>(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     useEffect(() => {
         ;(async () => {
             try {
                 setWorkspaces(await workspaceService.list())
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load workspaces')
+                notify('error', err instanceof Error ? err.message : 'Failed to load workspaces')
             }
         })()
-    }, [showToast])
+    }, [notify])
 
     useEffect(() => {
         if (!selectedId) { setMembers(null); return }
@@ -1716,7 +1716,7 @@ export function RoleEditorDrawer({
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // The permission floor a system role must keep (e.g. super_admin must
     // retain system:admin). Locked checkboxes render checked + disabled.
@@ -1750,11 +1750,11 @@ export function RoleEditorDrawer({
                 description: description.trim() || null,
                 permissions: Array.from(selectedPerms),
             })
-            showToast('success', `Updated role "${labelText}"`)
+            notify('success', `Updated role "${labelText}"`)
             setPreviewState(null)
             await onChanged()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Save failed')
+            notify('error', err instanceof Error ? err.message : 'Save failed')
         } finally {
             setSaving(false)
         }
@@ -1764,11 +1764,11 @@ export function RoleEditorDrawer({
         setSaving(true)
         try {
             await permissionsService.resetRole(role.name)
-            showToast('success', `Reset "${labelText}" to default`)
+            notify('success', `Reset "${labelText}" to default`)
             setPreviewState(null)
             await onChanged()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Reset failed')
+            notify('error', err instanceof Error ? err.message : 'Reset failed')
         } finally {
             setSaving(false)
         }
@@ -1779,11 +1779,11 @@ export function RoleEditorDrawer({
         setSaving(true)
         try {
             await permissionsService.deleteRole(role.name)
-            showToast('success', `Deleted role "${role.name}"`)
+            notify('success', `Deleted role "${role.name}"`)
             setPreviewState(null)
             await onChanged()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Delete failed')
+            notify('error', err instanceof Error ? err.message : 'Delete failed')
         } finally {
             setSaving(false)
         }
@@ -2131,7 +2131,7 @@ function CreateRoleModal({
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[] | null>(null)
     const [submitting, setSubmitting] = useState(false)
     const [error, setError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // Phase 7: the resolver's category × scope filter silently drops
     // perms whose category doesn't match the binding's scope. So a
@@ -2176,10 +2176,10 @@ function CreateRoleModal({
             try {
                 setWorkspaces(await workspaceService.list())
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load workspaces')
+                notify('error', err instanceof Error ? err.message : 'Failed to load workspaces')
             }
         })()
-    }, [scopeType, workspaces, showToast])
+    }, [scopeType, workspaces, notify])
 
     const togglePerm = (id: string) => {
         setSelectedPerms(prev => {
@@ -2207,12 +2207,12 @@ function CreateRoleModal({
                 scopeId: scopeType === 'workspace' ? scopeId : null,
                 permissions: Array.from(selectedPerms),
             })
-            showToast('success', `Created role "${name.trim()}"`)
+            notify('success', `Created role "${name.trim()}"`)
             await onCreated()
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Create failed'
             setError(msg)
-            showToast('error', msg)
+            notify('error', msg)
         } finally {
             setSubmitting(false)
         }

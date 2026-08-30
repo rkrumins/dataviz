@@ -138,7 +138,7 @@ export function pickLatestRun(
     return runs?.[0]
 }
 
-export function checkNowToast(
+export function checkNowMessage(
     res: {
         skipped?: boolean
         run?: Pick<ReconcileRun, 'scanned' | 'findings' | 'actions' | 'bySkip'> | null
@@ -204,7 +204,7 @@ export function formatClockTime(d: Date): string {
 
 /**
  * Land receipt — short enough not to fight "0 drifting now".
- * Full ``lastPassLabel`` stays on Preview / toast. Returns null when the
+ * Full ``lastPassLabel`` stays on Preview / notification. Returns null when the
  * last check found nobody drifting (healthy + watching).
  */
 export function lastPassBrief(

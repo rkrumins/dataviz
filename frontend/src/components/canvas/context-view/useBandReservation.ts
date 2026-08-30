@@ -45,7 +45,7 @@ export function useBandReservation(
 /**
  * Publish the element's full height as `varName` on the DOCUMENT ELEMENT, for
  * app-level chrome that shares this corner but lives outside the canvas tree —
- * the toast stack, which would otherwise paint over the dock and swallow the
+ * the notification stack, which would otherwise paint over the dock and swallow the
  * clicks meant for it. Withdrawn on unmount, so the var is simply absent (and
  * the fallback applies) on every other page.
  */
