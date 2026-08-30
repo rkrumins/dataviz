@@ -531,6 +531,15 @@ Left deliberately unfinished by the FalkorDB package split, for a later PR:
   completes in 580-880s) — machine load average was 34.37 during these
   attempts. Do not infer from this PR's other fifteen tasks' measured
   numbers that this last one was measured too; it wasn't.
+- **The full-lane gap above is no longer the only CI-shaped caveat.**
+  `.github/workflows/backend-tests.yml`'s `connectivity-suite` job now runs
+  a `falkordb/falkordb:v4.18.11` service container and a reachability step
+  that exits non-zero if it isn't up, so
+  `tests/regression/test_falkordb_provider_contract.py` actually runs in
+  CI instead of silently skipping (an unstarted service previously meant
+  a green job with the contract test never exercised at all). This
+  changes what a green required job means from here on — it now includes
+  a real, live-verified contract snapshot, not just the unit lane above.
 - **The provider-interface mermaid diagram and the capability table above**
   (`### Provider Interface`, `### Provider Capabilities`) still show
   `MockGraphProvider` as a real, implemented class with its own capability
