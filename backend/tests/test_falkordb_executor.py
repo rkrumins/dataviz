@@ -394,10 +394,11 @@ def test_new_built_instance_can_still_reach_executor():
     running __init__ (test_ensure_indices_onboarding.py:110,
     test_falkordb_ancestors_cache_reset.py:16,
     test_falkordb_pool_resilience.py:218). The executor properties must
-    not assume __init__ ran -- they are implemented purely in terms of
-    ``self.__dict__`` (a ``dict.get`` plus a conditional item-assignment,
-    not ``self.__dict__.setdefault``; see the docstring on ``executor``
-    for why), which every instance has regardless of whether __init__ ran.
+    not assume __init__ ran -- they are implemented as
+    ``functools.cached_property``, which needs only a real instance
+    ``__dict__`` to write its cached value into (present on every
+    instance regardless of whether __init__ ran, since neither
+    FalkorDBProvider nor any of its mixins define ``__slots__``).
     """
     p = FalkorDBProvider.__new__(FalkorDBProvider)
 
@@ -414,17 +415,21 @@ def test_new_built_instance_can_still_reach_executor():
 
 def test_executor_properties_construct_falkordbexecutor_exactly_once(monkeypatch):
     """Identity alone -- ``p.executor is p.executor``, already asserted
-    above -- does NOT catch the regression this test is for. The original
-    ``self.__dict__.setdefault("_executor", FalkorDBExecutor(self,
-    "source"))`` also returns the SAME cached object on every call
-    (setdefault discards its argument when the key already exists), so
-    identity holds either way. What it does NOT do is avoid the cost:
-    Python evaluates a call's arguments before the call, so that
-    ``FalkorDBExecutor(...)`` argument is constructed -- and thrown away
-    -- on every access after the first. Counting constructions directly
-    is the only way to pin "exactly once," which is the property that
-    motivated writing this as ``dict.get`` plus a conditional
-    item-assignment instead.
+    above -- does NOT catch the regression this test is for, and would not
+    have caught the original one either. A first version of these
+    properties used ``self.__dict__.setdefault("_executor",
+    FalkorDBExecutor(self, "source"))``, which also returns the SAME
+    cached object on every call (setdefault discards its argument when
+    the key already exists), so identity holds either way. What it did
+    NOT do is avoid the cost: Python evaluates a call's arguments before
+    the call, so that ``FalkorDBExecutor(...)`` argument was constructed
+    -- and thrown away -- on every access after the first. The current
+    ``functools.cached_property`` implementation makes that cost
+    structurally impossible (a non-data descriptor: after the first
+    access this getter never runs again), but nothing stops a future edit
+    from "simplifying" it back to a hand-rolled cache that reintroduces
+    the same waste. Counting constructions directly is the only way to
+    pin "exactly once" either way.
     """
     calls = []
     real_init = FalkorDBExecutor.__init__
