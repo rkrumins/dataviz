@@ -870,15 +870,21 @@ export function ContextViewCanvas({
     } | null
   >(null)
   // Sync indicator DERIVED from the canvas debounce (replaces the deleted store syncStatus): 'saving'
-  // from the moment a save is armed until the durable PUT settles, else 'idle'. The header subline
-  // shows a small spinner while 'saving'.
-  const [layoutSyncStatus, setLayoutSyncStatus] = useState<'idle' | 'saving'>('idle')
+  // from the moment a save is armed until the durable PUT settles, 'error' when it did not land,
+  // else 'idle'. The header subline shows a small spinner while 'saving' and the "Sync issue —
+  // retry" control on 'error'.
+  const [layoutSyncStatus, setLayoutSyncStatus] = useState<'idle' | 'saving' | 'error'>('idle')
+  // The autosave's own notifier, declared beside the save it reports on (the canvas already takes
+  // this hook more than once; `notify` is stable, which the effects below depend on). The header's
+  // retry sits in a subline the user may never look at — a lost layout edit has to say so.
+  const { notify: notifyLayoutSave } = useAppNotifications()
 
   const doLayoutSave = useCallback(async () => {
     if (layoutSaveTimer.current) { clearTimeout(layoutSaveTimer.current); layoutSaveTimer.current = null }
     const pending = pendingLayoutSave.current
     if (!pending) { setLayoutSyncStatus('idle'); return }
     pendingLayoutSave.current = null
+    setLayoutSyncStatus('saving')   // also covers a retry, which starts from 'error'
     try {
       await updateViewLayout(pending.viewId, {
         referenceLayout: pending.referenceLayout,
@@ -887,13 +893,21 @@ export function ContextViewCanvas({
         // replaces referenceLayout wholesale, then re-nests displayRules only when supplied).
         displayRules: useReferenceModelStore.getState().displayRules,
       }, pending.branchId ?? undefined)
-    } catch (err) {
-      // Swallow to avoid unhandled-rejection noise; the next edit re-arms the save.
-      console.error('[ContextViewCanvas] layout save failed', err)
-    } finally {
       setLayoutSyncStatus('idle')
+    } catch (err) {
+      // NOT swallowed. Layer create/rename/reorder, entity placement and display rules are all
+      // durable work that only travels this path, and UnsavedWorkGuard cannot see any of it (it
+      // keys off staged changes; none of these are staged).
+      // The edit stays PENDING: the branch-switch effect guards its re-fetch with this exact ref,
+      // so clearing it let the server's stale layout overwrite the user's edits. Restored only if
+      // no newer edit claimed the single slot while this one was in flight.
+      if (!pendingLayoutSave.current) pendingLayoutSave.current = pending
+      console.error('[ContextViewCanvas] layout save failed', err)
+      setLayoutSyncStatus('error')   // what the header's "Sync issue — retry" waits for
+      notifyLayoutSave('error', "Couldn't save the canvas layout — your edits are still here. "
+        + 'Retry from the sync note beside the view name.')
     }
-  }, [])
+  }, [notifyLayoutSave])
 
   /** Arm (or re-arm) the debounced durable save and show the 'saving' indicator.
    *  Gated on canEdit — the VIEW-config capability, not the graph-data one:
