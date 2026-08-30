@@ -244,6 +244,82 @@ async def test_projection_run_tolerant_reraises_when_not_verified_missing():
     assert excinfo.value is boom
 
 
+@pytest.mark.asyncio
+async def test_source_and_projection_tolerant_masking_are_pinned_together():
+    """The two tests above pin the projection copy of the tolerant-masking
+    rule against itself (a fake ``_is_verified_missing_graph`` it also
+    controls). That proves the executor calls the predicate, but not that
+    its rule agrees with the original: the same rule exists in two places
+    -- ``connection.py``'s ``_ro_query_tolerant`` (the original, source
+    target) and this module's ``run_tolerant`` projection branch (a
+    deliberate duplicate, documented at the top of executor.py) -- and
+    only the first is where someone extending the masking rule would look.
+
+    This test drives the SAME exception through BOTH paths using the
+    REAL, unpatched ``_is_verified_missing_graph`` (safe here: a freshly
+    constructed, never-connected provider has ``_conn_cfg is None``, so
+    ``_empty_key_is_genuine`` short-circuits to True and the predicate
+    reduces to ``_is_missing_graph_error`` alone). A future change that
+    teaches one copy to mask an additional exception class and not the
+    other fails here; each path's own tests, pinned only to a fake they
+    also control, would not notice.
+    """
+    async def _outcome(coro):
+        """Normalize "masked to an empty result_set" vs. "raised" so a
+        divergence in EITHER direction lands on the same assertion message
+        below, instead of an unhandled exception from whichever path
+        stopped masking (or started masking) -- pytest would still name
+        the right line, but not with this test's own explanation attached.
+        """
+        try:
+            result = await coro
+            return ("masked", result.result_set)
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad, see above
+            return ("raised", exc)
+
+    diverged = (
+        "the source (connection.py's _ro_query_tolerant) and projection "
+        "(executor.py's run_tolerant) copies of the tolerant-masking rule "
+        "disagreed on the SAME exception -- update both copies together."
+    )
+
+    p_missing = _provider()
+    missing_exc = RuntimeError("Invalid graph operation on empty key")
+
+    async def _ro_query_raises_missing(cypher, params=None, **kw):
+        raise missing_exc
+
+    async def _proj_ro_query_raises_missing(cypher, params=None, **kw):
+        raise missing_exc
+
+    p_missing._ro_query = _ro_query_raises_missing
+    p_missing._proj_ro_query = _proj_ro_query_raises_missing
+
+    source_outcome = await _outcome(p_missing._ro_query_tolerant("MATCH (n) RETURN n"))
+    projection_outcome = await _outcome(p_missing.projection_executor.run_tolerant("MATCH (n) RETURN n"))
+
+    assert source_outcome == ("masked", []), (diverged, "source", source_outcome)
+    assert projection_outcome == ("masked", []), (diverged, "projection", projection_outcome)
+
+    p_other = _provider()
+    other_exc = RuntimeError("connection reset by peer")
+
+    async def _ro_query_raises_other(cypher, params=None, **kw):
+        raise other_exc
+
+    async def _proj_ro_query_raises_other(cypher, params=None, **kw):
+        raise other_exc
+
+    p_other._ro_query = _ro_query_raises_other
+    p_other._proj_ro_query = _proj_ro_query_raises_other
+
+    source_outcome = await _outcome(p_other._ro_query_tolerant("MATCH (n) RETURN n"))
+    projection_outcome = await _outcome(p_other.projection_executor.run_tolerant("MATCH (n) RETURN n"))
+
+    assert source_outcome == ("raised", other_exc), (diverged, "source", source_outcome)
+    assert projection_outcome == ("raised", other_exc), (diverged, "projection", projection_outcome)
+
+
 # ---------------------------------------------------------------------------
 # The interception test -- the point of the whole design.
 # ---------------------------------------------------------------------------

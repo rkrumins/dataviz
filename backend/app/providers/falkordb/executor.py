@@ -10,6 +10,16 @@ algorithmic code (and this task's own tests) the database-neutral
 ``CypherExecutor`` shape from ``backend.common.providers.cypher.executor``
 to call instead of naming a FalkorDB chokepoint directly.
 
+One exception to "adds none of that": ``run_tolerant``'s projection branch
+duplicates, rather than delegates to, ``connection.py``'s
+``_ro_query_tolerant`` verified-missing-graph masking rule (~L1169-1181) --
+there is no native ``_proj_ro_query_tolerant`` chokepoint to call, and
+adding a sixth chokepoint for one caller was judged worse than the
+duplication. If that masking rule ever changes, update both copies;
+``backend/tests/test_falkordb_executor.py``'s
+``test_source_and_projection_tolerant_masking_are_pinned_together`` drives
+the same exception through both and fails if they diverge.
+
 Two instances, not one executor with a ``target=`` argument: ``_proj_query``
 carries the quiesce gate and the write semaphore, and
 ``ConnectionMixin._proj`` resolves to ``_graph`` only in ``"in_source"``
