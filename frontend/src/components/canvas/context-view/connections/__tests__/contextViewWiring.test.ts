@@ -45,6 +45,15 @@ describe('the Connections panel is wired into the Context View', () => {
     )
   })
 
+  it('the adaptive budget culls by the weight a line stands for', () => {
+    // The projection stamps the real underlying-relationship count on
+    // `edgeCount`; this is where that number earns its keep. Ranking on
+    // anything else (member count, insertion order) puts a rollup summarising
+    // thousands of flows at the bottom of the cull list.
+    expect(source).toMatch(/\(b\.edgeCount \|\| 1\) - \(a\.edgeCount \|\| 1\)/)
+    expect(source).toMatch(/\.sort\(bySignificance\)\.slice\(0, autoStubThreshold\)/)
+  })
+
   it('the panel highlight reaches the overlay only — cards keep their own highlight', () => {
     expect(source).toContain(
       'isHighlightActive={connectionHighlight !== null || isHighlightActive}'

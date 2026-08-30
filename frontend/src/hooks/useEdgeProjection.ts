@@ -598,6 +598,17 @@ export function useEdgeProjection({
       return e.originalType ? [e.originalType] : []
     }
 
+    // How many underlying relationships ONE member stands for. A raw edge is
+    // itself, so it weighs one; an AGGREGATED member arrives carrying the real
+    // total on `data.edgeCount` (set in section A above) and must contribute
+    // ALL of it. Counting members instead reported a rollup summarising 4,300
+    // table-level flows as `1`, which then sorted below any pair holding two
+    // raw edges when the adaptive budget culls.
+    const memberWeight = (e: { data?: { edgeCount?: number } }): number => {
+      const n = e.data?.edgeCount
+      return typeof n === 'number' && n > 0 ? n : 1
+    }
+
     // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
     const projected: any[] = []
     edgeGroups.forEach((groupEdges, key) => {
@@ -636,7 +647,7 @@ export function useEdgeProjection({
       // relationship between the two cards it touches.
       const isGhost = isAggregated || isBrowseBundle || members.some((e: any) => e._lifted === true)
 
-      const edgeCount = members.length
+      const edgeCount = members.reduce<number>((sum, e) => sum + memberWeight(e), 0)
       const typesArray = Array.from(distinctTypes)
 
       // Reverse-flow annotation: layer-index of target strictly less than
