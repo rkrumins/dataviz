@@ -2,6 +2,7 @@
 FalkorDB graph provider - persists graph data in FalkorDB and loads it via the application.
 Implements GraphDataProvider interface using FalkorDB async client and Cypher queries.
 """
+from typing import ClassVar
 
 from backend.app.providers.base import GraphDataProvider
 
@@ -45,3 +46,5 @@ class FalkorDBProvider(
     Schema: nodes have label = entityType, properties include urn, displayName, etc.
     Edges use relationship type = edgeType (CONTAINS, PRODUCES, etc.).
     """
+
+    provider_type: ClassVar[str] = "falkordb"

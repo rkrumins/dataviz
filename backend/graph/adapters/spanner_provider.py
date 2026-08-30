@@ -27,7 +27,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, ClassVar, Dict, Iterable, List, Optional, Set, Tuple
 
 from backend.common.adapters import CircuitBreakerProxy  # noqa: F401  (re-exported via registry)
 from backend.common.interfaces.preflight import (
@@ -185,6 +185,8 @@ class SpannerProvider(GraphDataProvider):
         "service_account_json": "{...}"           # optional in emulator mode
     }
     """
+
+    provider_type: ClassVar[str] = "spanner"
 
     # ----- Construction & lifecycle ---------------------------------------
 

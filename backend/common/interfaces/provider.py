@@ -4,7 +4,8 @@ Both the visualization service and graph service import from here.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Awaitable, Callable, List, Optional, Dict, Any
+from enum import Enum
+from typing import Awaitable, Callable, ClassVar, Dict, FrozenSet, List, Optional, Set, Any
 
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
@@ -12,6 +13,7 @@ from ..models.graph import (
     ChildrenWithEdgesResult, TopLevelNodesResult,
     TraceResult, TraceClosureResult,
 )
+from ..providers.cursors import CursorMismatchError
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -46,6 +48,95 @@ class ProviderInputError(ValueError):
     pass
 
 
+# CursorMismatchError (imported above) is defined in
+# backend.common.providers.cursors -- the kernel module that owns the
+# keyset-pagination helpers that actually raise it -- and re-exported here
+# so the provider *contract* stays one place to reach the whole error
+# family. Do not define a second class: PR 1's package guard 6
+# (tests/test_falkordb_package_guards.py) asserts every path that
+# re-exports it -- backend.app.providers.falkordb, the falkordb_provider
+# compatibility shim, and this module -- all resolve to the SAME object.
+
+
+class ProviderFeatureUnsupportedError(NotImplementedError):
+    """The provider exists and is reachable but does not implement an
+    OPTIONAL feature -- as opposed to ProviderConfigurationError, which
+    means the provider exists but has not been configured yet. A subclass
+    of NotImplementedError so every existing ``except NotImplementedError``
+    (graph.py's trace/expand/closure endpoints -> 501, the deep-search
+    fallback, context_engine's materialization guard) keeps working
+    untouched.
+
+    ``feature`` is a ``ProviderFeature`` member for a named, catalog-
+    checkable capability, in which case the message is built from it and
+    ``provider``. It may also be a plain string -- used verbatim as the
+    message -- for the handful of pre-existing base-class defaults (below)
+    whose exact wording predates this error family and must not change.
+    """
+
+    def __init__(self, feature: "ProviderFeature | str", provider: str) -> None:
+        self.feature = feature
+        self.provider = provider
+        if isinstance(feature, ProviderFeature):
+            message = f"{provider} does not support the {feature.value!r} feature"
+        else:
+            message = str(feature)
+        super().__init__(message)
+
+
+def call_optional(provider: Any, method: str, *args: Any, **kwargs: Any) -> bool:
+    """Call ``provider.<method>(...)`` when present; return True if it ran.
+
+    Concrete providers always have the ontology-injection setters (base-
+    class members with working defaults -- see ``GraphDataProvider``'s
+    Ontology Injection Lifecycle section), but the versioned/draft write
+    wrappers are not ``GraphDataProvider`` subclasses and may not forward
+    all of them. This collapses the ``hasattr(provider, "set_...") and
+    provider.set_...(...)`` pattern used at every injection call site into
+    one call.
+    """
+    fn = getattr(provider, method, None)
+    if not callable(fn):
+        return False
+    fn(*args, **kwargs)
+    return True
+
+
+async def await_optional(provider: Any, method: str, *args: Any, default: Any = None, **kwargs: Any) -> Any:
+    """Async counterpart of :func:`call_optional`: awaits
+    ``provider.<method>(...)`` when present, returning ``default`` when the
+    wrapper in hand does not forward it.
+    """
+    fn = getattr(provider, method, None)
+    if not callable(fn):
+        return default
+    return await fn(*args, **kwargs)
+
+
+class ProviderFeature(str, Enum):
+    """A named, optional provider capability — checkable up front via
+    ``ProviderCapability.supports()`` (a row-level admission gate, before
+    any instance exists) rather than only discovered at runtime by calling
+    a method and catching ``NotImplementedError`` (still valid for a live,
+    possibly-wrapped instance — see ``ProviderFeatureUnsupportedError``).
+
+    The first three mirror ``ProviderCapability``'s pre-existing boolean
+    fields (``supports()`` special-cases them so the two can never
+    disagree); the rest are new, named after the method or endpoint they
+    gate.
+    """
+    WRITABLE = "writable"
+    FULL_CRUD = "full_crud"
+    GRAPH_COPY = "graph_copy"
+    TRACE_CLOSURE = "trace_closure"                              # trace_closure() -> /trace/closure
+    COARSE_TRACE = "coarse_trace"                                 # trace_closure_coarse() rollup lane
+    DEEP_SEARCH = "deep_search"                                   # the DeepSearchProvider protocol
+    AGGREGATION_MATERIALIZATION = "aggregation_materialization"   # materialize_aggregated_edges_batch()
+    BLANK_MODELS = "blank_models"                                 # blank-model versioning gate
+    SCHEMA_DISCOVERY = "schema_discovery"                         # discover_schema() is a real implementation
+    MULTI_GRAPH = "multi_graph"                                   # list_graphs() enumerates real graphs
+
+
 @dataclass(frozen=True)
 class ProviderCapability:
     """What the system may do with a provider's backing store — the shared, enforced
@@ -57,11 +148,31 @@ class ProviderCapability:
                         we manage end-to-end.
     ``supports_copy`` — a fast server-side graph copy is available (enables per-branch
                         projection by cloning ``main`` + applying the overlay delta).
+    ``features``      — optional named capabilities beyond the four above (see
+                        ``ProviderFeature``). Defaults to empty so every existing
+                        ``ProviderCapability(...)`` construction keeps compiling unchanged.
     """
     writable: bool
     full_crud: bool
     is_external: bool
     supports_copy: bool
+    features: FrozenSet[ProviderFeature] = frozenset()
+
+    def supports(self, feature: ProviderFeature) -> bool:
+        """Whether this capability includes ``feature``. The three legacy
+        booleans are the authoritative answer for their own
+        ``ProviderFeature`` members — so a caller migrating a ``.writable``
+        / ``.full_crud`` / ``.supports_copy`` check to
+        ``.supports(ProviderFeature.X)`` never gets a different answer —
+        and every other feature is a plain membership test on ``features``.
+        """
+        if feature is ProviderFeature.WRITABLE:
+            return self.writable
+        if feature is ProviderFeature.FULL_CRUD:
+            return self.full_crud
+        if feature is ProviderFeature.GRAPH_COPY:
+            return self.supports_copy
+        return feature in self.features
 
 
 # Keyed by provider_type (authoritative + stable). The enforced kernel form of the static
@@ -84,6 +195,49 @@ def capability_for(provider_type: Optional[str]) -> ProviderCapability:
     return PROVIDER_CAPABILITIES.get((provider_type or "").lower(), _DEFAULT_CAPABILITY)
 
 
+def unwrap_provider(p: Any, max_depth: int = 5) -> Any:
+    """Peel provider wrapper layers to reach the concrete adapter instance.
+
+    Mirrors the ad hoc unwrap in ``graph.py``'s ``_resolve_physical_graph_id``:
+    ``CircuitBreakerProxy`` exposes its wrapped instance via the ``.target``
+    property, ``VersionedWriteProvider`` via ``._inner``, and
+    ``DraftOverlayProvider`` via ``._base`` (the one of the three that does
+    NOT also implement ``__getattr__`` forwarding, so plain attribute access
+    alone would not reach through it). Layers can nest, so this loops rather
+    than checking once; it stops at ``max_depth`` or as soon as none of the
+    three attributes is found.
+    """
+    current = p
+    for _ in range(max_depth):
+        nxt = getattr(current, "target", None)
+        if nxt is None:
+            nxt = getattr(current, "_inner", None)
+        if nxt is None:
+            nxt = getattr(current, "_base", None)
+        if nxt is None or nxt is current:
+            break
+        current = nxt
+    return current
+
+
+def provider_type_of(p: Any) -> Optional[str]:
+    """The catalog ``provider_type`` of a possibly-wrapped provider, or None
+    when unresolvable (e.g. a ``VersionedBranchProvider``, which wraps a
+    ``GraphVersioningService`` rather than a live graph adapter — there is
+    no physical provider to identify)."""
+    return getattr(type(unwrap_provider(p)), "provider_type", None)
+
+
+def supports_feature(p: Any, feature: ProviderFeature) -> bool:
+    """Instance-level feature check for the few call sites with no provider
+    ROW in hand. Prefer ``capability_for(row.provider_type).supports(...)``
+    when a row is available — the honest check for a wrapper like
+    ``DraftOverlayProvider`` that implements a feature by delegation rather
+    than by its own class.
+    """
+    return capability_for(provider_type_of(p)).supports(feature)
+
+
 class GraphDataProvider(ABC):
     """
     Abstract interface for graph data providers.
@@ -96,7 +250,49 @@ class GraphDataProvider(ABC):
     provider's responsibility because only the provider knows the right
     granularity (a single query vs. a batched orchestration). Failure to
     comply will manifest as hung worker tasks during downstream incidents.
+
+    Two conventions this ABC deliberately does NOT enforce via
+    ``@abstractmethod`` (every test double that subclasses this ABC
+    directly would become uninstantiable):
+
+    * **Ontology injection is a declared obligation, not an optional
+      extra.** ``set_containment_edge_types``, ``set_entity_type_levels``,
+      ``set_resolved_edge_metadata``, ``set_source_type_aliases``,
+      ``set_node_identity``, ``set_admission_controller`` and
+      ``set_ontology_rules`` (the "Ontology Injection Lifecycle" section
+      below) are base-class members with working defaults rather than
+      duck-typed extras a caller must ``hasattr()`` before calling. Every
+      registered adapter therefore participates by construction — it
+      either inherits the plain-assignment default or overrides it — so a
+      provider that simply lacks one of these can no longer fail open the
+      way ``ContextEngine`` skipping a missing ``hasattr`` used to: a flat
+      graph and no error. See ``containment_configured`` for how a
+      provider answers "has an ontology actually been injected into me?" —
+      the question anything deriving a *cacheable* answer from injected
+      state (e.g. ``get_ontology_metadata``'s shared-cache write) must
+      consult before trusting its own classification.
+    * **``async def preflight(self, *, deadline_s: float) -> PreflightResult``
+      is required by convention, not by this ABC.** A default that
+      returned success would lie about reachability; one that returned
+      failure would make ``ProviderManager`` gate every such provider as
+      permanently down (``manager.py``: "providers without a preflight()
+      are never gated"). Every concrete adapter must define its own,
+      meeting the contract in ``backend/common/interfaces/preflight.py``:
+      wall-clock bounded by ``deadline_s`` (plus scheduling slack),
+      returning a ``PreflightResult`` for connectivity outcomes rather than
+      raising, cancellation-clean, and never touching the production
+      driver pool or running schema work. The provider catalog's
+      registration test enforces this by inspecting each registered class
+      directly, since the ABC itself cannot.
     """
+
+    # Catalog id ("falkordb", "neo4j", "spanner", ...) set by every
+    # registered concrete adapter class; None on the ABC itself and on
+    # adapters not yet in the catalog (DataHub). Read by
+    # ``provider_type_of`` / ``supports_feature`` above to resolve a live
+    # instance's capability via ``type(instance).provider_type`` without a
+    # provider ROW in hand.
+    provider_type: ClassVar[Optional[str]] = None
 
     @property
     @abstractmethod
@@ -246,9 +442,10 @@ class GraphDataProvider(ABC):
         resolvable — do NOT silently default to hardcoded type names, as this
         breaks enterprise ontologies that use custom edge naming.
         """
-        raise NotImplementedError(
+        raise ProviderFeatureUnsupportedError(
             f"{type(self).__name__} does not implement get_top_level_or_orphan_nodes. "
-            "Override this method to support the /nodes/top-level endpoint."
+            "Override this method to support the /nodes/top-level endpoint.",
+            type(self).__name__,
         )
 
     # ==========================================
@@ -339,9 +536,10 @@ class GraphDataProvider(ABC):
         Default implementation raises NotImplementedError — override in
         concrete providers (Neo4j, FalkorDB).
         """
-        raise NotImplementedError(
+        raise ProviderFeatureUnsupportedError(
             f"{type(self).__name__} does not implement trace_at_level. "
-            "Required for the /trace/v2 endpoint."
+            "Required for the /trace/v2 endpoint.",
+            type(self).__name__,
         )
 
     async def expand_aggregated(
@@ -377,9 +575,10 @@ class GraphDataProvider(ABC):
         an entity type at two containment depths has no single honest
         level to send, and providers should drill structurally instead.
         """
-        raise NotImplementedError(
+        raise ProviderFeatureUnsupportedError(
             f"{type(self).__name__} does not implement expand_aggregated. "
-            "Required for the /trace/expand endpoint."
+            "Required for the /trace/expand endpoint.",
+            type(self).__name__,
         )
 
     async def trace_closure(
@@ -411,9 +610,10 @@ class GraphDataProvider(ABC):
         Default implementation raises NotImplementedError — override in
         concrete providers (Neo4j, FalkorDB).
         """
-        raise NotImplementedError(
+        raise ProviderFeatureUnsupportedError(
             f"{type(self).__name__} does not implement trace_closure. "
-            "Required for the /trace/closure endpoint."
+            "Required for the /trace/closure endpoint.",
+            type(self).__name__,
         )
 
     # ==========================================
@@ -499,6 +699,215 @@ class GraphDataProvider(ABC):
     async def delete_edge(self, edge_id: str) -> bool:
         """Delete an edge by its ID. Returns True on success, False if not found."""
         pass
+
+    # ==========================================
+    # Ontology Injection Lifecycle
+    # (base-class members with working defaults — see the class docstring's
+    #  "ontology injection is a declared obligation" note. FalkorDB, Neo4j
+    #  and Spanner override some of these with provider-specific behaviour;
+    #  the defaults below are what a provider gets for free otherwise.)
+    # ==========================================
+
+    def set_containment_edge_types(self, types: List[str], from_ontology: bool = True) -> None:
+        """Inject the authoritative containment edge types resolved by
+        ``ContextEngine`` / the aggregation worker.
+
+        ``types`` empty with ``from_ontology=True`` means the ontology
+        explicitly defines no containment (a flat graph) — a valid resolved
+        state, distinct from "never configured". ``from_ontology=False``
+        with an empty list is an introspection-only probe that found
+        nothing; it must NOT be taken as "resolved to empty", so the
+        configured-sentinel is left unset (see ``containment_configured``).
+        """
+        if from_ontology or types:
+            self._resolved_containment_types: Set[str] = {t.upper() for t in (types or [])}
+            self._resolved_containment_types_set = True
+
+    @property
+    def containment_configured(self) -> bool:
+        """Has ``set_containment_edge_types`` actually injected an ontology
+        into this instance? False on a freshly-constructed provider.
+
+        Anything deriving a *cacheable* classification from injected state
+        must consult this first — an uninjected instance's answer ("no
+        containment configured") is correct for IT but is not a fact about
+        the graph, and must never poison a shared key that a later,
+        correctly-injected caller will read. This is the exact invariant a
+        prior fix enforces by hand in FalkorDB's ``get_ontology_metadata``
+        (gating its shared-cache write on this same sentinel); this
+        accessor is what stops the next provider from reinventing that bug.
+        """
+        return getattr(self, "_resolved_containment_types_set", False)
+
+    def set_entity_type_levels(self, mapping: Dict[str, int]) -> None:
+        """Inject the entity-type → hierarchy.level mapping resolved by
+        ``ContextEngine`` / the aggregation worker. Used both at write time
+        (populates a level index) and at read time (resolves levels without
+        requiring every existing node to be backfilled first).
+        """
+        self._entity_type_levels: Dict[str, int] = dict(mapping or {})
+
+    def set_resolved_edge_metadata(
+        self, edge_type_metadata: Dict[str, Any], lineage_edge_types: List[str],
+    ) -> None:
+        """Inject the authoritative edge classification resolved by
+        ``ContextEngine``. When set, ``get_ontology_metadata`` should use
+        this instead of re-deriving classification from env vars or
+        hardcoded type names.
+        """
+        self._resolved_edge_metadata = {k.upper(): v for k, v in (edge_type_metadata or {}).items()}
+        self._resolved_lineage_types: Set[str] = {t.upper() for t in (lineage_edge_types or [])}
+        self._resolved_edge_metadata_set = True
+
+    def set_source_type_aliases(
+        self,
+        relationship_aliases: Dict[str, List[str]],
+        entity_aliases: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
+        """Per-source vocabulary alignment: ``UPPER(declared) -> [observed
+        spelling(s)]`` for types a graph spells differently than the
+        ontology declares. Always called on resolution — even with empty
+        maps — so a stale alias set from a prior ontology can't leak into
+        the next query on a cached, shared provider instance.
+        """
+        self._source_rel_aliases: Dict[str, List[str]] = {
+            str(k).upper(): [str(s) for s in v] for k, v in (relationship_aliases or {}).items()
+        }
+        self._source_entity_aliases: Dict[str, List[str]] = {
+            str(k).upper(): [str(s) for s in v] for k, v in (entity_aliases or {}).items()
+        }
+
+    def set_node_identity(
+        self, identity_property: Optional[str] = None, name_property: Optional[str] = None,
+    ) -> None:
+        """Inject the per-source node-identity mapping: which physical
+        property plays the role of ``urn``, and which holds the human name.
+        Passing ``None`` restores the platform defaults — a meaningful
+        instruction, since provider instances are cached/shared and
+        omitting the call would otherwise leak the previous source's
+        mapping forward.
+        """
+        from backend.app.services.node_identity import (
+            DEFAULT_IDENTITY_PROPERTY, DEFAULT_NAME_PROPERTY,
+        )
+        self._node_identity_property = (
+            str(identity_property).strip() if identity_property else ""
+        ) or DEFAULT_IDENTITY_PROPERTY
+        self._name_property = (
+            str(name_property).strip() if name_property else ""
+        ) or DEFAULT_NAME_PROPERTY
+
+    def set_admission_controller(self, controller: Optional[Any]) -> None:
+        """Inject the distributed write-admission controller for
+        aggregation writes. Only meaningful to a provider that materializes
+        AGGREGATED edges itself (FalkorDB overrides this to store it);
+        others have no use for it, so the default is a no-op rather than an
+        error.
+        """
+        pass
+
+    def set_ontology_rules(self, rules: Any) -> None:
+        """Inject the assigned ontology's rich rule set (endpoint-type and
+        containment-integrity rules); the versioned-write path enforces
+        these in ``apply_ops``. ``None`` clears a previously-injected set.
+
+        No concrete adapter currently derives read behaviour from this —
+        the default just stores it — but it must exist on every adapter so
+        ``ContextEngine``'s push-down never silently skips a provider that
+        hasn't opted in.
+        """
+        self._ontology_rules = rules
+
+    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None) -> None:
+        """Create/ensure indices for the given entity types (idempotent).
+        Called after ``set_entity_type_levels`` so a freshly-onboarded
+        source's types get their indices before the first write or trace.
+        No-op by default; FalkorDB, Neo4j and Spanner override with a real
+        index-creation routine.
+        """
+        pass
+
+    async def stamp_identity_urns(self) -> int:
+        """Backfill ``urn`` from the injected identity property on nodes
+        that don't already carry one (onboarded third-party graphs whose
+        native key isn't called ``urn``). Returns the number of nodes
+        stamped; 0 by default (nothing to stamp, or the provider doesn't
+        support onboarding graphs with a foreign identity property).
+        """
+        return 0
+
+    # ==========================================
+    # Capability-Gated Optional Behavior
+    # (base defaults = the behaviour call sites already assume when a
+    #  provider doesn't have the method at all; see ProviderFeature for the
+    #  row-level admission gate built on the same set of capabilities.)
+    # ==========================================
+
+    def inflight_ops(self) -> int:
+        """Number of guarded operations currently executing on this
+        instance. ``ProviderManager`` uses this to avoid closing a provider
+        mid-job during recovery eviction; 0 (idle) by default for providers
+        that don't track in-flight work.
+        """
+        return 0
+
+    async def get_counts_fast(self) -> Optional[Dict[str, Any]]:
+        """A cheap, approximate node/edge count read (e.g. from a
+        maintained counter rather than a full scan). None means "counters
+        cannot describe this graph" — callers fall back to a slower exact
+        count.
+        """
+        return None
+
+    async def prime_stats_cache(self, stats: Dict[str, Any]) -> None:
+        """Warm this provider's own stats cache with an externally-computed
+        result (e.g. after a slow exact count, so the next fast-path read
+        doesn't immediately re-trigger it). No-op by default.
+        """
+        pass
+
+    async def get_node_degrees(
+        self, urns: List[str], edge_types: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """TOTAL lineage degree per URN over the full graph. Absent means
+        unknown — {} by default, which callers treat the same as "no
+        entries" rather than as an error.
+        """
+        return {}
+
+    def physical_graph_id(self) -> Optional[str]:
+        """A stable identity for the live (host, port, graph/database) this
+        instance is actually connected to — used to scope caches that must
+        not be shared across two data sources that happen to point at the
+        same physical graph, or split when they don't. None means "no
+        physical identity available" (e.g. a managed store with no separate
+        physical handle), which callers treat as today's ds-only cache
+        scoping.
+        """
+        return None
+
+    async def clear_content_caches(self) -> None:
+        """Invalidate this provider's own content caches (e.g. after a bulk
+        rewrite). No-op by default for providers that don't maintain one.
+        """
+        pass
+
+    async def get_nodes_batch(self, urns: List[str]) -> List[GraphNode]:
+        """Batch node fetch. Default delegates to ``get_nodes`` with a
+        ``NodeQuery`` scoped to ``urns`` and a limit that fits the whole
+        batch; providers with a faster batched primitive override this.
+        """
+        return await self.get_nodes(NodeQuery(urns=urns, limit=max(1, len(urns))))
+
+    async def materialize_aggregated_edges_batch(self, **kwargs: Any) -> Dict[str, Any]:
+        """Batch-materialize :AGGREGATED rollup edges. Optional — gated by
+        ``ProviderFeature.AGGREGATION_MATERIALIZATION`` — because it is a
+        FalkorDB-specific optimization with no equivalent on a provider
+        that doesn't maintain its own rollup edges. ``**kwargs`` because
+        callers pass a large, evolving set of tuning/resume parameters a
+        provider without this feature has no use for.
+        """
+        raise ProviderFeatureUnsupportedError(ProviderFeature.AGGREGATION_MATERIALIZATION, type(self).__name__)
 
     # ==========================================
     # Optional Extension Methods

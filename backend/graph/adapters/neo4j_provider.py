@@ -26,7 +26,7 @@ import logging
 import os
 import time
 from collections import OrderedDict, defaultdict
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Optional, Set
 
 from backend.common.interfaces.provider import GraphDataProvider
 from backend.common.models.graph import (
@@ -183,6 +183,8 @@ class Neo4jProvider(GraphDataProvider):
       - ``redisUrl``: deprecated legacy alias for the cache Redis (see
         ``cache_redis_url`` in ``credentials`` / the central CACHE role config)
     """
+
+    provider_type: ClassVar[str] = "neo4j"
 
     def __init__(
         self,
