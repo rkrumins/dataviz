@@ -951,3 +951,27 @@ independently of the contract work.
 §9's D9 (`search_nodes` gains `offset`) is "include only if it costs nothing", and §6 gates
 neither choice. **Ruling: drop D9 from this PR.** An optional change nothing verifies is a
 change nobody can review; if the offset is wanted, it deserves its own task with a test.
+
+### 10.7 §2.2's heading says six; its code block defines nine
+
+Found during T-A. §2.2 is headed "The six injection setters as base-class members" and §10.3's
+locations table lists exactly six — the ones on `OntologyMixin`. But the code block under that
+heading defines **nine** methods: the six, plus `set_ontology_rules`, `ensure_indices` and
+`stamp_identity_urns`.
+
+The extra three are real and needed. They are simply a different kind of thing: lifecycle and
+write-path no-ops rather than ontology injection. `set_ontology_rules` in particular has **no
+concrete adapter implementation anywhere** to cite — only `VersionedWriteProvider` stores what it
+is handed — so a reader following §10.3's table will hunt `ontology.py` for an override that does
+not exist and reasonably conclude the table is wrong.
+
+Read §2.2 as two groups:
+
+- **the ontology-injection lifecycle** (six, all on `OntologyMixin`, all in §10.3's table):
+  `set_containment_edge_types`, `set_entity_type_levels`, `set_admission_controller`,
+  `set_resolved_edge_metadata`, `set_source_type_aliases`, `set_node_identity`;
+- **defaults that merely need to exist** so an adapter that does not implement them is still
+  usable: `set_ontology_rules`, `ensure_indices`, `stamp_identity_urns`.
+
+Only the first group carries §2.7's "declared obligation" weight. A future engine that no-ops the
+second group is fine; one that no-ops the first gets a flat graph.
