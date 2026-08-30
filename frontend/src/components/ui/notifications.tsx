@@ -337,6 +337,7 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
         {!isLoading && (
           <button
             onClick={onDismiss}
+            aria-label="Dismiss"
             className="pointer-events-auto opacity-40 hover:opacity-100 transition-opacity flex-shrink-0 rounded-md p-0.5 hover:bg-black/5 dark:hover:bg-white/5"
           >
             <X className="w-3.5 h-3.5" />
@@ -394,6 +395,15 @@ export function NotificationStack() {
       // element; the stack starts above whatever is reserved, and the var
       // is absent (0px) everywhere else in the app.
       data-testid="notification-stack"
+      // Mounted for the life of the app, so it — not the card — is the live
+      // region: a card that arrived carrying its own `aria-live` would be
+      // inserted along with the region it declares, which screen readers do not
+      // reliably announce. Every notify() in the app is spoken through here;
+      // before this the whole system was silent, and the admin Features page
+      // (which had said its own piece until it moved in) took a switch away
+      // from every user of the deployment without a word.
+      role="status"
+      aria-live="polite"
       style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px))' }}
       // `items-end` pins every card's right edge, so the column reads as one
       // stack however wide a message makes a card.

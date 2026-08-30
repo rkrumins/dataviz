@@ -26,6 +26,19 @@ export function useAdminFeatures() {
   const resetModalRef = useRef<HTMLDivElement>(null)
   const cancelButtonRef = useRef<HTMLButtonElement>(null)
   const { notify } = useAppNotifications()
+  /**
+   * The saved state, read at the moment a save FIRES rather than at the render that made the
+   * handler. The page's Undo is a closure the notification store keeps verbatim, so it outlives
+   * its render by the life of the notification: a `handleChange` that closed over `data` still
+   * held that render's `version`, which the save it reverses had already moved on — the undo
+   * PATCHed a stale version, the server 409'd, and the admin got "Someone else saved. Reloaded."
+   * while the feature stayed exactly as they had just changed it. Written in an effect, never
+   * during render (`react-hooks/refs`).
+   */
+  const dataRef = useRef<FeaturesResponse | null>(null)
+  useEffect(() => {
+    dataRef.current = data
+  })
 
   const load = useCallback(async () => {
     setIsLoading(true)
@@ -48,14 +61,15 @@ export function useAdminFeatures() {
    *  place that knows the feature's name and how to put it back. */
   const handleChange = useCallback(
     async (key: string, value: unknown) => {
-      if (!data) return false
-      const next = { ...data.values, [key]: value }
-      setData({ ...data, values: next })
+      const current = dataRef.current
+      if (!current) return false
+      const next = { ...current.values, [key]: value }
+      setData({ ...current, values: next })
       setSavingKey(key)
       try {
         const res = await featuresService.update({
           ...next,
-          version: data.version,
+          version: current.version,
         } as Record<string, unknown> & { version: number })
         setData(res)
         // Tell the RUNNING APP, not just this page. Without this the admin flips a switch, the
@@ -73,13 +87,13 @@ export function useAdminFeatures() {
         const msg = err instanceof Error ? err.message : 'Could not save. Please try again.'
         setError(msg)
         notify('error', msg)
-        setData({ ...data, values: data.values })
+        setData({ ...current, values: current.values })
         return false
       } finally {
         setSavingKey(null)
       }
     },
-    [data, load, notify]
+    [load, notify]
   )
 
   useEffect(() => {

@@ -179,3 +179,24 @@ describe('a notification can be given a longer life than the default', () => {
     }
   })
 })
+
+describe('a notification is said out loud', () => {
+  // The Features page used to carry its own pop-up, which announced itself
+  // (`role="status"`, `aria-live`). Folding it into this stack took that with
+  // it: an admin on a screen reader turned a feature off for every user of the
+  // deployment and heard nothing at all — not what changed, and not that an
+  // Undo was there for eight seconds. The stack is mounted for the life of the
+  // app, so it is the live region; the cards arrive inside it.
+  it('the stack is a live region, so an arriving card is announced', () => {
+    render(<NotificationStack />)
+    expect(container()).toHaveAttribute('role', 'status')
+    expect(container()).toHaveAttribute('aria-live', 'polite')
+  })
+
+  it('the dismiss control says what it is', () => {
+    // A bare icon button reads as "button" and nothing else.
+    useNotificationStore.getState().add({ type: 'success', message: 'Lineage trace — turned off' })
+    render(<NotificationStack />)
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeInTheDocument()
+  })
+})
