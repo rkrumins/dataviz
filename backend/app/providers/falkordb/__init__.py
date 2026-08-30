@@ -57,6 +57,15 @@ import asyncio
 
 from .provider import FalkorDBProvider
 
+# Side effect, not a re-export: registers this package's ProviderDescriptor
+# into backend.common.providers.catalog. That kernel package cannot import
+# anything under backend.app (test_falkordb_kernel_purity.py), so this is
+# the one direction the registration can happen -- see
+# catalog_descriptor.py's docstring and catalog/__init__.py's. Not part of
+# __all__: nothing outside this package imports catalog_descriptor by name,
+# only for the registration that runs on import.
+from . import catalog_descriptor  # noqa: F401
+
 # The rest of the export list: names ``provider.py`` no longer imports for
 # its own use (its class body never references them), so they come
 # straight from the leaf module that defines them. Same objects either

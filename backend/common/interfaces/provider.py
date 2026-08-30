@@ -182,24 +182,26 @@ class ProviderCapability:
         return feature in self.features
 
 
-# Keyed by provider_type (authoritative + stable). The enforced kernel form of the static
-# ``ProviderCapabilities.supportsWriteBack`` discovery metadata.
-PROVIDER_CAPABILITIES: Dict[str, ProviderCapability] = {
-    "falkordb": ProviderCapability(writable=True,  full_crud=True,  is_external=False, supports_copy=True),
-    "spanner":  ProviderCapability(writable=True,  full_crud=True,  is_external=False, supports_copy=False),
-    "neo4j":    ProviderCapability(writable=True,  full_crud=False, is_external=False, supports_copy=False),
-    "datahub":  ProviderCapability(writable=False, full_crud=False, is_external=True,  supports_copy=False),
-    "mock":     ProviderCapability(writable=True,  full_crud=True,  is_external=False, supports_copy=False),
-}
-
 # Unknown providers default to read-only/external (safe: never write to a store we don't
 # understand; treat it as a federated view).
 _DEFAULT_CAPABILITY = ProviderCapability(writable=False, full_crud=False, is_external=True, supports_copy=False)
 
 
 def capability_for(provider_type: Optional[str]) -> ProviderCapability:
-    """Capability for a ``provider_type`` (e.g. the data source's). Unknown → read-only/external."""
-    return PROVIDER_CAPABILITIES.get((provider_type or "").lower(), _DEFAULT_CAPABILITY)
+    """Capability for a ``provider_type`` (e.g. the data source's). Unknown → read-only/external.
+
+    Reads ``backend.common.providers.catalog`` -- the single registration
+    point per provider type -- rather than a hardcoded dict (the former
+    ``PROVIDER_CAPABILITIES``, deleted). Imported lazily: the catalog's
+    ``descriptor.py`` imports ``ProviderCapability``/``GraphDataProvider``
+    from this module, so a module-level import here would be circular.
+    ``"mock"`` (a ``LEGACY_DB_ONLY_TYPES`` entry, never registered in the
+    catalog) now falls through to the same default as any other unknown
+    type; nothing reads ``capability_for("mock")`` today.
+    """
+    from backend.common.providers.catalog import descriptor_for
+    d = descriptor_for(provider_type)
+    return d.capability if d is not None else _DEFAULT_CAPABILITY
 
 
 def unwrap_provider(p: Any, max_depth: int = 5) -> Any:
