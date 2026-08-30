@@ -513,7 +513,7 @@ synodic/
         models.py                    # ORM models (public schema)
         repositories/                # Data access layer
       providers/
-        falkordb_provider.py         # FalkorDB adapter (~2700 lines)
+        falkordb_provider.py         # Compatibility shim over the falkordb/ package (see docs/BACKEND.md §3)
         manager.py                   # Provider cache + circuit breakers
       services/
         aggregation/                 # Self-contained aggregation package

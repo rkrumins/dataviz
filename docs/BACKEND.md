@@ -459,12 +459,104 @@ classDiagram
 
 ### FalkorDB Implementation Details
 
-**File:** `backend/app/providers/falkordb_provider.py` (~1000 lines)
+**Location:** `backend/app/providers/falkordb/` (a package — see "FalkorDB Package
+Layout" below). `backend/app/providers/falkordb_provider.py` is now a 161-line
+compatibility shim that re-exports the package's names unchanged, so every
+existing import site keeps working without an edit.
 
 - **Connection:** Async Redis BlockingConnectionPool (12 connections, 30s timeout)
 - **Projection modes:** `in_source` (AGGREGATED edges in same graph) or `dedicated` (separate projection graph)
 - **Indexing:** `ensure_indices()` creates indexes for ontology-defined entity types
 - **Aggregation:** `materialize_aggregated_edges_batch()` batch-creates AGGREGATED edges between ancestor pairs using Cypher queries
+
+### FalkorDB Package Layout
+
+The implementation moved to `backend/app/providers/falkordb/`, one module per
+functional area (connection lifecycle, schema/indexing, ontology, caching,
+ancestors, reads, browse, simple lineage, aggregation, trace, closure, drill,
+stats, navigation, writes). `FalkorDBProvider` (`provider.py`) is a composition
+of the resulting fifteen mixins plus `GraphDataProvider` — nothing else lives
+in that file.
+
+**Why mixins, not collaborator objects:** the unit suite fakes the database by
+assigning over the provider's own methods on a *live instance* (`p._ro_query =
+fake`, `p._ensure_connected = noop`, dozens of sites). A mixin keeps every one
+of those a plain, shadowable instance method; a delegate object would leave the
+assignment bound to an attribute nothing reads, and every faked test would
+silently start hitting real code (or a real database) while still reporting
+green.
+
+Two engine-neutral seams sit alongside the mixins, unused by most call sites today:
+- **Executor** (`falkordb/executor.py`) — adapts the five query chokepoints to a
+  database-neutral `run`/`run_tolerant` shape a future engine can implement too.
+- **Dialect** (`falkordb/dialect.py`) — a plain data value holding FalkorDB's
+  Cypher fragments (labels, relationship types, index DDL), so a second engine
+  is a new value plus an executor, not another adapter class.
+
+### Checking a Query's Plan
+
+To confirm a Cypher query is not doing a full scan, `PROFILE` it directly
+against a graph and read the plan for `Results`/`Project` with no `All Node
+Scan` or `Node By Label Scan` (an index seek shows as `Node By Index Scan`):
+
+```python
+from falkordb import FalkorDB
+g = FalkorDB(host="localhost", port=6399).select_graph("<graph_name>")
+print(g.profile("MATCH (n:Thing) WHERE n.urn = $urn RETURN n"))
+```
+
+`backend/scripts/check_trace_query_plans.py` does this for a fixed list of
+trace hot-path queries only (`HOT_PATH_QUERIES`) — it has no entry point for
+an arbitrary query, so use the snippet above for anything else.
+
+### Known Follow-ups
+
+Left deliberately unfinished by the FalkorDB package split, for a later PR:
+
+- **Six files still import a private helper straight from the shim** rather
+  than the package's leaf modules — `backend/tests/test_falkordb_package_guards.py`'s
+  guard 1 allow-lists exactly these (`_sanitize_label`, `_node_from_props`,
+  `_edge_from_row`, `_sanitize_node_properties`, `_compute_searchable_text`,
+  `_split_user_properties`), all under `services/versioning/` plus
+  `api/v1/endpoints/versioning.py`. A later PR repoints them and deletes the
+  allow-list.
+- **`CursorMismatchError`** is defined in `falkordb/cursors.py`, not the
+  provider contract (`backend/common/interfaces/provider.py`) — a later PR
+  moves it there and re-exports it from both places.
+- **Expression-level dialect routing** (`labels(x)[0]` ~49 sites, `id(r)`/`ID(n)`
+  ~13, `type(r)` ~49) is deliberately deferred to the PR that lifts these
+  modules wholesale — see `falkordb/dialect.py`'s module docstring for exactly
+  which fields are defined but not yet wired.
+- **`get_aggregated_edges_between`** (`falkordb/aggregation.py:1342`) does a
+  lazy `from fastapi import HTTPException` — an HTTP-framework import inside a
+  provider. Noted, not fixed here.
+- **Neo4j has its own near-duplicate** `_sanitize_label` / `_node_from_props` /
+  `_edge_from_row` at `backend/graph/adapters/neo4j_provider.py:50-90`,
+  unrelated to this split's kernel extraction
+  (`backend/common/providers/rowmap.py`) — a future PR could point Neo4j at
+  the same kernel functions instead.
+- **Two kernel functions changed logger name, operationally, not behaviourally.**
+  `node_from_props` and `split_user_properties` (`backend/common/providers/rowmap.py`)
+  now log under that module's own name instead of the historic
+  `backend.app.providers.falkordb_provider` — unavoidable, since the kernel
+  must not import `backend.app` to reach the package's log setup. No test
+  depends on the old name for these two functions, but log-based alerting
+  keyed to it would silently stop matching.
+- **`docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md`'s prose will go stale.**
+  Lines 45, 66, and 105 describe live FalkorDB reads as going through
+  `falkordb_provider.py` — true today only because the compatibility shim
+  exists; repointing those consumers at the package directly (as above) will
+  make that specific phrasing wrong even though the behaviour it describes
+  will not change.
+- **Two halves of the executor seam have no caller anywhere yet.** `stats.py`
+  is the only module converted to it so far; from that task's report: "Every
+  call in this module is a read. Nine `run()` + five `run_tolerant()`, zero
+  `run(..., readonly=False)`. The write path through the executor is
+  unit-tested … but this is not a second, independent proof of it on real
+  code — that's still open for whichever of the next eight modules has the
+  first write chokepoint." And separately: "`projection_executor` has no
+  caller anywhere yet, this module included. Same caveat as above, restated
+  because it's the other seam half."
 
 ### Provider Location Note
 
@@ -472,8 +564,8 @@ All providers run **in-process** in the Visualization Service, split across two 
 
 | Provider | Location |
 |----------|----------|
-| FalkorDBProvider | `backend/app/providers/falkordb_provider.py` |
-| MockGraphProvider | `backend/app/providers/mock_provider.py` |
+| FalkorDBProvider | `backend/app/providers/falkordb/` (compatibility shim at `backend/app/providers/falkordb_provider.py`) |
+| MockGraphProvider | not implemented as a class today — `provider_type = 'mock'` is a valid `ProviderORM` value (`backend/app/db/models.py`) with no adapter behind it |
 | Neo4jProvider | `backend/graph/adapters/neo4j_provider.py` |
 | DataHubGraphQLProvider | `backend/graph/adapters/datahub_provider.py` |
 

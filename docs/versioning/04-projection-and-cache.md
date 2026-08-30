@@ -306,9 +306,9 @@ churn to one job. `resolve_aggregation_edge_types` (`projection_target.py:22-49`
 Reads, the projection registry, and key-listing all resolve a `(host, port)` through **one** function
 so the read instance and the projection instance can never drift:
 
-- **`resolve_falkordb_target(host, port)`** (`falkordb_provider.py:192`) composes, in order,
+- **`resolve_falkordb_target(host, port)`** (`falkordb/hosts.py:39`) composes, in order,
   `apply_local_dev_falkordb_override` (`manager.py:46` — opt-in host-run dev override) then
-  `_normalize_falkordb_host` (`falkordb_provider.py:163` — Docker→host rewrite and IPv4 pin to dodge
+  `_normalize_falkordb_host` (`falkordb/hosts.py:10` — Docker→host rewrite and IPv4 pin to dodge
   IPv6 `::1` failures).
 - **`make_registry_graph_factory`** (`falkor_graph_registry.py:52`) returns the async
   `(name, provider_id=None) -> graph` factory that routes each graph to **its data source's pinned
