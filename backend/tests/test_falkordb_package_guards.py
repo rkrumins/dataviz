@@ -565,15 +565,32 @@ def test_guard6_export_list_identity():
 #
 # ``get_counts_fast`` is the target because ``tests/test_falkordb_counts_
 # fast.py:42-70`` is already the suite's canonical instance-patch fixture
-# for it -- this follows that shape rather than inventing a new one. Two
-# things carried over from it, both load-bearing: ``_SCHEMA_CACHE_TTL = 0``
-# (a cache hit would let ``get_counts_fast`` -- or a sibling like
-# ``get_stats`` -- return early having issued zero Cypher, which would look
-# EXACTLY like a broken seam even though the seam is fine; forcing the TTL
-# to 0 removes that ambiguity) and the fake's ``(cypher, params=None,
-# **kw)`` signature (the chokepoints call with ``timeout=``/``op=``
-# keywords; a narrower signature fails with a TypeError that reads like a
-# bug in the provider rather than in the test).
+# for it -- this follows that shape rather than inventing a new one, with
+# one exception: that fixture also sets ``p._SCHEMA_CACHE_TTL = 0``, which
+# is NOT carried over here because it would be inert code. ``get_counts_
+# fast`` (stats.py:131) has no cache-READ gate -- it always issues its
+# queries; its only TTL interaction is the write-through
+# ``prime_stats_cache`` call at the end, which is a no-op either way (at
+# TTL 0 it returns immediately at stats.py:242; at a real TTL it reaches
+# ``self._redis``, which doesn't exist on this never-connected instance,
+# and its own ``except Exception: pass`` at stats.py:251 swallows that).
+#
+# The hazard the fixture's TTL=0 line guards against elsewhere is real,
+# just not on this method: ``get_stats`` (stats.py:63) and
+# ``get_ontology_metadata`` DO have a
+# ``if self._SCHEMA_CACHE_TTL > 0 and not bypass_cache:`` cache-read gate
+# before they query, so a cache hit lets them return having emitted zero
+# Cypher -- indistinguishable from a broken instance-patch seam even
+# though the seam would be fine. Anyone re-pointing this guard at one of
+# those methods (guard 7 has already moved once this task, from
+# ``get_node`` to ``get_counts_fast``) must disable its cache the same
+# way (``p._SCHEMA_CACHE_TTL = 0``) or the guard will report success
+# while the fake was never called.
+#
+# The fake's ``(cypher, params=None, **kw)`` signature IS carried over
+# from that fixture: the chokepoints call with ``timeout=``/``op=``
+# keywords, and a narrower signature fails with a TypeError that reads
+# like a bug in the provider rather than in the test.
 # ===========================================================================
 
 
@@ -581,7 +598,6 @@ def test_guard7_ro_query_patch_seam_is_intact():
     from backend.app.providers.falkordb import FalkorDBProvider
 
     p = FalkorDBProvider(host="x", graph_name="g")
-    p._SCHEMA_CACHE_TTL = 0  # load-bearing -- see the guard-7 block comment above
 
     async def _noop_connect():
         return None
@@ -607,9 +623,7 @@ def test_guard7_ro_query_patch_seam_is_intact():
         "if `_ro_query` stopped being a plain instance method, every test "
         "that patches it is now silently exercising the real code path "
         "(or hitting a real database) instead of its fake, while still "
-        "reporting green. (A cache hit would look identical to this "
-        "failure, which is why _SCHEMA_CACHE_TTL is forced to 0 above --  "
-        "rule that out before suspecting the seam.)"
+        "reporting green."
     )
     assert result == {"nodeCount": 0, "edgeCount": 0, "entityTypeCounts": {}, "edgeTypeCounts": {}}
 
@@ -618,7 +632,17 @@ def test_guard7_ensure_connected_patch_seam_is_intact():
     from backend.app.providers.falkordb import FalkorDBProvider
 
     p = FalkorDBProvider(host="x", graph_name="g")
-    p._SCHEMA_CACHE_TTL = 0  # load-bearing -- see the guard-7 block comment above
+    # Unlike the _ro_query test above, THIS one needs the cache TTL forced
+    # to 0 -- not for the cache-read reason described in the guard-7 block
+    # comment (get_counts_fast has no such read), but because
+    # prime_stats_cache's tail-end write ALSO calls self._ensure_connected()
+    # whenever TTL > 0 (stats.py:242-244). At the real default (300), that
+    # second call reaches the spy on its own and satisfies `assert calls`
+    # even when get_counts_fast's own TOP-LEVEL call is the one that's
+    # broken -- verified by replacing get_counts_fast's `await self.
+    # _ensure_connected()` with `pass`: this test still passed until this
+    # line was added.
+    p._SCHEMA_CACHE_TTL = 0
 
     async def _ro_query(cypher, params=None, **kw):
         return types.SimpleNamespace(result_set=[])
@@ -641,8 +665,6 @@ def test_guard7_ensure_connected_patch_seam_is_intact():
         "on -- if `_ensure_connected` stopped being a plain instance "
         "method, every test that patches it is now silently "
         "attempting a real connection instead of its fake, while still "
-        "reporting green. (A cache hit would look identical to this "
-        "failure, which is why _SCHEMA_CACHE_TTL is forced to 0 above -- "
-        "rule that out before suspecting the seam.)"
+        "reporting green."
     )
     assert result == {"nodeCount": 0, "edgeCount": 0, "entityTypeCounts": {}, "edgeTypeCounts": {}}
