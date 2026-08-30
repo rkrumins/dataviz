@@ -565,15 +565,24 @@ def test_guard6_export_list_identity():
 #
 # ``get_counts_fast`` is the target because ``tests/test_falkordb_counts_
 # fast.py:42-70`` is already the suite's canonical instance-patch fixture
-# for it -- this follows that shape rather than inventing a new one, with
-# one exception: that fixture also sets ``p._SCHEMA_CACHE_TTL = 0``, which
-# is NOT carried over here because it would be inert code. ``get_counts_
-# fast`` (stats.py:131) has no cache-READ gate -- it always issues its
-# queries; its only TTL interaction is the write-through
-# ``prime_stats_cache`` call at the end, which is a no-op either way (at
-# TTL 0 it returns immediately at stats.py:242; at a real TTL it reaches
-# ``self._redis``, which doesn't exist on this never-connected instance,
-# and its own ``except Exception: pass`` at stats.py:251 swallows that).
+# for it -- this follows that shape rather than inventing a new one. That
+# fixture also sets ``p._SCHEMA_CACHE_TTL = 0``, and the two tests below
+# differ on whether they need it:
+#
+#   - the ``_ro_query`` test does NOT set it. ``get_counts_fast``
+#     (stats.py:131) has no cache-READ gate -- it always issues its
+#     queries -- and its only TTL interaction is the write-through
+#     ``prime_stats_cache`` call at the end. That call's incidental
+#     ``self._ensure_connected()`` cannot satisfy an ``_ro_query`` spy
+#     anyway: it is a DIFFERENT chokepoint. Its Redis write is a no-op at
+#     either TTL besides (at TTL 0 it returns at stats.py:242; at a real
+#     TTL it reaches ``self._redis``, absent on this never-connected
+#     instance, and its own ``except Exception: pass`` at stats.py:251
+#     swallows that).
+#
+#   - the ``_ensure_connected`` test DOES set it, for a mechanism that has
+#     nothing to do with cache reads. See the comment on that line at the
+#     test itself; it is stated once, there, so the two cannot drift.
 #
 # The hazard the fixture's TTL=0 line guards against elsewhere is real,
 # just not on this method: ``get_stats`` (stats.py:63) and
