@@ -1,9 +1,15 @@
 /**
- * Admin Features page: data loading, save, reset, toasts, and modal state.
+ * Admin Features page: data loading, save, reset, and modal state.
  * Keeps AdminFeatures component thin and logic testable.
+ *
+ * It says what happened through the app's ONE notification stack. It used to
+ * own a second pop-up of its own in the same bottom-right corner — which could
+ * overlap the real one, swallowed clicks over whatever was beneath it, and had
+ * missed every fix the shared stack has had since.
  */
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { featuresService, FeaturesConcurrencyError, type FeaturesResponse } from '@/services/featuresService'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useFeaturesStore } from '@/store/features'
 
 export const SEARCH_MIN_FEATURES = 10
@@ -13,15 +19,13 @@ export function useAdminFeatures() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [savingKey, setSavingKey] = useState<string | null>(null)
-  const [toastVisible, setToastVisible] = useState(false)
-  const [errorToastVisible, setErrorToastVisible] = useState(false)
-  const [errorToastMessage, setErrorToastMessage] = useState('')
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
   const [resetLoading, setResetLoading] = useState(false)
   const [defaultsHintDismissed, setDefaultsHintDismissed] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const resetModalRef = useRef<HTMLDivElement>(null)
   const cancelButtonRef = useRef<HTMLButtonElement>(null)
+  const { notify } = useAppNotifications()
 
   const load = useCallback(async () => {
     setIsLoading(true)
@@ -40,9 +44,11 @@ export function useAdminFeatures() {
     load()
   }, [load])
 
+  /** True when the save landed. The page says WHAT changed — it is the only
+   *  place that knows the feature's name and how to put it back. */
   const handleChange = useCallback(
     async (key: string, value: unknown) => {
-      if (!data) return
+      if (!data) return false
       const next = { ...data.values, [key]: value }
       setData({ ...data, values: next })
       setSavingKey(key)
@@ -57,24 +63,23 @@ export function useAdminFeatures() {
         // admin's own tab keeps offering the buttons until they hard-refresh. They are then
         // looking at a UI they have personally disabled, which reads as "the toggle is broken".
         useFeaturesStore.getState().setValues(res.values)
-        setToastVisible(true)
+        return true
       } catch (err) {
         if (err instanceof FeaturesConcurrencyError) {
           await load()
-          setErrorToastMessage('Someone else saved. Reloaded.')
-          setErrorToastVisible(true)
-          return
+          notify('error', 'Someone else saved. Reloaded.')
+          return false
         }
         const msg = err instanceof Error ? err.message : 'Could not save. Please try again.'
         setError(msg)
-        setErrorToastMessage(msg)
-        setErrorToastVisible(true)
+        notify('error', msg)
         setData({ ...data, values: data.values })
+        return false
       } finally {
         setSavingKey(null)
       }
     },
-    [data, load]
+    [data, load, notify]
   )
 
   useEffect(() => {
@@ -94,12 +99,11 @@ export function useAdminFeatures() {
       setData(res)
       useFeaturesStore.getState().setValues(res.values)   // same reason as handleChange
       setResetConfirmOpen(false)
-      setToastVisible(true)
+      notify('success', 'Saved')
     } catch (err) {
       if (err instanceof FeaturesConcurrencyError) {
         await load()
-        setErrorToastMessage('Someone else saved. Reloaded.')
-        setErrorToastVisible(true)
+        notify('error', 'Someone else saved. Reloaded.')
         setResetConfirmOpen(false)
         return
       }
@@ -107,7 +111,7 @@ export function useAdminFeatures() {
     } finally {
       setResetLoading(false)
     }
-  }, [data?.version, load])
+  }, [data?.version, load, notify])
 
   const updateNotice = useCallback(
     async (notice: { enabled?: boolean; title?: string; message?: string }) => {
@@ -119,20 +123,17 @@ export function useAdminFeatures() {
           experimentalNotice: notice,
         } as Record<string, unknown> & { version: number })
         setData(res)
-        setToastVisible(true)
+        notify('success', 'Saved')
       } catch (err) {
         if (err instanceof FeaturesConcurrencyError) {
           await load()
-          setErrorToastMessage('Someone else saved. Reloaded.')
-          setErrorToastVisible(true)
+          notify('error', 'Someone else saved. Reloaded.')
           return
         }
-        const msg = err instanceof Error ? err.message : 'Could not save notice.'
-        setErrorToastMessage(msg)
-        setErrorToastVisible(true)
+        notify('error', err instanceof Error ? err.message : 'Could not save notice.')
       }
     },
-    [data, load]
+    [data, load, notify]
   )
 
   return {
@@ -142,12 +143,6 @@ export function useAdminFeatures() {
     load,
     handleChange,
     savingKey,
-    toastVisible,
-    setToastVisible,
-    errorToastVisible,
-    setErrorToastVisible,
-    errorToastMessage,
-    setErrorToastMessage,
     resetConfirmOpen,
     setResetConfirmOpen,
     handleReset,

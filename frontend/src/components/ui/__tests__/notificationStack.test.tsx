@@ -10,7 +10,7 @@
  * the stack starts above whatever is reserved. Everywhere else the variable is
  * absent and the stack sits where it always did.
  */
-import { render, renderHook, screen, cleanup } from '@testing-library/react'
+import { act, render, renderHook, screen, cleanup } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -145,5 +145,37 @@ describe('a loading notification can compute its own words', () => {
     rerender({ phase: 'Loading connections…' })
     expect(live()).toHaveLength(1)
     expect(live()[0].message).toBe('Loading connections…')
+  })
+})
+
+describe('a notification can be given a longer life than the default', () => {
+  it('honours its own durationMs, in the dismiss timer AND in the progress bar', () => {
+    // The admin Features page offers an Undo on the card that says what it
+    // just changed. At the shared 4.5s it expired before it could be read and
+    // reached — which is worse than offering nothing, because the escape hatch
+    // was visibly there and then gone.
+    vi.useFakeTimers()
+    try {
+      const store = useNotificationStore.getState()
+      store.add({ type: 'success', message: 'Lineage trace — turned off', durationMs: 8000 })
+      store.add({ type: 'success', message: 'Saved' })
+      render(<NotificationStack />)
+
+      const card = screen.getByText('Lineage trace — turned off').closest('.w-80') as HTMLElement
+      const bar = card.querySelector<HTMLElement>('[style*="nx-toast-progress"]')!
+      expect(bar.style.animation).toContain('8000ms')
+
+      // Past the default, and past when the ordinary one goes.
+      act(() => { vi.advanceTimersByTime(5000) })
+      expect(useNotificationStore.getState().notifications.map(n => n.message)).toEqual([
+        'Lineage trace — turned off',
+      ])
+
+      // Gone on its own schedule, not kept alive forever.
+      act(() => { vi.advanceTimersByTime(3100) })
+      expect(useNotificationStore.getState().notifications).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

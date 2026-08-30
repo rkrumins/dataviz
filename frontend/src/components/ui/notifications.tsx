@@ -7,7 +7,8 @@
  *   - <NotificationStack />  — render once in AppLayout; animates all active ones
  *
  * Notification types:
- *   - success / error / warning / info  — auto-dismiss after 4.5s
+ *   - success / error / warning / info  — auto-dismiss after 4.5s, or after the
+ *                                         caller's own `durationMs`
  *   - loading                           — persists until explicitly dismissed via hideLoading(key)
  *
  * Usage:
@@ -34,6 +35,10 @@ export interface AppNotification {
   /** Stable key for loading notifications — used by hideLoading() to dismiss. */
   key?: string
   action?: { label: string; onClick: () => void }
+  /** How long this one lives, in ms. Defaults to DURATION. An `action` a reader
+   * has to notice, read and reach for needs longer than a remark they only
+   * read — an Undo that expires first is worse than no Undo at all. */
+  durationMs?: number
   /** Epoch-ms at which the notification was added — drives the progress bar and
    * dismiss timer against an immutable reference time so sibling removals
    * never restart this notification's countdown. */
@@ -116,8 +121,9 @@ export function useAppNotifications() {
     type: Exclude<NotificationType, 'loading'>,
     message: string,
     action?: { label: string; onClick: () => void },
+    durationMs?: number,
   ) => {
-    return add({ type, message, action })
+    return add({ type, message, action, durationMs })
   }, [add])
 
   /** Show a persistent loading notification. Stays until hideLoading(key) is called. */
@@ -209,6 +215,7 @@ export function useLoadingNotification(
 
 // ─── Visual constants ─────────────────────────────────────────────────────
 
+/** How long a notification lives unless it asks for longer. */
 const DURATION = 4500
 
 const accentColors: Record<NotificationType, string> = {
@@ -242,6 +249,7 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
   const isLoading = notification.type === 'loading'
   const id = notification.id
   const createdAt = notification.createdAt
+  const duration = notification.durationMs ?? DURATION
 
   // The bar is a CSS animation, not React state.
   //
@@ -261,8 +269,8 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
   const [{ fromPercent, remainingMs }] = useState(() => {
     const elapsed = Date.now() - createdAt
     return {
-      fromPercent: Math.max(0, 100 - (elapsed / DURATION) * 100),
-      remainingMs: Math.max(0, DURATION - elapsed),
+      fromPercent: Math.max(0, 100 - (elapsed / duration) * 100),
+      remainingMs: Math.max(0, duration - elapsed),
     }
   })
 
@@ -275,12 +283,12 @@ function NotificationCard({ notification }: { notification: AppNotification }) {
     // whenever this effect re-ran (e.g. because a sibling notification dismissed
     // and the parent's onDismiss closure changed), which gave the user the
     // misleading impression that the remaining notifications had reset.
-    const timer = setTimeout(() => remove(id), Math.max(0, DURATION - (Date.now() - createdAt)))
+    const timer = setTimeout(() => remove(id), Math.max(0, duration - (Date.now() - createdAt)))
 
     return () => {
       clearTimeout(timer)
     }
-  }, [createdAt, id, isLoading, remove])
+  }, [createdAt, duration, id, isLoading, remove])
 
   const onDismiss = useCallback(() => remove(id), [remove, id])
 
