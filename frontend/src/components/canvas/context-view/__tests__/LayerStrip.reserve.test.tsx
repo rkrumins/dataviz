@@ -40,9 +40,7 @@ describe('LayerStrip reserves its band', () => {
     Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
       configurable: true,
       get(this: HTMLElement) {
-        return this.classList.contains('rounded-full') && this.classList.contains('pointer-events-auto')
-          ? BAR_HEIGHT
-          : 0
+        return this.hasAttribute('data-layer-strip-bar') ? BAR_HEIGHT : 0
       },
     })
   })
