@@ -1,0 +1,1305 @@
+[
+  {
+    "call": "get_node",
+    "queries": [
+      {
+        "cypher": "MATCH (n:Dataset {urn: $urn}) OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE n.urn = $urn OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_nodes:by_urns",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WHERE n.urn IN $urnList WITH n OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "limit": 100,
+          "skip": 0,
+          "urnList": [
+            "urn:golden:dataset:unknown"
+          ]
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n:Dataset) WHERE n.urn IN $urnList WITH n OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "limit": 100,
+          "skip": 0,
+          "urnList": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_nodes:by_entity_types",
+    "queries": [
+      {
+        "cypher": "CALL { MATCH (n:Dataset) RETURN n UNION MATCH (n:Container) RETURN n } WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "limit": 50,
+          "skip": 0
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_nodes:bare",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WITH n SKIP $skip LIMIT $limit OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "limit": 10,
+          "skip": 0
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_edges:typed",
+    "queries": [
+      {
+        "cypher": "MATCH (a)-[r:DERIVES_FROM|FLOWS_TO]->(b) RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops SKIP $skip LIMIT $limit",
+        "params": {
+          "limit": 100,
+          "skip": 0
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_edges:anchored_by_source_urns",
+    "queries": [
+      {
+        "cypher": "MATCH (a:Dataset)-[r:DERIVES_FROM]->(b) WHERE a.urn IN $anchorUrns RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, properties(r) AS rprops LIMIT $limit",
+        "params": {
+          "anchorUrns": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ],
+          "limit": 50
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_children:first_page",
+    "queries": [
+      {
+        "cypher": "MATCH (p)-[r]->(c) WHERE p.urn = $parent AND type(r) IN $relTypes WITH c ORDER BY c.displayName, c.urn SKIP $skip LIMIT $lim OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes RETURN c, count(gc) as childCount",
+        "params": {
+          "lim": 20,
+          "parent": "urn:golden:domain:root",
+          "relTypes": [
+            "CONTAINS",
+            "HAS_PART"
+          ],
+          "skip": 0
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_children:cursor",
+    "queries": [
+      {
+        "cypher": "MATCH (p)-[r]->(c) WHERE p.urn = $parent AND type(r) IN $relTypes AND (c.displayName > $cursorName OR (c.displayName = $cursorName AND c.urn > $cursorUrn)) WITH c ORDER BY c.displayName, c.urn LIMIT $lim OPTIONAL MATCH (c)-[rc]->(gc) WHERE type(rc) IN $relTypes RETURN c, count(gc) as childCount",
+        "params": {
+          "cursorName": "Container A",
+          "cursorUrn": "urn:golden:container:c1",
+          "lim": 20,
+          "parent": "urn:golden:domain:root",
+          "relTypes": [
+            "CONTAINS",
+            "HAS_PART"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_children_with_edges",
+    "queries": [
+      {
+        "cypher": "MATCH (p:Domain)-[r:CONTAINS|HAS_PART]->(c) WHERE p.urn = $parent WITH p, r, c ORDER BY c.displayName, c.urn SKIP $skip LIMIT $lim OPTIONAL MATCH (c)-[rc:CONTAINS|HAS_PART]->(gc) RETURN c, count(gc) as childCount, p.urn as parentUrn, type(r) as relType, properties(r) as rprops",
+        "params": {
+          "lim": 20,
+          "parent": "urn:golden:domain:root",
+          "relTypes": [
+            "CONTAINS",
+            "HAS_PART"
+          ],
+          "skip": 0
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_parent",
+    "queries": [
+      {
+        "cypher": "MATCH (p)-[r:CONTAINS|HAS_PART]->(c:Dataset {urn: $child}) RETURN p",
+        "params": {
+          "child": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_top_level_or_orphan_nodes:default",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) WITH n, count(child) as childCount ORDER BY n.displayName ASC, n.urn ASC RETURN n, childCount",
+        "params": {
+          "limit": 20
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() RETURN count(n) as total",
+        "params": {},
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_top_level_or_orphan_nodes:entity_types",
+    "queries": [
+      {
+        "cypher": "CALL { MATCH (n:Dataset) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() RETURN n UNION MATCH (n:Container) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() RETURN n } WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) WITH n, count(child) as childCount ORDER BY n.displayName ASC, n.urn ASC RETURN n, childCount",
+        "params": {
+          "limit": 20
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "CALL { MATCH (n:Dataset) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() RETURN n UNION MATCH (n:Container) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() RETURN n } RETURN count(n) as total",
+        "params": {},
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_top_level_or_orphan_nodes:cursor",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() AND (n.displayName > $cursorName OR (n.displayName = $cursorName AND n.urn > $cursorUrn)) WITH n ORDER BY n.displayName ASC, n.urn ASC LIMIT $limit OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) WITH n, count(child) as childCount ORDER BY n.displayName ASC, n.urn ASC RETURN n, childCount",
+        "params": {
+          "cursorName": "Container A",
+          "cursorUrn": "urn:golden:container:c1",
+          "limit": 20
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE NOT (n)<-[:CONTAINS|HAS_PART]-() RETURN count(n) as total",
+        "params": {},
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_nodes_by_layer",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WHERE n.layerAssignment = $lid WITH n ORDER BY n.displayName ASC, n.urn ASC SKIP $skip LIMIT $limit RETURN n",
+        "params": {
+          "lid": "layer-1",
+          "limit": 20,
+          "skip": 0
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_descendants",
+    "queries": [
+      {
+        "cypher": "MATCH (root)-[:CONTAINS|HAS_PART*1..3]->(desc) WHERE root.urn = $urn RETURN DISTINCT desc SKIP $skip LIMIT $lim",
+        "params": {
+          "lim": 20,
+          "skip": 0,
+          "urn": "urn:golden:domain:root"
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_ancestors",
+    "queries": [
+      {
+        "cypher": "MATCH (child:Dataset) WHERE child.urn IN $urns OPTIONAL MATCH path = (child)<-[:CONTAINS|HAS_PART*1..16]-(a) WITH child.urn AS u,      [n IN nodes(path)[1..] | n.urn] AS chain_candidate,      coalesce(length(path), 0) AS plen ORDER BY u, plen DESC WITH u, collect(chain_candidate) AS candidates RETURN u, coalesce(candidates[0], []) AS chain",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_nodes_by_tag",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags CONTAINS $tag RETURN n SKIP $skip LIMIT $limit",
+        "params": {
+          "limit": 20,
+          "skip": 0,
+          "tag": "\"pii\""
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_nodes_batch",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WHERE n.urn IN $urns OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:unknown"
+          ]
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n:Dataset) WHERE n.urn IN $urns OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_node_degrees",
+    "queries": [
+      {
+        "cypher": "MATCH (n:Dataset)-[r:DERIVES_FROM|FLOWS_TO]->() WHERE n.urn IN $urns RETURN n.urn AS urn, count(r) AS c",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n:Dataset)<-[r:DERIVES_FROM|FLOWS_TO]-() WHERE n.urn IN $urns RETURN n.urn AS urn, count(r) AS c",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_stats",
+    "queries": [
+      {
+        "cypher": "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c",
+        "params": {},
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
+        "params": {},
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_counts_fast",
+    "queries": [
+      {
+        "cypher": "CALL db.labels() YIELD label RETURN label",
+        "params": {},
+        "sink": "_ro_query_tolerant"
+      },
+      {
+        "cypher": "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType",
+        "params": {},
+        "sink": "_ro_query_tolerant"
+      },
+      {
+        "cypher": "MATCH (n) RETURN count(n)",
+        "params": {},
+        "sink": "_ro_query_tolerant"
+      },
+      {
+        "cypher": "MATCH ()-[r]->() RETURN count(r)",
+        "params": {},
+        "sink": "_ro_query_tolerant"
+      }
+    ]
+  },
+  {
+    "call": "get_schema_stats",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WITH labels(n)[0] AS lbl, n.displayName AS name WITH lbl, count(*) AS c, collect(name)[0..3] AS samples RETURN lbl, c, samples",
+        "params": {},
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
+        "params": {},
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags",
+        "params": {},
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_ontology_metadata",
+    "queries": [
+      {
+        "cypher": "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType",
+        "params": {},
+        "sink": "_ro_query_tolerant"
+      },
+      {
+        "cypher": "MATCH ()-[r]->() RETURN DISTINCT type(r)",
+        "params": {},
+        "sink": "_ro_query_tolerant"
+      },
+      {
+        "cypher": "MATCH (p)-[r]->(c) WHERE type(r) IN $containment RETURN DISTINCT labels(p)[0], labels(c)[0], type(r)",
+        "params": {
+          "containment": [
+            "CONTAINS",
+            "HAS_PART"
+          ]
+        },
+        "sink": "_ro_query_tolerant"
+      }
+    ]
+  },
+  {
+    "call": "get_distinct_values",
+    "queries": [
+      {
+        "cypher": "MATCH (n) WHERE n.sourceSystem IS NOT NULL RETURN DISTINCT n.sourceSystem AS v LIMIT 100",
+        "params": {},
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "ensure_indices",
+    "queries": [
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:GoldenType) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:GoldenType) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:GoldenType) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:GoldenType) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:GoldenType) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel, r.targetLevel)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetLevel)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
+        "params": {},
+        "sink": "graph.query"
+      }
+    ]
+  },
+  {
+    "call": "ensure_projections",
+    "queries": [
+      {
+        "cypher": "CREATE INDEX FOR (n:_Projection) ON (n.urn)",
+        "params": {},
+        "sink": "_proj_query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n) ON (n.urn)",
+        "params": {},
+        "sink": "_proj_query"
+      },
+      {
+        "cypher": "CALL db.indexes()",
+        "params": {},
+        "sink": "proj_graph.ro_query"
+      }
+    ]
+  },
+  {
+    "call": "trace_at_level",
+    "queries": [
+      {
+        "cypher": "MATCH (n:Dataset {urn: $urn}) OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE n.urn = $urn OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (focus:Dataset {urn: $urn}) OPTIONAL MATCH (focus)<-[c:CONTAINS|HAS_PART*1..10]-(anc) WITH focus, anc, size(c) AS depth ORDER BY depth DESC LIMIT 1 RETURN COALESCE(anc.urn, focus.urn) AS urn,        COALESCE(anc.level, focus.level, -1) AS level",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (child:Dataset) WHERE child.urn IN $urns OPTIONAL MATCH path = (child)<-[:CONTAINS|HAS_PART*1..16]-(a) WITH child.urn AS u,      [n IN nodes(path)[1..] | n.urn] AS chain_candidate,      coalesce(length(path), 0) AS plen ORDER BY u, plen DESC WITH u, collect(chain_candidate) AS candidates RETURN u, coalesce(candidates[0], []) AS chain",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1"
+          ]
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (m:_AggMeta {id: 'singleton'}) RETURN m.regime, m.stampVersion, m.maxDepth, m.lastMaterializedAt LIMIT 1",
+        "params": {},
+        "sink": "_proj_ro_query"
+      },
+      {
+        "cypher": "MATCH (f)<-[r:AGGREGATED]-(other) WHERE f.urn IN $frontier AND labels(other)[0] = 'unknown' AND (r.sourceEdgeTypes IS NULL OR any(et IN r.sourceEdgeTypes WHERE et IN $ltypes)) WITH other.urn AS sourceUrn, f.urn AS targetUrn, id(r) AS edgeId, type(r) AS edgeType, COALESCE(r.sourceEdgeTypes, [type(r)]) AS edgeTypes, COALESCE(r.weight, 1) AS weight, other AS otherNode ORDER BY weight DESC RETURN sourceUrn, targetUrn, edgeId, edgeType, edgeTypes, weight, otherNode LIMIT $limit",
+        "params": {
+          "frontier": [
+            "urn:golden:dataset:d1"
+          ],
+          "limit": 50,
+          "ltypes": [
+            "DERIVES_FROM",
+            "FLOWS_TO"
+          ]
+        },
+        "sink": "_proj_ro_query"
+      },
+      {
+        "cypher": "MATCH (f)<-[r:DERIVES_FROM|FLOWS_TO]-(other) WHERE f.urn IN $frontier AND labels(other)[0] = 'unknown' WITH other.urn AS sourceUrn, f.urn AS targetUrn, id(r) AS edgeId, type(r) AS edgeType, COALESCE(r.sourceEdgeTypes, [type(r)]) AS edgeTypes, COALESCE(r.weight, 1) AS weight, other AS otherNode RETURN sourceUrn, targetUrn, edgeId, edgeType, edgeTypes, weight, otherNode LIMIT $limit",
+        "params": {
+          "frontier": [
+            "urn:golden:dataset:d1"
+          ],
+          "limit": 50
+        },
+        "sink": "_proj_ro_query"
+      },
+      {
+        "cypher": "MATCH (f)-[r:AGGREGATED]->(other) WHERE f.urn IN $frontier AND labels(other)[0] = 'unknown' AND (r.sourceEdgeTypes IS NULL OR any(et IN r.sourceEdgeTypes WHERE et IN $ltypes)) WITH f.urn AS sourceUrn, other.urn AS targetUrn, id(r) AS edgeId, type(r) AS edgeType, COALESCE(r.sourceEdgeTypes, [type(r)]) AS edgeTypes, COALESCE(r.weight, 1) AS weight, other AS otherNode ORDER BY weight DESC RETURN sourceUrn, targetUrn, edgeId, edgeType, edgeTypes, weight, otherNode LIMIT $limit",
+        "params": {
+          "frontier": [
+            "urn:golden:dataset:d1"
+          ],
+          "limit": 50,
+          "ltypes": [
+            "DERIVES_FROM",
+            "FLOWS_TO"
+          ]
+        },
+        "sink": "_proj_ro_query"
+      },
+      {
+        "cypher": "MATCH (f)-[r:DERIVES_FROM|FLOWS_TO]->(other) WHERE f.urn IN $frontier AND labels(other)[0] = 'unknown' WITH f.urn AS sourceUrn, other.urn AS targetUrn, id(r) AS edgeId, type(r) AS edgeType, COALESCE(r.sourceEdgeTypes, [type(r)]) AS edgeTypes, COALESCE(r.weight, 1) AS weight, other AS otherNode RETURN sourceUrn, targetUrn, edgeId, edgeType, edgeTypes, weight, otherNode LIMIT $limit",
+        "params": {
+          "frontier": [
+            "urn:golden:dataset:d1"
+          ],
+          "limit": 50
+        },
+        "sink": "_proj_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "trace_closure",
+    "queries": [
+      {
+        "cypher": "MATCH (n:Dataset {urn: $urn}) OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE n.urn = $urn OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (f {urn: $urn}) WHERE (f)-[:DERIVES_FROM|FLOWS_TO]-() RETURN f.urn AS urn, labels(f)[0] AS label",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (f {urn: $urn})-[c:CONTAINS|HAS_PART*1..16]->(d) WHERE (d)-[:DERIVES_FROM|FLOWS_TO]-() RETURN DISTINCT d.urn AS urn, labels(d)[0] AS label ORDER BY urn LIMIT $cap",
+        "params": {
+          "cap": 51,
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n:Dataset) WHERE n.urn IN $urns OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "trace_closure_coarse",
+    "queries": [
+      {
+        "cypher": "MATCH (n:Dataset {urn: $urn}) OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE n.urn = $urn OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (f:Dataset {urn: $urn})<-[r:AGGREGATED]-(p) RETURN p.urn AS partner, labels(p)[0] AS label, coalesce(r.weight, 0) AS weight, r.sourceDepth AS sd, r.targetDepth AS td, r.latestUpdate AS lu, r.sourceEdgeTypes AS types ORDER BY weight DESC, partner LIMIT $cap",
+        "params": {
+          "cap": 21,
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (f:Dataset {urn: $urn})-[r:AGGREGATED]->(p) RETURN p.urn AS partner, labels(p)[0] AS label, coalesce(r.weight, 0) AS weight, r.sourceDepth AS sd, r.targetDepth AS td, r.latestUpdate AS lu, r.sourceEdgeTypes AS types ORDER BY weight DESC, partner LIMIT $cap",
+        "params": {
+          "cap": 21,
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n:Dataset) WHERE n.urn IN $urns OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "expand_aggregated",
+    "queries": [
+      {
+        "cypher": "MATCH (s)-[r:AGGREGATED]->(t) WHERE s.urn = $s AND t.urn = $t AND r.sourceDepth IS NOT NULL AND r.targetDepth IS NOT NULL RETURN r.sourceDepth, r.targetDepth LIMIT 1",
+        "params": {
+          "s": "urn:golden:dataset:d1",
+          "t": "urn:golden:dataset:d2"
+        },
+        "sink": "_proj_ro_query"
+      },
+      {
+        "cypher": "MATCH (s)-[r:AGGREGATED]->(t) WHERE s.urn IN $sUrns AND t.urn IN $tUrns AND any(et IN r.sourceEdgeTypes WHERE et IN $ltypes) RETURN s.urn AS sUrn, t.urn AS tUrn, 'AGGREGATED' AS edgeType, id(r) AS edgeId, {sourceEdgeTypes: r.sourceEdgeTypes, weight: r.weight} AS props LIMIT $limit",
+        "params": {
+          "limit": 50,
+          "ltypes": [
+            "DERIVES_FROM",
+            "FLOWS_TO"
+          ],
+          "sUrns": [
+            "urn:golden:dataset:d1"
+          ],
+          "tUrns": [
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_proj_ro_query"
+      },
+      {
+        "cypher": "MATCH (s)-[r]->(t) WHERE s.urn IN $sUrns AND t.urn IN $tUrns   AND type(r) IN $ltypes RETURN s.urn AS sUrn, t.urn AS tUrn, type(r) AS edgeType, id(r) AS edgeId, properties(r) AS props LIMIT $limit",
+        "params": {
+          "limit": 50,
+          "ltypes": [
+            "DERIVES_FROM",
+            "FLOWS_TO"
+          ],
+          "sUrns": [
+            "urn:golden:dataset:d1"
+          ],
+          "tUrns": [
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n:Dataset) WHERE n.urn IN $urns OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urns": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n:Dataset {urn: $urn}) OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "MATCH (n) WHERE n.urn = $urn OPTIONAL MATCH (n)-[:CONTAINS|HAS_PART]->(child) RETURN n, count(child) as childCount",
+        "params": {
+          "urn": "urn:golden:dataset:d1"
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "get_aggregated_edges_between",
+    "queries": [
+      {
+        "cypher": "MATCH (s:Dataset)-[r:AGGREGATED]->(t) WHERE s.urn IN $sourceUrns AND s.urn <> t.urn RETURN s.urn AS sUrn, t.urn AS tUrn, coalesce(r.weight, 0) AS weight, r.sourceEdgeTypes AS types ORDER BY weight DESC, sUrn, tUrn LIMIT 50000",
+        "params": {
+          "sourceUrns": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_proj_ro_query"
+      },
+      {
+        "cypher": "MATCH (s:Dataset)-[r]->(t) WHERE s.urn IN $sourceUrns AND type(r) IN $ltypes AND s.urn <> t.urn RETURN s.urn AS sUrn, t.urn AS tUrn, count(r) AS weight, collect(DISTINCT type(r)) AS types",
+        "params": {
+          "ltypes": [
+            "DERIVES_FROM",
+            "FLOWS_TO"
+          ],
+          "sourceUrns": [
+            "urn:golden:dataset:d1",
+            "urn:golden:dataset:d2"
+          ]
+        },
+        "sink": "_ro_query"
+      }
+    ]
+  },
+  {
+    "call": "save_custom_graph",
+    "queries": [
+      {
+        "cypher": "CALL db.relationshipTypes()",
+        "params": {},
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "CALL db.labels()",
+        "params": {},
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:domain) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataPlatform) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:container) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:dataset) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:schemaField) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Domain) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Domain) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Domain) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Domain) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Domain) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Dataset) ON (n.urn)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Dataset) ON (n.displayName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Dataset) ON (n.qualifiedName)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Dataset) ON (n.level)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR (n:Dataset) ON (n.layerAssignment)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel, r.targetLevel)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetLevel)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
+        "params": {},
+        "sink": "graph.query"
+      },
+      {
+        "cypher": "UNWIND $batch AS item MERGE (n:Domain {urn: item.urn}) SET n.displayName = item.displayName, n.qualifiedName = item.qualifiedName, n.description = item.description, n.tags = item.tags, n.layerAssignment = item.layerAssignment, n.childCount = item.childCount, n.sourceSystem = item.sourceSystem, n.lastSyncedAt = item.lastSyncedAt, n.propertiesRaw = item.propertiesRaw, n.level = coalesce(item.level, n.level), n.searchableText = item.searchableText, n += item.nativeProps REMOVE n.properties",
+        "params": {
+          "batch": [
+            {
+              "childCount": 0,
+              "description": "",
+              "displayName": "Root",
+              "lastSyncedAt": "",
+              "layerAssignment": "",
+              "level": null,
+              "nativeProps": {},
+              "propertiesRaw": "{}",
+              "qualifiedName": "",
+              "searchableText": "root",
+              "sourceSystem": "",
+              "tags": "[]",
+              "urn": "urn:golden:domain:root"
+            }
+          ]
+        },
+        "sink": "_query"
+      },
+      {
+        "cypher": "UNWIND $batch AS item MERGE (n:Dataset {urn: item.urn}) SET n.displayName = item.displayName, n.qualifiedName = item.qualifiedName, n.description = item.description, n.tags = item.tags, n.layerAssignment = item.layerAssignment, n.childCount = item.childCount, n.sourceSystem = item.sourceSystem, n.lastSyncedAt = item.lastSyncedAt, n.propertiesRaw = item.propertiesRaw, n.level = coalesce(item.level, n.level), n.searchableText = item.searchableText, n += item.nativeProps REMOVE n.properties",
+        "params": {
+          "batch": [
+            {
+              "childCount": 0,
+              "description": "",
+              "displayName": "D1",
+              "lastSyncedAt": "",
+              "layerAssignment": "",
+              "level": null,
+              "nativeProps": {},
+              "propertiesRaw": "{}",
+              "qualifiedName": "",
+              "searchableText": "d1",
+              "sourceSystem": "",
+              "tags": "[]",
+              "urn": "urn:golden:dataset:d1"
+            },
+            {
+              "childCount": 0,
+              "description": "",
+              "displayName": "D2",
+              "lastSyncedAt": "",
+              "layerAssignment": "",
+              "level": null,
+              "nativeProps": {},
+              "propertiesRaw": "{}",
+              "qualifiedName": "",
+              "searchableText": "d2",
+              "sourceSystem": "",
+              "tags": "[]",
+              "urn": "urn:golden:dataset:d2"
+            }
+          ]
+        },
+        "sink": "_query"
+      },
+      {
+        "cypher": "UNWIND $batch AS item MATCH (a:Domain {urn: item.src}) MATCH (b:Dataset {urn: item.tgt}) MERGE (a)-[r:CONTAINS]->(b) SET r.id = item.eid, r.confidence = item.conf, r.properties = item.props",
+        "params": {
+          "batch": [
+            {
+              "conf": null,
+              "eid": "golden-c1",
+              "props": "{}",
+              "src": "urn:golden:domain:root",
+              "tgt": "urn:golden:dataset:d1"
+            }
+          ]
+        },
+        "sink": "_query"
+      },
+      {
+        "cypher": "UNWIND $batch AS item MATCH (a:Dataset {urn: item.src}) MATCH (b:Dataset {urn: item.tgt}) MERGE (a)-[r:DERIVES_FROM]->(b) SET r.id = item.eid, r.confidence = item.conf, r.properties = item.props",
+        "params": {
+          "batch": [
+            {
+              "conf": null,
+              "eid": "golden-l1",
+              "props": "{}",
+              "src": "urn:golden:dataset:d1",
+              "tgt": "urn:golden:dataset:d2"
+            }
+          ]
+        },
+        "sink": "_query"
+      }
+    ]
+  },
+  {
+    "call": "create_node",
+    "queries": [
+      {
+        "cypher": "MERGE (n:Dataset {urn: $urn}) SET n += $p REMOVE n.properties",
+        "params": {
+          "p": {
+            "description": "",
+            "displayName": "D3",
+            "lastSyncedAt": "",
+            "layerAssignment": "",
+            "propertiesRaw": "{}",
+            "qualifiedName": "",
+            "searchableText": "d3",
+            "sourceSystem": "",
+            "tags": "[]"
+          },
+          "urn": "urn:golden:dataset:d3"
+        },
+        "sink": "_query"
+      },
+      {
+        "cypher": "\n                    MATCH (a {urn: $src}) MATCH (b {urn: $tgt})\n                    MERGE (a)-[r:CONTAINS]->(b)\n                    SET r.id = $eid, r.confidence = $conf, r.properties = $props\n                    ",
+        "params": {
+          "conf": null,
+          "eid": "golden-c2",
+          "props": "{}",
+          "src": "urn:golden:domain:root",
+          "tgt": "urn:golden:dataset:d3"
+        },
+        "sink": "_query"
+      }
+    ]
+  },
+  {
+    "call": "create_edge",
+    "queries": [
+      {
+        "cypher": "MATCH (a {urn: $src}) MATCH (b {urn: $tgt}) MERGE (a)-[r:FLOWS_TO]->(b) SET r.id = $eid, r.confidence = $conf, r.properties = $props",
+        "params": {
+          "conf": null,
+          "eid": "golden-l2",
+          "props": "{}",
+          "src": "urn:golden:dataset:d3",
+          "tgt": "urn:golden:dataset:d2"
+        },
+        "sink": "_query"
+      }
+    ]
+  },
+  {
+    "call": "update_edge",
+    "queries": [
+      {
+        "cypher": "MATCH (a)-[r]->(b) WHERE r.id = $eid SET r.properties = $props RETURN a.urn, b.urn, type(r), properties(r)",
+        "params": {
+          "eid": "golden-l2",
+          "props": "{\"note\": \"golden\"}"
+        },
+        "sink": "_query"
+      }
+    ]
+  },
+  {
+    "call": "delete_edge",
+    "queries": [
+      {
+        "cypher": "MATCH ()-[r]->() WHERE r.id = $eid DELETE r RETURN count(r)",
+        "params": {
+          "eid": "golden-l2"
+        },
+        "sink": "_query"
+      }
+    ]
+  },
+  {
+    "call": "_type_casing_maps",
+    "queries": [
+      {
+        "cypher": "CALL db.relationshipTypes()",
+        "params": {},
+        "sink": "_ro_query"
+      },
+      {
+        "cypher": "CALL db.labels()",
+        "params": {},
+        "sink": "_ro_query"
+      }
+    ]
+  }
+]
