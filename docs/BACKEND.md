@@ -513,6 +513,31 @@ an arbitrary query, so use the snippet above for anything else.
 
 Left deliberately unfinished by the FalkorDB package split, for a later PR:
 
+- **No full lane exists over this PR's final tip — run one before trusting this PR is fully measured.**
+  Measured on the final tree: the required CI lane (1,465 passed / 11 failed,
+  `comm -23` against `failures-0.txt` empty — zero new failures), the
+  targeted set (98 tests), both goldens, the live contract snapshot on
+  `:6399` (passed, not skipped), and import smoke in both orders. **Not**
+  measured on the final tree: the ~4,700 tests outside the required lane's
+  `-k` filter. The last complete full lane was 27 failed / 6,163 passed at
+  `798506de`; `git diff --stat 798506de..HEAD` is 28 files / 1,110
+  insertions / 270 deletions (the dialect seam, the `stats.py` pilot, and
+  this finishing task's five commits) — real, substantial work landed
+  since that number, not a docs-only gap. Five attempts to run a full lane
+  here were all defeated by the environment, not the code: three
+  background runs killed at 84%/90%/early, two foreground runs past a 600s
+  cap, and splitting into smaller batches made it *worse* (an explicit
+  120-file list reached only 29% in 580s where the whole `tests` directory
+  completes in 580-880s) — machine load average was 34.37 during these
+  attempts. Do not infer from this PR's other fifteen tasks' measured
+  numbers that this last one was measured too; it wasn't.
+- **The provider-interface mermaid diagram and the capability table above**
+  (`### Provider Interface`, `### Provider Capabilities`) still show
+  `MockGraphProvider` as a real, implemented class with its own capability
+  column — the same gap as the provider-location table row just above this
+  note (`provider_type = 'mock'` is a valid DB value with no adapter class
+  behind it). Not redrawn here — a future doc pass should either implement
+  the class or strip it from the diagram and table too.
 - **Six files still import a private helper straight from the shim** rather
   than the package's leaf modules — `backend/tests/test_falkordb_package_guards.py`'s
   guard 1 allow-lists exactly these (`_sanitize_label`, `_node_from_props`,
@@ -569,7 +594,7 @@ All providers run **in-process** in the Visualization Service, split across two 
 | Neo4jProvider | `backend/graph/adapters/neo4j_provider.py` |
 | DataHubGraphQLProvider | `backend/graph/adapters/datahub_provider.py` |
 
-The `backend/graph/adapters/` package (Neo4j, DataHub, Spanner) was formerly loaded by the standalone graph-service for **pre-registration connectivity testing**; since that service was removed ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) the Visualization Service imports these adapters directly. Workspace-scoped queries are served primarily by the FalkorDB and Mock providers.
+The `backend/graph/adapters/` package (Neo4j, DataHub, Spanner) was formerly loaded by the standalone graph-service for **pre-registration connectivity testing**; since that service was removed ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) the Visualization Service imports these adapters directly. Workspace-scoped queries are served primarily by the FalkorDB provider (`mock` is a DB-level `provider_type` value with no adapter class behind it — see the table above).
 
 ---
 
