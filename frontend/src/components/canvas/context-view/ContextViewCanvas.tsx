@@ -67,7 +67,7 @@ import { ConnectionsPanel } from './connections/ConnectionsPanel'
 import { ActivityPanel } from './ActivityPanel'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
-import { useBandReservation } from './useBandReservation'
+import { useBandReservation, useViewportReservation } from './useBandReservation'
 
 import { buildTraceLaneIndex, isReverseTraceWire } from '@/hooks/lib/traceWireDirection'
 import { useUnifiedTrace, type UseUnifiedTraceResult, type TraceResult } from '@/hooks/useUnifiedTrace'
@@ -1465,6 +1465,10 @@ export function ContextViewCanvas({
   // — Activity's header plus Connections' (CanvasStatusChips and the columns
   // read it by that name).
   useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
+  // ...and the dock's FULL height to the document, so the app's toast stack
+  // (bottom-right, z-80) starts above it instead of covering its headers and
+  // eating the clicks that collapse them.
+  useViewportReservation(edgeLegendRef, '--canvas-dock-height')
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
   // Zoom changes move every node card, but nothing else forces the edge

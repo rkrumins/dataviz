@@ -336,7 +336,18 @@ export function ToastContainer() {
   const toasts = useToastStore(s => s.toasts)
 
   return (
-    <div className="fixed bottom-6 right-6 z-[80] flex flex-col-reverse gap-2 pointer-events-none">
+    <div
+      // Toasts share the bottom-right corner with the canvas dock (the
+      // Activity and Connections panels), which sits BELOW them at z-40 —
+      // a visible toast used to sit on top of the dock's headers and eat
+      // the click that collapses them. Surfaces that reserve that corner
+      // publish their height as `--canvas-dock-height` on the document
+      // element; the stack starts above whatever is reserved, and the var
+      // is absent (0px) everywhere else in the app.
+      data-testid="toast-stack"
+      style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px))' }}
+      className="fixed right-6 z-[80] flex flex-col-reverse gap-2 pointer-events-none"
+    >
       <AnimatePresence>
         {toasts.map(toast => (
           <ToastItem key={toast.id} toast={toast} />
