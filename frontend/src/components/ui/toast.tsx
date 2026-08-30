@@ -264,8 +264,15 @@ function ToastItem({ toast }: { toast: Toast }) {
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: 12, scale: 0.95 }}
       transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+      // The card itself never takes a click. A toast is a passing remark laid
+      // over the app's bottom-right corner — on a canvas that is the right-hand
+      // column, and while three or four of these were up, a business user could
+      // not click the rows underneath: the left of a row worked and the rest was
+      // dead, for a few seconds at a time, over and over as children loaded.
+      // Only the controls below opt back in, so the message can still be
+      // dismissed or actioned, and everything else passes straight through.
       className={cn(
-        'w-80 max-w-sm rounded-xl overflow-hidden pointer-events-auto',
+        'w-80 max-w-sm rounded-xl overflow-hidden pointer-events-none',
         'bg-white dark:bg-slate-800',
         'border border-slate-200 dark:border-slate-700 shadow-lg shadow-black/15 dark:shadow-black/40',
       )}
@@ -280,7 +287,7 @@ function ToastItem({ toast }: { toast: Toast }) {
         {toast.action && (
           <button
             onClick={() => { toast.action!.onClick(); onDismiss() }}
-            className="flex-shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
+            className="pointer-events-auto flex-shrink-0 px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
           >
             {toast.action.label}
           </button>
@@ -288,7 +295,7 @@ function ToastItem({ toast }: { toast: Toast }) {
         {!isLoading && (
           <button
             onClick={onDismiss}
-            className="opacity-40 hover:opacity-100 transition-opacity flex-shrink-0 rounded-md p-0.5 hover:bg-black/5 dark:hover:bg-white/5"
+            className="pointer-events-auto opacity-40 hover:opacity-100 transition-opacity flex-shrink-0 rounded-md p-0.5 hover:bg-black/5 dark:hover:bg-white/5"
           >
             <X className="w-3.5 h-3.5" />
           </button>

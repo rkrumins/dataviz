@@ -11,7 +11,7 @@
  * absent and the stack sits where it always did.
  */
 import { render, screen, cleanup } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ToastContainer, useToastStore } from '../toast'
 
@@ -34,5 +34,23 @@ describe('the toast stack clears the canvas dock', () => {
     // No canvas mounted: the variable is unset, so the calc resolves to 1.5rem.
     expect(document.documentElement.style.getPropertyValue('--canvas-dock-height')).toBe('')
     expect(container().className).not.toMatch(/\bbottom-6\b/)
+  })
+})
+
+describe('a toast never swallows a click meant for the app', () => {
+  it('the card is click-through, and only its controls opt back in', () => {
+    const action = vi.fn()
+    useToastStore.getState().addToast({ type: 'info', message: 'Entities loaded', action: { label: 'View', onClick: action } })
+    render(<ToastContainer />)
+    const card = screen.getByText('Entities loaded').closest('.w-80') as HTMLElement
+    expect(card).not.toBeNull()
+    // Measured live: four of these over the right-hand canvas column left the
+    // rows beneath unclickable for seconds at a time, again and again as
+    // children loaded — the left of a row worked and the rest was dead.
+    expect(card.className).toContain('pointer-events-none')
+    expect(card.className).not.toContain('pointer-events-auto')
+    for (const btn of screen.getAllByRole('button')) {
+      expect(btn.className).toContain('pointer-events-auto')
+    }
   })
 })
