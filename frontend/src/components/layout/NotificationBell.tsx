@@ -11,7 +11,7 @@
  * getting it wrong is one extra dot.
  */
 import { useEffect, useState } from 'react'
-import { Bell, UserPlus } from 'lucide-react'
+import { UserPlus } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
 import { adminUserService, type InviteActivityItem } from '@/services/adminUserService'
 import { formatUtc, timeAgo, toUtcDate } from '@/lib/timeAgo'
@@ -96,7 +96,10 @@ export function NotificationBell() {
           aria-label={unread > 0 ? `Invite activity, ${unread} new` : 'Invite activity'}
           title={unread > 0 ? `${unread} new since you last looked` : 'Invite activity'}
         >
-          <Bell className="w-5 h-5 text-ink-secondary" />
+          {/* A person joining, not a bell: the Inbox sits immediately to the
+              right with a bell of its own, and two identical bells side by
+              side told a user nothing about which was which. */}
+          <UserPlus className="w-5 h-5 text-ink-secondary" />
           {unread > 0 && (
             <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-red-500 text-[9px] text-white flex items-center justify-center font-bold leading-none">
               {unread > 9 ? '9+' : unread}
@@ -117,7 +120,7 @@ export function NotificationBell() {
 
           {items.length === 0 ? (
             <div className="text-center px-6 py-8">
-              <Bell className="w-7 h-7 text-ink-muted/40 mx-auto mb-2" />
+              <UserPlus className="w-7 h-7 text-ink-muted/40 mx-auto mb-2" />
               <p className="text-xs text-ink-muted leading-relaxed">
                 Nobody has signed up through your invite links yet. When they
                 do, they'll show up here.
