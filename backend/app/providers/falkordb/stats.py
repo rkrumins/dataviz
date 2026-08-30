@@ -367,8 +367,17 @@ class StatsMixin:
         # treat "not configured yet" as empty and let the rest run.
         try:
             containment = list(self._get_containment_edge_types())
+            containment_configured = True
         except ProviderConfigurationError:
             containment = []
+            # PROVISIONAL: the classification below is now computed against an
+            # empty containment set, so every edge type falls out as lineage,
+            # the entity hierarchy comes back empty and root types are lost.
+            # That answer is correct FOR THIS CALLER (introspection wants the
+            # raw observed vocabulary) but it is not a fact about the graph --
+            # it is a fact about this instance's injection state, and it must
+            # therefore never reach the SHARED cache. See the cache write.
+            containment_configured = False
         containment_upper = {t.upper() for t in containment}
         
         # 1. Determine Lineage Types
@@ -502,7 +511,17 @@ class StatsMixin:
             rootEntityTypes=root_entity_types,
         )
 
-        if self._SCHEMA_CACHE_TTL > 0:
+        # Only cache a classification computed against a CONFIGURED containment
+        # set. `_resolve_ontology` calls this method on a fresh, uninjected
+        # provider by design (see the note above the containment fallback), and
+        # caching that provisional answer under a graph-scoped key lets the
+        # first caller's injection state decide what every later reader sees
+        # for the whole TTL: containment empty, HAS classified as lineage, an
+        # empty entity hierarchy and no root types -- a flat graph. The
+        # provisional result is still RETURNED to the caller that asked for it;
+        # it is only withheld from the shared key, so the next configured
+        # caller recomputes and caches the real thing.
+        if self._SCHEMA_CACHE_TTL > 0 and containment_configured:
             try:
                 await self._redis.setex(cache_key, self._SCHEMA_CACHE_TTL, result.model_dump_json())
             except Exception:
