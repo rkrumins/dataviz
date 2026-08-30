@@ -15,6 +15,15 @@ by attribute), plus the plan's defensive additions. Mutable module state
 (the cache dicts, the two log-once sets) is re-exported by reference here,
 never copied — tests mutate them in place via ``.clear()`` and expect the
 real state to change.
+
+``provider.py`` now holds only ``class FalkorDBProvider`` plus whatever
+module-level names its own body still references; the pre-class helpers
+that name imports for its own use were dissolved into leaf modules
+(``errors.py``, ``hosts.py``, ``knobs.py``, ``rowmap.py``, ``schema.py``,
+``aggregation.py``, ``closure.py``, ``cursors.py``). A handful of exported
+names are not referenced anywhere in the class body, so they are imported
+below directly from the leaf module that now defines them rather than
+from ``.provider``.
 """
 import asyncio
 
@@ -24,13 +33,9 @@ from .provider import (
     _sanitize_label,
     AggRunMeta,
     _node_from_props,
-    _RESERVED_NODE_KEYS,
     _split_user_properties,
-    resolve_falkordb_target,
     _compute_searchable_text,
     _decode_keyset_cursor,
-    _sanitize_node_properties,
-    CursorMismatchError,
     _edge_from_row,
     _encode_keyset_cursor,
     _is_transient_connection_error,
@@ -39,21 +44,16 @@ from .provider import (
     _is_missing_graph_error,
     _is_null_handle_error,
     _keyset_sort,
-    _keyset_sort_key,
     _normalize_falkordb_host,
     _validate_sort_direction,
     # Section B — read off the module object by two tests; must stay the
     # same object (mutated or monkeypatched in place), never a copy.
-    _BULK_CREATE_KNOBS_CACHE,
     CLOSURE_QUERY_CAP_SECS,
     _BULK_CREATE_BATCH_DEFAULT,
-    _BULK_CREATE_TIMEOUT_DEFAULT,
     logger,
     # Not imported anywhere today, but named by the plan as defensive
     # exports — costs nothing, protects a future in-repo import.
-    AggregationBatchAbort,
     _EmptyResult,
-    _CURSOR_PREFIX,
     _TRANSIENT_RETRY_BACKOFFS,
     _ClosureWalk,
     _completed,
@@ -64,6 +64,17 @@ from .provider import (
     _INDEX_HEALTH_LOGGED,
     _resolve_bulk_create_knobs,
 )
+
+# The rest of the export list: names ``provider.py`` no longer imports for
+# its own use (its class body never references them), so they come
+# straight from the leaf module that defines them. Same objects either
+# way — the split above is purely about which module happens to import
+# them first, not about identity.
+from .rowmap import _RESERVED_NODE_KEYS, _sanitize_node_properties
+from .hosts import resolve_falkordb_target
+from .cursors import CursorMismatchError, _keyset_sort_key, _CURSOR_PREFIX
+from .knobs import _BULK_CREATE_KNOBS_CACHE, _BULK_CREATE_TIMEOUT_DEFAULT
+from .aggregation import AggregationBatchAbort
 
 # _logged_legacy_blob is deliberately NOT re-exported: it is a bool
 # mutated in place via `global` inside provider.py, nothing outside the
