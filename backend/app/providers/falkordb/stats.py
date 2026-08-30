@@ -83,9 +83,9 @@ class StatsMixin:
         _stats_q_timeout = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
         try:
             # Optimize: Combine node counting with type aggregation
-            type_res = await self._ro_query(
+            type_res = await self.executor.run(
                 "MATCH (n) RETURN labels(n)[0] AS lbl, count(*) AS c",
-                timeout=_stats_q_timeout,
+                timeout_s=_stats_q_timeout,
             )
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
@@ -94,9 +94,9 @@ class StatsMixin:
                 node_count += cnt
 
             # Optimize: Combine edge counting with type aggregation
-            edge_type_res = await self._ro_query(
+            edge_type_res = await self.executor.run(
                 "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
-                timeout=_stats_q_timeout,
+                timeout_s=_stats_q_timeout,
             )
             for row in (edge_type_res.result_set or []):
                 t = row[0] or "UNKNOWN"
@@ -158,12 +158,12 @@ class StatsMixin:
         await self._ensure_connected()
 
         async def _count(cypher: str) -> int:
-            res = await self._ro_query_tolerant(cypher, op="probe.count")
+            res = await self.executor.run_tolerant(cypher, op="probe.count")
             rows = res.result_set or []
             return int(rows[0][0] or 0) if rows and rows[0] else 0
 
         async def _catalogue(cypher: str) -> List[str]:
-            res = await self._ro_query_tolerant(cypher, op="probe.catalogue")
+            res = await self.executor.run_tolerant(cypher, op="probe.catalogue")
             return [row[0] for row in (res.result_set or []) if row and row[0]]
 
         labels = await _catalogue(self.dialect.labels_statement())
@@ -257,12 +257,12 @@ class StatsMixin:
         _stats_q_timeout = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
         try:
             # Single query: counts + samples per label using collect() with slicing
-            type_res = await self._ro_query(
+            type_res = await self.executor.run(
                 "MATCH (n) "
                 "WITH labels(n)[0] AS lbl, n.displayName AS name "
                 "WITH lbl, count(*) AS c, collect(name)[0..3] AS samples "
                 "RETURN lbl, c, samples",
-                timeout=_stats_q_timeout,
+                timeout_s=_stats_q_timeout,
             )
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
@@ -277,9 +277,9 @@ class StatsMixin:
                 total_nodes += cnt
                 entity_stats.append(EntityTypeSummary(id=lbl, name=lbl, count=cnt, sampleNames=samples))
 
-            edge_type_res = await self._ro_query(
+            edge_type_res = await self.executor.run(
                 "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
-                timeout=_stats_q_timeout,
+                timeout_s=_stats_q_timeout,
             )
             for row in (edge_type_res.result_set or []):
                 t = row[0] or "UNKNOWN"
@@ -302,9 +302,9 @@ class StatsMixin:
         # same generous stats budget (it previously ran on the default
         # connection timeout and was the silent killer on large graphs).
         try:
-            tag_res = await self._ro_query(
+            tag_res = await self.executor.run(
                 "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags",
-                timeout=_stats_q_timeout,
+                timeout_s=_stats_q_timeout,
             )
             tag_counts: Dict[str, int] = {}
             tag_types: Dict[str, Set[str]] = {}
@@ -381,7 +381,7 @@ class StatsMixin:
         # stale entry simply classifies an absent type.
         all_types: List[str] = []
         try:
-            type_res = await self._ro_query_tolerant(
+            type_res = await self.executor.run_tolerant(
                 self.dialect.relationship_types_statement(),
                 op="ontology.reltypes",
             )
@@ -389,7 +389,7 @@ class StatsMixin:
         except Exception as exc:
             logger.debug("db.relationshipTypes() unavailable (%s) — falling back to edge scan", exc)
         if not all_types:
-            type_res = await self._ro_query_tolerant(
+            type_res = await self.executor.run_tolerant(
                 "MATCH ()-[r]->() RETURN DISTINCT type(r)", op="ontology.edge_scan",
             )
             all_types = [row[0] for row in (type_res.result_set or [])]
@@ -459,7 +459,7 @@ class StatsMixin:
             "WHERE type(r) IN $containment "
             "RETURN DISTINCT labels(p)[0], labels(c)[0], type(r)"
         )
-        hierarchy_res = await self._ro_query_tolerant(
+        hierarchy_res = await self.executor.run_tolerant(
             hierarchy_cypher,
             params={"containment": containment}
         )
@@ -547,8 +547,8 @@ class StatsMixin:
                     "RETURN n.urn AS urn, count(r) AS c"
                 )
                 try:
-                    result = await self._ro_query(
-                        cypher, params={"urns": bucket_urns}, timeout=2.0,
+                    result = await self.executor.run(
+                        cypher, params={"urns": bucket_urns}, timeout_s=2.0,
                         op="node_degrees",
                     )
                 except Exception as exc:
@@ -569,10 +569,10 @@ class StatsMixin:
     async def get_distinct_values(self, property_name: str) -> List[Any]:
         await self._ensure_connected()
         if property_name in ("entityType", "entitytype"):
-            res = await self._ro_query("MATCH (n) RETURN DISTINCT labels(n)[0] AS lbl")
+            res = await self.executor.run("MATCH (n) RETURN DISTINCT labels(n)[0] AS lbl")
             return [row[0] for row in (res.result_set or []) if row[0]]
         if property_name == "tags":
-            res = await self._ro_query("MATCH (n) RETURN n.tags")
+            res = await self.executor.run("MATCH (n) RETURN n.tags")
             seen = set()
             for row in (res.result_set or []):
                 raw = row[0]
@@ -585,7 +585,7 @@ class StatsMixin:
             return list(seen)
         safe_prop = "".join(c for c in property_name if c.isalnum() or c == "_") or "urn"
         try:
-            res = await self._ro_query(
+            res = await self.executor.run(
                 f"MATCH (n) WHERE n.{safe_prop} IS NOT NULL RETURN DISTINCT n.{safe_prop} AS v LIMIT 100"
             )
             return [row[0] for row in (res.result_set or [])]
