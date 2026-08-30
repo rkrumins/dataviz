@@ -16,6 +16,7 @@ import {
   useAuthStore,
   usePermission,
   usePermissionClaims,
+  useAnyWorkspacePermission,
   effectiveRoleFor,
   SYSTEM_ROLE_LABELS,
   type SystemRole,
@@ -41,6 +42,15 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const isSystemAdmin = usePermission('system:admin')
   const isOrgAdmin = usePermission('system:org-admin')
   const claims = usePermissionClaims()
+  // The invite-activity bell answers "did the links I sent work?" — so it is
+  // worth showing only to someone who can send one. Creating an invite needs
+  // `system:admin`, or `workspace:admin` on the target workspace under the
+  // ceiling `_enforce_invite_ceiling` applies (backend users.py `create_invite`);
+  // `useAnyWorkspacePermission` asks exactly that, short-circuiting on the two
+  // global roles. For everyone else the bell could never hold anything: the
+  // endpoint is scoped to the caller's own links, so it returned an empty list
+  // forever — a third look-alike icon in a row of them, for a thing they cannot do.
+  const canInvite = useAnyWorkspacePermission('workspace:admin')
   const location = useLocation()
   const navigate = useNavigate()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
@@ -202,7 +212,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
           {/* Group 2: Content shortcuts */}
           <BookmarksPopover />
-          <InviteActivityBell />
+          {canInvite && <InviteActivityBell />}
           <InboxBell />
 
           <div className="w-px h-6 bg-glass-border mx-1" />
