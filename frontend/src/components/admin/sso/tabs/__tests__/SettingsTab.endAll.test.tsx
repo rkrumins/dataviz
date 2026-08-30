@@ -14,6 +14,9 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SettingsTab } from '../SettingsTab'
+import {
+    NotificationStack, useNotificationStore,
+} from '@/components/ui/notifications'
 import { ssoAdminService, type AuthConfig } from '@/services/ssoAdminService'
 
 vi.mock('@/services/ssoAdminService', () => ({
@@ -44,8 +47,12 @@ function cfg(over: Partial<AuthConfig> = {}): AuthConfig {
     }
 }
 
+/** Outcomes land in the app's one stack, so the tests render it. */
+const page = () => render(<><SettingsTab /><NotificationStack /></>)
+
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     svc.getAuthConfig.mockResolvedValue(cfg())
     svc.listProviders.mockResolvedValue([])
     svc.updateAuthConfig.mockResolvedValue(
@@ -60,7 +67,7 @@ beforeEach(() => {
 describe('turning passwords off', () => {
     it('asks the everyone-question in the confirm, counts and carve-out included', async () => {
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Passwords' }),
         )
@@ -77,7 +84,7 @@ describe('turning passwords off', () => {
 
     it('flips only the switch when the checkbox stays unticked', async () => {
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Passwords' }),
         )
@@ -105,7 +112,7 @@ describe('turning passwords off', () => {
                 systemAccountsSkipped: 1, dryRun: false,
             })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Passwords' }),
         )
@@ -124,7 +131,7 @@ describe('turning passwords off', () => {
             dryRun: true,
         })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Passwords' }),
         )
@@ -138,7 +145,7 @@ describe('turning passwords off', () => {
 
 describe('the standalone everyone-sweep', () => {
     it('is always present — the moment it is needed is rarely a switch flip', async () => {
-        render(<SettingsTab />)
+        page()
         expect(await screen.findByText(/require everyone to sign in again/i))
             .toBeInTheDocument()
     })
@@ -154,7 +161,7 @@ describe('the standalone everyone-sweep', () => {
                 systemAccountsSkipped: 1, dryRun: false,
             })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
 
         await user.click(
             await screen.findByRole('button', { name: /sign everyone out now/i }),
@@ -177,7 +184,7 @@ describe('the standalone everyone-sweep', () => {
             dryRun: true,
         })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
 
         await user.click(
             await screen.findByRole('button', { name: /sign everyone out now/i }),

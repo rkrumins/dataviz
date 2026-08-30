@@ -23,6 +23,7 @@ import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHea
 import { CreateWorkspaceWizard } from '@/components/admin/CreateWorkspaceWizard'
 import { WorkspaceBulkBar } from '@/components/admin/workspace/WorkspaceBulkBar'
 import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     useWorkspaceDeletion, impactSections, DELETE_CAVEAT,
 } from '@/components/admin/workspace/useWorkspaceDeletion'
@@ -51,6 +52,7 @@ function providerLabel(type: string): string {
 export function WorkspacesPage() {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
+    const { notify } = useAppNotifications()
     const [searchParams, setSearchParams] = useSearchParams()
     // Per-card permission check — read the resolver fn from the auth
     // store so we can call it inline for each row without violating
@@ -372,7 +374,17 @@ export function WorkspacesPage() {
     }, [workspaces, deletion])
 
     const handleSetDefault = async (wsId: string) => {
-        await workspaceService.setDefault(wsId)
+        const name = workspaces.find(w => w.id === wsId)?.name ?? 'this workspace'
+        try {
+            await workspaceService.setDefault(wsId)
+            notify('success', `“${name}” is now the default workspace — it opens first for everyone.`)
+        } catch (err) {
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not make “${name}” the default workspace.`)
+        }
+        // Either way: on success this picks up the new default, and on failure it
+        // puts the old one back on screen instead of leaving the click half-applied.
         loadData()
     }
 

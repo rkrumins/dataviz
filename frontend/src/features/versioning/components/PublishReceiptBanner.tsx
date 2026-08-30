@@ -2,7 +2,7 @@
  * PublishReceiptBanner — "your changes are now live".
  *
  * The confirmation for the one action in this whole surface that is irreversible-in-spirit: work
- * leaving your draft and becoming what everyone else sees. It replaces a 3-second toast, which gave
+ * leaving your draft and becoming what everyone else sees. It replaces a 3-second notification, which gave
  * shipping the same weight as copying a link — and which was invisible if the merge happened on the
  * Reviews route and the user navigated back to the canvas afterwards.
  *

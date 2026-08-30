@@ -6,7 +6,7 @@ import { BrandLogo } from '@/components/brand/BrandLogo'
 import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
 import { NotificationBell as InviteActivityBell } from '@/components/layout/NotificationBell'
-import { NotificationBell } from '@/components/notifications/NotificationBell'
+import { InboxBell } from '@/components/inbox/InboxBell'
 import { AvatarPickerDialog } from '@/components/layout/AvatarPickerDialog'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { initialsOf } from '@/lib/avatar'
@@ -203,7 +203,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
           {/* Group 2: Content shortcuts */}
           <BookmarksPopover />
           <InviteActivityBell />
-          <NotificationBell />
+          <InboxBell />
 
           <div className="w-px h-6 bg-glass-border mx-1" />
 
@@ -230,8 +230,13 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             </button>
           )}
 
-          {/* User Menu */}
-          <DropdownMenu.Root>
+          {/* User Menu — non-modal, like every other dropdown in this app. A
+              MODAL Radix layer sets `body { pointer-events: none }` and only
+              clears it on effect cleanup; unmounting while open (a re-render
+              from an auth/branding/feature store, a route change) strands that
+              lock and the whole app goes click-dead until a reload. This menu
+              is mounted on every page, which made it the widest exposure left. */}
+          <DropdownMenu.Root modal={false}>
             <DropdownMenu.Trigger asChild>
               <button
                 className={cn(

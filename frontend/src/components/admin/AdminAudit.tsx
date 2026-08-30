@@ -13,7 +13,7 @@ import {
     RefreshCw, X, Shield, UserCog, KeyRound,
 } from 'lucide-react'
 import { auditService, type AuditEvent, type AuditFilters } from '@/services/auditService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -91,7 +91,7 @@ export function AdminAudit() {
     // cover a typical incident review, narrow enough to keep the
     // result set scannable. ``all`` removes the lower bound.
     const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d' | 'all'>('7d')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const fromTs = useMemo(() => {
         if (timeRange === 'all') return undefined
@@ -122,13 +122,13 @@ export function AdminAudit() {
             } catch (err) {
                 const message = err instanceof Error ? err.message : 'Failed to load audit'
                 setError(message)
-                if (silent) showToast('error', message)
+                if (silent) notify('error', message)
             } finally {
                 setLoading(false)
                 setRefreshing(false)
             }
         },
-        [activeFilters, showToast],
+        [activeFilters, notify],
     )
 
     useEffect(() => {
@@ -144,7 +144,7 @@ export function AdminAudit() {
             setNextCursor(resp.nextCursor ?? null)
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to load more'
-            showToast('error', message)
+            notify('error', message)
         } finally {
             setLoadingMore(false)
         }

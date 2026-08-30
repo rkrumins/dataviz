@@ -196,7 +196,7 @@ describe('a revealed level does not pull its first page', () => {
   // shed, empty or never-issued `/edges/between` — and the levels have no
   // child to hold, so the auto-loader pages every one of them: the exact
   // shape of the live capture (`children-with-edges` x3, one per ancestor,
-  // three "Child entities loaded" toasts).
+  // three "Child entities loaded" notifications).
   //
   // This is the CORRECT fallback, not a bug in the guard: a level with no
   // child and no page would render empty, which is what the auto-loader

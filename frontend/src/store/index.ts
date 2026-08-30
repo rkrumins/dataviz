@@ -1,6 +1,6 @@
 // Re-export all stores for convenient imports
-export { usePersonaStore, usePersonaMode, useLODDefault } from './persona'
-export type { PersonaMode, LODLevel } from './persona'
+export { usePersonaStore, usePersonaMode } from './persona'
+export type { PersonaMode } from './persona'
 
 export { usePreferencesStore } from './preferences'
 export type { ThemeMode, NodeStyleConfig, ShortcutConfig } from './preferences'

@@ -17,7 +17,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, Zap } from 'lucide-react'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { usePermission, checkPermission, usePermissionClaims } from '@/store/auth'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ConfirmDialog } from '@/components/admin/job-history/ConfirmDialog'
 import { workspaceService } from '@/services/workspaceService'
 import { aggregationService } from '@/services/aggregationService'
@@ -73,7 +73,7 @@ function parseList(raw: string | null): string[] {
 export function Freshness() {
     useDocumentTitle('Freshness')
     const isSystemAdmin = usePermission('system:admin')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const [searchParams, setSearchParams] = useSearchParams()
 
@@ -169,13 +169,13 @@ export function Freshness() {
     const onCancelJob = useCallback(async (dsId: string, jobId: string) => {
         try {
             await aggregationService.cancelJob(dsId, jobId)
-            showToast('success', 'Rebuild cancelled.')
+            notify('success', 'Rebuild cancelled.')
         } catch (e) {
-            showToast('error', (e as Error).message || 'Could not cancel the rebuild.')
+            notify('error', (e as Error).message || 'Could not cancel the rebuild.')
         }
         void qc.invalidateQueries({ queryKey: ACTIVE_JOBS_KEY })
         void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
-    }, [qc, showToast])
+    }, [qc, notify])
 
     const workspacesQ = useQuery({
         queryKey: ['freshness', 'workspaces'],
@@ -296,9 +296,9 @@ export function Freshness() {
                         : scope === 'rollups'
                             ? `Lineage ${firstBuild ? 'build' : 'rebuild'} queued for ${name}.`
                             : `Full refresh started for ${name}.`
-                showToast('success', msg)
+                notify('success', msg)
             },
-            onError: (e) => showToast('error', e.message || 'Refresh failed.'),
+            onError: (e) => notify('error', e.message || 'Refresh failed.'),
         })
     }
 

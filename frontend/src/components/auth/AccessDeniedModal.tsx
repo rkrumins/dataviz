@@ -4,7 +4,7 @@
  * them as a non-blocking floating card.
  *
  * Mounted once in ``AppLayout`` so every authenticated route inherits
- * the behaviour. The card matches the toast visual language (rounded
+ * the behaviour. The card matches the notification visual language (rounded
  * panel, layered border, accent-coloured icon box).
  *
  * Phase 4.3 — when the failing path is workspace-scoped (the URL
@@ -22,7 +22,7 @@ import {
     ShieldAlert, ChevronDown, X, Send, Check, Loader2, AlertCircle, Eye,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     permissionsService,
     type RoleDefinitionResponse,
@@ -253,7 +253,7 @@ function RequestAccessComposer({
     const [justification, setJustification] = useState('')
     const [submitting, setSubmitting] = useState(false)
     const [loadError, setLoadError] = useState<string | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     useEffect(() => {
         let cancelled = false
@@ -285,10 +285,10 @@ function RequestAccessComposer({
                 requestedRole: selectedRole,
                 justification: justification.trim() || null,
             })
-            showToast('success', 'Access request submitted. The workspace admin will review it.')
+            notify('success', 'Access request submitted. The workspace admin will review it.')
             onSubmitted()
         } catch (err) {
-            showToast(
+            notify(
                 'error',
                 err instanceof Error ? err.message : 'Failed to submit request',
             )

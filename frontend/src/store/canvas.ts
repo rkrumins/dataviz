@@ -6,7 +6,6 @@ export interface LineageNode extends Node {
   data: {
     label: string
     businessLabel?: string
-    technicalLabel?: string
     /** The entity's description (mapped from GraphNode.description in toCanvasNode). */
     description?: string
     urn: string
@@ -149,7 +148,7 @@ interface CanvasState {
   hydrationPhase: HydrationPhase
   setHydrationPhase: (phase: HydrationPhase) => void
   /** Authoritative hydration status, mirrored from CanvasRouter so downstream
-   *  canvas components (empty-state, toasts, ghosts) derive their UI from ONE
+   *  canvas components (empty-state, notifications, ghosts) derive their UI from ONE
    *  source and never render a failed/loading load as an empty graph. */
   hydrationStatus: HydrationStatus
   setHydrationStatus: (status: HydrationStatus) => void

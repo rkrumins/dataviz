@@ -21,7 +21,7 @@ import { useFeature } from '@/store/features'
 import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useLoadingToast } from '@/components/ui/toast'
+import { useLoadingNotification } from '@/components/ui/notifications'
 
 // UX-first interaction components (shared across canvases)
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -54,6 +54,7 @@ import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 
 interface HierarchyCanvasProps {
   className?: string
@@ -90,7 +91,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
   const { loadChildren, cancelChildLoad, loadingNodes, isLoading: isLoadingChildren } = useGraphHydration()
-  useLoadingToast('hier-children', isLoadingChildren, 'Expanding hierarchy')
+  useLoadingNotification('hier-children', isLoadingChildren, 'Expanding hierarchy')
   const relationshipTypes = useViewRelationshipTypes()
   // Legacy inline quick-filter (substring over visible nodes) — left
   // in place as a complementary quick-filter alongside the new
@@ -233,7 +234,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       return {
         id: node.id,
         typeId: node.data.type as string,
-        name: (node.data.label as string) ?? (node.data.businessLabel as string) ?? node.id,
+        name: resolveEntityName(node.data, 'business', node.id),
         data: node.data as Record<string, unknown>,
         children,
         depth,

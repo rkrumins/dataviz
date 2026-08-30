@@ -1,9 +1,9 @@
 /**
  * IncomingChangesSheet — "here's what just came in".
  *
- * A pull used to end in a toast that said "Pulled the latest changes from main." and nothing else:
+ * A pull used to end in a notification that said "Pulled the latest changes from main." and nothing else:
  * the user took someone else's work into their branch without ever being shown what it was. (Worse,
- * `alreadyUpToDate` never reached the client because of a casing mismatch, so the toast said that
+ * `alreadyUpToDate` never reached the client because of a casing mismatch, so the notification said that
  * even when nothing had arrived.)
  *
  * This shows the arriving work in the SAME visual language as every other diff on the canvas —

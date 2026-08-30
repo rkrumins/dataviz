@@ -40,7 +40,6 @@ function nodeUpdatePayload(after: Record<string, unknown>): Record<string, unkno
   if ('tags' in after) out.tags = after.tags
   else if ('classifications' in after) out.tags = after.classifications
   if ('businessLabel' in after) out.businessLabel = after.businessLabel
-  if ('technicalLabel' in after) out.technicalLabel = after.technicalLabel
   if (after.properties && typeof after.properties === 'object') out.properties = after.properties
   return out
 }

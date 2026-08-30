@@ -14,7 +14,7 @@
 import { useState } from 'react'
 import { Save, Settings2, Check, X, ChevronRight } from 'lucide-react'
 import { updateView, updateViewVisibility, type View as ViewT } from '@/services/viewApiService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePublishGate } from '@/hooks/usePublishGate'
 import { VisibilityImpact } from '@/components/views/VisibilityImpact'
 import { useBrand } from '@/store/branding'
@@ -37,7 +37,7 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   onEditLayout?: () => void
   editDisabled?: boolean
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const { appName } = useBrand()
   // The server's envelope already folded in the workspace policy and the
   // source's restricted flag; the gate below is the fallback for payloads
@@ -70,7 +70,7 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   const removeTag = (t: string) => setTagList(prev => prev.filter(x => x !== t))
 
   const handleSave = async () => {
-    if (!name.trim()) { showToast('error', 'Name is required'); return }
+    if (!name.trim()) { notify('error', 'Name is required'); return }
     setSaving(true)
     try {
       // The generic PUT rejects `visibility` (it carries its own
@@ -84,17 +84,17 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
         try {
           updated = await updateViewVisibility(view.id, visibility)
         } catch (visError) {
-          showToast('error', `Details saved, but visibility could not be changed: ${(visError as Error).message}`)
+          notify('error', `Details saved, but visibility could not be changed: ${(visError as Error).message}`)
           onSaved?.(updated)
           onCancel()
           return
         }
       }
-      showToast('success', 'View details updated')
+      notify('success', 'View details updated')
       onSaved?.(updated)
       onCancel()
     } catch {
-      showToast('error', 'Couldn’t save changes')
+      notify('error', 'Couldn’t save changes')
     } finally {
       setSaving(false)
     }

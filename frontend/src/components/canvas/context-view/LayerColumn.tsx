@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
 import {
   useAncestorMatchCounts,
   useCanvasFilterMode,
@@ -31,7 +32,7 @@ import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { SearchHitInlineRow } from './SearchHitInlineRow'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
-import { densityRowHeights } from './density'
+import { densityRowHeights, TECHNICAL_LINE_HEIGHT } from './density'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
@@ -76,7 +77,7 @@ interface LayerColumnProps {
   isHighlightActive?: boolean
   isHoverHighlight?: boolean
   onAnimationComplete?: () => void
-  onLoadMore?: (parentId: string) => void
+  onLoadMore?: (parentId: string, auto?: boolean) => void
   /** Walk a search hit's ancestors open and scroll to it. The inline hit
    *  rows are pointers into the result set — the entity itself may be
    *  nowhere near loaded — so clicking one has to go through the canvas's
@@ -172,7 +173,7 @@ function getItemKey(item: FlatTreeNode, _index: number): string {
  * scrolls the hit into view — which drops that row into the viewport for
  * every ancestor on the spine without the reader having scrolled at all.
  * Each one then pages itself, which is exactly the cost the reveal exists to
- * avoid (three `children-with-edges` and three toasts for one three-deep
+ * avoid (three `children-with-edges` and three notifications for one three-deep
  * hit). Being carried somewhere is not the same as scrolling there, so the
  * sentinel stays disarmed until the container holds something the reader
  * actually asked for. The button is unaffected.
@@ -653,8 +654,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   // Fetch the next page of a parent's children. Stable identity — the row that
   // calls this used to be an IntersectionObserver sentinel whose one-shot latch
   // was reset every time this callback's identity churned.
-  const handleLoadMore = useCallback((nodeId: string) => {
-    onLoadMore?.(nodeId)
+  const handleLoadMore = useCallback((nodeId: string, auto?: boolean) => {
+    onLoadMore?.(nodeId, auto)
   }, [onLoadMore])
 
   // Handle focus (zoom into subtree)
@@ -769,6 +770,13 @@ export const LayerColumn = React.memo(function LayerColumn({
   // users whose persisted preferences predate this field.
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const rowHeights = useMemo(() => densityRowHeights(density), [density])
+  // Technical mode adds a second line to every FlatTreeItem row, so the
+  // estimate has to grow with it — the estimate is all a row the virtualizer
+  // has never mounted contributes to `getTotalSize()` and to every
+  // `scrollToIndex` offset. The chrome rows below (search box, search hit,
+  // skeleton, load-more, error) render no technical line and keep their size.
+  const personaMode = usePersonaMode()
+  const technicalExtra = personaMode === 'technical' ? TECHNICAL_LINE_HEIGHT : 0
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -779,18 +787,20 @@ export const LayerColumn = React.memo(function LayerColumn({
       if (item.isSkeleton) return rowHeights.skeleton
       if (item.isFailed) return rowHeights.failed
       if (item.isLoadMore) return rowHeights.loadMore
-      return item.depth === 0 ? rowHeights.root : rowHeights.child
+      return (item.depth === 0 ? rowHeights.root : rowHeights.child) + technicalExtra
     },
     overscan,
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 
-  // Re-measure all virtualized rows when density flips so the cached
-  // measurements from the previous density don't leave the row stack
-  // pinned to stale heights.
+  // Re-measure all virtualized rows when density or the persona flips so the
+  // cached measurements from the previous mode don't leave the row stack
+  // pinned to stale heights. `itemSizeCache` survives unmount and is read
+  // ahead of `estimateSize`, so without this a row first measured in Business
+  // mode keeps its shorter height for the rest of the session.
   useEffect(() => {
     virtualizer.measure()
-  }, [density, virtualizer])
+  }, [density, personaMode, virtualizer])
 
   // Auto-scroll keyboard-focused row into view via virtualizer
   const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null
@@ -2173,7 +2183,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentIsLast={item.parentIsLast}
                         count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
-                        onLoadMore={() => handleLoadMore(item.node.id)}
+                        onLoadMore={(auto) => handleLoadMore(item.node.id, auto)}
                         // One-page-ahead auto-load — OFF in Isolate/Hide
                         // filter modes, where freshly-loaded children are
                         // filtered out of the tree and the pinned row

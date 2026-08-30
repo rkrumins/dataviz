@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ProgressBar } from '@/components/ui/ProgressBar'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import type { BootstrapJob, BootstrapPhase } from '@/services/versioningApiService'
 import { useAbandonBootstrap, useRetryBootstrap } from '../hooks/useVersioning'
@@ -78,7 +78,7 @@ export function BootstrapProgress({
   /** Close the completed report and hand over to the normal versioning UI. */
   onDismiss?: () => void
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const retry = useRetryBootstrap(wsId, dataSourceId)
   const abandon = useAbandonBootstrap(wsId, dataSourceId)
   const openPanel = useVersioningPanelStore((s) => s.openPanel)
@@ -103,14 +103,14 @@ export function BootstrapProgress({
 
   const runRetry = (mode: 'resume' | 'restart') =>
     retry.mutate(mode, {
-      onSuccess: () => showToast('success', mode === 'resume' ? 'Picking up where it left off…' : 'Starting over…'),
-      onError: (e) => showToast('error', e instanceof Error ? e.message : 'Could not retry.'),
+      onSuccess: () => notify('success', mode === 'resume' ? 'Picking up where it left off…' : 'Starting over…'),
+      onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not retry.'),
     })
 
   const runAbandon = () =>
     abandon.mutate(undefined, {
-      onSuccess: () => showToast('success', 'Cancelled — this data source is exactly as it was.'),
-      onError: (e) => showToast('error', e instanceof Error ? e.message : 'Could not cancel.'),
+      onSuccess: () => notify('success', 'Cancelled — this data source is exactly as it was.'),
+      onError: (e) => notify('error', e instanceof Error ? e.message : 'Could not cancel.'),
     })
 
   // ── running ───────────────────────────────────────────────────────────────

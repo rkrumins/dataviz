@@ -41,14 +41,20 @@ import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStaged
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
+import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
+import {
+  childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
+  openedViewMessage, openingViewMessage,
+} from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
 import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
@@ -63,9 +69,10 @@ import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
+import { DataLoadsPanel } from './DataLoadsPanel'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
-import { useBandReservation } from './useBandReservation'
+import { useBandReservation, useViewportReservation } from './useBandReservation'
 
 import { buildTraceLaneIndex, isReverseTraceWire } from '@/hooks/lib/traceWireDirection'
 import { useUnifiedTrace, type UseUnifiedTraceResult, type TraceResult } from '@/hooks/useUnifiedTrace'
@@ -180,7 +187,11 @@ function makeConnectionTypeResolver(
     // words or nothing at all, never a sentence nobody wrote. (The view's
     // edgeTypeMetadata carries no prose — only isContainment / isLineage /
     // direction / category — so there is nothing else to fall back to.)
-    const description = getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description || ''
+    // A system type whose wording this app owns is the one exception: its
+    // copy is a deliberate replacement for the ontology's engineer-speak, so
+    // it outranks the schema rather than being overwritten by it.
+    const description = edgeTypeCopy(edgeType)?.description
+      ?? (getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description || '')
     const resolved = { ...def, description }
     cache.set(edgeType, resolved)
     return resolved
@@ -230,7 +241,7 @@ import {
 } from '../search/session/useViewSearchSessionController'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
-import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
+import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
@@ -312,8 +323,20 @@ function siblingContext(
   }
 }
 
-/** The legend's header row is its collapsed footprint; the opened body is a transient overlay. */
-const measureLegendHeader = (el: HTMLElement): number => el.querySelector<HTMLElement>('button')?.offsetHeight ?? 0
+/** `gap-1.5` on the dock column below — the space between two stacked headers. */
+const DOCK_GAP_PX = 6
+
+/**
+ * The dock's collapsed footprint: every panel's header row plus the gaps
+ * between them. An opened body is a transient overlay above that band, so it
+ * is not measured — but a SECOND collapsed panel is, or the stack's own header
+ * sits over the bottom row of every column.
+ */
+const measureLegendHeader = (el: HTMLElement): number => {
+  const headers = [...el.querySelectorAll<HTMLElement>('[data-dock-header]')]
+  if (headers.length === 0) return 0
+  return headers.reduce((sum, h) => sum + h.offsetHeight, 0) + (headers.length - 1) * DOCK_GAP_PX
+}
 
 export function ContextViewCanvas({
   className,
@@ -1440,12 +1463,17 @@ export function ContextViewCanvas({
   // below to keep the selected column in the un-occluded region whenever a
   // side panel (EntityDrawer / EdgeDetailPanel) is open.
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null)
-  // The edge legend reserves the band it is docked in — its header only,
-  // so opening it does not shove the columns up.
+  // The bottom-right dock reserves the band it floats in — the collapsed
+  // headers only, so opening a panel does not shove the columns up.
   const edgeLegendRef = useRef<HTMLDivElement>(null)
-  // The variable keeps its name; what it measures is now the Connections
-  // panel's header (CanvasStatusChips and the columns read it by that name).
+  // The variable keeps its name; what it measures is now the whole dock stack
+  // — Data loads' header plus Connections' (CanvasStatusChips and the columns
+  // read it by that name).
   useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
+  // ...and the dock's FULL height to the document, so the app's notification stack
+  // (bottom-right, z-80) starts above it instead of covering its headers and
+  // eating the clicks that collapse them.
+  useViewportReservation(edgeLegendRef, '--canvas-dock-height')
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
   // Zoom changes move every node card, but nothing else forces the edge
@@ -1702,23 +1730,6 @@ export function ContextViewCanvas({
     horizontalScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' })
   }, [setCanvasZoom, sortedLayers.length])
 
-  // Measure the outer container's CLASSIC horizontal scrollbar into
-  // --canvas-hsb (0 for macOS overlay scrollbars). Percentage heights
-  // ignore scrollbar gutters, so without this the columns overflow the
-  // visible area by the scrollbar height and their bottom edge (and the
-  // bottom periphery scrims) clips below the fold.
-  useEffect(() => {
-    const el = horizontalScrollRef.current
-    if (!el) return
-    const update = () => {
-      el.style.setProperty('--canvas-hsb', `${Math.max(0, el.offsetHeight - el.clientHeight)}px`)
-    }
-    update()
-    if (typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(update)
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
@@ -2630,7 +2641,7 @@ export function ContextViewCanvas({
       const prefs = usePreferencesStore.getState()
       if (!prefs.onboardingCompletedSteps.includes('custom-order-toast')) {
         prefs.completeOnboardingStep('custom-order-toast')
-        useToastStore.getState().addToast({
+        useNotificationStore.getState().add({
           type: 'info',
           message: `Custom order — drag cards to arrange “${layer.name}”`,
         })
@@ -2824,7 +2835,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -2843,13 +2854,49 @@ export function ContextViewCanvas({
     [loadChildren, layerSortDirectionFor],
   )
 
+  /**
+   * The same load, but it says what it did — "Snowflake · 5 datasets", named
+   * from the summary `loadChildren` hands back.
+   *
+   * Only the two loads the USER asked for come through here: opening a
+   * container and "Load N more". Every other caller of `loadChildrenSorted`
+   * stays silent — the auto-first-page effect, a search reveal walking a hit's
+   * ancestors, the column's paging sentinel. None of those is something the
+   * user did, and announcing them is the noise this replaces.
+   *
+   * Keyed per container, so two containers opened at once are two named
+   * messages rather than one that outlives the other.
+   */
+  const { notify: notifyChildLoad, showLoading: showChildLoad, hideLoading: hideChildLoad } = useAppNotifications()
+  const announceChildLoad = useCallback(async (parentId: string) => {
+    const key = `ctx-children:${parentId}`
+    // Read at click time rather than through a dependency: `displayMap`
+    // changes with every graph write, and this callback is handed to
+    // LayerColumn's memo.
+    // `|| parentId`, not `?? ''`: a container whose backend displayName is ""
+    // would otherwise give "Loading …", a message with no subject at all.
+    const label = String(useCanvasStore.getState().nodes.find(n => n.id === parentId)?.data?.label || parentId)
+    showChildLoad(key, loadingChildrenMessage(label))
+    try {
+      const summary = await loadChildrenSorted(parentId)
+      // Undefined when nothing ran (already fully loaded, or collapsed onto an
+      // in-flight load) or when the load failed — nothing true to report.
+      if (summary) notifyChildLoad('success', childLoadMessage(summary, schema?.entityTypes))
+    } finally {
+      hideChildLoad(key)
+    }
+  }, [loadChildrenSorted, schema, showChildLoad, hideChildLoad, notifyChildLoad])
+
   // "Load N more" from a column. In trace mode the walk model IS the set of
   // children that carry lineage, so there is nothing more to fetch — and a
   // fetch would write the store the overlay deliberately leaves alone.
-  const loadMoreChildren = useCallback(async (parentId: string) => {
+  //
+  // `auto` = LoadMoreItem's one-page-ahead sentinel, which pages because the
+  // row drifted into view. Nobody asked for it, so it loads without a word.
+  const loadMoreChildren = useCallback(async (parentId: string, auto?: boolean) => {
     if (traceWriteLocked()) return
-    await loadChildrenSorted(parentId)
-  }, [loadChildrenSorted, traceWriteLocked])
+    await (auto ? loadChildrenSorted(parentId) : announceChildLoad(parentId))
+  }, [announceChildLoad, loadChildrenSorted, traceWriteLocked])
 
   // Same for another page of ROOTS — reachable from the status chip and from
   // scrolling a column to its end, neither of which means "grow the browse
@@ -3134,7 +3181,7 @@ export function ContextViewCanvas({
     scrollHitIntoView,
     getElementById: (id) => document.getElementById(`layer-node-${id}`),
     getScrollContainer: () => horizontalScrollRef.current,
-    showToast: (type, message) => { useToastStore.getState().addToast({ type, message }) },
+    notify: (type, message) => { useNotificationStore.getState().add({ type, message }) },
   })
 
   // Reveal callback for advanced-search hits and pin clicks. Walks the
@@ -3224,38 +3271,83 @@ export function ContextViewCanvas({
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
   const hydrationStatus = useCanvasStore((s) => s.hydrationStatus)
   const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'unavailable'
-  const regionCount = useCanvasStore((s) => s.loadingRegions.size)
   const isHydratingInitial = hydrationPhase !== 'complete'
 
-  // Floating loading toasts — keep the full set so every long-running operation
+  // Floating loading notifications — keep the full set so every long-running operation
   // is explicitly announced. Wording is centralised here.
-  // Two phase-explicit toasts ('ctx-hydrating-entities' / 'ctx-hydrating-edges')
-  // duplicate the global 'hydration' toast from CanvasRouter intentionally: the
+  // Two phase-explicit notifications ('ctx-hydrating-entities' / 'ctx-hydrating-edges')
+  // duplicate the global 'hydration' notification from CanvasRouter intentionally: the
   // global one has a single key that recycles between phases, so users with the
   // canvas focused want a sticky in-context indicator that the entities AND
   // edges loads both happened — even if hydration is fast.
-  useLoadingToast('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded', hydrationFailed)
-  useLoadingToast('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded', hydrationFailed)
-  useLoadingToast('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments', 'Layer assignments ready')
-  useLoadingToast('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges', 'Aggregated edges loaded')
-  useLoadingToast('ctx-children', isLoadingChildren, 'Loading child entities', 'Child entities loaded')
-  useLoadingToast('ctx-regions', regionCount > 0, 'Loading region data', 'Region data loaded')
+  //
+  // Every success message is a FUNCTION, evaluated at the loading→done
+  // transition: it reports what the load produced, and the counts only exist
+  // once it has. Read from the store rather than a render-scope value where
+  // the phase is what publishes the result — `nodes`/`edges` are authoritative
+  // the moment the phase leaves the roots/children pair / 'edges'.
+  //
+  // Expanding a container is NOT here: `isLoadingChildren` was
+  // `loadingNodes.size > 0`, a global "≥1 container busy" boolean that could
+  // never name which one. That message moved to `announceChildLoad`, at the
+  // two call sites where the container is known.
+  //
+  // 'roots' AND 'children' — the entities load spans BOTH phases, and only the
+  // transition out of the pair is behind `setGraph`. An open-scope view loads
+  // by type: roots first, then 'children' for the remaining visible types
+  // (useGraphHydration), and the nodes are committed after that second fetch.
+  // Gating on 'roots' alone put the falling edge at the roots→children hop —
+  // before the write, on a store that hydration had just emptied — so every
+  // such view was announced as "· 0 items".
+  useLoadingNotification(
+    'ctx-hydrating-entities',
+    hydrationPhase === 'roots' || hydrationPhase === 'children',
+    openingViewMessage(activeView?.name),
+    () => openedViewMessage(activeView?.name, useCanvasStore.getState().nodes.length),
+    hydrationFailed,
+  )
+  useLoadingNotification(
+    'ctx-hydrating-edges',
+    hydrationPhase === 'edges',
+    'Loading connections…',
+    () => connectionsLoadedMessage(useCanvasStore.getState().edges.length),
+    hydrationFailed,
+  )
+  useLoadingNotification(
+    'ctx-assignments',
+    assignmentStatus === 'loading',
+    'Arranging layers…',
+    () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.length),
+    // An errored pass leaves `effectiveAssignments` at its previous value —
+    // an empty Map on a first load — so without this a provider blip reports
+    // the green "Placed 0 items across 6 layers", once per bounded retry.
+    assignmentStatus === 'error',
+  )
+  // A spinner while it works, and NOTHING in the record afterwards. Summarising
+  // is a consequence of expanding something, not a thing the user did: it
+  // re-runs on every expand and collapse, so announcing it put a system line
+  // between every two of the user's own — and interleaved like that the panel's
+  // fold could never collapse them. The count belongs to the Connections panel
+  // directly below, which is where a reader can act on it. Only non-loading
+  // notifications are recorded, so passing no success message keeps the log to
+  // what the user actually did.
+  useLoadingNotification('ctx-agg-edges', isLoadingAggregatedEdges, 'Summarising connections…')
 
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const lastFailedCountRef = useRef(0)
   useEffect(() => {
     const count = failedNodes?.size ?? 0
     if (count > lastFailedCountRef.current) {
-      showToast('warning', count === 1 ? '1 entity failed to load' : `${count} entities failed to load`)
+      notify('warning', count === 1 ? '1 item failed to load' : `${count} items failed to load`)
     }
     lastFailedCountRef.current = count
-  }, [failedNodes, showToast])
+  }, [failedNodes, notify])
 
   // View/Edit mode transitions (header Edit / Done). Entering edit =
   // opening/resuming a draft; the versioning bar tints amber and the header
-  // morphs — that IS the success feedback, so no toast on the happy path.
+  // morphs — that IS the success feedback, so no notification on the happy path.
   // Entering Edit no longer silently resumes/creates a draft. The user explicitly continues an
   // existing draft OR names a new branch in StartEditingDialog (which then switchToDrafts). The
   // shared `ensureDraftOpen` stays the path for the OTHER authoring entry points (create-link,
@@ -3267,18 +3359,18 @@ export function ContextViewCanvas({
   const handleExitEdit = useCallback(() => {
     if (stagedChangeList.length > 0) {
       openStagedChangesPanel()
-      showToast('warning', 'Review your pending edits — save or discard them before leaving the draft.')
+      notify('warning', 'Review your pending edits — save or discard them before leaving the draft.')
       return
     }
     useBranchStore.getState().switchToMain()
-  }, [stagedChangeList.length, openStagedChangesPanel, showToast])
+  }, [stagedChangeList.length, openStagedChangesPanel, notify])
 
   // ── View-metadata actions (title menu) ──────────────────────────────
   // All read the live view from the store at call time so they carry no
   // stale-closure risk and keep their dep lists minimal.
 
   // Inline rename — optimistic: patch the store immediately (header updates
-  // instantly), persist, and on failure revert to the previous name + toast.
+  // instantly), persist, and on failure revert to the previous name + notification.
   const handleRenameView = useCallback((name: string) => {
     const view = useSchemaStore.getState().getActiveView()
     if (!view?.id) return
@@ -3287,9 +3379,9 @@ export function ContextViewCanvas({
     useSchemaStore.getState().updateView(viewId, { name })
     updateView(viewId, { name }).catch(err => {
       useSchemaStore.getState().updateView(viewId, { name: previousName })
-      showToast('error', err instanceof Error ? err.message : 'Failed to rename view')
+      notify('error', err instanceof Error ? err.message : 'Failed to rename view')
     })
-  }, [showToast])
+  }, [notify])
 
   const handleEditViewDetails = useCallback(() => setViewDetailsOpen(true), [])
 
@@ -3323,9 +3415,9 @@ export function ContextViewCanvas({
       setShareSeed({ id: full.id, name: full.name, visibility: full.visibility })
       setViewVisibility(full.visibility)
     } catch (err) {
-      showToast('error', err instanceof Error ? err.message : 'Failed to open sharing')
+      notify('error', err instanceof Error ? err.message : 'Failed to open sharing')
     }
-  }, [showToast])
+  }, [notify])
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
@@ -3551,7 +3643,7 @@ export function ContextViewCanvas({
         // density-tier renderer + browse-mode bundling now absorb the
         // result; the historical reason this was disabled (canvas
         // overload) no longer applies.
-        await loadChildrenSorted(nodeId)
+        await announceChildLoad(nodeId)
         if (trace.isTracing) {
           // Fire-and-forget: drill runs in the background and merges into
           // the canvas as it returns. No await — the children are already
@@ -3716,7 +3808,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
+  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
 
 
 
@@ -4828,9 +4920,9 @@ export function ContextViewCanvas({
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
               await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
               closeStagedChangesPanel()
-              showToast('success', 'Saved to draft.')
+              notify('success', 'Saved to draft.')
             } catch (e) {
-              showToast('error', (e as Error).message)
+              notify('error', (e as Error).message)
             }
             return
           }
@@ -4844,23 +4936,37 @@ export function ContextViewCanvas({
           }
         }} />
 
-        {/* Connections panel — docked bottom-right in the reserved band, never
-            over rows: it publishes its collapsed (header) height as
-            --edge-legend-height and the columns area pads for it; opening
-            it grows upward as a transient overlay. Right-rail panels are
-            flex siblings, so the canvas itself shrinks when one opens.
-            Lifts above TraceBottomDock via --trace-dock-height. */}
+        {/* The bottom-right dock — Data loads above Connections, one stack. Docked
+            in the reserved band, never over rows: it publishes its collapsed
+            (headers) height as --edge-legend-height and the columns area pads
+            for it; opening a panel grows upward as a transient overlay. The
+            column is bottom-anchored, so the two panels can never cover each
+            other however either one opens. Right-rail panels are flex
+            siblings, so the canvas itself shrinks when one opens.
+            Lifts above TraceBottomDock via --trace-dock-height.
+            Both bodies open (40vh + 45vh + ~244px of chrome) is TALLER than
+            the canvas body, which is `overflow-hidden` — so the column caps
+            itself and scrolls. Uncapped, the overflow is clipped off the top
+            and takes the Data loads header with it: the one control that closes
+            Data loads, unreachable. The cap excludes the bottom offset, or a
+            raised dock overflows the top by exactly the trace dock's height. */}
         <div
           ref={edgeLegendRef}
           // z-40, the floating-chrome tier (trace dock, lens pills): the
           // columns area is `relative z-30` and later in the DOM, so at
           // z-30 the opened panel body painted UNDER the rows it overlaps.
-          className="absolute z-40 w-64 pointer-events-auto transition-all duration-300 ease-out"
+          // w-80 = 320px, a NotificationCard's exact width. Data loads is the
+          // record of the very messages that just flew past in this corner, so
+          // the two surfaces line up as one column — and at 256px a message
+          // that fit on one line as a notification wrapped onto two here.
+          className="absolute z-40 w-80 pointer-events-auto flex flex-col gap-1.5 overflow-y-auto overscroll-contain transition-all duration-300 ease-out"
           style={{
             bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))',
             right: '1rem',
+            maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
+          <DataLoadsPanel />
           <ConnectionsPanel
             key={connectionsViewId}
             model={connectionModel}
@@ -5080,10 +5186,22 @@ export function ContextViewCanvas({
         )}
 
 
-        {/* Layer Columns. */}
+        {/* Layer Columns. The wrapper exists so the edge fades can be
+            anchored to the SCROLLER's box rather than to canvas-body,
+            whose in-flow banners would otherwise offset them. */}
+        <div className="relative flex-1 min-h-0 flex flex-col">
         <div
           ref={horizontalScrollRef}
-          className="flex-1 overflow-auto relative scroll-smooth"
+          // `custom-scrollbar`: an author-styled scrollbar is a CLASSIC one
+          // in both Chromium and WebKit — always drawn, and claiming its own
+          // strip of layout rather than floating over the last row. The macOS
+          // overlay bar it replaces fades out entirely when idle, which left
+          // the sideways run of the canvas with no affordance at all. The
+          // strip it claims (11px in Chromium, which honours
+          // `scrollbar-width: thin` over the rule's 6px) comes out of
+          // clientHeight, so a percentage-height child inside already stops
+          // above it and the columns still end at the visible edge.
+          className="flex-1 min-h-0 overflow-auto relative scroll-smooth custom-scrollbar"
           onClick={handleBackgroundClick}
           // Reserve the bottom band the floating chrome occupies (trace
           // dock, layer strip, edge legend) so a column's last row can always scroll
@@ -5186,17 +5304,19 @@ export function ContextViewCanvas({
               // scrolls chained into that ghost area instead of the
               // columns' internal lists.
               //
-              // --canvas-hsb: measured height of the container's CLASSIC
-              // horizontal scrollbar (0 for macOS overlay scrollbars).
-              // Percentage heights resolve against a box that ignores
-              // the scrollbar, so a plain 100% overflows the visible
-              // area by the scrollbar height — clipping the columns'
-              // bottom edge (and the bottom periphery scrims) below the
-              // fold. Subtracting the measured gutter makes the column
-              // bottom land exactly at the visible edge at every zoom.
+              // The height is the container's CONTENT box, undone by the
+              // zoom the same way the width is. A percentage already
+              // resolves against that box, which excludes BOTH the
+              // reserved padding band below and the classic scrollbar's
+              // strip — measured in Chromium: scroller offsetHeight 583,
+              // clientHeight 572, padding-bottom 86, and a 100%-tall
+              // child paints 486 with its bottom exactly on the band.
+              // Subtracting the scrollbar as well (this once did) left
+              // every column, its bottom periphery scrim and its
+              // end-of-list sentinel 11px short of the visible edge.
               zoom: canvasZoom !== 1 ? canvasZoom : undefined,
               width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
-              height: `calc((100% - var(--canvas-hsb, 0px)) / ${canvasZoom})`,
+              height: `calc(100% / ${canvasZoom})`,
             }}
           >
             {sortedLayers.map((layer) => (
@@ -5284,6 +5404,12 @@ export function ContextViewCanvas({
           </div>
 
 
+        </div>
+        {/* "There is more this way" — a fade on whichever side still has
+            content. Pure decoration: pointer-events-none, and painted
+            under the layer strip and the bottom-right dock, which are
+            later siblings of this wrapper. */}
+        <CanvasEdgeFades scrollRef={horizontalScrollRef} />
         </div>
       </div>
       </div>{/* end canvas column */}

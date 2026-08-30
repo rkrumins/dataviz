@@ -17,6 +17,12 @@
  * type's row keeps its name and swatch (to bring it back) but shows NO
  * count — there is no honest number left to show.
  *
+ * A row is three lines, at the scale of the Data loads cards docked directly
+ * above it (13px name and count, 11px below): the type and its count; the
+ * ontology's sentence, wrapped and clamped to two lines; and the direction
+ * split, the smallest print on the surface. The sentence used to share a line
+ * with the split and lost — hard-truncated mid-word at the dock's 320px.
+ *
  * Surface: an opaque elevated card. This panel animates its height inside
  * the canvas's bottom band, which is exactly where a blurred-backdrop
  * surface ghosts a mis-placed translucent tile in Chromium (the "white
@@ -164,6 +170,7 @@ export function ConnectionsPanel({
     >
       <button
         type="button"
+        data-dock-header
         aria-expanded={isExpanded}
         onClick={() => {
           // React fires no mouseleave when the row list unmounts, so a hover
@@ -257,8 +264,8 @@ export function ConnectionsPanel({
                             className="flex-1 min-w-0 flex items-center gap-2 text-left rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                           >
                             <Swatch def={def} />
-                            <span className="flex-1 min-w-0 text-xs font-medium text-ink truncate">{def.label}</span>
-                            <span className="flex-shrink-0 text-xs font-semibold text-ink tabular-nums">
+                            <span className="flex-1 min-w-0 text-[13px] font-medium text-ink truncate">{def.label}</span>
+                            <span className="flex-shrink-0 text-[13px] font-semibold text-ink tabular-nums">
                               {row.relationships.toLocaleString()}
                             </span>
                           </button>
@@ -275,18 +282,30 @@ export function ConnectionsPanel({
                           </button>
                         </span>
 
+                        {/* The ontology's sentence gets the line to itself and
+                            WRAPS. Sharing it with the direction split left it
+                            hard-truncated mid-word at the dock's 320px — a
+                            description cut to "Many detailed flows…" explains
+                            nothing. Two lines is the whole of every sentence
+                            the ontology actually writes; the title carries the
+                            rest for the rare one that is longer. */}
+                        {def.description && (
+                          <span
+                            data-connection-description
+                            title={def.description}
+                            className="pl-14 text-[11px] leading-snug text-ink-muted line-clamp-2 break-words"
+                          >
+                            {def.description}
+                          </span>
+                        )}
+
+                        {/* The split is the row's smallest print: its own line,
+                            right-aligned under the count so the numbers read as
+                            one column, and it yields its slot to `Only`. */}
                         <span className="flex items-center gap-2 pl-14">
-                          {def.description && (
-                            <span
-                              data-connection-description
-                              className="flex-1 min-w-0 text-2xs text-ink-muted truncate"
-                            >
-                              {def.description}
-                            </span>
-                          )}
                           <span
                             title={DIRECTION_TITLE}
-                            className="ml-auto flex-shrink-0 text-2xs text-ink-muted tabular-nums whitespace-nowrap group-hover/row:hidden group-focus-within/row:hidden"
+                            className="ml-auto flex-shrink-0 text-[11px] text-ink-muted tabular-nums whitespace-nowrap group-hover/row:hidden group-focus-within/row:hidden"
                           >
                             {`→ ${row.forward.toLocaleString()} · ← ${row.backward.toLocaleString()}`}
                             {row.bidirectional > 0 ? ` · ⇄ ${row.bidirectional.toLocaleString()}` : ''}
@@ -299,7 +318,7 @@ export function ConnectionsPanel({
                               e.stopPropagation()
                               onSoloType(row.type, allTypes)
                             }}
-                            className="ml-auto hidden group-hover/row:inline-flex group-focus-within/row:inline-flex flex-shrink-0 items-center text-2xs text-ink-muted hover:text-ink px-1.5 py-0.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                            className="ml-auto hidden group-hover/row:inline-flex group-focus-within/row:inline-flex flex-shrink-0 items-center text-[11px] text-ink-muted hover:text-ink px-1.5 py-0.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                           >
                             Only
                           </button>
@@ -318,7 +337,7 @@ export function ConnectionsPanel({
                         className="flex items-center gap-2 px-2 py-1.5 rounded-lg opacity-45"
                       >
                         <Swatch def={def} />
-                        <span className="flex-1 min-w-0 text-xs font-medium text-ink truncate">{def.label}</span>
+                        <span className="flex-1 min-w-0 text-[13px] font-medium text-ink truncate">{def.label}</span>
                         <button
                           type="button"
                           title="Show this type"

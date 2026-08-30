@@ -10,7 +10,7 @@
  * every ancestor's "N more" row lands in the viewport WITHOUT the reader
  * having scrolled anywhere. Each one then pages itself. Live evidence
  * (view_9416e6306aa2, revealing `customer_id` three levels down): three
- * `children-with-edges` requests and three "Child entities loaded" toasts —
+ * `children-with-edges` requests and three "Child entities loaded" notifications —
  * the exact cost E4 set out to remove, arriving through a door E4 never
  * looked at.
  *
@@ -151,7 +151,7 @@ describe('LayerColumn — the "N more" row after a reveal', () => {
 
         dwellInView()
 
-        expect(onLoadMore).toHaveBeenCalledWith('P')
+        expect(onLoadMore).toHaveBeenCalledWith('P', true)
     })
 
     it('resumes once a real page joins the revealed child', () => {
@@ -163,6 +163,6 @@ describe('LayerColumn — the "N more" row after a reveal', () => {
 
         dwellInView()
 
-        expect(onLoadMore).toHaveBeenCalledWith('P')
+        expect(onLoadMore).toHaveBeenCalledWith('P', true)
     })
 })

@@ -14,8 +14,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const showToast = vi.fn()
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
+const notify = vi.fn()
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/services/viewApiService', () => ({ updateViewVisibility: vi.fn() }))
 vi.mock('@/components/views/ViewActivityDrawer', () => ({ ViewActivityDrawer: () => null }))
 vi.mock('@/store/branding', () => ({ useBrand: () => ({ appName: 'TestBrand' }) }))
@@ -71,8 +71,8 @@ describe('after the change lands', () => {
     it('confirms with the new audience, not the word "updated"', async () => {
         renderMenu()
         fireEvent.click(screen.getByText('Enterprise'))
-        await waitFor(() => expect(showToast).toHaveBeenCalled())
-        const [level, message] = showToast.mock.calls[0]
+        await waitFor(() => expect(notify).toHaveBeenCalled())
+        const [level, message] = notify.mock.calls[0]
         expect(level).toBe('success')
         expect(message).toMatch(/Quarterly lineage/)
         expect(message).toMatch(/anyone signed in to TestBrand/i)
