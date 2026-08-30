@@ -39,12 +39,8 @@ from .provider import (
     _edge_from_row,
     _encode_keyset_cursor,
     _is_transient_connection_error,
-    _is_cluster_routing_error,
     _is_loading_error,
-    _is_missing_graph_error,
-    _is_null_handle_error,
     _keyset_sort,
-    _normalize_falkordb_host,
     _validate_sort_direction,
     # Section B — read off the module object by two tests; must stay the
     # same object (mutated or monkeypatched in place), never a copy.
@@ -53,8 +49,6 @@ from .provider import (
     logger,
     # Not imported anywhere today, but named by the plan as defensive
     # exports — costs nothing, protects a future in-repo import.
-    _EmptyResult,
-    _TRANSIENT_RETRY_BACKOFFS,
     _ClosureWalk,
     _completed,
     CLOSURE_FRONTIER_PROBE_CAP,
@@ -62,7 +56,6 @@ from .provider import (
     CLOSURE_WALK_RESERVE_FRACTION,
     _UNLABELED_URN_UNSUPPORTED,
     _INDEX_HEALTH_LOGGED,
-    _resolve_bulk_create_knobs,
 )
 
 # The rest of the export list: names ``provider.py`` no longer imports for
@@ -71,10 +64,21 @@ from .provider import (
 # way — the split above is purely about which module happens to import
 # them first, not about identity.
 from .rowmap import _RESERVED_NODE_KEYS, _sanitize_node_properties
-from .hosts import resolve_falkordb_target
+from .hosts import resolve_falkordb_target, _normalize_falkordb_host
 from .cursors import CursorMismatchError, _keyset_sort_key, _CURSOR_PREFIX
-from .knobs import _BULK_CREATE_KNOBS_CACHE, _BULK_CREATE_TIMEOUT_DEFAULT
+from .knobs import (
+    _BULK_CREATE_KNOBS_CACHE,
+    _BULK_CREATE_TIMEOUT_DEFAULT,
+    _resolve_bulk_create_knobs,
+)
 from .aggregation import AggregationBatchAbort
+from .errors import (
+    _is_cluster_routing_error,
+    _is_null_handle_error,
+    _is_missing_graph_error,
+    _EmptyResult,
+    _TRANSIENT_RETRY_BACKOFFS,
+)
 
 # _logged_legacy_blob is deliberately NOT re-exported: it is a bool
 # mutated in place via `global` inside provider.py, nothing outside the
