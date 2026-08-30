@@ -881,14 +881,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'relationships')} lead outside this view — ${unitMeaning('relationships')}`}
+          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'relationships')} lead outside this view — ${unitMeaning('relationships')}`}
+          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
     </div>

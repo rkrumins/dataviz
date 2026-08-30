@@ -5,15 +5,23 @@
  * explains why in its tooltip, and offers an action where one exists.
  *
  * Chips (each hidden when its count is zero):
- *  - "N connections not on canvas" — projected edges whose endpoints
- *    resolve to no rendered entity (unloaded or unassigned).
+ *  - "N flows not on canvas" — projected edges whose endpoints resolve to
+ *    no rendered entity (unloaded or unassigned).
  *  - "N entities not in any layer" — loaded nodes that matched no layer;
  *    popover lists them with click-through to the entity drawer.
- *  - "Showing X of Y connections" — expanded aggregated edges whose
+ *  - "Showing X of Y underlying flows" — expanded aggregated edges whose
  *    underlying detail is truncated; button pages more in.
  *
- * Every count here names its unit; the words come from
- * `connections/connectionUnits.ts` so no two chips can drift apart.
+ * Every relationship counted here is a FLOW: every one of these numbers
+ * comes from `useEdgeProjection`, which drops containment edges in all
+ * three of its sections, or from `useExternalDegrees`, which asks the
+ * server for lineage types only. Nothing structural can reach a chip.
+ *
+ * Every count here names its unit too; the words come from
+ * `connections/connectionUnits.ts` so no two chips can drift apart. The one
+ * exception is the unresolved chip: its number is mixed-granularity (one
+ * per collapsed rollup in section A, one per raw edge in B and C), so it
+ * names the kind and deliberately claims no unit.
  *
  * Visual language matches the column overflow chips: rounded-full glass,
  * backdrop blur, soft border, quiet colors.
@@ -132,8 +140,8 @@ export function CanvasStatusChips({
               <p className="font-semibold mb-1">This entity has lineage beyond this view</p>
               <p className="text-ink-muted">
                 {selectedExternal!.in.toLocaleString()} upstream and{' '}
-                {selectedExternal!.out.toLocaleString()} downstream connection
-                {selectedExternal!.in + selectedExternal!.out === 1 ? '' : 's'} exist in the
+                {selectedExternal!.out.toLocaleString()} downstream{' '}
+                {unitNoun(selectedExternal!.in + selectedExternal!.out, 'flows')} exist in the
                 data source but lead to entities outside this view&apos;s scope.
                 That&apos;s expected for a curated view — it is NOT missing data.
                 Add those entities to the view, or run a Trace, to see them.
@@ -197,7 +205,7 @@ export function CanvasStatusChips({
           side="right"
           content={
             <div>
-              <p className="font-semibold mb-1">Adaptive edge density</p>
+              <p className="font-semibold mb-1">Adaptive flow density</p>
               <p className="text-ink-muted">
                 Showing the {adaptiveShown!.toLocaleString()} strongest{' '}
                 {unitNoun(adaptiveTotal!, 'lines')} of {adaptiveTotal!.toLocaleString()} on
@@ -233,7 +241,7 @@ export function CanvasStatusChips({
           side="right"
           content={
             <div>
-              <p className="font-semibold mb-1">Large connection fan</p>
+              <p className="font-semibold mb-1">Large flow fan</p>
               <p className="text-ink-muted">
                 This entity touches {focusTotal!.toLocaleString()}{' '}
                 {unitNoun(focusTotal!, 'lines')} — showing the{' '}
@@ -270,7 +278,7 @@ export function CanvasStatusChips({
           content={
             <div>
               <p className="font-semibold mb-1">
-                {unresolvedEdgeCount.toLocaleString()} connection{unresolvedEdgeCount === 1 ? '' : 's'}{' '}
+                {unresolvedEdgeCount.toLocaleString()} flow{unresolvedEdgeCount === 1 ? '' : 's'}{' '}
                 {viewScope === 'curated' ? 'lead outside this view' : 'not shown'}
               </p>
               {viewScope === 'curated' ? (
@@ -278,13 +286,13 @@ export function CanvasStatusChips({
                   This view is a curated subset of the data source — these links
                   reference entities that aren&apos;t part of the view&apos;s
                   assignments. That&apos;s expected; add those entities to the
-                  view to see the connections.
+                  view to see the flows.
                 </p>
               ) : (
                 <p className="text-ink-muted">
                   These edges reference entities that aren&apos;t loaded on the canvas
                   or aren&apos;t assigned to any layer. Load or assign those entities
-                  to see the connections.
+                  to see the flows.
                 </p>
               )}
             </div>
@@ -294,7 +302,7 @@ export function CanvasStatusChips({
             <Unlink className={cn('w-3 h-3', viewScope === 'curated' ? 'text-sky-400/80' : 'text-amber-500/80')} />
             <span className="tabular-nums">{unresolvedEdgeCount.toLocaleString()}</span>
             <span className="text-ink-muted/70">
-              {viewScope === 'curated' ? 'connections outside this view' : 'connections not on canvas'}
+              {viewScope === 'curated' ? 'flows outside this view' : 'flows not on canvas'}
             </span>
           </div>
         </InfoTooltip>
@@ -351,7 +359,8 @@ export function CanvasStatusChips({
           <ListPlus className="w-3 h-3 text-sky-500/80" />
           <span>
             Showing <span className="tabular-nums">{aggDetailShown.toLocaleString()}</span> of{' '}
-            <span className="tabular-nums">{aggDetailTotal.toLocaleString()}</span> connections
+            <span className="tabular-nums">{aggDetailTotal.toLocaleString()}</span>{' '}
+            {unitNoun(aggDetailTotal, 'flows')}
           </span>
           {onLoadMoreDetail && (
             <button

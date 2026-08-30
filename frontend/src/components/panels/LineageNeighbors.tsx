@@ -241,7 +241,7 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany }: LineageN
       {fetchState === 'done' && sourceFetch.truncatedIds.has(nodeId) && (
         <div className="flex items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg border border-black/[0.06] dark:border-white/[0.06] bg-black/[0.02] dark:bg-white/[0.02] text-[10.5px] text-ink-muted">
           <LucideIcons.Info className="w-3 h-3 flex-shrink-0" />
-          <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} connections per direction from the data source.</span>
+          <span>Large neighborhood — showing the first {EDGE_FETCH_LIMIT} flows per direction from the data source.</span>
         </div>
       )}
 
@@ -344,7 +344,7 @@ interface DirectionCardProps {
   count: number
   records: NeighborRecord[]
   /** On-demand source-fetch status for the focal node — an in-flight
-   *  fetch must not read as "no connections", and a completed one
+   *  fetch must not read as "no flows", and a completed one
    *  upgrades the empty copy to a data-source claim. */
   fetchState?: 'loading' | 'done' | 'error'
   expanded: boolean
@@ -817,8 +817,8 @@ function ExpandedDetail({
             }
             title={
               activeFilterCount > 0 || search
-                ? 'No matching connections'
-                : 'No connections in this direction'
+                ? 'No matching flows'
+                : 'No flows in this direction'
             }
             hint={
               activeFilterCount > 0 || search
@@ -1340,7 +1340,7 @@ function NeighborRow({
         )}
       </div>
       <EdgeTypeChip edgeType={edgeTypeNorm} />
-      {/* Relationships folded into this one connection — named here
+      {/* Relationships folded into this one flow — named here
           rather than given a duplicate row of their own. */}
       {alsoTypes.map(t => <EdgeTypeChip key={t} edgeType={t} muted />)}
       {busy ? (
@@ -1363,7 +1363,7 @@ function NeighborRow({
 
 /** `muted` marks a relationship folded into the row's primary one —
  *  present, named, but not competing with the relationship that
- *  actually describes the connection. */
+ *  actually describes the flow. */
 function EdgeTypeChip({ edgeType, muted }: { edgeType: string; muted?: boolean }) {
   const schema = useSchemaStore((s) => s.schema)
   const rt = schema?.relationshipTypes.find(
@@ -1378,7 +1378,7 @@ function EdgeTypeChip({ edgeType, muted }: { edgeType: string; muted?: boolean }
         'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-semibold uppercase tracking-wide whitespace-nowrap',
         muted && 'opacity-60',
       )}
-      title={muted ? `Also connected by ${displayName} — shown as one connection, not two` : undefined}
+      title={muted ? `Also connected by ${displayName} — shown as one flow, not two` : undefined}
       style={{ backgroundColor: `${color}1a`, color }}
     >
       <span

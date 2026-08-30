@@ -61,3 +61,47 @@ describe('the Connections panel is wired into the Context View', () => {
     expect(source).toMatch(/isHighlightActive=\{isHighlightActive\}/)
   })
 })
+
+/**
+ * The canvas's own copy, held to the same rule the panel is.
+ *
+ * The discriminator is the SOURCE of each number, not the word that happens
+ * to be next to it:
+ *   - `aggregatedEdges` are AGGREGATED lineage rollups → flows;
+ *   - `useCanvasStore.edges` is the RAW fetch, the very set `lineageEdges`
+ *     filters `isContainmentEdge` out of, so it carries structural edges →
+ *     the covering word, "relationships", and never "flow";
+ *   - the frame pill counts distinct neighbour NODE IDS → entities, which
+ *     is neither.
+ */
+describe('the Context View canvas names the kind of thing it is counting', () => {
+  it('summarising rollups is about flows — that stream is lineage-only', () => {
+    expect(source).toContain("'Summarising flows…'")
+    expect(source).not.toContain("'Summarising connections…'")
+  })
+
+  it('the raw edge fetch says "relationships" — it carries structural edges too', () => {
+    expect(source).toContain("'Loading relationships…'")
+    expect(source).toContain('Some relationships could not be loaded')
+    expect(source).toContain('Showing the largest relationships')
+    expect(source).not.toContain("'Loading connections…'")
+    expect(source).not.toContain('Some connections could not be loaded')
+    expect(source).not.toContain('Showing the largest connections')
+  })
+
+  it('a raw-edge count is never called a flow', () => {
+    // The one place the hard boundary could be crossed by accident: these
+    // banners sit beside lineage copy and read as if they belonged to it.
+    expect(source).not.toContain('Loading flows…')
+    expect(source).not.toContain('Some flows could not be loaded')
+  })
+
+  it('the frame pill counts entities, because that is what it counts', () => {
+    // `framePill.neighborIds` is a Set of node ids and `framedContext.count`
+    // is its size — distinct entities, not relationships of any kind.
+    expect(source).toMatch(/entit\{framePill\.offCount === 1 \? 'y' : 'ies'\}/)
+    expect(source).toMatch(/entit\{framedContext\.count === 1 \? 'y' : 'ies'\}/)
+    expect(source).not.toMatch(/connection\{framePill\.offCount/)
+    expect(source).not.toMatch(/connection\{framedContext\.count/)
+  })
+})

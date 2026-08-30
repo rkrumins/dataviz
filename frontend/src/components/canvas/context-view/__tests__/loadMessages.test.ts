@@ -106,8 +106,12 @@ describe('opening a view', () => {
 })
 
 describe('the rest of the load', () => {
-  it('counts connections rather than naming edges', () => {
-    expect(connectionsLoadedMessage(2048)).toBe(`Connections · ${(2048).toLocaleString()}`)
+  it('counts relationships rather than naming edges — and never calls them flows', () => {
+    // This number is `useCanvasStore.edges.length`: the RAW fetch, which is
+    // the set `lineageEdges` filters containment out of. It therefore counts
+    // structural relationships too, and the covering word is the only
+    // honest one — "flows" here would cross the hard boundary.
+    expect(connectionsLoadedMessage(2048)).toBe(`Relationships · ${(2048).toLocaleString()}`)
   })
 
   it('reports what was placed, and appends the leftovers only when there are some', () => {
@@ -209,7 +213,7 @@ describe('the canvas raises them from the sites that know the subject', () => {
     // The batched roll-up gets a spinner and NO success message: only
     // non-loading notifications are recorded, so it never reaches the log.
     const agg = canvas.indexOf("'ctx-agg-edges'")
-    expect(canvas.slice(agg, agg + 200)).toContain("'Summarising connections…')")
+    expect(canvas.slice(agg, agg + 200)).toContain("'Summarising flows…')")
   })
 
   it('counts the entities load across BOTH of its phases', () => {

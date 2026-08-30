@@ -2,21 +2,31 @@
  * ConnectionsPanel — the Context View's bottom-right surface, replacing the
  * Edge Legend whose eye toggles changed nothing and whose counts were wrong.
  *
+ * Titled "Flows", because that is what it lists. It is fed by
+ * `effectiveLineageEdges`, and the projection that builds those drops every
+ * containment edge — containment is the TREE, not a row here — so nothing
+ * structural can ever reach this panel. Flow is also the better word for a
+ * non-technical reader than "connection" was: it carries DIRECTION, which is
+ * what the row's own → ← ⇄ split is about. The component, its props and its
+ * `data-connection-*` hooks keep their names: renaming the word the reader
+ * sees is the point, and renaming the symbols would churn four other files
+ * for nothing.
+ *
  * It says three different true things instead of one wrong one, and NAMES
  * the unit of each (`connectionUnits.ts` owns the words):
- *   - {n} underlying relationships — every relationship in view, a bundle
- *     contributing all of the relationships it stands for;
+ *   - {n} underlying flows — every flow in view, a bundle contributing all
+ *     of the flows it stands for;
  *   - {d} lines drawn — the lines the overlay is actually painting right
  *     now, published by the overlay itself (never re-derived here);
- *   - {t} types — how many kinds of connection are on screen.
+ *   - {t} types — how many kinds of flow are on screen.
  *
  * A type carried by a line that carries two types is counted in BOTH rows
  * and once in the total; the row tooltip says so, because a reader who adds
  * the rows up and gets more than the total deserves an explanation.
  *
- * Hiding is real: the projection drops those relationships, so a hidden
- * type's row keeps its name and swatch (to bring it back) but shows NO
- * count — there is no honest number left to show.
+ * Hiding is real: the projection drops those flows, so a hidden type's row
+ * keeps its name and swatch (to bring it back) but shows NO count — there is
+ * no honest number left to show.
  *
  * A row is three lines, at the scale of the Data loads cards docked directly
  * above it (13px name and count, 11px below): the type and its count; the
@@ -64,12 +74,12 @@ export interface ConnectionsPanelProps {
 
 const DIRECTION_TITLE = '→ flows with the layer order · ← flows back upstream · ⇄ both ways'
 /** Browse subtracts when a type is hidden — the projection drops those
- *  relationships per member. A trace cannot: its lines carry a total rather
+ *  flows per member. A trace cannot: its lines carry a total rather
  *  than a list of what makes it up, so a line carrying a hidden type AND a
  *  visible one stays on the board at its full count. Said plainly on the row
  *  rather than left for the reader to notice as a number that will not move. */
 const TRACE_COUNT_NOTE =
-  ' During a trace, a line that carries several types keeps its full underlying-relationship count when one of them is hidden.'
+  ' During a trace, a line that carries several types keeps its full underlying-flow count when one of them is hidden.'
 const ROW_HINT = 'Hover a row to spotlight its lines · click to keep it lit.'
 
 function Swatch({ def }: { def: EdgeTypeDefinition }) {
@@ -184,7 +194,7 @@ export function ConnectionsPanel({
       >
         <span className="flex items-center gap-2 min-w-0">
           <GitBranch className="w-4 h-4 text-accent-lineage flex-shrink-0" />
-          <span className="text-sm font-medium text-ink">Connections</span>
+          <span className="text-sm font-medium text-ink">Flows</span>
           <span className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 tabular-nums whitespace-nowrap">
             {summary}
           </span>
@@ -208,16 +218,16 @@ export function ConnectionsPanel({
               <div className="py-3 text-center">
                 <p className="text-xs font-medium text-ink">Lineage is off</p>
                 <p className="text-2xs text-ink-muted mt-0.5">
-                  Turn Lineage on in the header to see connections.
+                  Turn Lineage on in the header to see flows.
                 </p>
               </div>
             ) : (
               <>
                 <p
                   className="text-2xs text-ink-muted tabular-nums pb-2"
-                  title={`${unitMeaning('relationships')} ${unitMeaning('lines')}`}
+                  title={`${unitMeaning('flows')} ${unitMeaning('lines')}`}
                 >
-                  {`${formatUnitCount(model.relationships, 'relationships')} · ${drawn.toLocaleString()} ${unitNoun(drawn, 'lines')} drawn · ${model.typeCount} ${model.typeCount === 1 ? 'type' : 'types'}`}
+                  {`${formatUnitCount(model.relationships, 'flows')} · ${drawn.toLocaleString()} ${unitNoun(drawn, 'lines')} drawn · ${model.typeCount} ${model.typeCount === 1 ? 'type' : 'types'}`}
                 </p>
 
                 <div
@@ -226,7 +236,7 @@ export function ConnectionsPanel({
                   onMouseLeave={() => setHoveredType(null)}
                 >
                   {model.rows.length === 0 && (
-                    <p className="text-xs text-ink-muted py-3 text-center">No connections in view</p>
+                    <p className="text-xs text-ink-muted py-3 text-center">No flows in view</p>
                   )}
 
                   {model.rows.map((row) => {
@@ -236,7 +246,7 @@ export function ConnectionsPanel({
                       <div
                         key={row.type}
                         data-connection-row={row.type}
-                        title={`${def.label} — ${formatUnitCount(row.relationships, 'relationships')} in view carry this type. A line carrying more than one type is counted in each of its types. ${unitMeaning('relationships')}${traceMode ? TRACE_COUNT_NOTE : ''}`}
+                        title={`${def.label} — ${formatUnitCount(row.relationships, 'flows')} in view carry this type. A line carrying more than one type is counted in each of its types. ${unitMeaning('flows')}${traceMode ? TRACE_COUNT_NOTE : ''}`}
                         onMouseEnter={() => setHoveredType(row.type)}
                         onMouseLeave={() => setHoveredType(null)}
                         onClick={() => togglePin(row.type)}
@@ -338,7 +348,7 @@ export function ConnectionsPanel({
                       <div
                         key={`hidden-${type}`}
                         data-connection-row={type}
-                        title={`${def.label} — hidden. Its connections are not drawn and not counted.`}
+                        title={`${def.label} — hidden. Its flows are not drawn and not counted.`}
                         className="flex items-center gap-2 px-2 py-1.5 rounded-lg opacity-45"
                       >
                         <Swatch def={def} />

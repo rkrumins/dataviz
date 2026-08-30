@@ -105,7 +105,13 @@ const modelOf = (rows: ConnectionModel['rows']): ConnectionModel => ({
   untyped: 0,
 })
 
-const headerButton = () => screen.getByRole('button', { name: /connections/i })
+// The panel's own header, not a row's pin. Now that both say "Flows", a
+// loose name match finds two: the header ("Flows 47") and the pin for the
+// FLOWS_TO row ("Flows to 30"). `data-dock-header` is the marker the canvas
+// itself measures the reserved band from, so it is the right handle; the
+// accessible NAME is pinned separately, below.
+const headerButton = () =>
+  document.querySelector<HTMLElement>('button[data-dock-header]') as HTMLElement
 const rowFor = (type: string) =>
   document.querySelector<HTMLElement>(`[data-connection-row="${type}"]`) as HTMLElement
 const rowList = () => document.querySelector<HTMLElement>('[data-connection-rows]') as HTMLElement
@@ -123,10 +129,15 @@ describe('ConnectionsPanel', () => {
     vi.restoreAllMocks()
   })
 
-  it('the collapsed pill reads Connections and the relationship total', () => {
+  it('the collapsed pill reads Flows and the flow total', () => {
     mount()
     const header = headerButton()
-    expect(header.textContent).toMatch(/Connections/)
+    expect(header.textContent).toMatch(/Flows/)
+    expect(header.textContent).not.toMatch(/Connections/)
+    // The accessible name follows the label — a screen reader hears "Flows"
+    // too. `expanded` separates it from the FLOWS_TO row's pin, which is
+    // aria-pressed rather than aria-expanded.
+    expect(screen.getByRole('button', { name: /^Flows/, expanded: false })).toBe(header)
     expect(header.textContent).toMatch(/47/)
     expect(header.textContent).not.toMatch(/hidden/)
   })
@@ -142,23 +153,23 @@ describe('ConnectionsPanel', () => {
     // both definitions for the reader who wants them.
     useDrawnEdgesStore.setState({ drawn: 12 })
     mount({ defaultExpanded: true })
-    const line = screen.getByText('47 underlying relationships · 12 lines drawn · 2 types')
-    expect(line.getAttribute('title')).toContain(unitMeaning('relationships'))
+    const line = screen.getByText('47 underlying flows · 12 lines drawn · 2 types')
+    expect(line.getAttribute('title')).toContain(unitMeaning('flows'))
     expect(line.getAttribute('title')).toContain(unitMeaning('lines'))
   })
 
-  it('a row says its count is in underlying relationships', () => {
+  it('a row says its count is in underlying flows', () => {
     mount({ defaultExpanded: true })
     const title = rowFor('FLOWS_TO').getAttribute('title') ?? ''
-    expect(title).toContain('30 underlying relationships in view carry this type')
-    expect(title).toContain(unitMeaning('relationships'))
+    expect(title).toContain('30 underlying flows in view carry this type')
+    expect(title).toContain(unitMeaning('flows'))
   })
 
   it('Lineage off shows "Lineage is off" and renders no totals', () => {
     useDrawnEdgesStore.setState({ drawn: 12 })
     const { container } = mount({ lineageOn: false, defaultExpanded: true })
     expect(screen.getByText('Lineage is off')).toBeTruthy()
-    expect(screen.getByText('Turn Lineage on in the header to see connections.')).toBeTruthy()
+    expect(screen.getByText('Turn Lineage on in the header to see flows.')).toBeTruthy()
     expect(headerButton().textContent).toMatch(/Off/)
     // No number of any kind while lineage is off — not the total, not "drawn".
     expect(container.textContent).not.toMatch(/\d/)
@@ -182,8 +193,16 @@ describe('ConnectionsPanel', () => {
     )
     expect(order).toEqual(['FLOWS_TO', 'DERIVES_FROM', 'OWNS'])
 
+    // Its tooltip names the kind too — what is not drawn is flows.
+    expect(hidden.getAttribute('title')).toContain('Its flows are not drawn and not counted.')
+
     fireEvent.click(screen.getByTitle('Show this type'))
     expect(onToggleType).toHaveBeenCalledWith('OWNS')
+  })
+
+  it('an empty board says there are no flows, not no connections', () => {
+    mount({ model: modelOf([]), defaultExpanded: true })
+    expect(screen.getByText('No flows in view')).toBeTruthy()
   })
 
   it('hovering a row emits that type bundle ids; leaving emits null', () => {
@@ -436,7 +455,7 @@ describe('ConnectionsPanel', () => {
     // per member. A trace cannot: its lines carry a total, not a list, so
     // the reader is told rather than left to wonder why nothing moved.
     const clause =
-      'During a trace, a line that carries several types keeps its full underlying-relationship count when one of them is hidden.'
+      'During a trace, a line that carries several types keeps its full underlying-flow count when one of them is hidden.'
     const { unmount } = mount({ defaultExpanded: true })
     expect(rowFor('FLOWS_TO').getAttribute('title')).not.toMatch(/During a trace/)
     unmount()
