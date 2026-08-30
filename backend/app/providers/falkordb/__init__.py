@@ -32,7 +32,6 @@ from .provider import (
     FalkorDBProvider,
     _sanitize_label,
     AggRunMeta,
-    _node_from_props,
     _split_user_properties,
     _compute_searchable_text,
     _decode_keyset_cursor,
@@ -54,8 +53,6 @@ from .provider import (
     CLOSURE_FRONTIER_PROBE_CAP,
     CLOSURE_WALK_SLICE,
     CLOSURE_WALK_RESERVE_FRACTION,
-    _UNLABELED_URN_UNSUPPORTED,
-    _INDEX_HEALTH_LOGGED,
 )
 
 # The rest of the export list: names ``provider.py`` no longer imports for
@@ -63,7 +60,7 @@ from .provider import (
 # straight from the leaf module that defines them. Same objects either
 # way — the split above is purely about which module happens to import
 # them first, not about identity.
-from .rowmap import _RESERVED_NODE_KEYS, _sanitize_node_properties
+from .rowmap import _RESERVED_NODE_KEYS, _sanitize_node_properties, _node_from_props
 from .hosts import resolve_falkordb_target, _normalize_falkordb_host
 from .cursors import CursorMismatchError, _keyset_sort_key, _CURSOR_PREFIX
 from .knobs import (
@@ -72,6 +69,7 @@ from .knobs import (
     _resolve_bulk_create_knobs,
 )
 from .aggregation import AggregationBatchAbort
+from .schema import _UNLABELED_URN_UNSUPPORTED, _INDEX_HEALTH_LOGGED
 from .errors import (
     _is_cluster_routing_error,
     _is_null_handle_error,
