@@ -31,7 +31,6 @@ from .provider import (
     # Section A of export-surface.md — imported by name at 104 call sites.
     FalkorDBProvider,
     _sanitize_label,
-    AggRunMeta,
     _split_user_properties,
     _compute_searchable_text,
     _decode_keyset_cursor,
@@ -67,7 +66,7 @@ from .knobs import (
     _BULK_CREATE_TIMEOUT_DEFAULT,
     _resolve_bulk_create_knobs,
 )
-from .aggregation import AggregationBatchAbort
+from .aggregation import AggregationBatchAbort, AggRunMeta
 from .schema import _UNLABELED_URN_UNSUPPORTED, _INDEX_HEALTH_LOGGED
 from .errors import (
     _is_cluster_routing_error,
