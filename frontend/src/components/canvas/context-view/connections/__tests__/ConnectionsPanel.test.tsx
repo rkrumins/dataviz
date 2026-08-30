@@ -109,6 +109,7 @@ const rowFor = (type: string) =>
   document.querySelector<HTMLElement>(`[data-connection-row="${type}"]`) as HTMLElement
 const rowList = () => document.querySelector<HTMLElement>('[data-connection-rows]') as HTMLElement
 const lastHighlight = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.at(-1)?.[0] as ReadonlySet<string> | null
+const DIRECTION_TITLE = '→ flows with the layer order · ← flows back upstream · ⇄ both ways'
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -468,5 +469,84 @@ describe('ConnectionsPanel', () => {
     expect(split.className.split(/\s+/)).toEqual(
       expect.arrayContaining(['group-hover/row:hidden', 'group-focus-within/row:hidden']),
     )
+  })
+
+  // ─── Fix round 3 (the dock: one surface, two panels) ───────────────────────
+
+  it('the description wraps instead of being cut off mid-word', () => {
+    // Measured at the dock's real 320px: the description was hard-truncated to
+    // one line — "Many detailed flows…" — while the direction split sat on the
+    // same line taking the rest of it. A sentence the ontology wrote to explain
+    // the type is worth two lines; it is never worth half of one.
+    mount({
+      defaultExpanded: true,
+      resolveType: (type) => ({
+        ...resolveType(type),
+        label: 'Combined flow',
+        description: 'Many detailed flows between two items, shown as one connection.',
+      }),
+    })
+    const desc = rowFor('FLOWS_TO').querySelector<HTMLElement>('[data-connection-description]')!
+    expect(desc.textContent).toBe('Many detailed flows between two items, shown as one connection.')
+    expect(desc.className.split(/\s+/)).toEqual(expect.arrayContaining(['line-clamp-2']))
+    expect(desc.className).not.toMatch(/\btruncate\b/)
+  })
+
+  it('the description has the line to itself — the direction split never shares it', () => {
+    mount({ defaultExpanded: true })
+    const row = rowFor('FLOWS_TO')
+    const desc = row.querySelector<HTMLElement>('[data-connection-description]')!
+    const split = within(row).getByTitle(DIRECTION_TITLE)
+    expect(desc.parentElement).toBe(row)
+    expect(split.parentElement).not.toBe(desc.parentElement)
+    expect(desc.contains(split)).toBe(false)
+  })
+
+  it('a type with nothing to say leaves no empty slot behind', () => {
+    // The description is a LINE of the row, not a box inside one: with no
+    // description there must be no element and no gap where one would be.
+    mount({
+      defaultExpanded: true,
+      resolveType: (type) =>
+        type === 'FLOWS_TO' ? { ...resolveType(type), description: '' } : resolveType(type),
+    })
+    expect(rowFor('FLOWS_TO').querySelector('[data-connection-description]')).toBeNull()
+    expect(rowFor('FLOWS_TO').children).toHaveLength(2)
+    expect(rowFor('DERIVES_FROM').children).toHaveLength(3)
+  })
+
+  it('a long ontology label keeps the whole top line to itself', () => {
+    const label = 'Physically materialises into a downstream reporting table'
+    mount({
+      defaultExpanded: true,
+      resolveType: (type) => ({ ...resolveType(type), label }),
+    })
+    const row = rowFor('FLOWS_TO')
+    const labelEl = within(row).getByText(label)
+    // Nothing but the swatch and the count shares the label's line, so the
+    // name loses characters only when the panel itself runs out of width.
+    const topLine = row.children[0]
+    expect(topLine.contains(labelEl)).toBe(true)
+    expect(topLine.contains(row.querySelector('[data-connection-description]')!)).toBe(false)
+    expect(topLine.contains(within(row).getByTitle(DIRECTION_TITLE))).toBe(false)
+  })
+
+  it('the rows read at the Data loads card scale, and every number is tabular', () => {
+    // 13px primary / 11px secondary, the same as the notification cards the
+    // panel above it records — the two panels are one dock, not two designs.
+    mount({ hiddenTypes: new Set(['OWNS']), defaultExpanded: true })
+    const row = rowFor('FLOWS_TO')
+
+    expect(within(row).getByText('Flows to').className).toMatch(/text-\[13px\]/)
+    expect(within(row).getByText('30').className).toMatch(/text-\[13px\]/)
+    expect(row.querySelector('[data-connection-description]')!.className).toMatch(/text-\[11px\]/)
+
+    const split = within(row).getByTitle(DIRECTION_TITLE)
+    expect(split.className).toMatch(/text-\[11px\]/)
+    // Counts and the split are read against each other down the column.
+    expect(split.className).toMatch(/tabular-nums/)
+    expect(within(row).getByText('30').className).toMatch(/tabular-nums/)
+    // A hidden row is still a row: same label scale, so nothing jumps.
+    expect(within(rowFor('OWNS')).getByText('Owns').className).toMatch(/text-\[13px\]/)
   })
 })
