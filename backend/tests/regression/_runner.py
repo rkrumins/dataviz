@@ -157,13 +157,33 @@ async def _pin(
     assert_snapshot(provider=snapshot_label, name=name, actual=result)
 
 
+async def _call_optional(provider: GraphDataProvider, method_name: str, *args: Any, **kwargs: Any) -> Any:
+    """Call a provider method that isn't declared on ``GraphDataProvider``
+    (``get_nodes_batch``, ``get_node_degrees``, ``preflight`` — each
+    implemented by *some* concrete providers today, guaranteed by none of
+    them; ``get_node_degrees`` in particular is FalkorDB-only, absent even
+    from the Neo4j and Spanner adapters). Plain attribute access
+    (``provider.method_name(...)``) raises ``AttributeError`` the moment
+    the argument expression is built — *before* ``_pin`` is even entered,
+    so its ``NotImplementedError`` handling never gets a chance to run.
+    A provider missing the method entirely is the same "not implemented"
+    signal as one that raises, so both are funnelled into that one path
+    here instead of crashing one of them.
+    """
+    fn = getattr(provider, method_name, None)
+    if fn is None:
+        raise NotImplementedError(f"{type(provider).__name__} has no {method_name}")
+    return await fn(*args, **kwargs)
+
+
 async def _counts_fast_subset(provider: GraphDataProvider) -> Optional[Dict[str, int]]:
-    """``get_counts_fast`` isn't on the ABC (it's a FalkorDB-only fast
-    path — see ``_runner`` callers reaching it with ``getattr``). Absent,
-    unsupported (the method itself returns ``None`` when counts can't be
-    trusted), and an unimplemented raise all collapse to plain ``None``:
-    every caller's fallback is the same regardless of which of the three
-    it was — use ``get_stats`` instead.
+    """``get_counts_fast`` isn't on the ABC either (also FalkorDB-only).
+    Unlike ``_call_optional`` above, this pin's own contract (see the
+    task brief) collapses absence to plain ``None`` rather than the
+    ``"NotImplementedError"`` sentinel, because a *present* method also
+    returns ``None`` on its own (when counts can't be trusted) — absent,
+    unsupported, and an unimplemented raise all mean the same thing to
+    every caller: fall back to ``get_stats``.
     """
     fn = getattr(provider, "get_counts_fast", None)
     if fn is None:
@@ -203,8 +223,9 @@ async def run_extended(provider: GraphDataProvider, *, snapshot_label: str) -> N
     # --- Batch hydration / navigation ------------------------------------
     await _pin(
         snapshot_label=snapshot_label, name="get_nodes_batch_mixed",
-        call=provider.get_nodes_batch(
-            ["urn:test:dataset:d1", "urn:test:schema:s1", "urn:test:missing"]
+        call=_call_optional(
+            provider, "get_nodes_batch",
+            ["urn:test:dataset:d1", "urn:test:schema:s1", "urn:test:missing"],
         ),
     )
     await _pin(
@@ -224,11 +245,17 @@ async def run_extended(provider: GraphDataProvider, *, snapshot_label: str) -> N
     await _pin(
         snapshot_label=snapshot_label, name="get_distinct_values_entity_type",
         call=provider.get_distinct_values("entityType"),
+        # `DISTINCT labels(n)[0]` carries no ORDER BY (see falkordb_provider.py);
+        # a bare list of strings passes `_stabilize` unsorted (it only sorts
+        # lists of dicts). Same treatment as discover_schema_subset's labels
+        # above, and for the same reason.
+        normalize=lambda values: sorted(values or []),
     )
     await _pin(
         snapshot_label=snapshot_label, name="get_node_degrees_datasets",
-        call=provider.get_node_degrees(
-            ["urn:test:dataset:d1", "urn:test:dataset:d2"], ltypes
+        call=_call_optional(
+            provider, "get_node_degrees",
+            ["urn:test:dataset:d1", "urn:test:dataset:d2"], ltypes,
         ),
     )
     await _pin(
@@ -318,6 +345,6 @@ async def run_extended(provider: GraphDataProvider, *, snapshot_label: str) -> N
     )
     await _pin(
         snapshot_label=snapshot_label, name="preflight_verdict",
-        call=provider.preflight(deadline_s=2.0),
+        call=_call_optional(provider, "preflight", deadline_s=2.0),
         normalize=lambda pr: {"ok": pr.ok, "reason": pr.reason},
     )
