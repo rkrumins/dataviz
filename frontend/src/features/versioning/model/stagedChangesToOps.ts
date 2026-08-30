@@ -40,8 +40,44 @@ function nodeUpdatePayload(after: Record<string, unknown>): Record<string, unkno
   if ('tags' in after) out.tags = after.tags
   else if ('classifications' in after) out.tags = after.classifications
   if ('businessLabel' in after) out.businessLabel = after.businessLabel
+  // The drawer's Description and Metadata inputs edit these three as TOP-LEVEL node fields, and
+  // they are real GraphNode fields end to end — the backend merges them onto the entity's payload
+  // and the projector writes n.description / n.qualifiedName / n.sourceSystem (and folds them into
+  // searchableText), so they round-trip. Unmapped, an edit to only these produced an EMPTY payload,
+  // which the loop below skipped — a description edit made no request at all.
+  if ('description' in after) out.description = after.description
+  if ('qualifiedName' in after) out.qualifiedName = after.qualifiedName
+  if ('sourceSystem' in after) out.sourceSystem = after.sourceSystem
   if (after.properties && typeof after.properties === 'object') out.properties = after.properties
   return out
+}
+
+/** The `after` keys `nodeUpdatePayload` reads AND the backend stores. A node field the user changed
+ *  that is NOT here never lands — see `unsavedNodeFields`. `businessLabel` is deliberately absent
+ *  though the payload carries it: nothing on the backend reads it (it appears in no Python, the
+ *  projector never writes it, and the drawer reads it back out of `n.properties`), so counting it as
+ *  saved would be the same lie this list exists to prevent. */
+const MAPPED_NODE_KEYS = new Set([
+  'displayName', 'label', 'entityType', 'type', 'tags', 'classifications',
+  'description', 'qualifiedName', 'sourceSystem', 'properties',
+])
+
+/** Backend-managed or client-only node fields: deliberately never sent, and never a loss.
+ *  `layerAssignment` is VIEW config (referenceLayout.assignments); the rest are read-only. */
+const UNSENT_NODE_KEYS = new Set(['urn', 'version', 'childCount', 'lastSyncedAt', 'layerAssignment'])
+
+/** The node fields a staged entity edit CHANGED that `nodeUpdatePayload` cannot carry — an edit the
+ *  backend will never see. Empty for every other change type. The save path reports these rather
+ *  than letting a green "saved" stand over an edit that never left the browser: an update whose
+ *  whole payload maps to nothing is skipped below, and one that maps only in part still commits. */
+export function unsavedNodeFields(c: StagedChange): string[] {
+  if (c.type !== 'update_entity' && c.type !== 'rename_entity') return []
+  const before = asObj(c.before)
+  const after = asObj(c.after)
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((k) => !MAPPED_NODE_KEYS.has(k) && !UNSENT_NODE_KEYS.has(k))
+    .filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]))
+    .sort()
 }
 
 export function stagedChangesToOps(
@@ -58,6 +94,8 @@ export function stagedChangesToOps(
       case 'rename_entity':
       case 'update_entity': {
         const payload = nodeUpdatePayload(asObj(c.after))
+        // An empty payload is a no-op patch, so it is not sent — but it is never silently dropped:
+        // `unsavedNodeFields` names exactly what this skipped, and the save reports it.
         if (Object.keys(payload).length > 0) {
           ops.push({ op: 'update', kind: 'node', id: c.targetUrn ?? c.targetId, payload,
                      baseVersion: versionOf(c.before) })

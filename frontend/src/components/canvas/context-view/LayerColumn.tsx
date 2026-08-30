@@ -986,7 +986,18 @@ export const LayerColumn = React.memo(function LayerColumn({
       }
       case 'Enter': {
         const item = navigableItems[focusIndex]
-        if (item) onSelect(item.node.id)
+        if (!item) break
+        // Enter on the row that is ALREADY selected is the canvas's documented
+        // "Enter — Edit Selected": let it through. Swallowing every Enter left
+        // keyboard users re-selecting the row they were on, forever.
+        if (item.node.id === selectedNodeId) break
+        // End the SELECTING keystroke at the React root. This scroller is a
+        // plain div, so useCanvasKeyboard's document listener does not treat it
+        // as an activatable control: without this, one Enter selected the row
+        // here AND fired the canvas `onEdit` — on the node selected BEFORE this
+        // keystroke, since React has not flushed onSelect by then.
+        e.stopPropagation()
+        onSelect(item.node.id)
         break
       }
       case 'Home':
@@ -998,7 +1009,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, reorderEnabled, onReorderNudge])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, selectedNodeId, reorderEnabled, onReorderNudge])
 
   // After a keyboard reorder, re-point focus at the moved node's new row
   // (its index shifts by the displaced neighbor's visible subtree size).
