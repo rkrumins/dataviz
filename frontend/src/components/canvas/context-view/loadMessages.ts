@@ -69,8 +69,11 @@ export function openedViewMessage(viewName: string | undefined, count: number): 
     : `Opened this view · ${n(count)} items`
 }
 
+/** The RAW edge fetch — the set `lineageEdges` filters containment out of.
+ *  It carries structural relationships as well as flows, so the covering
+ *  word is the only honest one here. */
 export function connectionsLoadedMessage(count: number): string {
-  return `Connections · ${n(count)}`
+  return `Relationships · ${n(count)}`
 }
 
 export function layersPlacedMessage(placed: number, layers: number, unplaced: number): string {

@@ -34,6 +34,7 @@ import { SearchHitInlineRow } from './SearchHitInlineRow'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
 import { densityRowHeights, TECHNICAL_LINE_HEIGHT } from './density'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
@@ -136,7 +137,7 @@ interface LayerColumnProps {
   /** Render the per-row ambient in/out hairlines (follows the lineage-
    *  flow master switch). Now anchored to the row box, not the overlay. */
   showLineageIndicators?: boolean
-  /** Show the connection-density gutter (summarized edge modes only). */
+  /** Show the flow-density gutter (summarized edge modes only). */
   showDensityGutter?: boolean
   /** Anchor Rail — the selected node's off-screen partners that live in
    *  THIS column, docked as proxy chips the edge overlay anchors to. */
@@ -1088,11 +1089,11 @@ export const LayerColumn = React.memo(function LayerColumn({
     return { above, below }
   }, [scrollTick, flatTree, virtualizer, isRealRow])
 
-  // Periphery summary — connections from visible entities to partners
-  // beyond THIS column's fold, computed by the edge overlay. Merged into
-  // the "N above/below" chips so rows and connections read as one
-  // labeled statement ("↑ 97 rows · 306 connections") instead of two
-  // unlabeled numbers in different units floating near each other.
+  // Periphery summary — flows from visible entities to partners beyond
+  // THIS column's fold, computed by the edge overlay. Merged into the
+  // "N above/below" chips so rows and lines read as one labeled statement
+  // ("↑ 97 rows · 306 lines") instead of two unlabeled numbers in
+  // different units floating near each other.
   const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
@@ -1133,7 +1134,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     return Math.log2(1 + Math.max(1, maxCount))
   }, [showLineageIndicators, lineageCounts])
 
-  // Where does connection mass live across the WHOLE column (not just the
+  // Where does flow mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out
   // lineage counts of its rows. Normalized 0..1 for the heat strip.
   const densityBuckets = useMemo(() => {
@@ -1652,7 +1653,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               column edges. A gradient veil lets the boundary rows fade
               out beneath it (the veil IS the signal that more follows),
               and one compact centered label states exactly how much:
-              "↑ N more · M connections". Scrims float, so scrolling
+              "↑ N more · M lines". Scrims float, so scrolling
               never shifts layout, and unlike the old floating pill the
               occlusion reads as an intentional fade — never as chrome
               covering a card. Click scrolls the column. ── */}
@@ -1677,7 +1678,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       {(periphery?.upEdges ?? 0) > 0 && (
                         <>
                           <p className="text-ink-muted">
-                            {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'} from
+                            {periphery!.upEdges.toLocaleString()} {unitNoun(periphery!.upEdges, 'lines')} from
                             entities on screen lead up there:
                           </p>
                           <div className="mt-1">
@@ -1693,6 +1694,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                               </p>
                             )}
                           </div>
+                          <p className="mt-1 text-ink-muted/70">{unitMeaning('lines')}</p>
                         </>
                       )}
                       <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll up</p>
@@ -1714,7 +1716,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <>
                         {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
                         <span className="tabular-nums opacity-80">
-                          {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
+                          {periphery!.upEdges.toLocaleString()} {unitNoun(periphery!.upEdges, 'lines')}
                         </span>
                       </>
                     )}
@@ -1746,7 +1748,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       {(periphery?.downEdges ?? 0) > 0 && (
                         <>
                           <p className="text-ink-muted">
-                            {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'} from
+                            {periphery!.downEdges.toLocaleString()} {unitNoun(periphery!.downEdges, 'lines')} from
                             entities on screen lead down there:
                           </p>
                           <div className="mt-1">
@@ -1762,6 +1764,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                               </p>
                             )}
                           </div>
+                          <p className="mt-1 text-ink-muted/70">{unitMeaning('lines')}</p>
                         </>
                       )}
                       <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll down</p>
@@ -1783,7 +1786,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <>
                         {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
                         <span className="tabular-nums opacity-80">
-                          {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
+                          {periphery!.downEdges.toLocaleString()} {unitNoun(periphery!.downEdges, 'lines')}
                         </span>
                       </>
                     )}
@@ -1832,7 +1835,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   type="button"
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyMore() }}
-                  title="Every connection of the selected entity, grouped and searchable"
+                  title="Every flow of the selected entity, grouped and searchable"
                   className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
@@ -1866,7 +1869,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           </AnimatePresence>
 
           {/* Density gutter — a slim heat strip on the column's right edge
-              showing where connection mass lives across the FULL scroll
+              showing where flow mass lives across the FULL scroll
               range (the budget/stub modes summarize edges, this shows
               where the summarized mass is). Click a hot zone to jump. */}
           {densityBuckets && (
@@ -1874,7 +1877,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               type="button"
               data-canvas-interactive
               onClick={handleGutterClick}
-              title="Connection density across this column — click to jump"
+              title="Flow density across this column — click to jump"
               className="absolute right-[2px] top-8 bottom-8 w-[4px] z-20 pointer-events-auto cursor-pointer flex flex-col gap-[1px] opacity-60 hover:opacity-100 transition-opacity"
             >
               {densityBuckets.map((v, i) => (

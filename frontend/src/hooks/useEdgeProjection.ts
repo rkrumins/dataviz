@@ -592,10 +592,39 @@ export function useEdgeProjection({
     // tested for truthiness alone, so an empty-but-present array skipped the
     // originalType fallback and the member vanished from the bundle's types
     // while still counting toward edgeCount.
+    //
+    // A roll-up naming SEVERAL types is filed under its own type instead of all
+    // of them. The server builds one as a single `count(r)` beside a
+    // `collect(DISTINCT type(r))`, so it carries no per-type split to hand out:
+    // giving its whole weight to each type read PRODUCES 4,300 and TRANSFORMS
+    // 4,300 beneath a 4,300 header, and hiding either one changed nothing —
+    // the member still carried the other, so it stayed on the board at full
+    // weight while its row claimed to have been subtracted.
     const memberTypes = (e: any): string[] => {
+      const own = e.originalType ? [e.originalType] : []
       const arr = e.data?.edgeTypes
-      if (Array.isArray(arr) && arr.length > 0) return arr
-      return e.originalType ? [e.originalType] : []
+      if (!Array.isArray(arr) || arr.length === 0) return own
+      if (arr.length > 1 && e.data?.isAggregated && own.length > 0) return own
+      return arr
+    }
+
+    // How many underlying relationships ONE member stands for. A raw edge is
+    // itself, so it weighs one; a roll-up arrives carrying the real total and
+    // must contribute ALL of it. Counting members instead reported a rollup
+    // summarising 4,300 table-level flows as `1`, which then sorted below any
+    // pair holding two raw edges when the adaptive budget culls.
+    //
+    // Two shapes, one meaning: the collapsed aggregate built in section A puts
+    // the total on `data.edgeCount`, while a MATERIALIZED `:AGGREGATED` graph
+    // edge arrives through ordinary hydration with the worker's `weight` mapped
+    // onto `data.sourceEdgeCount` (`toCanvasEdge`). Reading only the first
+    // weighed the second as 1, so the drawer — whose `edgeWeight` reads both —
+    // said 4,300 about the very line this panel said 1 about.
+    const memberWeight = (e: { data?: { isAggregated?: boolean, edgeCount?: number, sourceEdgeCount?: number } }): number => {
+      const d = e.data
+      if (!d?.isAggregated) return 1
+      const n = d.edgeCount ?? d.sourceEdgeCount
+      return typeof n === 'number' && n > 0 ? n : 1
     }
 
     // Finalize: bundle groups into projected edges (without delegation — applied in separate memo)
@@ -618,12 +647,15 @@ export function useEdgeProjection({
       let isAggregated = false
       let isBrowseBundle = false
       let maxConfidence = 0
+      let rawWeight = 0
+      let rollupWeight = 0
 
       const sourceId = members[0].source
       const targetId = members[0].target
 
       members.forEach(e => {
-        if (e.data?.isAggregated) isAggregated = true
+        if (e.data?.isAggregated) { isAggregated = true; rollupWeight += memberWeight(e) }
+        else rawWeight += memberWeight(e)
         if (e._browseBundled) isBrowseBundle = true
         memberTypes(e).forEach((et: string) => {
           if (hiddenEdgeTypes?.has(et.toUpperCase())) return
@@ -636,7 +668,12 @@ export function useEdgeProjection({
       // relationship between the two cards it touches.
       const isGhost = isAggregated || isBrowseBundle || members.some((e: any) => e._lifted === true)
 
-      const edgeCount = members.length
+      // A roll-up summarises flows that can ALSO be members here in their own
+      // right (a search-revealed leaf lifts to the collapsed ancestor pair the
+      // roll-up covers), so its weight is evidence ABOUT the raw members rather
+      // than flows on top of them — max, not sum, the rule `collapseRecords`
+      // already states for the drawer.
+      const edgeCount = Math.max(rawWeight, rollupWeight)
       const typesArray = Array.from(distinctTypes)
 
       // Reverse-flow annotation: layer-index of target strictly less than

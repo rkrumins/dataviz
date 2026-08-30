@@ -157,7 +157,7 @@ const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
 const EMPTY_TYPE_SET: ReadonlySet<string> = new Set<string>()
 
 /**
- * ONE ontology lookup for the Connections panel's rows, the overlay's colour
+ * ONE ontology lookup for the Flows panel's rows, the overlay's colour
  * and the overlay's dash, CACHED PER TYPE. Each lookup builds a fresh
  * definition and allocates an icon element, and the overlay asks for one PER
  * EDGE on every compute pass — a pass that re-runs on hover. An estate has a
@@ -360,7 +360,7 @@ export function ContextViewCanvas({
   const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
-  // Connections panel: which connection types this user has hidden, per
+  // Flows panel: which flow types this user has hidden, per
   // view. Kept in localStorage keyed by view id, never in the view itself.
   const connectionsViewId = activeView?.id ?? ''
   const connectionVisibility = useConnectionVisibility(connectionsViewId)
@@ -3336,7 +3336,7 @@ export function ContextViewCanvas({
   useLoadingNotification(
     'ctx-hydrating-edges',
     hydrationPhase === 'edges',
-    'Loading connections…',
+    'Loading relationships…',
     () => connectionsLoadedMessage(useCanvasStore.getState().edges.length),
     hydrationFailed,
   )
@@ -3354,11 +3354,11 @@ export function ContextViewCanvas({
   // is a consequence of expanding something, not a thing the user did: it
   // re-runs on every expand and collapse, so announcing it put a system line
   // between every two of the user's own — and interleaved like that the panel's
-  // fold could never collapse them. The count belongs to the Connections panel
+  // fold could never collapse them. The count belongs to the Flows panel
   // directly below, which is where a reader can act on it. Only non-loading
   // notifications are recorded, so passing no success message keeps the log to
   // what the user actually did.
-  useLoadingNotification('ctx-agg-edges', isLoadingAggregatedEdges, 'Summarising connections…')
+  useLoadingNotification('ctx-agg-edges', isLoadingAggregatedEdges, 'Summarising flows…')
 
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
@@ -4809,7 +4809,7 @@ export function ContextViewCanvas({
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
-            <span className="font-medium">Showing the largest connections — narrow the selection to see more.</span>
+            <span className="font-medium">Showing the largest relationships — narrow the selection to see more.</span>
           </div>
         )}
         {/* Stale-source banner — a source-data change queued/ran a rebuild; the
@@ -4825,13 +4825,15 @@ export function ContextViewCanvas({
         )}
         {/* Edge-fetch integrity banner — an edge query failed and was
             swallowed to keep nodes rendering; the canvas may be missing
-            connections. Retry re-hydrates and refetches aggregated edges. */}
+            relationships. That fetch is the RAW one, structural edges
+            included, so the banner uses the covering word rather than
+            "flows". Retry re-hydrates and refetches aggregated edges. */}
         {(edgeFetchFailures > 0 || aggregationError) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
-            <span className="font-medium">Some connections could not be loaded — the canvas may be incomplete.</span>
+            <span className="font-medium">Some relationships could not be loaded — the canvas may be incomplete.</span>
             <button
               className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
               onClick={() => {
@@ -5071,7 +5073,9 @@ export function ContextViewCanvas({
               data-canvas-interactive
             >
               <span className="tabular-nums font-medium text-ink">{framePill.offCount}</span>
-              <span>connection{framePill.offCount === 1 ? '' : 's'} off-screen</span>
+              {/* neighborIds is a Set of NODE IDS: this counts entities,
+                  which is neither a flow nor a line. */}
+              <span>entit{framePill.offCount === 1 ? 'y' : 'ies'} off-screen</span>
               <button
                 type="button"
                 className="px-2 py-0.5 rounded-full font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
@@ -5117,7 +5121,7 @@ export function ContextViewCanvas({
                   {nodeMap.get(framedContext.nodeId)?.data.label ?? framedContext.nodeId}
                 </span>
                 {' '}· <span className="tabular-nums">{framedContext.count}</span>{' '}
-                connection{framedContext.count === 1 ? '' : 's'}
+                entit{framedContext.count === 1 ? 'y' : 'ies'}
               </span>
               <kbd className="flex-shrink-0 px-1.5 py-0.5 rounded-md border border-white/10 bg-white/[0.04] text-[9.5px] font-semibold uppercase tracking-wide text-ink-muted/70">
                 Esc
