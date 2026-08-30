@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RegistryConnections } from './RegistryConnections'
+import { useNotificationStore } from '@/components/ui/notifications'
 
 const {
   listProviders,
@@ -105,7 +106,11 @@ describe('RegistryConnections', () => {
     testOne.mockResolvedValue(undefined)
     setHealth.mockReturnValue(undefined)
     getImpact.mockResolvedValue({ catalogItems: [], workspaces: [], views: [] })
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
   })
+
+  /** What the app's ONE notification stack is currently holding. */
+  const raised = () => useNotificationStore.getState().notifications
 
   it('shows the high-level source onboarding guide above the provider empty state', async () => {
     listProviders.mockResolvedValue([])
@@ -150,5 +155,54 @@ describe('RegistryConnections', () => {
     })
 
     expect(screen.getByRole('heading', { name: /delete provider/i })).toBeInTheDocument()
+    // Nothing was deleted, so nothing may claim it was.
+    expect(raised()).toHaveLength(0)
+  })
+
+  it('confirms the delete, and says what went with it', async () => {
+    // The dialog opens on a "Blast Radius Warning" naming these three by name and
+    // then, on success, simply closed. Deleting infrastructure that other people's
+    // views depend on is not an action to perform in silence.
+    listProviders.mockResolvedValue([sampleProvider])
+    getImpact.mockResolvedValue({
+      catalogItems: [{ id: 'c1', name: 'orders' }],
+      workspaces: [{ id: 'w1', name: 'Sales' }],
+      views: [{ id: 'v1', name: 'Order lineage' }],
+    })
+    deleteProvider.mockResolvedValue(undefined)
+
+    const user = userEvent.setup()
+    renderRegistry()
+
+    await waitFor(() => expect(screen.getByText(/warehouse graph/i)).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /delete provider warehouse graph/i }))
+    await waitFor(() => expect(getImpact).toHaveBeenCalledWith(sampleProvider.id))
+
+    await user.type(screen.getByPlaceholderText(sampleProvider.name), sampleProvider.name)
+    await user.click(screen.getByRole('button', { name: /^delete provider$/i }))
+
+    await waitFor(() => expect(raised()).toHaveLength(1))
+    expect(raised()[0].type).toBe('success')
+    expect(raised()[0].message).toBe(
+      'Deleted \u201cWarehouse Graph\u201d and the 3 assets that depended on it.')
+  })
+
+  it('does not claim a blast radius when there was none', async () => {
+    listProviders.mockResolvedValue([sampleProvider])
+    deleteProvider.mockResolvedValue(undefined)
+
+    const user = userEvent.setup()
+    renderRegistry()
+
+    await waitFor(() => expect(screen.getByText(/warehouse graph/i)).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /delete provider warehouse graph/i }))
+    await waitFor(() => expect(getImpact).toHaveBeenCalledWith(sampleProvider.id))
+
+    await user.type(screen.getByPlaceholderText(sampleProvider.name), sampleProvider.name)
+    await user.click(screen.getByRole('button', { name: /^delete provider$/i }))
+
+    await waitFor(() => expect(raised()).toHaveLength(1))
+    expect(raised()[0].message).toBe(
+      'Deleted \u201cWarehouse Graph\u201d. Nothing else depended on it.')
   })
 })

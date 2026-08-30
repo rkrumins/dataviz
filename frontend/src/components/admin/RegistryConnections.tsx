@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
 import { providerService, friendlyError, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
 import { usePermission } from '@/store/auth'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
 import { StatusChip } from '@/components/insights/StatusChip'
 import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
@@ -189,6 +190,7 @@ export function RegistryConnections() {
     // but write paths (register / edit / delete / test / discover) stay
     // platform-admin-only because the rows carry credentials.
     const canManage = usePermission('system:admin')
+    const { notify } = useAppNotifications()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
     // Backend-published per-provider status — populated by the global
@@ -244,8 +246,17 @@ export function RegistryConnections() {
 
     const deleteProvider = async () => {
         if (!deleteTarget) return
+        const name = deleteTarget.name
+        // The dialog just warned about these by name. Say which way it went — a
+        // rejection is reported by the dialog itself, which stays open with it.
+        const dependents = deleteImpact
+            ? deleteImpact.catalogItems.length + deleteImpact.workspaces.length + deleteImpact.views.length
+            : 0
         await providerService.delete(deleteTarget.id)
         await loadProviders()
+        notify('success', dependents > 0
+            ? `Deleted “${name}” and the ${dependents} ${dependents === 1 ? 'asset' : 'assets'} that depended on it.`
+            : `Deleted “${name}”. Nothing else depended on it.`)
     }
 
     const handleEditProvider = (p: ProviderResponse) => {

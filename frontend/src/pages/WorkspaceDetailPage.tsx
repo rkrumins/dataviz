@@ -195,14 +195,37 @@ export function WorkspaceDetailPage() {
     // ── Handlers ───────────────────────────────────────────
     const handleSaveHeader = async () => {
         if (!wsId || !editName.trim()) return
-        await workspaceService.update(wsId, { name: editName, description: editDesc || undefined })
+        const name = editName.trim()
+        const renamed = name !== workspace?.name
+        try {
+            await workspaceService.update(wsId, { name: editName, description: editDesc || undefined })
+        } catch (err) {
+            // Leave the header in edit mode with what they typed — closing it here
+            // would swallow the edit as well as the failure.
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not save the changes to “${workspace?.name ?? 'this workspace'}”.`)
+            return
+        }
         setEditingHeader(false)
+        notify('success', renamed
+            ? `Workspace renamed to “${name}”.`
+            : `Description updated for “${name}”.`)
         reload()
     }
 
     const handleSetPrimary = async (dsId: string) => {
         if (!wsId) return
-        await workspaceService.setPrimaryDataSource(wsId, dsId)
+        const label = workspace?.dataSources.find(ds => ds.id === dsId)?.label || 'That data source'
+        try {
+            await workspaceService.setPrimaryDataSource(wsId, dsId)
+            notify('success', `“${label}” is now the primary data source for this workspace.`)
+        } catch (err) {
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not make “${label}” the primary data source.`)
+        }
+        // Either way — the Primary badge on the grid has to end up matching the server.
         reload()
     }
 
@@ -225,27 +248,48 @@ export function WorkspaceDetailPage() {
         const nameChanged = pending.dedicatedGraphName !== original.dedicatedGraphName
         const identityChanged = pending.identityProperty !== original.identityProperty
         const namePropChanged = pending.nameProperty !== original.nameProperty
-        if (modeChanged) {
-            await workspaceService.setProjectionMode(wsId, dsId, pending.projectionMode)
+        if (!modeChanged && !nameChanged && !identityChanged && !namePropChanged) return
+        const label = workspace?.dataSources.find(ds => ds.id === dsId)?.label || 'this data source'
+        try {
+            if (modeChanged) {
+                await workspaceService.setProjectionMode(wsId, dsId, pending.projectionMode)
+            }
+            if (nameChanged || identityChanged || namePropChanged) {
+                await workspaceService.updateDataSource(wsId, dsId, {
+                    ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
+                    // Empty string clears the override server-side, so the source
+                    // inherits from its provider / workspace / the platform again.
+                    ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
+                    ...(namePropChanged ? { nameProperty: pending.nameProperty } : {}),
+                })
+            }
+            notify('success', `Aggregation settings saved for “${label}”.`)
+        } catch (err) {
+            // Two writes, not one: the mode can land and the rest fail. Reload either
+            // way so the panel resyncs to whatever actually made it to the server.
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not save the aggregation settings for “${label}”.`)
         }
-        if (nameChanged || identityChanged || namePropChanged) {
-            await workspaceService.updateDataSource(wsId, dsId, {
-                ...(nameChanged ? { dedicatedGraphName: pending.dedicatedGraphName || undefined } : {}),
-                // Empty string clears the override server-side, so the source
-                // inherits from its provider / workspace / the platform again.
-                ...(identityChanged ? { identityProperty: pending.identityProperty } : {}),
-                ...(namePropChanged ? { nameProperty: pending.nameProperty } : {}),
-            })
-        }
-        if (modeChanged || nameChanged || identityChanged || namePropChanged) {
-            notify('success', 'Aggregation settings saved')
-            reload()
-        }
+        reload()
     }
 
     const handleEditDsSave = async (label: string, ontologyId: string | undefined) => {
         if (!wsId || !selectedDs) return
-        await workspaceService.updateDataSource(wsId, selectedDs.id, { label, ontologyId })
+        const renamed = label !== (selectedDs.label ?? '')
+        try {
+            await workspaceService.updateDataSource(wsId, selectedDs.id, { label, ontologyId })
+        } catch (err) {
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not save the changes to “${selectedDs.label || 'this data source'}”.`)
+            // Rethrown so the panel keeps its edit form — and the typed label — open.
+            // Same contract as handlePurge below.
+            throw err
+        }
+        notify('success', renamed
+            ? `Data source renamed to “${label}”.`
+            : `Ontology saved for “${label}”.`)
         reload()
     }
 
