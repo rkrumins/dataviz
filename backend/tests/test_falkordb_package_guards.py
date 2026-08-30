@@ -585,10 +585,11 @@ def test_guard6_export_list_identity():
 #     test itself; it is stated once, there, so the two cannot drift.
 #
 # The hazard the fixture's TTL=0 line guards against elsewhere is real,
-# just not on this method: ``get_stats`` (stats.py:63) and
-# ``get_ontology_metadata`` DO have a
-# ``if self._SCHEMA_CACHE_TTL > 0 and not bypass_cache:`` cache-read gate
-# before they query, so a cache hit lets them return having emitted zero
+# just not on this method: ``get_stats`` (``if self._SCHEMA_CACHE_TTL > 0
+# and not bypass_cache:``, stats.py:63) and ``get_ontology_metadata``
+# (``if self._SCHEMA_CACHE_TTL > 0:``, stats.py:349 -- it has no
+# ``bypass_cache`` parameter) both DO have a cache-read gate before they
+# query, so a cache hit lets them return having emitted zero
 # Cypher -- indistinguishable from a broken instance-patch seam even
 # though the seam would be fine. Anyone re-pointing this guard at one of
 # those methods (guard 7 has already moved once this task, from
