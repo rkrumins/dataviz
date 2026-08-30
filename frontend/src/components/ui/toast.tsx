@@ -260,10 +260,14 @@ function ToastItem({ toast }: { toast: Toast }) {
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 24, scale: 0.95 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 12, scale: 0.95 }}
-      transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+      // No `scale`: a scaled card measures narrower than the 320px it occupies
+      // (304px at 0.95), so its left edge crept in and out while it animated
+      // and a stack mid-flight looked like cards of several different widths.
+      // Rising and fading says the same thing and holds the column still.
+      initial={{ opacity: 0, y: 16 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ type: 'spring', damping: 22, stiffness: 320 }}
       // The card itself never takes a click. A toast is a passing remark laid
       // over the app's bottom-right corner — on a canvas that is the right-hand
       // column, and while three or four of these were up, a business user could
@@ -353,9 +357,18 @@ export function ToastContainer() {
       // is absent (0px) everywhere else in the app.
       data-testid="toast-stack"
       style={{ bottom: 'calc(1.5rem + var(--canvas-dock-height, 0px))' }}
-      className="fixed right-6 z-[80] flex flex-col-reverse gap-2 pointer-events-none"
+      // `items-end` pins every card's right edge, so the column reads as one
+      // stack however wide a message makes a card.
+      className="fixed right-6 z-[80] flex flex-col-reverse items-end gap-2 pointer-events-none"
     >
-      <AnimatePresence>
+      {/* `popLayout` is what keeps the stack tidy. In the default mode a
+          dismissed card keeps its slot in the flex column for the whole exit
+          animation — invisible, but still 56px tall — so with messages
+          arriving and leaving continuously the survivors were left floating
+          above 64px holes, scattered down the right of the screen. popLayout
+          takes an exiting card out of the flow at once and the rest close up
+          (each card carries `layout`, so they slide rather than jump). */}
+      <AnimatePresence mode="popLayout">
         {toasts.map(toast => (
           <ToastItem key={toast.id} toast={toast} />
         ))}

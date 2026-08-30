@@ -11,6 +11,8 @@
  * absent and the stack sits where it always did.
  */
 import { render, screen, cleanup } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ToastContainer, useToastStore } from '../toast'
@@ -52,5 +54,24 @@ describe('a toast never swallows a click meant for the app', () => {
     for (const btn of screen.getAllByRole('button')) {
       expect(btn.className).toContain('pointer-events-auto')
     }
+  })
+})
+
+describe('the stack stays organised', () => {
+  it('exiting cards leave the flow, and nothing animates the width', () => {
+    // The stack used to leave 64-128px holes: a dismissed card kept its slot
+    // for the whole exit, so the survivors floated apart down the right of the
+    // screen. And `scale: 0.95` made a card measure 304px of the 320px it
+    // occupies, so a stack mid-flight looked like several different widths.
+    const src = readFileSync(
+      resolve(__dirname, '..', 'toast.tsx'),
+      'utf8',
+    )
+    expect(src).toMatch(/<AnimatePresence mode="popLayout">/)
+    expect(src).toMatch(/flex flex-col-reverse items-end/)
+    // The card rises and fades; it never scales, because a scaled card
+    // measures narrower than the space it occupies.
+    expect(src).toMatch(/initial=\{\{ opacity: 0, y: 16 \}\}/)
+    expect(src).not.toMatch(/scale: 0\.95/)
   })
 })
