@@ -6,7 +6,7 @@ import { BrandLogo } from '@/components/brand/BrandLogo'
 import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
 import { NotificationBell as InviteActivityBell } from '@/components/layout/NotificationBell'
-import { NotificationBell } from '@/components/notifications/NotificationBell'
+import { InboxBell } from '@/components/inbox/InboxBell'
 import { AvatarPickerDialog } from '@/components/layout/AvatarPickerDialog'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { initialsOf } from '@/lib/avatar'
@@ -203,7 +203,7 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
           {/* Group 2: Content shortcuts */}
           <BookmarksPopover />
           <InviteActivityBell />
-          <NotificationBell />
+          <InboxBell />
 
           <div className="w-px h-6 bg-glass-border mx-1" />
 
