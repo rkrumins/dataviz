@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
 import {
   useAncestorMatchCounts,
   useCanvasFilterMode,
@@ -31,7 +32,7 @@ import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { SearchHitInlineRow } from './SearchHitInlineRow'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
-import { densityRowHeights } from './density'
+import { densityRowHeights, TECHNICAL_LINE_HEIGHT } from './density'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
@@ -769,6 +770,13 @@ export const LayerColumn = React.memo(function LayerColumn({
   // users whose persisted preferences predate this field.
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const rowHeights = useMemo(() => densityRowHeights(density), [density])
+  // Technical mode adds a second line to every FlatTreeItem row, so the
+  // estimate has to grow with it — the estimate is all a row the virtualizer
+  // has never mounted contributes to `getTotalSize()` and to every
+  // `scrollToIndex` offset. The chrome rows below (search box, search hit,
+  // skeleton, load-more, error) render no technical line and keep their size.
+  const personaMode = usePersonaMode()
+  const technicalExtra = personaMode === 'technical' ? TECHNICAL_LINE_HEIGHT : 0
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -779,18 +787,20 @@ export const LayerColumn = React.memo(function LayerColumn({
       if (item.isSkeleton) return rowHeights.skeleton
       if (item.isFailed) return rowHeights.failed
       if (item.isLoadMore) return rowHeights.loadMore
-      return item.depth === 0 ? rowHeights.root : rowHeights.child
+      return (item.depth === 0 ? rowHeights.root : rowHeights.child) + technicalExtra
     },
     overscan,
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 
-  // Re-measure all virtualized rows when density flips so the cached
-  // measurements from the previous density don't leave the row stack
-  // pinned to stale heights.
+  // Re-measure all virtualized rows when density or the persona flips so the
+  // cached measurements from the previous mode don't leave the row stack
+  // pinned to stale heights. `itemSizeCache` survives unmount and is read
+  // ahead of `estimateSize`, so without this a row first measured in Business
+  // mode keeps its shorter height for the rest of the session.
   useEffect(() => {
     virtualizer.measure()
-  }, [density, virtualizer])
+  }, [density, personaMode, virtualizer])
 
   // Auto-scroll keyboard-focused row into view via virtualizer
   const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null

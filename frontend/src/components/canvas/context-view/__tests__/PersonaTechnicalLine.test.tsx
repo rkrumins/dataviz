@@ -11,9 +11,14 @@
  *    again — several loaders set it that way, and measured against the dev
  *    stack that is the majority of real nodes;
  *  - it NEVER prints a line that repeats the name already on the row;
+ *  - it truncates that line from the HEAD, because sibling URNs from one
+ *    source differ only in their tail and an end ellipsis cuts exactly the
+ *    part that tells two rows apart;
+ *  - the virtualizer is told the row got taller, or every row it has not
+ *    measured yet is estimated short;
  *  - and Business mode shows none of it.
  */
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import {
@@ -28,6 +33,38 @@ import type { ViewLayerConfig } from '@/types/schema'
 
 import { LayerColumn } from '../LayerColumn'
 import type { HierarchyNode } from '../types'
+import { TECHNICAL_LINE_HEIGHT } from '../density'
+
+/**
+ * The REAL virtualizer, with two things about it made observable: the options
+ * it is handed each render, and every call to `measure()`. Those are exactly
+ * what a persona flip has to reach. `estimateSize` is what a row the
+ * virtualizer has never mounted contributes to `getTotalSize()` and to every
+ * `scrollToIndex` offset, and `measure()` is the only thing that clears
+ * `itemSizeCache` — that cache survives unmount, so a row first sized in
+ * Business mode keeps its shorter height forever otherwise.
+ */
+const virtualSpy = vi.hoisted(() => ({
+    estimateSize: null as ((index: number) => number) | null,
+    count: 0,
+    measureCalls: 0,
+}))
+vi.mock('@tanstack/react-virtual', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('@tanstack/react-virtual')>()
+    const wrapped = new WeakSet<object>()
+    const useVirtualizer: typeof actual.useVirtualizer = (options) => {
+        virtualSpy.estimateSize = options.estimateSize
+        virtualSpy.count = options.count
+        const v = actual.useVirtualizer(options)
+        if (!wrapped.has(v)) {
+            wrapped.add(v)
+            const original = v.measure
+            v.measure = () => { virtualSpy.measureCalls++; original() }
+        }
+        return v
+    }
+    return { ...actual, useVirtualizer }
+})
 
 const layer: ViewLayerConfig = {
     id: 'L1', name: 'Data', entityTypes: [], order: 0, color: '#4488ff',
@@ -129,5 +166,45 @@ describe('Technical mode', () => {
         renderColumn([QUALIFIED])
         const line = screen.getByText('snowflake.prod.sales.customer_orders')
         expect(line.getAttribute('title')).toBe('snowflake.prod.sales.customer_orders')
+    })
+})
+
+describe('the technical line is readable, not just present', () => {
+    it('truncates from the HEAD so the tail that tells two rows apart survives', () => {
+        usePersonaStore.setState({ mode: 'technical' })
+        renderColumn([QUALIFIED])
+        const line = screen.getByText('snowflake.prod.sales.customer_orders')
+        // Measured on the dev stack: the line's box is 143px against a 234px
+        // string, and every URN in one source shares the prefix
+        // (`urn:synodic:solidatus:node:OBJ-…`) — so an END ellipsis leaves
+        // five consecutive rows reading the identical `urn:synodic:solidatus:n…`.
+        // An RTL inline direction moves the ellipsis to the start and keeps the
+        // discriminating tail. jsdom cannot lay text out, so this pins the
+        // mechanism; the rendered result is checked against the dev stack.
+        expect(line.style.direction).toBe('rtl')
+        expect(line.style.textAlign).toBe('left')
+    })
+})
+
+describe('the virtualizer follows the persona', () => {
+    it('estimates a taller row in Technical mode, and re-measures the cached ones', () => {
+        virtualSpy.measureCalls = 0
+        renderColumn([QUALIFIED, SELF_NAMED, NOTHING])
+        const estimates = () =>
+            Array.from({ length: virtualSpy.count }, (_, i) => virtualSpy.estimateSize!(i))
+
+        const business = estimates()
+        const measuredBefore = virtualSpy.measureCalls
+
+        act(() => usePersonaStore.setState({ mode: 'technical' }))
+
+        const technical = estimates()
+        expect(technical).toHaveLength(business.length)
+        technical.forEach((h, i) => expect(h).toBeGreaterThanOrEqual(business[i]))
+        // Entity rows grow by exactly the line they gained; chrome rows
+        // (search box, load-more, error) carry no technical line and must not.
+        expect(technical.some((h, i) => h === business[i] + TECHNICAL_LINE_HEIGHT)).toBe(true)
+        // …and the sizes already cached from Business mode have to be dropped.
+        expect(virtualSpy.measureCalls).toBeGreaterThan(measuredBefore)
     })
 })

@@ -654,10 +654,20 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           {displayName}
         </span>
         {/* Technical identity (Business/Technical toggle) — one truncated line,
-            full value on hover. */}
+            full value on hover.
+
+            TRUNCATED FROM THE HEAD, not the tail. Every URN from one source
+            shares a long prefix (`urn:synodic:solidatus:node:OBJ-…`) and the
+            column gives this line ~143px against a ~234px string, so an end
+            ellipsis cuts off precisely the part that tells two rows apart —
+            a screenful of siblings then reads the identical
+            `urn:synodic:solidatus:n…`. An RTL inline direction puts the
+            ellipsis at the start and keeps the discriminating tail; the runs
+            inside are still read left-to-right. */}
         {technicalLine && (
           <span
             className="text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
+            style={{ direction: 'rtl', textAlign: 'left' }}
             title={technicalLine}
           >
             {technicalLine}

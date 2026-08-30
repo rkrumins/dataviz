@@ -115,11 +115,22 @@ export const GenericNode = memo(function GenericNode({
   const persona = usePersonaMode()
   const primaryLabel = resolveEntityName(entityFields, persona, entityData.id || 'Unknown')
 
-  // Technical mode reveals the qualified name (or the URN) in place of the
-  // description; it yields nothing when that would just repeat the name.
-  const secondaryLabel: string | undefined = persona === 'technical'
-    ? technicalSubtitle(entityFields, persona)
-    : (entityFields['description'] as string)
+  // Technical mode REVEALS the technical identity — it must not swallow the
+  // description. Computing it "in place of" the description hid the
+  // description on every card the moment the toggle went on (a populated URN
+  // that differs from the name is near-universal: 200,000 of 200,000 nodes on
+  // `perf-load-test-solidatus`), which is the opposite of what the toggle
+  // promises. Cards from `md` up already have room for a second `text-2xs`
+  // line, so they show both; `sm` has room for one, so there — and only
+  // there — the technical identity substitutes.
+  const description = typeof entityFields['description'] === 'string'
+    ? entityFields['description']
+    : undefined
+  const technicalLine = technicalSubtitle(entityFields, persona)
+  const showsBothLines = visual.size !== 'xs' && visual.size !== 'sm'
+  const secondaryLabel: string | undefined = showsBothLines
+    ? description
+    : (technicalLine ?? description)
 
   // Size classes
   const sizeClasses = {
@@ -377,10 +388,26 @@ export const GenericNode = memo(function GenericNode({
               )}
             </div>
 
-            {/* Secondary Label (persona-driven) */}
+            {/* Secondary Label — the description (or, on a one-line `sm` card,
+                whichever of the two the persona asks for) */}
             {secondaryLabel && visual.size !== 'xs' && (
               <p className="text-2xs text-ink-muted truncate mt-0.5" title={secondaryLabel}>
                 {secondaryLabel}
+              </p>
+            )}
+
+            {/* Technical identity (Business/Technical toggle), revealed UNDER
+                the description wherever the card has room for two lines.
+                Head-truncated for the same reason the context-view row is:
+                sibling URNs share a long prefix, so an end ellipsis would cut
+                the only part that differs. */}
+            {showsBothLines && technicalLine && (
+              <p
+                className="text-2xs font-mono text-ink-muted/70 truncate mt-0.5"
+                style={{ direction: 'rtl', textAlign: 'left' }}
+                title={technicalLine}
+              >
+                {technicalLine}
               </p>
             )}
           </div>
