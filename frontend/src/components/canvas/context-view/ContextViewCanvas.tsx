@@ -4870,16 +4870,23 @@ export function ContextViewCanvas({
             column is bottom-anchored, so the two panels can never cover each
             other however either one opens. Right-rail panels are flex
             siblings, so the canvas itself shrinks when one opens.
-            Lifts above TraceBottomDock via --trace-dock-height. */}
+            Lifts above TraceBottomDock via --trace-dock-height.
+            Both bodies open (40vh + 45vh + ~244px of chrome) is TALLER than
+            the canvas body, which is `overflow-hidden` — so the column caps
+            itself and scrolls. Uncapped, the overflow is clipped off the top
+            and takes the Activity header with it: the one control that closes
+            Activity, unreachable. The cap excludes the bottom offset, or a
+            raised dock overflows the top by exactly the trace dock's height. */}
         <div
           ref={edgeLegendRef}
           // z-40, the floating-chrome tier (trace dock, lens pills): the
           // columns area is `relative z-30` and later in the DOM, so at
           // z-30 the opened panel body painted UNDER the rows it overlaps.
-          className="absolute z-40 w-64 pointer-events-auto flex flex-col gap-1.5 transition-all duration-300 ease-out"
+          className="absolute z-40 w-64 pointer-events-auto flex flex-col gap-1.5 overflow-y-auto overscroll-contain transition-all duration-300 ease-out"
           style={{
             bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))',
             right: '1rem',
+            maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
           <ActivityPanel />

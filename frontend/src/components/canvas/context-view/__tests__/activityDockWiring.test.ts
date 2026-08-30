@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 
 const canvas = readFileSync(resolve(__dirname, '../ContextViewCanvas.tsx'), 'utf8')
 const connections = readFileSync(resolve(__dirname, '../connections/ConnectionsPanel.tsx'), 'utf8')
+const chips = readFileSync(resolve(__dirname, '../CanvasStatusChips.tsx'), 'utf8')
 
 describe('the Activity panel is docked with Connections in one bottom-right stack', () => {
   it('mounts ActivityPanel inside the band-reserving wrapper, above Connections', () => {
@@ -39,5 +40,31 @@ describe('the Activity panel is docked with Connections in one bottom-right stac
 
   it('both docked panels mark their collapsed header as the measured footprint', () => {
     expect(connections).toContain('data-dock-header')
+  })
+
+  it('caps the stack, so the Activity header cannot be pushed out of reach', () => {
+    // Both bodies open is taller than the canvas: Activity's list is 40vh and
+    // Connections' rows 45vh, plus ~244px of headers, summaries and footers.
+    // The column is bottom-anchored inside an `overflow-hidden` body, so
+    // without a cap the overflow is clipped off the TOP — taking with it the
+    // Activity header, the only control that closes Activity.
+    const wrapperStart = canvas.indexOf('ref={edgeLegendRef}')
+    const block = canvas.slice(wrapperStart, canvas.indexOf('</div>', wrapperStart))
+    expect(block).toMatch(/overflow-y-auto/)
+    // and it scrolls the dock, not the canvas behind it
+    expect(block).toMatch(/overscroll-contain/)
+    // The cap leaves the bottom offset out of the budget, or a raised dock
+    // (trace open) overflows the top by exactly the dock's height.
+    expect(block).toMatch(/maxHeight:[^\n]*100%[^\n]*--trace-dock-height/)
+  })
+
+  it('the status chips clear the dock column instead of sitting under it', () => {
+    // The dock is w-64 at right:1rem — 16px to 272px from the right edge, at
+    // z-40, with an opaque body. A chip cluster right-aligned at `right-3`
+    // shares that whole x-range, so an expanded panel paints and hit-tests
+    // over every chip in it. Clearing it horizontally is the fix; raising its
+    // z-tier would only put the chips over the panel's rows.
+    expect(chips).not.toMatch(/absolute right-3 z-30/)
+    expect(chips).toMatch(/right:\s*'calc\(1rem \+ 16rem \+ 0\.5rem\)'/)
   })
 })
