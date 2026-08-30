@@ -36,7 +36,6 @@ from .provider import (
     _compute_searchable_text,
     _decode_keyset_cursor,
     _edge_from_row,
-    _encode_keyset_cursor,
     _is_transient_connection_error,
     _is_loading_error,
     _keyset_sort,
@@ -62,7 +61,7 @@ from .provider import (
 # them first, not about identity.
 from .rowmap import _RESERVED_NODE_KEYS, _sanitize_node_properties, _node_from_props
 from .hosts import resolve_falkordb_target, _normalize_falkordb_host
-from .cursors import CursorMismatchError, _keyset_sort_key, _CURSOR_PREFIX
+from .cursors import CursorMismatchError, _keyset_sort_key, _CURSOR_PREFIX, _encode_keyset_cursor
 from .knobs import (
     _BULK_CREATE_KNOBS_CACHE,
     _BULK_CREATE_TIMEOUT_DEFAULT,
