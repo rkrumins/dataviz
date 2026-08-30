@@ -780,3 +780,86 @@ If PR 1 has landed: T-A's FalkorDB edit goes into the package module that define
 10. `family` is carried as a plain string (`cypher | gql | graphql | native`) through descriptor → `/types` → the FE type; no grouping or branching is implemented on it in PR 2.
 11. **Master-plan reconciliation needed (two spots):** (a) master §2.1's last bullet and §2.5 still bundle the DataHub 6-stub fix and a "DataHub update" test, which the later "DataHub stays untouched" instruction supersedes — this plan follows the instruction (D1 deferred, T4 allow-list); (b) the master's Architecture sketch says `backend/common/providers/catalog.py` (module) while its §2.2 says the `catalog/` package — this plan follows §2.2 (package), with the ArcadeDB-descriptor-in-adapter variant shown in §3.1.
 12. The `OntologyInjectionState` dataclass from the first draft is withdrawn per master §2.1 ("same attribute names FalkorDB uses, no separate state dataclass"); §2.2 now specifies the attribute-based defaults.
+
+---
+
+## 2.7 Ontology as a first-class contract obligation (added after PR 1's live verification)
+
+PR 1's live like-for-like verification against the dev FalkorDB surfaced a defect that reframes
+what §2.2 is for. It is recorded here because it changes the design, not merely the task list.
+
+### The defect
+
+`get_ontology_metadata` (`falkordb/stats.py`) does two different jobs in one method:
+
+1. **Introspection** — which entity and edge types exist in the graph. A *fact about the graph*:
+   deterministic, and safely cacheable under a graph-scoped key.
+2. **Classification** — which of those types are containment vs lineage, the entity-type
+   hierarchy, the root types. *Not* a fact about the graph: it is a function of the ontology
+   **injected into this provider instance**, and the method explicitly tolerates the
+   not-yet-injected case by treating containment as empty.
+
+It then caches the combined result under `{graph}:stats_cache`-style key
+`{ns}:ontology_cache` for `_SCHEMA_CACHE_TTL` (default 300s).
+
+`ContextEngine._resolve_ontology` calls this method on a **fresh, uninjected** provider
+(`context_engine.py:494`) *before* `_inject_resolved` runs the setters — by design, and
+`stats.py` documents the ordering. So the app's own resolution path is what warms the shared
+cache from an unconfigured instance.
+
+**Measured on `solidatus_perf_medium`, and identically on the pre-refactor monolith (so this is
+pre-existing, not a PR 1 regression):**
+
+| cache warmed by | containment | lineage | hierarchy | roots |
+|---|---|---|---|---|
+| uninjected caller | `[]` | `['FLOWS_TO','HAS']` | 0 entries | `[]` |
+| injected caller | `['HAS']` | `['FLOWS_TO']` | 4 | `['layer']` |
+
+A correctly-injected reader arriving afterwards gets the **poisoned** value back — the cache
+hit short-circuits before classification. Downstream that is a flat graph: no containment
+structure, no root types, and `HAS` presented as a *flow* edge rather than *structural*, to
+`graph.py:2432` and `:2513`. Same family as the earlier "wizard flat while canvas nests"
+defect.
+
+### The immediate fix (verified, patch held from PR 1 deliberately)
+
+Capture whether containment was configured, and gate the shared-cache write on it. The
+provisional answer is still returned to the caller that asked for it — introspection genuinely
+wants the raw observed vocabulary — it is only withheld from the shared key, so the next
+configured caller recomputes and caches the real classification.
+
+Verified: `cache_carries_first_callers_state` flips true → **false**; an injected reader after
+an uninjected warm now gets `containment=['HAS']`, hierarchy 4, roots `['layer']`. Targeted set
+111 passed, required lane zero new failures. The patch is
+`ontology-cache-fix.patch` in this plan's SDD workspace; it was deliberately **not** committed
+to PR 1, whose whole value is a provable zero-behaviour-change guarantee.
+
+### What this means for the contract — the part that outlives the bug
+
+The bug is a symptom of ontology being **implicit**. Today a provider participates in ontology
+by duck-typing: `context_engine.py:355` asks `hasattr(self.provider, 'set_containment_edge_types')`
+and silently skips the provider if the attribute is missing. A second engine that simply does
+not implement it gets no error — it gets a flat graph, and nobody finds out until a user says
+the canvas looks wrong.
+
+So §2.2's setters are not a compatibility shim; they are **the ontology lifecycle**, and PR 2
+must make three things explicit in `GraphDataProvider`:
+
+1. **Injection is a declared obligation.** The setters are base-class members with working
+   defaults (§2.2), so every registered adapter — FalkorDB, ArcadeDB, Neo4j, Spanner, DataHub —
+   participates by construction rather than by luck. The catalog contract test asserts each
+   registered class either inherits or overrides all six.
+2. **Configured-ness is observable.** A provider must be able to answer *"has an ontology been
+   injected into me?"* — the `_resolved_containment_types_set` flag becomes a documented part of
+   the contract rather than a private attribute nine call sites reach into. Anything deriving a
+   cacheable answer from injected state consults it, which is exactly what the fix above does.
+3. **Introspection and classification are separated.** Provider capability is *"tell me what
+   types exist in this graph"*. Turning that vocabulary into containment/lineage/hierarchy is
+   ontology-domain logic and is provider-independent — it belongs above the provider, or at
+   minimum must never be cached under a key that does not encode the ontology it was computed
+   against. PR 3's ArcadeDB provider should implement only the introspection half.
+
+Point 3 is the structural change; points 1 and 2 are what stop the next engine reintroducing the
+same class of defect. Together they are why ontology belongs in the contract work rather than in
+a follow-up: an ArcadeDB provider written against a contract that leaves ontology implicit will
+be flat, and it will look like an ArcadeDB bug.
