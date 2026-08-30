@@ -30,6 +30,33 @@ jobs:
     name: Backend connectivity + provider suite (required)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Without a live FalkorDB, tests/regression/test_falkordb_provider_contract.py
+    # SKIPS — silently, and it is the only test in the repo that pins what the
+    # provider RETURNS rather than what Cypher it emits (32 pins over 17 stored
+    # snapshots). Everything else here is fake-driven: a method could return a
+    # different shape and every other test would still pass. Its gate is a
+    # module-level ping at collection time (`_falkordb_available`), so the
+    # service has to be healthy before pytest starts, which is what the
+    # health-check options below guarantee.
+    services:
+      falkordb:
+        # Same pin as docker-compose.yml's falkordb service. Never :latest —
+        # an engine upgrade must be a deliberate, reviewable change, not
+        # something a CI run picks up on its own.
+        image: falkordb/falkordb:v4.18.11
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 10s
+    env:
+      # Defaults in the test already, but stated so the wiring is visible to
+      # anyone reading the workflow rather than the test.
+      FALKORDB_HOST: localhost
+      FALKORDB_PORT: "6379"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +70,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt -r backend/requirements-test.txt
+      # The contract test's gate is `pytest.mark.skipif(not _falkordb_available())`,
+      # so an unreachable service makes it SKIP and the job still goes green —
+      # the failure mode this service block exists to remove would simply come
+      # back quietly. Fail here instead, with a message that says what is
+      # actually missing.
+      - name: Verify FalkorDB is reachable (the contract test skips silently if not)
+        run: |
+          python - <<'PY'
+          import sys, redis
+          try:
+              redis.Redis(host="localhost", port=6379, socket_connect_timeout=5).ping()
+          except Exception as exc:
+              sys.exit(
+                  f"FalkorDB unreachable on localhost:6379 ({exc}). The provider "
+                  "contract test would SKIP and this job would pass without "
+                  "running the only check that pins what the provider RETURNS. "
+                  "Fix the service block rather than letting it skip."
+              )
+          print("FalkorDB reachable — the contract test will run, not skip.")
+          PY
+
       - name: Run the connectivity + provider domain suite
         working-directory: backend
         run: >-
