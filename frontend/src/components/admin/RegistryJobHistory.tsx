@@ -338,7 +338,11 @@ export function RegistryJobHistory() {
     }, [filters.dataSourceId, updateFilter, toggleStatusFilter])
 
     // Job actions
-    const withAction = useCallback(async (jobId: string, fn: () => Promise<unknown>, successMsg: string) => {
+    // `failureMsg` is per-caller: "Action failed" told an operator neither
+    // which of these actions failed nor which job it was for. `||` rather
+    // than `??` — an error carrying an empty message must not render as an
+    // empty notification.
+    const withAction = useCallback(async (jobId: string, fn: () => Promise<unknown>, successMsg: string, failureMsg: string) => {
         setActionLoading(jobId)
         try {
             await fn()
@@ -346,14 +350,14 @@ export function RegistryJobHistory() {
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
-            notify('error', err?.message ?? 'Action failed')
+            notify('error', err?.message || failureMsg)
         } finally {
             setActionLoading(null)
         }
     }, [notify, fetchJobs])
 
     const handleCancel = useCallback((job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled'),
+        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled', 'Could not cancel that job.'),
         [withAction],
     )
 
@@ -387,7 +391,7 @@ export function RegistryJobHistory() {
         if (!confirmDelete) return
         const job = confirmDelete
         setConfirmDelete(null)
-        withAction(job.id, () => aggregationService.deleteJob(job.id), 'Job removed from history')
+        withAction(job.id, () => aggregationService.deleteJob(job.id), 'Job removed from history', 'Could not remove that job from the history.')
     }
 
     /**
@@ -398,6 +402,7 @@ export function RegistryJobHistory() {
         loadingKey: string,
         action: () => Promise<unknown>,
         successMsg: string,
+        failureMsg: string,
     ) => {
         showLoading(loadingKey, 'Submitting…')
         try {
@@ -409,7 +414,7 @@ export function RegistryJobHistory() {
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
             hideLoading(loadingKey)
-            notify('error', err?.message ?? 'Action failed')
+            notify('error', err?.message || failureMsg)
             throw err
         }
     }, [showLoading, hideLoading, notify, setViewMode, fetchJobs])
@@ -427,6 +432,7 @@ export function RegistryJobHistory() {
                 tuning: tuningForRequest(overrides.tuning),
             }, 'manual'),
             'Aggregation triggered',
+            'Could not trigger the aggregation.',
         )
     }, [retriggerCtx, runDialogAction])
 
@@ -443,6 +449,7 @@ export function RegistryJobHistory() {
                 tuning: tuningForRequest(overrides.tuning),
             }),
             'Job resumed from checkpoint',
+            'Could not resume that job.',
         )
     }, [retriggerCtx, runDialogAction])
 
@@ -455,7 +462,7 @@ export function RegistryJobHistory() {
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
-            notify('error', err?.message ?? 'Purge failed')
+            notify('error', err?.message || 'Could not purge the aggregated edges. Nothing was deleted.')
         } finally {
             setActionLoading(null)
         }
@@ -483,7 +490,7 @@ export function RegistryJobHistory() {
             await fetchJobs()
             aggregationService.getJobsSummary().then(setSummary).catch(() => {})
         } catch (err: any) {
-            notify('error', err?.message ?? 'Purge failed')
+            notify('error', err?.message || 'Could not purge the aggregated edges. Nothing was deleted.')
         } finally {
             setActionLoading(null)
         }

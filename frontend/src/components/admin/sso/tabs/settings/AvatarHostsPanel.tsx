@@ -20,6 +20,7 @@ import {
     ssoAdminService, type BackchannelHost,
 } from '@/services/ssoAdminService'
 import { SsoCard, SsoSectionLabel } from '../../ui/SsoCard'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ErrorBanner } from '../ErrorBanner'
 
 const inputCls =
@@ -35,6 +36,7 @@ export function AvatarHostsPanel() {
     const [port, setPort] = useState('443')
     const [note, setNote] = useState('')
     const [busy, setBusy] = useState(false)
+    const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
         try {
@@ -57,6 +59,10 @@ export function AvatarHostsPanel() {
     useEffect(() => { void refresh() }, [refresh])
 
     const add = async () => {
+        // Named before the fields are cleared, and this is a change to
+        // where the deployment may send requests — it says so out loud
+        // rather than leaving a re-rendered list to be noticed.
+        const entry = `${host.trim()}:${Number(port) || 443}`
         setBusy(true)
         try {
             await ssoAdminService.addBackchannelHost({
@@ -66,20 +72,29 @@ export function AvatarHostsPanel() {
             }, 'avatar')
             setHost(''); setPort('443'); setNote('')
             await refresh()
+            notify('success',
+                `${entry} is allowed — avatars can be fetched from it now.`)
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e))
+            notify('error', e instanceof Error && e.message
+                ? e.message
+                : `Could not allow ${entry}.`)
         } finally {
             setBusy(false)
         }
     }
 
     const remove = async (entry: BackchannelHost) => {
+        const named = `${entry.host}:${entry.port}`
         setBusy(true)
         try {
             await ssoAdminService.deleteBackchannelHost(entry.id)
             await refresh()
+            notify('success',
+                `${named} is withdrawn — no avatar is fetched from it now.`)
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e))
+            notify('error', e instanceof Error && e.message
+                ? e.message
+                : `Could not withdraw ${named}.`)
         } finally {
             setBusy(false)
         }

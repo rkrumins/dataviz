@@ -1347,8 +1347,12 @@ export function OntologySchemaPage() {
             mutations.invalidateAll()
             navigate(schemaUrl(deletedId))
             notify('success', `"${deletedName}" restored`)
-          } catch {
-            notify('error', 'Failed to restore')
+          } catch (err: unknown) {
+            // The only call in this file that dropped the reason. An Undo
+            // that fails silently on "why" is the one place an operator
+            // most needs it — the row is still gone.
+            notify('error', `Failed to restore "${deletedName}": ${
+              err instanceof Error && err.message ? err.message : 'Unknown error'}`)
           }
         },
       })

@@ -46,6 +46,9 @@ vi.mock('@/services/groupsService', () => ({
 }))
 
 import { MappingComposer } from '../MappingComposer'
+import {
+    NotificationStack, useNotificationStore,
+} from '@/components/ui/notifications'
 
 const ROLES = [
     {
@@ -66,16 +69,23 @@ const PROVIDERS = [{
     id: 'idp_1', slug: 'entra', displayName: 'Corporate Entra',
 } as IdpProvider]
 
+/** The composer reports its own outcome, through the app's one
+ *  notification stack — the tab's banner is for a list that would not
+ *  load, not for a rule that would not save. */
+const raised = () => useNotificationStore.getState().notifications
+
 function renderComposer() {
     const onCreated = vi.fn()
-    const onError = vi.fn()
-    render(<MappingComposer providers={PROVIDERS}
-                            onCreated={onCreated} onError={onError} />)
-    return { onCreated, onError }
+    render(<>
+        <MappingComposer providers={PROVIDERS} onCreated={onCreated} />
+        <NotificationStack />
+    </>)
+    return { onCreated }
 }
 
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     listRoles.mockResolvedValue(ROLES)
     listWorkspaces.mockResolvedValue([
         { id: 'ws_abc', name: 'Analytics' }, { id: 'ws_def', name: 'Finance' },
@@ -304,6 +314,60 @@ describe('the preview is the row it will become', () => {
         await user.selectOptions(screen.getByLabelText('Role'), 'org_admin')
 
         expect(screen.queryByText(/will be created as/i)).toBeNull()
+    })
+})
+
+describe('saying what was saved', () => {
+    // The preview sentence is already the plain-language statement of the
+    // rule, with every id resolved to the name it was picked by. The
+    // confirmation says the same thing rather than "Created" — which
+    // would name nothing, on a page where two rules differ by one word.
+    it('repeats the rule it just wrote, in the words of the preview', async () => {
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'engineering')
+        await user.selectOptions(screen.getByLabelText('Role'), 'workspace_editor')
+        await user.selectOptions(await screen.findByLabelText('Workspace'), 'ws_abc')
+        await user.click(screen.getByRole('button', { name: /create rule/i }))
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('success')
+        expect(raised()[0].message).toMatch(
+            /^Rule created\. Anyone in engineering gets .* in Analytics\.$/,
+        )
+    })
+
+    it('falls back to naming the act when the refusal carries no words', async () => {
+        createRoleBindingMapping.mockRejectedValueOnce(new Error(''))
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'staff')
+        await user.selectOptions(screen.getByLabelText('Role'), 'org_member')
+        await user.click(screen.getByRole('button', { name: /create rule/i }))
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('error')
+        expect(raised()[0].message).toBe('Could not create the rule.')
+    })
+
+    it('passes the server its own words when it gave any', async () => {
+        createRoleBindingMapping.mockRejectedValueOnce(
+            new Error('That group already has this role.'),
+        )
+        const user = userEvent.setup()
+        renderComposer()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), 'staff')
+        await user.selectOptions(screen.getByLabelText('Role'), 'org_member')
+        await user.click(screen.getByRole('button', { name: /create rule/i }))
+
+        expect(await screen.findByText(/already has this role/i))
+            .toBeInTheDocument()
     })
 })
 

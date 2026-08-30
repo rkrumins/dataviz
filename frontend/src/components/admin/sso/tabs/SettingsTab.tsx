@@ -23,7 +23,7 @@ import {
 import { motion } from 'framer-motion'
 import {
     AlertTriangle, Check, ChevronDown, DoorOpen, Loader2, LogOut, Mail,
-    ShieldCheck, UserPlus, X,
+    ShieldCheck, UserPlus,
 } from 'lucide-react'
 
 import {
@@ -32,6 +32,7 @@ import {
     type IdpProvider,
 } from '@/services/ssoAdminService'
 import { cn } from '@/lib/utils'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ErrorBanner } from './ErrorBanner'
 import { BackchannelHostsPanel } from './settings/BackchannelHostsPanel'
 import { AvatarHostsPanel } from './settings/AvatarHostsPanel'
@@ -48,6 +49,11 @@ interface SwitchDef {
     technical: string
     /** Turning it OFF is the restrictive direction and wants a confirm. */
     confirmOff?: boolean
+    /** What just happened, in the operator's terms. A switch that moves
+     *  says what the sign-in page now does; the switch position alone is
+     *  the state, not the answer. */
+    resultOn: string
+    resultOff: string
 }
 
 const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: SwitchDef[] }[] = [
@@ -69,6 +75,12 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     '/auth/providers returns [] and every /auth/{slug}/* route ' +
                     'returns 404. Provider rows keep their settings.',
                 confirmOff: true,
+                resultOn:
+                    'Single sign-on is on — your published connections are ' +
+                    'back on the sign-in page.',
+                resultOff:
+                    'Single sign-on is off — no connection signs anyone in ' +
+                    'now, and nothing was deleted.',
             },
             {
                 field: 'allowLocalLogin',
@@ -82,6 +94,11 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'a system account. System accounts keep password sign-in, at ' +
                     '/login?password=1.',
                 confirmOff: true,
+                resultOn:
+                    'Passwords are on — people can sign in with an email and ' +
+                    'password again.',
+                resultOff:
+                    'Passwords are off — single sign-on is the only way in.',
             },
         ],
     },
@@ -101,6 +118,12 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'An unknown subject raises jit_disabled instead of creating a ' +
                     'user. Existing users are unaffected.',
                 confirmOff: true,
+                resultOn:
+                    'Accounts are created automatically — someone your ' +
+                    'directory knows can sign in without an invite.',
+                resultOff:
+                    'Accounts are no longer created automatically — anyone ' +
+                    'not already here is turned away.',
             },
         ],
     },
@@ -121,10 +144,26 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'The login page calls /auth/resolve with the address and ' +
                     'redirects to the matching provider. An address matching nothing ' +
                     'falls back to the password form.',
+                resultOn:
+                    'The sign-in page asks for an email address first.',
+                resultOff:
+                    'The sign-in page shows the connection buttons again.',
             },
         ],
     },
 ]
+
+/** Every switch by the field it writes — ``apply`` is handed a field, not
+ *  the group the switch happens to sit in. */
+const SWITCH: Record<string, SwitchDef> = Object.fromEntries(
+    GROUPS.flatMap(g => g.switches).map(s => [s.field, s]),
+)
+
+/** The server's own words when it gave any, and a sentence naming the
+ *  action when it did not — a failure must never read as an empty box. */
+function errText(err: unknown, fallback: string): string {
+    return err instanceof Error && err.message ? err.message : fallback
+}
 
 /** The healthy posture is the common one, so it gets the neutral card and
  *  only a warn/danger state spends colour. As a full-width amber slab this
@@ -136,8 +175,11 @@ const POSTURE_TONE: Record<PostureTone, CardTone> = {
 export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }) {
     const [cfg, setCfg] = useState<AuthConfig | null>(null)
     const [providers, setProviders] = useState<IdpProvider[]>(seeded ?? [])
+    // Only the posture read writes this. What an operator DOES here — a
+    // switch flipped, sessions ended, and every way those fail — just
+    // happened, and goes to the app's one notification stack; the banner
+    // is for what is still true while it is being read.
     const [error, setError] = useState<string | null>(null)
-    const [notice, setNotice] = useState<string | null>(null)
     const [pending, setPending] = useState<keyof AuthConfig | null>(null)
     const [confirming, setConfirming] = useState<keyof AuthConfig | null>(null)
     // The ssoEnabled confirm carries a number: how many people are signed
@@ -153,13 +195,16 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         { affected: number; skipped: number } | null
     >(null)
     const [localOffSignOut, setLocalOffSignOut] = useState(false)
+    const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
         try {
             setCfg(await ssoAdminService.getAuthConfig())
             setError(null)
         } catch (err) {
-            setError((err as Error).message)
+            setError(errText(
+                err, 'The current sign-in posture could not be read.',
+            ))
         }
         // The posture sentence needs to know what is actually live. A
         // failure here costs the sentence its detail, not the page.
@@ -181,15 +226,19 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
 
     async function apply(field: keyof AuthConfig, value: boolean): Promise<boolean> {
         if (!cfg) return false
+        const def = SWITCH[field]
         setPending(field)
         try {
             setCfg(await ssoAdminService.updateAuthConfig({
                 [field]: value, expectedVersion: cfg.version,
             } as never))
             setError(null)
+            notify('success', value ? def.resultOn : def.resultOff)
             return true
         } catch (err) {
-            setError((err as Error).message)
+            notify('error', errText(
+                err, `Could not turn ${def.label} ${value ? 'on' : 'off'}.`,
+            ))
             return false
         } finally {
             setPending(null)
@@ -216,16 +265,16 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         if (!ok || !signOut) return
         try {
             const ended = await ssoAdminService.endSsoSessions()
-            setNotice(
+            notify('success',
                 `Signed out ${ended.usersAffected} ${
                     ended.usersAffected === 1 ? 'person' : 'people'
                 } who had signed in through a connection.`,
             )
         } catch (err) {
             // The switch DID flip — say so, and say what didn't happen.
-            setError(
+            notify('error',
                 'Single sign-on is off, but signing its users out failed: '
-                + (err as Error).message,
+                + errText(err, 'the request did not complete'),
             )
         }
     }
@@ -252,7 +301,7 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         if (!ok || !signOut) return
         try {
             const ended = await ssoAdminService.endAllSessions()
-            setNotice(
+            notify('success',
                 `Signed out ${ended.usersAffected} ${
                     ended.usersAffected === 1 ? 'person' : 'people'
                 } — everyone signs back in under single sign-on. If your own `
@@ -260,9 +309,9 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                 + 'page in a moment.',
             )
         } catch (err) {
-            setError(
+            notify('error',
                 'Passwords are off, but the sign-everyone-out failed: '
-                + (err as Error).message,
+                + errText(err, 'the request did not complete'),
             )
         }
     }
@@ -282,23 +331,6 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         <div className="grid xl:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
             <div className="min-w-0 space-y-6">
             {error && <ErrorBanner message={error} />}
-            {notice && (
-                <div
-                    role="status"
-                    className="flex items-start gap-2 px-3 py-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06]"
-                >
-                    <Check className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
-                    <p className="text-xs text-ink flex-1 min-w-0">{notice}</p>
-                    <button
-                        type="button"
-                        aria-label="Dismiss notice"
-                        onClick={() => setNotice(null)}
-                        className="shrink-0 text-ink-muted hover:text-ink"
-                    >
-                        <X className="w-3.5 h-3.5" />
-                    </button>
-                </div>
-            )}
 
             {GROUPS.map((group, gi) => (
                 <motion.section
@@ -367,8 +399,8 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                 time (or turned SSO off before the offer existed). */}
             {cfg !== null && !cfg.ssoEnabled && (
                 <EndSsoSessionsCard
-                    onDone={line => { setNotice(line); setError(null) }}
-                    onError={msg => setError(msg)}
+                    onDone={line => notify('success', line)}
+                    onError={msg => notify('error', msg)}
                 />
             )}
 
@@ -379,8 +411,8 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                 being flipped. */}
             {cfg !== null && (
                 <EndAllSessionsCard
-                    onDone={line => { setNotice(line); setError(null) }}
-                    onError={msg => setError(msg)}
+                    onDone={line => notify('success', line)}
+                    onError={msg => notify('error', msg)}
                 />
             )}
 
@@ -656,7 +688,9 @@ function EndSsoSessionsCard({
             setCount(dry.usersAffected)
             setAsked(true)
         } catch (err) {
-            onError((err as Error).message)
+            onError(errText(
+                err, 'Could not count the sessions still open through a connection.',
+            ))
         } finally {
             setBusy(false)
         }
@@ -673,7 +707,9 @@ function EndSsoSessionsCard({
             )
             setAsked(false)
         } catch (err) {
-            onError((err as Error).message)
+            onError(errText(
+                err, 'Could not sign out the people signed in through a connection.',
+            ))
         } finally {
             setBusy(false)
         }
@@ -765,7 +801,7 @@ function EndAllSessionsCard({
             })
             setAsked(true)
         } catch (err) {
-            onError((err as Error).message)
+            onError(errText(err, 'Could not count the open sessions.'))
         } finally {
             setBusy(false)
         }
@@ -784,7 +820,7 @@ function EndAllSessionsCard({
             )
             setAsked(false)
         } catch (err) {
-            onError((err as Error).message)
+            onError(errText(err, 'Could not sign everyone out.'))
         } finally {
             setBusy(false)
         }
