@@ -1,5 +1,6 @@
 /**
- * ActivityPanel — "what did that notification say?", docked where it can be clicked.
+ * DataLoadsPanel — "what did that notification say?", docked where it can be
+ * clicked.
  *
  * Notifications live 4.5 seconds and the app fires hundreds of them; a user who looked
  * away has no way back. The messages this view raised now live in a panel
@@ -18,7 +19,7 @@
 import { render, screen, within, cleanup, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { ActivityPanel } from '../ActivityPanel'
+import { DataLoadsPanel } from '../DataLoadsPanel'
 import { useNotificationStore, type NotificationHistoryEntry } from '@/components/ui/notifications'
 
 const HOUR = 60 * 60 * 1000
@@ -36,12 +37,12 @@ function seed(oldestFirst: Seed[]) {
   useNotificationStore.setState({ history, _nextId: oldestFirst.length + 1 })
 }
 
-const header = () => screen.getByRole('button', { name: /activity/i })
+const header = () => screen.getByRole('button', { name: /data loads/i })
 const rows = () => screen.getAllByRole('listitem')
 
-describe('ActivityPanel', () => {
+describe('DataLoadsPanel', () => {
   it('renders nothing when no message has appeared', () => {
-    const { container } = render(<ActivityPanel />)
+    const { container } = render(<DataLoadsPanel />)
     expect(container).toBeEmptyDOMElement()
   })
 
@@ -51,16 +52,16 @@ describe('ActivityPanel', () => {
       { type: 'info', message: 'Layout applied', createdAt: Date.now() - 2 * HOUR },
       { type: 'error', message: 'Load failed', createdAt: Date.now() - HOUR },
     ])
-    const { container } = render(<ActivityPanel />)
+    const { container } = render(<DataLoadsPanel />)
 
     // ContextViewCanvas's measureLegendHeader sums every [data-dock-header] in
-    // the dock; without this attribute the Activity header is not reserved and
+    // the dock; without this attribute the Data loads header is not reserved and
     // the bottom row of every column slides under the stack.
     const first = container.querySelector('button')
     expect(first).toBe(header())
     expect(first).toHaveAttribute('data-dock-header')
     expect(first).toHaveAttribute('aria-expanded', 'false')
-    expect(first).toHaveTextContent('Activity')
+    expect(first).toHaveTextContent('Data loads')
     expect(first).toHaveTextContent('3')
     expect(screen.queryAllByRole('listitem')).toHaveLength(0)
   })
@@ -72,7 +73,7 @@ describe('ActivityPanel', () => {
       { type: 'warning', message: 'Some edges were skipped', createdAt: Date.now() - 2 * HOUR },
       { type: 'error', message: 'Load failed', createdAt: Date.now() - HOUR },
     ])
-    render(<ActivityPanel />)
+    render(<DataLoadsPanel />)
 
     await user.click(header())
     expect(header()).toHaveAttribute('aria-expanded', 'true')
@@ -82,7 +83,7 @@ describe('ActivityPanel', () => {
       expect.stringContaining('Load failed'),
     ])
     // The header stays the first button even opened — the band depends on it.
-    expect(screen.getByRole('region', { name: /activity/i })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: /data loads/i })).toBeInTheDocument()
   })
 
   it('folds a run of the identical message into one ×N row that keeps the LATEST time', async () => {
@@ -94,7 +95,7 @@ describe('ActivityPanel', () => {
       { type: 'info', message: 'Loading more', createdAt: latest },
       { type: 'success', message: 'View saved', createdAt: Date.now() - 30 * 60 * 1000 },
     ])
-    render(<ActivityPanel />)
+    render(<DataLoadsPanel />)
 
     // The header counts MESSAGES, not rows.
     expect(header()).toHaveTextContent('4')
@@ -119,7 +120,7 @@ describe('ActivityPanel', () => {
       { type: 'success', message: 'View saved', createdAt: saved },
       { type: 'error', message: 'Load failed', createdAt: failed },
     ])
-    render(<ActivityPanel />)
+    render(<DataLoadsPanel />)
 
     await user.click(header())
     const list = rows()
@@ -130,7 +131,7 @@ describe('ActivityPanel', () => {
   it('Clear empties the log, which takes the panel with it', async () => {
     const user = userEvent.setup()
     seed([{ type: 'success', message: 'View saved', createdAt: Date.now() }])
-    const { container } = render(<ActivityPanel />)
+    const { container } = render(<DataLoadsPanel />)
 
     await user.click(header())
     await user.click(screen.getByRole('button', { name: /clear/i }))
@@ -142,7 +143,7 @@ describe('ActivityPanel', () => {
   it('does not spring back open when the next message refills the log', async () => {
     const user = userEvent.setup()
     seed([{ type: 'success', message: 'View saved', createdAt: Date.now() }])
-    render(<ActivityPanel />)
+    render(<DataLoadsPanel />)
 
     await user.click(header())
     await user.click(screen.getByRole('button', { name: /clear/i }))
@@ -151,7 +152,7 @@ describe('ActivityPanel', () => {
     // rendered. The next notification must bring back a CLOSED panel, not one the
     // user never asked for, grown up over the canvas.
     seed([{ type: 'info', message: 'Saved to draft.', createdAt: Date.now() }])
-    expect(await screen.findByRole('button', { name: /activity/i })).toHaveAttribute('aria-expanded', 'false')
+    expect(await screen.findByRole('button', { name: /data loads/i })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryAllByRole('listitem')).toHaveLength(0)
   })
 
@@ -160,12 +161,12 @@ describe('ActivityPanel', () => {
     seed([{ type: 'info', message: 'Layout applied', createdAt: Date.now() }])
     const { container } = render(
       <div data-testid="dock">
-        <ActivityPanel />
+        <DataLoadsPanel />
       </div>,
     )
 
     await user.click(header())
-    const region = screen.getByRole('region', { name: /activity/i })
+    const region = screen.getByRole('region', { name: /data loads/i })
     expect(screen.getByTestId('dock')).toContainElement(region)
     expect(container).toContainElement(region)
   })
@@ -176,7 +177,7 @@ describe('ActivityPanel', () => {
     try {
       const start = Date.now()
       seed([{ type: 'success', message: 'Entities loaded', createdAt: start }])
-      render(<ActivityPanel />)
+      render(<DataLoadsPanel />)
       fireEvent.click(header())
       expect(screen.getByText('just now')).toBeInTheDocument()
       // Past the minute boundary, with the panel still open and untouched.
@@ -195,7 +196,7 @@ describe('ActivityPanel', () => {
       { type: 'success', message: 'Entities loaded', createdAt: now - 2000 },
       { type: 'success', message: 'Edges loaded', createdAt: now - 1000 },
     ])
-    render(<ActivityPanel />)
+    render(<DataLoadsPanel />)
     expect(screen.getByLabelText('2 messages')).toBeInTheDocument()
     fireEvent.click(header())
     expect(screen.getByRole('list')).toBeInTheDocument()

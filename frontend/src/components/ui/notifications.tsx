@@ -352,7 +352,7 @@ export function NotificationStack() {
   return (
     <div
       // Notifications share the bottom-right corner with the canvas dock (the
-      // Activity and Connections panels), which sits BELOW them at z-40 —
+      // Data loads and Connections panels), which sits BELOW them at z-40 —
       // a visible notification used to sit on top of the dock's headers and eat
       // the click that collapses them. Surfaces that reserve that corner
       // publish their height as `--canvas-dock-height` on the document

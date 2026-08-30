@@ -1,10 +1,10 @@
 /**
- * The notification stack and the canvas dock (Activity + Connections) share the
- * bottom-right corner. The stack is `z-80` with interactive items; the dock is
- * `z-40`. Measured in a real browser: with four notifications on screen, the
- * point at the centre of the Connections header belonged to a NOTIFICATION —
- * collapsing the dock was impossible until the messages timed out, and a canvas
- * raises them continuously as children load.
+ * The notification stack and the canvas dock (Data loads + Connections) share
+ * the bottom-right corner. The stack is `z-80` with interactive items; the
+ * dock is `z-40`. Measured in a real browser: with four notifications on
+ * screen, the point at the centre of the Connections header belonged to a
+ * NOTIFICATION — collapsing the dock was impossible until the messages timed
+ * out, and a canvas raises them continuously as children load.
  *
  * Surfaces that own that corner publish their height as `--canvas-dock-height`;
  * the stack starts above whatever is reserved. Everywhere else the variable is

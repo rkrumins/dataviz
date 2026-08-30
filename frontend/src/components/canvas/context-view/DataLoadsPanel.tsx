@@ -1,9 +1,14 @@
 /**
- * ActivityPanel — the notifications you missed, in the order they happened.
+ * DataLoadsPanel — what the open view has fetched this session, in the order
+ * it happened.
  *
- * A notification lives 4.5 seconds and the app fires hundreds of them; a user who
- * looked away, or who was reading the canvas when three fired at once, has no
- * way back to what they said. This panel is that way back.
+ * It is called Data loads, not Activity: the view has an Activity of its own —
+ * its audit history, in the page header — and two things called the same word
+ * in one screen is one thing too many. This is the fetching, not the editing.
+ *
+ * A notification lives 4.5 seconds and the app fires hundreds of them; a user
+ * who looked away, or who was reading the canvas when three fired at once, has
+ * no way back to what they said. This panel is that way back.
  *
  * It is docked directly ABOVE the Connections panel in the canvas's
  * bottom-right stack, and deliberately so: the log used to open from a chip in
@@ -58,7 +63,7 @@ function subscribeClock(onChange: () => void): () => void {
 const getClockTick = () => clockTick
 const subscribeNothing = () => () => {}
 
-interface ActivityRow {
+interface DataLoadRow {
   entry: NotificationHistoryEntry
   count: number
   /** The run's LATEST occurrence — the row answers "when did this last happen?" */
@@ -70,8 +75,8 @@ interface ActivityRow {
  * fired five times is one thing that happened five times, not five things.
  * The input is oldest-first, so the run's last entry is its newest.
  */
-function foldRuns(oldestFirst: NotificationHistoryEntry[]): ActivityRow[] {
-  const rows: ActivityRow[] = []
+function foldRuns(oldestFirst: NotificationHistoryEntry[]): DataLoadRow[] {
+  const rows: DataLoadRow[] = []
   for (const entry of oldestFirst) {
     const last = rows[rows.length - 1]
     if (last && last.entry.message === entry.message && last.entry.type === entry.type) {
@@ -84,7 +89,7 @@ function foldRuns(oldestFirst: NotificationHistoryEntry[]): ActivityRow[] {
   return rows
 }
 
-export function ActivityPanel({ className }: { className?: string }) {
+export function DataLoadsPanel({ className }: { className?: string }) {
   const history = useNotificationStore(s => s.history)
   const clearHistory = useNotificationStore(s => s.clearHistory)
   const [isExpanded, setIsExpanded] = useState(false)
@@ -141,13 +146,13 @@ export function ActivityPanel({ className }: { className?: string }) {
         data-dock-header
         aria-expanded={isExpanded}
         aria-controls={bodyId}
-        title="Messages from loading this view"
+        title="What this view has loaded"
         onClick={() => setIsExpanded(v => !v)}
         className="w-full flex items-center justify-between gap-2 px-3 py-2 hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
       >
         <span className="flex items-center gap-2 min-w-0">
           <History className="w-4 h-4 text-accent-lineage flex-shrink-0" />
-          <span className="text-sm font-medium text-ink">Activity</span>
+          <span className="text-sm font-medium text-ink">Data loads</span>
           <span
             aria-label={`${history.length.toLocaleString()} ${history.length === 1 ? 'message' : 'messages'}`}
             className="text-2xs text-ink-muted px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/5 tabular-nums whitespace-nowrap"
@@ -169,7 +174,7 @@ export function ActivityPanel({ className }: { className?: string }) {
           transition={{ duration: 0.18 }}
           className="overflow-hidden"
         >
-          <div id={bodyId} role="region" aria-label="Activity" className="px-3 pb-3">
+          <div id={bodyId} role="region" aria-label="Data loads" className="px-3 pb-3">
             <div ref={openAtNewest} className="max-h-52 overflow-y-auto custom-scrollbar">
               <ol role="list" className="relative pl-1">
                 {/* The rail the dots hang on. */}
@@ -240,4 +245,4 @@ export function ActivityPanel({ className }: { className?: string }) {
   )
 }
 
-export default ActivityPanel
+export default DataLoadsPanel

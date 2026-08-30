@@ -64,7 +64,7 @@ import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
-import { ActivityPanel } from './ActivityPanel'
+import { DataLoadsPanel } from './DataLoadsPanel'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation, useViewportReservation } from './useBandReservation'
@@ -1462,7 +1462,7 @@ export function ContextViewCanvas({
   // headers only, so opening a panel does not shove the columns up.
   const edgeLegendRef = useRef<HTMLDivElement>(null)
   // The variable keeps its name; what it measures is now the whole dock stack
-  // — Activity's header plus Connections' (CanvasStatusChips and the columns
+  // — Data loads' header plus Connections' (CanvasStatusChips and the columns
   // read it by that name).
   useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
   // ...and the dock's FULL height to the document, so the app's notification stack
@@ -4867,7 +4867,7 @@ export function ContextViewCanvas({
           }
         }} />
 
-        {/* The bottom-right dock — Activity above Connections, one stack. Docked
+        {/* The bottom-right dock — Data loads above Connections, one stack. Docked
             in the reserved band, never over rows: it publishes its collapsed
             (headers) height as --edge-legend-height and the columns area pads
             for it; opening a panel grows upward as a transient overlay. The
@@ -4878,8 +4878,8 @@ export function ContextViewCanvas({
             Both bodies open (40vh + 45vh + ~244px of chrome) is TALLER than
             the canvas body, which is `overflow-hidden` — so the column caps
             itself and scrolls. Uncapped, the overflow is clipped off the top
-            and takes the Activity header with it: the one control that closes
-            Activity, unreachable. The cap excludes the bottom offset, or a
+            and takes the Data loads header with it: the one control that closes
+            Data loads, unreachable. The cap excludes the bottom offset, or a
             raised dock overflows the top by exactly the trace dock's height. */}
         <div
           ref={edgeLegendRef}
@@ -4893,7 +4893,7 @@ export function ContextViewCanvas({
             maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
-          <ActivityPanel />
+          <DataLoadsPanel />
           <ConnectionsPanel
             key={connectionsViewId}
             model={connectionModel}

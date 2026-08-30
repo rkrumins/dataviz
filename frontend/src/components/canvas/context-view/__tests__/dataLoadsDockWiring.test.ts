@@ -1,5 +1,5 @@
 /**
- * The bottom-right dock: Activity above Connections, in ONE stack.
+ * The bottom-right dock: Data loads above Connections, in ONE stack.
  *
  * They used to be two surfaces in the same corner at different z-tiers — the
  * message chip in the status cluster (z-30) and the Connections panel (z-40) —
@@ -9,7 +9,7 @@
  *
  * Two things a future edit could silently undo, pinned at the source level
  * (the idiom of `noBackdropFilterInScrollers.test.ts` — this wiring cannot be
- * reached in jsdom without mounting the whole 5k-line canvas): that Activity
+ * reached in jsdom without mounting the whole 5k-line canvas): that Data loads
  * is mounted inside the band-reserving wrapper above Connections, and that the
  * reservation measures EVERY docked header rather than just the first button.
  */
@@ -21,13 +21,13 @@ const canvas = readFileSync(resolve(__dirname, '../ContextViewCanvas.tsx'), 'utf
 const connections = readFileSync(resolve(__dirname, '../connections/ConnectionsPanel.tsx'), 'utf8')
 const chips = readFileSync(resolve(__dirname, '../CanvasStatusChips.tsx'), 'utf8')
 
-describe('the Activity panel is docked with Connections in one bottom-right stack', () => {
-  it('mounts ActivityPanel inside the band-reserving wrapper, above Connections', () => {
+describe('the Data loads panel is docked with Connections in one bottom-right stack', () => {
+  it('mounts DataLoadsPanel inside the band-reserving wrapper, above Connections', () => {
     const wrapperStart = canvas.indexOf('ref={edgeLegendRef}')
     expect(wrapperStart).toBeGreaterThan(-1)
     const block = canvas.slice(wrapperStart, canvas.indexOf('</div>', wrapperStart))
-    expect(block).toContain('<ActivityPanel')
-    expect(block.indexOf('<ActivityPanel')).toBeLessThan(block.indexOf('<ConnectionsPanel'))
+    expect(block).toContain('<DataLoadsPanel')
+    expect(block.indexOf('<DataLoadsPanel')).toBeLessThan(block.indexOf('<ConnectionsPanel'))
     // A bottom-anchored column: opening either panel grows the stack upward,
     // so neither can ever cover the other.
     expect(block).toMatch(/flex flex-col gap-1\.5/)
@@ -42,12 +42,12 @@ describe('the Activity panel is docked with Connections in one bottom-right stac
     expect(connections).toContain('data-dock-header')
   })
 
-  it('caps the stack, so the Activity header cannot be pushed out of reach', () => {
-    // Both bodies open is taller than the canvas: Activity's list is 40vh and
+  it('caps the stack, so the Data loads header cannot be pushed out of reach', () => {
+    // Both bodies open is taller than the canvas: Data loads' list is 40vh and
     // Connections' rows 45vh, plus ~244px of headers, summaries and footers.
     // The column is bottom-anchored inside an `overflow-hidden` body, so
     // without a cap the overflow is clipped off the TOP — taking with it the
-    // Activity header, the only control that closes Activity.
+    // Data loads header, the only control that closes Data loads.
     const wrapperStart = canvas.indexOf('ref={edgeLegendRef}')
     const block = canvas.slice(wrapperStart, canvas.indexOf('</div>', wrapperStart))
     expect(block).toMatch(/overflow-y-auto/)
