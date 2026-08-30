@@ -93,6 +93,9 @@ export function ActivityPanel({ className }: { className?: string }) {
   // The store keeps the log newest-first; the sequence reads the other way.
   const rows = useMemo(() => foldRuns([...history].reverse()), [history])
 
+  // Capped at ~7 rows (max-h-52): a load can raise dozens of messages, and a
+  // log tall enough to span the canvas is a wall, not a surface. The rest is
+  // one scroll away.
   // The newest row is at the BOTTOM, so that is where an opened log starts.
   // A callback ref on the scroller does it as the element mounts — there is
   // no state here, and `react-hooks/set-state-in-effect` is an error in this
@@ -167,7 +170,7 @@ export function ActivityPanel({ className }: { className?: string }) {
           className="overflow-hidden"
         >
           <div id={bodyId} role="region" aria-label="Activity" className="px-3 pb-3">
-            <div ref={openAtNewest} className="max-h-[40vh] overflow-y-auto custom-scrollbar">
+            <div ref={openAtNewest} className="max-h-52 overflow-y-auto custom-scrollbar">
               <ol role="list" className="relative pl-1">
                 {/* The rail the dots hang on. */}
                 <span aria-hidden className="absolute left-[7px] top-2 bottom-2 w-px bg-glass-border" />

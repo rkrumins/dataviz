@@ -202,7 +202,6 @@ export function EntityDrawer({
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [showSaved, setShowSaved] = useState(false)
-  const [isPinned, setIsPinned] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
   const drawerRef = useRef<HTMLElement>(null)
   // Unsaved-changes guard: confirm before closing or switching nodes.
@@ -407,12 +406,15 @@ export function EntityDrawer({
   // Close drawer — the X button is the only close path. The drawer is
   // sticky: clicking other entities or the canvas background never closes
   // it, it only swaps the data shown inside.
+  // Close always closes. It used to return early while the drawer was
+  // "pinned" — the X became a dead control with no tooltip, no disabled state
+  // and no way back except reloading the page. That flag was local state and
+  // nothing else in the app ever read it, so the pin did nothing but this.
   const handleClose = useCallback(() => {
-    if (isPinned) return
     if (hasChanges) { setConfirmClose(true); return }
     closeNodeDrawer()
     clearSelection()
-  }, [closeNodeDrawer, clearSelection, isPinned, hasChanges])
+  }, [closeNodeDrawer, clearSelection, hasChanges])
 
   // Resolve the unsaved-changes prompt (shared by close + node-switch).
   const discardAndProceed = useCallback(() => {
@@ -608,12 +610,6 @@ export function EntityDrawer({
                 onClick={() => onFocusConnections(selectedNode.id)}
               />
             )}
-            <ActionButton
-              icon={LucideIcons.Pin}
-              label={isPinned ? "Unpin" : "Pin"}
-              active={isPinned}
-              onClick={() => setIsPinned(!isPinned)}
-            />
             <ActionButton
               icon={LucideIcons.Copy}
               label={copiedUrn ? "Copied!" : "Copy URN"}
