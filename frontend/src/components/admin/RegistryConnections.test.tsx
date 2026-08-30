@@ -205,4 +205,29 @@ describe('RegistryConnections', () => {
     expect(raised()[0].message).toBe(
       'Deleted \u201cWarehouse Graph\u201d. Nothing else depended on it.')
   })
+
+  it('claims nothing about dependents when the blast-radius probe failed', async () => {
+    // A failed getImpact leaves the dialog showing NEITHER the "Blast Radius
+    // Warning" nor "Safe to delete" \u2014 nobody knows what depended on this
+    // provider, least of all the notification. "Nothing else depended on it"
+    // would be an assertion the app never established.
+    listProviders.mockResolvedValue([sampleProvider])
+    getImpact.mockRejectedValue(new Error('impact query timed out'))
+    deleteProvider.mockResolvedValue(undefined)
+
+    const user = userEvent.setup()
+    renderRegistry()
+
+    await waitFor(() => expect(screen.getByText(/warehouse graph/i)).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /delete provider warehouse graph/i }))
+    await waitFor(() => expect(getImpact).toHaveBeenCalledWith(sampleProvider.id))
+
+    await user.type(screen.getByPlaceholderText(sampleProvider.name), sampleProvider.name)
+    await user.click(screen.getByRole('button', { name: /^delete provider$/i }))
+
+    await waitFor(() => expect(raised()).toHaveLength(1))
+    expect(raised()[0].type).toBe('success')
+    expect(raised()[0].message).toBe('Deleted \u201cWarehouse Graph\u201d.')
+    expect(raised()[0].message).not.toMatch(/depended on it/)
+  })
 })

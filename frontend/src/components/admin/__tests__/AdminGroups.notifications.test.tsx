@@ -90,6 +90,77 @@ describe('AdminGroups — once, not twice', () => {
     })
 })
 
+describe('AdminGroups — the membership modal speaks the same way', () => {
+    const MEMBER = { userId: 'usr_1', groupId: 'grp_1', addedAt: new Date().toISOString(), addedBy: null, source: 'local' }
+    const USER = {
+        id: 'usr_1', email: 'ada@example.com', firstName: 'Ada', lastName: 'Lovelace',
+        displayName: 'Ada Lovelace', status: 'active', role: 'member',
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        resetRequested: false, mustChangePassword: false, hasPassword: true,
+        signupSource: 'admin_created', identities: [], isSystemAccount: false,
+    }
+
+    async function openMembers() {
+        const u = userEvent.setup()
+        render(<AdminGroups />)
+        await u.click(await screen.findByTitle('Manage members'))
+        return u
+    }
+
+    it('names the person and the group when a failed removal carries no message', async () => {
+        // A 502 over HTTP/2 has an empty statusText, so the extractor yields ''
+        // and `new Error('')` is still an Error — an unguarded `err.message`
+        // read renders an EMPTY red card for a failed membership change.
+        vi.mocked(groupsService.listMembers).mockResolvedValue([MEMBER])
+        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
+        vi.mocked(groupsService.removeMember).mockRejectedValue(new Error(''))
+
+        const u = await openMembers()
+        await u.click(await screen.findByTitle('Remove from group'))
+
+        await waitFor(() => expect(messages()).toEqual([
+            'Could not remove Ada Lovelace from "Data Stewards".',
+        ]))
+    })
+
+    it('names the person and the group when a failed add carries no message', async () => {
+        vi.mocked(groupsService.listMembers).mockResolvedValue([])
+        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
+        vi.mocked(groupsService.addMember).mockRejectedValue(new Error(''))
+
+        const u = await openMembers()
+        await u.click(await screen.findByText('Ada Lovelace'))
+
+        await waitFor(() => expect(messages()).toEqual([
+            'Could not add Ada Lovelace to "Data Stewards".',
+        ]))
+    })
+
+    it('names the group when the member list itself will not load', async () => {
+        vi.mocked(groupsService.listMembers).mockRejectedValue(new Error(''))
+        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
+
+        await openMembers()
+
+        await waitFor(() => expect(messages()).toEqual([
+            'Could not load the members of "Data Stewards".',
+        ]))
+    })
+
+    it('says where the person went, not just that something happened', async () => {
+        vi.mocked(groupsService.listMembers).mockResolvedValue([MEMBER])
+        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
+        vi.mocked(groupsService.removeMember).mockResolvedValue(undefined)
+
+        const u = await openMembers()
+        await u.click(await screen.findByTitle('Remove from group'))
+
+        await waitFor(() => expect(messages()).toEqual([
+            'Removed Ada Lovelace from "Data Stewards".',
+        ]))
+    })
+})
+
 describe('AdminGroups — what stays on the page', () => {
     it('a failed load is still described inline', async () => {
         vi.mocked(groupsService.list).mockRejectedValue(new Error('Backend unavailable'))

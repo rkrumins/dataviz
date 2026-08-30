@@ -835,9 +835,11 @@ function ManageMembersModal({
             setMembers(m)
             setUsers(u)
         } catch (err) {
-            notify('error', err instanceof Error ? err.message : 'Failed to load members')
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not load the members of "${group.name}".`)
         }
-    }, [group.id, notify])
+    }, [group.id, group.name, notify])
 
     useEffect(() => { void refresh() }, [refresh])
 
@@ -933,9 +935,11 @@ function ManageMembersModal({
                                                         await groupsService.removeMember(group.id, member.userId)
                                                         await refresh()
                                                         onChange()
-                                                        notify('success', `Removed ${name}`)
+                                                        notify('success', `Removed ${name} from "${group.name}".`)
                                                     } catch (err) {
-                                                        notify('error', err instanceof Error ? err.message : 'Remove failed')
+                                                        notify('error', err instanceof Error && err.message
+                                                            ? err.message
+                                                            : `Could not remove ${name} from "${group.name}".`)
                                                     } finally {
                                                         setBusy(null)
                                                     }
@@ -1002,9 +1006,11 @@ function ManageMembersModal({
                                                     await groupsService.addMember(group.id, u.id)
                                                     await refresh()
                                                     onChange()
-                                                    notify('success', `Added ${u.displayName}`)
+                                                    notify('success', `Added ${u.displayName} to "${group.name}".`)
                                                 } catch (err) {
-                                                    notify('error', err instanceof Error ? err.message : 'Add failed')
+                                                    notify('error', err instanceof Error && err.message
+                                                        ? err.message
+                                                        : `Could not add ${u.displayName} to "${group.name}".`)
                                                 } finally {
                                                     setBusy(null)
                                                 }
