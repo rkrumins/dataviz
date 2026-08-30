@@ -8,8 +8,9 @@ single contiguous block.
 This mixin walks upstream/downstream edges one call at a time
 (``get_upstream``, ``get_downstream``, ``get_full_lineage``, all built on
 the shared ``_traverse_lineage`` helper) — the simple counterpart to the
-trace/closure machinery elsewhere in the provider. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this
-has to be a mixin rather than a delegate/helper object.
+trace/closure machinery elsewhere in the provider. See
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
+for why this has to be a mixin rather than a delegate/helper object.
 """
 from typing import Any, Dict, List, Optional, Set
 

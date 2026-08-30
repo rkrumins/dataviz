@@ -24,8 +24,9 @@ in each requested direction, the cursor grammar (``s:<urn>`` inclusive,
 a hub page cursor is ``e:<edge id>``, ``e:0`` is never minted), and the
 truncation-reason priority (``seed_failed``/``nodes_failed``/
 ``ancestors_failed``/``timeout`` outrank ``max_nodes``). None of that is
-this mixin's to change. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this
-has to be a mixin rather than a delegate/helper object.
+this mixin's to change. See
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
+for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio
 import time

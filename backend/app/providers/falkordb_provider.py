@@ -12,8 +12,10 @@ importing a private name — see ``test_falkordb_package_guards.py``'s
 consumers are repointed at the package.
 
 Export contract: the 40 names below are the measured union of everything
-the rest of the repo imports from this module today — 22 names imported
-by name across 104 call sites, 6 more read off the module object (e.g.
+the rest of the repo imports from this module today — 20 names imported
+by name across 95 import statements (an AST pass at this task's own HEAD,
+not inherited from the pre-package-split snapshot that first measured
+this), 6 more read off the module object (e.g.
 ``fp._normalize_falkordb_host``, ``fp._BULK_CREATE_KNOBS_CACHE``),
 ``asyncio`` (two tests patch ``backend.app.providers.falkordb_provider.
 asyncio.sleep``) and ``logger`` (two tests filter caplog on this module's

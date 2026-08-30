@@ -11,8 +11,9 @@ for a trace's expand/drill actions — plus ``_fetch_containment_edges``
 (pair-list-driven containment resolution) and ``get_nodes_batch``, the
 bulk URN→node hydration trace v2 and advanced search both call to fill in
 a page of results with a live ``childCount``. ``get_nodes_batch`` is
-public and stays reachable. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
-to be a mixin rather than a delegate/helper object.
+public and stays reachable. See
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
+for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio
 from typing import Any, Dict, List, Optional, Set, Tuple

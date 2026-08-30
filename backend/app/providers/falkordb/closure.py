@@ -13,8 +13,8 @@ walk" section-banner comment moved with the method it heads.
 This is the walk *engine* that ``TraceMixin``'s ``trace_closure`` /
 ``trace_closure_coarse`` (``backend/app/providers/falkordb/trace.py``)
 call; the entry points stayed there because that split is the plan's.
-See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this
-has to be a mixin rather than a delegate/helper object.
+See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md``
+§2.2 for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio
 import os

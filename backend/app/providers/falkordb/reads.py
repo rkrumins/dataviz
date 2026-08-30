@@ -12,8 +12,9 @@ the ``_match_*`` filter helpers and ``search_nodes``), the three
 import — that module is 3,604 lines and reaches back into this
 provider's private surface), and ``get_edges``. ``get_nodes`` carries
 the label-union shape that only exists because FalkorDB indexes are
-label-scoped; it is not simplified here. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
-to be a mixin rather than a delegate/helper object.
+label-scoped; it is not simplified here. See
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
+for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio
 import json

@@ -14,8 +14,8 @@ than a bare ``MATCH (n)`` because FalkorDB's indexes are label-scoped and
 a bare match cannot use them — it reads ``_indexed_entity_type_ids``,
 which ``ensure_indices`` sets; the ``CALL {} UNION`` wrapper itself now
 renders via ``self.dialect.label_union`` (task 14's dialect seam). See
-``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
-to be a mixin rather than a delegate/helper object.
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
+for why this has to be a mixin rather than a delegate/helper object.
 """
 import json
 from typing import Any, Dict, List, Optional

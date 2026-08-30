@@ -10,8 +10,9 @@ the original file.
 This mixin owns the whole connection lifecycle and the five query
 chokepoints the unit suite fakes by assigning over a live instance's own
 methods (``_ensure_connected``, ``_ro_query``, ``_proj_ro_query``,
-``_query``, ``_proj_query``, ``_run_guarded``) — see ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
-to be a mixin rather than a delegate/helper object.
+``_query``, ``_proj_query``, ``_run_guarded``) — see
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
+for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio
 import functools

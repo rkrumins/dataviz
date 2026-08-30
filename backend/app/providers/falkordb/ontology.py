@@ -12,8 +12,9 @@ This mixin owns the per-source ontology configuration injected by
 ``ContextEngine`` / the aggregation worker after ontology resolution
 (containment edge types, entity-type levels, resolved edge metadata,
 source-vocabulary aliases, node identity) and the containment/alias
-helpers built on it. See ``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2 for why this has
-to be a mixin rather than a delegate/helper object.
+helpers built on it. See
+``docs/superpowers/plans/2026-08-30-pr1-falkordb-decoupling.md`` §2.2
+for why this has to be a mixin rather than a delegate/helper object.
 """
 import asyncio
 import os
