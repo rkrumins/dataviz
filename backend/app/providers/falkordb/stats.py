@@ -166,13 +166,8 @@ class StatsMixin:
             res = await self._ro_query_tolerant(cypher, op="probe.catalogue")
             return [row[0] for row in (res.result_set or []) if row and row[0]]
 
-        labels = await _catalogue(
-            "CALL db.labels() YIELD label RETURN label"
-        )
-        rel_types = await _catalogue(
-            "CALL db.relationshipTypes() YIELD relationshipType "
-            "RETURN relationshipType"
-        )
+        labels = await _catalogue(self.dialect.labels_statement())
+        rel_types = await _catalogue(self.dialect.relationship_types_statement())
         node_count = await _count("MATCH (n) RETURN count(n)")
         edge_count = await _count("MATCH ()-[r]->() RETURN count(r)")
 
@@ -387,8 +382,7 @@ class StatsMixin:
         all_types: List[str] = []
         try:
             type_res = await self._ro_query_tolerant(
-                "CALL db.relationshipTypes() YIELD relationshipType "
-                "RETURN relationshipType",
+                self.dialect.relationship_types_statement(),
                 op="ontology.reltypes",
             )
             all_types = [row[0] for row in (type_res.result_set or []) if row and row[0]]

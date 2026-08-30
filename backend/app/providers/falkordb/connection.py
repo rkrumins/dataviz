@@ -21,6 +21,7 @@ import time
 from typing import Any, Awaitable, Callable, Optional
 
 from backend.app.providers.falkordb._log import logger
+from backend.app.providers.falkordb.dialect import FALKORDB_DIALECT
 from backend.app.providers.falkordb.errors import (
     _is_cluster_routing_error,
     _is_transient_connection_error,
@@ -33,6 +34,7 @@ from backend.app.providers.falkordb.errors import (
 from backend.app.providers.falkordb.executor import FalkorDBExecutor
 from backend.app.providers.falkordb.hosts import _normalize_falkordb_host
 from backend.app.providers.falkordb.knobs import _resolve_bulk_create_knobs
+from backend.common.providers.cypher.dialect import CypherDialect
 
 
 class ConnectionMixin:
@@ -1350,6 +1352,23 @@ class ConnectionMixin:
         than ``self.__dict__.setdefault(...)``.
         """
         return FalkorDBExecutor(self, "projection")
+
+    @functools.cached_property
+    def dialect(self) -> CypherDialect:
+        """The FalkorDB dialect object -- see ``backend.common.providers.
+        cypher.dialect.CypherDialect`` and ``backend.app.providers.
+        falkordb.dialect.FALKORDB_DIALECT``. Same lazy ``cached_property``
+        pattern as ``executor``/``projection_executor`` above, for the
+        same ``__new__`` reason (a test instance built without
+        ``__init__`` still gets one on first access).
+
+        Unlike the executor, ``FALKORDB_DIALECT`` needs no per-instance
+        state -- it is one shared, immutable, module-level value, so a
+        plain ``@property`` would be equally correct here. Caching it
+        anyway keeps this seam and the executor seam mechanically
+        identical, at zero extra cost.
+        """
+        return FALKORDB_DIALECT
 
     # `list_graphs` and `close` were lines 10496-10594 of provider.py
     # before this split — not contiguous with the block above.

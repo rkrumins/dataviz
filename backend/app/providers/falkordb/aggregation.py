@@ -278,7 +278,7 @@ class AggregationMixin:
                 rows: list = []
                 try:
                     lbl_res = await self._ro_query(
-                        "CALL db.labels() YIELD label RETURN label",
+                        self.dialect.labels_statement(),
                         timeout=5.0,
                     )
                     observed = [
@@ -364,7 +364,7 @@ class AggregationMixin:
             try:
                 await asyncio.wait_for(
                     self._proj.query(
-                        f"CREATE INDEX FOR (n:{label}) ON (n.urn)",
+                        self.dialect.create_node_index(label, "urn"),
                     ),
                     timeout=_init_timeout,
                 )
@@ -397,7 +397,7 @@ class AggregationMixin:
         """
         try:
             res = await asyncio.wait_for(
-                self._proj.ro_query("CALL db.labels() YIELD label RETURN label", {}),
+                self._proj.ro_query(self.dialect.labels_statement(), {}),
                 timeout=2.0,
             )
         except Exception as exc:

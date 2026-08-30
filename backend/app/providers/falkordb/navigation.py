@@ -12,8 +12,9 @@ free-form node query: ``get_ancestors`` (Redis chain + one Cypher hydrate),
 ``get_nodes_by_layer`` uses a per-label ``CALL { … } UNION`` shape rather
 than a bare ``MATCH (n)`` because FalkorDB's indexes are label-scoped and
 a bare match cannot use them — it reads ``_indexed_entity_type_ids``,
-which ``ensure_indices`` sets; that shape is on the dialect list for a
-later task and moves untouched here. See carve-protocol.md in
+which ``ensure_indices`` sets; the ``CALL {} UNION`` wrapper itself now
+renders via ``self.dialect.label_union`` (task 14's dialect seam). See
+carve-protocol.md in
 ``.superpowers/sdd/2026-08-30-pr1-falkordb-decoupling/`` for why this has
 to be a mixin rather than a delegate/helper object.
 """
@@ -143,11 +144,11 @@ class NavigationMixin:
 
         vocabulary = getattr(self, "_indexed_entity_type_ids", None)
         if vocabulary:
-            branches = " UNION ".join(
-                f"MATCH (n:{_sanitize_label(label)}){where} RETURN n"
-                for label in indexed_labels(vocabulary)
+            safe_labels = [_sanitize_label(label) for label in indexed_labels(vocabulary)]
+            cypher = (
+                self.dialect.label_union(safe_labels, where)
+                + f" WITH n{order}{skip_clause} LIMIT $limit RETURN n"
             )
-            cypher = "CALL { " + branches + " }" + f" WITH n{order}{skip_clause} LIMIT $limit RETURN n"
         else:
             cypher = f"MATCH (n){where} WITH n{order}{skip_clause} LIMIT $limit RETURN n"
 

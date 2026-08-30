@@ -444,7 +444,7 @@ class BrowseMixin:
         # was the original bug.
         if containment_rel_types:
             filter_fragments.append(
-                "NOT (n)<-[:" + containment_rel_types + "]-()"
+                self.dialect.no_incoming_pattern("n", containment_rel_types)
             )
 
         # ── Build MATCH clause: label UNION if entity_types specified ─────
@@ -476,11 +476,7 @@ class BrowseMixin:
         def _build_match(filters: List[str]) -> str:
             where_clause = (" WHERE " + " AND ".join(filters)) if filters else ""
             if use_label_union:
-                branches = [
-                    f"MATCH (n:{label}){where_clause} RETURN n"
-                    for label in safe_types
-                ]
-                return "CALL { " + " UNION ".join(branches) + " }"
+                return self.dialect.label_union(safe_types, where_clause)
             return f"MATCH (n){where_clause}"
 
         # ── Page query ────────────────────────────────────────────────────
@@ -573,11 +569,7 @@ class BrowseMixin:
 
             if use_label_union:
                 where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
-                count_branches = [
-                    f"MATCH (n:{label}){where_clause} RETURN n"
-                    for label in safe_types
-                ]
-                count_cypher = "CALL { " + " UNION ".join(count_branches) + " } RETURN count(n) as total"
+                count_cypher = self.dialect.label_union(safe_types, where_clause) + " RETURN count(n) as total"
             else:
                 where_clause = (" WHERE " + " AND ".join(filter_fragments)) if filter_fragments else ""
                 count_cypher = f"MATCH (n){where_clause} RETURN count(n) as total"

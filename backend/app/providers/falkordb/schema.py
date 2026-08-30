@@ -221,7 +221,7 @@ class SchemaMixin:
                     timeout=_init_timeout,
                 )
             except Exception as exc:
-                if "already indexed" in str(exc).lower():
+                if self.dialect.is_index_exists_error(exc):
                     return
                 failures.append(f"{cypher}: {type(exc).__name__}: {exc}")
 
@@ -229,7 +229,7 @@ class SchemaMixin:
         for label in labels:
             for prop in properties:
                 total += 1
-                await _create_index(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+                await _create_index(self.dialect.create_node_index(label, prop))
 
         # Edge-property indices on :AGGREGATED powering the level-pair
         # fast path used by ``_expand_aggregated_set``. With these in
@@ -244,17 +244,18 @@ class SchemaMixin:
         # rather than two single-column lookups OR-merged by the planner.
         # Idempotent; falls back to two single-column indices below if the
         # planner does not support composite edge indices.
+        _agg_edge_type = self.dialect.aggregated_edge_type
         aggregated_edge_indices = [
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel, r.targetLevel)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetLevel)",
+            self.dialect.create_edge_index(_agg_edge_type, ("sourceLevel", "targetLevel")),
+            self.dialect.create_edge_index(_agg_edge_type, ("sourceLevel",)),
+            self.dialect.create_edge_index(_agg_edge_type, ("targetLevel",)),
             # Depth stamps (stampVersion>=2) are the PREFERRED read filters
             # (Q3 mixed-depth derivation, trace structural drill) — without
             # these they run as Conditional Traverse property reads.
             # Verified supported on FalkorDB v4.16.0 (WS0 D1 spike).
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
+            self.dialect.create_edge_index(_agg_edge_type, ("sourceDepth", "targetDepth")),
+            self.dialect.create_edge_index(_agg_edge_type, ("sourceDepth",)),
+            self.dialect.create_edge_index(_agg_edge_type, ("targetDepth",)),
         ]
         for index_cypher in aggregated_edge_indices:
             total += 1
@@ -293,7 +294,9 @@ class SchemaMixin:
         """
 
         try:
-            await self._proj_query("CREATE INDEX FOR (n:_Projection) ON (n.urn)")
+            await self._proj_query(
+                self.dialect.create_node_index(self.dialect.projection_label, "urn")
+            )
         except Exception:
             pass  # Index may already exist
 
@@ -307,7 +310,7 @@ class SchemaMixin:
         server = (self._host, self._port)
         if server not in _UNLABELED_URN_UNSUPPORTED:
             try:
-                await self._proj_query("CREATE INDEX FOR (n) ON (n.urn)")
+                await self._proj_query(self.dialect.create_unlabeled_index("urn"))
             except Exception:
                 _UNLABELED_URN_UNSUPPORTED.add(server)
                 logger.info(
@@ -343,7 +346,7 @@ class SchemaMixin:
         """
         try:
             res = await asyncio.wait_for(
-                self._proj.ro_query("CALL db.indexes()", {}),
+                self._proj.ro_query(self.dialect.indexes_statement(), {}),
                 timeout=2.0,
             )
         except Exception as exc:
@@ -360,43 +363,28 @@ class SchemaMixin:
         unlabeled_urn = False
         aggregated_indexes: List[str] = []
 
-        for row in rows:
-            # FalkorDB row column order historically: label, properties,
-            # types, language, stopwords, entitytype, info. We only need
-            # the first three and read defensively.
-            if not row:
-                continue
-            label = row[0] if len(row) > 0 else None
-            props = row[1] if len(row) > 1 else None
-            entity_type_col = row[5] if len(row) > 5 else None
-
-            # Normalize: label may be None / "" for unlabeled indexes.
-            # props is typically a list of strings.
-            prop_list: List[str] = []
-            if isinstance(props, (list, tuple)):
-                prop_list = [str(p) for p in props]
-            elif isinstance(props, str):
-                prop_list = [props]
-
-            is_edge_index = False
-            if isinstance(entity_type_col, str):
-                is_edge_index = entity_type_col.upper().startswith("RELAT")
-
+        # Row-shape parsing (FalkorDB's historical column order: label,
+        # properties, types, language, stopwords, entitytype, info; read
+        # defensively because it varies by build) lives in
+        # ``self.dialect.parse_index_rows`` now -- see that method's
+        # docstring. What follows is the categorization that was always
+        # specific to this health check, not to FalkorDB's column layout.
+        for parsed in self.dialect.parse_index_rows(rows):
             # Edge index on AGGREGATED?
             if (
-                is_edge_index
-                and isinstance(label, str)
-                and label.upper() == "AGGREGATED"
+                parsed.is_edge_index
+                and isinstance(parsed.label, str)
+                and parsed.label.upper() == "AGGREGATED"
             ):
                 aggregated_indexes.append(
-                    f"({label} ON {prop_list})"
+                    f"({parsed.label} ON {parsed.props})"
                 )
                 continue
 
             # Node index on URN.
-            if "urn" in prop_list:
-                if label:
-                    labeled_urn.append(str(label))
+            if "urn" in parsed.props:
+                if parsed.label:
+                    labeled_urn.append(str(parsed.label))
                 else:
                     unlabeled_urn = True
 

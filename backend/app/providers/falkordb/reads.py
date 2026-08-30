@@ -220,31 +220,28 @@ class ReadMixin:
         if use_label_union:
             # Build UNION query with per-label MATCH clauses (uses FalkorDB label indices)
             where_suffix = (" WHERE " + " AND ".join(shared_conditions)) if shared_conditions else ""
-            union_branches = []
-            for t in types:
-                safe_label = _sanitize_label(t)
-                union_branches.append(f"MATCH (n:{safe_label}){where_suffix} RETURN n")
+            safe_labels = [_sanitize_label(t) for t in types]
             # Wrap in subquery pattern: UNION all branches, then paginate + child count
-            inner = " UNION ".join(union_branches)
+            call_block = self.dialect.label_union(safe_labels, where_suffix)
             if include_child_count:
                 containment = list(self._get_containment_edge_types())
                 containment_rel_types = "|".join([_sanitize_label(t) for t in containment])
                 if containment_rel_types:
                     cypher = (
-                        f"CALL {{ {inner} }} "
+                        f"{call_block} "
                         f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
                         f"OPTIONAL MATCH (n)-[:{containment_rel_types}]->(child) "
                         f"RETURN n, count(child) as childCount"
                     )
                 else:
                     cypher = (
-                        f"CALL {{ {inner} }} "
+                        f"{call_block} "
                         f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
                         f"RETURN n, 0 as childCount"
                     )
             else:
                 cypher = (
-                    f"CALL {{ {inner} }} "
+                    f"{call_block} "
                     f"WITH n ORDER BY n.displayName SKIP $skip LIMIT $limit "
                     f"RETURN n"
                 )
