@@ -375,7 +375,6 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
 
     const handleRevoke = async (invite: InviteSummary) => {
         setRevoking(invite.id)
-        setError(null)
         try {
             await adminUserService.revokeInvite(invite.id)
             setConfirming(null)
@@ -387,9 +386,10 @@ export function AdminInvites({ onCreate }: { onCreate?: () => void }) {
             )
             reload()
         } catch (err: unknown) {
-            const msg = messageOf(err, 'Could not revoke this link')
-            setError(msg)
-            notify('error', msg)
+            // Once, not twice: `error` below is the "the list didn't load" state,
+            // and a revoke that failed is not that — it is something that just
+            // happened, so it goes to the notification stack alone.
+            notify('error', messageOf(err, 'Could not revoke this link'))
         } finally {
             setRevoking(null)
         }

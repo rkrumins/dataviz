@@ -230,18 +230,21 @@ export function AdminGroups() {
         key: string,
         fn: () => Promise<T>,
         successMsg?: string,
+        /** What to say when the server sends nothing readable. Never
+         *  "Action failed" — one withAction serves create, rename and delete,
+         *  and only the caller knows which of them the user just tried. */
+        failureMsg?: string,
     ): Promise<T | undefined> => {
         setActionLoading(key)
-        setError(null)
         try {
             const result = await fn()
             if (successMsg) notify('success', successMsg)
             await fetchGroups()
             return result
         } catch (err) {
-            const message = err instanceof Error ? err.message : 'Action failed'
-            notify('error', message)
-            setError(message)
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : failureMsg ?? 'Could not complete that change to the group.')
             return undefined
         } finally {
             setActionLoading(null)
@@ -343,7 +346,10 @@ export function AdminGroups() {
                 )}
             </AnimatePresence>
 
-            {/* Error banner (in addition to notification) */}
+            {/* The list itself failed to load — still true while it is read, so it
+                stays on the page. Everything that merely HAPPENED (a group created,
+                renamed, deleted) speaks through the app's notification stack, and
+                used to be reported twice: once here and once there. */}
             <AnimatePresence>
                 {error && (
                     <motion.div
@@ -578,7 +584,7 @@ export function AdminGroups() {
                                     onSubmit={async (vals) => {
                                         const created = await withAction('create', async () => {
                                             return await groupsService.create(vals)
-                                        }, `Group "${vals.name}" created`)
+                                        }, `Group "${vals.name}" created`, `Could not create the group "${vals.name}".`)
                                         if (created) setModal(null)
                                     }}
                                     submitting={actionLoading === 'create'}
@@ -591,7 +597,7 @@ export function AdminGroups() {
                                     onSubmit={async (vals) => {
                                         const updated = await withAction(`edit-${modal.group.id}`, async () => {
                                             return await groupsService.update(modal.group.id, vals)
-                                        }, 'Group updated')
+                                        }, 'Group updated', `Could not save the changes to "${modal.group.name}".`)
                                         if (updated) setModal(null)
                                     }}
                                     submitting={actionLoading === `edit-${modal.group.id}`}
@@ -605,7 +611,7 @@ export function AdminGroups() {
                                         const ok = await withAction(`del-${modal.group.id}`, async () => {
                                             await groupsService.delete(modal.group.id)
                                             return true
-                                        }, `Deleted "${modal.group.name}"`)
+                                        }, `Deleted "${modal.group.name}"`, `Could not delete "${modal.group.name}".`)
                                         if (ok) setModal(null)
                                     }}
                                     submitting={actionLoading === `del-${modal.group.id}`}
