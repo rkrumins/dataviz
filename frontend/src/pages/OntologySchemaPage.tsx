@@ -1908,6 +1908,11 @@ export function OntologySchemaPage() {
                           relType={editorPanel.data}
                           availableEntityTypes={entityTypes.map(et => ({ id: et.id, name: et.name }))}
                           existingTypeIds={relTypes.map(rt => rt.id)}
+                          siblingTypes={relTypes.map(rt => ({
+                            id: rt.id,
+                            name: rt.name,
+                            visual: { strokeColor: rt.visual.strokeColor, strokeStyle: rt.visual.strokeStyle },
+                          }))}
                           readOnly={isLocked || !!editorPanel.data?.isSystem}
                           onSave={handleSaveRelType as (rt: RelationshipTypeSchema & { isContainment?: boolean; isLineage?: boolean; category?: string; direction?: string }) => void}
                           onCancel={() => setEditorPanel(null)}
