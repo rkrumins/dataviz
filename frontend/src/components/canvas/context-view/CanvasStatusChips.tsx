@@ -19,9 +19,7 @@ import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
 import { Unlink, Layers, ListPlus, GitBranch, Focus } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToastStore } from '@/components/ui/toast'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
-import { MessageHistoryChip } from './MessageHistoryChip'
 
 const CHIP_CLASS =
   'pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 rounded-full backdrop-blur-md ' +
@@ -91,10 +89,6 @@ export function CanvasStatusChips({
   onPreviewExternal?: () => void
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
-  // Toasts that already came and went in this view. The chip owns its own
-  // rendering; the cluster only needs to know whether it has anything to show,
-  // so an otherwise-quiet canvas still surfaces the messages.
-  const messageCount = useToastStore(s => s.history.length)
 
   const showUnresolved = unresolvedEdgeCount > 0
   const showUnassigned = unassignedEntities.length > 0
@@ -104,7 +98,7 @@ export function CanvasStatusChips({
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots && !showExternal && messageCount === 0) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showAdaptive && !showFocus && !showRoots && !showExternal) return null
 
   return (
     // Bottom-RIGHT, stacked directly above the docked Edge Legend (which
@@ -351,8 +345,6 @@ export function CanvasStatusChips({
           )}
         </div>
       )}
-
-      <MessageHistoryChip className={CHIP_CLASS} />
     </div>
   )
 }

@@ -164,6 +164,7 @@ export function ConnectionsPanel({
     >
       <button
         type="button"
+        data-dock-header
         aria-expanded={isExpanded}
         onClick={() => {
           // React fires no mouseleave when the row list unmounts, so a hover

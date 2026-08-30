@@ -64,6 +64,7 @@ import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
 import { ConnectionsPanel } from './connections/ConnectionsPanel'
+import { ActivityPanel } from './ActivityPanel'
 import { buildConnectionModel } from './connections/connectionModel'
 import { useConnectionVisibility } from '@/store/connectionVisibility'
 import { useBandReservation } from './useBandReservation'
@@ -317,8 +318,20 @@ function siblingContext(
   }
 }
 
-/** The legend's header row is its collapsed footprint; the opened body is a transient overlay. */
-const measureLegendHeader = (el: HTMLElement): number => el.querySelector<HTMLElement>('button')?.offsetHeight ?? 0
+/** `gap-1.5` on the dock column below — the space between two stacked headers. */
+const DOCK_GAP_PX = 6
+
+/**
+ * The dock's collapsed footprint: every panel's header row plus the gaps
+ * between them. An opened body is a transient overlay above that band, so it
+ * is not measured — but a SECOND collapsed panel is, or the stack's own header
+ * sits over the bottom row of every column.
+ */
+const measureLegendHeader = (el: HTMLElement): number => {
+  const headers = [...el.querySelectorAll<HTMLElement>('[data-dock-header]')]
+  if (headers.length === 0) return 0
+  return headers.reduce((sum, h) => sum + h.offsetHeight, 0) + (headers.length - 1) * DOCK_GAP_PX
+}
 
 export function ContextViewCanvas({
   className,
@@ -1445,11 +1458,12 @@ export function ContextViewCanvas({
   // below to keep the selected column in the un-occluded region whenever a
   // side panel (EntityDrawer / EdgeDetailPanel) is open.
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null)
-  // The edge legend reserves the band it is docked in — its header only,
-  // so opening it does not shove the columns up.
+  // The bottom-right dock reserves the band it floats in — the collapsed
+  // headers only, so opening a panel does not shove the columns up.
   const edgeLegendRef = useRef<HTMLDivElement>(null)
-  // The variable keeps its name; what it measures is now the Connections
-  // panel's header (CanvasStatusChips and the columns read it by that name).
+  // The variable keeps its name; what it measures is now the whole dock stack
+  // — Activity's header plus Connections' (CanvasStatusChips and the columns
+  // read it by that name).
   useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
@@ -4849,23 +4863,26 @@ export function ContextViewCanvas({
           }
         }} />
 
-        {/* Connections panel — docked bottom-right in the reserved band, never
-            over rows: it publishes its collapsed (header) height as
-            --edge-legend-height and the columns area pads for it; opening
-            it grows upward as a transient overlay. Right-rail panels are
-            flex siblings, so the canvas itself shrinks when one opens.
+        {/* The bottom-right dock — Activity above Connections, one stack. Docked
+            in the reserved band, never over rows: it publishes its collapsed
+            (headers) height as --edge-legend-height and the columns area pads
+            for it; opening a panel grows upward as a transient overlay. The
+            column is bottom-anchored, so the two panels can never cover each
+            other however either one opens. Right-rail panels are flex
+            siblings, so the canvas itself shrinks when one opens.
             Lifts above TraceBottomDock via --trace-dock-height. */}
         <div
           ref={edgeLegendRef}
           // z-40, the floating-chrome tier (trace dock, lens pills): the
           // columns area is `relative z-30` and later in the DOM, so at
           // z-30 the opened panel body painted UNDER the rows it overlaps.
-          className="absolute z-40 w-64 pointer-events-auto transition-all duration-300 ease-out"
+          className="absolute z-40 w-64 pointer-events-auto flex flex-col gap-1.5 transition-all duration-300 ease-out"
           style={{
             bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))',
             right: '1rem',
           }}
         >
+          <ActivityPanel />
           <ConnectionsPanel
             key={connectionsViewId}
             model={connectionModel}
