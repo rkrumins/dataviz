@@ -289,6 +289,61 @@ def test_provider_type_defaults_to_none_on_the_abc_and_the_double():
 
 
 # ---------------------------------------------------------------------------
+# ProviderFeatureUnsupportedError -- ``feature`` is always a ProviderFeature
+# or None, never a message string; the four pre-existing base defaults raise
+# it with their historical messages byte-identical (this is the property
+# that must not regress if the constructor shape ever changes again).
+# ---------------------------------------------------------------------------
+
+def test_for_feature_builds_the_structured_message():
+    exc = ProviderFeatureUnsupportedError.for_feature(ProviderFeature.SCHEMA_DISCOVERY, "Neo4jProvider")
+    assert str(exc) == "Neo4jProvider does not support the 'schema_discovery' feature"
+    assert exc.feature is ProviderFeature.SCHEMA_DISCOVERY
+    assert exc.provider == "Neo4jProvider"
+
+
+async def test_get_top_level_or_orphan_nodes_legacy_message_is_unchanged(provider):
+    with pytest.raises(ProviderFeatureUnsupportedError) as excinfo:
+        await provider.get_top_level_or_orphan_nodes()
+    assert str(excinfo.value) == (
+        "_MinimalProvider does not implement get_top_level_or_orphan_nodes. "
+        "Override this method to support the /nodes/top-level endpoint."
+    )
+    assert excinfo.value.feature is None
+    assert excinfo.value.provider == "_MinimalProvider"
+
+
+async def test_trace_at_level_legacy_message_is_unchanged(provider):
+    with pytest.raises(ProviderFeatureUnsupportedError) as excinfo:
+        await provider.trace_at_level("urn:a", 0, 1, 1, [], [], 100, 1000)
+    assert str(excinfo.value) == (
+        "_MinimalProvider does not implement trace_at_level. "
+        "Required for the /trace/v2 endpoint."
+    )
+    assert excinfo.value.feature is None
+
+
+async def test_expand_aggregated_legacy_message_is_unchanged(provider):
+    with pytest.raises(ProviderFeatureUnsupportedError) as excinfo:
+        await provider.expand_aggregated("urn:a", "urn:b", 0, [], [], 100, 1000)
+    assert str(excinfo.value) == (
+        "_MinimalProvider does not implement expand_aggregated. "
+        "Required for the /trace/expand endpoint."
+    )
+    assert excinfo.value.feature is None
+
+
+async def test_trace_closure_legacy_message_is_unchanged(provider):
+    with pytest.raises(ProviderFeatureUnsupportedError) as excinfo:
+        await provider.trace_closure("urn:a", 1, 1, [], [], 100, 1000)
+    assert str(excinfo.value) == (
+        "_MinimalProvider does not implement trace_closure. "
+        "Required for the /trace/closure endpoint."
+    )
+    assert excinfo.value.feature is None
+
+
+# ---------------------------------------------------------------------------
 # §2.1 — CursorMismatchError re-exported, not redefined.
 # ---------------------------------------------------------------------------
 

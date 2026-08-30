@@ -67,21 +67,28 @@ class ProviderFeatureUnsupportedError(NotImplementedError):
     fallback, context_engine's materialization guard) keeps working
     untouched.
 
-    ``feature`` is a ``ProviderFeature`` member for a named, catalog-
-    checkable capability, in which case the message is built from it and
-    ``provider``. It may also be a plain string -- used verbatim as the
-    message -- for the handful of pre-existing base-class defaults (below)
-    whose exact wording predates this error family and must not change.
+    ``feature`` is always a ``ProviderFeature`` member or None -- never a
+    message string -- so a handler reading ``exc.feature`` never gets a
+    surprise full sentence back. Construct directly with a plain message
+    (the handful of pre-existing base-class defaults below, whose exact
+    wording predates this error family and must not change, have no
+    catalog feature to name); use :meth:`for_feature` for a named,
+    catalog-checkable capability, which also builds the message.
     """
 
-    def __init__(self, feature: "ProviderFeature | str", provider: str) -> None:
-        self.feature = feature
+    def __init__(
+        self, message: str, provider: Optional[str] = None,
+        feature: "Optional[ProviderFeature]" = None,
+    ) -> None:
         self.provider = provider
-        if isinstance(feature, ProviderFeature):
-            message = f"{provider} does not support the {feature.value!r} feature"
-        else:
-            message = str(feature)
+        self.feature = feature
         super().__init__(message)
+
+    @classmethod
+    def for_feature(cls, feature: "ProviderFeature", provider: str) -> "ProviderFeatureUnsupportedError":
+        """The structured case: a named ``ProviderFeature`` the provider
+        doesn't support."""
+        return cls(f"{provider} does not support the {feature.value!r} feature", provider, feature)
 
 
 def call_optional(provider: Any, method: str, *args: Any, **kwargs: Any) -> bool:
@@ -907,7 +914,7 @@ class GraphDataProvider(ABC):
         callers pass a large, evolving set of tuning/resume parameters a
         provider without this feature has no use for.
         """
-        raise ProviderFeatureUnsupportedError(ProviderFeature.AGGREGATION_MATERIALIZATION, type(self).__name__)
+        raise ProviderFeatureUnsupportedError.for_feature(ProviderFeature.AGGREGATION_MATERIALIZATION, type(self).__name__)
 
     # ==========================================
     # Optional Extension Methods
