@@ -41,15 +41,7 @@ from .provider import (
     _validate_sort_direction,
     # Section B — read off the module object by two tests; must stay the
     # same object (mutated or monkeypatched in place), never a copy.
-    CLOSURE_QUERY_CAP_SECS,
     logger,
-    # Not imported anywhere today, but named by the plan as defensive
-    # exports — costs nothing, protects a future in-repo import.
-    _ClosureWalk,
-    _completed,
-    CLOSURE_FRONTIER_PROBE_CAP,
-    CLOSURE_WALK_SLICE,
-    CLOSURE_WALK_RESERVE_FRACTION,
 )
 
 # The rest of the export list: names ``provider.py`` no longer imports for
@@ -66,7 +58,14 @@ from .knobs import (
     _BULK_CREATE_TIMEOUT_DEFAULT,
     _resolve_bulk_create_knobs,
 )
-from .aggregation import AggregationBatchAbort, AggRunMeta
+from .aggregation import AggregationBatchAbort, AggRunMeta, _completed
+from .closure import (
+    _ClosureWalk,
+    CLOSURE_FRONTIER_PROBE_CAP,
+    CLOSURE_QUERY_CAP_SECS,
+    CLOSURE_WALK_SLICE,
+    CLOSURE_WALK_RESERVE_FRACTION,
+)
 from .schema import _UNLABELED_URN_UNSUPPORTED, _INDEX_HEALTH_LOGGED
 from .errors import (
     _is_cluster_routing_error,
