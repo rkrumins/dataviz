@@ -42,6 +42,7 @@ import { cn } from '@/lib/utils'
 import { withTimeout, TimeoutError } from '@/lib/concurrency'
 import { TIMEOUTS } from '@/config/timeouts'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 
 interface LineageNeighborsProps {
   nodeId: string
@@ -574,7 +575,6 @@ function ExpandedDetail({
         const hay = [
           d?.label,
           d?.businessLabel,
-          d?.technicalLabel,
           d?.urn,
           r.neighborId,
         ]
@@ -1244,11 +1244,13 @@ function NeighborRow({
     : LucideIcons.ArrowUpRight
 
   const data = neighborNode?.data
-  const label =
-    data?.businessLabel || data?.label || data?.urn || neighborId
-  const technical = data?.technicalLabel
-  const secondary =
-    technical && technical !== label ? technical : data?.urn ?? neighborId
+  // This panel is not persona-scoped — it always shows the friendly name, with
+  // the URN underneath. Precedence via the shared resolver so it agrees with the
+  // drawer and the canvas rows. (It used to prefer a `technicalLabel` that no
+  // mapper ever writes and no backend field defines, so the URN was already what
+  // rendered here; the dead branch is gone, the output is unchanged.)
+  const label = resolveEntityName(data, 'business', neighborId)
+  const secondary = data?.urn ?? neighborId
   const showSecondary = secondary && secondary !== label
 
   // Reveal lifecycle: while the parent's `onClick` (the canvas's reveal

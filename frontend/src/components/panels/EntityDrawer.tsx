@@ -44,6 +44,7 @@ import {
 } from '@/store/schema'
 import { allowedChildTypeIds, setHasId, deriveContainmentEdges } from '@/services/ontologyPreflightService'
 import { relationshipLabel, parentPlacementPhrase } from '@/lib/relationshipLabel'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
@@ -241,14 +242,17 @@ export function EntityDrawer({
   // Colors based on entity type (resolved from schema with hash-based fallback)
   const colors = useEntityColorSet((selectedNode?.data.type as string) ?? '')
 
-  // Get display label based on persona mode
-  const displayLabel = useMemo(() => {
-    if (!selectedNode) return ''
-    const data = selectedNode.data as Record<string, any>
-    return mode === 'business'
-      ? (data.businessLabel || data.label || data.name || selectedNode.id)
-      : (data.technicalLabel || data.label || data.name || selectedNode.id)
-  }, [selectedNode, mode])
+  // Name + (in Technical mode) the technical identity revealed beneath it —
+  // both from the shared resolver, so the drawer and the canvas row it was
+  // opened from can never disagree about what this entity is called.
+  const displayLabel = useMemo(
+    () => (selectedNode ? resolveEntityName(selectedNode.data, mode, selectedNode.id) : ''),
+    [selectedNode, mode],
+  )
+  const technicalLine = useMemo(
+    () => (selectedNode ? technicalSubtitle(selectedNode.data, mode) : undefined),
+    [selectedNode, mode],
+  )
 
   // Handle form field changes
   const handleChange = useCallback((key: string, value: any) => {
@@ -530,10 +534,22 @@ export function EntityDrawer({
             </button>
           </div>
 
-          {/* Entity Name */}
-          <h2 className="text-xl font-display font-semibold text-ink leading-tight mb-4">
+          {/* Entity Name — Technical mode adds the fully-qualified identity
+              underneath, and only when it says something the name does not. */}
+          <h2 className={cn(
+            'text-xl font-display font-semibold text-ink leading-tight',
+            technicalLine ? 'mb-1' : 'mb-4',
+          )}>
             {displayLabel}
           </h2>
+          {technicalLine && (
+            <p
+              className="text-xs font-mono text-ink-muted break-all mb-4"
+              title={technicalLine}
+            >
+              {technicalLine}
+            </p>
+          )}
 
           {/* Committed-deletion ghost → a Restore banner takes the place of the trace/edit actions. */}
           {isGhost && (

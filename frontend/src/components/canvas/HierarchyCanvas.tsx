@@ -54,6 +54,7 @@ import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 
 interface HierarchyCanvasProps {
   className?: string
@@ -233,7 +234,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       return {
         id: node.id,
         typeId: node.data.type as string,
-        name: (node.data.label as string) ?? (node.data.businessLabel as string) ?? node.id,
+        name: resolveEntityName(node.data, 'business', node.id),
         data: node.data as Record<string, unknown>,
         children,
         depth,

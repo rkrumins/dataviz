@@ -11,6 +11,8 @@ import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
@@ -230,6 +232,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
   const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
+
+  // Business/Technical. `node.name` is the business-facing name the hierarchy
+  // was built with; the persona mode is applied here, at render, so switching
+  // it never rebuilds the tree. Technical mode reveals the qualified name (or
+  // the URN) on a second line — and only when it says something the name on the
+  // row does not, so no row ever prints the same string twice. The row grows by
+  // one line when it does; LayerColumn measures every row via
+  // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
+  const personaMode = usePersonaMode()
+  const displayName = resolveEntityName(node.data, personaMode, node.name)
+  const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
   const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
@@ -619,7 +632,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           unreadable widths). */}
       <div
         className="flex-1 min-w-0 flex flex-col justify-center"
-        title={stagedSummary ?? node.name}
+        title={stagedSummary ?? displayName}
       >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
@@ -638,8 +651,18 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // their successors without scroll-jump.
           "line-clamp-3 break-words"
         )}>
-          {node.name}
+          {displayName}
         </span>
+        {/* Technical identity (Business/Technical toggle) — one truncated line,
+            full value on hover. */}
+        {technicalLine && (
+          <span
+            className="text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
+            title={technicalLine}
+          >
+            {technicalLine}
+          </span>
+        )}
         {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
             users can reclaim vertical space in dense canvases. */}
         {showTypeBadge && (
