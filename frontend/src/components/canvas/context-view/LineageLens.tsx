@@ -33,6 +33,7 @@
  */
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, startTransition } from 'react'
 import { createPortal } from 'react-dom'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { useRelationshipTypes } from '@/store/schema'
@@ -1572,36 +1573,25 @@ export function LineageLens({
   const toolbarInMenu = TOOLBAR_ORDER.filter(id => viewControls[id] && collapsedGroups.has(id))
 
   return createPortal(
-    <AnimatePresence>
-      <motion.div
-        key="lineage-lens"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.15 }}
-        className="fixed inset-0 z-[9990] flex items-center justify-center p-6"
-      >
-        {/* Backdrop — the ONE click outside the room, and the one that
-            asks before throwing a walk away.
-
-            NO `backdrop-filter` here, deliberately. This is a viewport-sized
-            layer sitting over a canvas that never stops moving — the flow
-            overlay's edges, a dozen `infinite` keyframes — so the compositor was
-            re-sampling the whole surface beneath it every frame, which is a
-            known way to make a page tear and flicker on some GPU/driver
-            combinations. The scrim does the actual work (separating the room
-            from the board); the blur was decoration on top of it. */}
-        <div
-          className="absolute inset-0 bg-black/50"
-          onClick={requestClose}
-        />
-
+    // The house shape for a portaled overlay, and the reason it is shaped this
+    // way: this used to be one `fixed inset-0` motion.div INSIDE
+    // <AnimatePresence> carrying `exit`, with the scrim as its child and no
+    // `pointer-events-none`. An interrupted exit (StrictMode, a rapid toggle, a
+    // parent re-render) leaves that node in the body — invisible at opacity 0,
+    // pointer-events on, covering the whole viewport — and every click in the
+    // app dies until a reload. This repo has shipped that freeze three times.
+    // Now: the scrim is a plain CSS Backdrop and a SIBLING (nested, its onClick
+    // never gets the click), the full-viewport wrapper is inert and outside any
+    // presence tree, and only the room itself is interactive. Entrance-only —
+    // the lens unmounts with its focus, so there is no exit to strand.
+    <>
+      <Backdrop open onClick={requestClose} zClassName="z-[9990]" className="bg-black/50" />
+      <div className="fixed inset-0 z-[9991] flex items-center justify-center p-6 pointer-events-none">
         <motion.div
           initial={{ opacity: 0, scale: 0.97, y: 8 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.97, y: 8 }}
           transition={{ duration: 0.18, ease: 'easeOut' }}
-          className="relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
+          className="pointer-events-auto relative flex flex-col rounded-2xl border border-black/10 dark:border-white/10 bg-canvas-elevated shadow-2xl shadow-black/40 overflow-hidden transition-[width,height,max-height] duration-300"
           style={
             // The focus room takes as much of the window as it can while
             // still reading as a room over the page, with a RESOLVED
@@ -2430,8 +2420,8 @@ export function LineageLens({
             </div>
           )}
         </motion.div>
-      </motion.div>
-    </AnimatePresence>,
+      </div>
+    </>,
     document.body,
   )
 }

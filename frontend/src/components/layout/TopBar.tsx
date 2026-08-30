@@ -230,8 +230,13 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             </button>
           )}
 
-          {/* User Menu */}
-          <DropdownMenu.Root>
+          {/* User Menu — non-modal, like every other dropdown in this app. A
+              MODAL Radix layer sets `body { pointer-events: none }` and only
+              clears it on effect cleanup; unmounting while open (a re-render
+              from an auth/branding/feature store, a route change) strands that
+              lock and the whole app goes click-dead until a reload. This menu
+              is mounted on every page, which made it the widest exposure left. */}
+          <DropdownMenu.Root modal={false}>
             <DropdownMenu.Trigger asChild>
               <button
                 className={cn(
