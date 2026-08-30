@@ -394,9 +394,10 @@ def test_new_built_instance_can_still_reach_executor():
     running __init__ (test_ensure_indices_onboarding.py:110,
     test_falkordb_ancestors_cache_reset.py:16,
     test_falkordb_pool_resilience.py:218). The executor properties must
-    not assume __init__ ran -- they are implemented via
-    ``self.__dict__.setdefault`` precisely so they work on such an
-    instance.
+    not assume __init__ ran -- they are implemented purely in terms of
+    ``self.__dict__`` (a ``dict.get`` plus a conditional item-assignment,
+    not ``self.__dict__.setdefault``; see the docstring on ``executor``
+    for why), which every instance has regardless of whether __init__ ran.
     """
     p = FalkorDBProvider.__new__(FalkorDBProvider)
 
@@ -409,6 +410,45 @@ def test_new_built_instance_can_still_reach_executor():
     assert isinstance(projection, FalkorDBExecutor)
     assert projection.target == "projection"
     assert projection is not executor
+
+
+def test_executor_properties_construct_falkordbexecutor_exactly_once(monkeypatch):
+    """Identity alone -- ``p.executor is p.executor``, already asserted
+    above -- does NOT catch the regression this test is for. The original
+    ``self.__dict__.setdefault("_executor", FalkorDBExecutor(self,
+    "source"))`` also returns the SAME cached object on every call
+    (setdefault discards its argument when the key already exists), so
+    identity holds either way. What it does NOT do is avoid the cost:
+    Python evaluates a call's arguments before the call, so that
+    ``FalkorDBExecutor(...)`` argument is constructed -- and thrown away
+    -- on every access after the first. Counting constructions directly
+    is the only way to pin "exactly once," which is the property that
+    motivated writing this as ``dict.get`` plus a conditional
+    item-assignment instead.
+    """
+    calls = []
+    real_init = FalkorDBExecutor.__init__
+
+    def counting_init(self, owner, target):
+        calls.append(target)
+        real_init(self, owner, target)
+
+    monkeypatch.setattr(FalkorDBExecutor, "__init__", counting_init)
+
+    p = _provider()
+    for _ in range(5):
+        p.executor
+    for _ in range(5):
+        p.projection_executor
+
+    assert calls == ["source", "projection"], (
+        "FalkorDBExecutor must be constructed exactly once per property "
+        f"(source, then projection) across repeated access; got {calls}. "
+        "A naive `p.executor is p.executor` identity check would NOT "
+        "catch this -- setdefault's cached return value is identical "
+        "across calls even though it silently discards a freshly built, "
+        "unused FalkorDBExecutor on every call after the first."
+    )
 
 
 # ---------------------------------------------------------------------------

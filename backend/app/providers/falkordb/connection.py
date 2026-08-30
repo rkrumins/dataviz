@@ -1322,8 +1322,29 @@ class ConnectionMixin:
         at call time, so a test that patches ``p._ro_query = fake`` keeps
         intercepting even when the caller goes through
         ``self.executor.run(...)`` instead of naming the chokepoint.
+
+        Deliberately not ``self.__dict__.setdefault("_executor",
+        FalkorDBExecutor(self, "source"))``, for two reasons. First,
+        Python evaluates a call's arguments before the call, so that form
+        constructs a (discarded) ``FalkorDBExecutor`` on every access
+        after the first, not only the first -- once a later PR routes the
+        ~120 chokepoint call sites through ``self.executor.run(...)``,
+        that is one throwaway object per query, on the path serving trace
+        and browse. Second, a *literal* ``self.__dict__[...] = ...``
+        assignment (unlike a ``setdefault`` call, or one routed through a
+        local variable as below) reads to this package's guard 2 as a
+        ``self._x``-shaped write and demands ``_state.py`` document
+        ``__dict__`` as new provider state, which it isn't -- confirmed by
+        running the guard against the naive rewrite before settling on
+        this one. Do not "simplify" this back to ``setdefault`` or to a
+        direct ``self.__dict__[...] = ...``.
         """
-        return self.__dict__.setdefault("_executor", FalkorDBExecutor(self, "source"))
+        cache = self.__dict__
+        ex = cache.get("_executor")
+        if ex is None:
+            ex = FalkorDBExecutor(self, "source")
+            cache["_executor"] = ex
+        return ex
 
     @property
     def projection_executor(self) -> FalkorDBExecutor:
@@ -1333,8 +1354,16 @@ class ConnectionMixin:
         quiesce gate and the write semaphore, and ``_proj`` resolves to
         ``_graph`` only in ``"in_source"`` projection mode -- the two
         targets differ in policy, not just in handle.
+
+        See ``executor`` above for why this avoids ``setdefault`` and a
+        literal ``self.__dict__[...] = ...``.
         """
-        return self.__dict__.setdefault("_projection_executor", FalkorDBExecutor(self, "projection"))
+        cache = self.__dict__
+        ex = cache.get("_projection_executor")
+        if ex is None:
+            ex = FalkorDBExecutor(self, "projection")
+            cache["_projection_executor"] = ex
+        return ex
 
     # `list_graphs` and `close` were lines 10496-10594 of provider.py
     # before this split — not contiguous with the block above.
