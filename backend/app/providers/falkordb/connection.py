@@ -29,6 +29,7 @@ from backend.app.providers.falkordb.errors import (
     _TRANSIENT_RETRY_BACKOFFS,
     _EmptyResult,
 )
+from backend.app.providers.falkordb.executor import FalkorDBExecutor
 from backend.app.providers.falkordb.hosts import _normalize_falkordb_host
 from backend.app.providers.falkordb.knobs import _resolve_bulk_create_knobs
 
@@ -1271,12 +1272,19 @@ class ConnectionMixin:
                 self._quiesce_trigger_s, self._quiesce_cooldown_s,
             )
 
-    async def _proj_query(self, cypher: str, params: dict = None, *, timeout: float = None):
+    async def _proj_query(self, cypher: str, params: dict = None, *, timeout: float = None,
+                          op: Optional[str] = None):
         """Timeout-guarded write query on the projection graph.
 
         Phase 2: also gated by ``_write_semaphore`` (per-graph hard cap
         on concurrent writes) and the latency-quiesce circuit. Records
         observed latency for the p95 trip decision.
+
+        ``op`` is additive (the other four chokepoints already take it) so
+        ``FalkorDBExecutor.run`` can pass its op label uniformly; unused
+        here, since -- unlike the other four -- this one calls
+        ``_run_guarded`` directly rather than ``_guarded_timed``, so it has
+        no slow-query telemetry line to feed.
         """
         # Quiesce gate — raises ``ProviderBusy`` if the provider is
         # currently in cooldown after a sustained p95 spike. Worker
@@ -1304,6 +1312,29 @@ class ConnectionMixin:
         async with self._write_semaphore:
             async with self._query_semaphore:
                 return await self._run_guarded(_call)
+
+    @property
+    def executor(self) -> FalkorDBExecutor:
+        """Adapter over the source-graph chokepoints (``_ro_query`` /
+        ``_query`` / ``_ro_query_tolerant``). Cached on the instance and
+        built lazily so a ``__new__``-built test instance (no ``__init__``)
+        still gets one on first access; looks the chokepoint up on ``self``
+        at call time, so a test that patches ``p._ro_query = fake`` keeps
+        intercepting even when the caller goes through
+        ``self.executor.run(...)`` instead of naming the chokepoint.
+        """
+        return self.__dict__.setdefault("_executor", FalkorDBExecutor(self, "source"))
+
+    @property
+    def projection_executor(self) -> FalkorDBExecutor:
+        """Adapter over the projection-graph chokepoints (``_proj_ro_query``
+        / ``_proj_query``). A separate instance from ``executor``, not the
+        same one with a different target: ``_proj_query`` carries the
+        quiesce gate and the write semaphore, and ``_proj`` resolves to
+        ``_graph`` only in ``"in_source"`` projection mode -- the two
+        targets differ in policy, not just in handle.
+        """
+        return self.__dict__.setdefault("_projection_executor", FalkorDBExecutor(self, "projection"))
 
     # `list_graphs` and `close` were lines 10496-10594 of provider.py
     # before this split — not contiguous with the block above.

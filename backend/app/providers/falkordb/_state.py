@@ -367,4 +367,5 @@ HELPER_CLASSES_EXCLUDED: FrozenSet[str] = frozenset({
     "aggregation.AggregationBatchAbort",
     "closure._ClosureWalk",
     "errors._EmptyResult",
+    "executor.FalkorDBExecutor",
 })
