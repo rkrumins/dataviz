@@ -138,3 +138,73 @@ describe('RelationshipTypeEditor line-style advisory', () => {
     expect(screen.queryByText(/color is the only difference/i)).toBeNull()
   })
 })
+
+/**
+ * The Appearance tab must describe the line the CANVAS draws — on BOTH sides.
+ *
+ * The siblings were already resolved that way by the caller (OntologySchemaPage
+ * maps each through `appOwnedStrokeStyle`), but the SUBJECT was still read
+ * declared. `AGGREGATED` is seeded `solid` on a live ontology and the canvas
+ * dashes every roll-up on geometry, so the row swatch an inch above drew dashed
+ * while this preview drew solid, and the advisory told the author the type was
+ * separated from every solid type by colour alone.
+ */
+describe('RelationshipTypeEditor — the subject is read as drawn, not as declared', () => {
+  const sibling = (id: string, strokeStyle: 'solid' | 'dashed' | 'dotted', strokeColor: string) => ({
+    id, name: id, visual: { strokeColor, strokeStyle },
+  })
+
+  const openAppearance = async () => {
+    await userEvent.click(screen.getByRole('button', { name: /appearance/i }))
+  }
+
+  const aggregated = () =>
+    relDefToSchema('AGGREGATED', { name: 'Aggregated', visual: { stroke_style: 'solid', stroke_color: '#94a3b8' } })
+
+  it('previews the roll-up dashed even though the ontology seeded it solid', async () => {
+    const { container } = render(
+      <RelationshipTypeEditor relType={aggregated()} existingTypeIds={['AGGREGATED']} onSave={noop} onCancel={noop} />,
+    )
+    await openAppearance()
+    expect(container.querySelector('svg line')?.getAttribute('stroke-dasharray')).toBe('8,4')
+  })
+
+  it('does not call the roll-up a solid twin of the solid types', async () => {
+    render(
+      <RelationshipTypeEditor
+        relType={aggregated()}
+        existingTypeIds={['AGGREGATED', 'PRODUCES']}
+        siblingTypes={[sibling('AGGREGATED', 'dashed', '#94a3b8'), sibling('PRODUCES', 'solid', '#3b82f6')]}
+        onSave={noop}
+        onCancel={noop}
+      />,
+    )
+    await openAppearance()
+    expect(screen.queryByText(/color is the only difference/i)).toBeNull()
+  })
+
+  it('still previews an ordinary type exactly as it is declared', async () => {
+    const relType = relDefToSchema('PRODUCES', { name: 'Produces', visual: { stroke_style: 'dotted', stroke_color: '#3b82f6' } })
+    const { container } = render(
+      <RelationshipTypeEditor relType={relType} existingTypeIds={['PRODUCES']} onSave={noop} onCancel={noop} />,
+    )
+    await openAppearance()
+    expect(container.querySelector('svg line')?.getAttribute('stroke-dasharray')).toBe('2,4')
+  })
+})
+
+/**
+ * Four of the Appearance controls persist to the database and reach no canvas:
+ * `EdgeTypeDefinition` carries colour, stroke style and animated only, and even
+ * `animated` is read by nothing but the legend's icon — every canvas computes
+ * motion from projection state. An author who set width 3 and arrow none saw
+ * every canvas draw the type exactly as before. Say so rather than ship a
+ * control whose only observable effect is a database row.
+ */
+describe('RelationshipTypeEditor — the Appearance tab says which channels are drawn', () => {
+  it('marks width, arrow and animation as not drawn yet', async () => {
+    render(<RelationshipTypeEditor existingTypeIds={[]} onSave={noop} onCancel={noop} />)
+    await userEvent.click(screen.getByRole('button', { name: /appearance/i }))
+    expect(screen.getByText(/the canvas does not draw them yet/i)).toBeTruthy()
+  })
+})

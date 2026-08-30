@@ -14,6 +14,7 @@ import { toRelationshipTypeId, findCaseInsensitiveCollision } from '@/features/o
 import { caseFold } from '@/features/ontology/lib/caseFold'
 import { DEFAULT_REL_VISUAL } from '@/features/ontology/lib/ontology-types'
 import { typesSharingLineStyle, type LineStyled } from '@/features/ontology/lib/lineStyle'
+import { appOwnedStrokeStyle } from '@/utils/edgeTypeUtils'
 import { ColorInput } from '@/components/ui/ColorInput'
 
 const STROKE_STYLES = ['solid', 'dashed', 'dotted'] as const
@@ -135,9 +136,19 @@ export function RelationshipTypeEditor({
   // hue and nothing else — which is nothing at all to a colour-blind reader, or in a
   // greyscale print of the canvas. The Appearance tab is where the colour gets picked,
   // so it is where that has to be said, and where the fix has to be one click away.
+  // Both sides of that comparison have to be the line the CANVAS draws. The
+  // siblings already are (the caller maps each through `appOwnedStrokeStyle`);
+  // the subject was still read declared, so the roll-up type — seeded `solid`
+  // on a live ontology, dashed by the canvas on geometry — previewed solid an
+  // inch under its own dashed row swatch, and the advisory named it a twin of
+  // every solid type.
+  const drawnStrokeStyle = appOwnedStrokeStyle(form.id) ?? form.visual.strokeStyle
   const lineTwins = useMemo(
-    () => typesSharingLineStyle({ id: form.id, name: form.name, visual: form.visual }, siblingTypes),
-    [form.id, form.name, form.visual, siblingTypes],
+    () => typesSharingLineStyle(
+      { id: form.id, name: form.name, visual: { ...form.visual, strokeStyle: drawnStrokeStyle } },
+      siblingTypes,
+    ),
+    [form.id, form.name, form.visual, drawnStrokeStyle, siblingTypes],
   )
   // A stroke style no OTHER declared type has taken, offered as that one click. Null
   // once all three are spoken for — three styles cannot separate a bigger ontology, and
@@ -169,8 +180,8 @@ export function RelationshipTypeEditor({
         stroke={form.visual.strokeColor}
         strokeWidth={form.visual.strokeWidth}
         strokeDasharray={
-          form.visual.strokeStyle === 'dashed' ? '8,4' :
-          form.visual.strokeStyle === 'dotted' ? '2,4' : undefined
+          drawnStrokeStyle === 'dashed' ? '8,4' :
+          drawnStrokeStyle === 'dotted' ? '2,4' : undefined
         }
         markerEnd={form.visual.arrowType !== 'none' ? 'url(#rel-arrow)' : undefined}
       />
@@ -401,6 +412,19 @@ export function RelationshipTypeEditor({
                   {preview}
                 </div>
 
+                {/* Two channels reach the canvas; the rest of this tab does not.
+                    `EdgeTypeDefinition` carries colour, stroke style and animated
+                    only — and `animated` is read by nothing but the legend's icon,
+                    because every canvas computes motion from projection state. An
+                    author who set width 3 and arrow none saw every canvas draw the
+                    type exactly as before. Say so, rather than ship a control whose
+                    only observable effect is a database row. */}
+                <p className="text-[11px] leading-relaxed text-ink-muted">
+                  Color and style are the two channels the canvas draws. Width, arrow and
+                  animation are saved with the type, but the canvas does not draw them yet —
+                  it sizes and animates lines from what is on screen.
+                </p>
+
                 <Section title="Stroke Color">
                   <ColorInput
                     value={form.visual.strokeColor}
@@ -455,7 +479,7 @@ export function RelationshipTypeEditor({
                         {lineTwins.slice(0, 3).map(t => t.name).join(', ')}
                         {lineTwins.length > 3 ? ` and ${lineTwins.length - 3} more` : ''}
                         {lineTwins.length === 1 ? ' is ' : ' are '}
-                        drawn with the same {form.visual.strokeStyle} line, so on the canvas
+                        drawn with the same {drawnStrokeStyle} line, so on the canvas
                         nothing but the hue tells them apart — and hue alone reaches nobody
                         who is colour-blind, or anyone printing the canvas in grey.
                       </p>
