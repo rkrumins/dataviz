@@ -986,7 +986,14 @@ export const LayerColumn = React.memo(function LayerColumn({
       }
       case 'Enter': {
         const item = navigableItems[focusIndex]
-        if (item) onSelect(item.node.id)
+        if (!item) break
+        // End the event at the React root. This scroller is a plain div, so
+        // useCanvasKeyboard's document listener does not treat it as an
+        // activatable control: without this, one Enter selected the row here
+        // AND fired the canvas `onEdit` — on the node selected BEFORE this
+        // keystroke, since React has not flushed onSelect by then.
+        e.stopPropagation()
+        onSelect(item.node.id)
         break
       }
       case 'Home':

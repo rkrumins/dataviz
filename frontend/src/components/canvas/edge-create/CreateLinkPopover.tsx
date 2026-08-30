@@ -246,12 +246,6 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
   return (
     <motion.div
       ref={ref}
-      // Enter must never leak to useCanvasKeyboard's document listener: its
-      // input-guard passes buttons through, and it preventDefaults Enter (killing
-      // the focused "Create link" activation) then fires onEdit on the source
-      // node. Stopping propagation here ends the event at the React root, before
-      // it bubbles on to document — the button's default activation still runs.
-      onKeyDown={(e) => { if (e.key === 'Enter') e.stopPropagation() }}
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.12 }}
