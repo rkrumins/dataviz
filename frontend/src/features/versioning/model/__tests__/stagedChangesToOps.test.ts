@@ -165,6 +165,20 @@ describe('unsavedNodeFields — what a staged entity edit CANNOT carry to the ba
     }))).toEqual(['owner'])
   })
 
+  it('names businessLabel — the payload carries it, but no backend field stores it', () => {
+    // The drawer edits "Business Label" as a top-level node field and the payload still carries it
+    // (so a mixed batch commits the rest), but nothing on the backend reads it: `businessLabel`
+    // appears nowhere in the Python, `_node_item` never projects it, and the drawer reads it back
+    // out of `n.properties`. Claiming it saved is exactly the lie this mechanism exists to end.
+    const c = sc({
+      type: 'update_entity', targetUrn: 'urn:bl',
+      before: { businessLabel: 'Orders' },
+      after: { businessLabel: 'Customer Orders' },
+    })
+    expect(stagedChangesToOps([c])[0].payload).toEqual({ businessLabel: 'Customer Orders' })
+    expect(unsavedNodeFields(c)).toEqual(['businessLabel'])
+  })
+
   it('says nothing about the descriptive fields now that they are carried', () => {
     expect(unsavedNodeFields(sc({
       type: 'update_entity', targetUrn: 'urn:i',

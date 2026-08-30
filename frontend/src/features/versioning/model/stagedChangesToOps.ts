@@ -52,11 +52,14 @@ function nodeUpdatePayload(after: Record<string, unknown>): Record<string, unkno
   return out
 }
 
-/** The `after` keys `nodeUpdatePayload` reads. A node field the user changed that is NOT here
- *  never reaches the backend — see `unsavedNodeFields`. */
+/** The `after` keys `nodeUpdatePayload` reads AND the backend stores. A node field the user changed
+ *  that is NOT here never lands — see `unsavedNodeFields`. `businessLabel` is deliberately absent
+ *  though the payload carries it: nothing on the backend reads it (it appears in no Python, the
+ *  projector never writes it, and the drawer reads it back out of `n.properties`), so counting it as
+ *  saved would be the same lie this list exists to prevent. */
 const MAPPED_NODE_KEYS = new Set([
   'displayName', 'label', 'entityType', 'type', 'tags', 'classifications',
-  'businessLabel', 'description', 'qualifiedName', 'sourceSystem', 'properties',
+  'description', 'qualifiedName', 'sourceSystem', 'properties',
 ])
 
 /** Backend-managed or client-only node fields: deliberately never sent, and never a loss.

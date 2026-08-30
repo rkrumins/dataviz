@@ -81,4 +81,30 @@ describe('what Review & Save tells the user it saved', () => {
     expect(requests.some(u => u.includes('/graph/changes'))).toBe(true)
     expect(messages()).toContain('success: Saved to draft.')
   }, 30000)
+
+  it('does not claim "Nothing was saved" when a layer move in the batch DID land', async () => {
+    // A zero-OP batch is not a zero-WORK batch. Layer placement is view config: it produces no
+    // graph ops (so no commitId) and is persisted separately by the save's own flushLayoutSave.
+    // Keying the sentence on commitId alone tells a user their move was lost while it is in fact
+    // durable — and they redo work that is already saved.
+    const h = await openDraftCanvas()
+    act(() => {
+      useStagedChangesStore.getState().stage({
+        type: 'assign_layer', targetId: 'orders', targetUrn: 'orders',
+        before: { layerId: 'raw' }, after: { layerId: 'gold' }, summary: 'Move orders',
+      } as Omit<StagedChange, 'id' | 'timestamp'>)
+      useStagedChangesStore.getState().stage({
+        type: 'update_entity', targetId: 'orders', targetUrn: 'orders',
+        before: { owner: 'ana' }, after: { owner: 'bo' }, summary: 'Edit orders',
+      } as Omit<StagedChange, 'id' | 'timestamp'>)
+      useStagedChangesStore.getState().openReviewPanel()
+    })
+    await h.settle()
+    const save = await screen.findByRole('button', { name: /save 2 changes/i })
+    await act(async () => { fireEvent.click(save) })
+    await h.settle()
+
+    expect(messages().join('\n')).not.toMatch(/Nothing was saved/)
+    expect(messages().join('\n')).toMatch(/Saved, except owner/)
+  }, 30000)
 })

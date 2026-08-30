@@ -874,6 +874,10 @@ export function ContextViewCanvas({
   // else 'idle'. The header subline shows a small spinner while 'saving' and the "Sync issue —
   // retry" control on 'error'.
   const [layoutSyncStatus, setLayoutSyncStatus] = useState<'idle' | 'saving' | 'error'>('idle')
+  // Which attempt owns the slot. A PUT slower than the 1500ms debounce leaves two saves in flight,
+  // and the loser must not speak for the canvas: an older one that rejects AFTER a later one settled
+  // is stale — its work rides in that newer payload.
+  const layoutSaveSeq = useRef(0)
   // The autosave's own notifier, declared beside the save it reports on (the canvas already takes
   // this hook more than once; `notify` is stable, which the effects below depend on). The header's
   // retry sits in a subline the user may never look at — a lost layout edit has to say so.
@@ -884,6 +888,7 @@ export function ContextViewCanvas({
     const pending = pendingLayoutSave.current
     if (!pending) { setLayoutSyncStatus('idle'); return }
     pendingLayoutSave.current = null
+    const seq = ++layoutSaveSeq.current
     setLayoutSyncStatus('saving')   // also covers a retry, which starts from 'error'
     try {
       await updateViewLayout(pending.viewId, {
@@ -901,8 +906,12 @@ export function ContextViewCanvas({
       // The edit stays PENDING: the branch-switch effect guards its re-fetch with this exact ref,
       // so clearing it let the server's stale layout overwrite the user's edits. Restored only if
       // no newer edit claimed the single slot while this one was in flight.
-      if (!pendingLayoutSave.current) pendingLayoutSave.current = pending
       console.error('[ContextViewCanvas] layout save failed', err)
+      // Only the NEWEST attempt owns the slot and the indicator. A save that started later has
+      // already carried this one's work (the payload is the whole layout); restoring the older one
+      // would report a failure over an edit that saved, and retrying it would revert the newer edit.
+      if (seq !== layoutSaveSeq.current) return
+      if (!pendingLayoutSave.current) pendingLayoutSave.current = pending
       setLayoutSyncStatus('error')   // what the header's "Sync issue — retry" waits for
       notifyLayoutSave('error', "Couldn't save the canvas layout — your edits are still here. "
         + 'Retry from the sync note beside the view name.')
@@ -959,8 +968,12 @@ export function ContextViewCanvas({
         return
       }
       if (cancelled) return
-      // A local edit landed after we started (a new save is armed) → don't clobber the optimistic layout.
-      if (pendingLayoutSave.current) return
+      // A local edit for THIS branch landed after we started (a new save is armed) → don't clobber the
+      // optimistic layout. Branch-aware, not presence-based: a pending edit belonging to a DIFFERENT
+      // branch has no claim here (its payload carries the branch it must go back to), and blocking on
+      // it left the previous branch's columns on screen under this branch's name — then wrote them
+      // over this branch's overlay on the next gesture.
+      if (pendingLayoutSave.current?.branchId === effectiveBranchId) return
       const view = useSchemaStore.getState().getActiveView()
       if (!view || view.id !== viewId) return   // the active view switched under us
       const nextRef = full.config?.layout?.referenceLayout
@@ -4938,8 +4951,13 @@ export function ContextViewCanvas({
               // (the entity drawer's schema-property inputs, a raw-JSON edit) — an edit made only of
               // those sends no ops at all, and a zero-op save resolves exactly like a commit. A green
               // "Saved to draft." over that is the lie this reports instead.
+              // A zero-OP batch is not a zero-WORK batch: layer moves produce no graph ops (so no
+              // commitId) and were just persisted durably by the flushLayoutSave above. Telling that
+              // user nothing was saved sends them to redo work that already landed.
+              const carriedSomething = !!commitId || stagedChangeList.some(
+                c => c.type !== 'update_entity' && c.type !== 'rename_entity')
               if (unsaved.length > 0) {
-                notify('warning', commitId
+                notify('warning', carriedSomething
                   ? `Saved, except ${unsaved.join(', ')} — the app can't store ${unsaved.length === 1 ? 'that field' : 'those fields'} on an entity yet.`
                   : `Nothing was saved — the app can't store ${unsaved.join(', ')} on an entity yet.`)
               } else {
