@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
   GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
@@ -234,10 +234,14 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   return createPortal(
     <>
       <Backdrop open={true} onClick={onClose} zClassName="z-[60]" className="bg-black/40" />
-      <AnimatePresence>
+      {/* Entrance-only, and no <AnimatePresence>: the drawer is mounted only
+          while a review is open, so its presence tree unmounted with it and the
+          `exit` never ran. A viewport-height panel sitting inside a presence
+          tree is the shape that strands a click-blocker in the body when an
+          exit is interrupted; without one there is nothing to strand. */}
       <motion.aside
         className="fixed right-0 top-0 h-full w-[520px] max-w-[92vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
-        initial={{ x: 520 }} animate={{ x: 0 }} exit={{ x: 520 }} transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+        initial={{ x: 520 }} animate={{ x: 0 }} transition={{ type: 'spring', damping: 30, stiffness: 300 }}
       >
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-4 border-b border-glass-border/60">
@@ -575,7 +579,6 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           />
         )}
       </motion.aside>
-      </AnimatePresence>
     </>,
     document.body,
   )
