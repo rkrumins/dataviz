@@ -1,0 +1,72 @@
+[
+  {
+    "child_count": null,
+    "description": "",
+    "display_name": "Dataset 1",
+    "entity_type": "dataset",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {},
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:dataset:d1",
+    "version": null
+  },
+  {
+    "child_count": null,
+    "description": "",
+    "display_name": "Dataset 2",
+    "entity_type": "dataset",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {},
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:dataset:d2",
+    "version": null
+  },
+  {
+    "child_count": null,
+    "description": "",
+    "display_name": "Dataset 3",
+    "entity_type": "dataset",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {},
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:dataset:d3",
+    "version": null
+  },
+  {
+    "child_count": null,
+    "description": "",
+    "display_name": "Schema 1",
+    "entity_type": "schema",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {},
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:schema:s1",
+    "version": null
+  },
+  {
+    "child_count": null,
+    "description": "",
+    "display_name": "Schema 2",
+    "entity_type": "schema",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {},
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:schema:s2",
+    "version": null
+  }
+]

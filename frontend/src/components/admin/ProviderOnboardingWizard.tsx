@@ -34,11 +34,19 @@ import {
   type ProviderUpdateRequest,
   type SchemaDiscoveryResult,
 } from '@/services/providerService'
+import {
+  providerTypeEntry,
+  shapeKind,
+  defaultPortFor,
+  supportsFeature,
+  formOwnedExtraKeys,
+  STATIC_PROVIDER_TYPES,
+  type ProviderTypeEntry,
+} from '@/services/providerTypes'
 import { fetchRedisConfig } from '@/services/redisConfigService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { DocsLink } from '@/components/help/DocsLink'
 import { useWizardKeyboard } from './AssetOnboardingWizard/hooks/useWizardKeyboard'
-import { DataHubLogo, FalkorDBLogo, Neo4jLogo, SpannerLogo } from './ProviderLogos'
 import { NodeIdentityField } from '@/components/dataSource/NodeIdentity'
 
 type ProviderWizardStep = 'type' | 'connection' | 'schema' | 'review'
@@ -160,6 +168,11 @@ interface ProviderOnboardingFormData {
   spanner?: SpannerFormState
   // FalkorDB connection topology (standalone / sentinel / cluster).
   falkordbConnection?: FalkorDBConnectionState
+  // The generic connection shape's own fields: an optional database name
+  // (rendered when the descriptor declares one) and a single API token
+  // (rendered when the descriptor's auth is 'token' rather than 'basic').
+  // Ignored by any type whose connectionShape doesn't ask for them.
+  generic?: { database: string; token: string }
   // The provider's extra_config exactly as loaded (edit mode only; never
   // rendered). buildExtraConfig REBUILDS the payload from the form fields,
   // and the backend replaces extra_config wholesale on update — so any key
@@ -180,47 +193,15 @@ interface ProviderOnboardingWizardProps {
   mode?: WizardMode
   provider?: ProviderResponse | null
   providers: ProviderResponse[]
+  // The provider catalog, as entries (info + brand visual). Defaults to the
+  // offline snapshot so every existing caller -- and every wizard test,
+  // none of which render under a QueryClientProvider -- keeps working
+  // unchanged. A live caller passes `useProviderTypes().types`.
+  providerTypes?: ProviderTypeEntry[]
   onClose: () => void
   onCreated?: (provider: ProviderResponse, health: ConnectionTestResult) => Promise<void> | void
   onUpdated?: (provider: ProviderResponse) => Promise<void> | void
 }
-
-const PROVIDER_TYPES: Array<{
-  type: ProviderType
-  label: string
-  Logo: typeof FalkorDBLogo
-  color: string
-  desc: string
-}> = [
-  {
-    type: 'falkordb',
-    label: 'FalkorDB',
-    Logo: FalkorDBLogo,
-    color: 'text-amber-500 bg-amber-500/10 border-amber-500/20',
-    desc: 'High-performance graph database',
-  },
-  {
-    type: 'neo4j',
-    label: 'Neo4j',
-    Logo: Neo4jLogo,
-    color: 'text-blue-500 bg-blue-500/10 border-blue-500/20',
-    desc: 'The original graph database',
-  },
-  {
-    type: 'datahub',
-    label: 'DataHub',
-    Logo: DataHubLogo,
-    color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20',
-    desc: 'LinkedIn metadata platform',
-  },
-  {
-    type: 'spanner',
-    label: 'Google Spanner Graph',
-    Logo: SpannerLogo,
-    color: 'text-sky-500 bg-sky-500/10 border-sky-500/20',
-    desc: 'Cloud-native distributed property graph (GQL). Requires Enterprise edition.',
-  },
-]
 
 // The cloud-spanner-emulator is a developer-only tool; surfacing the
 // toggle in production builds invites accidental misconfiguration that
@@ -290,23 +271,7 @@ const DEFAULT_SCHEMA_MAPPING: SchemaMappingState = {
   entityTypeField: 'entityType',
 }
 
-function getProviderConfig(type: string) {
-  return PROVIDER_TYPES.find((provider) => provider.type === type) ?? PROVIDER_TYPES[0]
-}
-
-function defaultPortForProvider(type: ProviderType | ''): number {
-  if (type === 'neo4j') return 7687
-  if (type === 'datahub') return 8080
-  // Spanner has no port concept (managed gRPC); the form hides the
-  // port field when type === 'spanner'. We still return a sentinel so
-  // ``ProviderOnboardingFormData.port`` stays a number.
-  if (type === 'spanner') return 0
-  return 6379
-}
-
-function isSpanner(type: ProviderType | ''): boolean {
-  return type === 'spanner'
-}
+const DEFAULT_GENERIC_STATE = { database: '', token: '' }
 
 // Normalize stored falkordbConnection nodes (arrays / {host,port} / "host:port")
 // into [host, port] tuples for the form.
@@ -358,11 +323,16 @@ function parseLegacyCacheUrl(raw: string): Partial<CacheConnectionState> | null 
   }
 }
 
-export function buildInitialFormData(provider?: ProviderResponse | null): ProviderOnboardingFormData {
+export function buildInitialFormData(
+  provider?: ProviderResponse | null,
+  types: ProviderTypeEntry[] = STATIC_PROVIDER_TYPES,
+): ProviderOnboardingFormData {
   const schemaMapping = provider?.extraConfig?.schemaMapping
   const extra = provider?.extraConfig ?? {}
-  const isSpannerProvider = provider?.providerType === 'spanner'
-  const isFalkorDBProvider = provider?.providerType === 'falkordb'
+  const entry = providerTypeEntry(provider?.providerType, types)
+  const isSpannerProvider = entry.connectionShape.kind === 'spanner'
+  const isFalkorDBProvider = entry.connectionShape.kind === 'falkordb'
+  const databaseKey = entry.connectionShape.databaseField?.key
   const fdbConn = (isFalkorDBProvider && extra.falkordbConnection) || {}
   // cacheConnection is a TOP-LEVEL extra_config key (sibling of
   // falkordbConnection, not nested inside it) — matches the backend
@@ -373,7 +343,7 @@ export function buildInitialFormData(provider?: ProviderResponse | null): Provid
     providerType: provider?.providerType ?? '',
     name: provider?.name ?? '',
     host: provider?.host ?? '',
-    port: provider?.port ?? defaultPortForProvider(provider?.providerType ?? ''),
+    port: provider?.port ?? defaultPortFor(provider?.providerType ?? '', types),
     tlsEnabled: provider?.tlsEnabled ?? false,
     rawExtraConfig: provider?.extraConfig ?? undefined,
     username: '',
@@ -460,19 +430,14 @@ export function buildInitialFormData(provider?: ProviderResponse | null): Provid
           tlsCheckHostname: fdbConn.tls?.checkHostname ?? true,
         }
       : { ...DEFAULT_FALKORDB_CONNECTION },
+    generic: {
+      database: databaseKey ? (extra[databaseKey] ?? '') : '',
+      // Write-only secret, like every other credential: never echoed back.
+      token: '',
+    },
   }
 }
 
-// extra_config keys the FORM owns: it rebuilds these from its fields, so a
-// missing form value means "delete the key" (e.g. disabling the cache removes
-// cacheConnection). Everything NOT listed is carried through verbatim from the
-// loaded provider — the backend replaces extra_config wholesale on update, so
-// dropping unknown keys here silently deletes ops-configured settings.
-const FORM_OWNED_EXTRA_KEYS = new Set([
-  'schemaMapping',
-  'projectId', 'instanceId', 'databaseId', 'graphName', 'useEmulator',
-  'falkordbConnection', 'cacheConnection',
-])
 // Same contract one level down, inside falkordbConnection: keys the form
 // edits vs. advanced knobs that only ride the API/ops tooling
 // (addressRemap, connectTimeout, probeDeadlineS, and future additions).
@@ -504,11 +469,15 @@ function preserveUnknownKeys(
   return kept
 }
 
-export function buildExtraConfig(formData: ProviderOnboardingFormData) {
+export function buildExtraConfig(
+  formData: ProviderOnboardingFormData,
+  types: ProviderTypeEntry[] = STATIC_PROVIDER_TYPES,
+) {
+  const entry = providerTypeEntry(formData.providerType, types)
   // Unknown keys from the loaded provider survive the rebuild; the form-owned
   // keys written below override them.
   const out: Record<string, any> = preserveUnknownKeys(
-    formData.rawExtraConfig, FORM_OWNED_EXTRA_KEYS,
+    formData.rawExtraConfig, formOwnedExtraKeys(entry),
   )
 
   if (formData.schemaMappingEnabled) {
@@ -523,7 +492,7 @@ export function buildExtraConfig(formData: ProviderOnboardingFormData) {
     }
   }
 
-  if (isSpanner(formData.providerType) && formData.spanner) {
+  if (entry.connectionShape.kind === 'spanner' && formData.spanner) {
     const s = formData.spanner
     if (s.projectId) out.projectId = s.projectId
     if (s.instanceId) out.instanceId = s.instanceId
@@ -532,7 +501,7 @@ export function buildExtraConfig(formData: ProviderOnboardingFormData) {
     if (!IS_PROD_BUILD && s.useEmulator) out.useEmulator = true
   }
 
-  if (formData.providerType === 'falkordb' && formData.falkordbConnection) {
+  if (entry.connectionShape.kind === 'falkordb' && formData.falkordbConnection) {
     const fc = formData.falkordbConnection
     const rawConn = (formData.rawExtraConfig?.falkordbConnection ?? {}) as Record<string, any>
     // Advanced knobs the form doesn't render (addressRemap, connectTimeout,
@@ -646,6 +615,13 @@ export function buildExtraConfig(formData: ProviderOnboardingFormData) {
     }
   }
 
+  if (entry.connectionShape.kind === 'generic') {
+    const databaseField = entry.connectionShape.databaseField
+    if (databaseField && formData.generic?.database.trim()) {
+      out[databaseField.key] = formData.generic.database.trim()
+    }
+  }
+
   return Object.keys(out).length > 0 ? out : undefined
 }
 
@@ -653,8 +629,13 @@ export function buildExtraConfig(formData: ProviderOnboardingFormData) {
 // paths so each carries the same secrets (incl. FalkorDB's dedicated-cache
 // ACL user/password — never the legacy cache_redis_url, which new saves no
 // longer emit; see the "Convert to structured config" flow for that path).
-export function buildCredentials(formData: ProviderOnboardingFormData) {
-  if (isSpanner(formData.providerType)) {
+export function buildCredentials(
+  formData: ProviderOnboardingFormData,
+  types: ProviderTypeEntry[] = STATIC_PROVIDER_TYPES,
+) {
+  const shape = providerTypeEntry(formData.providerType, types).connectionShape
+
+  if (shape.auth === 'service_account') {
     return formData.spanner?.serviceAccountJson || formData.spanner?.projectId
       ? {
           project_id: formData.spanner?.projectId || undefined,
@@ -662,8 +643,15 @@ export function buildCredentials(formData: ProviderOnboardingFormData) {
         }
       : undefined
   }
+  if (shape.auth === 'token') {
+    return formData.generic?.token ? { token: formData.generic.token } : undefined
+  }
+  if (shape.auth === 'none') {
+    return undefined
+  }
+  // shape.auth === 'basic' from here down.
   const cache =
-    formData.providerType === 'falkordb' ? formData.falkordbConnection?.cache : undefined
+    shape.kind === 'falkordb' ? formData.falkordbConnection?.cache : undefined
   const cacheActive = Boolean(cache?.enabled && !cache.legacyUrlPresent)
   const cacheUsername = cacheActive ? cache?.username.trim() || undefined : undefined
   const cachePassword = cacheActive ? cache?.password || undefined : undefined
@@ -674,14 +662,14 @@ export function buildCredentials(formData: ProviderOnboardingFormData) {
   // When FalkorDB auth is toggled OFF, the graph credentials are being removed
   // (handleSubmit adds them to credentialsClear) — never send them here.
   const graphAuthOn =
-    formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)
+    shape.kind !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)
   const graphUsername = graphAuthOn ? formData.username || undefined : undefined
   const graphPassword = graphAuthOn ? formData.password || undefined : undefined
   // GRAPH sentinel-DAEMON credentials: sent only for sentinel mode with the
   // 'dedicated' auth choice ('reuse' rides sentinel.authEnabled in
   // extra_config; 'none' sends nothing). Write-only like every secret —
   // blank inputs on edit mean "keep the stored value" (merge semantics).
-  const fc = formData.providerType === 'falkordb' ? formData.falkordbConnection : undefined
+  const fc = shape.kind === 'falkordb' ? formData.falkordbConnection : undefined
   const sentinelDedicated = Boolean(
     graphAuthOn && fc?.mode === 'sentinel' && fc.sentinelAuthMode === 'dedicated',
   )
@@ -703,26 +691,49 @@ export function buildCredentials(formData: ProviderOnboardingFormData) {
   }
 }
 
-function buildConnectivityRequest(formData: ProviderOnboardingFormData): ProviderCreateRequest {
+function buildConnectivityRequest(
+  formData: ProviderOnboardingFormData,
+  types: ProviderTypeEntry[] = STATIC_PROVIDER_TYPES,
+): ProviderCreateRequest {
   // Spanner doesn't use host/port/username/password; build credentials and
-  // skip host/port for that branch. Other providers stay on the legacy shape.
-  const isSpannerType = isSpanner(formData.providerType)
-  const credentials = buildCredentials(formData)
+  // skip host/port for shapes that don't use it. Everything else stays on
+  // the legacy host/port shape.
+  const usesHostPort = providerTypeEntry(formData.providerType, types).connectionShape.usesHostPort
+  const credentials = buildCredentials(formData, types)
 
   return {
     name: formData.name.trim() || 'Connectivity Check',
     providerType: formData.providerType as ProviderType,
-    host: isSpannerType ? undefined : (formData.host || undefined),
-    port: isSpannerType ? undefined : (formData.port || undefined),
+    host: usesHostPort ? (formData.host || undefined) : undefined,
+    port: usesHostPort ? (formData.port || undefined) : undefined,
     tlsEnabled: formData.tlsEnabled,
     credentials,
-    extraConfig: buildExtraConfig(formData),
+    extraConfig: buildExtraConfig(formData, types),
     // Omitted when blank: on CREATE there is nothing to clear, so an empty
     // field means "set no provider default" rather than "clear one".
     ...(formData.identityProperty.trim()
       ? { identityProperty: formData.identityProperty.trim() } : {}),
     ...(formData.nameProperty.trim()
       ? { nameProperty: formData.nameProperty.trim() } : {}),
+  }
+}
+
+// Whether the form currently holds credentials for `entry`'s auth kind —
+// the review step's "Access" summary. FalkorDB with auth toggled off reports
+// false regardless of stale username/password state, same as buildCredentials.
+function hasCredentials(formData: ProviderOnboardingFormData, entry: ProviderTypeEntry): boolean {
+  const shape = entry.connectionShape
+  switch (shape.auth) {
+    case 'service_account':
+      return Boolean(formData.spanner?.serviceAccountJson || formData.spanner?.projectId)
+    case 'token':
+      return Boolean(formData.generic?.token)
+    case 'none':
+      return false
+    case 'basic':
+    default:
+      if (shape.kind === 'falkordb' && !(formData.falkordbConnection?.authEnabled ?? true)) return false
+      return Boolean(formData.password || formData.username)
   }
 }
 
@@ -814,6 +825,7 @@ export function ProviderOnboardingWizard({
   mode = 'create',
   provider = null,
   providers,
+  providerTypes = STATIC_PROVIDER_TYPES,
   onClose,
   onCreated,
   onUpdated,
@@ -823,7 +835,14 @@ export function ProviderOnboardingWizard({
   const { notify } = useAppNotifications()
   const modalRef = useRef<HTMLDivElement>(null)
 
-  const [formData, setFormData] = useState<ProviderOnboardingFormData>(() => buildInitialFormData(provider))
+  // FalkorDB gets its own dedicated panels below (topology, TLS, dedicated
+  // cache); every other shape kind renders generically. A named helper reads
+  // better than repeating shapeKind(...) === 'falkordb' at each of its call
+  // sites.
+  const isFalkor = (type: ProviderType | '') => shapeKind(type, providerTypes) === 'falkordb'
+  const visibleTypes = providerTypes.filter((t) => t.adminVisible)
+
+  const [formData, setFormData] = useState<ProviderOnboardingFormData>(() => buildInitialFormData(provider, providerTypes))
   const [schemaDiscovery, setSchemaDiscovery] = useState<SchemaDiscoveryResult | null>(null)
   const [schemaLoading, setSchemaLoading] = useState(false)
   const [schemaError, setSchemaError] = useState<string | null>(null)
@@ -856,16 +875,16 @@ export function ProviderOnboardingWizard({
 
     flow.push({ id: 'connection', title: 'Connection', icon: Globe })
 
-    // Schema-mapping step appears for any non-canonical-schema provider.
-    // FalkorDB and DataHub use the canonical Synodic property names; Neo4j
-    // and Spanner can map foreign properties via SchemaMapping.
-    if (formData.providerType === 'neo4j' || formData.providerType === 'spanner') {
+    // Schema-mapping step appears for any provider type whose descriptor
+    // advertises schema discovery (today: Neo4j and Spanner — FalkorDB and
+    // DataHub use the canonical Synodic property names).
+    if (supportsFeature(formData.providerType || 'falkordb', 'schema_discovery', providerTypes)) {
       flow.push({ id: 'schema', title: 'Schema Mapping', icon: Scan })
     }
 
     flow.push({ id: 'review', title: 'Review', icon: Shield })
     return flow
-  }, [formData.providerType, mode])
+  }, [formData.providerType, mode, providerTypes])
 
   const currentStepIndex = steps.findIndex((step) => step.id === currentStep)
   const isLastStep = currentStepIndex === steps.length - 1
@@ -880,39 +899,50 @@ export function ProviderOnboardingWizard({
     })
   }, [formData.name, mode, provider?.id, providers])
 
+  // The connection step's own validity, independent of which step is
+  // currently active — the schema step's discover-schema probe needs this
+  // even while `currentStep === 'schema'`, where canProceed's own
+  // 'connection' case is out of reach.
+  const canProceedFromConnection = useMemo(() => {
+    if (!formData.name.trim() || nameDuplicate) return false
+    const shape = providerTypeEntry(formData.providerType, providerTypes).connectionShape
+    // Spanner needs project + instance + database before we can probe.
+    if (shape.kind === 'spanner') {
+      const s = formData.spanner
+      if (!s) return false
+      if (!s.projectId.trim() || !s.instanceId.trim() || !s.databaseId.trim()) return false
+      // In emulator mode the service-account JSON is optional.
+      if (!s.useEmulator && !s.serviceAccountJson.trim()) return false
+    }
+    // FalkorDB sentinel/cluster need a valid node list before probing.
+    if (shape.kind === 'falkordb' && formData.falkordbConnection) {
+      const fc = formData.falkordbConnection
+      const validNodes = (nodes: HostPort[]) =>
+        nodes.length > 0 && nodes.every((n) => n[0]?.trim() && Number(n[1]) > 0)
+      if (fc.mode === 'sentinel') {
+        if (!fc.sentinelMasterName.trim() || !validNodes(fc.sentinelNodes)) return false
+      } else if (fc.mode === 'cluster') {
+        if (!validNodes(fc.clusterStartupNodes)) return false
+      }
+    }
+    // A required database field (the generic shape) must be filled in;
+    // an optional API token, like today's password, is never required.
+    if (shape.databaseField?.required && !formData.generic?.database.trim()) return false
+    return true
+  }, [formData.name, formData.providerType, formData.spanner, formData.falkordbConnection, formData.generic, nameDuplicate, providerTypes])
+
   const canProceed = useMemo(() => {
     switch (currentStep) {
       case 'type':
         return Boolean(formData.providerType)
-      case 'connection': {
-        if (!formData.name.trim() || nameDuplicate) return false
-        // Spanner needs project + instance + database before we can probe.
-        if (isSpanner(formData.providerType)) {
-          const s = formData.spanner
-          if (!s) return false
-          if (!s.projectId.trim() || !s.instanceId.trim() || !s.databaseId.trim()) return false
-          // In emulator mode the service-account JSON is optional.
-          if (!s.useEmulator && !s.serviceAccountJson.trim()) return false
-        }
-        // FalkorDB sentinel/cluster need a valid node list before probing.
-        if (formData.providerType === 'falkordb' && formData.falkordbConnection) {
-          const fc = formData.falkordbConnection
-          const validNodes = (nodes: HostPort[]) =>
-            nodes.length > 0 && nodes.every((n) => n[0]?.trim() && Number(n[1]) > 0)
-          if (fc.mode === 'sentinel') {
-            if (!fc.sentinelMasterName.trim() || !validNodes(fc.sentinelNodes)) return false
-          } else if (fc.mode === 'cluster') {
-            if (!validNodes(fc.clusterStartupNodes)) return false
-          }
-        }
-        return true
-      }
+      case 'connection':
+        return canProceedFromConnection
       case 'schema':
         return true
       case 'review':
         return true
     }
-  }, [currentStep, formData.name, formData.providerType, formData.spanner, formData.falkordbConnection, nameDuplicate])
+  }, [currentStep, formData.providerType, canProceedFromConnection])
 
   const stepWarnings = useMemo(() => {
     if (currentStep === 'connection') {
@@ -944,7 +974,7 @@ export function ProviderOnboardingWizard({
   useEffect(() => {
     if (!isOpen) return
 
-    const nextState = buildInitialFormData(provider)
+    const nextState = buildInitialFormData(provider, providerTypes)
     setFormData(nextState)
     initialStateRef.current = nextState
     setSchemaDiscovery(null)
@@ -964,7 +994,7 @@ export function ProviderOnboardingWizard({
     setPreviousSteps([])
     setCurrentStep(mode === 'edit' ? 'connection' : 'type')
     setLegacyCacheUrlInput('')
-  }, [isOpen, mode, provider])
+  }, [isOpen, mode, provider, providerTypes])
 
   // Detect a legacy dedicated-cache Redis URL on the credentials blob. GET
   // /providers never returns credentials (Fernet-encrypted, write-only), so
@@ -972,7 +1002,7 @@ export function ProviderOnboardingWizard({
   // the one place that surfaces "this provider id still has cache_redis_url
   // set" without exposing the secret itself.
   useEffect(() => {
-    if (!isOpen || mode !== 'edit' || provider?.providerType !== 'falkordb' || !provider?.id) return
+    if (!isOpen || mode !== 'edit' || !isFalkor(provider?.providerType ?? '') || !provider?.id) return
     let cancelled = false
     const providerId = provider.id
 
@@ -1149,49 +1179,37 @@ export function ProviderOnboardingWizard({
     setSchemaError(null)
 
     try {
-      const tempReq: ProviderCreateRequest = {
-        name: `_temp_discovery_${Date.now()}`,
-        providerType: 'neo4j',
-        host: formData.host || 'localhost',
-        port: formData.port || 7687,
-        tlsEnabled: formData.tlsEnabled,
-        credentials: {
-          username: formData.username || undefined,
-          password: formData.password || undefined,
-        },
-      }
+      // Probes the CANDIDATE payload directly — no more creating a throwaway
+      // provider (always typed 'neo4j', regardless of what was actually
+      // selected) just to read its schema, then deleting it.
+      const result = await providerService.discoverSchemaUnsaved(
+        buildConnectivityRequest(formData, providerTypes),
+      )
+      setSchemaDiscovery(result)
 
-      const tempProvider = await providerService.create(tempReq)
-      try {
-        const result = await providerService.discoverSchema(tempProvider.id)
-        setSchemaDiscovery(result)
-
-        if (result.suggestedMapping) {
-          const mapping = result.suggestedMapping
-          setFormData((previous) => ({
-            ...previous,
-            schemaMapping: {
-              ...previous.schemaMapping,
-              identityField: mapping.identity_field || previous.schemaMapping.identityField,
-              displayNameField: mapping.display_name_field || previous.schemaMapping.displayNameField,
-              qualifiedNameField: mapping.qualified_name_field || previous.schemaMapping.qualifiedNameField,
-              descriptionField: mapping.description_field || previous.schemaMapping.descriptionField,
-              entityTypeStrategy: mapping.entity_type_strategy || previous.schemaMapping.entityTypeStrategy,
-            },
-          }))
-        }
-      } finally {
-        await providerService.delete(tempProvider.id).catch(() => undefined)
+      if (result.suggestedMapping) {
+        const mapping = result.suggestedMapping
+        setFormData((previous) => ({
+          ...previous,
+          schemaMapping: {
+            ...previous.schemaMapping,
+            identityField: mapping.identity_field || previous.schemaMapping.identityField,
+            displayNameField: mapping.display_name_field || previous.schemaMapping.displayNameField,
+            qualifiedNameField: mapping.qualified_name_field || previous.schemaMapping.qualifiedNameField,
+            descriptionField: mapping.description_field || previous.schemaMapping.descriptionField,
+            entityTypeStrategy: mapping.entity_type_strategy || previous.schemaMapping.entityTypeStrategy,
+          },
+        }))
       }
     } catch (error) {
       setSchemaError(error instanceof Error ? error.message : 'Failed to discover schema')
     } finally {
       setSchemaLoading(false)
     }
-  }, [formData.host, formData.password, formData.port, formData.tlsEnabled, formData.username])
+  }, [formData, providerTypes])
 
   const handleTestConnection = useCallback(async () => {
-    const request = buildConnectivityRequest(formData)
+    const request = buildConnectivityRequest(formData, providerTypes)
 
     setSubmitError(null)
     setConnectivityCheck({
@@ -1217,7 +1235,7 @@ export function ProviderOnboardingWizard({
         },
       })
     }
-  }, [connectivityFingerprint, formData])
+  }, [connectivityFingerprint, formData, providerTypes])
 
   const handleSubmit = useCallback(async () => {
     if (mode === 'create' && connectivityCheck.state === 'idle') {
@@ -1248,13 +1266,13 @@ export function ProviderOnboardingWizard({
         // connection is genuinely unauthenticated (not just authEnabled=false
         // over a lingering secret).
         if (
-          formData.providerType === 'falkordb' &&
+          isFalkor(formData.providerType) &&
           formData.falkordbConnection &&
           !formData.falkordbConnection.authEnabled
         ) {
           credentialsClear.push('username', 'password', 'sentinel_username', 'sentinel_password')
         } else if (
-          formData.providerType === 'falkordb' &&
+          isFalkor(formData.providerType) &&
           initialStateRef.current?.falkordbConnection?.sentinelAuthMode === 'dedicated' &&
           formData.falkordbConnection?.sentinelAuthMode !== 'dedicated'
         ) {
@@ -1267,8 +1285,8 @@ export function ProviderOnboardingWizard({
           host: formData.host || undefined,
           port: formData.port || undefined,
           tlsEnabled: formData.tlsEnabled,
-          credentials: buildCredentials(formData),
-          extraConfig: buildExtraConfig(formData),
+          credentials: buildCredentials(formData, providerTypes),
+          extraConfig: buildExtraConfig(formData, providerTypes),
           // Always sent, including as '' — that is how an admin CLEARS the
           // provider default so its sources fall through again. Omitting it
           // would mean "untouched", making the clear impossible to express.
@@ -1284,7 +1302,7 @@ export function ProviderOnboardingWizard({
       }
 
       const req: ProviderCreateRequest = {
-        ...buildConnectivityRequest(formData),
+        ...buildConnectivityRequest(formData, providerTypes),
         name: formData.name.trim(),
       }
 
@@ -1308,7 +1326,7 @@ export function ProviderOnboardingWizard({
     } finally {
       setIsSubmitting(false)
     }
-  }, [connectivityCheck.result, connectivityCheck.state, formData, mode, onClose, onCreated, onUpdated, provider, notify])
+  }, [connectivityCheck.result, connectivityCheck.state, formData, mode, onClose, onCreated, onUpdated, provider, providerTypes, notify])
 
   const requiresConnectivityTest = mode === 'create' && currentStep === 'review'
   const shouldRunConnectivityTest = requiresConnectivityTest && connectivityCheck.state === 'idle'
@@ -1329,7 +1347,7 @@ export function ProviderOnboardingWizard({
   if (!isOpen) return null
 
   const activeStep = steps[currentStepIndex]
-  const currentConfig = getProviderConfig(formData.providerType || provider?.providerType || 'falkordb')
+  const currentConfig = providerTypeEntry(formData.providerType || provider?.providerType || 'falkordb', providerTypes)
 
   const renderTypeStep = () => (
     <div className="space-y-6">
@@ -1350,51 +1368,53 @@ export function ProviderOnboardingWizard({
       </motion.div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        {PROVIDER_TYPES.map((providerOption, index) => (
+        {visibleTypes.map((entry, index) => (
           <motion.button
-            key={providerOption.type}
+            key={entry.id}
             type="button"
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: index * 0.06 }}
             onClick={() => updateFormData({
-              providerType: providerOption.type,
-              port: defaultPortForProvider(providerOption.type),
+              providerType: entry.id as ProviderType,
+              port: defaultPortFor(entry.id, providerTypes),
             })}
             className={cn(
               'rounded-2xl border p-5 text-left transition-[colors,transform,box-shadow] duration-150 hover:-translate-y-0.5 hover:shadow-md',
-              formData.providerType === providerOption.type
+              formData.providerType === entry.id
                 ? 'border-indigo-500 bg-indigo-500/8 shadow-md'
                 : 'border-glass-border bg-canvas-elevated hover:border-indigo-500/30',
             )}
           >
-            <div className={cn('mb-4 flex h-11 w-11 items-center justify-center rounded-xl border', providerOption.color)}>
-              <providerOption.Logo className="h-6 w-6" />
+            <div className={cn('mb-4 flex h-11 w-11 items-center justify-center rounded-xl border', entry.visual.color)}>
+              <entry.visual.Logo className="h-6 w-6" />
             </div>
             <div className="flex items-center justify-between gap-3">
-              <h4 className="text-base font-semibold text-ink">{providerOption.label}</h4>
-              {formData.providerType === providerOption.type && (
+              <h4 className="text-base font-semibold text-ink">{entry.label}</h4>
+              {formData.providerType === entry.id && (
                 <div className="flex h-6 w-6 items-center justify-center rounded-full bg-indigo-500 text-white">
                   <Check className="h-3.5 w-3.5" />
                 </div>
               )}
             </div>
-            <p className="mt-2 text-sm leading-relaxed text-ink-muted">{providerOption.desc}</p>
+            <p className="mt-2 text-sm leading-relaxed text-ink-muted">{entry.description}</p>
           </motion.button>
         ))}
       </div>
     </div>
   )
 
-  const renderConnectionStep = () => (
+  const renderConnectionStep = () => {
+    const shape = currentConfig.connectionShape
+    return (
     <div className="space-y-6">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         className="flex items-start gap-3"
       >
-        <div className={cn('flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border', currentConfig.color)}>
-          <currentConfig.Logo className="h-5 w-5" />
+        <div className={cn('flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border', currentConfig.visual.color)}>
+          <currentConfig.visual.Logo className="h-5 w-5" />
         </div>
         <div className="flex-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -1423,7 +1443,7 @@ export function ProviderOnboardingWizard({
             />
           </div>
 
-          {isSpanner(formData.providerType) ? (
+          {shape.kind === 'spanner' ? (
             <>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -1522,97 +1542,145 @@ export function ProviderOnboardingWizard({
             </>
           ) : (
             <>
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-2">
-                  <label className="mb-1.5 block text-sm font-medium text-ink">Host</label>
-                  <input
-                    value={formData.host}
-                    onChange={(event) => updateFormData({ host: event.target.value })}
-                    placeholder="localhost"
-                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-sm font-medium text-ink">Port</label>
-                  <input
-                    type="number"
-                    value={formData.port}
-                    onChange={(event) => updateFormData({ port: Number(event.target.value) })}
-                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                  />
-                </div>
-              </div>
-
-              {/* Authentication. FalkorDB gets an explicit "requires auth"
-                  toggle (falkordbConnection.authEnabled); other providers keep
-                  simple optional credentials. Stored secrets are NEVER returned
-                  by the API, so on edit we signal that they exist rather than
-                  showing empty fields that read as "no credentials". */}
-              {formData.providerType === 'falkordb' && (
-                <label className="flex items-center justify-between gap-3 rounded-xl border border-glass-border bg-black/5 px-4 py-3 dark:bg-white/5">
-                  <div>
-                    <p className="text-sm font-medium text-ink">Requires authentication</p>
-                    <p className="text-xs text-ink-muted">
-                      Turn off for an instance with no password — the connection is unauthenticated and any stored credential is removed on save.
-                    </p>
+              {shape.usesHostPort && (
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="col-span-2">
+                    <label className="mb-1.5 block text-sm font-medium text-ink">Host</label>
+                    <input
+                      value={formData.host}
+                      onChange={(event) => updateFormData({ host: event.target.value })}
+                      placeholder="localhost"
+                      className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    />
                   </div>
-                  <input
-                    type="checkbox"
-                    checked={formData.falkordbConnection?.authEnabled ?? true}
-                    onChange={(event) => updateFalkorConn({ authEnabled: event.target.checked })}
-                    className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
-                  />
-                </label>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-ink">Port</label>
+                    <input
+                      type="number"
+                      value={formData.port}
+                      onChange={(event) => updateFormData({ port: Number(event.target.value) })}
+                      className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    />
+                  </div>
+                </div>
               )}
 
-              {(formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)) ? (
+              {shape.databaseField && (
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-ink">{shape.databaseField.label}</label>
+                  <input
+                    value={formData.generic?.database ?? ''}
+                    onChange={(event) => updateFormData({
+                      generic: { ...(formData.generic ?? DEFAULT_GENERIC_STATE), database: event.target.value },
+                    })}
+                    placeholder={shape.databaseField.placeholder}
+                    className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                  />
+                  {shape.databaseField.help && (
+                    <p className="mt-1 text-[11px] leading-tight text-ink-muted">{shape.databaseField.help}</p>
+                  )}
+                </div>
+              )}
+
+              {shape.auth === 'basic' && (
+                <>
+                  {/* Authentication. FalkorDB gets an explicit "requires auth"
+                      toggle (falkordbConnection.authEnabled); other providers keep
+                      simple optional credentials. Stored secrets are NEVER returned
+                      by the API, so on edit we signal that they exist rather than
+                      showing empty fields that read as "no credentials". */}
+                  {isFalkor(formData.providerType) && (
+                    <label className="flex items-center justify-between gap-3 rounded-xl border border-glass-border bg-black/5 px-4 py-3 dark:bg-white/5">
+                      <div>
+                        <p className="text-sm font-medium text-ink">Requires authentication</p>
+                        <p className="text-xs text-ink-muted">
+                          Turn off for an instance with no password — the connection is unauthenticated and any stored credential is removed on save.
+                        </p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={formData.falkordbConnection?.authEnabled ?? true}
+                        onChange={(event) => updateFalkorConn({ authEnabled: event.target.checked })}
+                        className="h-4 w-4 rounded border-glass-border text-indigo-500 focus:ring-indigo-500/50"
+                      />
+                    </label>
+                  )}
+
+                  {(!isFalkor(formData.providerType) || (formData.falkordbConnection?.authEnabled ?? true)) ? (
+                    <div className="space-y-2">
+                      {mode === 'edit' && formData.authConfigured && (
+                        <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2">
+                          <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
+                          <p className="text-[11px] leading-relaxed text-ink-secondary">
+                            Credentials are <span className="font-medium text-ink">stored</span> for this provider — leave the fields blank to keep them, or type new values to replace.
+                          </p>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="mb-1.5 block text-sm font-medium text-ink">Username</label>
+                          <input
+                            value={formData.username}
+                            onChange={(event) => updateFormData({ username: event.target.value })}
+                            placeholder={mode === 'edit' && formData.authConfigured ? 'default user — blank keeps stored' : 'default user (optional)'}
+                            className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-sm font-medium text-ink">Password</label>
+                          <input
+                            type="password"
+                            value={formData.password}
+                            onChange={(event) => updateFormData({ password: event.target.value })}
+                            placeholder={mode === 'edit' && formData.authConfigured ? 'stored — enter to replace' : 'optional'}
+                            className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                          />
+                        </div>
+                      </div>
+                      {isFalkor(formData.providerType) && (
+                        <p className="text-[11px] leading-tight text-ink-muted">
+                          Leave the username blank for a password-only instance (default user / <code>requirepass</code>) — the same credential authenticates every standalone, sentinel, or cluster node.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-start gap-2 rounded-lg border border-glass-border bg-black/5 px-3 py-2.5 dark:bg-white/5">
+                      <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-muted" />
+                      <p className="text-[11px] leading-relaxed text-ink-secondary">
+                        Connecting <span className="font-medium text-ink">without authentication</span>.
+                        {mode === 'edit' && formData.authConfigured ? ' The stored credentials will be removed when you save.' : ''}
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {shape.auth === 'token' && (
                 <div className="space-y-2">
                   {mode === 'edit' && formData.authConfigured && (
                     <div className="flex items-start gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.06] px-3 py-2">
                       <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />
                       <p className="text-[11px] leading-relaxed text-ink-secondary">
-                        Credentials are <span className="font-medium text-ink">stored</span> for this provider — leave the fields blank to keep them, or type new values to replace.
+                        A token is <span className="font-medium text-ink">stored</span> for this provider — leave the field blank to keep it, or type a new value to replace it.
                       </p>
                     </div>
                   )}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1.5 block text-sm font-medium text-ink">Username</label>
-                      <input
-                        value={formData.username}
-                        onChange={(event) => updateFormData({ username: event.target.value })}
-                        placeholder={mode === 'edit' && formData.authConfigured ? 'default user — blank keeps stored' : 'default user (optional)'}
-                        className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1.5 block text-sm font-medium text-ink">Password</label>
-                      <input
-                        type="password"
-                        value={formData.password}
-                        onChange={(event) => updateFormData({ password: event.target.value })}
-                        placeholder={mode === 'edit' && formData.authConfigured ? 'stored — enter to replace' : 'optional'}
-                        className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
-                      />
-                    </div>
+                  <div>
+                    <label className="mb-1.5 block text-sm font-medium text-ink">API token</label>
+                    <input
+                      type="password"
+                      value={formData.generic?.token ?? ''}
+                      onChange={(event) => updateFormData({
+                        generic: { ...(formData.generic ?? DEFAULT_GENERIC_STATE), token: event.target.value },
+                      })}
+                      placeholder={mode === 'edit' && formData.authConfigured ? 'stored — enter to replace' : 'optional'}
+                      className="w-full rounded-xl border border-glass-border bg-black/5 px-4 py-2.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                    />
                   </div>
-                  {formData.providerType === 'falkordb' && (
-                    <p className="text-[11px] leading-tight text-ink-muted">
-                      Leave the username blank for a password-only instance (default user / <code>requirepass</code>) — the same credential authenticates every standalone, sentinel, or cluster node.
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <div className="flex items-start gap-2 rounded-lg border border-glass-border bg-black/5 px-3 py-2.5 dark:bg-white/5">
-                  <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-muted" />
-                  <p className="text-[11px] leading-relaxed text-ink-secondary">
-                    Connecting <span className="font-medium text-ink">without authentication</span>.
-                    {mode === 'edit' && formData.authConfigured ? ' The stored credentials will be removed when you save.' : ''}
-                  </p>
                 </div>
               )}
 
-              {formData.providerType === 'falkordb' && (
+              {isFalkor(formData.providerType) && (
                 <div className="space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
                   <div className="flex items-center gap-2">
                     <Server className="h-4 w-4 text-amber-500" />
@@ -1963,7 +2031,7 @@ export function ProviderOnboardingWizard({
             />
           </label>
 
-          {formData.providerType === 'falkordb' && formData.tlsEnabled && (
+          {isFalkor(formData.providerType) && formData.tlsEnabled && (
             <div className="mt-3 space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
               <p className="text-xs font-medium text-ink">TLS / mutual TLS</p>
               <p className="text-[11px] leading-tight text-ink-muted">
@@ -2039,7 +2107,7 @@ export function ProviderOnboardingWizard({
         </div>
       </div>
 
-      {formData.providerType === 'falkordb' && (
+      {isFalkor(formData.providerType) && (
                   <div className="space-y-3 rounded-xl border border-glass-border bg-black/5 p-4 dark:bg-white/5">
                     {/* What the cache is for + the best-effort promise */}
                     <div className="flex items-start gap-2.5">
@@ -2304,7 +2372,8 @@ export function ProviderOnboardingWizard({
         onNameChange={(v) => updateFormData({ nameProperty: v })}
       />
     </div>
-  )
+    )
+  }
 
   const renderSchemaStep = () => (
     <div className="space-y-6">
@@ -2319,7 +2388,7 @@ export function ProviderOnboardingWizard({
         <div>
           <h3 className="text-lg font-semibold text-ink">Optional schema mapping</h3>
           <p className="mt-0.5 text-sm text-ink-muted">
-            If your Neo4j graph uses custom property names, map them now so later ingestion steps feel native.
+            If your {currentConfig.label} graph uses custom property names, map them now so later ingestion steps feel native.
           </p>
         </div>
       </motion.div>
@@ -2355,7 +2424,7 @@ export function ProviderOnboardingWizard({
               <button
                 type="button"
                 onClick={handleDiscoverSchema}
-                disabled={schemaLoading || !formData.host}
+                disabled={schemaLoading || !canProceedFromConnection}
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-500/10 px-4 py-2.5 text-sm font-semibold text-indigo-600 transition-colors hover:bg-indigo-500/20 disabled:opacity-50 dark:text-indigo-400"
               >
                 {schemaLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scan className="h-4 w-4" />}
@@ -2487,7 +2556,9 @@ export function ProviderOnboardingWizard({
     </div>
   )
 
-  const renderReviewStep = () => (
+  const renderReviewStep = () => {
+    const shape = currentConfig.connectionShape
+    return (
     <div className="mx-auto w-full max-w-2xl space-y-8">
       <motion.div
         initial={{ opacity: 0, y: 10 }}
@@ -2515,8 +2586,8 @@ export function ProviderOnboardingWizard({
         <div className="divide-y divide-glass-border">
           <div className="p-6">
             <div className="mb-4 flex items-center gap-3">
-              <div className={cn('flex h-11 w-11 items-center justify-center rounded-xl border shadow-sm', currentConfig.color)}>
-                <currentConfig.Logo className="h-5 w-5" />
+              <div className={cn('flex h-11 w-11 items-center justify-center rounded-xl border shadow-sm', currentConfig.visual.color)}>
+                <currentConfig.visual.Logo className="h-5 w-5" />
               </div>
               <div className="flex-1">
                 <p className="text-sm font-medium uppercase tracking-wide text-slate-500">Provider</p>
@@ -2547,18 +2618,20 @@ export function ProviderOnboardingWizard({
               <div className="flex-1">
                 <p className="text-sm font-medium uppercase tracking-wide text-slate-500">Access</p>
                 <p className="font-semibold text-slate-800 dark:text-slate-200">
-                  {(formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)) && (formData.password || formData.username)
-                    ? 'Credentials supplied'
-                    : 'Anonymous / host-only access'}
+                  {hasCredentials(formData, currentConfig) ? 'Credentials supplied' : 'Anonymous / host-only access'}
                 </p>
               </div>
               <Check className="h-5 w-5 text-green-500" />
             </div>
             <p className="text-sm text-slate-500">
-              {(formData.providerType !== 'falkordb' || (formData.falkordbConnection?.authEnabled ?? true)) && (formData.password || formData.username)
-                ? (formData.username
-                    ? `The provider will be created with username ${formData.username}.`
-                    : `The provider will be created with password-only authentication (default user).`)
+              {hasCredentials(formData, currentConfig)
+                ? (shape.auth === 'token'
+                    ? `The provider will be created with an API token.`
+                    : shape.auth === 'service_account'
+                      ? `The provider will be created with a Google Cloud service account.`
+                      : formData.username
+                        ? `The provider will be created with username ${formData.username}.`
+                        : `The provider will be created with password-only authentication (default user).`)
                 : `No credentials were entered. ${appName} will connect with the host and port settings only.`}
             </p>
           </div>
@@ -2642,7 +2715,7 @@ export function ProviderOnboardingWizard({
             )}
           </div>
 
-          {formData.providerType === 'neo4j' && (
+          {supportsFeature(currentConfig, 'schema_discovery') && (
             <div className="p-6">
               <div className="mb-4 flex items-center gap-3">
                 <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-violet-100 text-violet-600 shadow-sm dark:bg-violet-900/30 dark:text-violet-400">
@@ -2681,7 +2754,8 @@ export function ProviderOnboardingWizard({
         </div>
       </motion.div>
     </div>
-  )
+    )
+  }
 
   const renderSuccessPhase = () => {
     if (!createdProvider || !connectionResult) return null

@@ -26,7 +26,7 @@ import logging
 import os
 import time
 from collections import OrderedDict, defaultdict
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, ClassVar, Dict, List, Optional, Set
 
 from backend.common.interfaces.provider import GraphDataProvider
 from backend.common.models.graph import (
@@ -183,6 +183,8 @@ class Neo4jProvider(GraphDataProvider):
       - ``redisUrl``: deprecated legacy alias for the cache Redis (see
         ``cache_redis_url`` in ``credentials`` / the central CACHE role config)
     """
+
+    provider_type: ClassVar[str] = "neo4j"
 
     def __init__(
         self,
@@ -420,18 +422,6 @@ class Neo4jProvider(GraphDataProvider):
         if isinstance(record_value, dict):
             return _node_from_props(record_value)
         return None
-
-    # ------------------------------------------------------------------ #
-    # Containment edge type resolution                                     #
-    # ------------------------------------------------------------------ #
-
-    def set_containment_edge_types(self, types: List[str]) -> None:
-        """Called by ContextEngine after ontology resolution.
-
-        An empty list is valid — it means no containment types (flat graph).
-        """
-        self._resolved_containment_types: Set[str] = {t.upper() for t in types}
-        self._resolved_containment_types_set = True  # sentinel: distinguishes "set to empty" from "never set"
 
     def set_entity_type_levels(self, mapping: Dict[str, int]) -> None:
         """Inject entity-type → hierarchy.level mapping. Used both at write

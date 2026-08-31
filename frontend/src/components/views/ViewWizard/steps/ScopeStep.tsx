@@ -39,7 +39,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { resolveSourceMode, type WorkspaceResponse, type DataSourceResponse } from '@/services/workspaceService'
-import type { ProviderType } from '@/services/providerService'
+import { PROVIDER_TYPE_IDS, providerVisual, type ProviderType } from '@/services/providerTypes'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import type { SchemaAvailability } from '@/hooks/useWizardScope'
 import { useDataSourceStats, type DataSourceStats } from '@/hooks/useDataSourceStats'
@@ -360,7 +360,7 @@ const DataSourceCard = memo(function DataSourceCard({
     // roles (unknown = neutral gray, never blocks selection).
     const health = useProviderHealth(providerInfo?.providerId ?? ds.providerId)
     const healthMeta = PROVIDER_HEALTH_META[health.state]
-    const provMeta = providerInfo ? providerMeta(providerInfo.providerType) : null
+    const provMeta = providerInfo ? providerVisual(providerInfo.providerType) : null
     const Logo = providerInfo ? getProviderLogo(providerInfo.providerType) : null
 
     return (
@@ -738,20 +738,8 @@ function ScopeModeToggle({ mode, onChange }: { mode: ScopeMode; onChange: (m: Sc
     )
 }
 
-// Provider-type visual meta — copied from admin/RegistryConnections so the
-// wizard renders the same brand tint/label without importing the admin surface.
-const PROVIDER_TYPE_META: Record<string, { label: string; color: string; desc: string }> = {
-    falkordb: { label: 'FalkorDB', color: 'text-amber-500 bg-amber-500/10 border-amber-500/20', desc: 'High-performance graph database' },
-    neo4j: { label: 'Neo4j', color: 'text-blue-500 bg-blue-500/10 border-blue-500/20', desc: 'The original graph database' },
-    datahub: { label: 'DataHub', color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', desc: 'LinkedIn metadata platform' },
-    spanner: { label: 'Google Spanner Graph', color: 'text-sky-500 bg-sky-500/10 border-sky-500/20', desc: 'Globally-distributed property graph on Spanner' },
-}
 /** Standard types always get a filter pill (disabled when count is 0). */
-const PROVIDER_TYPE_ORDER: ProviderType[] = ['falkordb', 'neo4j', 'datahub', 'spanner']
-
-function providerMeta(type: string) {
-    return PROVIDER_TYPE_META[type] ?? { label: type, color: 'text-slate-500 bg-slate-500/10 border-slate-500/20', desc: '' }
-}
+const PROVIDER_TYPE_ORDER: ProviderType[] = PROVIDER_TYPE_IDS.filter(id => id !== 'mock')
 
 /** Provider registry + semantic layer management routes (used by empty states). */
 const CONNECTIONS_ROUTE = '/ingestion?tab=connections'
@@ -763,7 +751,7 @@ const SEMANTIC_LAYERS_ROUTE = '/schema'
  *  create data in something that's down). */
 function ProviderCard({ option, isSelected, onSelect }: { option: ProviderScopeOption; isSelected: boolean; onSelect: () => void }) {
     const { provider, graphCount, inUseCount, blankSupported } = option
-    const meta = providerMeta(provider.providerType)
+    const meta = providerVisual(provider.providerType)
     const Logo = getProviderLogo(provider.providerType)
     const health = useProviderHealth(provider.id)
     const healthMeta = PROVIDER_HEALTH_META[health.state]
@@ -1022,7 +1010,7 @@ function BlankScopePickers({
                             {pillTypes.map(t => (
                                 <TypePill
                                     key={t}
-                                    label={providerMeta(t).label}
+                                    label={providerVisual(t).label}
                                     count={countsByType[t] ?? 0}
                                     active={typeFilter === t}
                                     disabled={(countsByType[t] ?? 0) === 0}
@@ -1033,7 +1021,7 @@ function BlankScopePickers({
                         {visibleProviders.length === 0 ? (
                             <BlankPickerEmpty
                                 icon={<Server className="w-6 h-6" />}
-                                title={`No ${providerMeta(typeFilter).label} connections`}
+                                title={`No ${providerVisual(typeFilter).label} connections`}
                                 hint="Register one in the provider registry, or pick another type above."
                                 href={CONNECTIONS_ROUTE}
                                 cta="Manage connections"

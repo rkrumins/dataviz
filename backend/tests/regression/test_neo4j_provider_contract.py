@@ -1,74 +1,49 @@
 """Neo4j contract test — pins every ABC method's response shape.
 
+Env vars (only NEO4J_TEST_HOST is required):
+
+    NEO4J_TEST_HOST       -- required to run; TCP-checked before connecting.
+    NEO4J_TEST_PORT       -- defaults to the descriptor's default port (7687).
+    NEO4J_TEST_GRAPH      -- the target database name; defaults to a
+                             per-process "test_regression_<pid>" name (set
+                             this to your server's actual database, e.g.
+                             "neo4j", if it isn't Enterprise-Edition
+                             multi-database).
+    NEO4J_TEST_TLS        -- "1"/"true" to connect via bolt+s.
+    NEO4J_TEST_USERNAME / NEO4J_TEST_PASSWORD -- defaults to Neo4jProvider's
+                             own default ("neo4j" / "") when unset.
+
+Distinct from `NEO4J_URI` / `NEO4J_USERNAME` / `NEO4J_PASSWORD` /
+`NEO4J_DATABASE` (documented in backend/scripts/README.md for other
+scripts) -- this test builds its provider through the catalog, which
+wants discrete host/port/tls fields, not a combined URI.
+
 Run before Phase C (Neo4j reshape onto the shared base):
 
     UPDATE_PROVIDER_SNAPSHOTS=1 \\
-        NEO4J_URI=bolt://localhost:7687 NEO4J_PASSWORD=test \\
+        NEO4J_TEST_HOST=localhost NEO4J_TEST_PASSWORD=test \\
         pytest backend/tests/regression/test_neo4j_provider_contract.py -v
+
+    # Env unset -> reports skipped, never failed:
+    pytest backend/tests/regression/test_neo4j_provider_contract.py -v
 """
 from __future__ import annotations
-
-import os
-import socket
-
-import pytest
-import pytest_asyncio
 
 from . import _runner
 
 
-def _neo4j_reachable() -> bool:
-    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    # Strip scheme; bolt[+s] both share host:port semantics.
-    if "://" in uri:
-        uri = uri.split("://", 1)[1]
-    host, _, port = uri.partition(":")
-    if not port:
-        port = "7687"
+async def _cleanup(provider) -> None:
+    """Neo4j's deletion primitive: DETACH DELETE everything under the
+    urn:test: prefix this fixture writes."""
     try:
-        with socket.create_connection((host, int(port)), timeout=0.5):
-            return True
-    except (OSError, ValueError):
-        return False
+        await provider._run_write(
+            "MATCH (n) WHERE n.urn STARTS WITH 'urn:test:' DETACH DELETE n",
+            {},
+        )
+    except Exception:
+        pass
 
 
-skip_if_no_neo4j = pytest.mark.skipif(
-    not _neo4j_reachable(),
-    reason="Neo4j not reachable on $NEO4J_URI (default bolt://localhost:7687)",
+test_neo4j_provider_contract = _runner.make_contract_test(
+    "neo4j", env_prefix="NEO4J_TEST", cleanup=_cleanup,
 )
-
-
-@pytest_asyncio.fixture
-async def provider():
-    from backend.graph.adapters.neo4j_provider import Neo4jProvider
-
-    p = Neo4jProvider(
-        uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-        username=os.getenv("NEO4J_USERNAME", "neo4j"),
-        password=os.getenv("NEO4J_PASSWORD", "test"),
-        database=os.getenv("NEO4J_DATABASE", "neo4j"),
-    )
-    # Clean slate for the regression namespace.
-    try:
-        await p._run_write(
-            "MATCH (n) WHERE n.urn STARTS WITH 'urn:test:' DETACH DELETE n",
-            {},
-        )
-    except Exception:
-        pass
-    await _runner.seed(p)
-    yield p
-    try:
-        await p._run_write(
-            "MATCH (n) WHERE n.urn STARTS WITH 'urn:test:' DETACH DELETE n",
-            {},
-        )
-    except Exception:
-        pass
-    await p.close()
-
-
-@skip_if_no_neo4j
-@pytest.mark.asyncio
-async def test_neo4j_provider_contract(provider):
-    await _runner.run_all(provider, snapshot_label="neo4j")

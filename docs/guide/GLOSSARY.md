@@ -12,7 +12,7 @@ return whenever a word trips you up.
 
 | Term | Meaning |
 | --- | --- |
-| **Provider** | A connection to a graph database (FalkorDB, Neo4j, DataHub, Spanner) where lineage data lives. |
+| **Provider** | A connection to a graph database where lineage data lives — any of the provider types offered under **Admin → Add Provider** (FalkorDB, Neo4j, DataHub and Google Spanner Graph today). |
 | **Catalog Item** | A discovered graph/dataset registered for governed sharing into workspaces. |
 | **Workspace** | An isolated team or project context containing data sources, Views, and members. |
 | **Data Source** | A binding of a catalog item (graph) + ontology that you actually explore. |

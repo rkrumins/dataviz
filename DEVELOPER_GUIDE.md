@@ -513,7 +513,7 @@ synodic/
         models.py                    # ORM models (public schema)
         repositories/                # Data access layer
       providers/
-        falkordb_provider.py         # FalkorDB adapter (~2700 lines)
+        falkordb_provider.py         # Compatibility shim over the falkordb/ package (see docs/BACKEND.md §3)
         manager.py                   # Provider cache + circuit breakers
       services/
         aggregation/                 # Self-contained aggregation package
@@ -589,6 +589,300 @@ synodic/
    ```bash
    cd backend && alembic revision -m "add_your_table"
    ```
+
+### Adding a graph data provider
+
+Everything the platform knows about a provider type — how to construct it, what
+it can do, what its connection form looks like, how it is probed and validated —
+lives in one `ProviderDescriptor` under `backend/common/providers/catalog/`.
+That descriptor is the **single registration point for behaviour**: both
+dispatchers (`ProviderManager` and `ProviderRegistry`), the admin API, the
+connectivity probe, payload validation and the onboarding wizard all read it and
+need no edit of their own.
+
+Five further additions are **declarative** — an enum member, a DB CHECK literal,
+a migration, a frontend visual, a regenerated fixture. They are listed in step 6
+along with the test that fails for each one you forget. This is deliberately not
+the same promise as "one file"; it is the more useful one, that almost nothing
+you forget stays silent.
+
+*Almost.* There are two edits outside that story, and they are the two that
+break production rather than a test: if your provider class lives under
+`backend/app/`, each dispatcher needs an eager import of your package or it
+cannot dispatch your type at all. Step 3 explains why, and step 6 closes with
+the complete edit list — including which entries no test names.
+
+#### 1. Executor — how statements reach the engine
+
+Implement the `CypherExecutor` Protocol
+(`backend/common/providers/cypher/executor.py`): `run()` and `run_tolerant()`,
+each returning a `CypherResult(raw, result_set)`, over Bolt, HTTP or an embedded
+driver. `result_set` must be **the driver's own list object**, not a copy — call
+sites index rows positionally and rely on that aliasing being free.
+`backend/app/providers/falkordb/executor.py` is the working reference.
+
+#### 2. Dialect — the engine's spelling of the same statements
+
+Supply a `CypherDialect` value (`backend/common/providers/cypher/dialect.py`): a
+frozen dataclass carrying the introspection statements (labels, relationship
+types, property keys, indexes), index and fulltext DDL, the `id()` / `labels()`
+expressions, list-parameter support, unknown-label `MATCH` behaviour and
+constant-time counts — each with its declared flag.
+`backend/app/providers/falkordb/dialect.py` is the reference value; a second
+engine is a new value plus an executor, not another adapter class.
+
+Declare each flag honestly in **both** directions. The dialect conformance suite
+(step 7) fails a flag that is `True` and does not work, *and* one that is `False`
+but actually does — an under-declared dialect silently forfeits a real
+capability, which is as much a bug as one that lies.
+
+#### 3. Descriptor — the one registration point
+
+`backend/common/providers/catalog/<type>.py`, holding a `ProviderDescriptor`
+(`catalog/descriptor.py`) with:
+
+- `id`, `label`, `description`, `docs_url`, `family` (a label only — nothing
+  branches on it);
+- `capability` — a `ProviderCapability` whose `features` set of `ProviderFeature`
+  members is what endpoints gate on, instead of comparing `provider_type` to a
+  string;
+- `connection` — a `ConnectionShape` the onboarding wizard renders **without an
+  edit** (`kind="generic"` gives host/port/database/auth/TLS; `falkordb` and
+  `spanner` select the two bespoke panels);
+- `build(spec)` — construct the provider from a normalised `ProviderSpec`;
+- `provider_class_path` — `"module:ClassName"`, resolved by the catalog's own
+  class-invariant tests;
+- optionally `validate` (raise `ProviderRequestError` → HTTP 422
+  `provider_config_invalid`), `probe_strategy`, `probe_deadline_s`,
+  `admin_visible`.
+
+Then add the module to the self-registration import at the bottom of
+`backend/common/providers/catalog/__init__.py`. `catalog/spanner.py` is the
+fullest worked example.
+
+**One exception to "register from the kernel."** `backend/common/providers/` is a
+dependency-free kernel: `backend/tests/test_falkordb_kernel_purity.py` fails on
+any `backend.app` import there, module-level or inside a function body. If your
+provider class lives under `backend/app/`, its descriptor therefore cannot be
+constructed by any file in the kernel. Register it from its own package instead,
+the way FalkorDB does — `backend/app/providers/falkordb/catalog_descriptor.py`
+calls `register()` on import, and that package's `__init__.py` imports it for the
+side effect. A class under `backend/graph/adapters/` (Neo4j, DataHub, Spanner)
+has no such problem and registers from `catalog/<type>.py` in the ordinary way.
+
+**Registering from your own package is only half of it.** A side effect needs
+someone to import the module, and nothing does that on your behalf. Add the same
+eager import FalkorDB has to **both** dispatchers — `manager.py:60` and
+`provider_registry.py:29`, which carry it independently so that neither depends
+on the other's imports:
+
+```python
+from backend.app.providers.<type> import catalog_descriptor  # noqa: F401
+```
+
+Skip either one and the catalog does not know your type in a process that
+reached it through that dispatcher: `descriptor_for('<type>')` returns `None`
+and the first real dispatch raises `ValueError: Unknown provider_type`. **No
+test tells you this.** `test_provider_catalog_classes.py`'s two fresh-process
+import tests pin the guarantee for `falkordb` by name, not for whatever type is
+newest, so they stay green. The one test that does go red —
+`test_provider_catalog_sync.py::test_provider_type_enum_matches_catalog`, when
+you add the enum member in step 6 — invites the wrong repair, because the test
+file has an import of exactly this shape at its own line 19. Adding yours
+alongside it turns the test green and leaves production 500ing. Both dispatchers,
+not the test.
+
+#### 4. Overrides — only where the dialect differs or the engine is faster
+
+Subclass the Cypher base (`backend/app/providers/cypher/`, added in PR 3 by
+lifting FalkorDB's engine-neutral modules) and override a method **only** when
+the dialect genuinely differs or the engine has a native fast path. The canonical
+fast path is FalkorDB's constant-time counts: `reduce_count` answers `count()`
+over an unfiltered pattern from the label/relation matrix with no scan operator
+at all, which is why `get_counts_fast()` costs ~1.3ms on a 500k-node /
+850k-edge graph where `get_stats()`'s two queries — which project `labels(n)[0]`
+and lose the optimisation — cost ~514ms. That is what an override is for. Copying
+a method to change nothing is how the duplication this catalog removed grew in the
+first place.
+
+A store that is not Cypher at all skips steps 1, 2 and 4 and implements
+`GraphDataProvider` (`backend/common/interfaces/provider.py`) directly. Spanner is
+the reference. Everything else in this recipe applies unchanged.
+
+#### 5. Ontology — the step that separates a provider that works from one that looks like it works
+
+This is not optional polish; it is the difference between a correct graph and a
+flat one, and it used to fail **silently**.
+
+Until PR 2, a provider participated in ontology by duck-typing: `ContextEngine`
+asked `hasattr(provider, 'set_containment_edge_types')` and *skipped* a provider
+that lacked it. No error — just a flat graph with no containment structure and no
+root types, discovered whenever a user eventually said the canvas looked wrong.
+
+So, for a new provider:
+
+- **The injection setters are contract obligations, not duck-typed extras.**
+  `set_containment_edge_types`, `set_entity_type_levels`,
+  `set_resolved_edge_metadata`, `set_source_type_aliases`, `set_node_identity`
+  and `set_admission_controller` are base-class members of `GraphDataProvider`
+  with working defaults. You participate by construction — inherit them, or
+  override them if your engine needs to do something with the values. Do not
+  reintroduce a `hasattr` guard at a call site.
+- **Never cache ontology *classification* under a key that does not encode the
+  ontology.** Introspection ("which entity and edge types exist in this graph")
+  is a fact about the graph and is safely cacheable under a graph-scoped key.
+  Classification (which of those are containment vs lineage, the type hierarchy,
+  the root types) is a function of the ontology injected into *this instance*,
+  and a provider may legitimately be asked before injection has happened. Two
+  rules, and the first alone is **not** enough:
+  1. Consult `GraphDataProvider.containment_configured` before writing any
+     answer derived from injected state to a shared key. That stops an
+     *uninjected* caller publishing its provisional answer — measured on the
+     pre-refactor code, one warmed the shared key with `containment=[]`,
+     hierarchy 0, roots `[]`, and a correctly-configured reader arriving
+     afterwards got that back, with `HAS` presented as a *flow* edge rather
+     than a *structural* one.
+  2. Fold a digest of the injected ontology into the key. Configured-ness says
+     *whether* an ontology was injected, never *which* one, so two correctly
+     injected callers still collide: the DB uniqueness constraint is
+     (workspace, provider, graph_name), so two data sources in different
+     workspaces can address the same physical graph with different ontologies,
+     and both writes are legitimate. Without the digest they overwrite each
+     other, and editing one data source's ontology changes nothing any reader
+     sees until the TTL expires.
+
+  `backend/app/providers/falkordb/stats.py` does both — `_ontology_cache_key`
+  is the worked example. Copy its two hashing rules as well as its inputs:
+  **sort every collection before hashing, and use `hashlib`, never `hash()`**.
+  Both `hash()` and set/frozenset iteration order vary per process with
+  `PYTHONHASHSEED`, so a digest built from unsorted iteration fails nothing —
+  it silently gives every worker its own key.
+- A new provider should implement the **introspection** half and leave
+  classification to the ontology layer above it.
+
+#### 6. The five declarative additions, and the test that names each
+
+| Addition | Where | What fails if you skip it |
+|---|---|---|
+| `ProviderType` enum member | `backend/common/models/management.py` | `test_provider_catalog_sync.py::test_provider_type_enum_matches_catalog` |
+| DB CHECK constraint literal | `ProviderORM.__table_args__`, `backend/app/db/models.py` (`ck_providers_provider_type`) | `test_provider_catalog_sync.py::test_db_check_constraint_matches_catalog_plus_legacy` |
+| Alembic migration widening that CHECK | `backend/alembic/versions/`, copied from `20260508_spanner_provider.py` | `test_provider_catalog_sync.py::test_newest_migration_new_types_matches_catalog_plus_legacy` and `::test_db_check_constraint_matches_newest_migration` |
+| `PROVIDER_TYPE_IDS` + `PROVIDER_VISUALS` entry | `frontend/src/services/providerTypes.ts` | `npx tsc --noEmit` — `PROVIDER_VISUALS` is a `Record<ProviderType, …>`, so an id with no visual is a compile error (`TS2741`), not a half-registered type |
+| Regenerated backend fixture | `frontend/src/services/__fixtures__/providerTypes.backend.json` | `test_api_provider_types.py::test_list_provider_types_generates_the_frontend_fixture` |
+
+One honest caveat on that table:
+
+- The migration row also needs a **one-line test edit**.
+  `test_provider_catalog_sync.py`'s `_newest_provider_type_migration()` asserts
+  there is exactly one migration touching `ck_providers_provider_type`; a second
+  one trips that assert with a message telling you to point it at the newest.
+  That is the test doing its job, not a defect — but it means the migration is
+  two edits, not one.
+
+The fixture row is a **regeneration**, not an edit — the test that names it is
+the same test that writes it:
+
+```bash
+cd backend && UPDATE_PROVIDER_TYPES_FIXTURE=1 \
+    python -m pytest tests/test_api_provider_types.py -k generates_the_frontend_fixture
+```
+
+Run without that variable — i.e. in CI, and in every ordinary run — the same
+test compares the checked-in file against the live `GET
+/admin/providers/types` response and fails with the diff if they have parted.
+It is worth knowing what that failure is protecting you from, because the
+symptom is otherwise mild enough to ship: the frontend's offline snapshot
+(`STATIC_PROVIDER_TYPES`) simply has no row for your type, so
+`providerTypeEntry()` falls back to a synthesised generic entry with
+`adminVisible: false` and no features — the wizard's type card is missing
+until the live query resolves, and any `supportsFeature(id, …)` asked without
+a live catalog answers `false`.
+
+##### The complete edit list
+
+The five above are the declarative ones. This is all of it, in the order it is
+easiest to do, so you can see what the "one registration" promise does and does
+not cover:
+
+| # | Edit | What names it if you forget |
+|---|---|---|
+| 1 | Descriptor + your package's `__init__` import | — (this *is* the registration) |
+| 2 | Eager import in `backend/app/providers/manager.py` | **nothing** — see step 3 |
+| 3 | Eager import in `backend/app/registry/provider_registry.py` | **nothing** — see step 3 |
+| 4 | `ProviderType` enum member | `test_provider_catalog_sync.py::test_provider_type_enum_matches_catalog` |
+| 5 | ORM CHECK constraint literal | `test_provider_catalog_sync.py::test_db_check_constraint_matches_catalog_plus_legacy` |
+| 6 | Alembic migration widening that CHECK | `test_provider_catalog_sync.py::test_newest_migration_new_types_matches_catalog_plus_legacy` |
+| 7 | Retarget `_newest_provider_type_migration()` | its own assert message |
+| 8 | `PROVIDER_TYPE_IDS` + `PROVIDER_VISUALS` | `npx tsc --noEmit` (`TS2741`) |
+| 9 | Regenerate the frontend fixture | `test_api_provider_types.py::test_list_provider_types_generates_the_frontend_fixture` |
+| 10 | `test_provider_catalog_classes.py`'s registered-id set | itself |
+| 11 | `test_api_provider_types.py`'s id set and count | itself |
+
+Rows 10 and 11 are two tests that enumerate today's four types by hand; they
+fail with the new id in the diff, which is the test doing its job. Rows 2 and 3
+are the only two edits on this list that nothing at all names, and they are the
+only two whose omission is a 500 rather than a red run — which is why they get
+their own paragraph in step 3 rather than a table row here.
+
+The drift guards are deliberately absent from this list. Both of them
+(`test_provider_type_literals.py` and `providerTypes.drift.test.ts`) derive
+their provider ids from `ProviderType` / `PROVIDER_TYPE_IDS`, and the backend's
+`isinstance` check matches any `…Provider` class by shape, so row 4 and row 8
+extend them for you. If you find yourself editing a guard to make your provider
+pass, stop — that is the guard reporting a real dispatch you wrote, not a list
+that needs your id added to it.
+
+#### 7. Run the provider conformance kit
+
+Four parts, in this order:
+
+1. **The base's fake-executor suite** — per-method tests with pinned Cypher, run
+   against a fake executor rather than a live engine.
+2. **The live contract snapshot.** `make_contract_test` in
+   `backend/tests/regression/_runner.py` does all the work; a new provider's
+   contract test is ~15 lines of its own plus a docstring:
+
+   ```python
+   from . import _runner
+
+   async def _cleanup(provider) -> None: ...
+
+   test_<type>_provider_contract = _runner.make_contract_test(
+       "<type>", env_prefix="<TYPE>_TEST", cleanup=_cleanup,
+   )
+   ```
+
+   It builds the provider **through the catalog** — the same path production uses,
+   so a bad `build` or a wrong capability fails here rather than in a deployment —
+   and skips (never fails) unless `<PREFIX>_HOST` is set and `host:port` accepts a
+   TCP connection. `test_neo4j_provider_contract.py` is the reference.
+
+   The factory assumes a provider addressed by `host:port`. A provider addressed
+   by a resource path instead (Spanner: project/instance/database) keeps its own
+   fixture and skip gate, builds a `ProviderSpec` by hand, still constructs via
+   `create_provider_instance`, and calls `_runner.seed()` / `_runner.run_all()`
+   directly — see `test_spanner_provider_contract.py`. `run_all()` itself carries
+   no host:port assumption, so that path is exactly as fully covered.
+3. **The dialect conformance suite** —
+   `backend/tests/regression/dialect_conformance.py` holds the agreed
+   specification of its seven probes (introspection, index DDL, fulltext, id/labels
+   expressions, list params, unknown-label MATCH, counts). It is a docstring-only
+   stub today; PR 3 fills it in with the Cypher base it tests against.
+4. **The drift guards** — `backend/tests/test_provider_type_literals.py` fails CI
+   if a `provider_type == "…"` comparison, a `.lower() == "…"` normalised
+   comparison, an `isinstance(x, SomeConcreteProvider)` dispatch, or a
+   string-keyed capability dict is reintroduced under `backend/app`,
+   `backend/common` or `backend/insights_service`. Its frontend counterpart is
+   `frontend/src/services/__tests__/providerTypes.drift.test.ts`, which matches
+   both quoted literals and unquoted object keys (`falkordb:` in a label map is a
+   real site a quoted-literal grep misses). If you need a genuine exemption, add it
+   to the allow-list **with a reason**, not a count.
+
+Also worth running, since they are cheap and cover the catalog's own invariants:
+`backend/tests/test_provider_catalog_classes.py` (every `provider_class_path`
+resolves, no unfilled abstract methods, `preflight` is a coroutine on every
+registered class, importing the kernel catalog pulls in no `backend.app` module
+and no graph driver) and `backend/tests/test_provider_catalog_sync.py`.
 
 ### Testing aggregation
 

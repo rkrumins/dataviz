@@ -1,0 +1,11 @@
+{
+  "aggregated_edges": [],
+  "last_materialized_at": null,
+  "materialization_triggered": false,
+  "regime": "unknown",
+  "stale": true,
+  "stale_reason": "unmaterialized",
+  "stamp_version": 1,
+  "total_source_edges": 0,
+  "truncated": false
+}

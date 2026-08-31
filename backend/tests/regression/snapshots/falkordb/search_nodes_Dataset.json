@@ -10,7 +10,8 @@
     "qualified_name": "",
     "source_system": "",
     "tags": [],
-    "urn": "urn:test:dataset:d1"
+    "urn": "urn:test:dataset:d1",
+    "version": null
   },
   {
     "child_count": 0,
@@ -23,7 +24,8 @@
     "qualified_name": "",
     "source_system": "",
     "tags": [],
-    "urn": "urn:test:dataset:d2"
+    "urn": "urn:test:dataset:d2",
+    "version": null
   },
   {
     "child_count": 0,
@@ -36,6 +38,7 @@
     "qualified_name": "",
     "source_system": "",
     "tags": [],
-    "urn": "urn:test:dataset:d3"
+    "urn": "urn:test:dataset:d3",
+    "version": null
   }
 ]

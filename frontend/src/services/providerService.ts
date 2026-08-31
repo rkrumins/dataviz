@@ -5,6 +5,7 @@
 
 import { fetchWithTimeout } from './fetchWithTimeout'
 import type { Envelope, AssetListPayload, AssetStatsPayload } from '@/types/insights'
+import { parseProviderTypeList, type ProviderType, type ProviderTypeInfo } from './providerTypes'
 
 const ADMIN_API = '/api/v1/admin/providers'
 
@@ -14,7 +15,10 @@ const ADMIN_API = '/api/v1/admin/providers'
 // returns a `computing` envelope.
 const INSIGHTS_API = '/api/v1/admin/insights'
 
-export type ProviderType = 'falkordb' | 'neo4j' | 'datahub' | 'spanner' | 'mock'
+// The union itself now lives in providerTypes.ts, derived from
+// PROVIDER_TYPE_IDS rather than hand-maintained here. Re-exported so every
+// existing importer of `ProviderType` from this module keeps compiling.
+export type { ProviderType }
 
 export interface ProviderCreateRequest {
     name: string
@@ -200,6 +204,12 @@ export function friendlyError(raw: string): string {
             if (typeof parsed.detail === 'object') {
                 if (typeof parsed.detail.reason === 'string') code = parsed.detail.reason
                 else if (typeof parsed.detail.code === 'string') code = parsed.detail.code
+                // The provider catalog's own 422s use {type, providerType,
+                // message} (provider_unsupported / provider_config_invalid) —
+                // `type` is this envelope's code field, and its `message` is
+                // the human text to show, not the whole re-stringified object.
+                else if (typeof parsed.detail.type === 'string') code = parsed.detail.type
+                if (typeof parsed.detail.message === 'string') detail = parsed.detail.message
             }
         }
         // The /test endpoint returns {success: false, error: 'dns_unresolvable'}
@@ -220,6 +230,15 @@ export function friendlyError(raw: string): string {
     }
 
     const lower = detail.toLowerCase()
+
+    // PR 2 — the http_status_<nnn> family: an HTTP-speaking provider
+    // (DataHub today, ArcadeDB in PR 3) that chooses not to classify a
+    // non-2xx reply into a named reason. May arrive as the `code` extracted
+    // above (a JSON envelope) or as the raw string itself.
+    const httpStatusMatch = (code ?? lower).toLowerCase().match(/^http_status_(\d{3})$/)
+    if (httpStatusMatch) {
+        return `The server answered HTTP ${httpStatusMatch[1]} — an unexpected response for this operation.`
+    }
 
     // Code-keyed match against the raw string (some paths return just
     // the code without a JSON envelope).
@@ -474,6 +493,38 @@ export const providerService = {
             {
                 method: 'POST',
                 body: JSON.stringify({ assetName: assetName || null }),
+                timeoutMs: 20_000,
+            },
+        )
+    },
+
+    /**
+     * The provider catalog: id, brand label/description, capabilities and
+     * connection shape for every admin-visible provider type. Read-gated
+     * (non-secret metadata; the view wizard's scope step and other
+     * non-admin surfaces render these labels too), so this uses the same
+     * silent-403 read as `list()`. The raw response is parsed defensively
+     * (`parseProviderTypeList`) — there is no OpenAPI client or zod, and
+     * `request<T>` otherwise just casts `res.json()`.
+     */
+    async listTypes(): Promise<ProviderTypeInfo[]> {
+        const raw = await request<unknown>(`${ADMIN_API}/types`, SILENT_READ)
+        return parseProviderTypeList(raw)
+    },
+
+    /**
+     * Sniff an UNSAVED provider payload's schema for the onboarding
+     * wizard's mapping-suggestion step, without creating a throwaway row
+     * first (the wizard used to create-then-delete a real provider just to
+     * reach this). Same 20s client-side wait as `discoverSchema` for the
+     * same reason — the backend caps its own probe at 15s.
+     */
+    discoverSchemaUnsaved(req: ProviderCreateRequest, assetName?: string): Promise<SchemaDiscoveryResult> {
+        return request<SchemaDiscoveryResult>(
+            `${ADMIN_API}/discover-schema`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ provider: req, assetName: assetName || null }),
                 timeoutMs: 20_000,
             },
         )

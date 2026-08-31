@@ -143,8 +143,9 @@ def _node_items(client):
 
 
 def test_node_merge_cypher_stamps_level():
-    """RC2: the projector must stamp n.level like save_custom_graph (falkordb_provider.py:8757),
-    else a rebuild drops it and trace level-pair filtering breaks."""
+    """RC2: the projector must stamp n.level like save_custom_graph
+    (backend/app/providers/falkordb/writes.py:152), else a rebuild drops
+    it and trace level-pair filtering breaks."""
     from backend.app.services.versioning.projection import _node_merge_cypher
     assert "n.level = coalesce(item.level, n.level)" in _node_merge_cypher("Table")
 

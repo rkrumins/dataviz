@@ -87,3 +87,23 @@ async def test_plaintext_probe_against_tls_only_fails_cleanly(self_signed_cert):
             "127.0.0.1", port, deadline_s=3.0, ssl_context=None,
         )
     assert res.ok is False  # classified failure, no exception
+
+
+@pytest.mark.asyncio
+async def test_untrusted_cert_classifies_as_tls_handshake(self_signed_cert):
+    """A client context that does NOT trust the self-signed cert fails the
+    handshake itself (ssl.SSLCertVerificationError, an OSError subclass).
+    Before ``tls_handshake`` existed this fell into the generic
+    ``os_error: ...`` bucket, indistinguishable from a routing failure —
+    TLS misconfiguration needs its own stable code, the same way Redis
+    AUTH/cluster-mode mismatches already get one."""
+    cert_path, key_path = self_signed_cert
+    server = await _tls_server(cert_path, key_path)
+    port = server.sockets[0].getsockname()[1]
+    cctx = ssl.create_default_context()  # verifies against the system trust store — does NOT trust this cert
+    async with server:
+        res = await redis_ping_preflight(
+            "127.0.0.1", port, deadline_s=3.0, ssl_context=cctx,
+        )
+    assert res.ok is False
+    assert res.reason == "tls_handshake"

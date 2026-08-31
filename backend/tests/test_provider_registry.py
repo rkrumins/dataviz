@@ -55,6 +55,33 @@ class TestCreateProviderInstance:
         from backend.app.providers.falkordb_provider import FalkorDBProvider
         assert isinstance(provider, FalkorDBProvider)
 
+    def test_delegates_to_the_catalog(self):
+        """PR 2 §3.5: the duplicated `if ptype == "falkordb": ... elif ...`
+        chain this class used to carry is gone -- construction now delegates
+        to ProviderManager, which itself delegates to
+        backend.common.providers.catalog.create_provider_instance."""
+        import inspect
+
+        src = inspect.getsource(ProviderRegistry._create_provider_instance)
+        assert "ProviderManager._create_provider_instance(" in src
+        assert "elif ptype ==" not in src
+
+    def test_module_has_its_own_falkordb_registration_import(self):
+        """Source-level pin, not just a behavioural one: this module's
+        bottom-of-file `from backend.app.providers.manager import
+        provider_manager` (an unrelated re-export) already imports manager.py
+        -- which itself registers "falkordb" -- so a fresh-process test that
+        only imports provider_registry and checks the catalog (see
+        test_provider_catalog_classes.py::test_importing_provider_registry_registers_falkordb)
+        stays green even if THIS module's own registration import is deleted
+        (verified: it does). This checks the line itself is still here."""
+        import inspect
+
+        import backend.app.registry.provider_registry as provider_registry_module
+
+        src = inspect.getsource(provider_registry_module)
+        assert "from backend.app.providers.falkordb import catalog_descriptor" in src
+
 
 # ---------------------------------------------------------------------------
 # Tests — _merge_extra_config

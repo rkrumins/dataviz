@@ -1,0 +1,10 @@
+{
+  "urn:test:dataset:d1": {
+    "in": 0,
+    "out": 1
+  },
+  "urn:test:dataset:d2": {
+    "in": 2,
+    "out": 0
+  }
+}

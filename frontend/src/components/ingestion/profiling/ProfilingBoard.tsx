@@ -27,7 +27,7 @@ import { cn } from '@/lib/utils'
 import { compact, exact } from '@/lib/formatMetric'
 import { KpiCard } from '@/components/analytics/KpiCard'
 import { Sparkline } from '@/components/ui/Sparkline'
-import { getProviderLogo } from '@/components/admin/ProviderLogos'
+import { providerVisual } from '@/services/providerTypes'
 import { SteadyMark } from './SteadyMark'
 import {
     DEFAULT_WINDOW, PROFILING_WINDOWS, type ProfilingWindowKey,
@@ -470,7 +470,7 @@ function Row({
 }) {
     const meta = significanceMeta(row.significance)
     const unusual = row.significance !== 'normal'
-    const ProviderLogo = getProviderLogo(row.provider_type ?? 'falkordb')
+    const ProviderLogo = providerVisual(row.provider_type).Logo
 
     return (
         <tr

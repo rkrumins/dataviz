@@ -90,7 +90,7 @@ export interface StreamsSection {
 export interface GraphProvider {
     id: string
     name: string
-    /** falkordb | neo4j | spanner | datahub | mock | … */
+    /** a provider type id (see providerTypes.ts) */
     type: string
     status: ServiceStatus
     error: string | null
@@ -103,7 +103,7 @@ export interface ProjectionWorstRow {
     workspaceName: string | null
     dataSourceId: string
     dataSourceLabel: string | null
-    /** The provider backing this data source (falkordb/neo4j/…). */
+    /** The provider backing this data source (a provider type id). */
     providerName: string | null
     providerType: string | null
     kind: string | null

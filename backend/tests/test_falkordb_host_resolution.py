@@ -9,10 +9,11 @@ composed independently, inline, at each of three call sites. This pins:
    the two existing helpers in the current order, for representative cases
    (localhost with/without the Docker rewrite, the ``falkordb`` passthrough,
    a remote host, the local-dev override).
-2. All three call sites (``ProviderManager._create_provider_instance``,
-   ``falkor_graph_registry``'s registry-factory ``_resolve`` closure, and its
-   ``list_graph_keys``) route through the ONE function — no call site
-   composes the two helpers inline anymore.
+2. All three call sites (the falkordb catalog descriptor's ``_build``,
+   reached via ``ProviderManager._create_provider_instance``'s delegation to
+   the provider catalog; ``falkor_graph_registry``'s registry-factory
+   ``_resolve`` closure; and its ``list_graph_keys``) route through the ONE
+   function — no call site composes the two helpers inline anymore.
 
 No live FalkorDB/Postgres required — pure host/port resolution + source
 inspection.
@@ -22,6 +23,7 @@ import inspect
 import pytest
 
 import backend.app.providers.falkor_graph_registry as frg
+import backend.app.providers.falkordb.catalog_descriptor as falkordb_descriptor
 import backend.app.providers.manager as mgr
 from backend.app.providers.falkordb_provider import (
     _normalize_falkordb_host,
@@ -110,8 +112,28 @@ def test_resolve_equals_manual_composition_across_envs(monkeypatch):
 
 # ── routing: all three call sites use the ONE function ──────────────
 
-def test_manager_create_provider_instance_routes_through_resolve_falkordb_target():
+def test_manager_create_provider_instance_delegates_to_the_catalog():
+    # PR 2: the manager's `if ptype == "falkordb": ...`/`elif ptype == "neo4j":`
+    # chain is gone -- construction now runs through the provider catalog for
+    # every type, and the resolver call this test used to pin here moved into
+    # the falkordb descriptor's build() (see the test below). What used to be
+    # true here -- "the manager's dispatch uses the ONE resolver function" --
+    # is now two separate, narrower facts, checked by the two tests below.
     src = inspect.getsource(mgr.ProviderManager._create_provider_instance)
+    assert "create_provider_instance(" in src
+    assert "elif ptype ==" not in src
+
+
+def test_falkordb_descriptor_build_routes_through_resolve_falkordb_target():
+    # The other half of the property the retired test above protected: the
+    # resolver call itself still exists, unduplicated, just relocated. It
+    # cannot live in backend.common.providers.catalog.falkordb -- FalkorDB's
+    # concrete class lives under backend.app, which the kernel-purity guard
+    # (test_falkordb_kernel_purity.py) forbids that package from importing --
+    # so the descriptor that builds it lives at
+    # backend.app.providers.falkordb.catalog_descriptor instead (see that
+    # module's docstring).
+    src = inspect.getsource(falkordb_descriptor._build)
     assert "resolve_falkordb_target(" in src
     assert "apply_local_dev_falkordb_override(" not in src
 
@@ -142,7 +164,8 @@ if __name__ == "__main__":
     test_resolve_localhost_default_pins_ipv4()
     test_resolve_falkordb_passthrough()
     test_resolve_remote_host_unchanged()
-    test_manager_create_provider_instance_routes_through_resolve_falkordb_target()
+    test_manager_create_provider_instance_delegates_to_the_catalog()
+    test_falkordb_descriptor_build_routes_through_resolve_falkordb_target()
     test_registry_provider_resolution_routes_through_resolve_falkordb_target()
     test_registry_call_sites_do_not_resolve_hosts_themselves()
     print("host resolution + routing (no-env cases): OK")

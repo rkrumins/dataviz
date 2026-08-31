@@ -1173,7 +1173,7 @@ class AggregationPipeline:
         """Load containment into a child→parent map, stream lineage edges
         into a raw-pair base map, and roll the base up through the ancestor
         lattice into the final accumulator — all in worker memory."""
-        from backend.app.providers.falkordb_provider import _sanitize_label
+        from backend.common.providers.rowmap import sanitize_label as _sanitize_label
 
         # ---- containment → parent DAG (child_id → all parent_ids) ----
         parent_lists: Dict[int, List[int]] = {}
@@ -1587,7 +1587,7 @@ class AggregationPipeline:
                 stack.pop()
             return cnt_memo[node]
 
-        from backend.app.providers.falkordb_provider import _sanitize_label
+        from backend.common.providers.rowmap import sanitize_label as _sanitize_label
         estimate = 0
         for etype in self._effective_types:
             safe = _sanitize_label(etype)
@@ -2033,7 +2033,7 @@ class AggregationPipeline:
         """
         if not items:
             return
-        from backend.app.providers.falkordb_provider import _sanitize_label
+        from backend.common.providers.rowmap import sanitize_label as _sanitize_label
         dedicated = getattr(self.p, "_projection_mode", "in_source") == "dedicated"
         weight_expr = (
             "coalesce(r.weight, 0) + item.w" if weight_mode == "add" else "item.w"

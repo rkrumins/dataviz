@@ -1,0 +1,34 @@
+[
+  {
+    "child_count": 0,
+    "description": "",
+    "display_name": "Dataset 1",
+    "entity_type": "dataset",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {
+      "childCount": 0
+    },
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:dataset:d1",
+    "version": null
+  },
+  {
+    "child_count": 1,
+    "description": "",
+    "display_name": "Schema 1",
+    "entity_type": "schema",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {
+      "childCount": 1
+    },
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:schema:s1",
+    "version": null
+  }
+]

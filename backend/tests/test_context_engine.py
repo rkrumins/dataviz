@@ -322,3 +322,90 @@ class TestContextEngineStaticHelpers:
         filtered = engine._filter_containment_edges(result, {"CONTAINS"})
         assert len(filtered.edges) == 1
         assert filtered.edges[0].edge_type == "TRANSFORMS"
+
+
+# ---------------------------------------------------------------------------
+# T-C: materialize_aggregated_edges's hasattr(...) guard became a
+# supports_feature + callable(fn) guard (context_engine.py:856). Two
+# independent failure modes, each with its own test, plus the success path.
+# ---------------------------------------------------------------------------
+
+
+class _StubNeo4jTypedProvider(_StubProvider):
+    """A registered provider type without AGGREGATION_MATERIALIZATION (see
+    the plan's §2.3 feature matrix). Inherits the ABC's base default for
+    materialize_aggregated_edges_batch, which RAISES ProviderFeatureUnsupportedError
+    if actually called — proving the guard must reject it via supports_feature
+    before ever calling that default, not by letting the call fail."""
+    provider_type = "neo4j"
+
+
+class _StubFalkorDBTypedProvider(_StubProvider):
+    """provider_type='falkordb' plus a working materialize_aggregated_edges_batch
+    override, so the DraftOverlayProvider test below proves its failure is
+    about the WRAPPER not forwarding the call — not about the base being
+    unable to serve it."""
+    provider_type = "falkordb"
+
+    def __init__(self):
+        super().__init__()
+        self.materialize_calls: List[Dict[str, Any]] = []
+
+    async def materialize_aggregated_edges_batch(self, **kwargs) -> Dict[str, Any]:
+        self.materialize_calls.append(kwargs)
+        return {"materialized": 1}
+
+
+class TestContextEngineMaterializeAggregatedEdges:
+
+    async def test_rejects_a_provider_without_the_feature(self):
+        """A bare GraphDataProvider subclass with no provider_type. The base
+        default for materialize_aggregated_edges_batch exists (T-A) but must
+        never actually be reached here — calling it raises
+        ProviderFeatureUnsupportedError, not the documented ValueError."""
+        engine = ContextEngine(provider=_StubProvider())
+        with pytest.raises(ValueError, match="Materialization only supported"):
+            await engine.materialize_aggregated_edges()
+
+    async def test_rejects_a_registered_type_without_the_feature(self):
+        """Same base default as above, reached through a concrete adapter
+        registered under a real (non-materializing) provider_type."""
+        engine = ContextEngine(provider=_StubNeo4jTypedProvider())
+        with pytest.raises(ValueError, match="Materialization only supported"):
+            await engine.materialize_aggregated_edges()
+
+    async def test_succeeds_for_a_provider_typed_falkordb(self):
+        # Registers "falkordb" in backend.common.providers.catalog (see that
+        # package's __init__ docstring: FalkorDB self-registers from here,
+        # not from the kernel, so nothing has necessarily imported it yet in
+        # a unit-test process). Without this, supports_feature("falkordb",
+        # ...) sees an unregistered type and falls back to the safe default
+        # (unsupported) — same import test_provider_contract_defaults.py
+        # already relies on for its own falkordb-typed assertions.
+        import backend.app.providers.falkordb_provider  # noqa: F401
+        provider = _StubFalkorDBTypedProvider()
+        engine = ContextEngine(provider=provider)
+
+        result = await engine.materialize_aggregated_edges(batch_size=50)
+
+        assert result == {"materialized": 1}
+        assert provider.materialize_calls[0]["batch_size"] == 50
+
+    async def test_draft_whose_base_supports_it_still_raises_value_error_not_attribute_error(self):
+        """DraftOverlayProvider has no materialize_aggregated_edges_batch
+        forwarder at all — it's a write/maintenance op with no per-draft
+        meaning — even though its base fully supports it. supports_feature
+        ALONE would say True here (it resolves capability from the
+        UNWRAPPED base via DraftOverlayProvider._base), so calling straight
+        through would be an AttributeError instead of the documented
+        ValueError; the guard's callable(fn) check is what catches this."""
+        from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+
+        base = _StubFalkorDBTypedProvider()
+        overlay = DraftOverlayProvider(base, svc=None, graph_id="g1", branch_id="draft1")
+        engine = ContextEngine(provider=overlay)
+
+        with pytest.raises(ValueError, match="Materialization only supported"):
+            await engine.materialize_aggregated_edges()
+
+        assert base.materialize_calls == []  # never reached the base either

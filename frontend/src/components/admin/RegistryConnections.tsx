@@ -17,18 +17,8 @@ import { useProviderStatusStore } from '@/store/providerStatus'
 import { DeleteProviderDialog } from './DeleteProviderDialog'
 import { FirstRunHero } from './FirstRunHero'
 import { ProviderOnboardingWizard } from './ProviderOnboardingWizard'
-import { Neo4jLogo, FalkorDBLogo, DataHubLogo, SpannerLogo } from './ProviderLogos'
-
-const PROVIDER_TYPES = [
-    { type: 'falkordb' as const, label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20', desc: 'High-performance graph database' },
-    { type: 'neo4j' as const, label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20', desc: 'The original graph database' },
-    { type: 'datahub' as const, label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', desc: 'LinkedIn metadata platform' },
-    { type: 'spanner' as const, label: 'Google Spanner Graph', Logo: SpannerLogo, color: 'text-sky-500 bg-sky-500/10 border-sky-500/20', desc: 'Globally-distributed property graph on Spanner' },
-]
-
-function getProviderConfig(type: string) {
-    return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]
-}
+import { useProviderTypes } from '@/hooks/useProviderTypes'
+import { providerTypeEntry, type ProviderTypeEntry } from '@/services/providerTypes'
 
 /** Compact "45s ago" / "3m ago" freshness label. */
 function timeAgoShort(iso: string): string {
@@ -86,8 +76,8 @@ function syntheticMetaFromSweep(
     }
 }
 
-function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedAt, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; canManage: boolean; justChecked?: boolean; lastCheckedAt?: string | null; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
-    const config = getProviderConfig(provider.providerType)
+function ConnectionCard({ provider, health, canManage, justChecked, lastCheckedAt, providerTypes, onTest, onEdit, onDelete, onScan }: { provider: ProviderResponse; health: ProviderHealth; canManage: boolean; justChecked?: boolean; lastCheckedAt?: string | null; providerTypes: ProviderTypeEntry[]; onTest: () => void; onEdit: () => void; onDelete: () => void; onScan: () => void }) {
+    const config = providerTypeEntry(provider.providerType, providerTypes).visual
     const [expanded, setExpanded] = useState(false)
     const statusDot = { checking: 'bg-amber-400 animate-pulse', healthy: 'bg-emerald-400', unhealthy: 'bg-red-400', unknown: 'bg-gray-400' }[health.status]
     // Only surface a freshness stamp when the status is MEANINGFULLY stale —
@@ -190,6 +180,7 @@ export function RegistryConnections() {
     // but write paths (register / edit / delete / test / discover) stay
     // platform-admin-only because the rows carry credentials.
     const canManage = usePermission('system:admin')
+    const { types: providerTypes } = useProviderTypes()
     const { notify } = useAppNotifications()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
@@ -435,6 +426,7 @@ export function RegistryConnections() {
                                 // status carries the warmup loop's last probe time.
                                 justChecked={!!local}
                                 lastCheckedAt={backend?.lastCheckedAt ?? null}
+                                providerTypes={providerTypes}
                                 canManage={canManage}
                                 onTest={() => { void testOne(p.id) }}
                                 onEdit={() => handleEditProvider(p)}
@@ -451,6 +443,7 @@ export function RegistryConnections() {
                 mode={editingProvider ? 'edit' : 'create'}
                 provider={editingProvider}
                 providers={providers}
+                providerTypes={providerTypes}
                 onClose={() => {
                     setShowWizard(false)
                     setEditingProvider(null)

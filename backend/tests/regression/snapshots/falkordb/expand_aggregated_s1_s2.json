@@ -1,0 +1,17 @@
+{
+  "containment_edges": [],
+  "downstream_urns": [],
+  "edges": [],
+  "effective_level": 2,
+  "focus": {
+    "entity_type": "schema",
+    "level": 1,
+    "urn": "urn:test:schema:s1"
+  },
+  "inherited_from_urn": null,
+  "is_inherited": false,
+  "nodes": [],
+  "truncated": true,
+  "truncation_reason": "descendants_failed",
+  "upstream_urns": []
+}

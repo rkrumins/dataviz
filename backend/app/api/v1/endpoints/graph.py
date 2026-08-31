@@ -269,13 +269,13 @@ async def _assert_copyable(session: AsyncSession, provider_id: Optional[str]) ->
     if provider_id in (None, "", "default"):
         return                                     # env-default instance: FalkorDB by definition
     from backend.app.db.repositories import provider_repo
-    from backend.common.interfaces.provider import capability_for
+    from backend.common.interfaces.provider import ProviderFeature, capability_for
 
     prov = await provider_repo.get_provider_orm(session, provider_id)
     ptype = getattr(prov, "provider_type", None)
     if prov is None or not ptype:
         raise HTTPException(status_code=404, detail="unknown provider")
-    if not capability_for(ptype).supports_copy:
+    if not capability_for(ptype).supports(ProviderFeature.GRAPH_COPY):
         raise HTTPException(status_code=422, detail={
             "type": "provider_unsupported",
             "message": (f"Version control can't be enabled for a '{ptype}' data source yet — "

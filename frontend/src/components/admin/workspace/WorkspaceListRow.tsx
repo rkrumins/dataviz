@@ -3,6 +3,7 @@ import { Database, Shield, Trash2, ChevronRight, CircleDot, ArrowRightLeft, Laye
 import { type WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge, type WorkspaceHealth } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
+import { providerShortLabel } from '@/services/providerTypes'
 import { accentFor, monogram, type WsDataSourceProviderInfo } from '../WorkspaceCard'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -117,7 +118,7 @@ function WorkspaceListRowBase({ ws, index: _index, isSelected = false, onToggleS
                         <span key={pt} className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border">
                             <Logo className="w-3 h-3" />
                             <span className="text-[9px] font-medium text-ink-muted">
-                                {pt === 'neo4j' ? 'Neo4j' : pt === 'falkordb' ? 'FDB' : pt === 'datahub' ? 'DH' : pt}
+                                {providerShortLabel(pt)}
                             </span>
                         </span>
                     )

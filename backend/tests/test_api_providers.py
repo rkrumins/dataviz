@@ -4,6 +4,8 @@ Phase 4 — API endpoint tests for /api/v1/admin/providers/*.
 Tests the provider CRUD admin endpoints using the test_client fixture
 which overrides auth and DB session.
 """
+import json
+
 import pytest
 from httpx import AsyncClient
 
@@ -407,3 +409,70 @@ async def test_test_connection_deadline_extends_with_probe_deadline(
     )
     assert resp.status_code == 200
     assert seen["deadline_s"] == 2.0
+
+
+# ── /test-connection & create: descriptor-driven validation ────────────
+
+_FAKE_SPANNER_SA_JSON = json.dumps({
+    "type": "service_account",
+    "project_id": "test-project",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+    "client_email": "synodic-test@test-project.iam.gserviceaccount.com",
+})
+
+
+async def test_test_connection_rejects_spanner_host_port_structured(test_client: AsyncClient):
+    """Spanner is a managed service with no host/port. The descriptor's
+    validate() now raises the structured 422 (moved out of an inline check
+    that used to live only on this endpoint)."""
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={
+            "name": "Bad Spanner",
+            "providerType": "spanner",
+            "host": "should-not-be-set",
+            "credentials": {"service_account_json": _FAKE_SPANNER_SA_JSON},
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "provider_config_invalid"
+    assert resp.json()["detail"]["providerType"] == "spanner"
+
+
+async def test_create_provider_rejects_spanner_host_port(test_client: AsyncClient):
+    """The same descriptor validation now also gates provider creation --
+    previously create_provider had no host/port check for Spanner at all."""
+    resp = await test_client.post(
+        "/api/v1/admin/providers",
+        json={
+            "name": "Bad Spanner",
+            "providerType": "spanner",
+            "host": "should-not-be-set",
+            "credentials": {"service_account_json": _FAKE_SPANNER_SA_JSON},
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["type"] == "provider_config_invalid"
+
+    # Nothing was persisted.
+    providers_resp = await test_client.get("/api/v1/admin/providers")
+    assert providers_resp.json() == []
+
+
+async def test_test_connection_unknown_provider_type_still_422s_via_pydantic(
+    test_client: AsyncClient,
+):
+    """provider_type stays a strict ProviderType enum -- pydantic rejects an
+    unknown value before the descriptor lookup ever runs. Guards against a
+    future change that widens the field to `str` and silently relies on the
+    catalog to catch bad values instead."""
+    resp = await test_client.post(
+        "/api/v1/admin/providers/test-connection",
+        json={"name": "x", "providerType": "made_up_engine"},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    # FastAPI's own request-validation shape (a list of error dicts) --
+    # not the catalog's structured {"type": ..., "providerType": ...} dict.
+    assert isinstance(body["detail"], list)
+    assert any("providerType" in str(err.get("loc")) for err in body["detail"])

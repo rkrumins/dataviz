@@ -41,7 +41,7 @@ import { aggregationService } from '@/services/aggregationService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
-import { Neo4jLogo, FalkorDBLogo, DataHubLogo } from './ProviderLogos'
+import { providerVisual } from '@/services/providerTypes'
 import { AssetOnboardingWizard } from './AssetOnboardingWizard'
 import { FirstRunHero } from './FirstRunHero'
 import { RetriggerDialog } from './job-history/RetriggerDialog'
@@ -79,16 +79,6 @@ const REFRESH_POLL_BASE_MS = 2_500
 const REFRESH_POLL_MAX_MS = 10_000
 const REFRESH_POLL_DEADLINE_MS = 90_000
 
-// ─── Provider type helpers ────────────────────────────────────────────────────
-const PROVIDER_TYPES = [
-    { type: 'falkordb', label: 'FalkorDB', Logo: FalkorDBLogo, color: 'text-amber-500 bg-amber-500/10 border-amber-500/20' },
-    { type: 'neo4j', label: 'Neo4j', Logo: Neo4jLogo, color: 'text-blue-500 bg-blue-500/10 border-blue-500/20' },
-    { type: 'datahub', label: 'DataHub', Logo: DataHubLogo, color: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20' },
-]
-function getProviderConfig(type: string) {
-    return PROVIDER_TYPES.find(p => p.type === type) || PROVIDER_TYPES[0]
-}
-
 /** One provider row in the left rail. Renders the SAME live health dot (from the
  *  shared `providerHealthModel`) as the Providers tab and the view wizard, so a
  *  provider that's down looks down everywhere — not silently blank here. */
@@ -100,7 +90,7 @@ function ProviderRailItem({
     isActive: boolean
     onSelect: () => void
 }) {
-    const config = getProviderConfig(provider.providerType)
+    const config = providerVisual(provider.providerType)
     const health = useProviderHealth(provider.id)
     const healthMeta = PROVIDER_HEALTH_META[health.state]
     return (
@@ -1330,7 +1320,7 @@ export function RegistryAssets() {
                         <div className="flex items-center justify-between mb-4 shrink-0">
                             <div>
                                 <h2 className="text-base font-bold text-ink flex items-center gap-2">
-                                    {(() => { const C = getProviderConfig(selectedProvider.providerType); return <C.Logo className="w-5 h-5" /> })()}
+                                    {(() => { const C = providerVisual(selectedProvider.providerType); return <C.Logo className="w-5 h-5" /> })()}
                                     {selectedProvider.name}
                                 </h2>
                                 <p className="text-sm text-ink-muted mt-0.5">

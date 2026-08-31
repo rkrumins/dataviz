@@ -1,0 +1,30 @@
+[
+  {
+    "child_count": null,
+    "description": "",
+    "display_name": "Root Domain",
+    "entity_type": "domain",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {},
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:domain:root",
+    "version": null
+  },
+  {
+    "child_count": null,
+    "description": "",
+    "display_name": "Schema 1",
+    "entity_type": "schema",
+    "last_synced_at": "",
+    "layer_assignment": "",
+    "properties": {},
+    "qualified_name": "",
+    "source_system": "",
+    "tags": [],
+    "urn": "urn:test:schema:s1",
+    "version": null
+  }
+]

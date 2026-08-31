@@ -1,11 +1,14 @@
 import logging
 from typing import List, Optional, Set, Dict, Any
-from ..providers.falkordb_provider import FalkorDBProvider
+
+from backend.common.interfaces.provider import (
+    GraphDataProvider, ProviderFeature, supports_feature,
+)
 
 logger = logging.getLogger(__name__)
 
 class LineageAggregator:
-    def __init__(self, provider: FalkorDBProvider):
+    def __init__(self, provider: GraphDataProvider):
         self.provider = provider
         
     async def materialize_lineage(self, source_urn: str, target_urn: str, lineage_edge_type: str = "TRANSFORMS"):
@@ -32,8 +35,16 @@ class LineageAggregator:
         # We will implement this in the provider or a script
         pass
 
-def get_aggregator(provider: Optional[FalkorDBProvider]):
-    """Return an aggregator for an explicit FalkorDB provider instance."""
-    if isinstance(provider, FalkorDBProvider):
+def get_aggregator(provider: Optional[GraphDataProvider]):
+    """Return an aggregator for a provider capable of materializing
+    AGGREGATED edges itself, or None.
+
+    Was ``isinstance(provider, FalkorDBProvider)`` — a name-based check that
+    could never recognize a second provider with the same capability (PR 3's
+    ArcadeDB). Replaced with the catalog's own feature check, the same one
+    ``ContextEngine.materialize_aggregated_edges`` gates on. No production
+    caller today (grep confirms); kept for scripts / future callers.
+    """
+    if supports_feature(provider, ProviderFeature.AGGREGATION_MATERIALIZATION):
         return LineageAggregator(provider)
     return None

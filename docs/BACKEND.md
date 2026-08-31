@@ -397,74 +397,348 @@ RelationshipTypeDefEntry:
 
 **File:** `backend/common/interfaces/provider.py`
 
-Abstract base class defining the contract for all graph backends:
+Abstract base class defining the contract for all graph backends. Its members
+fall into **three tiers**, and which tier a method is in tells you what a new
+adapter has to do about it:
+
+| Tier | Count | What it means for an implementer |
+|---|---|---|
+| **Abstract** (`@abstractmethod`) | 25 | Must be implemented, or the class cannot be instantiated. Reads, writes, stats/schema/ontology introspection, and `name`. |
+| **Real defaults** | 28 | Working implementations. Override only if your engine can do better. Includes the ontology-injection lifecycle (below), `get_children_with_edges`, `get_nodes_batch` (delegates to `get_nodes`), `inflight_ops`→`0`, `get_node_degrees`→`{}`, `get_counts_fast`→`None`, `clear_content_caches`/`prime_stats_cache` no-ops, the projection/aggregation write hooks, `discover_schema`, `list_graphs`, `close`. |
+| **Feature-gated defaults** | 5 | Raise `ProviderFeatureUnsupportedError` (a `NotImplementedError` subclass) unless overridden: `get_top_level_or_orphan_nodes`, `trace_at_level`, `expand_aggregated`, `trace_closure`, `materialize_aggregated_edges_batch`. Each has a matching `ProviderFeature` so callers can check *before* building an instance instead of calling and catching. |
+
+Two conventions the ABC deliberately does **not** enforce with
+`@abstractmethod` — because four test doubles subclass it directly and would
+become uninstantiable:
+
+- **`async def preflight(self, *, deadline_s) -> PreflightResult` is required by
+  convention.** A default returning success would lie about reachability; one
+  returning failure would make `ProviderManager` gate every such provider as
+  permanently down ("providers without a `preflight()` are never gated"). The
+  catalog's registration test enforces it instead, by inspecting each registered
+  class (`test_provider_catalog_classes.py::test_preflight_is_a_coroutine_on_every_registered_class`).
+- **Ontology injection is a declared obligation, not a duck-typed extra.**
+  `set_containment_edge_types`, `set_entity_type_levels`,
+  `set_resolved_edge_metadata`, `set_source_type_aliases`, `set_node_identity`,
+  `set_admission_controller` and `set_ontology_rules` are base-class members with
+  working defaults, so every adapter participates by construction. Previously
+  `ContextEngine` asked `hasattr()` and *silently skipped* a provider that lacked
+  a setter — the result was a flat graph and no error. `containment_configured`
+  is the contract's answer to "has an ontology actually been injected into me?",
+  and anything deriving a **cacheable** answer from injected state must consult it
+  first (see `falkordb/stats.py`'s `get_ontology_metadata`).
 
 ```mermaid
 classDiagram
     class GraphDataProvider {
         <<abstract>>
-        +get_node(urn) GraphNode
-        +get_nodes(query) List~GraphNode~
-        +search_nodes(query, limit, offset) List~GraphNode~
-        +get_edges(query) List~GraphEdge~
-        +get_children(parent_urn) List~GraphNode~
-        +get_parent(child_urn) GraphNode
-        +get_upstream(urn, depth) LineageResult
-        +get_downstream(urn, depth) LineageResult
-        +get_full_lineage(urn) LineageResult
-        +get_trace_lineage(urn, direction) LineageResult
-        +get_aggregated_edges_between() Any
-        +get_stats() Dict
-        +get_schema_stats() GraphSchemaStats
-        +get_ontology_metadata() OntologyMetadata
-        +create_node(request) CreateNodeResult
-        +create_edge(request) EdgeMutationResult
-        +update_edge(edge_id, request) EdgeMutationResult
-        +delete_edge(edge_id) bool
+        +provider_type
+        +containment_configured
+        +preflight()
     }
-    class FalkorDBProvider {
-        -pool: BlockingConnectionPool
-        -graph_name: str
-        +materialize_aggregated_edges_batch()
-        +ensure_indices(entity_types)
-    }
-    class Neo4jProvider {
-        -driver: AsyncDriver
-        -database: str
-    }
-    class DataHubGraphQLProvider {
-        -client: httpx.AsyncClient
-        -base_url: str
-    }
-    class MockGraphProvider {
-        -nodes: Dict
-        -edges: List
-    }
+    class FalkorDBProvider
+    class Neo4jProvider
+    class SpannerProvider
+    class DataHubGraphQLProvider
     GraphDataProvider <|-- FalkorDBProvider
     GraphDataProvider <|-- Neo4jProvider
+    GraphDataProvider <|-- SpannerProvider
     GraphDataProvider <|-- DataHubGraphQLProvider
-    GraphDataProvider <|-- MockGraphProvider
 ```
+
+| Class | `provider_type` | Module |
+|---|---|---|
+| `FalkorDBProvider` | `"falkordb"` | `backend/app/providers/falkordb/` (composition of 15 mixins in `provider.py`) |
+| `Neo4jProvider` | `"neo4j"` | `backend/graph/adapters/neo4j_provider.py` |
+| `SpannerProvider` | `"spanner"` | `backend/graph/adapters/spanner_provider.py` |
+| `DataHubGraphQLProvider` | `None` | `backend/graph/adapters/datahub_provider.py` |
+
+`provider_type` is the ClassVar that lets `provider_type_of` / `supports_feature`
+resolve a live instance's capability without a provider **row** in hand. All four
+types are registered in the catalog; the ClassVar is unset on
+`DataHubGraphQLProvider` only because the DataHub adapter file was deliberately
+left untouched, and no live instance of it can exist anyway (see below).
+
+There is no `MockGraphProvider` class. `mock` is a legacy `provider_type` value
+still accepted by the DB CHECK constraint with no adapter behind it — see
+"Provider Location Note" below.
+
+`DataHubGraphQLProvider` is currently **uninstantiable**: it is missing six
+abstract members (`create_edge`, `delete_edge`, `get_aggregated_edges_between`,
+`get_full_lineage`, `get_trace_lineage`, `update_edge`), so registering a DataHub
+provider writes a row but every probe raises `TypeError: Can't instantiate
+abstract class…`. This is a known, deliberately-deferred defect, pinned by
+`test_provider_catalog_classes.py`'s `KNOWN_UNINSTANTIABLE = {"datahub"}` so the
+same check still guards every other type.
 
 ### Provider Capabilities
 
-| Capability | FalkorDB | Neo4j | DataHub | Mock |
-|-----------|----------|-------|---------|------|
-| Multi-graph | Yes | Yes | No | Yes |
-| Lineage | Yes | Yes | Yes | Yes |
-| Containment | Yes | Yes | No | Yes |
-| Write ops | Yes | No | No | Yes |
-| Aggregation | Yes | No | No | No |
-| Full-text search | Yes | Yes | Yes | Yes |
+Capabilities are data on the type's catalog descriptor, read via
+`capability_for(provider_type)`. Four are long-standing booleans; the rest are
+`ProviderFeature` members checked with `.supports(...)`. The three booleans that
+also have a `ProviderFeature` name (`writable`, `full_crud`, `graph_copy`) are
+special-cased inside `supports()`, so the two spellings can never disagree.
+
+| | FalkorDB | Neo4j | Spanner | DataHub |
+|---|---|---|---|---|
+| `family` | cypher | cypher | gql | graphql |
+| `writable` | Yes | Yes | Yes | No |
+| `full_crud` | Yes | No | Yes | No |
+| `is_external` | No | No | No | Yes |
+| `supports_copy` (`graph_copy`) | Yes | No | No | No |
+| `trace_closure` | Yes | No | No | No |
+| `coarse_trace` | Yes | No | No | No |
+| `deep_search` | Yes | No | No | No |
+| `aggregation_materialization` | Yes | No | No | No |
+| `blank_models` | Yes | No | No | No |
+| `schema_discovery` | No | Yes | Yes | No |
+| `multi_graph` | Yes | Yes | Yes | No |
+
+There are two distinct gate kinds, and they are not interchangeable:
+
+- **Row-level admission** — `capability_for(row.provider_type).supports(F)`,
+  answered from the catalog before any instance exists. Endpoints use this to
+  return a clean 422 `provider_unsupported`.
+- **Instance-level tolerance** — catching `ProviderFeatureUnsupportedError` from
+  a live, possibly-wrapped instance. Still needed: a wrapper
+  (`DraftOverlayProvider`, `VersionedBranchProvider`) may lack a method its
+  unwrapped base supports, so a row-level check alone can pass and the call still
+  fail.
+
+### Provider Catalog
+
+**Files:** `backend/common/providers/catalog/` (`descriptor.py` + one module per
+type), plus `backend/app/providers/falkordb/catalog_descriptor.py`.
+
+One `ProviderDescriptor` per provider type is the single registration point for
+behaviour. It carries `id`, `label`, `description`, `docs_url`, `family`,
+`capability`, `connection` (a `ConnectionShape`: which wizard panel renders the
+connection step, default port, TLS and auth kind, the secret credential keys and
+the form-owned `extra_config` keys), `build(spec)`, `provider_class_path`, and
+optional `validate` / `probe_strategy` / `probe_deadline_s` / `admin_visible`.
+
+What reads it, none of which needs an edit to gain a type:
+
+- **Both dispatchers.** `ProviderManager._create_provider_instance` and
+  `ProviderRegistry._create_provider_instance` were two verbatim copies of the
+  same `if provider_type == …` chain; both now build a `ProviderSpec` and
+  delegate to `catalog.create_provider_instance`. Both signatures are unchanged.
+- **The admin API.** `GET /admin/providers/types` serves the catalog as
+  non-secret metadata, gated on `workspace:provider:read` rather than
+  `system:admin` (the view wizard's scope step renders these labels).
+  `/test-connection`, provider creation and schema discovery run
+  `descriptor.validate(...)` → 422 `{"type": "provider_config_invalid", …}`, and
+  the connectivity probe reads `descriptor.probe_strategy` /
+  `probe_deadline_s`.
+- **The frontend.** `frontend/src/services/providerTypes.ts` is the single module
+  that knows what a provider type is — the id union, the brand visuals as a
+  `Record<ProviderType, …>` (a missing visual is a compile error), the wire types
+  and a runtime guard, and an offline snapshot pinned to a fixture generated from
+  the backend's own `/types` response.
+
+`backend/common/providers/` is a **dependency-free kernel** —
+`test_falkordb_kernel_purity.py` fails on any `backend.app` import there, lazy or
+not. Three types register from `catalog/{neo4j,datahub,spanner}.py` because their
+classes live under `backend/graph/adapters/`. FalkorDB cannot: its class is under
+`backend.app`, so its descriptor is built and registered from
+`backend/app/providers/falkordb/catalog_descriptor.py`, imported for its side
+effect by that package's `__init__.py`. Both dispatcher modules therefore carry an
+eager `from backend.app.providers.falkordb import catalog_descriptor` import;
+without it, the first `create_provider_instance("falkordb")` in a process that had
+not otherwise imported the package would raise `Unknown provider_type`.
+
+`ProviderType` (needed statically by pydantic/OpenAPI) and the DB CHECK
+constraint stay hand-written rather than generated from the catalog;
+`test_provider_catalog_sync.py` is the drift guard that replaces generation, and
+`test_provider_type_literals.py` fails CI if `provider_type == "…"` dispatch is
+reintroduced.
+
+The recipe for adding a type is in `DEVELOPER_GUIDE.md` at the repository root,
+under "Adding a graph data provider". (Not a link: that file sits outside the
+`docs/` tree the in-app viewer serves, so a relative link to it 404s in-app —
+which `docsIntegrity.test.ts` enforces.)
 
 ### FalkorDB Implementation Details
 
-**File:** `backend/app/providers/falkordb_provider.py` (~1000 lines)
+**Location:** `backend/app/providers/falkordb/` (a package — see "FalkorDB Package
+Layout" below). `backend/app/providers/falkordb_provider.py` is now a 163-line
+compatibility shim that re-exports the package's names unchanged, so every
+existing import site keeps working without an edit.
 
 - **Connection:** Async Redis BlockingConnectionPool (12 connections, 30s timeout)
 - **Projection modes:** `in_source` (AGGREGATED edges in same graph) or `dedicated` (separate projection graph)
 - **Indexing:** `ensure_indices()` creates indexes for ontology-defined entity types
 - **Aggregation:** `materialize_aggregated_edges_batch()` batch-creates AGGREGATED edges between ancestor pairs using Cypher queries
+
+### FalkorDB Package Layout
+
+The implementation moved to `backend/app/providers/falkordb/`, one module per
+functional area (connection lifecycle, schema/indexing, ontology, caching,
+ancestors, reads, browse, simple lineage, aggregation, trace, closure, drill,
+stats, navigation, writes). `FalkorDBProvider` (`provider.py`) is a composition
+of the resulting fifteen mixins plus `GraphDataProvider` — nothing else lives
+in that file.
+
+**Why mixins, not collaborator objects:** the unit suite fakes the database by
+assigning over the provider's own methods on a *live instance* (`p._ro_query =
+fake`, `p._ensure_connected = noop`, dozens of sites). A mixin keeps every one
+of those a plain, shadowable instance method; a delegate object would leave the
+assignment bound to an attribute nothing reads, and every faked test would
+silently start hitting real code (or a real database) while still reporting
+green.
+
+Two engine-neutral seams sit alongside the mixins, unused by most call sites today:
+- **Executor** (`falkordb/executor.py`) — adapts the five query chokepoints to a
+  database-neutral `run`/`run_tolerant` shape a future engine can implement too.
+- **Dialect** (`falkordb/dialect.py`) — a plain data value holding FalkorDB's
+  Cypher fragments (labels, relationship types, index DDL), so a second engine
+  is a new value plus an executor, not another adapter class.
+
+### Checking a Query's Plan
+
+To confirm a Cypher query is not doing a full scan, `PROFILE` it directly
+against a graph and read the plan for `Results`/`Project` with no `All Node
+Scan` or `Node By Label Scan` (an index seek shows as `Node By Index Scan`):
+
+```python
+from falkordb import FalkorDB
+g = FalkorDB(host="localhost", port=6399).select_graph("<graph_name>")
+print(g.profile("MATCH (n:Thing) WHERE n.urn = $urn RETURN n"))
+```
+
+`backend/scripts/check_trace_query_plans.py` does this for a fixed list of
+trace hot-path queries only (`HOT_PATH_QUERIES`) — it has no entry point for
+an arbitrary query, so use the snippet above for anything else.
+
+### Known Follow-ups
+
+Left deliberately unfinished by the FalkorDB package split, for a later PR:
+
+- **RESOLVED 2026-08-31 — the full lane has now run.** Over PR 2's tip
+  (`baea8b57`, which contains this PR unchanged): **6,301 passed / 24 failed
+  / 208 skipped / 45 deselected in 667s**, machine load ~10. All 24 are
+  accounted for: 22 are in `failures-0.txt`, and the remaining two
+  (`tests/test_data_source_move.py::test_refuses_to_move_a_source_with_a_view`
+  and `::test_a_data_source_from_another_workspace_is_404_not_moved`) are
+  absent from that ledger only because it is a *required-lane* baseline and
+  neither test matches that lane's `-k` filter. They are pre-existing and
+  unrelated to either PR — they pass run singly and fail run as a file,
+  because `insights_service/enqueue.py:95` (`try_claim`) reuses a
+  module-global async Redis client across pytest-asyncio's per-test event
+  loops (`Event loop is closed` → `got Future attached to a different
+  loop`); it needs a live Redis to manifest, which is why it had never been
+  seen. `git diff --name-only <range> -- backend/` over both PR ranges
+  (`54980893..1a3e75e9`, `1a3e75e9..baea8b57`) returns nothing matching
+  `insights|enqueue|redis_bus|common/adapters` — the `-- backend/` pathspec
+  matters, since without it PR 2's range surfaces
+  `frontend/src/components/insights/DataSourceProfile.tsx`, a UI file that
+  merely shares the word. See the follow-up below.
+  The original item, kept for the record:
+  Measured on the final tree: the required CI lane (1,465 passed / 11 failed,
+  `comm -23` against `failures-0.txt` empty — zero new failures), the
+  targeted set (98 tests), both goldens, the live contract snapshot on
+  `:6399` (passed, not skipped), and import smoke in both orders. **Not**
+  measured on the final tree: the ~4,700 tests outside the required lane's
+  `-k` filter. The last complete full lane was 27 failed / 6,163 passed at
+  `798506de`; `git diff --stat 798506de..HEAD` is 28 files / 1,110
+  insertions / 270 deletions (the dialect seam, the `stats.py` pilot, and
+  this finishing task's five commits) — real, substantial work landed
+  since that number, not a docs-only gap. Five attempts to run a full lane
+  here were all defeated by the environment, not the code: three
+  background runs killed at 84%/90%/early, two foreground runs past a 600s
+  cap, and splitting into smaller batches made it *worse* (an explicit
+  120-file list reached only 29% in 580s where the whole `tests` directory
+  completes in 580-880s) — machine load average was 34.37 during these
+  attempts. Do not infer from this PR's other fifteen tasks' measured
+  numbers that this last one was measured too; it wasn't.
+- **A module-global async Redis client is reused across pytest-asyncio's
+  per-test event loops**, surfaced by the first full lane ever completed
+  here (above). The client is the singleton `_client` in
+  **`backend/app/services/aggregation/redis_client.py:90`** (`get_redis()`),
+  lazily built on whichever test's event loop calls it first; its own
+  docstring notes the aggregation control-plane, the worker **and** the
+  insights service all share it, which is both why the defect is real and
+  where a fix belongs. The reported call chain is three hops from there —
+  `insights_service/enqueue.py:95` → `insights_service/redis_streams.py:219`
+  (`try_claim`) → `get_redis()` — so the traceback's top frame is a call
+  site with no client in it. A later test's loop then gets
+  `Event loop is closed` /
+  `RuntimeError: … got Future attached to a different loop`, and the
+  swallowed enqueue failure shows up as an unrelated-looking `assert False`
+  in `tests/test_data_source_move.py`. Only reproduces with a live Redis
+  reachable and only when the file's tests run in sequence — running either
+  test alone passes, which is why it stayed invisible. Same shape as the
+  process-global engine cache behind `with_short_session()`
+  (`backend/app/db/engine.py:341`), which bypasses the `get_db_session`
+  dependency override and so is unreachable through `test_client`: shared
+  global state outliving a per-test loop. Neither PR 1 nor PR 2 touched
+  this chain; not fixed here.
+- **The full-lane gap above is no longer the only CI-shaped caveat.**
+  `.github/workflows/backend-tests.yml`'s `connectivity-suite` job now runs
+  a `falkordb/falkordb:v4.18.11` service container and a reachability step
+  that exits non-zero if it isn't up, so
+  `tests/regression/test_falkordb_provider_contract.py` actually runs in
+  CI instead of silently skipping (an unstarted service previously meant
+  a green job with the contract test never exercised at all). This
+  changes what a green required job means from here on — it now includes
+  a real, live-verified contract snapshot, not just the unit lane above.
+- ~~The provider-interface mermaid diagram and the capability table show
+  `MockGraphProvider` as a real, implemented class.~~ **Done** — both were
+  redrawn in PR 2's doc pass from the shipped contract and the shipped catalog
+  descriptors. `mock` is still a legacy `provider_type` value accepted by the DB
+  CHECK constraint with no adapter class behind it (`LEGACY_DB_ONLY_TYPES`);
+  removing it would need a narrowing migration that refuses when rows exist, and
+  that remains unwritten.
+- **Six files still import a private helper straight from the shim** rather
+  than the package's leaf modules — `backend/tests/test_falkordb_package_guards.py`'s
+  guard 1 allow-lists exactly these (`_sanitize_label`, `_node_from_props`,
+  `_edge_from_row`, `_sanitize_node_properties`, `_compute_searchable_text`,
+  `_split_user_properties`), all under `services/versioning/` plus
+  `api/v1/endpoints/versioning.py`. A later PR repoints them and deletes the
+  allow-list.
+- ~~`CursorMismatchError` is defined outside the provider contract.~~
+  **Done, differently than planned.** It is defined in
+  `backend/common/providers/cursors.py` (`falkordb/cursors.py` is a re-export
+  shim), and PR 2's contract *imports and re-exports* it rather than redefining
+  it there: `cursors.py` is a stdlib-only kernel module by design, while
+  `interfaces/provider.py` already imports `common.models.graph`, so moving the
+  definition would have made the dependency-free module depend on the models
+  package. One class object, reachable from both names — which is what
+  `test_falkordb_package_guards.py`'s export-identity guard checks.
+- **Expression-level dialect routing** (`labels(x)[0]` ~49 sites, `id(r)`/`ID(n)`
+  ~13, `type(r)` ~49) is deliberately deferred to the PR that lifts these
+  modules wholesale — see `falkordb/dialect.py`'s module docstring for exactly
+  which fields are defined but not yet wired.
+- **`get_aggregated_edges_between`** (`falkordb/aggregation.py:1342`) does a
+  lazy `from fastapi import HTTPException` — an HTTP-framework import inside a
+  provider. Noted, not fixed here.
+- **Neo4j has its own near-duplicate** `_sanitize_label` / `_node_from_props` /
+  `_edge_from_row` at `backend/graph/adapters/neo4j_provider.py:50-90`,
+  unrelated to this split's kernel extraction
+  (`backend/common/providers/rowmap.py`) — a future PR could point Neo4j at
+  the same kernel functions instead.
+- **Two kernel functions changed logger name, operationally, not behaviourally.**
+  `node_from_props` and `split_user_properties` (`backend/common/providers/rowmap.py`)
+  now log under that module's own name instead of the historic
+  `backend.app.providers.falkordb_provider` — unavoidable, since the kernel
+  must not import `backend.app` to reach the package's log setup. No test
+  depends on the old name for these two functions, but log-based alerting
+  keyed to it would silently stop matching.
+- **`docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md`'s prose will go stale.**
+  Lines 45, 66, and 105 describe live FalkorDB reads as going through
+  `falkordb_provider.py` — true today only because the compatibility shim
+  exists; repointing those consumers at the package directly (as above) will
+  make that specific phrasing wrong even though the behaviour it describes
+  will not change.
+- **Two halves of the executor seam have no caller anywhere yet.** `stats.py`
+  is the only module converted to it so far; from that task's report: "Every
+  call in this module is a read. Nine `run()` + five `run_tolerant()`, zero
+  `run(..., readonly=False)`. The write path through the executor is
+  unit-tested … but this is not a second, independent proof of it on real
+  code — that's still open for whichever of the next eight modules has the
+  first write chokepoint." And separately: "`projection_executor` has no
+  caller anywhere yet, this module included. Same caveat as above, restated
+  because it's the other seam half."
 
 ### Provider Location Note
 
@@ -472,12 +746,12 @@ All providers run **in-process** in the Visualization Service, split across two 
 
 | Provider | Location |
 |----------|----------|
-| FalkorDBProvider | `backend/app/providers/falkordb_provider.py` |
-| MockGraphProvider | `backend/app/providers/mock_provider.py` |
+| FalkorDBProvider | `backend/app/providers/falkordb/` (compatibility shim at `backend/app/providers/falkordb_provider.py`) |
+| MockGraphProvider | not implemented as a class today — `provider_type = 'mock'` is a valid `ProviderORM` value (`backend/app/db/models.py`) with no adapter behind it |
 | Neo4jProvider | `backend/graph/adapters/neo4j_provider.py` |
 | DataHubGraphQLProvider | `backend/graph/adapters/datahub_provider.py` |
 
-The `backend/graph/adapters/` package (Neo4j, DataHub, Spanner) was formerly loaded by the standalone graph-service for **pre-registration connectivity testing**; since that service was removed ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) the Visualization Service imports these adapters directly. Workspace-scoped queries are served primarily by the FalkorDB and Mock providers.
+The `backend/graph/adapters/` package (Neo4j, DataHub, Spanner) was formerly loaded by the standalone graph-service for **pre-registration connectivity testing**; since that service was removed ([ADR-018](DECISIONS.md#adr-018-retire-the-graph-service)) the Visualization Service imports these adapters directly. Workspace-scoped queries are served primarily by the FalkorDB provider (`mock` is a DB-level `provider_type` value with no adapter class behind it — see the table above).
 
 ---
 

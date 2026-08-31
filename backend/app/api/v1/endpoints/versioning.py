@@ -1271,19 +1271,20 @@ async def create_blank_graph(
     Management and graphver may be separate DBs (no 2PC): the data source commits first
     and is compensated away if graph creation fails."""
     from backend.app.db.repositories import ontology_definition_repo, provider_repo
+    from backend.common.interfaces.provider import ProviderFeature, capability_for
     from backend.common.models.management import DataSourceCreateRequest
 
-    # 1) Provider must exist, be active, FalkorDB (Neo4j later), and workspace-permitted.
+    # 1) Provider must exist, be active, support blank models, and be workspace-permitted.
     prov = await provider_repo.get_provider_orm(session, body.provider_id)
     if prov is None or not prov.is_active:
         raise HTTPException(status_code=422, detail={
             "type": "provider_unsupported",
             "message": "The selected provider connection does not exist or is inactive."})
-    if prov.provider_type != "falkordb":
+    if not capability_for(prov.provider_type).supports(ProviderFeature.BLANK_MODELS):
         raise HTTPException(status_code=422, detail={
             "type": "provider_unsupported",
-            "message": f"Blank models are FalkorDB-backed for now; '{prov.provider_type}' "
-                       "providers are not supported yet."})
+            "message": f"Blank models are not supported on '{prov.provider_type}' "
+                       "providers yet."})
     try:
         permitted = json.loads(prov.permitted_workspaces or '["*"]')
     except Exception:

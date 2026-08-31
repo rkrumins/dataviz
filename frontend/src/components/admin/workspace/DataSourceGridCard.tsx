@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { resolveSourceMode } from '@/services/workspaceService'
 import type { DataSourceStats } from '@/hooks/useDashboardData'
-import { getProviderLogo } from '../ProviderLogos'
+import { providerVisual } from '@/services/providerTypes'
 import { NodeIdentityBadge } from '@/components/dataSource/NodeIdentity'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
@@ -68,7 +68,7 @@ function DataSourceGridCardBase({
     onSelect,
     onSetPrimary,
 }: DataSourceGridCardProps) {
-    const ProviderLogo = providerInfo ? getProviderLogo(providerInfo.providerType) : null
+    const ProviderLogo = providerInfo ? providerVisual(providerInfo.providerType).Logo : null
 
     return (
         <div
@@ -81,13 +81,7 @@ function DataSourceGridCardBase({
             )}
         >
             {/* Provider accent bar at top */}
-            <div className={cn(
-                "h-1 w-full",
-                providerInfo?.providerType === 'neo4j' ? 'bg-gradient-to-r from-blue-500 to-blue-400' :
-                providerInfo?.providerType === 'falkordb' ? 'bg-gradient-to-r from-purple-500 via-pink-500 to-orange-400' :
-                providerInfo?.providerType === 'datahub' ? 'bg-gradient-to-r from-blue-600 via-orange-400 to-red-500' :
-                'bg-gradient-to-r from-indigo-500 to-violet-500'
-            )} />
+            <div className={cn("h-1 w-full", providerVisual(providerInfo?.providerType).accent)} />
 
             <div className="p-4">
                 {/* Header */}

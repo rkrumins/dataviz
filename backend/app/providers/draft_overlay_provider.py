@@ -143,6 +143,37 @@ class DraftOverlayProvider:
         if callable(setter):
             setter(identity_property, name_property)
 
+    def set_entity_type_levels(self, mapping: Dict[str, int]) -> None:
+        """Forward to the base provider only — same "read-time concern, the
+        writer has no use for it" reasoning as :meth:`set_node_identity`."""
+        setter = getattr(self._base, "set_entity_type_levels", None)
+        if callable(setter):
+            setter(mapping)
+
+    def set_resolved_edge_metadata(
+        self, edge_type_metadata: Dict[str, Any], lineage_edge_types: List[str],
+    ) -> None:
+        """Forward to the base provider only — see :meth:`set_entity_type_levels`."""
+        setter = getattr(self._base, "set_resolved_edge_metadata", None)
+        if callable(setter):
+            setter(edge_type_metadata, lineage_edge_types)
+
+    def set_source_type_aliases(
+        self,
+        relationship_aliases: Dict[str, List[str]],
+        entity_aliases: Optional[Dict[str, List[str]]] = None,
+    ) -> None:
+        """Forward to the base provider only — see :meth:`set_entity_type_levels`."""
+        setter = getattr(self._base, "set_source_type_aliases", None)
+        if callable(setter):
+            setter(relationship_aliases, entity_aliases)
+
+    def set_admission_controller(self, controller: Optional[Any]) -> None:
+        """Forward to the base provider only — see :meth:`set_entity_type_levels`."""
+        setter = getattr(self._base, "set_admission_controller", None)
+        if callable(setter):
+            setter(controller)
+
     @property
     def name(self) -> str:
         return f"draft-overlay[{self._gid}:{self._branch}] over {getattr(self._base, 'name', '?')}"
