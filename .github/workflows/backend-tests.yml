@@ -32,12 +32,13 @@ jobs:
     timeout-minutes: 25
     # Without a live FalkorDB, tests/regression/test_falkordb_provider_contract.py
     # SKIPS — silently, and it is the only test in the repo that pins what the
-    # provider RETURNS rather than what Cypher it emits (32 pins over 17 stored
-    # snapshots). Everything else here is fake-driven: a method could return a
-    # different shape and every other test would still pass. Its gate is a
-    # module-level ping at collection time (`_falkordb_available`), so the
-    # service has to be healthy before pytest starts, which is what the
-    # health-check options below guarantee.
+    # provider RETURNS rather than what Cypher it emits (31 stored snapshots).
+    # Everything else here is fake-driven: a method could return a different
+    # shape and every other test would still pass. Its gate is inside the test,
+    # in `_runner.make_contract_test`: FALKORDB_HOST must be set AND host:port
+    # must accept a TCP connection, both checked when the test runs. The
+    # health-check options below are what make that connection succeed on the
+    # first attempt rather than racing a still-starting container.
     services:
       falkordb:
         # Same pin as docker-compose.yml's falkordb service. Never :latest —
@@ -53,8 +54,12 @@ jobs:
           --health-retries 10
           --health-start-period 10s
     env:
-      # Defaults in the test already, but stated so the wiring is visible to
-      # anyone reading the workflow rather than the test.
+      # LOAD-BEARING, not decorative — do not delete. FALKORDB_HOST has no
+      # default: `make_contract_test` calls pytest.skip() outright when
+      # <PREFIX>_HOST is unset, so removing these two lines puts CI straight
+      # back into the silent-skip state the service block above exists to
+      # prevent. (FALKORDB_PORT alone would fall back to the descriptor's
+      # default_port, 6379; it is stated so the pair reads as one setting.)
       FALKORDB_HOST: localhost
       FALKORDB_PORT: "6379"
     steps:
@@ -70,25 +75,34 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt -r backend/requirements-test.txt
-      # The contract test's gate is `pytest.mark.skipif(not _falkordb_available())`,
-      # so an unreachable service makes it SKIP and the job still goes green —
-      # the failure mode this service block exists to remove would simply come
-      # back quietly. Fail here instead, with a message that says what is
-      # actually missing.
-      - name: Verify FalkorDB is reachable (the contract test skips silently if not)
+      # The contract test skips itself two ways (`_runner.make_contract_test`):
+      # FALKORDB_HOST unset, or host:port refusing a TCP connection. Either one
+      # makes it SKIP and the job still goes green — the failure mode the
+      # service block above exists to remove would simply come back quietly.
+      # Fail here instead, checking both halves, with a message that says which
+      # one is actually missing.
+      - name: Verify the contract test will run (it skips silently otherwise)
         run: |
           python - <<'PY'
-          import sys, redis
+          import os, sys, redis
+          host = os.getenv("FALKORDB_HOST")
+          if not host:
+              sys.exit(
+                  "FALKORDB_HOST is unset. make_contract_test skips outright "
+                  "without it — there is no default. Restore the job's env: "
+                  "block rather than letting the contract test skip."
+              )
+          port = int(os.getenv("FALKORDB_PORT") or 6379)
           try:
-              redis.Redis(host="localhost", port=6379, socket_connect_timeout=5).ping()
+              redis.Redis(host=host, port=port, socket_connect_timeout=5).ping()
           except Exception as exc:
               sys.exit(
-                  f"FalkorDB unreachable on localhost:6379 ({exc}). The provider "
+                  f"FalkorDB unreachable on {host}:{port} ({exc}). The provider "
                   "contract test would SKIP and this job would pass without "
                   "running the only check that pins what the provider RETURNS. "
                   "Fix the service block rather than letting it skip."
               )
-          print("FalkorDB reachable — the contract test will run, not skip.")
+          print(f"FalkorDB reachable on {host}:{port} — the contract test will run, not skip.")
           PY
 
       - name: Run the connectivity + provider domain suite
