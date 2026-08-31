@@ -3970,10 +3970,22 @@ export function ContextViewCanvas({
     return visibleLineageEdges.length > autoStubThreshold
   }, [overlay.active, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Significance ranking: bundled edge count first (a 600-edge bundle IS
-  // the macro flow), confidence as the tie-break.
-  const bySignificance = (a: { edgeCount?: number; confidence?: number }, b: { edgeCount?: number; confidence?: number }) =>
-    ((b.edgeCount || 1) - (a.edgeCount || 1)) || ((b.confidence || 0) - (a.confidence || 0))
+  // Significance ranking for the AMBIENT BUDGET, which rations room on the
+  // board. It ranks on `bundleSize` — how many lines this one line replaces —
+  // NOT on `edgeCount`, which is the weight the bundle stands for.
+  //
+  // Those diverge on a roll-up: a "Combined flow" can speak for thousands of
+  // table-level flows while occupying exactly one line. Ranking on the weight
+  // let such a roll-up outrank, and therefore evict, the raw edges a user had
+  // just expanded a container to see — lineage vanishing at the moment they
+  // asked for more of it. `edgeCount` remains the weight everywhere it is
+  // read for display; only the budget's ordering changed.
+  const bySignificance = (
+    a: { bundleSize?: number; edgeCount?: number; confidence?: number },
+    b: { bundleSize?: number; edgeCount?: number; confidence?: number },
+  ) =>
+    ((b.bundleSize ?? b.edgeCount ?? 1) - (a.bundleSize ?? a.edgeCount ?? 1))
+    || ((b.confidence || 0) - (a.confidence || 0))
 
   // Adaptive ambient budget. Above the threshold, "Adaptive" adapts
   // instead of cliffing (old behavior: all ambient edges vanished at

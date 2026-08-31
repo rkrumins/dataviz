@@ -668,18 +668,23 @@ export function useEdgeProjection({
       // relationship between the two cards it touches.
       const isGhost = isAggregated || isBrowseBundle || members.some((e: any) => e._lifted === true)
 
-      // REVERTED, deliberately, at the user's instruction: this counted the
-      // MEMBERS a bundle stands for, weighting a roll-up by the flows it
-      // summarises (`Math.max(rawWeight, rollupWeight)` over `memberWeight`).
-      // That is the truer number — a "Combined flow" over 4,300 table-level
-      // flows reported 1 — but it lands on the same field the adaptive edge
-      // budget ranks (`bySignificance`, ContextViewCanvas.tsx:3975), and
-      // aggregated edges started disappearing from the board. Losing lineage
-      // is worse than under-reporting it, so the count is a member count again
-      // until the two concerns are separated: a bundle needs a WEIGHT for what
-      // it represents and a separate COUNT for how much of the board it may
-      // occupy, and this one field is doing both jobs.
-      const edgeCount = members.length
+      // TWO NUMBERS, because this bundle answers two different questions and
+      // one field was doing both jobs.
+      //
+      // `edgeCount` is the WEIGHT: what this line stands for. A roll-up
+      // summarises flows that can also be members here in their own right, so
+      // it is evidence ABOUT them rather than flows on top of them — max, not
+      // sum, the rule `collapseRecords` already states for the drawer. The
+      // panel, the drawer, the badge and the stroke width all want this.
+      //
+      // `bundleSize` is the COUNT: how many lines this one line replaces. The
+      // adaptive edge budget ranks on THIS, because the budget is rationing
+      // room on the board, and a single roll-up occupies one line's worth of
+      // room no matter how many flows it speaks for. Ranking the budget on the
+      // weight let a heavy roll-up outrank — and evict — the raw edges the user
+      // had just expanded to see.
+      const edgeCount = Math.max(rawWeight, rollupWeight)
+      const bundleSize = members.length
       const typesArray = Array.from(distinctTypes)
 
       // Reverse-flow annotation: layer-index of target strictly less than
@@ -709,7 +714,7 @@ export function useEdgeProjection({
         isDelegated: false,
         isResidual: false,
         isBidirectional: false,
-        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
+        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount, bundleSize }
       })
     })
 
