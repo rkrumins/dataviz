@@ -7,7 +7,8 @@
  * Shared across all three canvases via the toolbars. Renders nothing when the data source has
  * no versioned graph (the common case until a graph is created).
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import { GitBranch, GitPullRequest, Check, Plus, ChevronDown, Loader2, Globe, Settings2, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -25,6 +26,26 @@ import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
 import { BranchManager } from './BranchManager'
 
+/** 21rem — the menu's fixed width, in px, so the anchor can keep it on-screen. */
+const MENU_WIDTH = 336
+
+// A tick that advances on every resize and on any scroll (capture), so the
+// open menu's placement is re-derived from the trigger's live rect. Read via
+// useSyncExternalStore and subscribed ONLY while open, so a closed switcher
+// leaves no listener behind and never re-renders on someone else's scroll.
+let viewportTick = 0
+function subscribeViewport(onChange: () => void): () => void {
+  const bump = () => { viewportTick += 1; onChange() }
+  window.addEventListener('resize', bump)
+  window.addEventListener('scroll', bump, true)
+  return () => {
+    window.removeEventListener('resize', bump)
+    window.removeEventListener('scroll', bump, true)
+  }
+}
+const getViewportTick = () => viewportTick
+const subscribeNothing = () => () => {}
+
 interface BranchSwitcherProps {
   workspaceId: string
   dataSourceId: string | null
@@ -37,7 +58,10 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const [newName, setNewName] = useState('')
   const [settingsBranch, setSettingsBranch] = useState<Branch | null>(null)
   const [managerOpen, setManagerOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement>(null)
+  // Callback ref: the trigger lands in state on mount so the menu's position can be
+  // derived from its rect AT RENDER TIME — no state written from an effect.
+  const [triggerEl, setTriggerEl] = useState<HTMLButtonElement | null>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
 
@@ -94,15 +118,42 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
     switchToDraft,
   })
 
-  // Close on outside click.
+  // Close on outside click or Escape. The menu is portalled to the body, so "outside"
+  // has to clear BOTH the trigger and the popover — a containment test against the
+  // trigger's wrapper alone would close the menu on its own rows.
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+      const t = e.target as Node
+      if (!triggerEl?.contains(t) && !popoverRef.current?.contains(t)) setOpen(false)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setOpen(false)
+      triggerEl?.focus()
     }
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, triggerEl])
+
+  // The Context View header that hosts this switcher carries `backdrop-blur-xl`, and a
+  // backdrop-filter CREATES A STACKING CONTEXT: rendered inline, the menu's z-index only
+  // competed inside the header, and the canvas columns below (relative z-30, later in the
+  // DOM) painted straight over it — the menu opened and could not be seen. It portals to
+  // the body and anchors to the trigger's rect, the same fix DisplayMenu / ImportExportMenu
+  // already use in that header.
+  useSyncExternalStore(open ? subscribeViewport : subscribeNothing, getViewportTick, getViewportTick)
+  const triggerRect = open && triggerEl ? triggerEl.getBoundingClientRect() : null
+  const anchor = triggerRect
+    ? {
+        top: triggerRect.bottom + 6,
+        left: Math.max(8, Math.min(triggerRect.left, window.innerWidth - MENU_WIDTH - 8)),
+      }
+    : null
 
   // No versioned graph for this data source → nothing to switch.
   if (!dataSourceId || (resolve.isError && !graphId) || (!resolve.isLoading && !graphId)) {
@@ -133,9 +184,13 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const label = onMain ? BRANCH_VOCAB.published : activeDraft?.name || BRANCH_VOCAB.draft
 
   return (
-    <div ref={rootRef} className={cn('relative', className)}>
+    <div className={cn('relative', className)}>
       <button
+        ref={setTriggerEl}
+        type="button"
         onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
         className={cn(
           'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition-colors',
           'bg-canvas-elevated border border-glass-border hover:bg-canvas-overlay',
@@ -153,8 +208,18 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
         <ChevronDown className="w-3.5 h-3.5 text-ink-muted" />
       </button>
 
-      {open && (
-        <div className="absolute left-0 top-full mt-1.5 w-[21rem] z-50 rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg overflow-hidden animate-fade-in">
+      {/* Portalled + fixed — see the anchor above. No AnimatePresence/exit: the menu
+          unmounts instantly on close, so an interrupted exit can never strand an
+          invisible click-blocker at z-1000 over the canvas. It still animates in. */}
+      {open && anchor && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={popoverRef}
+          role="dialog"
+          aria-label="Version"
+          data-branch-switcher-menu="true"
+          style={{ position: 'fixed', top: anchor.top, left: anchor.left, width: MENU_WIDTH, zIndex: 1000 }}
+          className="rounded-xl border border-glass-border bg-canvas-elevated shadow-glass-lg overflow-hidden animate-fade-in"
+        >
           <div className="px-3 py-2 border-b border-glass-border">
             <p className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">Version</p>
           </div>
@@ -170,7 +235,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
               }}
             />
             {drafts.length > 0 && (
-              <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-ink-muted/70 uppercase tracking-wider">{BRANCH_VOCAB.yourDrafts}</p>
+              <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">{BRANCH_VOCAB.yourDrafts}</p>
             )}
             {drafts.map((b) => {
               const status = draftStatus(b.baseCommitSeq, mainHead)
@@ -200,7 +265,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                     <button
                       onClick={(e) => { e.stopPropagation(); setSettingsBranch(b); setOpen(false) }}
                       title="Settings — rename, describe, share link"
-                      className="shrink-0 p-1 rounded-md text-ink-muted/70 hover:text-ink hover:bg-canvas-base transition-colors"
+                      className="shrink-0 p-1 rounded-md text-ink-muted hover:text-ink hover:bg-canvas-base transition-colors"
                     >
                       <Settings2 className="w-3.5 h-3.5" />
                     </button>
@@ -236,7 +301,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                   onChange={(e) => setNewName(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleCreate()
-                    if (e.key === 'Escape') { setCreating(false); setNewName('') }
+                    if (e.key === 'Escape') { e.stopPropagation(); setCreating(false); setNewName('') }
                   }}
                   placeholder="Draft name (optional)"
                   className="flex-1 min-w-0 px-2 py-1 rounded-md bg-canvas-overlay border border-glass-border text-sm text-ink outline-none focus:border-accent-lineage"
@@ -259,7 +324,8 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
               </button>
             )
           )}
-        </div>
+        </div>,
+        document.body,
       )}
 
       {settingsBranch && graphId && (
