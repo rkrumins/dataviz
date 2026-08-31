@@ -59,11 +59,9 @@
  *    holding every sharing right. Naming the tier and offering the action are
  *    now separate questions.
  *
- * Colour is spent on meaning: the icon tile and the whisper of gradient across
- * the bar are the view TYPE's colour, state badges are the app's state hues
- * (sky = read-only, amber = waiting on a decision), and the data source stays
- * NEUTRAL — emerald there would read as "this source is healthy", which is
- * what emerald means everywhere else in this product.
+ * Colour is spent on meaning: the view type's hue lives in the icon tile alone.
+ * A gradient wash across the bar was tried and removed — the bar is chrome, and
+ * tinting the whole of it competed with the canvas it sits above.
  *
  * It renders ABOVE the canvas rather than over it. The canvas corners are already
  * spoken for (search trigger top-right at z-30, minimap and controls, transient
@@ -293,11 +291,6 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     return (
         <>
             <header className="relative flex items-start gap-3 px-4 py-2.5 border-b border-glass-border bg-canvas-elevated shrink-0">
-                {/* The view type's colour, as a whisper across the whole bar —
-                    the same hue as the tile, so the page has an identity you
-                    can feel before you read anything. Bracket alpha on a real
-                    palette colour, so it actually renders. */}
-                <span aria-hidden className={cn('pointer-events-none absolute inset-0', meta.gradient)} />
 
                 <span className={cn(
                     'relative mt-0.5 h-9 w-9 rounded-xl border flex items-center justify-center shrink-0',
