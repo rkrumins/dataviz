@@ -226,6 +226,10 @@ export function useEdgeProjection({
   // ── Incremental ancestorMap state ──────────────────────────────────────
   const ancestorMapRef = useRef<Map<string, string>>(new Map())
   const prevNodesByLayerRef = useRef<Map<string, HierarchyNode[]> | null>(null)
+  // The hierarchy's CONTENTS, not just its layer buckets. Children arrive
+  // LAZILY on drill-down and land here without `nodesByLayer` changing identity.
+  const prevDisplayFlatRef = useRef<HierarchyNode[] | null>(null)
+  const prevNodeIndexRef = useRef<Map<string, HierarchyNode> | null>(null)
   const prevExpandedNodesRef = useRef<Set<string>>(new Set())
 
   // ── lineageEdges ───────────────────────────────────────────────────────
@@ -287,11 +291,29 @@ export function useEdgeProjection({
   // collapses a tree node). We diff the previous/current Set and only
   // traverse the affected subtrees — O(subtree) instead of O(N).
   const ancestorMap = useMemo(() => {
-    const needsFullRebuild = prevNodesByLayerRef.current !== nodesByLayer
+    // Rebuild when ANY input the map is built from changed, not only the layer
+    // buckets. This read `prevNodesByLayerRef.current !== nodesByLayer` alone
+    // while the memo also depends on `displayFlat` and `nodeIndex`.
+    //
+    // Expanding a container whose children are not loaded yet ran the
+    // incremental patch against an EMPTY `children` array and mapped nothing.
+    // The children then arrived, changing `displayFlat` and `nodeIndex` but not
+    // `nodesByLayer`, so the memo re-ran, found no rebuild needed, found
+    // `prev === expandedNodes`, and returned the STALE cached map. Lazily
+    // loaded children could never enter it, so every edge into them stayed
+    // resolved up to the collapsed ancestor — the board kept drawing one line
+    // into `Tableau` while four `REPORTING -> dashboard` edges sat unused in
+    // the response.
+    const needsFullRebuild =
+      prevNodesByLayerRef.current !== nodesByLayer
+      || prevDisplayFlatRef.current !== displayFlat
+      || prevNodeIndexRef.current !== nodeIndex
 
     if (needsFullRebuild) {
       const map = buildFullAncestorMap(nodesByLayer, expandedNodes, displayFlat)
       prevNodesByLayerRef.current = nodesByLayer
+      prevDisplayFlatRef.current = displayFlat
+      prevNodeIndexRef.current = nodeIndex
       prevExpandedNodesRef.current = expandedNodes
       ancestorMapRef.current = map
       return map
