@@ -27,7 +27,7 @@ export function DataSourceProfileDrawer({ catalogId, isOpen, onClose }: {
               transition={MOTION.drawerSlide}
               className="pointer-events-auto absolute right-0 top-0 h-full w-full max-w-2xl overflow-y-auto bg-canvas border-l border-glass-border shadow-2xl"
             >
-              <div className="sticky top-0 z-10 flex items-center justify-end p-3 bg-canvas/80 backdrop-blur">
+              <div className="sticky top-0 z-10 flex items-center justify-end p-3 bg-canvas">
                 <button onClick={onClose} aria-label="Close" className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                   <X className="w-4 h-4" />
                 </button>

@@ -1010,7 +1010,7 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                         transition={MOTION.drawerSlide}
                         className="fixed right-0 top-0 z-50 h-full w-full max-w-xl overflow-y-auto bg-canvas border-l border-glass-border shadow-2xl"
                     >
-                        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 p-4 bg-canvas/80 backdrop-blur border-b border-glass-border">
+                        <div className="sticky top-0 z-10 flex items-start justify-between gap-3 p-4 bg-canvas border-b border-glass-border">
                             <div className="min-w-0">
                                 <h2 className="text-base font-bold text-ink truncate">
                                     {doc?.name || dsId}

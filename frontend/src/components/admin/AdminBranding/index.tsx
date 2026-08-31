@@ -448,7 +448,7 @@ export function AdminBranding() {
                     )}
 
                     {/* Action bar */}
-                    <div className="flex items-center gap-3 sticky bottom-4 bg-canvas-elevated/80 backdrop-blur border border-glass-border rounded-2xl px-4 py-3 shadow-lg">
+                    <div className="flex items-center gap-3 sticky bottom-4 bg-canvas-elevated border border-glass-border rounded-2xl px-4 py-3 shadow-lg">
                         <button
                             onClick={handleSave}
                             disabled={!dirty || saving}
