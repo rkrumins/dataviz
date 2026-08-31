@@ -13,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy import select, func, delete
+
+from backend.common.display_name import resolve_display_name
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -908,3 +910,57 @@ async def get_groups_for_user(session: AsyncSession, user_id: str) -> list[str]:
     """Group ids the user belongs to. Hot path; called on every login."""
     from . import group_repo
     return await group_repo.get_user_groups(session, user_id)
+
+
+async def get_identities_by_ids(
+    session: AsyncSession, user_ids: list[str],
+) -> dict[str, dict]:
+    """Name + email for a batch of user ids, keyed by id.
+
+    Exists so a log can name the people in it. The audit lens, and every
+    surface like it, holds a page of rows carrying nothing but
+    ``usr_ac3f19``-shaped identifiers; an administrator reading it had no
+    way to tell who that was without opening another tab per row, and no
+    way at all once the account was deleted.
+
+    SOFT-DELETED USERS ARE INCLUDED, deliberately, and this is the reason
+    the query does not reuse the repo's default ``deleted_at IS NULL``
+    filter. An audit log is a record of what happened, and the most
+    interesting question an administrator asks of it — who was that
+    account we removed, and what did it do first — is exactly the one that
+    excluding them makes unanswerable. ``deleted`` rides on the result so
+    the caller can mark it rather than pretend the account is current.
+
+    An id that resolves to nothing is simply ABSENT from the returned map.
+    The caller must keep showing the raw id in that case: an unresolvable
+    actor is a real state (a system-generated event, a hard-deleted row, a
+    payload naming something that was never a user) and inventing
+    "Unknown User" for it would claim a fact the database does not have.
+    """
+    ids = [i for i in dict.fromkeys(user_ids) if i]
+    if not ids:
+        return {}
+    rows = (await session.execute(
+        select(
+            UserORM.id,
+            UserORM.display_name,
+            UserORM.first_name,
+            UserORM.last_name,
+            UserORM.email,
+            UserORM.status,
+            UserORM.deleted_at,
+        ).where(UserORM.id.in_(ids))
+    )).all()
+    return {
+        r[0]: {
+            # Through the shared resolver, never a re-join of the halves —
+            # a stored display name has to win here as it does everywhere
+            # else, or the audit log names people differently from the
+            # user list it links to.
+            "name": resolve_display_name(r[1], r[2], r[3]),
+            "email": r[4],
+            "status": r[5],
+            "deleted": r[6] is not None,
+        }
+        for r in rows
+    }

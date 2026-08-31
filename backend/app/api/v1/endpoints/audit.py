@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import OutboxEventORM
+from backend.app.db.repositories import user_repo
 from backend.auth_service.interface import User
 from backend.common.models.audit import (
     AuditEventResponse,
@@ -581,6 +582,41 @@ async def list_audit_events(
         if target_role and ev.target_role != target_role:
             continue
         out.append(ev)
+
+    # ── Name the people in the page ───────────────────────────────
+    # ONE query for the whole page, after filtering, so the lookup only ever
+    # covers rows that are actually being returned. Every event carries at most
+    # two user ids and a page is capped at `_MAX_LIMIT`, so this is a single
+    # indexed `IN` over a few dozen keys at worst.
+    #
+    # It runs against the page rather than per row for the obvious reason, but
+    # also because the same actor usually appears on many rows of an audit log —
+    # deduplicating first turns "one lookup per row" into "one lookup per
+    # distinct person".
+    #
+    # A failure here must not take the audit lens down with it: the ids are the
+    # record, the names are an enrichment of it, and a log that renders with raw
+    # ids is enormously more useful than one that 500s.
+    try:
+        identities = await user_repo.get_identities_by_ids(
+            session,
+            [i for ev in out for i in (ev.actor_id, ev.target_user_id) if i],
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("audit: could not resolve user identities for this page", exc_info=True)
+        identities = {}
+
+    for ev in out:
+        actor = identities.get(ev.actor_id) if ev.actor_id else None
+        if actor:
+            ev.actor_name = actor["name"] or None
+            ev.actor_email = actor["email"]
+            ev.actor_deleted = actor["deleted"]
+        target = identities.get(ev.target_user_id) if ev.target_user_id else None
+        if target:
+            ev.target_user_name = target["name"] or None
+            ev.target_user_email = target["email"]
+            ev.target_user_deleted = target["deleted"]
 
     next_cursor = None
     if has_more and rows:

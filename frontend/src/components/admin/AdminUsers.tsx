@@ -15,7 +15,7 @@ import {
     RefreshCw, Search, UserPlus, Ban, X, Loader2, Mail,
     ChevronDown, ChevronUp,
     KeyRound, UserCog,
-    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign,
+    RotateCcw, Lock, Copy, Check, Link2, Pencil, ScrollText, ListChecks, AtSign, Fingerprint,
 } from 'lucide-react'
 import {
     adminUserService,
@@ -259,6 +259,50 @@ function SignInMethods({ user }: { user: AdminUserResponse }) {
 
 // ── Main component ───────────────────────────────────────────────────
 
+
+/**
+ * A user's internal id, on the row that names them.
+ *
+ * `usr_ac3f19`-shaped identifiers appear in the audit log, in support
+ * tickets, in exports and in the URL of half the admin API — and nowhere in
+ * the user list, which is the one place an operator comes to turn one back
+ * into a person. Joining the two directions up meant guessing.
+ *
+ * Quiet by design: monospace, muted, and under the email, because it is a
+ * string to MATCH and to copy rather than to read. Clicking copies it, since
+ * every use of an id is somewhere else.
+ */
+function UserIdChip({ id }: { id: string }) {
+    const [copied, setCopied] = useState(false)
+    return (
+        <HoverTip
+            label={copied ? 'Copied' : 'Internal user ID'}
+            detail={`${id} — the identifier this account carries in the audit log, in exports and in the admin API. Click to copy.`}
+        >
+            <button
+                type="button"
+                aria-label={`Copy user ID ${id}`}
+                onClick={(e) => {
+                    e.stopPropagation()
+                    // Best effort: a denied clipboard permission must not throw
+                    // out of a table row.
+                    navigator.clipboard?.writeText(id).then(
+                        () => { setCopied(true); setTimeout(() => setCopied(false), 1200) },
+                        () => {},
+                    )
+                }}
+                className="mt-0.5 flex items-center gap-1 max-w-full rounded text-ink-muted hover:text-ink-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+            >
+                {copied
+                    ? <Check className="w-3 h-3 shrink-0 text-emerald-500" />
+                    : <Fingerprint className="w-3 h-3 shrink-0" />}
+                <span className="font-mono text-[10px] truncate">{id}</span>
+            </button>
+        </HoverTip>
+    )
+}
+
+
 export function AdminUsers() {
     // Phase 6: only super_admins can grant super_admin. Org admins
     // see ``org_admin`` only — the dropdown shouldn't tease a role
@@ -282,7 +326,23 @@ export function AdminUsers() {
      *  notification stack instead. */
     const [error, setError] = useState<string | null>(null)
     const [filter, setFilter] = useState<StatusFilter>('all')
-    const [search, setSearch] = useState('')
+    // Seeded from `?q=`, so a person clicked in the audit log lands here with
+    // their id already in the box rather than on an unfiltered list of
+    // everybody.
+    //
+    // Read once from `window.location`, NOT through `useSearchParams`. The app
+    // mounts a `createBrowserRouter`, so the two agree — and the hook would
+    // make this component unrenderable outside a Router, which it has never
+    // needed to be and which two existing test files depend on. A mount-time
+    // read is all this is: after that the box belongs to the operator, and
+    // re-syncing it from the URL would fight their typing.
+    const [search, setSearch] = useState(() => {
+        try {
+            return new URLSearchParams(window.location.search).get('q') ?? ''
+        } catch {
+            return ''
+        }
+    })
     const [sortField, setSortField] = useState<SortField>('createdAt')
     const [sortDir, setSortDir] = useState<SortDir>('desc')
     const [page, setPage] = useState(0)
@@ -400,6 +460,11 @@ export function AdminUsers() {
             list = list.filter(u =>
                 u.displayName.toLowerCase().includes(q) ||
                 u.email.toLowerCase().includes(q) ||
+                // The id is the whole reason someone arrives here from an
+                // audit row or a support ticket holding `usr_ac3f19`. Matching
+                // everything BUT the identifier made this list unsearchable by
+                // the one string that brought them.
+                u.id.toLowerCase().includes(q) ||
                 u.role.toLowerCase().includes(q) ||
                 (u.identities ?? []).some(i =>
                     i.displayName.toLowerCase().includes(q) ||
@@ -857,7 +922,7 @@ export function AdminUsers() {
                 </div>
                 <div className="relative flex-1 max-w-xs ml-auto">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
-                    <input type="text" placeholder="Search by name, email, role, or provider..."
+                    <input type="text" placeholder="Search by name, email, user ID, role, or provider..."
                         value={search} onChange={(e) => setSearch(e.target.value)}
                         className="input pl-9 h-9 text-sm bg-white/50 dark:bg-black/20 w-full" />
                     {search && (
@@ -967,6 +1032,16 @@ export function AdminUsers() {
                                                         <Mail className="w-3 h-3 text-ink-muted shrink-0" />
                                                         <p className="text-xs text-ink-muted truncate">{user.email}</p>
                                                     </div>
+                                                    {/* THE INTERNAL ID, ON THE FACE OF THE ROW.
+                                                        It appears in the audit log, in support
+                                                        tickets, in exports and in the URL of half
+                                                        the admin API — and nowhere in this list,
+                                                        which is the one place someone comes to
+                                                        turn `usr_ac3f19` back into a person. It
+                                                        is deliberately quiet: monospace, muted,
+                                                        below the email, because it is a thing to
+                                                        MATCH and to copy rather than to read. */}
+                                                    <UserIdChip id={user.id} />
                                                 </div>
                                             </div>
                                         </td>

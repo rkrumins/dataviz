@@ -142,7 +142,7 @@ describe('the sign-in column', () => {
         expect(screen.getByText('Local Person')).toBeInTheDocument()
 
         await u.type(
-            screen.getByPlaceholderText(/search by name, email, role, or provider/i),
+            screen.getByPlaceholderText(/search by name, email, user id, role, or provider/i),
             'entra',
         )
         await waitFor(() => {
