@@ -89,6 +89,16 @@ const subscribeNothing = () => () => {}
  * only runs while there is a load to qualify.
  */
 const CATCH_UP_POLL_MS = 20_000
+/**
+ * The ceiling the poll backs off to while the answer keeps coming back the
+ * same. A source that is up to date is the overwhelmingly common case and it
+ * is not a case anyone is watching, so a fixed 20s cadence would spend ~180
+ * requests an hour, for the whole session, to keep re-learning nothing. The
+ * interval doubles on each unchanged healthy reading and snaps straight back
+ * to `CATCH_UP_POLL_MS` the moment the verdict moves, so the transition INTO
+ * behind — the only moment this panel exists for — is still caught promptly.
+ */
+const CATCH_UP_POLL_MAX_MS = 120_000
 /** Give up (quietly) rather than hammer a backend that is not answering. */
 const CATCH_UP_MAX_ERRORS = 3
 
@@ -141,12 +151,23 @@ function useConnectionsCatchUp(dataSourceId: string | null | undefined, enabled:
     }
     let cancelled = false
     let errors = 0
-    let poll: ReturnType<typeof setInterval> | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let delay = CATCH_UP_POLL_MS
+    let prevBehind: boolean | null = null
     const stop = () => {
-      if (poll) {
-        clearInterval(poll)
-        poll = undefined
+      if (timer) {
+        clearTimeout(timer)
+        timer = undefined
       }
+    }
+    // A self-rescheduling chain rather than setInterval, so the cadence can
+    // widen. Two rules it must never break: `cancelled` is checked after every
+    // await before anything is scheduled, and the delay is validated — a
+    // NaN reaches setTimeout as 0ms and turns this into a tight request loop.
+    const schedule = () => {
+      if (cancelled) return
+      const ms = Number.isFinite(delay) && delay > 0 ? delay : CATCH_UP_POLL_MS
+      timer = setTimeout(() => { void check() }, ms)
     }
 
     const check = async () => {
@@ -161,6 +182,13 @@ function useConnectionsCatchUp(dataSourceId: string | null | undefined, enabled:
           lastSeenCurrent.current = { dsId: dataSourceId, at: now }
         }
         if (cancelled) return
+        // Back off only while the verdict is unchanged AND healthy. Behind
+        // stays at the base cadence: someone is waiting for it to clear.
+        const behind = res.projectorCurrent === false
+        delay = behind || prevBehind === null || behind !== prevBehind
+          ? CATCH_UP_POLL_MS
+          : Math.min(delay * 2, CATCH_UP_POLL_MAX_MS)
+        prevBehind = behind
         setCatchUp(() => {
           // Anything but an affirmative `false` leaves every row unmarked —
           // including null, which means we do not know. Saying nothing is the
@@ -173,12 +201,12 @@ function useConnectionsCatchUp(dataSourceId: string | null | undefined, enabled:
         })
       } catch {
         if (cancelled) return
-        if (++errors >= CATCH_UP_MAX_ERRORS) stop()
+        if (++errors >= CATCH_UP_MAX_ERRORS) return
       }
+      schedule()
     }
 
     void check()
-    poll = setInterval(check, CATCH_UP_POLL_MS)
     return () => {
       cancelled = true
       stop()

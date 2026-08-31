@@ -484,6 +484,57 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
     }
   })
 
+  it('backs off while the answer keeps coming back healthy, and snaps back when it moves', async () => {
+    // A source that is up to date is the common case and nobody is watching
+    // it. At a fixed 20s cadence this panel spent ~180 requests an hour, for
+    // the whole session, re-learning nothing — and `projector_health()` is
+    // cached only 5s server-side, so most of those reached graphver.
+    vi.useFakeTimers()
+    try {
+      readiness.mockResolvedValue(reading(true))
+      seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() }])
+      render(<DataLoadsPanel dataSourceId="ds-1" />)
+      await act(async () => {})
+      expect(readiness).toHaveBeenCalledTimes(1)          // the baseline reading
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+      expect(readiness).toHaveBeenCalledTimes(2)          // first repeat at the base cadence
+
+      // Unchanged and healthy: the next one is NOT due at 20s.
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+      expect(readiness).toHaveBeenCalledTimes(2)
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+      expect(readiness).toHaveBeenCalledTimes(3)          // it was due at 40s
+
+      // The verdict moves. The cadence must snap straight back to base, or the
+      // panel would take up to two minutes to notice the source recovering.
+      readiness.mockResolvedValue(reading(false))
+      await act(async () => { await vi.advanceTimersByTimeAsync(80_000) })
+      expect(readiness).toHaveBeenCalledTimes(4)
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+      expect(readiness).toHaveBeenCalledTimes(5)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops asking after three straight failures, and never spins', async () => {
+    // The backoff turned a setInterval into a self-rescheduling chain. Two
+    // ways that shape goes wrong: it keeps hammering a backend that is down,
+    // or a bad delay reaches setTimeout as 0ms and it becomes a tight loop.
+    vi.useFakeTimers()
+    try {
+      readiness.mockRejectedValue(new Error('down'))
+      seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() }])
+      render(<DataLoadsPanel dataSourceId="ds-1" />)
+      await act(async () => {})
+      await act(async () => { await vi.advanceTimersByTimeAsync(200_000) })
+      expect(readiness).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('never asks when the open view has no data source of its own', async () => {
     seed([{ type: 'success', message: 'View saved', createdAt: Date.now() }])
     render(<DataLoadsPanel />)
