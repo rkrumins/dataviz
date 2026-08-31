@@ -603,8 +603,14 @@ need no edit of their own.
 Five further additions are **declarative** — an enum member, a DB CHECK literal,
 a migration, a frontend visual, a regenerated fixture. They are listed in step 6
 along with the test that fails for each one you forget. This is deliberately not
-the same promise as "one file"; it is the more useful one, that nothing you
-forget stays silent.
+the same promise as "one file"; it is the more useful one, that almost nothing
+you forget stays silent.
+
+*Almost.* There are two edits outside that story, and they are the two that
+break production rather than a test: if your provider class lives under
+`backend/app/`, each dispatcher needs an eager import of your package or it
+cannot dispatch your type at all. Step 3 explains why, and step 6 closes with
+the complete edit list — including which entries no test names.
 
 #### 1. Executor — how statements reach the engine
 
@@ -663,6 +669,28 @@ the way FalkorDB does — `backend/app/providers/falkordb/catalog_descriptor.py`
 calls `register()` on import, and that package's `__init__.py` imports it for the
 side effect. A class under `backend/graph/adapters/` (Neo4j, DataHub, Spanner)
 has no such problem and registers from `catalog/<type>.py` in the ordinary way.
+
+**Registering from your own package is only half of it.** A side effect needs
+someone to import the module, and nothing does that on your behalf. Add the same
+eager import FalkorDB has to **both** dispatchers — `manager.py:60` and
+`provider_registry.py:29`, which carry it independently so that neither depends
+on the other's imports:
+
+```python
+from backend.app.providers.<type> import catalog_descriptor  # noqa: F401
+```
+
+Skip either one and the catalog does not know your type in a process that
+reached it through that dispatcher: `descriptor_for('<type>')` returns `None`
+and the first real dispatch raises `ValueError: Unknown provider_type`. **No
+test tells you this.** `test_provider_catalog_classes.py`'s two fresh-process
+import tests pin the guarantee for `falkordb` by name, not for whatever type is
+newest, so they stay green. The one test that does go red —
+`test_provider_catalog_sync.py::test_provider_type_enum_matches_catalog`, when
+you add the enum member in step 6 — invites the wrong repair, because the test
+file has an import of exactly this shape at its own line 19. Adding yours
+alongside it turns the test green and leaves production 500ing. Both dispatchers,
+not the test.
 
 #### 4. Overrides — only where the dialect differs or the engine is faster
 
@@ -754,6 +782,40 @@ symptom is otherwise mild enough to ship: the frontend's offline snapshot
 `adminVisible: false` and no features — the wizard's type card is missing
 until the live query resolves, and any `supportsFeature(id, …)` asked without
 a live catalog answers `false`.
+
+##### The complete edit list
+
+The five above are the declarative ones. This is all of it, in the order it is
+easiest to do, so you can see what the "one registration" promise does and does
+not cover:
+
+| # | Edit | What names it if you forget |
+|---|---|---|
+| 1 | Descriptor + your package's `__init__` import | — (this *is* the registration) |
+| 2 | Eager import in `backend/app/providers/manager.py` | **nothing** — see step 3 |
+| 3 | Eager import in `backend/app/registry/provider_registry.py` | **nothing** — see step 3 |
+| 4 | `ProviderType` enum member | `test_provider_catalog_sync.py::test_provider_type_enum_matches_catalog` |
+| 5 | ORM CHECK constraint literal | `test_provider_catalog_sync.py::test_db_check_constraint_matches_catalog_plus_legacy` |
+| 6 | Alembic migration widening that CHECK | `test_provider_catalog_sync.py::test_newest_migration_new_types_matches_catalog_plus_legacy` |
+| 7 | Retarget `_newest_provider_type_migration()` | its own assert message |
+| 8 | `PROVIDER_TYPE_IDS` + `PROVIDER_VISUALS` | `npx tsc --noEmit` (`TS2741`) |
+| 9 | Regenerate the frontend fixture | `test_api_provider_types.py::test_list_provider_types_generates_the_frontend_fixture` |
+| 10 | `test_provider_catalog_classes.py`'s registered-id set | itself |
+| 11 | `test_api_provider_types.py`'s id set and count | itself |
+
+Rows 10 and 11 are two tests that enumerate today's four types by hand; they
+fail with the new id in the diff, which is the test doing its job. Rows 2 and 3
+are the only two edits on this list that nothing at all names, and they are the
+only two whose omission is a 500 rather than a red run — which is why they get
+their own paragraph in step 3 rather than a table row here.
+
+The drift guards are deliberately absent from this list. Both of them
+(`test_provider_type_literals.py` and `providerTypes.drift.test.ts`) derive
+their provider ids from `ProviderType` / `PROVIDER_TYPE_IDS`, and the backend's
+`isinstance` check matches any `…Provider` class by shape, so row 4 and row 8
+extend them for you. If you find yourself editing a guard to make your provider
+pass, stop — that is the guard reporting a real dispatch you wrote, not a list
+that needs your id added to it.
 
 #### 7. Run the provider conformance kit
 

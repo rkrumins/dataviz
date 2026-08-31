@@ -56,7 +56,17 @@ def _migration_new_types(path: Path) -> set:
 def test_provider_type_enum_matches_catalog():
     """Every API-exposed provider type is registered, and vice versa."""
     enum_types = {member.value for member in ProviderType}
-    assert enum_types == set(registered_type_ids())
+    assert enum_types == set(registered_type_ids()), (
+        "ProviderType and the catalog disagree. If the missing side is the "
+        "catalog and your provider class lives under backend/app/, the fix is "
+        "NOT another import in this file next to line 19's falkordb one -- "
+        "that turns this test green while production still raises "
+        "ValueError: Unknown provider_type on the first real dispatch. The "
+        "eager import belongs in both dispatchers, backend/app/providers/"
+        "manager.py and backend/app/registry/provider_registry.py, the way "
+        "falkordb's is (DEVELOPER_GUIDE.md, 'Adding a graph data provider', "
+        "step 3)."
+    )
 
 
 def test_db_check_constraint_matches_catalog_plus_legacy():
