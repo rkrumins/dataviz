@@ -3,7 +3,16 @@
  * test asserted the type list or card count — a new type would have
  * silently rendered with the FalkorDB logo/tint. This file is the guard
  * against that regressing, and against `STATIC_PROVIDER_TYPES` drifting
- * from what the backend actually serves.
+ * from `__fixtures__/providerTypes.backend.json`.
+ *
+ * That is one half of a two-part chain, and the half that can be checked
+ * from here: this file cannot see the server. What pins the fixture itself
+ * to the live `GET /admin/providers/types` response is the backend test that
+ * writes it — `test_api_provider_types.py::
+ * test_list_provider_types_generates_the_frontend_fixture`, which compares
+ * file against response on every run where it is not regenerating. Read this
+ * file alone and the assertion below is a parser round-trip; read both and
+ * `STATIC_PROVIDER_TYPES` is pinned to what the server sends.
  */
 import { describe, it, expect } from 'vitest'
 import fixture from '../__fixtures__/providerTypes.backend.json'

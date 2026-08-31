@@ -2,11 +2,13 @@
 GET /api/v1/admin/providers/types — the provider catalog surfaced outside
 the backend (Admin UI, the view-wizard's scope step).
 
-Also generates frontend/src/services/__fixtures__/providerTypes.backend.json
-(gated by UPDATE_PROVIDER_TYPES_FIXTURE=1) -- the *serialised response* of
-this endpoint, not a hand-written approximation, so the frontend's offline
-snapshot (STATIC_PROVIDER_TYPES) can be checked against what the server
-actually sends. Regenerate whenever a descriptor's public shape changes:
+Also owns frontend/src/services/__fixtures__/providerTypes.backend.json --
+the *serialised response* of this endpoint, not a hand-written
+approximation. UPDATE_PROVIDER_TYPES_FIXTURE=1 rewrites it; every other run
+asserts the checked-in file still equals what the endpoint serves, which is
+what makes the frontend's offline snapshot (STATIC_PROVIDER_TYPES) pinned to
+the server rather than merely pinned to a file that came from it once.
+Regenerate whenever a descriptor's public shape changes:
 
     UPDATE_PROVIDER_TYPES_FIXTURE=1 python -m pytest \\
         tests/test_api_provider_types.py -k generates_the_frontend_fixture -q
@@ -16,7 +18,6 @@ import json
 import os
 from pathlib import Path
 
-import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
 
@@ -153,13 +154,29 @@ async def test_list_provider_types_rejects_unauthenticated(test_client: AsyncCli
 # ── Fixture generation ───────────────────────────────────────────────────
 
 async def test_list_provider_types_generates_the_frontend_fixture(test_client: AsyncClient):
-    """Regenerates providerTypes.backend.json from the LIVE endpoint
-    response when UPDATE_PROVIDER_TYPES_FIXTURE=1 -- the frontend's
-    offline snapshot is checked against this, not a hand-maintained copy
-    that can silently drift."""
-    if os.environ.get("UPDATE_PROVIDER_TYPES_FIXTURE") != "1":
-        pytest.skip("set UPDATE_PROVIDER_TYPES_FIXTURE=1 to (re)write the fixture")
+    """Writes providerTypes.backend.json from the LIVE endpoint response
+    when UPDATE_PROVIDER_TYPES_FIXTURE=1, and asserts the checked-in file
+    still matches that response when it is not.
+
+    The unset case is the one that matters: it is what runs in CI and in
+    every ordinary run, and skipping there is what made the frontend's
+    offline snapshot free to go stale. The frontend only pins
+    STATIC_PROVIDER_TYPES to this file (providerTypes.catalog.test.ts) --
+    it has no way to see the server -- so if nothing pins the file to the
+    server, the whole chain proves a parser round-trip and nothing else.
+    """
     resp = await test_client.get("/api/v1/admin/providers/types")
     assert resp.status_code == 200
-    _FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _FIXTURE_PATH.write_text(json.dumps(resp.json(), indent=2, sort_keys=True) + "\n")
+    serialised = json.dumps(resp.json(), indent=2, sort_keys=True) + "\n"
+
+    if os.environ.get("UPDATE_PROVIDER_TYPES_FIXTURE") == "1":
+        _FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FIXTURE_PATH.write_text(serialised)
+        return
+
+    assert _FIXTURE_PATH.read_text() == serialised, (
+        f"{_FIXTURE_PATH} no longer matches what GET /admin/providers/types "
+        "serves, so the frontend's offline catalog is stale. Regenerate it:\n"
+        "    cd backend && UPDATE_PROVIDER_TYPES_FIXTURE=1 python -m pytest "
+        "tests/test_api_provider_types.py -k generates_the_frontend_fixture"
+    )

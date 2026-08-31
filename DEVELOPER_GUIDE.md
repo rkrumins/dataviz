@@ -725,9 +725,9 @@ So, for a new provider:
 | DB CHECK constraint literal | `ProviderORM.__table_args__`, `backend/app/db/models.py` (`ck_providers_provider_type`) | `test_provider_catalog_sync.py::test_db_check_constraint_matches_catalog_plus_legacy` |
 | Alembic migration widening that CHECK | `backend/alembic/versions/`, copied from `20260508_spanner_provider.py` | `test_provider_catalog_sync.py::test_newest_migration_new_types_matches_catalog_plus_legacy` and `::test_db_check_constraint_matches_newest_migration` |
 | `PROVIDER_TYPE_IDS` + `PROVIDER_VISUALS` entry | `frontend/src/services/providerTypes.ts` | `npx tsc --noEmit` — `PROVIDER_VISUALS` is a `Record<ProviderType, …>`, so an id with no visual is a compile error (`TS2741`), not a half-registered type |
-| Regenerated backend fixture | `frontend/src/services/__fixtures__/providerTypes.backend.json` | **Nothing today — see below** |
+| Regenerated backend fixture | `frontend/src/services/__fixtures__/providerTypes.backend.json` | `test_api_provider_types.py::test_list_provider_types_generates_the_frontend_fixture` |
 
-Two honest caveats on that table:
+One honest caveat on that table:
 
 - The migration row also needs a **one-line test edit**.
   `test_provider_catalog_sync.py`'s `_newest_provider_type_migration()` asserts
@@ -735,20 +735,25 @@ Two honest caveats on that table:
   one trips that assert with a message telling you to point it at the newest.
   That is the test doing its job, not a defect — but it means the migration is
   two edits, not one.
-- The fixture is the one addition **no test currently catches**. Regenerate it
-  with:
 
-  ```bash
-  cd backend && UPDATE_PROVIDER_TYPES_FIXTURE=1 \
-      python -m pytest tests/test_api_provider_types.py -k generates_the_frontend_fixture
-  ```
+The fixture row is a **regeneration**, not an edit — the test that names it is
+the same test that writes it:
 
-  If you forget, nothing goes red: the frontend's offline snapshot
-  (`STATIC_PROVIDER_TYPES`) simply has no row for your type, so
-  `providerTypeEntry()` falls back to a synthesised generic entry with
-  `adminVisible: false` and no features. The visible symptom is that the wizard's
-  type card is missing until the live `GET /admin/providers/types` query resolves,
-  and any `supportsFeature(id, …)` asked without a live catalog answers `false`.
+```bash
+cd backend && UPDATE_PROVIDER_TYPES_FIXTURE=1 \
+    python -m pytest tests/test_api_provider_types.py -k generates_the_frontend_fixture
+```
+
+Run without that variable — i.e. in CI, and in every ordinary run — the same
+test compares the checked-in file against the live `GET
+/admin/providers/types` response and fails with the diff if they have parted.
+It is worth knowing what that failure is protecting you from, because the
+symptom is otherwise mild enough to ship: the frontend's offline snapshot
+(`STATIC_PROVIDER_TYPES`) simply has no row for your type, so
+`providerTypeEntry()` falls back to a synthesised generic entry with
+`adminVisible: false` and no features — the wizard's type card is missing
+until the live query resolves, and any `supportsFeature(id, …)` asked without
+a live catalog answers `false`.
 
 #### 7. Run the provider conformance kit
 
