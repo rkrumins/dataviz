@@ -72,4 +72,86 @@ describe('HoverTip', () => {
         expect(await screen.findByRole('tooltip'))
             .toHaveClass('pointer-events-none')
     })
+
+    it('carries a quieter detail line under the lead', async () => {
+        const user = userEvent.setup()
+        render(
+            <HoverTip
+                label="Discard this draft"
+                detail="Everything in it goes — this cannot be undone"
+            >
+                <button type="button" aria-label="Discard draft">x</button>
+            </HoverTip>,
+        )
+        await user.hover(screen.getByLabelText('Discard draft'))
+
+        const tip = await screen.findByRole('tooltip')
+        expect(tip).toHaveTextContent('Discard this draft')
+        expect(tip).toHaveTextContent('Everything in it goes')
+    })
+
+    it('shows a keyboard shortcut as a chip, not as prose in the sentence', async () => {
+        const user = userEvent.setup()
+        render(
+            <HoverTip label="Undo the last change on the canvas" shortcut="⌘Z">
+                <button type="button">Undo</button>
+            </HoverTip>,
+        )
+        await user.hover(screen.getByText('Undo'))
+
+        const tip = await screen.findByRole('tooltip')
+        // A real <kbd>, so it is announced and styled as a key rather than
+        // being glued onto the end of the sentence.
+        expect(tip.querySelector('kbd')).toHaveTextContent('⌘Z')
+        expect(tip).toHaveTextContent('Undo the last change on the canvas')
+    })
+
+    // TWO WIDTHS, ONE SYSTEM. Neighbouring tips that wrap to wildly different
+    // shapes are half of what "the text is all over the place" means.
+    it('gives a one-line control tip the narrow box and a data tip the wide one', async () => {
+        const user = userEvent.setup()
+        const { unmount } = render(
+            <HoverTip label="Choose who can see this view"><span>a</span></HoverTip>,
+        )
+        await user.hover(screen.getByText('a'))
+        const control = await screen.findByRole('tooltip')
+        expect(control).toHaveAttribute('data-tip-width', 'control')
+        const controlWidth = control.style.maxWidth
+        unmount()
+
+        render(
+            <HoverTip label={<span><b>12 people</b><i>in the last 30 days</i></span>}>
+                <span>b</span>
+            </HoverTip>,
+        )
+        await user.hover(screen.getByText('b'))
+        const data = await screen.findByRole('tooltip')
+        expect(data).toHaveAttribute('data-tip-width', 'data')
+        expect(parseInt(data.style.maxWidth, 10))
+            .toBeGreaterThan(parseInt(controlWidth, 10))
+    })
+
+    it('lets a caller override the width it would have chosen', async () => {
+        const user = userEvent.setup()
+        render(
+            <HoverTip label="A string that still wants the wide box" width="data">
+                <span>c</span>
+            </HoverTip>,
+        )
+        await user.hover(screen.getByText('c'))
+        expect(await screen.findByRole('tooltip'))
+            .toHaveAttribute('data-tip-width', 'data')
+    })
+
+    // Entrance only. A portaled node with an exit animation is exactly how this
+    // app strands invisible click-blockers over the canvas.
+    it('animates in and never out', async () => {
+        const user = userEvent.setup()
+        render(<HoverTip label="Rises out of its trigger"><span>d</span></HoverTip>)
+        await user.hover(screen.getByText('d'))
+
+        const tip = await screen.findByRole('tooltip')
+        expect(tip).toHaveClass('animate-in')
+        expect(tip.className).not.toContain('animate-out')
+    })
 })
