@@ -13,7 +13,7 @@ import { useState, useMemo, useEffect, useCallback } from 'react'
 import {
     Database, Settings2, Trash2, AlertTriangle, Loader2,
     CheckCircle2, Clock, AlertCircle, XCircle, SkipForward, CircleDot,
-    RefreshCw, Activity,
+    RefreshCw, Activity, Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { mapWithConcurrency } from '@/lib/concurrency'
@@ -426,7 +426,15 @@ export function WorkspaceAggregationDashboard({
                                         not help. */}
                                     {notServing && (
                                         <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-red-500/30 bg-red-500/[0.07]">
-                                            <AlertTriangle className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
+                                            {/* Unplug, not AlertTriangle: this banner
+                                                stacks directly above the drift warning,
+                                                which is a triangle too, and the two
+                                                prescribe opposite actions. Red-vs-amber
+                                                alone is the one channel the drift-badge
+                                                contract rules out, and Unplug is the
+                                                shape this verdict already carries on
+                                                every other surface. */}
+                                            <Unplug className="w-3.5 h-3.5 text-red-500 flex-shrink-0 mt-0.5" />
                                             <div className="min-w-0">
                                                 <p className="text-[11px] font-semibold text-red-600 dark:text-red-400">
                                                     Connections not up to date{behind != null && behind > 0

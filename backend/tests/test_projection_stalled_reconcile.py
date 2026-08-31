@@ -13,11 +13,14 @@ terminal skip. The justification in the guard's own comment — the projector
 maintains the rollups incrementally — is a claim about a RUNNING subsystem, and
 nothing checked it. These tests pin the check.
 
-They cover both shapes of the wedge (a watermark that trails the published
-head, and a recorded projector error even once the watermark has caught up),
-the two readings that must NOT trip it (a current projector, an unpinned graph
-that projects nothing by design), and the read path that presented the stored
-``ready`` column as the whole truth.
+They cover the wedge itself (a watermark that trails the published head with
+nothing closing the gap), the FOUR readings that must NOT trip it — a current
+projector, an unpinned graph that projects nothing by design, a pass that is
+in flight, and a stale error on a graph that has caught up — and the read path
+that presented the stored ``ready`` column as the whole truth.
+
+The last two were originally counted as wedges and both were false alarms on
+ordinary operation; see the tests for what each one actually costs.
 """
 import pytest
 
@@ -99,23 +102,103 @@ def test_a_versioned_source_whose_projector_is_behind_is_not_managed():
     assert v.evidence["projectionCheckedAt"] == "2026-08-30T12:00:00+00:00"
 
 
-def test_a_projector_error_counts_even_once_the_watermark_caught_up():
-    """The second shape. A projector erroring every pass is a projector whose
-    NEXT publish will not land, and between attempts the watermark goes quiet —
-    so the error alone has to be enough."""
+def test_the_error_is_carried_as_evidence_when_the_graph_is_behind():
+    """The projector error is the one field that tells an operator what to do
+    next, so narrowing the VERDICT to the watermark must not drop it from the
+    REPORT."""
     v = evaluate(
         _versioned(
-            projection_commits_behind=0,
+            projection_commits_behind=4,
             projection_last_error="verify mismatch at seq 902",
         ),
         POLICY,
     )
 
     assert v.drift_state == "projectionStalled"
+    assert v.evidence["projectionCommitsBehind"] == 4
     assert v.evidence["projectionLastError"] == "verify mismatch at seq 902"
 
 
 # ── What must NOT trip it ───────────────────────────────────────────────
+
+def test_a_stale_error_on_a_caught_up_graph_is_not_a_wedge():
+    """A permanent false alarm, and it was live.
+
+    ``last_error`` is only ever rewritten by the NEXT projection pass, so on a
+    graph nothing publishes to any more it never clears. Ten pinned graphs on
+    the dev fleet sat exactly at their published head carrying errors between
+    six weeks and two and a half months old — four of them data sources, so
+    18% of the versioned fleet was permanently red.
+
+    Every string the verdict renders asserts the OTHER shape: "reads fall back
+    to the change history", "aggregated lineage is missing from views of this
+    source right now", "this clears on its own within a minute". All false
+    while the graph is at its head — read routing is ``projected >= committed``
+    and consults ``last_error`` nowhere. And a failed verify deliberately holds
+    the watermark BACK, so a projector that is really failing to publish is
+    already ``behind`` and caught by the clause above.
+    """
+    v = evaluate(
+        _versioned(
+            projection_commits_behind=0,
+            projection_last_error=(
+                "FalkorDB has extra entities vs committed main "
+                "(PG n=2,e=0; Falkor n=3,e=0)"
+            ),
+        ),
+        POLICY,
+    )
+
+    assert v.drift_state == "managed", (
+        "a graph serving its rollups was reported as not serving them, "
+        "permanently — the badge that is always red is the badge nobody reads"
+    )
+    assert v.skip == "platform_mastered"
+
+
+@pytest.mark.parametrize("status", ["projecting", "rebuilding"])
+def test_a_pass_in_flight_is_working_not_wedged(status):
+    """The watermark trails the head for the length of every ordinary pass.
+
+    Reporting that as a wedge fires the red badge, the 8th stat tile, the
+    "Rebuild won't fix this" chip and the "Needs attention" workspace dot on
+    normal operation, and prescribes an action ("someone has to look at version
+    control for it") that is wrong. ``versioning/reconcile.py`` already skips
+    its scan for this exact reason and the infrastructure panel already leaves
+    these graphs out of its not-publishing list; this is the third reader of
+    the one rule and it has to agree with both.
+    """
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _projection_ctx,
+    )
+
+    h = _health(projected_commit_seq=0, main_head_commit_seq=400,
+                status=status)
+
+    v = evaluate(_versioned(**_projection_ctx(h)), POLICY)
+    assert v.drift_state == "managed", (
+        "an ordinary in-flight projection pass reported itself as an outage"
+    )
+    assert v.skip == "platform_mastered"
+    assert h.commits_behind == 400, "the gap is still reported as evidence"
+    assert h.behind is False and h.stalled is False and h.current is True
+
+
+def test_the_same_gap_with_no_pass_running_is_still_a_wedge():
+    """The contrast that keeps the test above from being a way to switch the
+    whole verdict off: identical numbers, ``idle``, still red."""
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _projection_ctx,
+    )
+
+    h = _health(projected_commit_seq=0, main_head_commit_seq=400,
+                status="idle")
+    assert h.behind is True and h.current is False
+
+    v = evaluate(_versioned(**_projection_ctx(h)), POLICY)
+    assert v.drift_state == "projectionStalled"
+    assert v.evidence["projectionCommitsBehind"] == 400
+
 
 def test_a_current_projector_is_still_managed():
     """The guard's original justification holds while the projector keeps up,
@@ -315,3 +398,50 @@ def test_a_stalled_source_needs_attention_but_is_not_counted_as_drifting():
         "counted as drifting sends the operator to a rebuild, which is not "
         "the remedy — that fold is what under-states the problem"
     )
+
+
+# ── The two clocks on one row ───────────────────────────────────────────
+# ``drift_state`` is stamped by the reconciliation SWEEP, at most once per
+# check interval (shipped default 3600s). The ``projection*`` fields on the
+# SAME row are read live on every request. The fleet tile counted only the
+# stamp, so for up to a whole interval after a wedge started the identical
+# payload said ``projectorCurrent: false`` and ``driftState: managed`` — and
+# the surfaces split along that seam: Insights rendered red and said "open
+# Freshness for what to do" while Freshness rendered the source green.
+
+
+def test_the_tile_counts_a_wedge_the_stamp_has_not_caught_up_with_yet():
+    from backend.app.services.aggregation.service import _stalled_ids
+
+    states = {"ds_v": {"drift_state": "managed"}}
+    health = {"ds_v": _health(projected_commit_seq=0, main_head_commit_seq=902)}
+
+    assert _stalled_ids(["ds_v"], states, health) == {"ds_v"}, (
+        "the fleet page read the live watermark for the row's own "
+        "projection fields and then counted the hour-old stamp instead"
+    )
+
+
+def test_the_stored_stamp_still_counts_when_the_live_read_is_unavailable():
+    """graphver down ⇒ an empty health map (the fleet page must not 500). The
+    stamp is the DURABLE verdict and must not evaporate with the live read."""
+    from backend.app.services.aggregation.service import _stalled_ids
+
+    states = {"ds_v": {"drift_state": "projectionStalled"}}
+
+    assert _stalled_ids(["ds_v"], states, {}) == {"ds_v"}
+
+
+def test_an_unknown_projector_reading_is_never_counted_as_stalled():
+    """An unpinned graph projects nothing by design: its wire fields are all
+    null, and null is UNKNOWN — never a wedge, and equally never "up to
+    date"."""
+    from backend.app.services.aggregation.service import _stalled_ids
+
+    states = {"ds_v": {"drift_state": "managed"}}
+    health = {"ds_v": _health(
+        projected_commit_seq=0, main_head_commit_seq=902,
+        falkor_graph_pinned=False,
+    )}
+
+    assert _stalled_ids(["ds_v"], states, health) == set()

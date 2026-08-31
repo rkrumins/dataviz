@@ -147,8 +147,14 @@ def _projector_health(monkeypatch):
     return health
 
 
-def _health(*, behind=0, last_error=None, pinned=True, head=100):
-    """One ``ProjectorHealth`` row, expressed as "N commits behind"."""
+def _health(*, behind=0, last_error=None, pinned=True, head=100, status="idle"):
+    """One ``ProjectorHealth`` row, expressed as "N commits behind".
+
+    ``status`` defaults to ``idle``, which is what a wedged projector actually
+    looks like: nothing running, watermark stuck. ``projecting``/``rebuilding``
+    mean a pass IS closing the gap and are deliberately not wedges — pass one
+    explicitly to test that.
+    """
     from backend.app.services.versioned_sources import ProjectorHealth
 
     return ProjectorHealth(
@@ -158,7 +164,7 @@ def _health(*, behind=0, last_error=None, pinned=True, head=100):
         main_head_commit_seq=head,
         last_error=last_error,
         falkor_graph_pinned=pinned,
-        status="projecting",
+        status=status,
         checked_at="2026-08-30T12:00:00+00:00",
     )
 
@@ -1717,12 +1723,16 @@ async def test_a_wedged_projection_is_not_waved_through_as_managed(
 
 
 @pytest.mark.asyncio
-async def test_a_projector_error_alone_is_enough(
+async def test_a_stale_projector_error_alone_is_not_a_wedge(
     session_factory, _versioned, _projector_health,
 ):
-    """The watermark has caught up but the projector recorded a failure — the
-    second shape of the same fault, and one the watermark goes quiet about
-    between attempts."""
+    """The watermark has caught up and the error is left over from an earlier
+    pass. It was counted as a wedge, and that was a permanent false alarm: ten
+    pinned graphs on the dev fleet sat at their head carrying errors six weeks
+    to two and a half months old, because ``last_error`` is only ever rewritten
+    by the NEXT pass and nothing publishes to those graphs any more. A failed
+    verify holds the watermark BACK on purpose, so a projector that is really
+    failing to publish is caught by ``behind`` instead."""
     await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
     _versioned.add("ds_1")
     _projector_health["ds_1"] = _health(
@@ -1731,7 +1741,28 @@ async def test_a_projector_error_alone_is_enough(
 
     await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
 
-    assert (await _state(session_factory)).drift_state == "projectionStalled"
+    assert (await _state(session_factory)).drift_state == "managed"
+
+
+@pytest.mark.asyncio
+async def test_a_projection_pass_in_flight_is_not_a_wedge(
+    session_factory, _versioned, _projector_health,
+):
+    """The watermark trails the head for the length of every ordinary pass.
+    Stamping ``projectionStalled`` there fires the red badge, the stat tile and
+    the "Needs attention" workspace dot on normal operation, and prescribes an
+    action ("go look at version control") that is wrong."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=400, status="projecting")
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert (await _state(session_factory)).drift_state == "managed"
+    assert result.by_skip.get("projection_stalled") is None
+    assert result.by_skip.get("platform_mastered") == 1
 
 
 @pytest.mark.asyncio

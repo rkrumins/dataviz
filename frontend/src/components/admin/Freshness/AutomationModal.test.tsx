@@ -179,7 +179,15 @@ describe('AutomationModal', () => {
         // The stage name is now in two places — the rail's diagram and the
         // section it points at — so this asks for the section, not for "the
         // only element saying Detect".
-        expect(await screen.findByRole('heading', { name: 'Detect' })).toBeInTheDocument()
+        // Explicit timeout, not the 1000ms testing-library default: vitest's
+        // ``testTimeout: 20000`` governs the TEST, never an individual
+        // ``findBy*`` query. This first paint measures ~1.5-1.8s whenever the
+        // directory is run under contention (three concurrent runs failed it
+        // 3/3, isolated runs never do), so the default made the whole
+        // directory flaky in CI.
+        expect(await screen.findByRole(
+            'heading', { name: 'Detect' }, { timeout: 5000 },
+        )).toBeInTheDocument()
         // The settings READ is ingestion-read server-side (the PUT stays
         // admin), so a non-admin sees the real Detect and Act values with
         // every control disabled and no Save.
@@ -410,7 +418,8 @@ describe('AutomationModal', () => {
         })
         wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={null} />)
 
-        await screen.findByRole('heading', { name: 'Detect' })
+        // Same first-paint-under-load exposure as the read-only test above.
+        await screen.findByRole('heading', { name: 'Detect' }, { timeout: 5000 })
         // Detect off starves the seam into Check; only Check→Act still feeds.
         await waitFor(() => expect(screen.getAllByText('starved')).toHaveLength(1))
         expect(screen.getAllByText('feeding')).toHaveLength(1)

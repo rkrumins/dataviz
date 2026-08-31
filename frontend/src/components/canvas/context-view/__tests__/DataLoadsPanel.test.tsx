@@ -20,6 +20,7 @@
  * carrying ONE glyph. The panel used to be flat 12px rows with two indicators
  * apiece: a timeline rail dot AND a status icon, saying the same thing twice.
  */
+import { StrictMode } from 'react'
 import { render, screen, within, cleanup, fireEvent, act, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -414,6 +415,47 @@ describe('DataLoadsPanel · a published load whose connections have not caught u
       expect(list[1].textContent).toContain('Snowflake · 5 datasets')
       expect(list[1]).not.toHaveAttribute('data-waiting')
       expect(screen.getAllByText(noteText)).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the known-good instant when the effect re-subscribes mid-reading', async () => {
+    // The same assertion as the test above, under the mount the app actually
+    // uses: `main.tsx` wraps the tree in StrictMode, so every effect runs,
+    // tears down and runs again. The first reading — the one that establishes
+    // "everything before this instant is already on the canvas" — was in
+    // flight across that teardown, and `if (cancelled) return` threw it away.
+    // The next reading then found no cut and marked EVERY row, which is the
+    // banner repeated per line rather than the per-load truth this panel is
+    // for. Intermittent in a plain mount (it depends on whether the promise
+    // resolves before the teardown), permanent in dev.
+    vi.useFakeTimers()
+    try {
+      const t0 = Date.now()
+      readiness.mockResolvedValueOnce(reading(true))   // known-good at t0…
+      readiness.mockResolvedValue(reading(false))      // …behind ever after
+      const early = { type: 'success' as const, message: 'Snowflake · 5 datasets', createdAt: t0 - 60_000 }
+      seed([early])
+      render(<StrictMode><DataLoadsPanel dataSourceId="ds-1" /></StrictMode>)
+      await act(async () => {})
+
+      vi.setSystemTime(t0 + 5_000)
+      act(() => {
+        seed([early, { type: 'success', message: 'Snowflake · 3 more datasets', createdAt: t0 + 5_000 }])
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+
+      // The re-subscribe really did happen — otherwise this test would be
+      // asserting the ordinary single-mount path all over again.
+      expect(readiness.mock.calls.length).toBeGreaterThan(1)
+
+      fireEvent.click(header())
+      const list = rows()
+      expect(list[0].textContent).toContain('3 more datasets')
+      expect(list[0]).toHaveAttribute('data-waiting')
+      expect(list[1].textContent).toContain('Snowflake · 5 datasets')
+      expect(list[1]).not.toHaveAttribute('data-waiting')
     } finally {
       vi.useRealTimers()
     }

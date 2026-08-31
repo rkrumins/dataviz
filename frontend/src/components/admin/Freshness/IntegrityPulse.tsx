@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils'
 import { TimeStamp } from '@/components/ui/TimeStamp'
 import type { FreshnessSummary, ReconcilePolicy, ReconcileRun } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
+import { DRIFT_SPEC } from './DriftStateBadge'
 import {
     formatCheckInterval, formatClockTime, formatHorizon, lastPassBrief,
     nextCheckAt, policyWord, sweepsHaveStopped,
@@ -218,7 +219,7 @@ export function IntegrityPulse({
                         )}
                     >
                         <Unplug className="w-3.5 h-3.5 shrink-0" />
-                        {stalled.toLocaleString()} not serving connections
+                        {stalled.toLocaleString()} with {DRIFT_SPEC.projectionStalled.label.toLowerCase()}
                     </button>
                 )}
                 {brief && (

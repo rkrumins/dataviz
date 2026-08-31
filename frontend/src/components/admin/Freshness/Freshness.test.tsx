@@ -1076,9 +1076,16 @@ describe('a wedged projection across the cockpit', () => {
         // The provider group must force itself open: a wedged source hidden
         // inside a collapsed "healthy" group is the failure this replaces.
         const group = await screen.findByRole('button', { name: /warehouse/i, expanded: true })
-        expect(group).toHaveTextContent('1 not serving connections')
+        // ONE name for one condition. The badge, the tile and the active-filter
+        // chip all say "Connections not up to date"; a group header and a
+        // briefing line that said "1 not serving connections" instead offered
+        // the reader two phrases for the same verdict on one screen — and they
+        // do not mean the same thing ("not up to date" reads as stale-but-
+        // present, "not serving" as none at all) while both toggle the very
+        // same facet.
+        expect(group).toHaveTextContent('1 with connections not up to date')
         // ...and the briefing at the top names it too, beside "drifting now".
-        expect(screen.getAllByRole('button', { name: /1 not serving connections/i }).length)
+        expect(screen.getAllByRole('button', { name: /1 with connections not up to date/i }).length)
             .toBeGreaterThan(1)
 
         await waitFor(() => expect(screen.getByText('Wedged Source')).toBeInTheDocument())
@@ -1089,6 +1096,29 @@ describe('a wedged projection across the cockpit', () => {
         await waitFor(() => expect(screen.queryByText('Healthy Source')).not.toBeInTheDocument())
         expect(screen.getByText('Wedged Source')).toBeInTheDocument()
         expect(probe.search).toContain('fstatus=projectionStalled')
+    })
+
+    it('keeps its tile while its own filter is active, even at a count of zero', async () => {
+        // Self-trapping. Filtering to this facet can drop the count to zero —
+        // the sweep clears the stamp, or the projector catches up — and the
+        // tile IS the control that set the filter. Dropped on ``count === 0``,
+        // the band leaves the operator holding a filter it no longer offers
+        // any way to clear.
+        listFleet.mockResolvedValue({
+            total: 1,
+            rows: [{ ...fleet.rows[1], name: 'Healthy Source', driftState: 'inSync' }],
+            summary: {
+                total: 1, ready: 1, pending: 0, failed: 0, notBuilt: 0,
+                recomputing: 0, needsAttention: 0, cacheStamped: 1,
+                drifting: 0, suspended: 0, projectionStalled: 0,
+            },
+        })
+        renderTab('/?tab=freshness&fstatus=projectionStalled')
+
+        const band = await screen.findByRole('group', { name: 'Fleet summary' })
+        const tile = within(band).getByRole('button', { name: /connections not up to date/i })
+        expect(tile).toHaveAttribute('aria-pressed', 'true')
+        expect(tile).toHaveTextContent('0')
     })
 
     it('tells the drawer what is wrong and what to do, not "nothing here needs to"', async () => {
@@ -1118,5 +1148,56 @@ describe('a wedged projection across the cockpit', () => {
         expect(screen.getByText(/rebuilding this source will not fix it/i)).toBeInTheDocument()
         // The projector's own words, verbatim, as operator detail.
         expect(screen.getByText('verify mismatch at seq 902')).toBeInTheDocument()
+    })
+
+    it('believes the live watermark over an hour-old "managed" stamp', async () => {
+        // The onset window. ``driftState`` is stamped by the sweep at most
+        // once per check interval (shipped default 3600s), and the four
+        // ``projection*`` fields beside it are read live on every request. Off
+        // the stamp alone this drawer rendered the sky "version control has
+        // this covered / Nothing here needs to" reassurance over a source that
+        // was, at that same instant, not serving its rolled-up connections.
+        getSourceDoc.mockResolvedValue({
+            dataSourceId: 'ds-1', name: 'Orders Graph', workspaceId: 'ws-1',
+            aggregationStatus: 'ready', lastAggregatedAt: recent, events: [],
+            driftState: 'managed', platformMastered: true,
+            projectorCurrent: false, projectionCommitsBehind: 902,
+            projectionLastError: null, projectionCheckedAt: recent,
+        })
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(
+            <QueryClientProvider client={qc}>
+                <MemoryRouter>
+                    <FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />
+                </MemoryRouter>
+            </QueryClientProvider>,
+        )
+
+        expect((await screen.findAllByText('Connections not up to date')).length).toBeGreaterThan(0)
+        expect(screen.queryByText(/Nothing here needs to/i)).not.toBeInTheDocument()
+        expect(screen.getByText(/902 published changes behind/i)).toBeInTheDocument()
+    })
+
+    it('counts one change in the singular', async () => {
+        // The sibling copy path (the canvas catch-up banner) has an explicit
+        // singular test; this branch had none, so "1 published changes behind"
+        // could ship unnoticed.
+        getSourceDoc.mockResolvedValue({
+            dataSourceId: 'ds-1', name: 'Orders Graph', workspaceId: 'ws-1',
+            aggregationStatus: 'ready', lastAggregatedAt: recent, events: [],
+            driftState: 'projectionStalled', platformMastered: true,
+            projectorCurrent: false, projectionCommitsBehind: 1,
+            projectionLastError: null, projectionCheckedAt: recent,
+        })
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(
+            <QueryClientProvider client={qc}>
+                <MemoryRouter>
+                    <FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />
+                </MemoryRouter>
+            </QueryClientProvider>,
+        )
+
+        expect(await screen.findByText('1 published change behind')).toBeInTheDocument()
     })
 })

@@ -45,16 +45,36 @@ export function isReconcileSuspended(row: FreshnessRow): boolean {
  *  moment an operator most needs to know who owns it. */
 const VERSION_CONTROLLED_STATES = new Set(['managed', 'projectionStalled'])
 
+/** The two fields a projection verdict is read from. Both the fleet row and
+ *  the drawer's doc satisfy it, so one predicate serves every surface. */
+type ProjectionReading = Pick<FreshnessRow, 'driftState' | 'projectorCurrent'>
+
 /** Mastered here, but the projector that maintains its rolled-up connections
- *  is behind the published head or erroring. Main reads fall back to the
- *  version log, which carries no rollups, so aggregated lineage is missing
- *  from the product right now.
+ *  is behind the published head. Main reads fall back to the version log,
+ *  which carries no rollups, so aggregated lineage is missing from the
+ *  product right now.
+ *
+ *  BOTH CLOCKS, because one row carries both and they are allowed to
+ *  disagree. ``driftState`` is the verdict the reconciliation SWEEP stamped —
+ *  durable, and written at most once per check interval (shipped default
+ *  3600s). ``projectorCurrent`` is the LIVE watermark, read on the very
+ *  request that produced this row. Reading only the stamp left an onset
+ *  window a whole interval wide in which the same payload said
+ *  ``projectorCurrent: false`` and ``driftState: managed`` — and the surfaces
+ *  split along that seam: Insights rendered red and said "open Freshness for
+ *  what to do" while Freshness rendered the source green "Up to date". That is
+ *  the outage this feature exists to remove, relocated one surface over.
+ *
+ *  ``=== false`` and not ``!== true``: ``null`` is UNKNOWN (an unversioned
+ *  source, a graph pinned to no target, an unreadable store) and must render
+ *  as neither verdict.
  *
  *  Deliberately NOT part of ``isDrifting``: that tile means "the rollup no
  *  longer matches the data, rebuild it", and a rebuild does not restart a
- *  projector. Mirrors ``stalled_ids`` in ``_assemble_fleet_summary``. */
-export function isProjectionStalled(row: FreshnessRow): boolean {
-    return row.driftState === 'projectionStalled'
+ *  projector. Mirrors ``_stalled_ids`` in service.py, which ORs the same two
+ *  readings so a tile's number equals the rows its facet reveals. */
+export function isProjectionStalled(row: ProjectionReading): boolean {
+    return row.projectorCurrent === false || row.driftState === 'projectionStalled'
 }
 
 /** Mastered here (live versioned graph), not an external provider graph.

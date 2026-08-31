@@ -106,4 +106,40 @@ describe('FreshnessRow — a wedged projection is never a healthy row', () => {
         expect(chip?.facet).toBe('projectionStalled')
         expect(chip?.title).toMatch(/version control/i)
     })
+
+    it('reads the live projector, not only the sweep stamp', () => {
+        // One row, two clocks. ``driftState`` is written by the reconciliation
+        // sweep at most once per check interval (shipped default 3600s);
+        // ``projectorCurrent`` on the SAME row is read live on every request.
+        // For up to a whole interval after a wedge starts the payload says
+        // ``managed`` and ``projectorCurrent: false`` at once — and this row
+        // rendered the green badge over a live wedge, while Insights (which
+        // reads the live bit) rendered red and said "open Freshness".
+        renderRow({
+            dataSourceId: 'ds-onset', name: 'Onset Source',
+            aggregationStatus: 'ready', driftState: 'managed',
+            platformMastered: true, projectorCurrent: false,
+        })
+        expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Connections not up to date')).toBeInTheDocument()
+    })
+
+    it('leaves an unknown projector reading as unknown, never as a wedge', () => {
+        // ``null`` is UNKNOWN — an unversioned source, a graph pinned to no
+        // target, an unreadable store. It must render as neither verdict.
+        renderRow({
+            dataSourceId: 'ds-unknown', name: 'Unknown Source',
+            aggregationStatus: 'ready', driftState: 'inSync',
+            projectorCurrent: null,
+        })
+        expect(screen.queryByText('Connections not up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Up to date')).toBeInTheDocument()
+    })
+
+    it('warns automation off a live wedge the stamp has not caught up with', () => {
+        expect(automationChip({ driftState: 'managed', projectorCurrent: false })?.label)
+            .toBe("Rebuild won't fix this")
+        // ...and still says nothing when the live reading is unknown.
+        expect(automationChip({ driftState: 'managed', projectorCurrent: null })).toBeNull()
+    })
 })

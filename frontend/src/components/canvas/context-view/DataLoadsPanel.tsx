@@ -119,6 +119,20 @@ interface CatchUp {
  */
 function useConnectionsCatchUp(dataSourceId: string | null | undefined, enabled: boolean): CatchUp | null {
   const [catchUp, setCatchUp] = useState<CatchUp | null>(null)
+  // The known-good instant is held OUTSIDE the effect's state, keyed by the
+  // source it was observed for.
+  //
+  // It has to survive a re-subscribe. The effect re-runs whenever the log goes
+  // from empty to non-empty — and, under StrictMode (which `main.tsx` mounts
+  // the app in), on every mount — and its teardown sets `cancelled`, which
+  // discarded the in-flight reading. Losing THAT reading is not a missed
+  // poll: it is the one reading that establishes "everything before this
+  // instant is already on the canvas", and without it the next reading finds
+  // no cut at all and marks EVERY row. The panel then says the same thing on
+  // every line, which is the banner it exists not to be.
+  const lastSeenCurrent = useRef<{ dsId: string | null | undefined; at: number }>(
+    { dsId: null, at: 0 },
+  )
 
   useEffect(() => {
     if (!enabled || !dataSourceId) {
@@ -139,15 +153,23 @@ function useConnectionsCatchUp(dataSourceId: string | null | undefined, enabled:
       try {
         const res = await aggregationService.getReadiness(dataSourceId)
         errors = 0
+        const now = Date.now()
+        // Recorded BEFORE the cancelled check, deliberately. A teardown may
+        // throw away the render this reading would have caused; it may not
+        // throw away the FACT the reading established.
+        if (res.projectorCurrent !== false) {
+          lastSeenCurrent.current = { dsId: dataSourceId, at: now }
+        }
         if (cancelled) return
-        setCatchUp(prev => {
-          const now = Date.now()
+        setCatchUp(() => {
           // Anything but an affirmative `false` leaves every row unmarked —
           // including null, which means we do not know. Saying nothing is the
           // only honest thing an unknown reading can say.
           if (res.projectorCurrent !== false) return { behind: false, since: now }
-          // Behind: hold the last known-good instant. Never seen one → 0.
-          return { behind: true, since: prev ? prev.since : 0 }
+          // Behind: hold the last known-good instant for THIS source. Never
+          // seen one → 0, i.e. we can vouch for nothing and every row marks.
+          const seen = lastSeenCurrent.current
+          return { behind: true, since: seen.dsId === dataSourceId ? seen.at : 0 }
         })
       } catch {
         if (cancelled) return

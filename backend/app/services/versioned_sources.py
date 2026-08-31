@@ -135,6 +135,11 @@ def reset_cache() -> None:
 # and no longer.
 HEALTH_CACHE_TTL_SECS = 5
 
+# Projection statuses that mean "a pass is running", per the CHECK constraint
+# on ``graphver.projection_state`` (``idle``/``projecting``/``rebuilding``/
+# ``evicted``).
+_IN_PROGRESS_STATUSES = frozenset({"projecting", "rebuilding"})
+
 _health_cache: Optional["Dict[str, ProjectorHealth]"] = None
 _health_cache_at: float = 0.0
 
@@ -185,20 +190,62 @@ class ProjectorHealth:
         return max(0, self.main_head_commit_seq - self.projected_commit_seq)
 
     @property
+    def in_progress(self) -> bool:
+        """A projection pass is running for this graph right now.
+
+        ``FalkorProjector`` stamps ``projecting`` for an incremental window and
+        ``rebuilding`` for a full seed, and resets both to ``idle`` when the
+        pass ends — so this is the NORMAL state for the seconds after every
+        publish, exactly when the watermark legitimately trails the head.
+        ``versioning/reconcile.py`` already skips its scan for the same reason
+        ("a projection/rebuild is actively catching the cache up"), and the
+        infrastructure panel already excludes these graphs from its
+        not-publishing list. This is the third reader of that one rule.
+        """
+        return (self.status or "idle") in _IN_PROGRESS_STATUSES
+
+    @property
     def behind(self) -> bool:
-        return self.falkor_graph_pinned and self.commits_behind > 0
+        """The read cache trails the published head and nothing is closing the
+        gap. Working is not wedged: without the second clause every ordinary
+        publish reported itself as an outage for the length of its own pass."""
+        return (
+            self.falkor_graph_pinned
+            and self.commits_behind > 0
+            and not self.in_progress
+        )
 
     @property
     def erroring(self) -> bool:
-        """The projector recorded a failure. Reported even when the watermark
-        has since caught up: a projector that is erroring every pass is a
-        projector whose NEXT publish will not land, and the watermark alone
-        goes quiet between attempts."""
+        """The projector's last completed pass recorded a failure.
+
+        EVIDENCE, never a verdict on its own. A failed verify deliberately does
+        NOT advance the watermark — ``projection.py`` holds ``projected`` below
+        ``committed`` so reads stay on Postgres — so a projector that is really
+        failing to publish is ALREADY ``behind``. The one shape this catches
+        that ``behind`` does not is a graph that is fully caught up carrying an
+        error from a pass that ran weeks ago: ``last_error`` is only ever
+        rewritten by the next pass, so on a graph nothing publishes to any more
+        it never clears. Ten live graphs sat in exactly that shape while every
+        string this drove asserted the ``behind`` consequence — "reads fall
+        back to the change history", "aggregated lineage is missing right now",
+        "this clears on its own within a minute" — all of them false. So it is
+        surfaced (as ``projectionLastError``, and in the infrastructure panel's
+        not-publishing list) and never counted as stalled.
+        """
         return self.falkor_graph_pinned and bool(self.last_error)
 
     @property
     def stalled(self) -> bool:
-        return self.behind or self.erroring
+        """Rolled-up connections are missing from the product RIGHT NOW.
+
+        Exactly ``behind``, because that is exactly what read routing consults:
+        ``fresh = projected >= committed`` (``versioning/service.py``,
+        ``projection_watermark``) looks at neither ``last_error`` nor
+        ``status``. Every consumer's copy asserts this consequence, so the
+        predicate has to be the consequence and nothing wider.
+        """
+        return self.behind
 
     @property
     def current(self) -> bool:

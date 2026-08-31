@@ -154,12 +154,33 @@ describe('GraphProvidersPanel — graphs not publishing', () => {
 
   it('stays silent for graphs that are actively projecting or rebuilding', () => {
     // Working is not wedged: a rebuild in flight must not raise the block.
+    // This one is held by the zero-count gate, exactly as the test above is —
+    // it proves the block does not open, and deliberately says nothing about
+    // the row filter, which never runs while nothing is lagging or failed.
     render(<GraphProvidersPanel providers={PROVIDERS} services={falkor(HEALTHY_NODE)}
       projection={projection({
         fresh: 9, projecting: 2, rebuilding: 1, maxLag: 400,
         worst: [worst({ status: 'projecting', lag: 400 })],
       })} />)
     expect(screen.queryByText(/not publishing/i)).not.toBeInTheDocument()
+  })
+
+  it('leaves a working graph out of the list even when the block IS open', () => {
+    // The exclusion the block's docstring claims lives in the ROW FILTER, and
+    // the filter only runs once something is lagging or failed. Proved by
+    // widening the filter to `lastError != null || lag > 0`: the whole
+    // directory stayed green, so the clause was covered by nothing.
+    render(<GraphProvidersPanel providers={PROVIDERS} services={falkor(HEALTHY_NODE)}
+      projection={projection({
+        fresh: 10, lagging: 1, maxLag: 400,
+        worst: [
+          worst({ graphId: 'g1', dataSourceLabel: 'Stalled One', status: 'idle', lag: 22 }),
+          worst({ graphId: 'g2', dataSourceLabel: 'Rebuilding One', status: 'projecting', lag: 400 }),
+        ],
+      })} />)
+    expect(screen.getByText('Graphs not publishing')).toBeInTheDocument()
+    expect(screen.getByText('Stalled One')).toBeInTheDocument()
+    expect(screen.queryByText('Rebuilding One')).not.toBeInTheDocument()
   })
 
   it('names the stalled graph, how far behind, and which cache hosts it', () => {

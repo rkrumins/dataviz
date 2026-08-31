@@ -132,6 +132,10 @@ class Observation:
     projection_commits_behind: Optional[int] = None
     projection_last_error: Optional[str] = None
     projection_checked_at: Optional[str] = None
+    # A projection pass is running for this graph right now. The watermark
+    # legitimately trails the head while one is in flight, so this is the
+    # normal state for the seconds after every publish rather than a wedge.
+    projection_in_progress: bool = False
 
     # ── public.data_source_stats (the stats service's output) ─────────
     has_stats: bool = False
@@ -179,19 +183,31 @@ class Observation:
     def projection_stalled(self) -> bool:
         """The projector that owns this source's rollups is not current.
 
-        ONE state, not two, for the two shapes the wedge takes — a watermark
-        that trails the published head, and a recorded projector error. They
-        are the same fact to an operator ("this source's rollups are not being
-        served, go look at its projection") and have the same remedy, and they
-        overlap constantly: an erroring projector ends up behind, and a
-        projector that is behind is usually erroring. Which of the two it is
-        is EVIDENCE (``projection_commits_behind`` /
-        ``projection_last_error``), not a different tier — splitting the state
-        would force every consumer to handle both identically while doubling
-        the vocabulary the UI, the API and the tests all derive from.
+        ONE narrow fact: the watermark trails the published head and no pass is
+        closing the gap. That is precisely — and only — what every string this
+        verdict renders asserts. Main reads fall back to the version log, which
+        holds no ``:AGGREGATED`` rows, so aggregated lineage is missing from
+        the product right now, and it clears on its own the moment the
+        watermark catches up.
+
+        Two readings are deliberately NOT this state, because for neither is
+        any of that sentence true:
+
+        * A pass in flight (``projecting``/``rebuilding``). It is working, not
+          wedged; the prescribed action ("someone has to look at version
+          control for it") is wrong, and a verdict that fires on ordinary
+          operation is a verdict operators learn to ignore. The drift
+          reconciler and the infrastructure panel already exclude it.
+        * A recorded ``last_error`` on a graph that has caught up. A failed
+          verify deliberately holds the watermark back, so a projector really
+          failing to publish is already behind; what is left over is a stale
+          error from a pass that ran weeks ago, which nothing ever clears. Ten
+          live graphs sat in that shape permanently. It stays EVIDENCE
+          (``projection_last_error``, still on the wire and still in the
+          infrastructure panel's not-publishing list), not a verdict.
         """
-        if self.projection_last_error:
-            return True
+        if self.projection_in_progress:
+            return False
         behind = self.projection_commits_behind
         return behind is not None and behind > 0
 

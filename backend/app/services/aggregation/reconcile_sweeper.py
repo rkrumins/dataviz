@@ -160,6 +160,7 @@ def _projection_ctx(health) -> Dict:
         "projection_commits_behind": health.commits_behind,
         "projection_last_error": health.last_error,
         "projection_checked_at": health.checked_at,
+        "projection_in_progress": health.in_progress,
     }
 
 
@@ -1135,6 +1136,7 @@ class ReconciliationSweeper:
             projection_commits_behind=c.get("projection_commits_behind"),
             projection_last_error=c.get("projection_last_error"),
             projection_checked_at=c.get("projection_checked_at"),
+            projection_in_progress=c.get("projection_in_progress", False),
             has_stats=c.get("has_stats", False),
             stats_age_secs=stats_age,
             stats_as_of=c.get("stats_as_of"),

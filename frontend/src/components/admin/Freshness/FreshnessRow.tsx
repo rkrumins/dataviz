@@ -71,7 +71,8 @@ export function timeUntil(iso?: string | null): string | null {
  *  `Pick`, not the full row type, so the decision logic is testable with a
  *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
 type AutomationRow = Pick<
-    FreshnessRowData, 'driftState' | 'autoReconcile' | 'pausedUntil'
+    FreshnessRowData,
+    'driftState' | 'autoReconcile' | 'pausedUntil' | 'projectorCurrent'
 >
 
 /**
@@ -104,7 +105,7 @@ export function automationChip(row: AutomationRow): {
     // Ranked above the breaker: automation is not merely stopped here, the
     // action it would take is the wrong one. Saying nothing in this column
     // would imply automation has the source covered.
-    if (row.driftState === 'projectionStalled') {
+    if (isProjectionStalled(row)) {
         return {
             label: "Rebuild won't fix this", tone: DRIFT_SPEC.projectionStalled.tone,
             facet: 'projectionStalled', Icon: Unplug,
@@ -364,7 +365,15 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
     // Current overlay verdict — additive on failed/queued rows, and the
     // primary freshness label when a ready source is drifting.
     if (isDrifting(row) || isReconcileSuspended(row) || isProjectionStalled(row)) {
-        badges.push(<DriftStateBadge key="driftState" state={row.driftState} />)
+        // The live watermark can outrun the sweep stamp, so the badge is
+        // rendered from the verdict the predicate actually reached — otherwise
+        // the row suppresses "Up to date" and then shows the sky "Version
+        // controlled" badge in its place, which reads as reassurance.
+        badges.push(
+            <DriftStateBadge key="driftState"
+                state={isProjectionStalled(row) ? 'projectionStalled' : row.driftState}
+            />,
+        )
     }
 
     if (row.drifted === true) {

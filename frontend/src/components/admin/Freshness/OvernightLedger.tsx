@@ -20,6 +20,7 @@ import { groupLedgerBySweep, type LedgerGroup } from './reconcileHealth'
 const SKIP_LABEL: Record<string, string> = {
     deleted: 'Deleted',
     platform_mastered: DRIFT_SPEC.managed.label,
+    projection_stalled: DRIFT_SPEC.projectionStalled.label,
     no_ontology: 'No ontology assigned',
     no_stats: 'No counts to check yet',
     stats_stale: 'Counts too old to check',

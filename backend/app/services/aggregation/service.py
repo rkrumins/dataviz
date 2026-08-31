@@ -3477,6 +3477,7 @@ async def assemble_fleet_freshness(
         running=running,
         provider_names=provider_names,
         states=states,
+        health=health,
     )
     return FreshnessFleetResponse(
         rows=rows, total=total, summary=summary,
@@ -3496,6 +3497,7 @@ async def _assemble_fleet_summary(
     running: dict,
     provider_names: dict,
     states: Optional[dict] = None,
+    health: Optional[dict] = None,
 ) -> tuple[Optional[FreshnessSummary], Optional[list[ProviderFreshnessSummary]]]:
     """Fleet stat-tile counts over the workspace/provider-filtered set,
     BEFORE the ``staleOnly`` facet and pagination — so the tiles describe
@@ -3600,10 +3602,7 @@ async def _assemble_fleet_summary(
     # projection". Folding it in would send an operator to the wrong remedy —
     # and, since a wedged source is otherwise in no bucket at all, leaving it
     # out entirely would let a whole wedged fleet read as needing nothing.
-    stalled_ids = {
-        ds_id for ds_id, st in full_states.items()
-        if st.get("drift_state") == "projectionStalled"
-    }
+    stalled_ids = _stalled_ids(full_ids, full_states, health)
 
     summary = _summarize_freshness(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
@@ -3619,6 +3618,41 @@ async def _assemble_fleet_summary(
 # Drift verdicts that count toward the "Drifting" tile. Both mean the rollup
 # no longer matches the data; the split is only about which detector saw it.
 _DRIFTING_STATES = frozenset({"drifting", "overlayMissing"})
+
+
+def _stalled_ids(ds_ids, states: dict, health: Optional[dict] = None) -> set:
+    """Sources whose rolled-up connections are not being served — from BOTH
+    clocks, because one row carries both and they are allowed to disagree.
+
+    ``drift_state`` is the stamp the reconciliation SWEEP wrote, at most once
+    per check interval (shipped default 3600s). ``health`` is the live
+    watermark read this very request already performed for the row's
+    ``projection*`` fields. Counting only the stamp left an onset window — up
+    to a whole interval wide — in which the same payload said
+    ``projectorCurrent: false`` and ``driftState: managed``, so the cockpit
+    rendered the green "Up to date" badge over a wedge while Insights (which
+    reads the live bit) rendered red and said "open Freshness for what to do".
+    That is the original outage, narrowed to the check interval and moved one
+    surface over.
+
+    The stamp is kept as the DURABLE verdict — it survives a graphver outage,
+    where ``health`` is simply empty — and the live bit is what stops a green
+    badge appearing over a wedge. ``ProjectorHealth.stalled`` is false for an
+    unpinned or unreadable graph, so an unknown reading never counts here,
+    exactly as ``projectorCurrent: null`` never renders as either verdict.
+
+    Mirrors ``isProjectionStalled`` in freshnessTriage.ts: the tile's number
+    has to equal the number of rows its facet reveals.
+    """
+    health = health or {}
+    out = set()
+    for ds_id in ds_ids:
+        h = health.get(ds_id)
+        if (states.get(ds_id) or {}).get("drift_state") == "projectionStalled":
+            out.add(ds_id)
+        elif h is not None and h.stalled:
+            out.add(ds_id)
+    return out
 
 
 def _summarize_freshness(

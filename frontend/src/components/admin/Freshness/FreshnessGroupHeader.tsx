@@ -19,6 +19,7 @@ import { ChevronDown, ChevronRight, Unplug, Waves, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessRow, ProviderFreshnessSummary } from '@/services/freshnessService'
 import { isDrifting, isNeverBuilt, isProjectionStalled, isRebuilding, needsAttention } from './freshnessTriage'
+import { DRIFT_SPEC } from './DriftStateBadge'
 
 interface Props {
     providerId: string
@@ -116,7 +117,7 @@ export function FreshnessGroupHeader({
                         {cov.stalled > 0 && (
                             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-600 dark:text-red-400">
                                 <Unplug className="w-3 h-3 shrink-0" />
-                                {cov.stalled} not serving connections
+                                {cov.stalled} with {DRIFT_SPEC.projectionStalled.label.toLowerCase()}
                             </span>
                         )}
                         {cov.drifting > 0 && (

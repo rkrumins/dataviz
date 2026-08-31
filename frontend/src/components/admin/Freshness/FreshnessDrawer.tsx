@@ -40,7 +40,7 @@ import {
 import { SettingRow, StageRow } from './StageRow'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, MasteryTag, timeUntil } from './FreshnessRow'
-import { isPlatformMastered } from './freshnessTriage'
+import { isPlatformMastered, isProjectionStalled } from './freshnessTriage'
 import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
     FailureCategory, FreshnessDoc, FreshnessSettingsPatch, RefreshEventSummary,
@@ -426,8 +426,6 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
     const setSettings = useSetFreshnessSettings()
     const reconcileNow = useReconcileNow()
 
-    const state = (doc.driftState ?? undefined) as DriftState | undefined
-    const spec = state ? DRIFT_SPEC[state] : undefined
     // A versioned graph is mastered in Postgres with FalkorDB as a rebuildable
     // read cache, so version control maintains its rollups on every publish and
     // this section's controls would be inert. Explain that instead of offering
@@ -438,7 +436,17 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
     // counting the read cache), and the cadence still governs a sweep that
     // will never act — but the reassurance is now false, so the explanatory
     // block is swapped, not the gating.
-    const stalled = state === 'projectionStalled'
+    //
+    // Read through the shared predicate, which consults the LIVE watermark as
+    // well as the sweep stamp: for up to a check interval after a wedge starts
+    // the stamp still says ``managed``, and this section would then render the
+    // sky "version control has this covered" reassurance over it.
+    const stalled = isProjectionStalled(doc)
+    // The badge and its one-line explanation name the verdict this section
+    // actually rendered — otherwise the drawer shows "Version controlled"
+    // above the red block that contradicts it.
+    const state = (stalled ? 'projectionStalled' : doc.driftState ?? undefined) as DriftState | undefined
+    const spec = state ? DRIFT_SPEC[state] : undefined
     const isManaged = state === 'managed' || stalled
     // ``blocked`` is the one verdict that means this stage is genuinely not
     // running for this source — there is no ontology to judge against.
@@ -447,7 +455,7 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
     return (
         <StageRow stage="check" on={on} muted={doc.probeEnabled === false}>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-                <DriftStateBadge state={doc.driftState} />
+                <DriftStateBadge state={state} />
                 {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
             </div>
 
@@ -600,7 +608,7 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const setSettings = useSetFreshnessSettings()
 
-    const stalled = doc.driftState === 'projectionStalled'
+    const stalled = isProjectionStalled(doc)
     const isManaged = doc.driftState === 'managed' || stalled
     const auto = doc.autoReconcile !== false
     // The rebuild-interval override lives on the aggregation state row, which
