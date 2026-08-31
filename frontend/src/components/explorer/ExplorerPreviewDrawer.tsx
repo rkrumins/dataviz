@@ -41,6 +41,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
@@ -376,19 +377,44 @@ export function ExplorerPreviewDrawer({
             {/* ── Header ── */}
             <div className="flex items-start justify-between gap-3 px-6 pt-6 pb-5 border-b border-glass-border/50">
               <div className="flex-1 min-w-0">
-                {(() => {
-                  const typeMeta = viewTypeMeta(view.viewType)
-                  // Glyph = the user's chosen icon when set; pill color stays type identity.
-                  const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
-                  return (
-                    <div className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold mb-3', typeMeta.iconBg)}>
-                      <DynamicIcon name={iconName} className="h-3 w-3" />
-                      {/* No " View" suffix — the labels are already nouns, and
-                          appending it rendered "Context View View". */}
-                      {typeMeta.label}
-                    </div>
-                  )
-                })()}
+                {/* WHAT IT IS, AND WHO CAN SEE IT, on one line. Visibility used
+                    to hold a band of its own at the top of the body — a single
+                    small chip with a whole row's height and margin to itself,
+                    on a panel that had to be scrolled to reach its buttons. It
+                    belongs beside the type: both answer "what am I looking at"
+                    before any detail about it. */}
+                <div className="flex items-center gap-2 flex-wrap mb-3">
+                  {(() => {
+                    const typeMeta = viewTypeMeta(view.viewType)
+                    // Glyph = the user's chosen icon when set; pill color stays type identity.
+                    const iconName = resolveViewIcon({ icon: view.config?.icon, viewType: view.viewType })
+                    return (
+                      <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold', typeMeta.iconBg)}>
+                        <DynamicIcon name={iconName} className="h-3 w-3" />
+                        {/* No " View" suffix — the labels are already nouns, and
+                            appending it rendered "Context View View". */}
+                        {typeMeta.label}
+                      </span>
+                    )
+                  })()}
+                  {(() => {
+                    const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
+                    const VisIcon = vis.icon
+                    return (
+                      <HoverTip
+                        label={`Visibility · ${vis.label}`}
+                        detail={visibilityDescription(view.visibility, {
+                          workspaceName: view.workspaceName ?? undefined,
+                        })}
+                      >
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-2.5 py-1 text-[11px] font-medium text-ink-muted">
+                          <VisIcon className="h-3 w-3" />
+                          {vis.label}
+                        </span>
+                      </HoverTip>
+                    )
+                  })()}
+                </div>
                 <h2 className="text-ink text-lg font-bold leading-tight">
                   {view.name}
                 </h2>
@@ -442,31 +468,6 @@ export function ExplorerPreviewDrawer({
                 <EditDetailsPanel view={view} onCancel={() => setEditMode(false)} onSaved={onSaved} onEditLayout={onEdit} editDisabled={editDisabled} />
               ) : (
               <>
-              {/* VISIBILITY ONLY. The workspace, data source and provider pills
-                  used to sit here as well — and then the "What this view is
-                  built on" chain below said all three again, in more detail and
-                  with the relationship between them drawn. Two accounts of the
-                  same four facts, one above the other, is what made this panel
-                  scroll. Visibility is the one fact the chain does not carry,
-                  so it is the one that stays. */}
-              <div className="flex items-center gap-2 flex-wrap">
-                {(() => {
-                  const vis = VISIBILITY_META[view.visibility] ?? VISIBILITY_META.private
-                  const VisIcon = vis.icon
-                  return (
-                    <span
-                      title={visibilityDescription(view.visibility, {
-                        workspaceName: view.workspaceName ?? undefined,
-                      })}
-                      className="inline-flex items-center gap-1.5 rounded-full bg-black/[0.04] dark:bg-white/[0.06] px-3 py-1 text-xs font-medium text-ink-muted"
-                    >
-                      <VisIcon className="h-3 w-3" />
-                      {vis.label}
-                    </span>
-                  )
-                })()}
-              </div>
-
               {/* Mini preview for hierarchy */}
               {view.viewType === 'hierarchy' && (
                 <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-3 overflow-hidden">
@@ -482,11 +483,16 @@ export function ExplorerPreviewDrawer({
                 const layers: ViewLayerConfig[] = view.config?.layout?.referenceLayout?.layers ?? []
                 return (
                   <div className="rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.02] p-3 overflow-hidden">
+                    {/* "Reference model layers" is the schema's word for it,
+                        not the reader's: `reference` is the internal viewType
+                        that this app presents everywhere else as "Context
+                        View". Derived from the same label resolver the header
+                        pill uses, so the two can never drift apart. */}
                     <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted block mb-2">
-                      Reference Model Layers
+                      {viewTypeMeta(view.viewType).label} layout preview
                       {layers.length > 0 && (
                         <span className="ml-1.5 text-ink-muted/50 normal-case tracking-normal">
-                          ({layers.length})
+                          ({layers.length} layers)
                         </span>
                       )}
                     </span>
@@ -545,14 +551,38 @@ export function ExplorerPreviewDrawer({
                   the Explorer's list path. */}
               <ViewBuiltOn view={view} />
 
-              {/* Key details grid — the view RECORD: what it is, who made it,
-                  when. What it rests on is the chain above; keeping the two
-                  apart is what stopped this list being a bag of facts. */}
-              <div>
-                <h4 className="text-[10px] uppercase tracking-widest font-bold text-ink-muted mb-3">
-                  Details
-                </h4>
-                <div className="space-y-3">
+              {/* The view RECORD — what it is, who made it, when. What it
+                  RESTS ON is the chain above; keeping the two apart is what
+                  stopped this list being a bag of facts.
+                  
+                  FOLDED AWAY BY DEFAULT. Four rows of authorship and timestamps
+                  is the least-read block on the panel and the last thing still
+                  pushing the buttons below the fold on a QHD screen — but it is
+                  also the block somebody occasionally needs exactly, so it
+                  folds rather than goes. The summary carries the gist, so
+                  collapsed is not the same as hidden: whoever only wanted to
+                  know who made it and when never has to open it at all.
+                  Native <details>, like the chain's own disclosure — keyboard
+                  reachable and correctly announced without a line of JS. */}
+              <details className="group/details">
+                <summary className="flex cursor-pointer list-none items-center gap-1.5 -mx-1 rounded-lg px-1 py-1 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                  <ChevronRight
+                    aria-hidden
+                    className="h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform group-open/details:rotate-90"
+                  />
+                  <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted">
+                    Details
+                  </span>
+                  {/* The gist, so the fold costs nothing at a glance. Hidden
+                      once open, where the rows say it properly. */}
+                  <span className="ml-1 truncate text-[11px] font-normal normal-case tracking-normal text-ink-muted/70 group-open/details:hidden">
+                    {[
+                      view.createdByName ? `by ${view.createdByName}` : null,
+                      view.updatedAt ? `updated ${timeAgo(view.updatedAt)}` : null,
+                    ].filter(Boolean).join(' · ')}
+                  </span>
+                </summary>
+                <div className="space-y-3 pt-3">
                   {/* THE TYPE IS ALREADY THE PILL BESIDE THE TITLE, and the
                       layout is the same word again on nearly every view — this
                       panel printed "Context View" three times in the top third
@@ -660,7 +690,7 @@ export function ExplorerPreviewDrawer({
                     }
                   />
                 </div>
-              </div>
+              </details>
 
               {/* Usage — the question somebody opening a details panel is
                   actually asking about a view they do not recognise. */}

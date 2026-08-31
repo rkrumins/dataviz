@@ -399,73 +399,123 @@ export function ExplorerViewCard({
                 {meta.label}
               </span>
             )}
-            <h3 className="line-clamp-2 text-sm font-bold text-ink group-hover:text-accent-lineage transition-colors duration-150 leading-tight">
+            {/* TWO LINES ALWAYS, clamped and reserved. A name that wraps and
+                one that does not otherwise start the whole card at different
+                heights, and every block below inherits the offset — which is
+                why the previews in a row did not line up even though the
+                footers did. */}
+            <h3 className={cn(
+              'line-clamp-2 text-sm font-bold text-ink group-hover:text-accent-lineage transition-colors duration-150 leading-tight',
+              !compact && 'min-h-[2.1875rem]',
+            )}>
               {view.name}
             </h3>
           </div>
         </div>
 
-        {/* ── 2. Badges: workspace + visibility + semantic layer ── */}
-        <div className={cn('flex flex-wrap items-center gap-1.5 min-h-[22px]', sectionGap)}>
-          <ViewScopeBadge
-            workspaceId={view.workspaceId}
-            workspaceName={view.workspaceName}
-            dataSourceId={view.dataSourceId}
-            dataSourceName={view.dataSourceName}
-            providerName={providerInfo?.providerName}
-            providerType={providerInfo?.providerType}
-            ontologyName={providerInfo?.ontologyName ?? view.contextModelName}
-            ontologyVersion={providerInfo?.ontologyVersion}
-            hideWorkspace={hideWorkspaceInScope}
-            foldProviderIntoSource
-          />
-          <span
-            title={vis.hint}
-            className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium"
-          >
-            <VisIcon className="h-2.5 w-2.5" />
-            {vis.label}
-          </span>
-          {healthInfo && (
+        {/* ── 2. Badges, on TWO ROWS BY LENGTH, not by kind ──
+            At 250px, a workspace pill and a data source pill side by side both
+            truncate — "Perf-Load-Test-S…" beside "Synodic Default O…" tells a
+            reader less than nothing, and a name cut at fourteen characters is
+            not a name. So the SHORT facts share the first row (workspace, the
+            semantic layer as a glyph, visibility) and the DATA SOURCE gets the
+            second to itself, where its whole name fits. The semantic layer has
+            the longest name of the four and the least claim on the space, so it
+            holds an icon here and gives its name to the tip; it is a real
+            button, and opens the preview where the chain spells all four out. */}
+        <div className={cn('flex flex-col gap-1 min-h-[2.75rem]', sectionGap)}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ViewScopeBadge
+              workspaceId={view.workspaceId}
+              workspaceName={view.workspaceName}
+              ontologyName={providerInfo?.ontologyName ?? view.contextModelName}
+              ontologyVersion={providerInfo?.ontologyVersion}
+              hideWorkspace={hideWorkspaceInScope}
+              parts={['workspace', 'ontology']}
+              onOntologyClick={onPreview}
+            />
             <span
-              className={cn(
-                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border',
-                healthStatus === 'broken'
-                  ? 'border-red-500/20 bg-red-500/[0.08] text-red-500'
-                  : 'border-amber-500/20 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400',
-              )}
-              title={healthInfo.tooltip}
+              title={vis.hint}
+              className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium"
             >
-              <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
-              {healthStatus === 'broken' ? 'Source deleted' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
+              <VisIcon className="h-2.5 w-2.5" />
+              {vis.label}
             </span>
-          )}
-          {isDeleted && (
-            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-red-500/20 bg-red-500/[0.08] text-red-500">
-              <Trash2 className="h-2.5 w-2.5 shrink-0" />
-              Deleted
-            </span>
+            {healthInfo && (
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border',
+                  healthStatus === 'broken'
+                    ? 'border-red-500/20 bg-red-500/[0.08] text-red-500'
+                    : 'border-amber-500/20 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400',
+                )}
+                title={healthInfo.tooltip}
+              >
+                <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+                {healthStatus === 'broken' ? 'Source deleted' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
+              </span>
+            )}
+            {isDeleted && (
+              <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-red-500/20 bg-red-500/[0.08] text-red-500">
+                <Trash2 className="h-2.5 w-2.5 shrink-0" />
+                Deleted
+              </span>
+            )}
+          </div>
+          {/* Its own row, and a generous cap: this is the fact a person scans
+              for, and the one the old layout cut in half. */}
+          {view.dataSourceId && (
+            <div className="flex min-w-0">
+              <ViewScopeBadge
+                workspaceId={view.workspaceId}
+                dataSourceId={view.dataSourceId}
+                dataSourceName={view.dataSourceName}
+                providerName={providerInfo?.providerName}
+                providerType={providerInfo?.providerType}
+                parts={['source']}
+                foldProviderIntoSource
+                wide
+              />
+            </div>
           )}
         </div>
 
-        {/* ── 4. Description (fixed 2-line height) — hidden in compact ── */}
+        {/* ── 4. Description — two lines reserved, hidden in compact.
+            RESERVED BECAUSE IT SITS ABOVE THE PREVIEW. Everything above the
+            illustration decides what height the illustration starts at, and
+            the illustration is the strongest thing on the card — so a row of
+            them landing at four different heights reads as broken even when
+            the footers are perfectly aligned. Below the preview the opposite
+            holds: the `flex-1` spacer and the grid's own row stretch align the
+            footers on their own, so reserving height down there buys nothing
+            and only leaves a hole. */}
         {showDescription && (
           <div className={cn('min-h-[2.5rem]', sectionGap)}>
-            {view.description ? (
+            {view.description && (
               <p className="line-clamp-2 text-xs leading-relaxed text-ink-muted">
                 {view.description}
               </p>
-            ) : (
-              <div />
             )}
           </div>
         )}
 
-        {/* ── 5. Preview area — hidden in compact density ── */}
+        {/* ── 5. Preview area — hidden in compact density ──
+            A CATALOGUE IS FOR SCANNING, so this stays small. Every MiniPreview
+            is drawn on a 120x48 viewBox and `preserveAspectRatio` defaults to
+            `meet`, which scales to the shorter side — in a wide, short box the
+            art lands centred with dead space either side, and it read as tiny
+            and narrow. Handing the frame the artwork's own 5:2 fixed that and
+            made it far worse: at full card width that is ~112px of decoration,
+            which turned a browsable grid into two and a half rows of cards.
+            
+            The picture is the same on every Context View — it says the type,
+            which the label above it already said — so it does not get to be the
+            biggest thing on the card. It keeps a modest fixed height and gives
+            up the width instead: decoration should lose that argument. */}
         {showPreview && (
-          <div className={cn('h-[3.75rem]', sectionGap)}>
+          <div className={cn('h-[3.25rem]', sectionGap)}>
             {hasPreview ? (
-              <div className="rounded-lg border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.015] px-2 py-1 overflow-hidden h-full">
+              <div className="h-full w-full rounded-lg border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.015] p-1 overflow-hidden">
                 <MiniPreview viewType={view.viewType} />
               </div>
             ) : (
@@ -474,9 +524,12 @@ export function ExplorerViewCard({
           </div>
         )}
 
-        {/* ── 6. Tags (fixed height) — hidden in compact density ── */}
+        {/* ── 6. Tags — hidden in compact density. Same reasoning as the
+            description: no reserved height, because the spacer below does the
+            aligning. The block still renders when there are no tags, because
+            ViewUsageNote lives here and often has something to say. */}
         {showTags && (
-        <div className={cn('min-h-[20px]', sectionGap)}>
+        <div className={sectionGap}>
           {/* Only when there is something to say. The counters live in the
               footer; this is the one usage fact worth a line of its own. */}
           <ViewUsageNote usage={usage} />

@@ -61,9 +61,17 @@ export function useDataSourceProviderMap() {
   //
   // Admin-gated with a silent 403 (same as catalog/providers), so a
   // non-admin resolves to an empty list and callers simply omit the fact.
+  // ALL VERSIONS, deliberately. A data source pins the exact ontology version
+  // it reads through, and `list()` returns only the latest per schema — so a
+  // source on v1 of a schema now at v2 resolved to nothing at all, and its
+  // views showed no semantic layer while sources on a current version did.
+  // (Measured: `Perf-Load-Test-Solidatus` pins bp_3e105c56b3b4, "Solidatus
+  // roots-node" v1, while the schema's head is v2.) Taking the head instead
+  // would be worse than silence — it would name a version the source is not
+  // reading. 38 rows in the whole table, cached five minutes.
   const ontologiesQuery = useQuery({
-    queryKey: ['ontologies', 'list'],
-    queryFn: () => ontologyDefinitionService.list(),
+    queryKey: ['ontologies', 'list', 'all-versions'],
+    queryFn: () => ontologyDefinitionService.list(true),
     enabled: canRead,
     staleTime: 5 * 60_000,
     retry: false,

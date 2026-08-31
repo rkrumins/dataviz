@@ -13,7 +13,7 @@
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { ViewScopeBadge } from '../ViewScopeBadge'
 
@@ -84,6 +84,63 @@ describe('ViewScopeBadge — each pill names its layer', () => {
         render(<ViewScopeBadge workspaceId="ws-1" workspaceName="Writes" />)
         expect(screen.getByText('Writes')).toBeInTheDocument()
         expect(screen.queryByText(/data source/i)).toBeNull()
+    })
+
+    it('gives the semantic layer a real BUTTON when the host offers an action', async () => {
+        // An earlier pass rendered this as a bare glyph with no hover state, no
+        // focus ring and nothing to press. Two anonymous squares read as broken
+        // pills rather than as controls, which is worse than the truncation
+        // they were meant to solve.
+        const onOntologyClick = vi.fn()
+        const user = userEvent.setup()
+        render(<ViewScopeBadge {...FULL} ontologyName="Solidatus roots-node" ontologyVersion={1} onOntologyClick={onOntologyClick} />)
+
+        const btn = screen.getByRole('button', { name: 'Semantic layer: Solidatus roots-node' })
+        await user.hover(btn)
+        const tip = await screen.findByRole('tooltip')
+        expect(tip).toHaveTextContent('Semantic layer · Solidatus roots-node')
+        expect(tip).toHaveTextContent('version 1')
+
+        await user.click(btn)
+        expect(onOntologyClick).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not let the glyph press double as a press of the card behind it', async () => {
+        const onOntologyClick = vi.fn()
+        const onCard = vi.fn()
+        const user = userEvent.setup()
+        render(
+            <div onClick={onCard}>
+                <ViewScopeBadge {...FULL} ontologyName="Solidatus roots-node" onOntologyClick={onOntologyClick} />
+            </div>,
+        )
+        await user.click(screen.getByRole('button', { name: /Semantic layer/ }))
+        expect(onOntologyClick).toHaveBeenCalledTimes(1)
+        expect(onCard).not.toHaveBeenCalled()
+    })
+
+    it('stays a named pill where there is room and no action', () => {
+        render(<ViewScopeBadge {...FULL} ontologyName="Solidatus roots-node" size="md" />)
+        expect(screen.getByText('Solidatus roots-node')).toBeInTheDocument()
+        expect(screen.queryByRole('button')).toBeNull()
+    })
+
+    it('renders only the parts it was asked for', () => {
+        render(<ViewScopeBadge {...FULL} ontologyName="Ont" parts={['workspace', 'ontology']} />)
+        expect(screen.getByText('Major Refactor Agg')).toBeInTheDocument()
+        expect(screen.getByText('Ont')).toBeInTheDocument()
+        // The source and provider belong to the card's second row.
+        expect(screen.queryByText('Perf-Load-Test-Solidatus')).toBeNull()
+        expect(screen.queryByText('Falkor Docker')).toBeNull()
+    })
+
+    it('folds the provider into the source tip instead of spending a chip on it', async () => {
+        const user = userEvent.setup()
+        render(<ViewScopeBadge {...FULL} parts={['source']} foldProviderIntoSource />)
+        expect(screen.queryByText('Falkor Docker')).toBeNull()
+        await user.hover(screen.getByText('Perf-Load-Test-Solidatus'))
+        expect(await screen.findByRole('tooltip'))
+            .toHaveTextContent('Served by Falkor Docker (FalkorDB)')
     })
 
     it('carries a fill that actually compiles, on both tinted pills', () => {
