@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { createPortal } from 'react-dom'
 import { GitBranch, GitPullRequest, Check, Plus, ChevronDown, Loader2, Globe, Settings2, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
@@ -185,6 +186,16 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
 
   return (
     <div className={cn('relative min-w-0', className)}>
+      {/* The old tip restated the visible label and threw away the case that
+          needed it: the name TRUNCATES, so on a tight header the one thing
+          hovering could have told you was which draft you are on. */}
+      <HoverTip
+        className="inline-flex min-w-0 max-w-full"
+        label={onMain
+          ? `You are on the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`
+          : `You are on the draft “${label}”`}
+        detail="Switch versions, or start a new draft"
+      >
       <button
         ref={setTriggerEl}
         type="button"
@@ -196,7 +207,6 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           'bg-canvas-elevated border border-glass-border hover:bg-canvas-overlay',
           !onMain && 'text-amber-500 border-amber-500/30',
         )}
-        title={onMain ? `On the ${BRANCH_VOCAB.published} version` : `On draft: ${label}`}
       >
         {onMain
           ? <Globe className="w-4 h-4 shrink-0 text-ink-muted" />
@@ -208,11 +218,20 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
             The icon and chevron are not shrinkable, so the control always
             keeps a clickable body; only the branch name truncates. */}
         <span className="min-w-0 max-w-[10rem] truncate">{label}</span>
+        {/* A 6x6px target with a one-second native delay is not a tooltip at
+            all — the highest-value single conversion in this file. */}
         {!onMain && activeDraft && isBehind(activeDraft) && (
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-500" title="Updates available — get the latest before publishing" />
+          <HoverTip
+            className="inline-flex"
+            label={`The ${BRANCH_VOCAB.published.toLowerCase()} version has moved on since this draft started`}
+            detail={`${BRANCH_VOCAB.getLatest} before publishing, or you will publish over newer work`}
+          >
+            <span aria-label={BRANCH_VOCAB.updatesAvailable} className="block w-1.5 h-1.5 rounded-full bg-amber-500" />
+          </HoverTip>
         )}
         <ChevronDown className="w-3.5 h-3.5 shrink-0 text-ink-muted" />
       </button>
+      </HoverTip>
 
       {/* Portalled + fixed — see the anchor above. No AnimatePresence/exit: the menu
           unmounts instantly on close, so an interrupted exit can never strand an
@@ -254,12 +273,15 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                   active={b.branchId === currentBranchId}
                   statusPill={status}
                   prBadge={openPrBranchIds.has(b.branchId) ? (
-                    <span
-                      className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-500 text-[9px] font-medium"
-                      title="A review (PR) is already open for this draft"
+                    <HoverTip
+                      className="inline-flex shrink-0"
+                      label={`A ${BRANCH_VOCAB.reviewRequest.toLowerCase()} is already open for this draft`}
+                      detail="Publishing goes through that review"
                     >
-                      <GitPullRequest className="w-2.5 h-2.5" /> PR
-                    </span>
+                      <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-violet-500/10 text-violet-500 text-[9px] font-medium">
+                        <GitPullRequest className="w-2.5 h-2.5" /> PR
+                      </span>
+                    </HoverTip>
                   ) : undefined}
                   pullSlot={canManage ? (
                     <PullLatestButton
@@ -268,13 +290,18 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                     />
                   ) : undefined}
                   settingsSlot={canManage ? (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setSettingsBranch(b); setOpen(false) }}
-                      title="Settings — rename, describe, share link"
-                      className="shrink-0 p-1 rounded-md text-ink-muted hover:text-ink hover:bg-canvas-base transition-colors"
+                    <HoverTip
+                      className="inline-flex shrink-0"
+                      label="Rename this draft, describe it, or copy a link to it"
                     >
-                      <Settings2 className="w-3.5 h-3.5" />
-                    </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setSettingsBranch(b); setOpen(false) }}
+                        aria-label="Draft settings"
+                        className="shrink-0 p-1 rounded-md text-ink-muted hover:text-ink hover:bg-canvas-base transition-colors"
+                      >
+                        <Settings2 className="w-3.5 h-3.5" />
+                      </button>
+                    </HoverTip>
                   ) : undefined}
                   onClick={() => {
                     switchToDraft(b.branchId, b.originatingViewId ?? null)

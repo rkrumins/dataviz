@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, Loader2 } from 'lucide-react'
 import { aggregationService } from '@/services/aggregationService'
+import { HoverTip } from '@/components/ui/HoverTip'
 
 const POLL_MS = 5_000
 const MAX_POLLS = 24          // ~2 minutes, then go quiet
@@ -56,21 +57,25 @@ export function AggregationSyncChip({ dataSourceId, mainHeadSeq, enabled }: Aggr
   }, [mainHeadSeq, dataSourceId, enabled])
 
   if (phase === 'idle') return null
+  // A status chip is exactly where a rich tip pays: the words on it are a
+  // term of art, and the sentence that explains them was in OS chrome.
   return phase === 'syncing' ? (
-    <span
-      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium text-indigo-500 bg-indigo-500/10 border border-indigo-500/20"
-      title="Your published changes are being rolled up so cross-container lineage stays accurate"
+    <HoverTip
+      className="inline-flex"
+      label="Rolling up your published changes"
+      detail="Lineage between containers stays accurate while this finishes"
     >
-      <Loader2 className="w-3 h-3 animate-spin" />
-      Syncing lineage rollups…
-    </span>
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium text-indigo-500 bg-indigo-500/10 border border-indigo-500/20">
+        <Loader2 className="w-3 h-3 animate-spin" />
+        Syncing lineage rollups…
+      </span>
+    </HoverTip>
   ) : (
-    <span
-      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium text-emerald-500 bg-emerald-500/10 border border-emerald-500/20"
-      title="Cross-container lineage is up to date"
-    >
-      <CheckCircle2 className="w-3 h-3" />
-      Lineage synced
-    </span>
+    <HoverTip className="inline-flex" label="Lineage between containers is up to date">
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium text-emerald-500 bg-emerald-500/10 border border-emerald-500/20">
+        <CheckCircle2 className="w-3 h-3" />
+        Lineage synced
+      </span>
+    </HoverTip>
   )
 }

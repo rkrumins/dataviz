@@ -14,6 +14,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, X, Loader2, AlertTriangle, ArrowRight, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
@@ -240,6 +241,13 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
 
         <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-3 bg-canvas-overlay/40">
           {canManage && (
+            <HoverTip
+              className="inline-flex"
+              label={inReview
+                ? 'Publish straight to the live version, bypassing the open review'
+                : 'Publish straight to the live version, skipping review'}
+              detail="Everyone sees the result immediately"
+            >
             <button
               onClick={handlePublish}
               disabled={busy || !hasChanges}
@@ -249,13 +257,11 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
                   ? 'text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
                   : 'text-ink hover:bg-canvas-overlay',
               )}
-              title={inReview
-                ? 'Publish straight to the live version, bypassing the open review'
-                : 'Publish straight to the live version, skipping review'}
             >
               {publish.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}
               {confirmBypass ? 'Publish anyway' : 'Publish now'}
             </button>
+            </HoverTip>
           )}
           {inReview ? (
             <button

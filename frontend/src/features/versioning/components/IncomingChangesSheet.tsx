@@ -16,6 +16,7 @@
 import { createPortal } from 'react-dom'
 import { ArrowDownToLine, X, Loader2, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { IncomingChanges } from '@/services/versioningApiService'
 import { useDiffWindow } from '../hooks/useVersioning'
@@ -76,13 +77,15 @@ export function IncomingChangesSheet({
                 . Your own edits were kept and rebased on top.
               </p>
             </div>
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg hover:bg-canvas-overlay transition-colors shrink-0"
-              title="Close"
-            >
-              <X className="w-4 h-4 text-ink-muted" />
-            </button>
+            <HoverTip className="inline-flex shrink-0" label="Close this summary">
+              <button
+                onClick={onClose}
+                aria-label="Close"
+                className="p-1.5 rounded-lg hover:bg-canvas-overlay transition-colors shrink-0"
+              >
+                <X className="w-4 h-4 text-ink-muted" />
+              </button>
+            </HoverTip>
           </div>
 
           {changeSet && changeSet.changes.length > 0 && (

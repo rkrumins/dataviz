@@ -78,8 +78,12 @@ describe('BranchManager', () => {
   it('archives a draft after confirmation', () => {
     branchesData = [draft({ branchId: 'br_1', name: 'Q3 pricing' })]
     renderManager()
-    // The card's Archive icon button (title), then the confirm's "Archive draft" button.
-    fireEvent.click(screen.getByTitle('Archive this draft'))
+    // The card's Archive icon button, then the confirm's "Archive draft"
+    // button. Found by its accessible NAME, not by a `title`: the row's icon
+    // controls carry an explicit `aria-label` now, because the `title` that
+    // used to name them has become a HoverTip and a sighted-only tooltip
+    // would have left them nameless.
+    fireEvent.click(screen.getByRole('button', { name: 'Archive this draft' }))
     fireEvent.click(screen.getByRole('button', { name: /archive draft/i }))
     expect(abandonMutate).toHaveBeenCalledWith('br_1', expect.anything())
   })

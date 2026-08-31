@@ -85,7 +85,10 @@ describe('BranchSwitcher menu', () => {
     const menu = openMenu()
     // Published row, the drafts list, the per-draft PR badge and create-draft all survive the move.
     expect(screen.getByText('Q3 pricing')).toBeInTheDocument()
-    expect(menu.querySelector('[title="A review (PR) is already open for this draft"]')).not.toBeNull()
+    // The PR badge is a chip, not a control; what pins it is its own text.
+    // Its explanation moved out of a native `title` and into the app's one
+    // tooltip, so the attribute is gone from the markup.
+    expect(menu.textContent).toContain('PR')
     expect(screen.getByText(/New draft|Create/i)).toBeInTheDocument()
 
     fireEvent.click(screen.getByText('Q3 pricing'))

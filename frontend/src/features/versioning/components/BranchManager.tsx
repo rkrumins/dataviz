@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { useAppNotifications } from '@/components/ui/notifications'
 import type { Branch } from '@/services/versioningApiService'
@@ -144,8 +145,8 @@ export function BranchManager({
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value as SortKey)}
+              aria-label="Sort drafts"
               className="shrink-0 px-2 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border text-[12px] text-ink-muted focus:outline-none focus:border-accent-lineage/50 cursor-pointer"
-              title="Sort drafts"
             >
               <option value="recent">Recent</option>
               <option value="name">Name</option>
@@ -164,9 +165,12 @@ export function BranchManager({
                 >
                   <Eye className="w-3 h-3" /> This view
                 </button>
+                <HoverTip
+                  className="inline-flex"
+                  label="Show every draft on this data source, across all views"
+                >
                 <button
                   onClick={() => setAllDataSource(true)}
-                  title="Show every draft on this data source, across all views"
                   className={cn(
                     'px-2.5 py-1 font-medium border-l border-glass-border inline-flex items-center gap-1',
                     allDataSource ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
@@ -174,6 +178,7 @@ export function BranchManager({
                 >
                   <Layers className="w-3 h-3" /> All data source drafts
                 </button>
+                </HoverTip>
               </div>
             </div>
           )}
@@ -336,29 +341,41 @@ function DraftCard({
         <div className="flex-1" />
 
         {canManage && (
-          <button
-            onClick={onPublish}
-            title={`${BRANCH_VOCAB.publish} this draft to the published version`}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+          <HoverTip
+            className="inline-flex"
+            label={`Send this draft to the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`}
           >
-            <Rocket className="w-3.5 h-3.5" /> {BRANCH_VOCAB.publish}
-          </button>
+            <button
+              onClick={onPublish}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium text-ink-muted hover:text-indigo-500 hover:bg-indigo-500/10 transition-colors"
+            >
+              <Rocket className="w-3.5 h-3.5" /> {BRANCH_VOCAB.publish}
+            </button>
+          </HoverTip>
         )}
-        <button
-          onClick={onSettings}
-          title="Settings — rename, describe, share link"
-          className="p-1.5 rounded-lg text-ink-muted/80 hover:text-ink hover:bg-canvas-base transition-colors"
-        >
-          <Settings2 className="w-3.5 h-3.5" />
-        </button>
-        {canManage && (
+        <HoverTip className="inline-flex" label="Rename this draft, describe it, or copy a link to it">
           <button
-            onClick={onArchive}
-            title={`${BRANCH_VOCAB.archive} this draft`}
-            className="p-1.5 rounded-lg text-ink-muted/80 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+            onClick={onSettings}
+            aria-label="Draft settings"
+            className="p-1.5 rounded-lg text-ink-muted/80 hover:text-ink hover:bg-canvas-base transition-colors"
           >
-            <Archive className="w-3.5 h-3.5" />
+            <Settings2 className="w-3.5 h-3.5" />
           </button>
+        </HoverTip>
+        {canManage && (
+          <HoverTip
+            className="inline-flex"
+            label={`${BRANCH_VOCAB.archive} this draft`}
+            detail="It leaves the list; nothing published changes"
+          >
+            <button
+              onClick={onArchive}
+              aria-label={`${BRANCH_VOCAB.archive} this draft`}
+              className="p-1.5 rounded-lg text-ink-muted/80 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+            >
+              <Archive className="w-3.5 h-3.5" />
+            </button>
+          </HoverTip>
         )}
       </div>
     </div>
