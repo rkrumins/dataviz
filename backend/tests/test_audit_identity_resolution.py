@@ -237,3 +237,81 @@ async def test_an_unknown_workspace_id_is_not_given_a_name(
     resp = await test_client.get("/api/v1/admin/audit?category=all")
     ev = next(e for e in resp.json()["events"] if e["workspaceId"] == "ws_gone")
     assert ev["workspaceName"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_filter_takes_a_name_now_that_the_table_shows_names(
+    test_client: AsyncClient, db_session,
+):
+    """Typing "john" must find John Doe's rows, not silently nothing."""
+    await _seed(db_session, uid="usr_jd", first="John", last="Doe",
+                email="john.doe@example.com")
+    await _seed(db_session, uid="usr_ada", first="Ada", last="Lovelace",
+                email="ada@example.com")
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.role.updated",
+        payload={"user_id": "usr_jd", "role": "admin"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.role.updated",
+        payload={"user_id": "usr_ada", "role": "admin"},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get(
+        "/api/v1/admin/audit?category=all&targetUserId=john")
+    ids = {e["targetUserId"] for e in resp.json()["events"]}
+    assert ids == {"usr_jd"}, ids
+
+
+@pytest.mark.asyncio
+async def test_the_filter_takes_an_email_too(test_client: AsyncClient, db_session):
+    await _seed(db_session, uid="usr_jd2", first="John", last="Doe",
+                email="john.doe@example.com")
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.role.updated",
+        payload={"user_id": "usr_jd2", "role": "admin"},
+    )
+    await db_session.commit()
+    resp = await test_client.get(
+        "/api/v1/admin/audit?category=all&targetUserId=john.doe@example.com")
+    assert {e["targetUserId"] for e in resp.json()["events"]} == {"usr_jd2"}
+
+
+@pytest.mark.asyncio
+async def test_an_exact_id_still_filters_exactly(test_client: AsyncClient, db_session):
+    """Every existing link and bookmark passes an id; none may break."""
+    await _seed(db_session, uid="usr_exact", first="Ex", last="Act",
+                email="ex@example.com")
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.role.updated",
+        payload={"user_id": "usr_exact", "role": "admin"},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.role.updated",
+        payload={"user_id": "usr_other_one", "role": "admin"},
+    )
+    await db_session.commit()
+    resp = await test_client.get(
+        "/api/v1/admin/audit?category=all&targetUserId=usr_exact")
+    assert {e["targetUserId"] for e in resp.json()["events"]} == {"usr_exact"}
+
+
+@pytest.mark.asyncio
+async def test_an_id_that_names_nobody_still_filters_to_nothing(
+    test_client: AsyncClient, db_session,
+):
+    """A term matching no user must not silently widen to everything.
+
+    The dangerous failure here is the opposite of the obvious one: resolving
+    the term to an empty set and then treating "empty" as "no filter" would
+    show the operator every row they asked to exclude.
+    """
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.role.updated",
+        payload={"user_id": "usr_someone", "role": "admin"},
+    )
+    await db_session.commit()
+    resp = await test_client.get(
+        "/api/v1/admin/audit?category=all&targetUserId=nobody-by-that-name")
+    assert resp.json()["events"] == []

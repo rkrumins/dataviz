@@ -316,19 +316,28 @@ export function AdminAudit() {
                     )}
                 </div>
 
-                {/* Filter row */}
+                {/* Filter row.
+                    THE BOXES TAKE A PERSON, not only an identifier. They asked
+                    for a user id back when the table showed nothing else, and
+                    an operator now reading names would type one and get an
+                    empty log — which reads as "this person did nothing" rather
+                    than "that is not an id". The server resolves a name or an
+                    email to the ids behind it; an exact id short-circuits, so
+                    every existing link still filters exactly as before. */}
                 <div className="rounded-xl border border-glass-border bg-canvas-elevated p-3 flex flex-wrap items-center gap-2">
                     <Filter className="w-4 h-4 text-ink-muted shrink-0" />
                     <input
                         type="text"
-                        placeholder="Filter by actor user id…"
+                        aria-label="Filter by who did it"
+                        placeholder="Who did it — name, email or user ID…"
                         value={actorFilter}
                         onChange={e => setActorFilter(e.target.value)}
                         className="flex-1 min-w-[180px] bg-transparent border border-glass-border rounded-lg px-3 py-1.5 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40"
                     />
                     <input
                         type="text"
-                        placeholder="Filter by target user id…"
+                        aria-label="Filter by who it affected"
+                        placeholder="Who it affected — name, email or user ID…"
                         value={targetUserFilter}
                         onChange={e => setTargetUserFilter(e.target.value)}
                         className="flex-1 min-w-[180px] bg-transparent border border-glass-border rounded-lg px-3 py-1.5 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40"

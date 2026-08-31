@@ -182,4 +182,25 @@ describe('the audit log names people', () => {
         render(<AdminAudit />)
         expect(await screen.findByText('ws_gone')).toBeInTheDocument()
     })
+
+    it('asks for a person, not only an identifier', async () => {
+        // The boxes asked for a user id back when the table showed nothing
+        // else. Now that it names people, typing one and getting an empty log
+        // reads as "this person did nothing" rather than "that is not an id".
+        render(<AdminAudit />)
+        await screen.findByText('Role changed')
+        expect(screen.getByLabelText('Filter by who it affected'))
+            .toHaveAttribute('placeholder', expect.stringMatching(/name, email or user ID/i))
+        expect(screen.getByLabelText('Filter by who did it')).toBeInTheDocument()
+    })
+
+    it('sends the typed term through as the filter, whatever shape it is', async () => {
+        const u = userEvent.setup()
+        render(<AdminAudit />)
+        await screen.findByText('Role changed')
+        await u.type(screen.getByLabelText('Filter by who it affected'), 'john')
+        await waitFor(() => expect(list).toHaveBeenCalledWith(
+            expect.objectContaining({ targetUserId: 'john' }),
+        ))
+    })
 })

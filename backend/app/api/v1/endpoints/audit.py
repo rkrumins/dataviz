@@ -571,13 +571,44 @@ async def list_audit_events(
     has_more = len(rows) > limit
     rows = rows[:limit]
 
+    # ── Turn a typed person into the ids to match on ──────────────
+    # The two filters took an exact user id, which was all they could offer
+    # while the rows showed nothing else. The table names people now, so an
+    # operator will type "john" or an email — and matching that against an id
+    # returns nothing, silently, which reads as "this person did nothing"
+    # rather than "that is not an id".
+    #
+    # An exact id short-circuits: it needs no lookup, and it keeps every
+    # existing link and bookmark working unchanged. Anything else is resolved
+    # to a SET of ids once, and the row test becomes membership.
+    async def _subject_ids(term: Optional[str]) -> Optional[set[str]]:
+        if not term:
+            return None
+        term = term.strip()
+        if not term:
+            return None
+        try:
+            matches = await user_repo.find_user_ids_matching(session, term)
+        except Exception:  # noqa: BLE001
+            logger.warning("audit: could not resolve the subject filter %r", term, exc_info=True)
+            # Fall back to the exact-id behaviour rather than dropping the
+            # filter — silently widening a filter shows rows the operator
+            # asked to exclude.
+            return {term}
+        # A term that resolves to nobody must still filter to nothing, not to
+        # everything: `set()` is a real answer, and `None` means "no filter".
+        return matches | ({term} if term.startswith("usr_") else set())
+
+    actor_ids = await _subject_ids(actor_id)
+    target_ids = await _subject_ids(target_user_id)
+
     # ── Python-level predicates (payload introspection) ───────────
     out: list[AuditEventResponse] = []
     for row in rows:
         ev = _row_to_response(row)
-        if actor_id and ev.actor_id != actor_id:
+        if actor_ids is not None and ev.actor_id not in actor_ids:
             continue
-        if target_user_id and ev.target_user_id != target_user_id:
+        if target_ids is not None and ev.target_user_id not in target_ids:
             continue
         if target_role and ev.target_role != target_role:
             continue

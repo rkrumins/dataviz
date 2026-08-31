@@ -12,7 +12,7 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, or_
 
 from backend.common.display_name import resolve_display_name
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -992,3 +992,40 @@ async def get_workspace_names_by_ids(
         select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.id.in_(ids))
     )).all()
     return {r[0]: r[1] for r in rows if r[1]}
+
+
+async def find_user_ids_matching(
+    session: AsyncSession, term: str, *, limit: int = 200,
+) -> set[str]:
+    """Every user id whose id, email or name contains ``term``.
+
+    The audit lens filters by an exact user id, which was the only thing it
+    could offer while its rows showed nothing else. Now that the table names
+    people, an operator reading it will reasonably type "john" or
+    "john.doe@example.com" into the box above — and matching that against an id
+    column returns nothing, silently, which reads as "this person did nothing"
+    rather than as "that is not an id".
+
+    Soft-deleted users are included for the same reason they are named:
+    filtering the log down to a departed colleague is a normal thing to want.
+
+    Case-insensitive substring, capped: this exists to turn a typed name into a
+    set of ids for an ``IN``-shaped comparison, not to be a user search API.
+    """
+    needle = (term or "").strip().lower()
+    if not needle:
+        return set()
+    like = f"%{needle}%"
+    rows = (await session.execute(
+        select(UserORM.id).where(
+            or_(
+                func.lower(UserORM.id).like(like),
+                func.lower(UserORM.email).like(like),
+                func.lower(func.coalesce(UserORM.display_name, "")).like(like),
+                func.lower(
+                    UserORM.first_name + " " + UserORM.last_name
+                ).like(like),
+            )
+        ).limit(limit)
+    )).all()
+    return {r[0] for r in rows}
