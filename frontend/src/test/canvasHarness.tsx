@@ -318,6 +318,11 @@ function stubProvider(
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
    *  only the fine page, so the coarse cells land alone first (Part G). */
   gateFineOnly?: boolean,
+  /** Extra fields merged onto every aggregated-edge answer — `staleReason`
+   *  and friends. The canvas reads these to decide what it tells the reader
+   *  about the completeness of the wires it drew, and that decision has no
+   *  other observable. */
+  aggregatedExtra?: Record<string, unknown>,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -382,7 +387,7 @@ function stubProvider(
     // it auto-selects.
     getAggregatedEdges: async (request: { granularity?: string | null }) => {
       calls.aggregated.push(request?.granularity ?? null)
-      return { aggregatedEdges: [], totalSourceEdges: 0 }
+      return { aggregatedEdges: [], totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
     },
     computeLayerAssignments: async () => ({
       assignments,
@@ -460,7 +465,16 @@ function seedBrowse(estate: TraceEstate, holds?: readonly string[]): void {
   store.clearSelection()
 }
 
-function seedView(estate: TraceEstate, entityTypes: readonly unknown[] = []): void {
+/** `dataSourceId` is OPT-IN and defaults to absent, exactly as it was before
+ *  this parameter existed. Several canvas hooks (branch resolution, graph
+ *  resolve, the readiness loops) only run once the view names a data source,
+ *  so setting it unconditionally would have changed what all nine harness
+ *  modules exercise. Only a test that needs those paths asks for it. */
+function seedView(
+  estate: TraceEstate,
+  entityTypes: readonly unknown[] = [],
+  dataSourceId?: string,
+): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
     schema: {
@@ -470,6 +484,7 @@ function seedView(estate: TraceEstate, entityTypes: readonly unknown[] = []): vo
       rootEntityTypes: [], defaultViewId: 'harness-view',
       views: [{
         id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
+        ...(dataSourceId ? { dataSourceId } : {}),
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
           defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
@@ -504,6 +519,12 @@ export async function renderCanvasWithTrace(
      *  fan-out is debounced behind that, so a test that installs the schema
      *  after this call returns can miss the round it exists to read. */
     entityTypes?: readonly unknown[]
+    /** Extra fields on every aggregated-edge answer (e.g. `staleReason`),
+     *  so a test can put the canvas in a degraded-rollup state. */
+    aggregatedExtra?: Record<string, unknown>
+    /** Give the seeded view a data source, arming the canvas hooks that are
+     *  inert without one. Absent by default. */
+    dataSourceId?: string
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -535,7 +556,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate, opts.entityTypes)
+  seedView(estate, opts.entityTypes, opts.dataSourceId)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
@@ -580,7 +601,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,

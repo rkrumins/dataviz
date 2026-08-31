@@ -228,6 +228,7 @@ import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
+import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatchUp'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import {
     ViewRowSearchContext,
@@ -3022,6 +3023,15 @@ export function ContextViewCanvas({
   // hooks/useSourceChangedRefresh.
   useSourceChangedRefresh(dataSourceId, aggregationStaleReason)
 
+  // Connections-still-catching-up: when the rollup layer answers SHORT, ask
+  // readiness whether this source is actually behind, and if it is, say so on
+  // the board. The silent version of this condition — cards drawn with the
+  // wires between them simply missing — is what cost a day of debugging.
+  // Rarely-changing by construction (it only moves when a source wedges or
+  // recovers), so it is safe at this component's top level; it is read by JSX
+  // only and is in no memo's dependency array.
+  const projectionCatchUp = useProjectionCatchUp(dataSourceId, aggregationStaleReason)
+
   // A node can become expanded WITHOUT going through the toggle handler that
   // loads its first page — the per-view expanded-state restore above replays a
   // saved expansion set onto a freshly-hydrated canvas that only has roots. Such
@@ -4764,12 +4774,36 @@ export function ContextViewCanvas({
         )}
 
 
+        {/* Connections-still-catching-up banner — THE EXPLANATION THAT WAS
+            MISSING. When a source's read cache trails its published history,
+            main reads fall back to the version log and the connections
+            between items largely stop being drawn. Before this, that looked
+            exactly like a correct, nearly-empty answer: cards on the board,
+            no wires, nothing said. It sits ABOVE the truncation banner and
+            suppresses that banner's "narrow the selection" advice, which is
+            wrong here — narrowing the selection cannot recover connections
+            the source is not serving yet. Plain language only: no
+            "projection", "watermark", "commit seq" or "rollup" on the board.
+            In normal flow inside [data-canvas-body], like every banner here,
+            so the columns are pushed down rather than covered — it reserves
+            no floating band and needs no --*-height. */}
+        {projectionCatchUp.catchingUp && (
+          <div
+            data-canvas-interactive
+            data-testid="lineage-catching-up"
+            role="status"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-start gap-2 z-20"
+          >
+            <span className="font-medium shrink-0">Connections are still catching up.</span>
+            <span>{catchUpMessage(projectionCatchUp.commitsBehind)}</span>
+          </div>
+        )}
         {/* Aggregation truncation banner — backend signal that the visible
             edge set was capped. The "computing" and "last computed Xh ago"
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
             for fresh aggregations. Trust the data already on canvas. */}
-        {(aggregationTruncated || edgesTruncated) && (
+        {((aggregationTruncated && !projectionCatchUp.catchingUp) || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
