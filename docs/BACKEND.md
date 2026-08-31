@@ -625,9 +625,12 @@ Left deliberately unfinished by the FalkorDB package split, for a later PR:
   module-global async Redis client across pytest-asyncio's per-test event
   loops (`Event loop is closed` → `got Future attached to a different
   loop`); it needs a live Redis to manifest, which is why it had never been
-  seen. `git diff --name-only` over both PR ranges
+  seen. `git diff --name-only <range> -- backend/` over both PR ranges
   (`54980893..1a3e75e9`, `1a3e75e9..baea8b57`) returns nothing matching
-  `insights|enqueue|redis_bus|common/adapters`. See the follow-up below.
+  `insights|enqueue|redis_bus|common/adapters` — the `-- backend/` pathspec
+  matters, since without it PR 2's range surfaces
+  `frontend/src/components/insights/DataSourceProfile.tsx`, a UI file that
+  merely shares the word. See the follow-up below.
   The original item, kept for the record:
   Measured on the final tree: the required CI lane (1,465 passed / 11 failed,
   `comm -23` against `failures-0.txt` empty — zero new failures), the
@@ -648,16 +651,26 @@ Left deliberately unfinished by the FalkorDB package split, for a later PR:
   numbers that this last one was measured too; it wasn't.
 - **A module-global async Redis client is reused across pytest-asyncio's
   per-test event loops**, surfaced by the first full lane ever completed
-  here (above). `insights_service/enqueue.py:95` (`try_claim`) builds its
-  client on whichever test's loop touches it first; the next test's loop
-  then gets `Event loop is closed` /
+  here (above). The client is the singleton `_client` in
+  **`backend/app/services/aggregation/redis_client.py:90`** (`get_redis()`),
+  lazily built on whichever test's event loop calls it first; its own
+  docstring notes the aggregation control-plane, the worker **and** the
+  insights service all share it, which is both why the defect is real and
+  where a fix belongs. The reported call chain is three hops from there —
+  `insights_service/enqueue.py:95` → `insights_service/redis_streams.py:219`
+  (`try_claim`) → `get_redis()` — so the traceback's top frame is a call
+  site with no client in it. A later test's loop then gets
+  `Event loop is closed` /
   `RuntimeError: … got Future attached to a different loop`, and the
   swallowed enqueue failure shows up as an unrelated-looking `assert False`
   in `tests/test_data_source_move.py`. Only reproduces with a live Redis
   reachable and only when the file's tests run in sequence — running either
-  test alone passes, which is why it stayed invisible. Same family as the
-  `FALKORDB_PORT` leak below: shared global state outliving a per-test
-  loop. Neither PR 1 nor PR 2 touched this chain; not fixed here.
+  test alone passes, which is why it stayed invisible. Same shape as the
+  process-global engine cache behind `with_short_session()`
+  (`backend/app/db/engine.py:341`), which bypasses the `get_db_session`
+  dependency override and so is unreachable through `test_client`: shared
+  global state outliving a per-test loop. Neither PR 1 nor PR 2 touched
+  this chain; not fixed here.
 - **The full-lane gap above is no longer the only CI-shaped caveat.**
   `.github/workflows/backend-tests.yml`'s `connectivity-suite` job now runs
   a `falkordb/falkordb:v4.18.11` service container and a reachability step
