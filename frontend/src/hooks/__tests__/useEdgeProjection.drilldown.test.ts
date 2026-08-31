@@ -56,13 +56,23 @@ function inputsFor(roots: HierarchyNode[], expanded: Set<string>) {
   }
 }
 
-function project(roots: HierarchyNode[], expanded: Set<string>, edges: ReturnType<typeof edge>[]) {
+function project(
+  roots: HierarchyNode[],
+  expanded: Set<string>,
+  edges: ReturnType<typeof edge>[],
+  aggregated?: (expanded: boolean) => Map<string, unknown>,
+) {
   return renderHook(
     (p: { roots: HierarchyNode[]; expanded: Set<string> }) => {
       const inp = inputsFor(p.roots, p.expanded)
       return useEdgeProjection({
         edges,
-        aggregatedEdges: new Map(),
+        aggregatedEdges: (aggregated?.(p.expanded.has('tableau')) ?? new Map()) as Map<string, unknown>,
+        // Containment parents — what lets a container-level roll-up be marked
+        // `isDelegated` once its children carry the same flow.
+        browseBundleParentMap: aggregated
+          ? new Map(DASHBOARDS.map(d => [d, 'tableau']))
+          : undefined,
         nodesByLayer: inp.nodesByLayer,
         expandedNodes: inp.expandedNodes,
         displayFlat: inp.displayFlat,
@@ -133,5 +143,72 @@ describe('useEdgeProjection — a drill-down re-routes its edges', () => {
     // would pass every single-shot test above and still fail the user.
     rerender({ roots, expanded: new Set(['tableau']) })
     expect(targetsOf(result.current)).toEqual([...DASHBOARDS].sort())
+  })
+})
+
+/**
+ * The channel that actually carried the live failure.
+ *
+ * `children-with-edges` returns only the lineage BETWEEN a container's
+ * children, so `POST /graph/edges/aggregated` is the sole way lineage from
+ * OUTSIDE the container reaches the children an expand just revealed. These
+ * drive the hook with what that call answers for each visible set — one coarse
+ * `snowflake -> tableau` cell while collapsed, plus one cell per dashboard once
+ * expanded — and pin that the board follows.
+ */
+const aggCell = (source: string, target: string, edgeCount: number) =>
+  [`${source}->${target}`, {
+    aggregated: {
+      id: `agg-${source}-${target}`,
+      sourceUrn: source,
+      targetUrn: target,
+      edgeCount,
+      edgeTypes: ['FLOWS_TO'],
+      confidence: 1,
+      sourceEdgeIds: [],
+    },
+    state: 'collapsed',
+    detailedEdges: [],
+  }] as const
+
+/** What the server answers for the visible set at each toggle position. */
+const rollupsFor = (isExpanded: boolean) =>
+  new Map<string, unknown>(
+    isExpanded
+      ? [aggCell('snowflake', 'tableau', 4), ...DASHBOARDS.map(d => aggCell('snowflake', d, 1))]
+      : [aggCell('snowflake', 'tableau', 4)],
+  )
+
+/** Lines the canvas actually paints — a delegated roll-up is not drawn. */
+const paintedTargets = (res: {
+  visibleLineageEdges: Array<{ target: string; isDelegated?: boolean }>
+}) => res.visibleLineageEdges.filter(e => !e.isDelegated).map(e => e.target).sort()
+
+describe('useEdgeProjection — roll-ups follow the drill-down too', () => {
+  const roots = () => [hNode('snowflake'), hNode('tableau', DASHBOARDS.map(d => hNode(d)))]
+
+  it('paints one line into each visible child, and stands the container line down', () => {
+    const { result } = project(roots(), new Set(['tableau']), [], rollupsFor)
+
+    expect(paintedTargets(result.current)).toEqual([...DASHBOARDS].sort())
+    // The coarse cell is still projected — it just defers to the four finer
+    // ones rather than double-drawing over them.
+    const container = result.current.visibleLineageEdges.find(e => e.target === 'tableau')
+    expect(container?.isDelegated).toBe(true)
+    expect(container?.edgeCount).toBe(4)
+    expect(result.current.unresolvedEdgeCount).toBe(0)
+  })
+
+  it('redraws on every expand → collapse → expand', () => {
+    const { result, rerender } = project(roots(), new Set(), [], rollupsFor)
+    expect(paintedTargets(result.current)).toEqual(['tableau'])
+
+    for (let i = 0; i < 3; i++) {
+      rerender({ roots: roots(), expanded: new Set(['tableau']) })
+      expect(paintedTargets(result.current)).toEqual([...DASHBOARDS].sort())
+
+      rerender({ roots: roots(), expanded: new Set() })
+      expect(paintedTargets(result.current)).toEqual(['tableau'])
+    }
   })
 })
