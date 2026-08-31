@@ -48,7 +48,9 @@ REASONS: Tuple[str, ...] = (
 # row was stale" look identical without this.
 SKIP_REASONS: Tuple[str, ...] = (
     "deleted",            # soft-deleted or deactivated data source
-    "platform_mastered",  # versioned — the projector owns its rollups
+    "platform_mastered",  # versioned — the projector owns its rollups,
+                          # and is demonstrably keeping up
+    "projection_stalled",  # versioned, but the projector is NOT keeping up
     "no_ontology",        # trigger() would raise OntologyResolutionError
     "no_stats",           # the stats service has never profiled it
     "stats_stale",        # counts too old to trust
@@ -71,6 +73,14 @@ SKIP_REASONS: Tuple[str, ...] = (
 DRIFT_STATES: Tuple[str, ...] = (
     "inSync", "drifting", "overlayMissing", "neverBuilt",
     "blocked", "unobservable", "suspended", "managed",
+    # RED, and worse than ``drifting``. ``drifting`` says the raw graph moved
+    # and the rollups need rebuilding; this says the rollups are not being
+    # SERVED AT ALL — while the projection watermark trails the published head
+    # every main read falls back to the version log, which holds none, so
+    # aggregated lineage is missing from the product right now. Deliberately
+    # NOT folded onto ``drifting``: that would under-state the problem and
+    # point the operator at a rebuild, which is not the fix.
+    "projectionStalled",
 )
 
 # Reason → the drift state it implies.
@@ -88,6 +98,7 @@ _SKIP_STATE: Dict[str, str] = {
     "suspended": "suspended",
     "in_sync": "inSync",
     "platform_mastered": "managed",
+    "projection_stalled": "projectionStalled",
 }
 
 
@@ -110,6 +121,17 @@ class Observation:
     # Postgres is the source of truth and FalkorDB a rebuildable read cache.
     # Resolved by the sweeper; see ``_guard``.
     platform_mastered: bool = False
+
+    # ── graphver.projection_state ⋈ graphver.graphs ────────────────────
+    # Only ever populated for a platform-mastered source, and only from a
+    # graph that is actually PINNED to a FalkorDB target — an unpinned graph
+    # projects nothing by design and must never read as wedged. All None
+    # means "not versioned, or nothing is projected here"; the sweeper never
+    # reaches evaluation with these unknown for a versioned source, because a
+    # health lookup it cannot answer defers the whole pass.
+    projection_commits_behind: Optional[int] = None
+    projection_last_error: Optional[str] = None
+    projection_checked_at: Optional[str] = None
 
     # ── public.data_source_stats (the stats service's output) ─────────
     has_stats: bool = False
@@ -152,6 +174,26 @@ class Observation:
 
     # ── resolved policy ───────────────────────────────────────────────
     reconcile_enabled: bool = True
+
+    @property
+    def projection_stalled(self) -> bool:
+        """The projector that owns this source's rollups is not current.
+
+        ONE state, not two, for the two shapes the wedge takes — a watermark
+        that trails the published head, and a recorded projector error. They
+        are the same fact to an operator ("this source's rollups are not being
+        served, go look at its projection") and have the same remedy, and they
+        overlap constantly: an erroring projector ends up behind, and a
+        projector that is behind is usually erroring. Which of the two it is
+        is EVIDENCE (``projection_commits_behind`` /
+        ``projection_last_error``), not a different tier — splitting the state
+        would force every consumer to handle both identically while doubling
+        the vocabulary the UI, the API and the tests all derive from.
+        """
+        if self.projection_last_error:
+            return True
+        behind = self.projection_commits_behind
+        return behind is not None and behind > 0
 
 
 @dataclass(frozen=True)
@@ -212,6 +254,10 @@ def evaluate(obs: Observation, policy: Policy) -> Verdict:
             skip=skip,
             # Named skip states only — everything else preserves the prior stamp.
             drift_state=_SKIP_STATE.get(skip),
+            evidence=(
+                _projection_evidence(obs) if skip == "projection_stalled"
+                else {}
+            ),
         )
 
     for detector in (
@@ -288,6 +334,21 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
         # So this comes SECOND, ahead of every "someone else owns this" guard,
         # because that is exactly what it asserts. Recorded and surfaced as
         # 'managed', never acted on.
+        #
+        # BUT ONLY WHILE THE PROJECTOR IS ACTUALLY KEEPING UP. That whole
+        # justification is a claim about a running subsystem, and for fourteen
+        # hours on 2026-08-30 the claim was false: a wedged projection left
+        # ``projected_commit_seq`` below ``main_head_commit_seq``, every main
+        # read fell back to the version log — which holds no ``:AGGREGATED``
+        # rows — and aggregated lineage disappeared from the canvas while this
+        # guard kept stamping 'managed', i.e. "someone else owns this and is
+        # doing fine". So the claim is now VERIFIED rather than assumed.
+        #
+        # Still never acted on: a versioned source's recovery is a deliberate
+        # operator action on the projector, not a rebuild the sweep can queue.
+        # This is report-only, and it is the report that was missing.
+        if obs.projection_stalled:
+            return "projection_stalled"
         return "platform_mastered"
     if obs.aggregation_status == "skipped":
         return "opted_out"
@@ -451,6 +512,20 @@ def _raw_drift(obs, policy) -> Tuple[Optional[str], Dict]:
     if obs.stored_raw_fingerprint == obs.observed_raw_fingerprint:
         return None, {}
     return "raw_drift", {}
+
+
+def _projection_evidence(obs: Observation) -> Dict:
+    """Why we refused to call a versioned source healthy, in the operator's
+    own units. Deliberately NOT merged into ``_base_evidence``: the raw
+    node/edge counts a projection-stalled source reports were measured against
+    whichever backend happened to answer, and quoting them beside this verdict
+    would invite exactly the "so rebuild it" reading this state exists to
+    prevent."""
+    return {
+        "projectionCommitsBehind": obs.projection_commits_behind,
+        "projectionLastError": obs.projection_last_error,
+        "projectionCheckedAt": obs.projection_checked_at,
+    }
 
 
 def _base_evidence(obs: Observation) -> Dict:

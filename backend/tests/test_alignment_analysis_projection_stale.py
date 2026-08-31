@@ -47,12 +47,23 @@ async def graphver_schema(db_session):
     await db_session.execute(text("DETACH DATABASE graphver"))
 
 
-async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_error=None):
+async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_error=None,
+                agg_ready=False):
     db_session.add(_m.WorkspaceORM(id="ws_stale", name="Stale WS"))
     db_session.add(_m.ProviderORM(id="prov_stale", name="P", provider_type="falkordb"))
     db_session.add(_m.WorkspaceDataSourceORM(
         id="ds_stale", workspace_id="ws_stale", provider_id="prov_stale",
         graph_name="g", label="Stale Source"))
+    if agg_ready:
+        # A source whose batch aggregation job genuinely succeeded — the only
+        # state in which ``canonicalized`` was ever true, and therefore the
+        # only state in which its claim can be wrong.
+        from backend.app.services.aggregation.models import (
+            AggregationDataSourceStateORM,
+        )
+        db_session.add(AggregationDataSourceStateORM(
+            data_source_id="ds_stale", workspace_id="ws_stale",
+            aggregation_status="ready", aggregation_edge_count=500))
     db_session.add(_m.DataSourceStatsORM(
         data_source_id="ds_stale", schema_stats=json.dumps(CLEAN_STATS),
         schema_updated_at="2026-08-30T00:00:00Z"))
@@ -103,3 +114,56 @@ async def test_an_unpinned_graph_is_not_reported(
     await _seed(db_session, projected=0, head=9, falkor_name=None)
 
     assert "PROJECTION_STALE" not in await _findings(test_client)
+
+
+# ── The ``aggregation`` block itself ─────────────────────────────────────
+# The finding above is loud, but the same response also carries an
+# ``aggregation`` block, and ``canonicalized`` claimed the declared-spelling,
+# index-aligned graph was serving reads. Under a wedge it is not: reads come
+# from the version log. A page that raises a critical finding and, two keys
+# away, reports the read path as canonicalized is still lying.
+
+
+async def _aggregation_block(client: AsyncClient) -> dict:
+    resp = await client.get(
+        "/api/v1/ws_stale/graph/alignment-analysis?dataSourceId=ds_stale")
+    assert resp.status_code == 200, resp.text
+    return resp.json()["aggregation"]
+
+
+async def test_a_lagging_projection_is_not_reported_as_canonicalized(
+        test_client: AsyncClient, db_session, graphver_schema):
+    await _seed(db_session, projected=4, head=9, last_error="verify mismatch",
+                agg_ready=True)
+
+    agg = await _aggregation_block(test_client)
+    assert agg["status"] == "ready"
+    assert agg["canonicalized"] is False, (
+        "the block claimed reads were being served through the canonicalized "
+        "graph while they were coming from the version log instead"
+    )
+    assert agg["projectorCurrent"] is False
+    assert agg["projectionCommitsBehind"] == 5
+    assert agg["projectionLastError"] == "verify mismatch"
+    assert agg["projectionCheckedAt"] is not None
+
+
+async def test_a_caught_up_projection_reports_a_current_projector(
+        test_client: AsyncClient, db_session, graphver_schema):
+    await _seed(db_session, projected=9, head=9, agg_ready=True)
+
+    agg = await _aggregation_block(test_client)
+    assert agg["canonicalized"] is True
+    assert agg["projectorCurrent"] is True
+    assert agg["projectionCommitsBehind"] == 0
+
+
+async def test_an_unpinned_graph_reports_projection_health_as_unknown(
+        test_client: AsyncClient, db_session, graphver_schema):
+    """Nothing is projected there by design, so there is no projector to be
+    current or behind. Null means unknown — never "up to date"."""
+    await _seed(db_session, projected=0, head=9, falkor_name=None)
+
+    agg = await _aggregation_block(test_client)
+    assert agg["projectorCurrent"] is None
+    assert agg["projectionCommitsBehind"] is None

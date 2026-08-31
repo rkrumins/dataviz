@@ -122,6 +122,47 @@ def _versioned(monkeypatch):
     return versioned
 
 
+@pytest.fixture(autouse=True)
+def _projector_health(monkeypatch):
+    """Stub the projection-watermark read, for the same reason as above.
+
+    It goes to the ``graphver`` store through its own engine, and a cold
+    failure DEFERS the whole sweep — deliberately, since the one answer that
+    must never be invented is "the fleet's projectors are fine". Without this
+    stub every test here would be asserting against a sweep that never ran (or,
+    worse, against whatever a developer's live dev database happened to say).
+
+    Returns a mutable ``{data_source_id: ProjectorHealth}`` a test can populate
+    to wedge a source's projection.
+    """
+    health: dict = {}
+
+    async def _fake_health(**_kw):
+        return dict(health)
+
+    monkeypatch.setattr(
+        "backend.app.services.versioned_sources.projector_health",
+        _fake_health,
+    )
+    return health
+
+
+def _health(*, behind=0, last_error=None, pinned=True, head=100):
+    """One ``ProjectorHealth`` row, expressed as "N commits behind"."""
+    from backend.app.services.versioned_sources import ProjectorHealth
+
+    return ProjectorHealth(
+        data_source_id="ds_1",
+        graph_id="g_1",
+        projected_commit_seq=head - behind,
+        main_head_commit_seq=head,
+        last_error=last_error,
+        falkor_graph_pinned=pinned,
+        status="projecting",
+        checked_at="2026-08-30T12:00:00+00:00",
+    )
+
+
 class _FakeJob:
     id = "agg_fake"
 
@@ -1641,3 +1682,161 @@ async def test_a_sub_300s_override_not_yet_elapsed_stays_quiet(session_factory):
         session_factory, lambda: _FakeService(),
     ).sweep()
     assert result.scanned == 0
+
+
+# ── A versioned source whose projector is NOT keeping up ────────────────
+# ``platform_mastered`` asserts "the projector owns this source's rollups and
+# is maintaining them". For fourteen hours that assertion was false and nothing
+# checked it: a wedged projection left reads falling back to the version log,
+# which holds no rollups, while the sweep kept stamping ``managed``.
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_projection_is_not_waved_through_as_managed(
+    session_factory, _versioned, _projector_health,
+):
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=5)
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    state = await _state(session_factory)
+    assert state.drift_state == "projectionStalled", (
+        "a source whose rolled-up connections are missing from the product "
+        "still reads as 'managed' — someone else owns this and is doing fine"
+    )
+    assert result.by_skip.get("projection_stalled") == 1
+    assert result.by_skip.get("platform_mastered") is None
+    # Report-only, unchanged: recovery is a deliberate operator action on the
+    # projector. An automatic retry against a deterministically-failing verify
+    # is what burned CPU for fourteen hours without recovering anything.
+    assert result.actions == 0
+    assert svc.signals == [] and svc.triggers == []
+
+
+@pytest.mark.asyncio
+async def test_a_projector_error_alone_is_enough(
+    session_factory, _versioned, _projector_health,
+):
+    """The watermark has caught up but the projector recorded a failure — the
+    second shape of the same fault, and one the watermark goes quiet about
+    between attempts."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(
+        behind=0, last_error="verify mismatch at seq 902",
+    )
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    assert (await _state(session_factory)).drift_state == "projectionStalled"
+
+
+@pytest.mark.asyncio
+async def test_a_current_projector_still_reads_managed(
+    session_factory, _versioned, _projector_health,
+):
+    """The guard's justification holds while the projector keeps up. A verdict
+    that is always red is a verdict nobody reads."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=0)
+
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert (await _state(session_factory)).drift_state == "managed"
+    assert result.by_skip.get("platform_mastered") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_projection_does_not_adopt_its_baseline(
+    session_factory, _versioned, _projector_health,
+):
+    """The baseline is only moved when we believe the numbers. While the
+    projection is behind, the stats scan is measuring whichever backend
+    happened to answer, and freezing a wedged reading as "the new normal" is
+    how the fault gets forgotten. Contrast the ``managed`` sibling above,
+    which DOES adopt."""
+    await _seed(
+        session_factory,
+        edge_counts={"FLOWS_TO": 900, "AGGREGATED": 500},
+        raw_fingerprint="fp_last_known_good",
+    )
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=3)
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+
+    state = await _state(session_factory)
+    assert state.raw_fingerprint == "fp_last_known_good"
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_source_stays_due_on_the_next_tick(
+    session_factory, _versioned, _projector_health,
+):
+    """A red condition that means lineage is missing RIGHT NOW must be
+    re-looked-at every tick — both so it is noticed within a minute instead of
+    an hour, and so it CLEARS within a minute of the projector catching up. The
+    fairness clock still advances, so it rotates rather than camping in the
+    oldest-first window."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+    _projector_health["ds_1"] = _health(behind=5)
+
+    await ReconciliationSweeper(session_factory, lambda: _FakeService()).sweep()
+    stamped = (await _state(session_factory)).last_reconcile_checked_at
+    assert stamped is not None, "the fairness clock must still advance"
+
+    # The projector catches up; the very next sweep must clear the state.
+    _projector_health["ds_1"] = _health(behind=0)
+    result = await ReconciliationSweeper(
+        session_factory, lambda: _FakeService(),
+    ).sweep()
+
+    assert result.scanned == 1, (
+        "a stalled source fell out of the scan window, so its recovery would "
+        "not be noticed until the next full check interval"
+    )
+    assert (await _state(session_factory)).drift_state == "managed"
+
+
+@pytest.mark.asyncio
+async def test_a_cold_projector_health_lookup_defers_the_whole_sweep(
+    session_factory, _versioned, monkeypatch,
+):
+    """The one answer that must never be invented is "the fleet's projectors
+    are fine" — assuming exactly that is what let a wedged projection read as
+    ``managed``. So the sweep defers, and stamps no verdict on the way out."""
+    from backend.app.services.versioned_sources import (
+        ProjectorHealthUnavailable,
+    )
+
+    async def _unavailable(**_kw):
+        raise ProjectorHealthUnavailable("graphver unreachable")
+
+    monkeypatch.setattr(
+        "backend.app.services.versioned_sources.projector_health",
+        _unavailable,
+    )
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    _versioned.add("ds_1")
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result is None
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.drift_state is None
+    assert state.last_reconcile_checked_at is None
+
+    async with session_factory() as s:
+        run = (await s.execute(select(ReconcileRunORM))).scalars().one()
+    assert json.loads(run.detail)["bySkip"] == {
+        "projector_health_unavailable": 1,
+    }

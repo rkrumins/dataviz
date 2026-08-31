@@ -755,6 +755,24 @@ class AggregationService:
             "failed": "Aggregation failed. You can retry or skip.",
             "skipped": "Aggregation was skipped. Views can be created without aggregated edges.",
         }
+        message = messages.get(status, "Unknown status.")
+
+        # ``aggregation_status == 'ready'`` records one true thing: the batch
+        # aggregation job succeeded. It does NOT mean the rolled-up connections
+        # are reaching the product. For a versioned source they are served out
+        # of a graph the projector maintains, and while that projection is
+        # behind, reads fall back to the version log, which holds none — the
+        # exact combination that read "ready" for fourteen hours with no
+        # lineage on the canvas. The stored column keeps its meaning; this read
+        # path stops presenting it as the whole truth.
+        health = (await _projector_health_map()).get(ds_id)
+        projection = _projection_wire_fields(health)
+        if status == "ready" and projection["projector_current"] is False:
+            message = (
+                "Aggregation is complete, but this source's connections are "
+                "still catching up. Rolled-up connections may not appear on a "
+                "canvas until it does."
+            )
 
         return DataSourceReadinessResponse(
             data_source_id=ds_id,
@@ -779,7 +797,8 @@ class AggregationService:
                 getattr(state, "reconcile_enabled", None),
                 (await read_global_cadence(session)).reconcile_enabled,
             ),
-            message=messages.get(status, "Unknown status."),
+            **projection,
+            message=message,
         )
 
     async def get_job(
@@ -2411,6 +2430,7 @@ class AggregationService:
         )
         observed_agg, stats_as_of = await _observed_overlay(session, ds.id)
         versioned = await _platform_mastered_ids()
+        health = await _projector_health_map()
 
         return FreshnessDoc(
             **_freshness_row_kwargs(
@@ -2423,6 +2443,7 @@ class AggregationService:
                 last_failure_reason=last_failure_reason,
                 last_failure_category=last_failure_category,
                 platform_mastered=ds.id in versioned,
+                projector_health=health.get(ds.id),
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
@@ -2989,6 +3010,46 @@ async def _platform_mastered_ids() -> frozenset:
         return frozenset()
 
 
+async def _projector_health_map() -> dict:
+    """Live projection watermark per data source, for the freshness read paths.
+
+    Empty on a lookup failure, exactly like :func:`_platform_mastered_ids` —
+    a fleet page must not 500 because graphver is down. That is safe ONLY
+    because an absent entry renders every projection field as ``null``, which
+    the contract defines as UNKNOWN rather than healthy. Nothing downstream
+    may turn a missing entry into "up to date".
+    """
+    try:
+        from backend.app.services.versioned_sources import projector_health
+        return await projector_health()
+    except Exception as exc:
+        logger.warning("projector health lookup failed for freshness: %s", exc)
+        return {}
+
+
+def _projection_wire_fields(health) -> dict:
+    """The four ``projection*`` wire fields for one source.
+
+    All None when the source is not versioned, when its graph is not pinned to
+    a real graph target (nothing is projected there by design), or when the
+    projection store could not be read — see the contract note on
+    ``FreshnessRow``.
+    """
+    if health is None or not health.falkor_graph_pinned:
+        return dict(
+            projector_current=None,
+            projection_commits_behind=None,
+            projection_last_error=None,
+            projection_checked_at=None,
+        )
+    return dict(
+        projector_current=health.current,
+        projection_commits_behind=health.commits_behind,
+        projection_last_error=health.last_error,
+        projection_checked_at=health.checked_at,
+    )
+
+
 def _freshness_row_kwargs(
     ds, *, provider_name, signals, running_job_id, last_event, drifted=None,
     cooldown_interval_secs: int = AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
@@ -2997,6 +3058,7 @@ def _freshness_row_kwargs(
     last_failure_reason: Optional[str] = None,
     last_failure_category: Optional[str] = None,
     platform_mastered: bool = False,
+    projector_health=None,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -3046,7 +3108,16 @@ def _freshness_row_kwargs(
         last_finding_evidence=st.get("last_finding_evidence"),
         last_failure_reason=last_failure_reason,
         last_failure_category=last_failure_category,
-        platform_mastered=platform_mastered or st.get("drift_state") == "managed",
+        # Both stamps are only ever written for a versioned source, so either
+        # one still identifies this source as platform-mastered when the live
+        # lookup is down. ``projectionStalled`` had to join ``managed`` here:
+        # without it, a wedged source would lose its "mastered here" badge at
+        # exactly the moment an operator most needs to know who owns it.
+        platform_mastered=(
+            platform_mastered
+            or st.get("drift_state") in ("managed", "projectionStalled")
+        ),
+        **_projection_wire_fields(projector_health),
     )
 
 
@@ -3371,6 +3442,7 @@ async def assemble_fleet_freshness(
     ]
     failures = await _latest_failure_map(session, failed_ids)
     versioned = await _platform_mastered_ids()
+    health = await _projector_health_map()
 
     rows = [
         FreshnessRow(**_freshness_row_kwargs(
@@ -3390,6 +3462,7 @@ async def assemble_fleet_freshness(
             last_failure_reason=(failures.get(ds.id) or {}).get("reason"),
             last_failure_category=(failures.get(ds.id) or {}).get("category"),
             platform_mastered=ds.id in versioned,
+            projector_health=health.get(ds.id),
         ))
         for ds in ds_list
     ]
@@ -3521,12 +3594,24 @@ async def _assemble_fleet_summary(
         ds_id for ds_id, st in full_states.items()
         if st.get("drift_state") == "suspended"
     }
+    # Deliberately its OWN set, not folded into ``drifting_ids``. The Drifting
+    # tile means "the rollup no longer matches the data, rebuild it"; this
+    # means "the rollups are not being served at all, go look at the
+    # projection". Folding it in would send an operator to the wrong remedy —
+    # and, since a wedged source is otherwise in no bucket at all, leaving it
+    # out entirely would let a whole wedged fleet read as needing nothing.
+    stalled_ids = {
+        ds_id for ds_id, st in full_states.items()
+        if st.get("drift_state") == "projectionStalled"
+    }
 
     summary = _summarize_freshness(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
+        stalled_ids,
     )
     provider_summaries = _summarize_by_provider(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
+        stalled_ids,
     )
     return summary, provider_summaries
 
@@ -3540,6 +3625,7 @@ def _summarize_freshness(
     full_rows: list, signals: dict, running: dict,
     drifting_ids: Optional[set] = None,
     suspended_ids: Optional[set] = None,
+    stalled_ids: Optional[set] = None,
 ) -> FreshnessSummary:
     """Reduce ``(ds_id, workspace_id, aggregation_status, ...)`` rows +
     their Redis signals + running-job map into the fleet summary counts
@@ -3553,8 +3639,10 @@ def _summarize_freshness(
     completed run) and ``pending`` (a new rebuild already in flight)."""
     drifting_ids = drifting_ids or set()
     suspended_ids = suspended_ids or set()
+    stalled_ids = stalled_ids or set()
     ready = pending = failed = not_built = 0
     recomputing = needs_attention = cache_stamped = drifting = suspended = 0
+    projection_stalled = 0
     for row in full_rows:
         ds_id, ws_id, status = row[0], row[1], row[2]
         if status == "ready":
@@ -3577,10 +3665,18 @@ def _summarize_freshness(
         is_suspended = ds_id in suspended_ids
         if is_suspended:
             suspended += 1
+        is_stalled = ds_id in stalled_ids
+        if is_stalled:
+            projection_stalled += 1
         # A drifting or suspended source is serving data that no longer
         # matches its graph, so it belongs in the same triage bucket as a
         # failed or marked one. Suspended is the case that needs a person.
-        if marker or status == "failed" or is_drifting or is_suspended:
+        # So is a stalled projection — its rolled-up connections are missing
+        # from the product right now, and only a person can restart it.
+        if (
+            marker or status == "failed" or is_drifting or is_suspended
+            or is_stalled
+        ):
             needs_attention += 1
         if cache_as_of:
             cache_stamped += 1
@@ -3595,6 +3691,7 @@ def _summarize_freshness(
         cache_stamped=cache_stamped,
         drifting=drifting,
         suspended=suspended,
+        projection_stalled=projection_stalled,
     )
 
 
@@ -3602,6 +3699,7 @@ def _summarize_by_provider(
     full_rows: list, signals: dict, running: dict,
     drifting_ids: Optional[set] = None,
     suspended_ids: Optional[set] = None,
+    stalled_ids: Optional[set] = None,
 ) -> list[ProviderFreshnessSummary]:
     """Per-provider breakdown of the SAME rows ``_summarize_freshness``
     reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
@@ -3615,7 +3713,7 @@ def _summarize_by_provider(
     result = []
     for (provider_id, provider_name), rows in groups.items():
         s = _summarize_freshness(
-            rows, signals, running, drifting_ids, suspended_ids,
+            rows, signals, running, drifting_ids, suspended_ids, stalled_ids,
         )
         result.append(ProviderFreshnessSummary(
             provider_id=provider_id,
@@ -3623,7 +3721,7 @@ def _summarize_by_provider(
             total=s.total, ready=s.ready, pending=s.pending, failed=s.failed,
             not_built=s.not_built, needs_attention=s.needs_attention,
             cache_stamped=s.cache_stamped, drifting=s.drifting,
-            suspended=s.suspended,
+            suspended=s.suspended, projection_stalled=s.projection_stalled,
         ))
     result.sort(key=lambda ps: (ps.provider_name is None, ps.provider_name or ""))
     return result

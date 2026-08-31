@@ -418,9 +418,57 @@ async def get_alignment_analysis(
             last_aggregated_at = state.last_aggregated_at
     except Exception:  # aggregation schema absent (test contexts)
         pass
+    # ── Projection watermark, read ONCE and used twice ───────────────────
+    # ``aggregation_status == 'ready'`` records that the batch aggregation job
+    # succeeded — nothing more. For a versioned source the rolled-up
+    # connections are served out of a graph the projector maintains, and while
+    # ``projected_commit_seq`` trails ``main_head_commit_seq`` every main read
+    # falls back to the version log, which holds none of them. Read here rather
+    # than in the findings block below so the ``aggregation`` block itself —
+    # which the unprofiled early return also serves — cannot claim a
+    # canonicalized read path that is not actually being used.
+    proj_behind: Optional[int] = None
+    proj_error: Optional[str] = None
+    proj_checked_at: Optional[str] = None
+    try:
+        from sqlalchemy import select as _select
+        from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+        _proj_row = (await session.execute(
+            _select(ProjectionStateORM.projected_commit_seq,
+                   GraphORM.main_head_commit_seq,
+                   ProjectionStateORM.last_error)
+            .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+            .where(GraphORM.data_source_id == ds_id,
+                   ProjectionStateORM.falkor_graph_name.isnot(None))
+        )).first()
+        if _proj_row is not None:
+            proj_checked_at = datetime.now(timezone.utc).isoformat()
+            proj_error = _proj_row[2] or None
+            if _proj_row[0] is not None and _proj_row[1] is not None:
+                proj_behind = max(0, int(_proj_row[1]) - int(_proj_row[0]))
+    except Exception:  # versioning schema absent (test contexts) — never break Data health
+        _proj_row = None
+    # None means UNKNOWN (not versioned, unpinned, or the store could not be
+    # read) — never "up to date". Only an affirmative reading may set False.
+    projector_current: Optional[bool] = (
+        None if proj_checked_at is None
+        else not (bool(proj_error) or bool(proj_behind))
+    )
+
     # Only a READY aggregation serves reads through the canonicalized
-    # (declared-spelling, index-aligned) graph.
-    canonicalized = agg_status == "ready"
+    # (declared-spelling, index-aligned) graph — AND only while the projection
+    # is current. Behind it, reads come from the version log instead, so
+    # claiming canonicalized here is simply false.
+    canonicalized = agg_status == "ready" and projector_current is not False
+    aggregation_block = {
+        "status": agg_status,
+        "lastAggregatedAt": last_aggregated_at,
+        "canonicalized": canonicalized,
+        "projectorCurrent": projector_current,
+        "projectionCommitsBehind": proj_behind,
+        "projectionLastError": proj_error,
+        "projectionCheckedAt": proj_checked_at,
+    }
 
     if not profiled:
         return {
@@ -429,8 +477,7 @@ async def get_alignment_analysis(
             "ontology": ontology,
             "adoption": None,
             "indexCoverage": None,
-            "aggregation": {"status": agg_status, "lastAggregatedAt": last_aggregated_at,
-                            "canonicalized": canonicalized},
+            "aggregation": aggregation_block,
             "grade": None,
             "findings": [{
                 "severity": "info", "code": "NOT_PROFILED",
@@ -476,31 +523,19 @@ async def get_alignment_analysis(
     # projection fell behind. That combination hid a wedged projection for 14
     # hours: the board drew no lineage on drill-down and every surface claimed
     # to be healthy.
-    try:
-        from sqlalchemy import select as _select
-        from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
-        row = (await session.execute(
-            _select(ProjectionStateORM.projected_commit_seq,
-                   GraphORM.main_head_commit_seq,
-                   ProjectionStateORM.last_error)
-            .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
-            .where(GraphORM.data_source_id == ds_id,
-                   ProjectionStateORM.falkor_graph_name.isnot(None))
-        )).first()
-        if row is not None and row[0] is not None and row[1] is not None and row[0] < row[1]:
-            findings.append({
-                "severity": "critical",
-                "code": "PROJECTION_STALE",
-                "message": (
-                    f"This source's graph is {row[1] - row[0]} commit(s) behind what has been "
-                    f"published (projected {row[0]}, published {row[1]}). Until it catches up, "
-                    f"reads are served from the version log, which holds no aggregated lineage — "
-                    f"so rolled-up connections will not appear on a canvas."
-                    + (f" Last error: {row[2]}" if row[2] else "")
-                ),
-            })
-    except Exception:  # versioning schema absent (test contexts) — never break Data health
-        pass
+    row = _proj_row
+    if row is not None and row[0] is not None and row[1] is not None and row[0] < row[1]:
+        findings.append({
+            "severity": "critical",
+            "code": "PROJECTION_STALE",
+            "message": (
+                f"This source's graph is {row[1] - row[0]} commit(s) behind what has been "
+                f"published (projected {row[0]}, published {row[1]}). Until it catches up, "
+                f"reads are served from the version log, which holds no aggregated lineage — "
+                f"so rolled-up connections will not appear on a canvas."
+                + (f" Last error: {row[2]}" if row[2] else "")
+            ),
+        })
     drift_instances = adopt.nodes.drift_instances + adopt.edges.drift_instances
     for entry in unindexed_physical:
         if entry["reason"] != "case_drift":
@@ -578,8 +613,7 @@ async def get_alignment_analysis(
             "indexedProps": list(INDEXED_NODE_PROPS),
             "unindexedPhysical": unindexed_physical,
         },
-        "aggregation": {"status": agg_status, "lastAggregatedAt": last_aggregated_at,
-                        "canonicalized": canonicalized},
+        "aggregation": aggregation_block,
         "grade": grade,
         "findings": findings,
     }
