@@ -728,20 +728,35 @@ So, for a new provider:
   with working defaults. You participate by construction — inherit them, or
   override them if your engine needs to do something with the values. Do not
   reintroduce a `hasattr` guard at a call site.
-- **Never cache ontology *classification*.** Introspection ("which entity and
-  edge types exist in this graph") is a fact about the graph and is safely
-  cacheable under a graph-scoped key. Classification (which of those are
-  containment vs lineage, the type hierarchy, the root types) is a function of
-  the ontology injected into *this instance*, and a provider may legitimately be
-  asked before injection has happened. Caching the second under a key that does
-  not encode the ontology it was computed against poisons every later reader:
-  measured on the pre-refactor code, an uninjected caller warmed the shared key
-  with `containment=[]`, hierarchy 0, roots `[]`, and a correctly-configured
-  reader arriving afterwards got that back — with `HAS` presented as a *flow*
-  edge rather than a *structural* one. Consult
-  `GraphDataProvider.containment_configured` before writing any answer derived
-  from injected state to a shared key; that is exactly what
-  `backend/app/providers/falkordb/stats.py` now does.
+- **Never cache ontology *classification* under a key that does not encode the
+  ontology.** Introspection ("which entity and edge types exist in this graph")
+  is a fact about the graph and is safely cacheable under a graph-scoped key.
+  Classification (which of those are containment vs lineage, the type hierarchy,
+  the root types) is a function of the ontology injected into *this instance*,
+  and a provider may legitimately be asked before injection has happened. Two
+  rules, and the first alone is **not** enough:
+  1. Consult `GraphDataProvider.containment_configured` before writing any
+     answer derived from injected state to a shared key. That stops an
+     *uninjected* caller publishing its provisional answer — measured on the
+     pre-refactor code, one warmed the shared key with `containment=[]`,
+     hierarchy 0, roots `[]`, and a correctly-configured reader arriving
+     afterwards got that back, with `HAS` presented as a *flow* edge rather
+     than a *structural* one.
+  2. Fold a digest of the injected ontology into the key. Configured-ness says
+     *whether* an ontology was injected, never *which* one, so two correctly
+     injected callers still collide: the DB uniqueness constraint is
+     (workspace, provider, graph_name), so two data sources in different
+     workspaces can address the same physical graph with different ontologies,
+     and both writes are legitimate. Without the digest they overwrite each
+     other, and editing one data source's ontology changes nothing any reader
+     sees until the TTL expires.
+
+  `backend/app/providers/falkordb/stats.py` does both — `_ontology_cache_key`
+  is the worked example. Copy its two hashing rules as well as its inputs:
+  **sort every collection before hashing, and use `hashlib`, never `hash()`**.
+  Both `hash()` and set/frozenset iteration order vary per process with
+  `PYTHONHASHSEED`, so a digest built from unsorted iteration fails nothing —
+  it silently gives every worker its own key.
 - A new provider should implement the **introspection** half and leave
   classification to the ontology layer above it.
 

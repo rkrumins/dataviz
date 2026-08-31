@@ -38,6 +38,19 @@ from backend.app.providers.falkordb._log import logger
 from backend.app.providers.falkordb.rowmap import _sanitize_label
 
 
+def _sorted_for_digest(value: Any) -> Any:
+    """``json.dumps(default=...)`` hook for the ontology cache key.
+
+    Sets are rendered as SORTED lists rather than left to ``str()``: a
+    set's repr follows iteration order, which varies per process with
+    ``PYTHONHASHSEED``, and a per-process digest is a silently disabled
+    cache. Anything else with no JSON form falls back to ``str``.
+    """
+    if isinstance(value, (set, frozenset)):
+        return sorted(str(v) for v in value)
+    return str(value)
+
+
 class StatsMixin:
     """Schema/ontology statistics: full-scan stats, the no-scan counts
     fast-path, ontology metadata, node degrees, and distinct values."""
@@ -332,6 +345,70 @@ class StatsMixin:
             tagStats=tag_stats,
         )
 
+    def _ontology_cache_key(self) -> str:
+        """Redis key for the ontology-metadata cache, scoped by a digest of
+        the ONTOLOGY injected into this instance.
+
+        ``_cache_ns`` identifies the physical graph — (host, port,
+        graph_name). That is right for the introspection half of
+        :meth:`get_ontology_metadata` ("which edge types exist") and wrong
+        for the classification half (containment vs lineage, the entity
+        hierarchy, the root types), which is a function of the injected
+        ontology rather than a fact about the graph. The DB uniqueness
+        constraint is (workspace, provider, graph_name), so two data
+        sources in DIFFERENT workspaces can point at the same physical
+        graph with different ontologies: under a key that ignores the
+        ontology they overwrite each other, and the configured-ness gate on
+        the write cannot help, because both writes are legitimate. A single
+        data source whose ontology is edited has the same problem in time —
+        every reader gets the pre-change classification for the rest of the
+        TTL. Folding the ontology in gives each configuration its own key,
+        and an edit lands on a new one, which closes that window as a side
+        effect. Superseded keys are simply unreachable and lazy-evicted by
+        Redis — the same invalidation model ``_ancestors_cache_key`` uses.
+
+        The digest covers everything the ontology-injection setters store
+        (``set_containment_edge_types``, ``set_resolved_edge_metadata``,
+        ``set_entity_type_levels``, ``set_source_type_aliases``,
+        ``set_node_identity``), the ``containment_configured`` sentinel
+        itself — so "never injected" keys apart from "resolved to a flat
+        graph with no containment", which are different answers — and the
+        two env vars the heuristic fallback branch below reads.
+        ``set_ontology_rules`` is deliberately excluded: it stores an
+        arbitrary object with no canonical serialisation, and no
+        classification path reads it.
+
+        Every collection is SORTED before hashing and the hash is
+        ``hashlib``, never ``hash()``. Both ``hash()`` and set/frozenset
+        iteration order vary per process with ``PYTHONHASHSEED``, so a
+        digest built from unsorted iteration would give every worker its
+        own key — which fails nothing, it just silently disables the cache
+        and leaves a dead key per process behind.
+        """
+        import hashlib
+
+        try:
+            containment = sorted(str(t) for t in self._get_containment_edge_types())
+        except ProviderConfigurationError:
+            containment = []
+        payload = {
+            "containment": containment,
+            "containment_configured": bool(getattr(self, "_resolved_containment_types_set", False)),
+            "edge_metadata": getattr(self, "_resolved_edge_metadata", None) or {},
+            "edge_metadata_set": bool(getattr(self, "_resolved_edge_metadata_set", False)),
+            "entity_aliases": getattr(self, "_source_entity_aliases", None) or {},
+            "env_lineage": os.getenv("LINEAGE_EDGE_TYPES", "").strip(),
+            "env_metadata": os.getenv("METADATA_EDGE_TYPES", "").strip(),
+            "identity_property": getattr(self, "_node_identity_property", None) or "",
+            "levels": getattr(self, "_entity_type_levels", None) or {},
+            "lineage": sorted(str(t) for t in (getattr(self, "_resolved_lineage_types", None) or ())),
+            "name_property": getattr(self, "_name_property", None) or "",
+            "rel_aliases": getattr(self, "_source_rel_aliases", None) or {},
+        }
+        canonical = json.dumps(payload, sort_keys=True, default=_sorted_for_digest)
+        digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
+        return f"{self._cache_ns}:ontology_cache:{digest}"
+
     async def get_ontology_metadata(self) -> OntologyMetadata:
         """
         Build ontology metadata including containment and lineage roles.
@@ -340,7 +417,7 @@ class StatsMixin:
         """
         await self._ensure_connected()
 
-        cache_key = f"{self._cache_ns}:ontology_cache"
+        cache_key = self._ontology_cache_key()
         if self._SCHEMA_CACHE_TTL > 0:
             try:
                 cached = await self._redis.get(cache_key)
@@ -521,6 +598,12 @@ class StatsMixin:
         # provisional result is still RETURNED to the caller that asked for it;
         # it is only withheld from the shared key, so the next configured
         # caller recomputes and caches the real thing.
+        #
+        # Belt and braces since `_ontology_cache_key` started encoding the
+        # ontology: an uninjected instance now writes under its own distinct
+        # key that no configured reader consults, so this gate is no longer
+        # the only defence. Kept anyway -- there is no value in publishing a
+        # provisional answer at all, and this bug has already shipped twice.
         if self._SCHEMA_CACHE_TTL > 0 and containment_configured:
             try:
                 await self._redis.setex(cache_key, self._SCHEMA_CACHE_TTL, result.model_dump_json())

@@ -864,6 +864,17 @@ same class of defect. Together they are why ontology belongs in the contract wor
 a follow-up: an ArcadeDB provider written against a contract that leaves ontology implicit will
 be flat, and it will look like an ArcadeDB bug.
 
+**Shipped in PR 2 — point 3's "at minimum" half only.** `_ontology_cache_key`
+(`falkordb/stats.py`) folds a digest of everything the injection setters store into the key, so
+each ontology caches under its own and an edit lands on a new key rather than waiting out the
+TTL. That was needed because the configured-ness gate above separates a configured writer from
+an unconfigured one and nothing else: two *correctly injected* callers on the same physical
+graph with different ontologies were still overwriting each other, which the DB uniqueness
+constraint (workspace, provider, graph_name) makes reachable across workspaces. **Still open:**
+lifting classification out of the provider entirely, so a PR-3 adapter implements only the
+introspection half rather than inheriting a classification path it must remember to key
+correctly.
+
 ---
 
 ## 10. Pre-flight corrections (read before executing §7 — these supersede)
