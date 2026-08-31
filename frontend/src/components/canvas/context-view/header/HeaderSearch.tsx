@@ -868,7 +868,7 @@ function AnchoredMenu({ icon: Icon, current, label, active, children }: {
                 zIndex: 1000,
                 maxHeight: `calc(100vh - ${anchor.top}px - 16px)`,
               }}
-              className="min-w-[180px] overflow-y-auto custom-scrollbar p-1 rounded-xl bg-canvas-elevated backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40"
+              className="min-w-[180px] overflow-y-auto custom-scrollbar p-1 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40"
             >
               <div className="pt-0.5 px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/60">
                 {label} · {current}

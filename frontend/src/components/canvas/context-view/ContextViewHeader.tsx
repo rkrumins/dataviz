@@ -240,7 +240,7 @@ export function ContextViewHeader({
        it sat directly under the page header, which uses the plain token and is
        solid, so one bar was opaque and the one below it was see-through, with
        its words floating over blurred canvas. */
-    <div className="flex-shrink-0 bg-canvas-elevated backdrop-blur-xl border-b border-black/[0.08] dark:border-white/[0.06] px-6 py-3 relative">
+    <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-black/[0.08] dark:border-white/[0.06] px-6 py-3 relative">
       {/* Subtle gradient overlay — dark-mode decoration */}
       <div className="absolute inset-0 hidden dark:block bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />
 

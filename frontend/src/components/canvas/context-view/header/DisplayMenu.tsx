@@ -174,7 +174,7 @@ export function DisplayMenu({
                 // way to reach the lower settings.
                 maxHeight: `calc(100vh - ${anchor.top}px - 16px)`,
               }}
-              className="flex flex-col rounded-xl bg-canvas-elevated backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
+              className="flex flex-col rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
             >
               <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
               {/* Section: Canvas */}

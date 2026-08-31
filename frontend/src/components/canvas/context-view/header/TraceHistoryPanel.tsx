@@ -119,7 +119,7 @@ export function TraceHistoryPanel({
         'w-[300px] py-1.5 rounded-xl overflow-hidden',
         // A plain token: an alpha suffix on a canvas colour emits no rule at
         // all, so this panel was rendering with no fill over the canvas.
-        'bg-canvas-elevated backdrop-blur-2xl',
+        'bg-canvas-elevated/98 backdrop-blur-2xl',
         'border border-glass-border shadow-glass-lg',
       )}
     >
