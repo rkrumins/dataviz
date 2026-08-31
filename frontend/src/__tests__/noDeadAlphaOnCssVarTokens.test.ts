@@ -52,8 +52,10 @@ const HOW_TO_FIX =
   + 'DELETE the class, when the surface is meant to be see-through and a `backdrop-blur` '
   + 'sibling is already doing the work. Do not reach for the first one by reflex — '
   + '75208053 reverted nine surfaces made opaque on exactly that reasoning, because '
-  + 'their transparency was the design. For an OFF-SCALE amount, the fix is only ever '
-  + 'notation: `/12` -> `/[0.12]`.'
+  + 'their transparency was the design. An OFF-SCALE amount (`/12`, `/45`) is a second, '
+  + 'separate silence: on a CHANNEL-TRIPLE token the fix is notation alone, `/12` -> '
+  + '`/[0.12]`; on a bare `var()` token no notation helps — `bg-ink/[0.06]` is in the '
+  + 'baseline below proving it — so pick one of the four options above.'
 
 /**
  * Alpha suffixes that are dead ON PURPOSE. Nothing qualifies yet: an unpaintable
@@ -65,11 +67,12 @@ const ALLOWED = new Map<string, string>()
 /**
  * The dead classes already in the tree, with the number of times each occurs.
  *
- * This is a RATCHET, not an amnesty. The list is pinned exactly: a new dead
- * class fails, a dead class used MORE often fails, and a dead class used less
- * often fails too — because that means someone fixed sites and the number here
- * has to come down with them. It is deliberately a full inventory rather than a
- * total, so the failure message can name what changed.
+ * This is a RATCHET, not an amnesty: a new dead class fails, and a dead class
+ * used MORE often than the number here fails. The numbers are a CEILING, not an
+ * equality — a count that DROPS is someone fixing sites, and must not fail their
+ * run (several agents work this tree at once). It is deliberately a full
+ * inventory rather than a single total, so the failure message can name which
+ * class moved.
  *
  * Why it exists at all: 1,669 of these are already in 323 files, and clearing
  * them is a THEME change (raw channels for the canvas/ink families, and a
@@ -351,7 +354,7 @@ describe('an alpha suffix on a CSS-variable token emits no rule', () => {
     // know paints nothing, which is exactly the regression this exists to stop.
     const grown = dead
       .filter((cls) => occurrences.get(cls)!.length > (BASELINE.get(cls) ?? 0))
-      .map((cls) => `${cls}: ${BASELINE.get(cls)} -> ${occurrences.get(cls)!.length}. ${occurrences.get(cls)!.slice(0, 4).join(', ')}`)
+      .map((cls) => `${cls}: ${BASELINE.get(cls) ?? 0} -> ${occurrences.get(cls)!.length}. ${occurrences.get(cls)!.slice(0, 4).join(', ')}`)
     expect(grown, HOW_TO_FIX).toEqual([])
   })
 

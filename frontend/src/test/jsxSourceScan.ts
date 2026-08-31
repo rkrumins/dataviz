@@ -11,12 +11,35 @@
  * these guards forbid, so comments have to go — and collapsing a block comment
  * to nothing silently renumbers every line after it, which turns a report into
  * a wild goose chase.
+ *
+ * The line-comment pass is QUOTE-AWARE, because a plain "first `//` on the line"
+ * rule truncates `bg-[url('https://…/noise.svg')]` mid-string and leaves an
+ * unterminated quote that `tagStream` then swallows to the next quote — skipping
+ * every tag in between. Four auth pages carry exactly that URL.
  */
+const blankLineComment = (line: string): string => {
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (quote) {
+      if (c === '\\') i++
+      else if (c === quote) quote = null
+    } else if (c === '"' || c === "'" || c === '`') {
+      quote = c
+    } else if (c === '/' && line[i + 1] === '/') {
+      return line.slice(0, i) + ' '.repeat(line.length - i)
+    }
+  }
+  return line
+}
+
 export const stripComments = (src: string): string =>
   src
     .replace(/\{\/\*[\s\S]*?\*\/\}/g, (m) => m.replace(/[^\n]/g, ' '))
     .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/^([^\n]*?)\/\/[^\n]*$/gm, (m, keep: string) => keep + ' '.repeat(m.length - keep.length))
+    .split('\n')
+    .map(blankLineComment)
+    .join('\n')
 
 export interface Tag {
   /** The whole opening tag, `<` to `>`, including every prop. */

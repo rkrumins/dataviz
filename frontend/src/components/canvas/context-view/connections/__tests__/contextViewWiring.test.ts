@@ -45,12 +45,18 @@ describe('the Connections panel is wired into the Context View', () => {
     )
   })
 
-  it('the adaptive budget culls by the weight a line stands for', () => {
-    // The projection stamps the real underlying-relationship count on
-    // `edgeCount`; this is where that number earns its keep. Ranking on
-    // anything else (member count, insertion order) puts a rollup summarising
-    // thousands of flows at the bottom of the cull list.
-    expect(source).toMatch(/\(b\.edgeCount \|\| 1\) - \(a\.edgeCount \|\| 1\)/)
+  it('the adaptive budget culls by how many lines a line REPLACES, not by its weight', () => {
+    // The budget rations room on the board, so it must rank on `bundleSize` —
+    // the number of lines this one line stands in for. `edgeCount` is the
+    // WEIGHT that bundle carries, and the two diverge on a roll-up: a
+    // "Combined flow" can speak for thousands of table-level flows while
+    // occupying exactly one line. Ranking on weight let such a roll-up outrank
+    // and therefore EVICT the raw edges a user had just expanded a container to
+    // see — lineage disappearing at the moment they asked for more of it.
+    // `edgeCount` stays the weight everywhere it is read for display.
+    expect(source).toMatch(
+      /\(b\.bundleSize \?\? b\.edgeCount \?\? 1\) - \(a\.bundleSize \?\? a\.edgeCount \?\? 1\)/
+    )
     expect(source).toMatch(/\.sort\(bySignificance\)\.slice\(0, autoStubThreshold\)/)
   })
 

@@ -233,13 +233,14 @@ export function ContextViewHeader({
   }
 
   return (
-    /* A PLAIN token, not a gradient of alpha'd ones. The canvas colours are
-       complete CSS variables, so `from-canvas-elevated/90` emits no rule and
-       `--tw-gradient-stops` is never set — which makes the `background-image`
-       invalid and paints NOTHING. This toolbar therefore had no fill at all:
-       it sat directly under the page header, which uses the plain token and is
-       solid, so one bar was opaque and the one below it was see-through, with
-       its words floating over blurred canvas. */
+    /* These three gradient stops paint NOTHING, and that is deliberate. The canvas
+       colours are complete CSS variables, so `from-canvas-elevated/90` emits no
+       rule, `--tw-gradient-stops` is never set, and the `background-image` is
+       invalid — the frosted fill you see is the `backdrop-blur-xl` sibling on this
+       same element. Do NOT "fix" them to plain tokens: 75208053 reverted exactly
+       that change across nine surfaces, because an opaque toolbar floating over the
+       canvas reads as a pasted-on bar rather than glass. All three classes are
+       recorded in the baseline of `__tests__/noDeadAlphaOnCssVarTokens.test.ts`. */
     <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-black/[0.08] dark:border-white/[0.06] px-6 py-3 relative">
       {/* Subtle gradient overlay — dark-mode decoration */}
       <div className="absolute inset-0 hidden dark:block bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />

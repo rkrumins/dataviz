@@ -120,10 +120,26 @@ function renderHeader(mode: 'view' | 'edit') {
   )
 }
 
-/** The three-track row itself. */
+/**
+ * The three-track row itself.
+ *
+ * Anchored on the EXACT template rather than `[class*="grid-cols-"]`: any
+ * `grid-cols-2` added earlier in the header would silently retarget every spec
+ * in this file, and the failure would read as "expected 3 children" instead of
+ * "the selector found the wrong element".
+ */
+const ROW_TEMPLATE = 'grid-cols-[auto_1fr_auto]'
 function row(): HTMLElement {
-  const el = document.querySelector<HTMLElement>('[class*="grid-cols-"]')
-  if (!el) throw new Error('the toolbar grid row is gone')
+  const el = document.querySelector<HTMLElement>(`[class*="${ROW_TEMPLATE}"]`)
+  if (!el) {
+    const others = [...document.querySelectorAll('[class*="grid-cols-"]')]
+      .map(e => e.getAttribute('class'))
+    throw new Error(
+      `the toolbar row is no longer \`${ROW_TEMPLATE}\`. Grid rows present: ${
+        others.length ? others.join(' | ') : '(none)'
+      }`,
+    )
+  }
   return el
 }
 

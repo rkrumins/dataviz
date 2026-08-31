@@ -164,7 +164,10 @@ function analyze(files: Map<string, string>): Violation[] {
   interface Comp { file: string; name: string; start: number; end: number }
   const compsOf = new Map<string, Comp[]>()
   for (const [rel, src] of stripped) {
-    const decls = [...src.matchAll(/(?:^|\n)(?:export\s+)?(?:function|const)\s+([A-Z]\w*)\s*[(<=]/g)]
+    // `export default function X` counts too — two files in the tree declare their
+    // only component that way, and missing the declaration hands every floating tag
+    // in the file to the wrong owner (or to no owner at all).
+    const decls = [...src.matchAll(/(?:^|\n)(?:export\s+(?:default\s+)?)?(?:function|const)\s+([A-Z]\w*)\s*[(<=]/g)]
       .map((m) => ({ name: m[1], at: m.index! }))
     compsOf.set(
       rel,
@@ -175,7 +178,9 @@ function analyze(files: Map<string, string>): Violation[] {
   const importsOf = new Map<string, Map<string, string>>()
   for (const [rel, src] of stripped) {
     const named = new Map<string, string>()
-    for (const m of src.matchAll(/import\s+(?:\{([^}]*)\}|([A-Z]\w*))\s+from\s+'([^']+)'/g)) {
+    // Both quote styles: one file in the tree uses double quotes, and an unmatched
+    // import means its component is never followed into.
+    for (const m of src.matchAll(/import\s+(?:\{([^}]*)\}|([A-Z]\w*))\s+from\s+['"]([^'"]+)['"]/g)) {
       if (m[2]) named.set(m[2], m[3])
       for (const one of (m[1] ?? '').split(',')) {
         const name = one.trim().split(/\s+as\s+/).pop()?.trim()
