@@ -13,6 +13,7 @@ import { cn } from '@/lib/utils'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 import { WorkspaceHealthBadge, type WorkspaceHealth } from './WorkspaceHealthBadge'
 import { getProviderLogo } from '../ProviderLogos'
+import { providerLabel } from '@/services/providerTypes'
 import type { DataSourceProviderInfo } from './useWorkspaceDetailData'
 
 // ---------------------------------------------------------------------------
@@ -181,7 +182,7 @@ export function WorkspaceHeroHeader({
                         return (
                           <span key={p.providerType} className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-[11px] font-medium text-ink-secondary">
                             <Logo className="w-3.5 h-3.5" />
-                            {p.providerType === 'neo4j' ? 'Neo4j' : p.providerType === 'falkordb' ? 'FalkorDB' : p.providerType === 'datahub' ? 'DataHub' : p.providerType}
+                            {providerLabel(p.providerType)}
                           </span>
                         )
                       })}

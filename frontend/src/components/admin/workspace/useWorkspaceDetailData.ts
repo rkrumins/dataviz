@@ -25,7 +25,7 @@ const EMPTY_READINESS: Record<string, DataSourceReadinessResponse> = {}
 export interface DataSourceProviderInfo {
   providerId: string
   providerName: string
-  providerType: string   // 'falkordb' | 'neo4j' | 'datahub' | 'mock'
+  providerType: string   // a ProviderType id (see providerTypes.ts)
   sourceIdentifier?: string
   catalogItemName?: string
   host?: string

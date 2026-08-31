@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { GraphProvider, ProjectionSection } from '@/services/systemStatusService'
+import { providerLabel } from '@/services/providerTypes'
 import { compactNum, formatSince } from './meta'
 
 const CHIP_DEFS: { key: keyof ProjectionSection; label: string; cls: string; alwaysShow?: boolean }[] = [
@@ -28,10 +29,6 @@ const ROW_STATUS_CLS: Record<string, string> = {
 
 const KIND_LABEL: Record<string, string> = {
     manual: 'Manual', authoritative: 'Authoritative', hybrid: 'Hybrid', blank: 'Blank',
-}
-
-const PROVIDER_LABEL: Record<string, string> = {
-    falkordb: 'FalkorDB', neo4j: 'Neo4j', spanner: 'Spanner', datahub: 'DataHub', mock: 'Mock',
 }
 
 interface Props {
@@ -115,7 +112,7 @@ export function ProjectionPanel({ projection, providers }: Props) {
                                                         <span className={cn('truncate max-w-[220px]', row.dataSourceLabel ? 'font-semibold text-ink' : 'font-mono text-[11px] text-ink-secondary')} title={row.dataSourceId}>{name}</span>
                                                         {row.providerType && (
                                                             <span className="inline-flex px-1.5 py-px rounded-full border border-indigo-500/20 bg-indigo-500/10 text-[9px] uppercase tracking-wide text-indigo-600 dark:text-indigo-400 shrink-0">
-                                                                {PROVIDER_LABEL[row.providerType] ?? row.providerType}
+                                                                {providerLabel(row.providerType)}
                                                             </span>
                                                         )}
                                                         {row.kind && (

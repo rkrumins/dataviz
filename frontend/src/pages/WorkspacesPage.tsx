@@ -14,6 +14,7 @@ import { providerService, type ProviderResponse } from '@/services/providerServi
 import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { Link } from 'react-router-dom'
 import { getProviderLogo } from '@/components/admin/ProviderLogos'
+import { providerLabel } from '@/services/providerTypes'
 import { WorkspaceCard, type WsDataSourceProviderInfo, type WorkspaceSchemaSummary } from '@/components/admin/WorkspaceCard'
 import { useWorkspaceUsage } from '@/hooks/useContentInsights'
 import { WorkspaceFilterToolbar, type WorkspaceSortKey, type HealthFilter } from '@/components/admin/workspace/WorkspaceFilterToolbar'
@@ -39,13 +40,6 @@ function compactNum(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
     return n.toLocaleString()
-}
-
-function providerLabel(type: string): string {
-    if (type === 'neo4j') return 'Neo4j'
-    if (type === 'falkordb') return 'FalkorDB'
-    if (type === 'datahub') return 'DataHub'
-    return type
 }
 
 export function WorkspacesPage() {

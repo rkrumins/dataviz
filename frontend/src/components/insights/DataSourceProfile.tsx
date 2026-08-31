@@ -25,7 +25,7 @@ import {
 } from '@/components/admin/Freshness/DriftStateBadge'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { StatusChip } from '@/components/insights/StatusChip'
-import { getProviderLogo } from '@/components/admin/ProviderLogos'
+import { providerVisual } from '@/services/providerTypes'
 import { aggregationService } from '@/services/aggregationService'
 import { VocabAlignmentWarning } from '@/components/admin/workspace/VocabAlignmentWarning'
 import { isIdentityOverridden, normalizeIdentity, isNameOverridden, normalizeName } from '@/components/dataSource/NodeIdentity'
@@ -69,13 +69,6 @@ function connectivity(nodeCount: number, edgeCount: number): { label: string; pc
     const pct = Math.max(4, Math.min(100, Math.round((ratio / 4) * 100)))
     const label = ratio < 0.5 ? 'Very sparse' : ratio < 1 ? 'Sparse' : ratio < 2 ? 'Balanced' : ratio < 3.5 ? 'Dense' : 'Very dense'
     return { label, pct }
-}
-
-const PROVIDER_TINT: Record<string, string> = {
-    falkordb: 'from-amber-500/15 to-orange-500/5 text-amber-500',
-    neo4j: 'from-blue-500/15 to-indigo-500/5 text-blue-500',
-    datahub: 'from-emerald-500/15 to-teal-500/5 text-emerald-500',
-    spanner: 'from-sky-500/15 to-cyan-500/5 text-sky-500',
 }
 
 // ── section primitives ────────────────────────────────────────────────────
@@ -276,8 +269,9 @@ export function DataSourceProfile({ catalogId, context, embedded, onNavigate }: 
     const health = useProviderHealth(item?.providerId)
     const healthMeta = PROVIDER_HEALTH_META[health.state]
 
-    const ProviderLogo = getProviderLogo(provider?.providerType ?? 'falkordb')
-    const tint = PROVIDER_TINT[provider?.providerType ?? 'falkordb'] ?? PROVIDER_TINT.falkordb
+    const providerVisualInfo = providerVisual(provider?.providerType)
+    const ProviderLogo = providerVisualInfo.Logo
+    const tint = providerVisualInfo.tint
     const conn = connectivity(stats?.nodeCount ?? 0, stats?.edgeCount ?? 0)
 
     const workspaces = consumers?.workspaces ?? []

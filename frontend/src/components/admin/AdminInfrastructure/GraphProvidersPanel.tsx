@@ -8,16 +8,8 @@
 import { Boxes } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { GraphProvider } from '@/services/systemStatusService'
+import { providerLabel } from '@/services/providerTypes'
 import { STATUS_META } from './meta'
-
-/** Neutral type badge — no privileged provider. */
-const TYPE_LABEL: Record<string, string> = {
-    falkordb: 'FalkorDB',
-    neo4j: 'Neo4j',
-    spanner: 'Spanner',
-    datahub: 'DataHub',
-    mock: 'Mock',
-}
 
 function ProviderCard({ p }: { p: GraphProvider }) {
     const meta = STATUS_META[p.status] ?? STATUS_META.unknown
@@ -33,7 +25,7 @@ function ProviderCard({ p }: { p: GraphProvider }) {
                 <span className={cn('w-2 h-2 rounded-full shrink-0', meta.dot, p.status === 'down' && 'animate-pulse')} />
                 <span className="text-sm font-semibold text-ink truncate">{p.name}</span>
                 <span className="ml-auto inline-flex px-1.5 py-0.5 rounded-full border border-glass-border bg-black/5 dark:bg-white/5 text-[10px] font-medium text-ink-muted shrink-0">
-                    {TYPE_LABEL[p.type] ?? p.type}
+                    {providerLabel(p.type)}
                 </span>
             </div>
             <div className={cn('mt-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide', meta.chip)}>
