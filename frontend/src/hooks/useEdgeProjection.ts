@@ -668,12 +668,18 @@ export function useEdgeProjection({
       // relationship between the two cards it touches.
       const isGhost = isAggregated || isBrowseBundle || members.some((e: any) => e._lifted === true)
 
-      // A roll-up summarises flows that can ALSO be members here in their own
-      // right (a search-revealed leaf lifts to the collapsed ancestor pair the
-      // roll-up covers), so its weight is evidence ABOUT the raw members rather
-      // than flows on top of them — max, not sum, the rule `collapseRecords`
-      // already states for the drawer.
-      const edgeCount = Math.max(rawWeight, rollupWeight)
+      // REVERTED, deliberately, at the user's instruction: this counted the
+      // MEMBERS a bundle stands for, weighting a roll-up by the flows it
+      // summarises (`Math.max(rawWeight, rollupWeight)` over `memberWeight`).
+      // That is the truer number — a "Combined flow" over 4,300 table-level
+      // flows reported 1 — but it lands on the same field the adaptive edge
+      // budget ranks (`bySignificance`, ContextViewCanvas.tsx:3975), and
+      // aggregated edges started disappearing from the board. Losing lineage
+      // is worse than under-reporting it, so the count is a member count again
+      // until the two concerns are separated: a bundle needs a WEIGHT for what
+      // it represents and a separate COUNT for how much of the board it may
+      // occupy, and this one field is doing both jobs.
+      const edgeCount = members.length
       const typesArray = Array.from(distinctTypes)
 
       // Reverse-flow annotation: layer-index of target strictly less than
