@@ -20,16 +20,33 @@
  * carrying ONE glyph. The panel used to be flat 12px rows with two indicators
  * apiece: a timeline rail dot AND a status icon, saying the same thing twice.
  */
-import { render, screen, within, cleanup, fireEvent, act } from '@testing-library/react'
+import { render, screen, within, cleanup, fireEvent, act, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { DataLoadsPanel } from '../DataLoadsPanel'
 import { useNotificationStore, type NotificationHistoryEntry } from '@/components/ui/notifications'
+import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService'
+
+vi.mock('@/services/aggregationService', () => ({
+  aggregationService: { getReadiness: vi.fn() },
+}))
+const readiness = vi.mocked(aggregationService.getReadiness)
+
+/**
+ * The only field on the readiness reading this panel is allowed to believe.
+ * `isReady` stays TRUE while a source's connections trail behind — that is the
+ * whole reason a finished load and a load that is not queryable yet looked
+ * identical here.
+ */
+const reading = (projectorCurrent: boolean | null) =>
+  ({ isReady: true, projectorCurrent } as unknown as DataSourceReadinessResponse)
 
 const HOUR = 60 * 60 * 1000
 
 beforeEach(() => {
   useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
+  readiness.mockReset()
+  readiness.mockResolvedValue(reading(null))
 })
 afterEach(cleanup)
 
@@ -284,5 +301,166 @@ describe('DataLoadsPanel', () => {
     expect(screen.getByLabelText('2 messages')).toBeInTheDocument()
     fireEvent.click(header())
     expect(screen.getByRole('list')).toBeInTheDocument()
+  })
+})
+
+/**
+ * A load can FINISH and still not be on the canvas.
+ *
+ * On a version-controlled source the connections between things are rebuilt
+ * after the load lands. While that is behind, a main read serves the data
+ * WITHOUT them: the message said "loaded" and it was true, and the lineage was
+ * missing anyway. In the log those two loads looked identical — same green
+ * tick, same time — which is the silence this panel exists to end.
+ *
+ * The reading comes from the readiness endpoint's `projectorCurrent`. NOT
+ * `isReady`: that reports the load job alone and stays true under a wedge.
+ * `false` is the only affirmative "not yet" — null is UNKNOWN (an unversioned
+ * source, an unreadable store) and must never be rendered as either answer.
+ *
+ * The cut is per LOAD, not per panel: the last instant we saw the connections
+ * up to date. Loads before it are on the canvas; loads after it are waiting.
+ */
+describe('DataLoadsPanel · a published load whose connections have not caught up', () => {
+  const noteText = /connections still catching up/i
+
+  it('marks the load on its own row, and says so from the collapsed header', async () => {
+    readiness.mockResolvedValue(reading(false))
+    seed([
+      { type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - 2 * HOUR },
+      { type: 'success', message: 'Snowflake · 3 more datasets', createdAt: Date.now() - HOUR },
+    ])
+    render(<DataLoadsPanel dataSourceId="ds-1" />)
+
+    // Collapsed, the panel is one line of chrome — the truth cannot live only
+    // behind a click nobody knows to make.
+    expect(await screen.findByText('Catching up')).toBeInTheDocument()
+
+    fireEvent.click(header())
+    const list = rows()
+    expect(list).toHaveLength(2)
+    for (const card of list) {
+      expect(card).toHaveAttribute('data-waiting')
+      expect(within(card).getByText(noteText)).toBeInTheDocument()
+    }
+    // The load is saved — the reader has nothing to redo, and is told so once.
+    expect(screen.getByText(/nothing to redo/i)).toBeInTheDocument()
+
+    // The mark has to survive `cn`. twMerge keeps `dark:bg-*` in a group of
+    // its own, so an amber that is only declared light-mode loses to the
+    // card's own `dark:bg-white/…` and the row reads unmarked in dark mode —
+    // marked in the DOM, invisible on the screen.
+    expect(list[0].className).toContain('bg-amber-500/10')
+    expect(list[0].className).toContain('dark:bg-amber-500/10')
+    expect(list[0].className).not.toMatch(/dark:bg-white/)
+  })
+
+  it('says nothing at all when the connections are up to date', async () => {
+    readiness.mockResolvedValue(reading(true))
+    seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - HOUR }])
+    render(<DataLoadsPanel dataSourceId="ds-1" />)
+
+    await waitFor(() => expect(readiness).toHaveBeenCalledWith('ds-1'))
+    await act(async () => {})
+
+    expect(screen.queryByText('Catching up')).toBeNull()
+    fireEvent.click(header())
+    expect(rows()[0]).not.toHaveAttribute('data-waiting')
+    expect(screen.queryByText(noteText)).toBeNull()
+  })
+
+  it('an UNKNOWN reading marks nothing — and never claims the load is up to date either', async () => {
+    // null: not a versioned source, or the store could not be read. Unknown is
+    // not healthy; the one thing it may not do is invent an answer.
+    readiness.mockResolvedValue(reading(null))
+    seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - HOUR }])
+    const { container } = render(<DataLoadsPanel dataSourceId="ds-1" />)
+
+    await waitFor(() => expect(readiness).toHaveBeenCalledWith('ds-1'))
+    await act(async () => {})
+
+    fireEvent.click(header())
+    expect(screen.queryByText(noteText)).toBeNull()
+    expect(rows()[0]).not.toHaveAttribute('data-waiting')
+    expect(container.textContent).not.toMatch(/up to date|caught up/i)
+  })
+
+  it('marks only the loads recorded SINCE the connections were last seen up to date', async () => {
+    vi.useFakeTimers()
+    try {
+      const t0 = Date.now()
+      readiness.mockResolvedValueOnce(reading(true))   // first reading: current at t0
+      readiness.mockResolvedValue(reading(false))      // and behind ever after
+      const early = { type: 'success' as const, message: 'Snowflake · 5 datasets', createdAt: t0 - 60_000 }
+      seed([early])
+      render(<DataLoadsPanel dataSourceId="ds-1" />)
+      await act(async () => {})
+
+      // A second load lands five seconds after that known-good reading.
+      vi.setSystemTime(t0 + 5_000)
+      act(() => {
+        seed([early, { type: 'success', message: 'Snowflake · 3 more datasets', createdAt: t0 + 5_000 }])
+      })
+      // …and the next reading finds the connections behind.
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+
+      fireEvent.click(header())
+      const list = rows()
+      // Newest first. Only the load that arrived after the last good reading
+      // is waiting — the earlier one is already on the canvas, and saying
+      // otherwise would be the banner repeated per row, not per-load truth.
+      expect(list[0].textContent).toContain('3 more datasets')
+      expect(list[0]).toHaveAttribute('data-waiting')
+      expect(list[1].textContent).toContain('Snowflake · 5 datasets')
+      expect(list[1]).not.toHaveAttribute('data-waiting')
+      expect(screen.getAllByText(noteText)).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the mark by itself the moment the connections catch up', async () => {
+    vi.useFakeTimers()
+    try {
+      readiness.mockResolvedValueOnce(reading(false))
+      readiness.mockResolvedValue(reading(true))
+      seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - 60_000 }])
+      render(<DataLoadsPanel dataSourceId="ds-1" />)
+      await act(async () => {})
+
+      fireEvent.click(header())
+      expect(screen.getByText(noteText)).toBeInTheDocument()
+      expect(screen.getByText('Catching up')).toBeInTheDocument()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000) })
+
+      expect(screen.queryByText(noteText)).toBeNull()
+      expect(screen.queryByText('Catching up')).toBeNull()
+      expect(rows()[0]).not.toHaveAttribute('data-waiting')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never asks when the open view has no data source of its own', async () => {
+    seed([{ type: 'success', message: 'View saved', createdAt: Date.now() }])
+    render(<DataLoadsPanel />)
+    await act(async () => {})
+    expect(readiness).not.toHaveBeenCalled()
+  })
+
+  it('says it in plain language — no internals reach this panel', async () => {
+    readiness.mockResolvedValue(reading(false))
+    seed([{ type: 'success', message: 'Snowflake · 5 datasets', createdAt: Date.now() - HOUR }])
+    const { container } = render(<DataLoadsPanel dataSourceId="ds-1" />)
+    await screen.findByText('Catching up')
+    fireEvent.click(header())
+
+    // This panel is read by business users. The words below are what the
+    // backend calls this state; none of them mean anything to a reader here.
+    const shown = `${container.textContent} ${Array.from(container.querySelectorAll('[title]'))
+      .map(el => el.getAttribute('title'))
+      .join(' ')}`
+    expect(shown).not.toMatch(/projection|watermark|commit[ _]?seq|AGGREGATED|roll[ -]?up/i)
   })
 })

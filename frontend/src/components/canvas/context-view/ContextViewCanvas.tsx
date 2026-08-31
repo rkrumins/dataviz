@@ -4975,7 +4975,7 @@ export function ContextViewCanvas({
             maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
-          <DataLoadsPanel />
+          <DataLoadsPanel dataSourceId={dataSourceId} />
           <ConnectionsPanel
             key={connectionsViewId}
             model={connectionModel}
