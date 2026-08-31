@@ -8,10 +8,15 @@
  * Plus the graph tier's per-node memory headroom, which is silent until a
  * node is actually filling: under ``noeviction`` crossing ``maxmemory``
  * does not slow writes down, it REFUSES them.
+ *
+ * And beneath that, the fleet answer to "is it RIGHT" — how many versioned
+ * graphs are behind or erroring, which ones, and how far. It sits here on
+ * purpose: a full node and a stalled publish are the same incident seen from
+ * two ends, and an operator has to read that pair in one glance.
  */
-import { Boxes } from 'lucide-react'
+import { Boxes, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import type { GraphProvider, ServiceEntry } from '@/services/systemStatusService'
+import type { GraphProvider, ProjectionSection, ServiceEntry } from '@/services/systemStatusService'
 import { STATUS_META, formatBytes, num, obj, str } from './meta'
 
 /** Neutral type badge — no privileged provider. */
@@ -166,14 +171,133 @@ function MemoryHeadroom({ shards }: { shards: ShardMemory[] }) {
     )
 }
 
-export function GraphProvidersPanel({ providers, services }: {
+/** One versioned graph whose read cache is not keeping up. */
+interface StalledGraph {
+    graphId: string
+    name: string
+    workspace: string | null
+    lag: number
+    /** The provider hosting this graph's read cache — the same identity the
+     *  cards above are keyed by, so the two halves name one thing. */
+    host: string | null
+    error: string | null
+}
+
+/**
+ * The graphs that are stuck — behind with nothing running, or erroring.
+ * A graph mid-``projecting``/``rebuilding`` is WORKING, not wedged, and is
+ * deliberately excluded so the block stays silent while the fleet catches
+ * itself up.
+ *
+ * Rows come from the probe's worst list, which is capped server-side; the
+ * COUNT comes from the fleet aggregate. The two are reported separately and
+ * neither is derived from the other — deriving the count from the rows would
+ * under-report a wide outage as exactly the cap.
+ */
+function stalledGraphs(projection: ProjectionSection | null | undefined, providers: GraphProvider[]): StalledGraph[] {
+    const byId = new Map(providers.map(p => [p.id, p.name]))
+    return (projection?.worst ?? [])
+        .filter(r => r.lastError != null || (r.lag > 0 && r.status === 'idle'))
+        .map(r => ({
+            graphId: r.graphId,
+            name: r.dataSourceLabel ?? r.dataSourceId,
+            workspace: r.workspaceName ?? r.workspaceId,
+            lag: r.lag,
+            host: r.falkorProvider ? (byId.get(r.falkorProvider) ?? r.falkorProvider) : null,
+            error: r.lastError,
+        }))
+}
+
+/** Why a stalled publish and a full node are one incident — the 14-hour
+ *  outage this adjacency exists to prevent. Only claimed when a node is
+ *  ACTUALLY at its cap; otherwise the cause is unknown and goes unstated. */
+const WEDGE_WITH_MEMORY =
+    'A graph node above is at its memory cap, so FalkorDB is refusing writes: every publish and '
+    + 'every heal fails while reads keep working, which is why these graphs stopped catching up. '
+    + 'Free memory or move a graph to another shard — they then catch up on their own.'
+
+/** No node is full, so the cause is elsewhere and is not guessed at here. */
+const WEDGE_ALONE =
+    'While a graph is behind, reads fall back to the version log, which carries no rolled-up '
+    + 'connections — so aggregated lineage is missing from its canvases until it catches up. '
+    + 'Check the projector for the graphs listed.'
+
+function StalledRow({ g }: { g: StalledGraph }) {
+    return (
+        <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="text-[11px] font-semibold text-ink truncate max-w-[240px]" title={g.graphId}>{g.name}</span>
+            {g.workspace && <span className="text-[10px] text-ink-muted truncate max-w-[160px]">{g.workspace}</span>}
+            <span className="text-[11px] text-ink-secondary tabular-nums">
+                {g.lag > 0 ? `${g.lag} commit${g.lag === 1 ? '' : 's'} behind` : 'not publishing'}
+            </span>
+            {g.host && <span className="text-[10px] text-ink-muted">on {g.host}</span>}
+            {g.error && (
+                <span className="w-full font-mono text-[10px] text-red-600 dark:text-red-400 break-all line-clamp-2">{g.error}</span>
+            )}
+        </div>
+    )
+}
+
+/**
+ * Rendered ONLY when at least one versioned graph is behind or erroring —
+ * the same silent-unless-wrong contract the memory block holds to.
+ */
+function PublishingStalled({ projection, providers, nodeFilling }: {
+    projection: ProjectionSection | null | undefined
+    providers: GraphProvider[]
+    nodeFilling: boolean
+}) {
+    if (!projection) return null
+    const count = projection.lagging + projection.failed
+    if (count === 0) return null
+    const rows = stalledGraphs(projection, providers)
+    const notListed = Math.max(0, count - rows.length)
+    // Erroring is worse than merely behind, and borrows the page's down colour.
+    const meta = projection.failed > 0 ? STATUS_META.down : STATUS_META.degraded
+    return (
+        <div className="px-4 pb-4">
+            <div className="border border-glass-border rounded-xl p-3 bg-black/[0.02] dark:bg-white/[0.03]">
+                <div className="flex items-center gap-2">
+                    <GitBranch className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
+                    <h3 className="text-xs font-semibold text-ink">Graphs not publishing</h3>
+                    <span className={cn('inline-flex items-center px-1.5 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide', meta.chip)}>
+                        {projection.failed > 0
+                            ? `${projection.failed} erroring${projection.lagging > 0 ? ` · ${projection.lagging} behind` : ''}`
+                            : `${projection.lagging} behind`}
+                    </span>
+                    <span className="ml-auto text-[11px] text-ink-muted">
+                        {count} of {projection.totalGraphs} versioned graph{projection.totalGraphs === 1 ? '' : 's'}
+                    </span>
+                </div>
+                {rows.length > 0 && (
+                    <div className="mt-2 space-y-1.5">
+                        {rows.map(g => <StalledRow key={g.graphId} g={g} />)}
+                    </div>
+                )}
+                {notListed > 0 && (
+                    <p className="mt-1.5 text-[10px] text-ink-muted">
+                        {notListed} more not listed — the full table is in Versioned graph projection below.
+                    </p>
+                )}
+                <p className={cn('mt-2 text-[11px] leading-snug', nodeFilling ? meta.text : 'text-ink-secondary')}>
+                    {nodeFilling ? WEDGE_WITH_MEMORY : WEDGE_ALONE}
+                </p>
+            </div>
+        </div>
+    )
+}
+
+export function GraphProvidersPanel({ providers, services, projection }: {
     providers: GraphProvider[] | null
     services?: ServiceEntry[] | null
+    projection?: ProjectionSection | null
 }) {
     const shards = graphShardMemory(services)
     const list = providers ?? []
-    // A filling shard is never hidden because no provider rows are registered.
-    if (list.length === 0 && shards.length === 0) return null
+    const stalledCount = projection ? projection.lagging + projection.failed : 0
+    // Neither a filling shard nor a stalled publish is hidden because no
+    // provider rows happen to be registered.
+    if (list.length === 0 && shards.length === 0 && stalledCount === 0) return null
     const down = list.filter(p => p.status === 'down').length
 
     return (
@@ -194,6 +318,11 @@ export function GraphProvidersPanel({ providers, services }: {
                 </div>
             )}
             <MemoryHeadroom shards={shards} />
+            <PublishingStalled
+                projection={projection}
+                providers={list}
+                nodeFilling={shards.some(s => s.level)}
+            />
         </div>
     )
 }
