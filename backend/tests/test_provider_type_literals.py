@@ -21,7 +21,10 @@ Deliberately a source-text grep, not an import-and-introspect test, so it
 runs without spinning up the full conftest stack (which currently needs
 auth-service deps not installed in every CI lane) — same reasoning, and
 the same docstring/comment-stripping approach, as
-``test_falkordb_no_unlabeled_unwind_match.py``.
+``test_falkordb_no_unlabeled_unwind_match.py``. The two imports below are
+the one exception, and they are both cheap and app-free: the provider-id
+alternation is *derived* rather than retyped (see ``_PROVIDER_IDS``), and
+nothing here constructs a provider or touches the app.
 
 Docstrings and full-line comments are stripped before matching, since
 every current hit in the tree is prose describing the removed pattern,
@@ -34,7 +37,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from backend.common.models.management import ProviderType
+from backend.common.providers.catalog import LEGACY_DB_ONLY_TYPES
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+# Derived, never retyped. A hardcoded id list makes this guard blind to
+# exactly the id a new provider adds -- the one case it exists for -- while
+# its own docstrings read as if it covered it. ``ProviderType`` is the right
+# source: ``test_provider_catalog_sync.py`` pins it equal to the catalog's
+# registered ids, and PR 3 has to edit it anyway. Reading the catalog
+# directly would not work here -- "falkordb" is only in ``PROVIDER_CATALOG``
+# once ``backend.app.providers.falkordb`` has been imported, so a provider
+# whose eager import was forgotten would also silently un-guard itself.
+_PROVIDER_IDS = tuple(sorted({t.value for t in ProviderType} | set(LEGACY_DB_ONLY_TYPES)))
+_PROVIDER_ID_ALT = "|".join(_PROVIDER_IDS)
 
 # Only these three: everywhere a provider could plausibly be dispatched on
 # by hardcoded identity. ``backend/insights_service`` is not under
@@ -110,7 +127,7 @@ def _scan(pattern: "re.Pattern[str]", allowed: dict) -> list:
 
 _DIRECT_COMPARISON_RE = re.compile(r"provider_type\s*(?:==|!=)\s*[\"']")
 _NORMALIZED_COMPARISON_RE = re.compile(
-    r"\.lower\(\)\s*(?:==|!=)\s*[\"'](?:falkordb|neo4j|spanner|datahub|mock)[\"']"
+    rf"\.lower\(\)\s*(?:==|!=)\s*[\"'](?:{_PROVIDER_ID_ALT})[\"']"
 )
 
 # Re-derived by direct verification against this tree (2026-08-30), not
@@ -166,27 +183,40 @@ def test_no_provider_type_string_literal_dispatch():
 
 
 # ---------------------------------------------------------------------------
-# Check 2 — isinstance() against a concrete provider implementation. The
-# ABC (GraphDataProvider) is intentionally not in this list: isinstance
-# against the interface is normal conformance checking, not the
-# name-based dispatch this guards against. If that ever needs excluding
-# too, add it here the same way, with the same kind of reason -- it does
-# not appear anywhere in the scanned tree today.
+# Check 2 — isinstance() against a concrete provider implementation.
+# Matched by SHAPE (any ``SomethingProvider`` class name), not by a list of
+# the four classes that exist today: a hand-listed alternation is blind to
+# whatever class the next provider brings, which is the only case this
+# check is really for. Deriving the names from the catalog's
+# ``provider_class_path`` would not work either -- "falkordb" is in
+# ``PROVIDER_CATALOG`` only once ``backend.app.providers.falkordb`` has been
+# imported, so a provider that forgot its eager import would silently
+# un-guard its own class. Exemptions are by CLASS NAME below, since the
+# thing being exempted is a class, not a file.
 # ---------------------------------------------------------------------------
 
+_ISINSTANCE_EXEMPT_CLASSES = {
+    "GraphDataProvider": (
+        "the interface itself -- isinstance against the ABC is normal "
+        "conformance checking, not the name-based dispatch this guards "
+        "against. It does not appear anywhere in the scanned tree today."
+    ),
+}
+
 _ISINSTANCE_CONCRETE_PROVIDER_RE = re.compile(
-    r"isinstance\([^)]*\b(?:FalkorDBProvider|Neo4jProvider|SpannerProvider|DataHubGraphQLProvider)\b"
+    r"isinstance\([^)]*,\s*\(?\s*"
+    rf"(?!(?:{'|'.join(sorted(_ISINSTANCE_EXEMPT_CLASSES))})\b)[A-Z]\w*Provider\b"
 )
 
 _ISINSTANCE_ALLOWED: dict = {}  # no live exemption found; re-add here if one is ever justified
 
 
 def test_no_isinstance_concrete_provider_dispatch():
-    """``isinstance(provider, FalkorDBProvider)`` (or any other concrete
-    provider class) must never appear as a case-analysis dispatch. Use
-    ``supports_feature(provider, ProviderFeature.X)`` instead -- it
-    recognizes any provider with the capability, not just the one that
-    happened to be first.
+    """``isinstance(provider, FalkorDBProvider)`` -- or any other
+    ``…Provider`` class that is not the interface -- must never appear as a
+    case-analysis dispatch. Use ``supports_feature(provider,
+    ProviderFeature.X)`` instead -- it recognizes any provider with the
+    capability, not just the one that happened to be first.
     """
     violations = _scan(_ISINSTANCE_CONCRETE_PROVIDER_RE, _ISINSTANCE_ALLOWED)
     assert not violations, (
@@ -207,7 +237,7 @@ def test_no_isinstance_concrete_provider_dispatch():
 # ---------------------------------------------------------------------------
 
 _CAPABILITY_DICT_LITERAL_RE = re.compile(
-    r"[\"'](?:falkordb|neo4j|spanner|datahub)[\"']\s*:\s*ProviderCapability"
+    rf"[\"'](?:{_PROVIDER_ID_ALT})[\"']\s*:\s*ProviderCapability"
 )
 
 _CAPABILITY_DICT_ALLOWED: dict = {}  # no live exemption found

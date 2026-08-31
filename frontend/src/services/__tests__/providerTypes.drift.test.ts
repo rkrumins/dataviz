@@ -34,15 +34,21 @@
  *      keys that a regex requiring a quote mark cannot see — both spellings
  *      are checked here.
  *
+ * Both checks are keyed on `PROVIDER_TYPE_IDS` itself, imported rather than
+ * retyped: a hardcoded copy of the id list makes the guard blind to exactly
+ * the id a new provider adds — the one case it exists for — while reading as
+ * if it covered it. Adding an id to `providerTypes.ts` extends both regexes
+ * with no edit here.
+ *
  * `ShapeKind` (`'generic' | 'falkordb' | 'spanner'`, also in `providerTypes.ts`)
  * is a *different* type whose members coincide in spelling with a subset of
  * `ProviderType` — the wizard compares it ~8 times as
  * `shape.kind === 'falkordb'` / `shapeKind(x, types) === 'falkordb'`. That
  * comparison is exempted by SHAPE (see `isShapeKindComparison` below), not by
- * file path — so a genuine `providerType === 'arcadedb'` dispatch added
- * anywhere in that same file, including the wizard, still fails this guard.
- * A path-level exemption for the wizard would have blinded the guard to the
- * 3,000-line component most likely to grow one.
+ * file path — so a genuine provider-type dispatch on any `PROVIDER_TYPE_IDS`
+ * member added anywhere in that same file, including the wizard, still fails
+ * this guard. A path-level exemption for the wizard would have blinded the
+ * guard to the 3,000-line component most likely to grow one.
  *
  * Deliberately not covered: `ProviderOnboardingWizard.tsx`'s two
  * `formData.providerType || 'falkordb'` fallback defaults (a starting guess
@@ -56,12 +62,15 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { PROVIDER_TYPE_IDS } from '../providerTypes'
 
 const FRONTEND_ROOT = resolve(__dirname, '../../..')
 const SRC_ROOT = resolve(FRONTEND_ROOT, 'src')
 
-const PROVIDER_IDS = ['falkordb', 'neo4j', 'datahub', 'spanner', 'mock'] as const
-const _PROVIDER_ALT = PROVIDER_IDS.join('|')
+// Imported, never retyped -- see the header. A hardcoded copy would have to
+// be edited by the same PR that adds a provider, i.e. exactly when the guard
+// is supposed to be watching without being asked.
+const _PROVIDER_ALT = PROVIDER_TYPE_IDS.join('|')
 
 // Directories that may contain provider-identity text that isn't production
 // dispatch (fixtures, generated snapshots) -- excluded by name wherever they
@@ -205,8 +214,8 @@ const _OBJECT_KEY_ALLOWED: Record<string, string> = {
         'share a provider id\'s spelling, not a provider-keyed dispatch map (its sibling fields ' +
         'are `falkordbConnection` and `generic`, never another provider id). Pattern A is NOT ' +
         'exempted by path for this file -- only the structural ShapeKind exemption above applies ' +
-        "there -- so a genuine `providerType === 'arcadedb'` dispatch added to this file still " +
-        'fails this guard.',
+        'there -- so a genuine provider-type dispatch on any PROVIDER_TYPE_IDS member added to ' +
+        'this file still fails this guard.',
 }
 
 describe('provider-type literal drift guard', () => {
