@@ -1,9 +1,16 @@
 /**
  * ExplorerPreviewDrawer — Slide-in side panel for quick-previewing a view.
  *
- * Shows: view type, name, description, tags, workspace, visibility,
- * data source, semantic layer, layout, created/updated dates,
- * last synced, and a mini preview for hierarchy/reference.
+ * Two accounts, deliberately separate. WHAT THIS VIEW RESTS ON is the shared
+ * `ViewBuiltOn` chain — workspace, data source, graph provider, semantic layer,
+ * drawn as one stack with the provider's live health and the ontology's version
+ * on it. THE VIEW RECORD is everything else: type, layout, description, tags,
+ * authorship, dates, usage, and a preview of its layers.
+ *
+ * Those first four used to be two flat rows here plus two pills up top, each
+ * naming a fact and none of them saying the four were a stack. The chain is the
+ * same component the view's own details sheet renders, so the two surfaces
+ * cannot drift about what a view is built on.
  */
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { History, Settings2 } from 'lucide-react'
@@ -12,6 +19,7 @@ import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 // two hosts — not two forms that drift.
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
 import { ViewUsageDetails } from './ViewUsage'
+import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
 import { useViewUsage } from '@/hooks/useContentInsights'
 import { Link } from 'react-router-dom'
 import { createPortal } from 'react-dom'
@@ -26,8 +34,6 @@ import {
   User,
   ExternalLink,
   Pencil,
-  Database,
-  Box,
   RefreshCw,
   LayoutDashboard,
   ChevronLeft,
@@ -530,7 +536,24 @@ export function ExplorerPreviewDrawer({
                 </div>
               )}
 
-              {/* Key details grid */}
+              {/* ── What this view is built on ──
+                  The same chain the view's own details sheet renders, and for
+                  the same reason: workspace → data source → graph provider →
+                  semantic layer is a STACK, and drawing it as one says so.
+                  This drawer used to print two of those four as flat rows
+                  ("Semantic Layer: <name>", "Data Source: <name>") and the
+                  other two only as pills up top, so the relationship between
+                  them — the whole reason they belong on one panel — was left
+                  for the reader to infer. The chain also carries what the rows
+                  never could: the provider's live health, the ontology's
+                  version and type counts, and when the source's data last
+                  changed. Mounted with the drawer, so its two lookups stay off
+                  the Explorer's list path. */}
+              <ViewBuiltOn view={view} />
+
+              {/* Key details grid — the view RECORD: what it is, who made it,
+                  when. What it rests on is the chain above; keeping the two
+                  apart is what stopped this list being a bag of facts. */}
               <div>
                 <h4 className="text-[10px] uppercase tracking-widest font-bold text-ink-muted mb-3">
                   Details
@@ -572,24 +595,6 @@ export function ExplorerPreviewDrawer({
                       </div>
                     </div>
                   </div>
-
-                  {/* Semantic layer */}
-                  {view.contextModelName && (
-                    <DetailRow
-                      icon={Box}
-                      label="Semantic Layer"
-                      value={view.contextModelName}
-                    />
-                  )}
-
-                  {/* Data source */}
-                  {view.dataSourceId && (
-                    <DetailRow
-                      icon={Database}
-                      label="Data Source"
-                      value={view.dataSourceName ?? view.dataSourceId}
-                    />
-                  )}
 
                   {/* Created by — prefer the server-resolved display name;
                       fall back to "Unknown" when unresolvable — never the

@@ -24,6 +24,7 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { ViewUsage } from '@/services/contentInsightsService'
 import { FavouriteTip, favouriteSentence, ViewUsageCounters, ViewUsageNote } from './ViewUsage'
+import { ViewLayerStrip } from './ViewLayerStrip'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -229,6 +230,11 @@ export function ExplorerViewCard({
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
   const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference' || view.viewType === 'graph' || view.viewType === 'layered-lineage'
+  // A Context View's own layers, when it has any. Read straight off the view
+  // the card was already given — `?? []` because an older view, or one saved
+  // before layers existed, carries no referenceLayout at all and must fall
+  // through to the category illustration rather than render an empty strip.
+  const layerStrip = view.config?.layout?.referenceLayout?.layers ?? []
   const showContextModel = view.contextModelName
     && view.contextModelName.toLowerCase() !== view.name.toLowerCase()
 
@@ -467,10 +473,21 @@ export function ExplorerViewCard({
           </div>
         )}
 
-        {/* ── 5. Preview area — hidden in compact density ── */}
+        {/* ── 5. Preview area — hidden in compact density ──
+            THIS VIEW's layers where it has them, the category illustration
+            only where it does not. `MiniPreview` is keyed on `viewType` alone,
+            so every Context View in the grid drew the same rose block — a
+            third of the card restating the label directly above it, on the one
+            screen whose job is telling views apart. The layers already arrive
+            with the view (no request, no extra field), and they are what the
+            preview drawer prints as "Reference model layers (N)". */}
         {showPreview && (
           <div className={cn('h-[3.75rem]', sectionGap)}>
-            {hasPreview ? (
+            {layerStrip.length > 0 ? (
+              <div className="rounded-lg overflow-hidden h-full">
+                <ViewLayerStrip layers={layerStrip} />
+              </div>
+            ) : hasPreview ? (
               <div className="rounded-lg border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.015] px-2 py-1 overflow-hidden h-full">
                 <MiniPreview viewType={view.viewType} />
               </div>
