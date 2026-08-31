@@ -27,7 +27,9 @@ import { cn } from '@/lib/utils'
  * — no wizard — and the change is captured by the activity log's field diff.
  * Structural edits (scope/layers/layout) stay in the builder ("Edit layout & scope").
  */
-export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDisabled }: {
+export function EditDetailsPanel({
+  view, onCancel, onSaved, onEditLayout, editDisabled, hideHeading, autoFocusName = true,
+}: {
   view: ViewT
   onCancel: () => void
   /** Receives the SAVED view. Hosts that mirror view state elsewhere (the canvas
@@ -36,6 +38,18 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
   onSaved?: (updated: ViewT) => void
   onEditLayout?: () => void
   editDisabled?: boolean
+  /** Whether the Name field takes focus on mount. TRUE by default — that is
+   *  right wherever mounting this form IS the act of opening the editor (the
+   *  Explorer drawer swaps its whole body for it). A host that mounts the form
+   *  by switching a TAB must pass false: stealing focus out of the tab strip
+   *  and into a text field strands a keyboard user, who can no longer arrow
+   *  back to the tab they came from. */
+  autoFocusName?: boolean
+  /** The host already names this section — a tab labelled "Edit" directly
+   *  above it — so the panel's own heading would say it twice and push the
+   *  Name field down for nothing. The Explorer drawer, which swaps its whole
+   *  body for this form and has no other label, keeps it. */
+  hideHeading?: boolean
 }) {
   const { notify } = useAppNotifications()
   const { appName } = useBrand()
@@ -120,16 +134,18 @@ export function EditDetailsPanel({ view, onCancel, onSaved, onEditLayout, editDi
 
   return (
     <div className="space-y-5">
-      <div>
-        <h3 className="text-sm font-bold text-ink">Edit details</h3>
-        <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
-          Update this view's name, description, tags and who can see it.
-        </p>
-      </div>
+      {!hideHeading && (
+        <div>
+          <h3 className="text-sm font-bold text-ink">Edit details</h3>
+          <p className="text-xs text-ink-muted mt-0.5 leading-relaxed">
+            Update this view's name, description, tags and who can see it.
+          </p>
+        </div>
+      )}
 
       <div>
         <label className={labelCls}>Name</label>
-        <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="View name" autoFocus />
+        <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="View name" autoFocus={autoFocusName} />
       </div>
 
       <div>

@@ -25,7 +25,7 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/services/viewApiService', async () => {
@@ -37,9 +37,14 @@ vi.mock('@/services/viewApiService', async () => {
 vi.mock('@/store/schema', () => ({
   useSchemaStore: (selector: (s: unknown) => unknown) => selector({ updateView: vi.fn() }),
 }))
-// The panels are exercised by their own suites; here they are noise.
+// The panels are exercised by their own suites; here they are noise — except
+// for the props this host is responsible for choosing, which are recorded.
+const { editPanelProps } = vi.hoisted(() => ({ editPanelProps: vi.fn() }))
 vi.mock('@/components/views/EditDetailsPanel', () => ({
-  EditDetailsPanel: () => <div data-testid="edit-details-form" />,
+  EditDetailsPanel: (props: Record<string, unknown>) => {
+    editPanelProps(props)
+    return <div data-testid="edit-details-form" />
+  },
 }))
 // Mounted only inside the opened sheet — that is what keeps its two
 // membership-gated lookups off the canvas-open path.
@@ -308,7 +313,9 @@ describe('what this view is built on', () => {
     expect(screen.queryByTestId('edit-details-form')).toBeNull()
   })
 
-  it('still gives an editor the form, under the facts', async () => {
+  it('does not hand an editor the form they did not ask for', async () => {
+    // The old sheet stacked BOTH: three paragraphs of account, then the form
+    // below the fold. Whichever errand you were on, you got the other one first.
     renderHeader(viewResponse({
       access: OWNER_ACCESS,
       dataSourceId: 'ds_1',
@@ -316,7 +323,99 @@ describe('what this view is built on', () => {
     }))
     fireEvent.click(await screen.findByRole('button', { name: /built on/i }))
     expect(screen.getByTestId('built-on-account')).toBeTruthy()
+    expect(screen.queryByTestId('edit-details-form')).toBeNull()
+    // …and it is one click away, not one scroll.
+    fireEvent.click(screen.getByRole('tab', { name: 'Edit' }))
     expect(screen.getByTestId('edit-details-form')).toBeTruthy()
+  })
+})
+
+describe('the details sheet is two errands, and the affordance picks one', () => {
+  const WITH_SOURCE: Partial<View> = {
+    access: OWNER_ACCESS,
+    dataSourceId: 'ds_1',
+    dataSourceName: 'Production Warehouse',
+  }
+
+  it('opens on Edit from the pencil — Name and the rest, with nothing above them', async () => {
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+    expect(screen.getByRole('tab', { name: 'Edit' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByTestId('edit-details-form')).toBeTruthy()
+    expect(screen.queryByTestId('built-on-account')).toBeNull()
+  })
+
+  it('opens on About from the data source — the question it answers', async () => {
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: /built on/i }))
+    expect(screen.getByRole('tab', { name: 'About' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByTestId('built-on-account')).toBeTruthy()
+  })
+
+  it('wires each tab to the panel the way a screen reader needs', async () => {
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+    const tablist = screen.getByRole('tablist', { name: 'View details sections' })
+    const [about, edit] = within(tablist).getAllByRole('tab')
+    expect(edit.getAttribute('aria-selected')).toBe('true')
+    // Roving tabindex: the strip is ONE tab stop, walked with the arrow keys.
+    expect(about.getAttribute('tabindex')).toBe('-1')
+    expect(edit.getAttribute('tabindex')).toBe('0')
+    const panel = screen.getByRole('tabpanel')
+    expect(edit.getAttribute('aria-controls')).toBe(panel.id)
+    expect(panel.getAttribute('aria-labelledby')).toBe(edit.id)
+  })
+
+  it('walks the strip with the arrow keys, selection following focus', async () => {
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Edit' }), { key: 'ArrowLeft' })
+    expect(screen.getByRole('tab', { name: 'About' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByTestId('built-on-account')).toBeTruthy()
+  })
+
+  it('offers a viewer no strip at all — one errand is not a choice', async () => {
+    renderHeader(viewResponse({ ...WITH_SOURCE, access: VIEWER_ACCESS }))
+    fireEvent.click(await screen.findByRole('button', { name: /built on/i }))
+    expect(screen.queryByRole('tablist')).toBeNull()
+    expect(screen.getByTestId('built-on-account')).toBeTruthy()
+    expect(screen.queryByTestId('edit-details-form')).toBeNull()
+  })
+
+  it('puts the cursor in Name when opening the editor was the point', async () => {
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+    expect(editPanelProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ autoFocusName: true }),
+    )
+  })
+
+  it('does NOT take focus when Edit was merely arrowed onto', async () => {
+    // Measured live: the form's autofocus fired after the tab took focus and
+    // pulled the caret into the Name field, so the tab strip lost focus after
+    // ONE arrow press and the reader could not arrow back to About.
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: /built on/i }))
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'About' }), { key: 'ArrowRight' })
+    expect(screen.getByRole('tab', { name: 'Edit' }).getAttribute('aria-selected')).toBe('true')
+    expect(editPanelProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ autoFocusName: false }),
+    )
+  })
+
+  it('lets the tab that already says "Edit" be the only thing that says it', async () => {
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+    expect(editPanelProps).toHaveBeenLastCalledWith(
+      expect.objectContaining({ hideHeading: true }),
+    )
+  })
+
+  it('closes on Escape, like any other dialog', async () => {
+    renderHeader(viewResponse(WITH_SOURCE))
+    fireEvent.click(await screen.findByRole('button', { name: 'Details' }))
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })
 

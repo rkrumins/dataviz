@@ -74,10 +74,10 @@
  * component, two hosts: the Explorer and the canvas cannot drift into showing
  * different edit forms for the same view.
  */
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, History, Pencil, Shapes, Share2, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { cn } from '@/lib/utils'
 import {
@@ -116,6 +116,14 @@ const ACTION_BUTTON = 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg
 const IDENTITY_ITEM = 'inline-flex items-center gap-1 min-w-0'
 const IDENTITY_LINK = '-mx-1 px-1 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/5 hover:text-ink transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500'
 
+/** The details sheet's two errands. ABOUT is what this view rests on;
+ *  EDIT is the metadata form. Ordered as they are offered. */
+type DetailsTab = 'about' | 'edit'
+const DETAILS_TABS: { id: DetailsTab; label: string; icon: typeof Info }[] = [
+    { id: 'about', label: 'About', icon: Info },
+    { id: 'edit', label: 'Edit', icon: Pencil },
+]
+
 /** Provenance dates read as dates, not timestamps — the same format the
  *  canvas's Edit-details dialog used before this sheet replaced it. */
 function shortDate(value: string): string {
@@ -132,7 +140,47 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     workspaceName?: string
 }) {
     const [activityOpen, setActivityOpen] = useState(false)
-    const [detailsOpen, setDetailsOpen] = useState(false)
+    // The details sheet is TABBED, and which tab you land on is decided by the
+    // affordance you used. Someone who clicked a pencil came to change
+    // something; someone who clicked the data source came to find out what
+    // this thing is. Landing both of them on the same essay-then-form scroll
+    // is what made this panel unusable for either.
+    const [details, setDetails] = useState<DetailsTab | null>(null)
+    // Which tab the sheet was OPENED on, cleared the instant the reader picks a
+    // different one. It is what decides whether a panel may take focus on
+    // mount: arriving at the Edit form because you opened the editor should put
+    // the cursor in Name, but arriving because you ARROWED onto its tab must
+    // not — that yanks focus out of the tab strip and strands a keyboard user
+    // in a text field, unable to arrow back.
+    const [entry, setEntry] = useState<DetailsTab | null>(null)
+    const detailsOpen = details !== null
+    const openDetails = (tab: DetailsTab) => { setDetails(tab); setEntry(tab) }
+    const chooseTab = (tab: DetailsTab) => { setDetails(tab); setEntry(null) }
+    const closeDetails = () => { setDetails(null); setEntry(null) }
+    // Stable ids so each tab can point at the panel and the panel back at the
+    // selected tab — the wiring a screen reader needs to announce the pair.
+    const sheetId = useId()
+
+    /**
+     * The arrow-key half of the tabs pattern: one tab stop for the whole
+     * strip (roving tabindex above), left/right to move within it, and
+     * selection FOLLOWS focus because both panels are instant. Reads the
+     * buttons off the tablist it is bound to, so there is no second list to
+     * keep in step with DETAILS_TABS.
+     */
+    const handleTabKeys = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
+        if (!delta) return
+        e.preventDefault()
+        const tabs = Array.from(
+            e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+        )
+        const from = tabs.findIndex(t => t.getAttribute('aria-selected') === 'true')
+        const next = tabs[(from + delta + tabs.length) % tabs.length]
+        if (!next) return
+        chooseTab(next.dataset.tab as DetailsTab)
+        next.focus()
+    }
     const [shareOpen, setShareOpen] = useState(false)
     // Double-click the name to rename it — the affordance came up with the name
     // when the canvas toolbar's duplicate title was removed. The long way round
@@ -233,7 +281,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     }
 
     const handleSaved = (updated: View) => {
-        setDetailsOpen(false)
+        closeDetails()
         queryClient.invalidateQueries({ queryKey: [...VIEW_QUERY_KEY, viewId] })
         queryClient.invalidateQueries({ queryKey: ['views'] })
         // The canvas reads its view from the schema store, not React Query — without
@@ -376,7 +424,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 >
                                     <button
                                         type="button"
-                                        onClick={() => setDetailsOpen(true)}
+                                        onClick={() => openDetails('about')}
                                         aria-label={`What this view is built on: ${builtOnLabel}`}
                                         className={cn(IDENTITY_ITEM, IDENTITY_LINK, 'max-w-[180px]')}
                                     >
@@ -438,7 +486,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     {canEditDetails && (
                         <button
                             type="button"
-                            onClick={() => setDetailsOpen(true)}
+                            onClick={() => openDetails('edit')}
                             className={ACTION_BUTTON}
                             aria-label="Details"
                             title="Rename, describe, tag, or change who can see this view"
@@ -475,55 +523,127 @@ export function ViewPageHeader({ viewId, workspaceName }: {
             </header>
 
             {/* Details — an inline sheet, not a portal: the canvas below keeps its
-                own overlays, and this stays scoped to the page. */}
+                own overlays, and this stays scoped to the page.
+
+                TWO TABS, and the affordance you used picks the one you land on.
+                It used to be one scroll: three grey blocks of label + value +
+                explanatory paragraph, and only THEN the form — so an editor who
+                came to rename the view met an essay first, and a viewer who came
+                to ask "what is this?" got the answer buried under prose about
+                what the words meant. Facts and editing are two different errands.
+
+                Only the selected panel is mounted, which is also what keeps the
+                built-on account's two lookups off an Edit-first open. */}
             {detailsOpen && (
-                <div className="absolute inset-0 z-[60] flex justify-end">
+                <div
+                    className="absolute inset-0 z-[60] flex justify-end"
+                    onKeyDown={e => { if (e.key === 'Escape') closeDetails() }}
+                >
                     <button
                         type="button"
                         aria-label="Close details"
-                        onClick={() => setDetailsOpen(false)}
+                        onClick={closeDetails}
                         className="absolute inset-0 bg-black/20 backdrop-blur-[2px]"
                     />
-                    <aside className="relative w-full max-w-md h-full overflow-y-auto custom-scrollbar bg-canvas border-l border-glass-border shadow-2xl">
-                        <div className="flex items-center justify-between px-5 py-3 border-b border-glass-border">
-                            <h2 className="text-sm font-bold text-ink">View details</h2>
-                            <button
-                                type="button"
-                                onClick={() => setDetailsOpen(false)}
-                                className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                            >
-                                <X className="w-4 h-4" />
-                            </button>
-                        </div>
+                    <aside
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby={`${sheetId}-title`}
+                        className="relative w-full max-w-md h-full overflow-y-auto custom-scrollbar bg-canvas border-l border-glass-border shadow-2xl"
+                    >
+                        <div className="sticky top-0 z-10 bg-canvas border-b border-glass-border">
+                            <div className="flex items-center justify-between px-5 pt-3 pb-2">
+                                <h2 id={`${sheetId}-title`} className="text-sm font-bold text-ink">View details</h2>
+                                <button
+                                    type="button"
+                                    onClick={closeDetails}
+                                    aria-label="Close details"
+                                    /* Opening on Edit autofocuses the Name field; opening
+                                       on About has no target of its own, so focus would be
+                                       left outside the sheet. Evaluated at MOUNT, so
+                                       switching tabs later never steals focus back. */
+                                    autoFocus={entry === 'about'}
+                                    className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
 
-                        {/* Facts above, form below. The account is read-only,
-                            so it sits OUTSIDE the form's dirty/Cancel scope —
-                            and outside its edit gate, so a viewer gets it. */}
-                        <div className="p-5 space-y-5">
-                            <ViewBuiltOn view={view} />
-
-                            {/* Who made this and who last touched it — the quiet
-                                footer the canvas's old Edit-details dialog carried.
-                                It rides on the view this header already fetched, so
-                                it costs nothing, and sitting outside the edit gate it
-                                reaches the viewer that dialog never opened for. */}
-                            <p className="text-[11px] text-ink-muted leading-relaxed">
-                                Created by {view.createdByName ?? 'Unknown'} · {shortDate(view.createdAt)}
-                                {view.updatedBy && (
-                                    <> · Last edited by {view.updatedByName ?? 'Unknown'} · {shortDate(view.updatedAt)}</>
-                                )}
-                            </p>
-
+                            {/* One errand, one tab. A viewer has only About to see,
+                                and a strip of one is not a choice — so they get none. */}
                             {canEditDetails && (
-                                <div className="pt-5 border-t border-glass-border">
-                                    <EditDetailsPanel
-                                        view={view}
-                                        onCancel={() => setDetailsOpen(false)}
-                                        onSaved={handleSaved}
-                                    />
+                                <div
+                                    role="tablist"
+                                    aria-label="View details sections"
+                                    onKeyDown={handleTabKeys}
+                                    className="mx-5 mb-3 inline-flex items-center gap-1 rounded-xl border border-black/[0.06] bg-black/[0.03] p-1 dark:border-white/[0.08] dark:bg-white/[0.04]"
+                                >
+                                    {DETAILS_TABS.map(({ id, label, icon: TabIcon }) => {
+                                        const active = details === id
+                                        return (
+                                            <button
+                                                key={id}
+                                                type="button"
+                                                role="tab"
+                                                id={`${sheetId}-tab-${id}`}
+                                                data-tab={id}
+                                                aria-selected={active}
+                                                aria-controls={`${sheetId}-panel`}
+                                                tabIndex={active ? 0 : -1}
+                                                onClick={() => chooseTab(id)}
+                                                className={cn(
+                                                    'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors',
+                                                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500',
+                                                    // A real border, not `glass-border` — that token is
+                                                    // white-on-white in light mode, which would leave the
+                                                    // selected pill with no edge at all.
+                                                    active
+                                                        ? 'border border-black/[0.08] bg-canvas-elevated text-ink shadow-sm dark:border-white/[0.10]'
+                                                        : 'border border-transparent text-ink-muted hover:text-ink',
+                                                )}
+                                            >
+                                                <TabIcon className="h-3.5 w-3.5" aria-hidden />
+                                                {label}
+                                            </button>
+                                        )
+                                    })}
                                 </div>
                             )}
                         </div>
+
+                        <div
+                            role="tabpanel"
+                            id={`${sheetId}-panel`}
+                            aria-labelledby={canEditDetails ? `${sheetId}-tab-${details}` : undefined}
+                            tabIndex={-1}
+                            className="p-5"
+                        >
+                            {details === 'about' || !canEditDetails ? (
+                                <ViewBuiltOn view={view} />
+                            ) : (
+                                <EditDetailsPanel
+                                    view={view}
+                                    onCancel={closeDetails}
+                                    onSaved={handleSaved}
+                                    /* The tab above already says "Edit". */
+                                    hideHeading
+                                    autoFocusName={entry === 'edit'}
+                                />
+                            )}
+                        </div>
+
+                        {/* Who made this and who last touched it — the quiet footer
+                            the canvas's old Edit-details dialog carried. It rides on
+                            the view this header already fetched, so it costs nothing;
+                            it sits OUTSIDE the tabs because it is true of the view
+                            either way, and outside the edit gate so it reaches the
+                            viewer that dialog never opened for. */}
+                        <p className="px-5 pb-5 text-[11px] text-ink-muted leading-relaxed">
+                            Created by {view.createdByName ?? 'Unknown'} · {shortDate(view.createdAt)}
+                            {view.updatedBy && (
+                                <> · Last edited by {view.updatedByName ?? 'Unknown'} · {shortDate(view.updatedAt)}</>
+                            )}
+                        </p>
                     </aside>
                 </div>
             )}
