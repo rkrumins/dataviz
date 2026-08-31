@@ -52,10 +52,13 @@ const HOW_TO_FIX =
   + 'DELETE the class, when the surface is meant to be see-through and a `backdrop-blur` '
   + 'sibling is already doing the work. Do not reach for the first one by reflex — '
   + '75208053 reverted nine surfaces made opaque on exactly that reasoning, because '
-  + 'their transparency was the design. An OFF-SCALE amount (`/12`, `/45`) is a second, '
-  + 'separate silence: on a CHANNEL-TRIPLE token the fix is notation alone, `/12` -> '
-  + '`/[0.12]`; on a bare `var()` token no notation helps — `bg-ink/[0.06]` is in the '
-  + 'baseline below proving it — so pick one of the four options above.'
+  + 'their transparency was the design. An OFF-SCALE amount (`/8`, `/12`, `/45`) is a '
+  + 'SECOND, SEPARATE silence, and the two need opposite fixes. On a REAL PALETTE '
+  + 'COLOUR (`bg-emerald-500/8`) or a channel-triple token, the amount is the only '
+  + 'thing wrong and the fix is pure notation with no design decision at all: '
+  + '`/8` -> `/[0.08]`, `/12` -> `/[0.12]`. On a bare `var()` token no notation helps — '
+  + '`bg-ink/[0.06]` is in the baseline below proving it — so pick one of the four '
+  + 'options above. Check which kind you have before reaching for either.'
 
 /**
  * Alpha suffixes that are dead ON PURPOSE. Nothing qualifies yet: an unpaintable
@@ -83,13 +86,17 @@ const ALLOWED = new Map<string, string>()
  * only go down.
  */
 /** The sum of the numbers below, recorded with them. */
-const BASELINE_TOTAL = 1669
+const BASELINE_TOTAL = 1726
 
 const BASELINE = new Map<string, number>([
   ['bg-accent-business/8', 4],
   ['bg-accent-lineage/12', 27],
   ['bg-accent-lineage/22', 1],
   ['bg-accent-lineage/8', 3],
+  ['bg-amber-500/12', 4],
+  ['bg-amber-500/8', 5],
+  ['bg-blue-500/8', 1],
+  ['bg-blue-600/8', 1],
   ['bg-canvas-base/20', 5],
   ['bg-canvas-base/30', 13],
   ['bg-canvas-base/40', 22],
@@ -121,6 +128,10 @@ const BASELINE = new Map<string, number>([
   ['bg-canvas/80', 4],
   ['bg-canvas/95', 1],
   ['bg-canvas/98', 3],
+  ['bg-cyan-500/12', 2],
+  ['bg-cyan-500/8', 1],
+  ['bg-emerald-500/12', 2],
+  ['bg-emerald-500/8', 4],
   ['bg-glass-border/30', 1],
   ['bg-glass-border/50', 2],
   ['bg-glass-border/60', 13],
@@ -131,6 +142,8 @@ const BASELINE = new Map<string, number>([
   ['bg-glass/50', 6],
   ['bg-glass/60', 3],
   ['bg-glass/70', 2],
+  ['bg-indigo-500/12', 3],
+  ['bg-indigo-500/8', 7],
   ['bg-ink-muted/10', 17],
   ['bg-ink-muted/20', 1],
   ['bg-ink-muted/25', 7],
@@ -142,6 +155,17 @@ const BASELINE = new Map<string, number>([
   ['bg-ink/10', 2],
   ['bg-ink/5', 5],
   ['bg-ink/[0.06]', 1],
+  ['bg-orange-500/12', 1],
+  ['bg-purple-500/12', 1],
+  ['bg-purple-500/8', 2],
+  ['bg-red-500/12', 1],
+  ['bg-red-500/8', 6],
+  ['bg-rose-500/12', 1],
+  ['bg-rose-500/8', 1],
+  ['bg-sky-500/12', 1],
+  ['bg-sky-500/8', 2],
+  ['bg-violet-500/12', 3],
+  ['bg-violet-500/8', 4],
   ['border-b-glass-border/30', 1],
   ['border-glass-border/20', 5],
   ['border-glass-border/30', 23],
@@ -164,6 +188,7 @@ const BASELINE = new Map<string, number>([
   ['from-accent-lineage/12', 1],
   ['from-accent-lineage/18', 1],
   ['from-accent-lineage/8', 1],
+  ['from-amber-500/8', 1],
   ['from-canvas-base/55', 1],
   ['from-canvas-elevated/40', 1],
   ['from-canvas-elevated/80', 2],
@@ -173,8 +198,10 @@ const BASELINE = new Map<string, number>([
   ['from-canvas/80', 2],
   ['from-glass/40', 1],
   ['from-glass/50', 1],
+  ['from-indigo-500/8', 1],
   ['placeholder-ink-muted/40', 1],
   ['placeholder-ink-muted/60', 1],
+  ['ring-blue-400/12', 1],
   ['ring-ink-muted/60', 1],
   ['stroke-ink-muted/10', 1],
   ['stroke-ink-muted/15', 1],
@@ -209,6 +236,7 @@ const BASELINE = new Map<string, number>([
   ['to-canvas-elevated/95', 1],
   ['to-canvas-elevated/96', 1],
   ['to-glass/20', 2],
+  ['to-rose-500/8', 1],
   ['via-canvas-elevated/30', 3],
   ['via-canvas-elevated/40', 4],
   ['via-canvas-elevated/70', 1],
@@ -267,11 +295,25 @@ beforeAll(async () => {
   }
 
   tokens = tokenNames(config.theme.extend.colors).sort((a, b) => b.length - a.length)
+  // STOCK PALETTE COLOURS ARE SCANNED TOO, and they were the blind spot. The
+  // config tokens are where the bare-`var()` trap lives, but they are not the
+  // only way to author a class that compiles to nothing: an OFF-SCALE modifier
+  // emits no rule on ANY colour, stock ones included. Tailwind's opacity scale
+  // has no `8`, so `bg-emerald-500/8` and `bg-sky-500/8` are silently empty —
+  // and 38 of those shipped, including both pills of `ViewScopeBadge`, which
+  // draws the data source and provider on Explorer cards, list rows, the hero,
+  // the recent strip and the preview drawer. Five surfaces, no fill, for as
+  // long as it has been in the tree. Nothing here caught it, because the
+  // alternation below only ever contained config tokens.
+  //
+  // Valid palette alphas (`/10`, `/[0.08]`) still compile, so widening the scan
+  // reports nothing extra — it only stops an off-scale one from hiding.
+  const PALETTE = String.raw`(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(?:50|\d{3})`
   // `<utility->` `<token>` `/<amount>`, where the amount is a scale step or an
-  // arbitrary `[0.04]`. Anchored on a config token so `w-1/2` and the `/item` in
+  // arbitrary `[0.04]`. Anchored on a known colour so `w-1/2` and the `/item` in
   // `group-hover/item:` can never be mistaken for a colour.
   const usage = new RegExp(
-    String.raw`(?<![-\w])((?:[a-z][a-z0-9]*-)*)(${tokens.join('|')})\/(\[[^\]\s]+\]|\d{1,3})(?![\w-])`,
+    String.raw`(?<![-\w])((?:[a-z][a-z0-9]*-)*)(${tokens.join('|')}|${PALETTE})\/(\[[^\]\s]+\]|\d{1,3})(?![\w-])`,
     'g',
   )
 

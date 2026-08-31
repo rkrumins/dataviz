@@ -758,7 +758,6 @@ export default function WorkspaceViewsSection({
                     ? () => setDeleteView({ id: previewView!.id, name: previewView!.name, favouriteCount: previewView!.favouriteCount })
                     : undefined}
                 healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
-                providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
                 initialEditMode={previewEditMode}
                 onSaved={() => refetch()}
             />

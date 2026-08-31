@@ -30,6 +30,12 @@ export interface DataSourceProviderInfo {
   catalogItemName?: string
   host?: string
   port?: number
+  /** The semantic layer this source is read through, resolved from
+   *  `dataSource.ontologyId`. Absent when the source declares none, or when
+   *  the caller cannot read the ontologies list (it is admin-gated and fails
+   *  silently) — treat missing as "unknown", never as "none". */
+  ontologyName?: string
+  ontologyVersion?: number
 }
 
 export interface UseWorkspaceDetailDataReturn {

@@ -789,7 +789,7 @@ export function ExplorerPage() {
               transition={{ duration: 0.15 }}
             >
               {layout === 'grid' ? (
-                <div className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
+                <div className={cn('grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
                   {Array.from({ length: 8 }).map((_, i) => <ExplorerCardSkeleton key={i} />)}
                 </div>
               ) : (
@@ -823,7 +823,7 @@ export function ExplorerPage() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.18 }}
             >
-              <div ref={gridRef} className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
+              <div ref={gridRef} className={cn('grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
                 {views.map((v, i) => (
                   <div
                     key={v.id}
@@ -920,7 +920,6 @@ export function ExplorerPage() {
           ? () => handleDeleteRequest(previewView)
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
-        providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
         initialEditMode={previewEditMode}
         onSaved={() => refetch()}
       />

@@ -10,7 +10,6 @@
 import { Link } from 'react-router-dom'
 import {
   Heart,
-  Box,
   ExternalLink,
   Pencil,
   AlertTriangle,
@@ -74,60 +73,87 @@ const HEALTH_INDICATOR: Record<string, { color: string; tooltip: string }> = {
 }
 
 // ─── Mini preview illustrations ─────────────────────────────────
+/**
+ * DRAWN ON THE SHAPE OF ITS FRAME. These were all 120x48 — 5:2 — inside a card
+ * slot that is roughly 5.4:1, and `preserveAspectRatio` defaults to `meet`, so
+ * each one scaled to the shorter side and landed about 130px wide in a 280px
+ * box. Two thirds of the frame was empty, which is what made the picture read
+ * as a small cluster stranded in a large box.
+ *
+ * The canvas is now 260x48, so the drawing fills the width it is given. Nothing
+ * grew: the frame keeps its modest fixed height, and the art spends the space
+ * that was already there and going unused.
+ */
 function MiniPreview({ viewType }: { viewType: string }) {
   if (viewType === 'hierarchy') {
     return (
-      <svg viewBox="0 0 120 48" className="w-full h-full text-violet-500/20">
-        <circle cx="60" cy="8" r="4" fill="currentColor" />
-        <line x1="60" y1="12" x2="30" y2="28" stroke="currentColor" strokeWidth="1.5" />
-        <line x1="60" y1="12" x2="60" y2="28" stroke="currentColor" strokeWidth="1.5" />
-        <line x1="60" y1="12" x2="90" y2="28" stroke="currentColor" strokeWidth="1.5" />
-        <circle cx="30" cy="32" r="3.5" fill="currentColor" />
-        <circle cx="60" cy="32" r="3.5" fill="currentColor" />
-        <circle cx="90" cy="32" r="3.5" fill="currentColor" />
-        <line x1="30" y1="35.5" x2="18" y2="44" stroke="currentColor" strokeWidth="1" />
-        <line x1="30" y1="35.5" x2="42" y2="44" stroke="currentColor" strokeWidth="1" />
-        <circle cx="18" cy="44" r="2.5" fill="currentColor" opacity="0.6" />
-        <circle cx="42" cy="44" r="2.5" fill="currentColor" opacity="0.6" />
+      <svg viewBox="0 0 260 56" className="w-full h-full text-violet-500/20" aria-hidden>
+        <circle cx="130" cy="7" r="4.5" fill="currentColor" />
+        <line x1="130" y1="11" x2="46" y2="25" stroke="currentColor" strokeWidth="1.5" />
+        <line x1="130" y1="11" x2="130" y2="25" stroke="currentColor" strokeWidth="1.5" />
+        <line x1="130" y1="11" x2="214" y2="25" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="46" cy="28" r="4" fill="currentColor" />
+        <circle cx="130" cy="28" r="4" fill="currentColor" />
+        <circle cx="214" cy="28" r="4" fill="currentColor" />
+        <line x1="46" y1="32" x2="20" y2="43" stroke="currentColor" strokeWidth="1" opacity="0.6" />
+        <line x1="46" y1="32" x2="72" y2="43" stroke="currentColor" strokeWidth="1" opacity="0.6" />
+        <line x1="214" y1="32" x2="188" y2="43" stroke="currentColor" strokeWidth="1" opacity="0.6" />
+        <line x1="214" y1="32" x2="240" y2="43" stroke="currentColor" strokeWidth="1" opacity="0.6" />
+        <circle cx="20" cy="44" r="3" fill="currentColor" opacity="0.6" />
+        <circle cx="72" cy="44" r="3" fill="currentColor" opacity="0.6" />
+        <circle cx="188" cy="44" r="3" fill="currentColor" opacity="0.6" />
+        <circle cx="240" cy="44" r="3" fill="currentColor" opacity="0.6" />
       </svg>
     )
   }
   if (viewType === 'graph' || viewType === 'layered-lineage') {
     return (
-      <svg viewBox="0 0 120 48" className="w-full h-full text-indigo-500/20">
-        {/* Nodes at different levels */}
-        <rect x="8" y="4" width="18" height="10" rx="2" fill="currentColor" />
-        <rect x="8" y="22" width="18" height="10" rx="2" fill="currentColor" opacity="0.8" />
-        <rect x="8" y="36" width="18" height="10" rx="2" fill="currentColor" opacity="0.6" />
-        <rect x="50" y="8" width="18" height="10" rx="2" fill="currentColor" opacity="0.7" />
-        <rect x="50" y="28" width="18" height="10" rx="2" fill="currentColor" opacity="0.5" />
-        <rect x="92" y="14" width="18" height="10" rx="2" fill="currentColor" opacity="0.6" />
-        <rect x="92" y="32" width="18" height="10" rx="2" fill="currentColor" opacity="0.4" />
-        {/* Lineage edges */}
-        <path d="M26 9 Q38 9 50 13" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.6" />
-        <path d="M26 27 Q38 27 50 33" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.5" />
-        <path d="M68 13 Q80 13 92 19" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4" />
-        <path d="M68 33 Q80 33 92 37" stroke="currentColor" strokeWidth="1" fill="none" opacity="0.4" />
-        {/* Containment edges (dashed) */}
-        <path d="M17 14 L17 22" stroke="currentColor" strokeWidth="0.8" strokeDasharray="2,2" opacity="0.4" />
-        <path d="M17 32 L17 36" stroke="currentColor" strokeWidth="0.8" strokeDasharray="2,2" opacity="0.3" />
+      <svg viewBox="0 0 260 56" className="w-full h-full text-indigo-500/20" aria-hidden>
+        {/* Four tiers, left to right — lineage reads as flow. */}
+        <rect x="6" y="4" width="34" height="12" rx="2.5" fill="currentColor" />
+        <rect x="6" y="20" width="34" height="12" rx="2.5" fill="currentColor" opacity="0.8" />
+        <rect x="6" y="36" width="34" height="10" rx="2.5" fill="currentColor" opacity="0.6" />
+        <rect x="76" y="8" width="34" height="12" rx="2.5" fill="currentColor" opacity="0.75" />
+        <rect x="76" y="28" width="34" height="12" rx="2.5" fill="currentColor" opacity="0.55" />
+        <rect x="146" y="4" width="34" height="12" rx="2.5" fill="currentColor" opacity="0.65" />
+        <rect x="146" y="24" width="34" height="12" rx="2.5" fill="currentColor" opacity="0.45" />
+        <rect x="216" y="14" width="34" height="12" rx="2.5" fill="currentColor" opacity="0.55" />
+        <rect x="216" y="32" width="34" height="10" rx="2.5" fill="currentColor" opacity="0.35" />
+        <path d="M40 10 Q58 10 76 14" stroke="currentColor" strokeWidth="1.2" fill="none" opacity="0.6" />
+        <path d="M40 26 Q58 26 76 34" stroke="currentColor" strokeWidth="1.2" fill="none" opacity="0.5" />
+        <path d="M110 14 Q128 14 146 10" stroke="currentColor" strokeWidth="1.2" fill="none" opacity="0.5" />
+        <path d="M110 34 Q128 34 146 30" stroke="currentColor" strokeWidth="1.2" fill="none" opacity="0.4" />
+        <path d="M180 10 Q198 10 216 20" stroke="currentColor" strokeWidth="1.2" fill="none" opacity="0.4" />
+        <path d="M180 30 Q198 30 216 37" stroke="currentColor" strokeWidth="1.2" fill="none" opacity="0.35" />
+        {/* Containment, dashed — the second kind of edge a lineage board draws. */}
+        <path d="M23 16 L23 20" stroke="currentColor" strokeWidth="0.9" strokeDasharray="2,2" opacity="0.4" />
+        <path d="M23 32 L23 36" stroke="currentColor" strokeWidth="0.9" strokeDasharray="2,2" opacity="0.3" />
       </svg>
     )
   }
   if (viewType === 'reference') {
     return (
-      <svg viewBox="0 0 120 48" className="w-full h-full text-rose-500/20">
-        <rect x="4" y="4" width="24" height="16" rx="2" fill="currentColor" />
-        <rect x="32" y="4" width="24" height="16" rx="2" fill="currentColor" opacity="0.7" />
-        <rect x="60" y="4" width="24" height="16" rx="2" fill="currentColor" opacity="0.5" />
-        <rect x="88" y="4" width="24" height="16" rx="2" fill="currentColor" opacity="0.3" />
-        <rect x="4" y="26" width="24" height="16" rx="2" fill="currentColor" opacity="0.7" />
-        <rect x="32" y="26" width="24" height="16" rx="2" fill="currentColor" opacity="0.5" />
-        <rect x="60" y="26" width="24" height="16" rx="2" fill="currentColor" opacity="0.3" />
-        <line x1="8" y1="10" x2="24" y2="10" stroke="white" strokeWidth="1" opacity="0.5" />
-        <line x1="8" y1="14" x2="20" y2="14" stroke="white" strokeWidth="1" opacity="0.3" />
-        <line x1="36" y1="10" x2="52" y2="10" stroke="white" strokeWidth="1" opacity="0.5" />
-        <line x1="36" y1="14" x2="48" y2="14" stroke="white" strokeWidth="1" opacity="0.3" />
+      <svg viewBox="0 0 260 56" className="w-full h-full text-rose-500/20" aria-hidden>
+        {/* Columns, because a Context View IS columns — one per layer, fading
+            left to right the way the board's own depth does. Five of them, not
+            six: at this size another column stops reading as a card and starts
+            reading as texture. */}
+        <rect x="4" y="4" width="46" height="22" rx="3" fill="currentColor" />
+        <rect x="56" y="4" width="46" height="22" rx="3" fill="currentColor" opacity="0.78" />
+        <rect x="108" y="4" width="46" height="22" rx="3" fill="currentColor" opacity="0.58" />
+        <rect x="160" y="4" width="46" height="22" rx="3" fill="currentColor" opacity="0.4" />
+        <rect x="212" y="4" width="44" height="22" rx="3" fill="currentColor" opacity="0.24" />
+        <rect x="4" y="31" width="46" height="21" rx="3" fill="currentColor" opacity="0.72" />
+        <rect x="56" y="31" width="46" height="21" rx="3" fill="currentColor" opacity="0.54" />
+        <rect x="108" y="31" width="46" height="21" rx="3" fill="currentColor" opacity="0.38" />
+        <rect x="160" y="31" width="46" height="21" rx="3" fill="currentColor" opacity="0.24" />
+        {/* Ruled lines on the nearest cards — enough to read as content. */}
+        <line x1="10" y1="11" x2="42" y2="11" stroke="white" strokeWidth="1.4" opacity="0.5" />
+        <line x1="10" y1="18" x2="33" y2="18" stroke="white" strokeWidth="1.4" opacity="0.3" />
+        <line x1="62" y1="11" x2="94" y2="11" stroke="white" strokeWidth="1.4" opacity="0.4" />
+        <line x1="62" y1="18" x2="85" y2="18" stroke="white" strokeWidth="1.4" opacity="0.25" />
+        <line x1="10" y1="38" x2="42" y2="38" stroke="white" strokeWidth="1.4" opacity="0.35" />
+        <line x1="10" y1="45" x2="33" y2="45" stroke="white" strokeWidth="1.4" opacity="0.2" />
       </svg>
     )
   }
@@ -229,8 +255,6 @@ export function ExplorerViewCard({
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
   const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference' || view.viewType === 'graph' || view.viewType === 'layered-lineage'
-  const showContextModel = view.contextModelName
-    && view.contextModelName.toLowerCase() !== view.name.toLowerCase()
 
   return (
     <div
@@ -402,76 +426,122 @@ export function ExplorerViewCard({
                 {meta.label}
               </span>
             )}
-            <h3 className="line-clamp-2 text-sm font-bold text-ink group-hover:text-accent-lineage transition-colors duration-150 leading-tight">
+            {/* TWO LINES ALWAYS, clamped and reserved. A name that wraps and
+                one that does not otherwise start the whole card at different
+                heights, and every block below inherits the offset — which is
+                why the previews in a row did not line up even though the
+                footers did. */}
+            <h3 className={cn(
+              'line-clamp-2 text-sm font-bold text-ink group-hover:text-accent-lineage transition-colors duration-150 leading-tight',
+              !compact && 'min-h-[2.1875rem]',
+            )}>
               {view.name}
             </h3>
           </div>
         </div>
 
-        {/* ── 2. Badges: workspace + visibility + semantic layer ── */}
-        <div className={cn('flex flex-wrap items-center gap-1.5 min-h-[22px]', sectionGap)}>
-          <ViewScopeBadge
-            workspaceId={view.workspaceId}
-            workspaceName={view.workspaceName}
-            dataSourceId={view.dataSourceId}
-            dataSourceName={view.dataSourceName}
-            providerName={providerInfo?.providerName}
-            providerType={providerInfo?.providerType}
-            hideWorkspace={hideWorkspaceInScope}
-          />
-          <span
-            title={vis.hint}
-            className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium"
-          >
-            <VisIcon className="h-2.5 w-2.5" />
-            {vis.label}
-          </span>
-          {showContextModel && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-cyan-500/20 bg-cyan-500/8 px-2 py-0.5 text-[10px] font-medium text-cyan-600 dark:text-cyan-400 leading-none truncate max-w-[140px]">
-              <Box className="h-2.5 w-2.5 shrink-0" />
-              {view.contextModelName}
-            </span>
-          )}
-          {healthInfo && (
+        {/* ── 2. Badges, on TWO ROWS BY LENGTH, not by kind ──
+            At 250px, a workspace pill and a data source pill side by side both
+            truncate — "Perf-Load-Test-S…" beside "Synodic Default O…" tells a
+            reader less than nothing, and a name cut at fourteen characters is
+            not a name. So the SHORT facts share the first row (workspace, the
+            semantic layer as a glyph, visibility) and the DATA SOURCE gets the
+            second to itself, where its whole name fits. The semantic layer has
+            the longest name of the four and the least claim on the space, so it
+            holds an icon here and gives its name to the tip; it is a real
+            button, and opens the preview where the chain spells all four out. */}
+        <div className={cn('flex flex-col gap-1 min-h-[2.75rem]', sectionGap)}>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ViewScopeBadge
+              workspaceId={view.workspaceId}
+              workspaceName={view.workspaceName}
+              ontologyName={providerInfo?.ontologyName ?? view.contextModelName}
+              ontologyVersion={providerInfo?.ontologyVersion}
+              hideWorkspace={hideWorkspaceInScope}
+              parts={['workspace', 'ontology']}
+              onOntologyClick={onPreview}
+            />
             <span
-              className={cn(
-                'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border',
-                healthStatus === 'broken'
-                  ? 'border-red-500/20 bg-red-500/8 text-red-500'
-                  : 'border-amber-500/20 bg-amber-500/8 text-amber-600 dark:text-amber-400',
-              )}
-              title={healthInfo.tooltip}
+              title={vis.hint}
+              className="inline-flex items-center gap-1 text-[10px] text-ink-muted font-medium"
             >
-              <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
-              {healthStatus === 'broken' ? 'Source deleted' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
+              <VisIcon className="h-2.5 w-2.5" />
+              {vis.label}
             </span>
-          )}
-          {isDeleted && (
-            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-red-500/20 bg-red-500/8 text-red-500">
-              <Trash2 className="h-2.5 w-2.5 shrink-0" />
-              Deleted
-            </span>
+            {healthInfo && (
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border',
+                  healthStatus === 'broken'
+                    ? 'border-red-500/20 bg-red-500/[0.08] text-red-500'
+                    : 'border-amber-500/20 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400',
+                )}
+                title={healthInfo.tooltip}
+              >
+                <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+                {healthStatus === 'broken' ? 'Source deleted' : healthStatus === 'warning' ? 'Warning' : 'Stale'}
+              </span>
+            )}
+            {isDeleted && (
+              <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-red-500/20 bg-red-500/[0.08] text-red-500">
+                <Trash2 className="h-2.5 w-2.5 shrink-0" />
+                Deleted
+              </span>
+            )}
+          </div>
+          {/* Its own row, and a generous cap: this is the fact a person scans
+              for, and the one the old layout cut in half. */}
+          {view.dataSourceId && (
+            <div className="flex min-w-0">
+              <ViewScopeBadge
+                workspaceId={view.workspaceId}
+                dataSourceId={view.dataSourceId}
+                dataSourceName={view.dataSourceName}
+                providerName={providerInfo?.providerName}
+                providerType={providerInfo?.providerType}
+                parts={['source']}
+                foldProviderIntoSource
+                wide
+              />
+            </div>
           )}
         </div>
 
-        {/* ── 4. Description (fixed 2-line height) — hidden in compact ── */}
+        {/* ── 4. Description — ONE line, always reserved, above the preview.
+            Every block above the illustration decides what height it starts
+            at, so this has to hold its space whether or not it has content —
+            below the preview instead, the row's card bottoms go ragged, which
+            reads worse than the reserve. Two reserved lines was forty pixels of
+            nothing on the large majority of views, which carry no description;
+            one line halves that and still tells a browsing reader what the
+            view is for. The full text is in the preview drawer. */}
         {showDescription && (
-          <div className={cn('min-h-[2.5rem]', sectionGap)}>
-            {view.description ? (
-              <p className="line-clamp-2 text-xs leading-relaxed text-ink-muted">
+          <div className={cn('min-h-[1.125rem]', sectionGap)}>
+            {view.description && (
+              <p className="line-clamp-1 text-xs leading-relaxed text-ink-muted">
                 {view.description}
               </p>
-            ) : (
-              <div />
             )}
           </div>
         )}
 
-        {/* ── 5. Preview area — hidden in compact density ── */}
+        {/* ── 5. Preview area — hidden in compact density ──
+            A CATALOGUE IS FOR SCANNING, so this stays small. Every MiniPreview
+            is drawn on a 120x48 viewBox and `preserveAspectRatio` defaults to
+            `meet`, which scales to the shorter side — in a wide, short box the
+            art lands centred with dead space either side, and it read as tiny
+            and narrow. Handing the frame the artwork's own 5:2 fixed that and
+            made it far worse: at full card width that is ~112px of decoration,
+            which turned a browsable grid into two and a half rows of cards.
+            
+            The picture is the same on every Context View — it says the type,
+            which the label above it already said — so it does not get to be the
+            biggest thing on the card. It keeps a modest fixed height and gives
+            up the width instead: decoration should lose that argument. */}
         {showPreview && (
-          <div className={cn('h-[3.75rem]', sectionGap)}>
+          <div className={cn('h-[4rem]', sectionGap)}>
             {hasPreview ? (
-              <div className="rounded-lg border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.015] px-2 py-1 overflow-hidden h-full">
+              <div className="h-full w-full rounded-lg border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.015] p-1 overflow-hidden">
                 <MiniPreview viewType={view.viewType} />
               </div>
             ) : (
@@ -480,9 +550,12 @@ export function ExplorerViewCard({
           </div>
         )}
 
-        {/* ── 6. Tags (fixed height) — hidden in compact density ── */}
+        {/* ── 6. Tags — hidden in compact density. Same reasoning as the
+            description: no reserved height, because the spacer below does the
+            aligning. The block still renders when there are no tags, because
+            ViewUsageNote lives here and often has something to say. */}
         {showTags && (
-        <div className={cn('min-h-[20px]', sectionGap)}>
+        <div className={sectionGap}>
           {/* Only when there is something to say. The counters live in the
               footer; this is the one usage fact worth a line of its own. */}
           <ViewUsageNote usage={usage} />
