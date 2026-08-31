@@ -23,7 +23,7 @@
  * bare text in a hairline outline while the workspace pill beside them was
  * properly tinted. The bracket form is exact and always compiles.
  */
-import { Database, Server } from 'lucide-react'
+import { Database, Layers, Server } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { workspaceColor } from '@/lib/workspaceColor'
@@ -36,6 +36,26 @@ interface ViewScopeBadgeProps {
   /** Provider the data source is built from (resolved via catalog → provider). */
   providerName?: string | null
   providerType?: string | null
+  /** The semantic layer the source is read through, from the same resolver. */
+  ontologyName?: string | null
+  ontologyVersion?: number | null
+  /**
+   * Name the provider inside the DATA SOURCE's tip instead of giving it a pill
+   * of its own.
+   *
+   * A catalogue card had six chips in a 250px row and wrapped onto three lines,
+   * which is what made a card of five facts read as overwhelming. Rendering the
+   * provider and the semantic layer as bare glyphs was worse: two anonymous
+   * squares read as broken pills, and the row still wrapped. The provider is
+   * infrastructure — nobody browsing sixty-five views picks one by its graph
+   * database — and it is a PROPERTY OF THE SOURCE, so folding it into that
+   * pill's tip loses nothing and buys back a whole chip for the semantic layer,
+   * which is a fact about meaning rather than plumbing.
+   *
+   * The drawer leaves this off: it has the width, and the chain below spells
+   * all four layers out in full anyway.
+   */
+  foldProviderIntoSource?: boolean
   /** 'sm' for cards/rows, 'md' for hero/drawer */
   size?: 'sm' | 'md'
   /** Hide the workspace pill — for contexts already scoped to one workspace
@@ -50,8 +70,11 @@ export function ViewScopeBadge({
   dataSourceName,
   providerName,
   providerType,
+  ontologyName,
+  ontologyVersion,
   size = 'sm',
   hideWorkspace,
+  foldProviderIntoSource,
 }: ViewScopeBadgeProps) {
   const wsColor = workspaceColor(workspaceId)
   const textSize = size === 'sm' ? 'text-[10px]' : 'text-xs'
@@ -95,9 +118,12 @@ export function ViewScopeBadge({
         <HoverTip
           label={dataSourceName ? `Data source · ${dataSourceName}` : 'Data source'}
           detail={
-            dataSourceName
-              ? `Everything in this view is drawn from ${dataSourceName}. Change the source and you change what the view can show.`
-              : 'Where this view draws its data from.'
+            (dataSourceName
+              ? `Everything in this view is drawn from ${dataSourceName}.`
+              : 'Where this view draws its data from.')
+            + (foldProviderIntoSource && providerName
+              ? ` Served by ${providerName}${providerType ? ` (${providerType})` : ''}.`
+              : '')
           }
         >
           <span
@@ -114,7 +140,7 @@ export function ViewScopeBadge({
       )}
 
       {/* Provider pill */}
-      {providerName && (
+      {providerName && !foldProviderIntoSource && (
         <HoverTip
           label={`Graph provider · ${providerName}`}
           detail={
@@ -132,6 +158,33 @@ export function ViewScopeBadge({
           >
             <Server className="h-2.5 w-2.5 shrink-0" />
             <span className="truncate">{providerName}</span>
+          </span>
+        </HoverTip>
+      )}
+
+      {/* Semantic layer pill — the ontology the source is read through.
+          The catalogue could never name this before: a view's own
+          `contextModelName` is a different, usually-empty field, while the id
+          that resolves to the ontology lives on the DATA SOURCE. It is the
+          same fact the view's own details panel prints as "Semantic layer". */}
+      {ontologyName && (
+        <HoverTip
+          label={`Semantic layer · ${ontologyName}`}
+          detail={
+            `The vocabulary this view reads its data through — the entity types and `
+            + `relationships it can show`
+            + (ontologyVersion != null ? `. Version ${ontologyVersion}.` : '.')
+          }
+        >
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 rounded-full border border-indigo-500/20 bg-indigo-500/[0.08] px-2 py-0.5 font-medium leading-none text-indigo-600 dark:text-indigo-400 min-w-0',
+              pillMax,
+              textSize,
+            )}
+          >
+            <Layers className="h-2.5 w-2.5 shrink-0" />
+            <span className="truncate">{ontologyName}</span>
           </span>
         </HoverTip>
       )}

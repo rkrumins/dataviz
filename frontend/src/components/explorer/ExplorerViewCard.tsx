@@ -10,7 +10,6 @@
 import { Link } from 'react-router-dom'
 import {
   Heart,
-  Box,
   ExternalLink,
   Pencil,
   AlertTriangle,
@@ -229,8 +228,6 @@ export function ExplorerViewCard({
   const overflowCount = tags.length - visibleTags.length
   const healthInfo = healthStatus ? HEALTH_INDICATOR[healthStatus] : null
   const hasPreview = view.viewType === 'hierarchy' || view.viewType === 'reference' || view.viewType === 'graph' || view.viewType === 'layered-lineage'
-  const showContextModel = view.contextModelName
-    && view.contextModelName.toLowerCase() !== view.name.toLowerCase()
 
   return (
     <div
@@ -417,7 +414,10 @@ export function ExplorerViewCard({
             dataSourceName={view.dataSourceName}
             providerName={providerInfo?.providerName}
             providerType={providerInfo?.providerType}
+            ontologyName={providerInfo?.ontologyName ?? view.contextModelName}
+            ontologyVersion={providerInfo?.ontologyVersion}
             hideWorkspace={hideWorkspaceInScope}
+            foldProviderIntoSource
           />
           <span
             title={vis.hint}
@@ -426,19 +426,13 @@ export function ExplorerViewCard({
             <VisIcon className="h-2.5 w-2.5" />
             {vis.label}
           </span>
-          {showContextModel && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-cyan-500/20 bg-cyan-500/8 px-2 py-0.5 text-[10px] font-medium text-cyan-600 dark:text-cyan-400 leading-none truncate max-w-[140px]">
-              <Box className="h-2.5 w-2.5 shrink-0" />
-              {view.contextModelName}
-            </span>
-          )}
           {healthInfo && (
             <span
               className={cn(
                 'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border',
                 healthStatus === 'broken'
-                  ? 'border-red-500/20 bg-red-500/8 text-red-500'
-                  : 'border-amber-500/20 bg-amber-500/8 text-amber-600 dark:text-amber-400',
+                  ? 'border-red-500/20 bg-red-500/[0.08] text-red-500'
+                  : 'border-amber-500/20 bg-amber-500/[0.08] text-amber-600 dark:text-amber-400',
               )}
               title={healthInfo.tooltip}
             >
@@ -447,7 +441,7 @@ export function ExplorerViewCard({
             </span>
           )}
           {isDeleted && (
-            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-red-500/20 bg-red-500/8 text-red-500">
+            <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none border border-red-500/20 bg-red-500/[0.08] text-red-500">
               <Trash2 className="h-2.5 w-2.5 shrink-0" />
               Deleted
             </span>

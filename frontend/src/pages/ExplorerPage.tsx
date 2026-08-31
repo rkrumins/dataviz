@@ -920,7 +920,6 @@ export function ExplorerPage() {
           ? () => handleDeleteRequest(previewView)
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
-        providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
         initialEditMode={previewEditMode}
         onSaved={() => refetch()}
       />

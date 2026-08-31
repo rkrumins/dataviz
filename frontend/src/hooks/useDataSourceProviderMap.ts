@@ -1,5 +1,6 @@
 /**
- * useDataSourceProviderMap — resolves the Provider behind every data source.
+ * useDataSourceProviderMap — resolves the Provider and the semantic layer
+ * behind every data source.
  *
  * Catalog-onboarded sources resolve via `DataSource.catalogItemId →
  * CatalogItem.providerId → Provider`; manual/blank sources (no catalog item)
@@ -14,6 +15,7 @@
 import { useMemo, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
+import { ontologyDefinitionService, type OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useAnyWorkspacePermission } from '@/store/auth'
@@ -21,6 +23,7 @@ import type { DataSourceProviderInfo } from '@/components/admin/workspace/useWor
 
 const EMPTY_CATALOG: CatalogItemResponse[] = []
 const EMPTY_PROVIDERS: ProviderResponse[] = []
+const EMPTY_ONTOLOGIES: OntologyDefinitionResponse[] = []
 
 export function useDataSourceProviderMap() {
   const workspaces = useWorkspacesStore(s => s.workspaces)
@@ -50,14 +53,32 @@ export function useDataSourceProviderMap() {
     enabled: canRead,
     staleTime: 5 * 60_000,
   })
+  // The semantic layer each source is read through. A view's own
+  // `contextModelName` is NOT this — that is the view's optional context model
+  // and is null on most views, which is why the catalogue could never name the
+  // ontology while the view's own details panel could: the id lives on the DATA
+  // SOURCE. One cached list serves every card on the page.
+  //
+  // Admin-gated with a silent 403 (same as catalog/providers), so a
+  // non-admin resolves to an empty list and callers simply omit the fact.
+  const ontologiesQuery = useQuery({
+    queryKey: ['ontologies', 'list'],
+    queryFn: () => ontologyDefinitionService.list(),
+    enabled: canRead,
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
   const catalogItems = catalogQuery.data ?? EMPTY_CATALOG
   const providers = providersQuery.data ?? EMPTY_PROVIDERS
+  const ontologies = ontologiesQuery.data ?? EMPTY_ONTOLOGIES
 
   const map = useMemo(() => {
     const catMap: Record<string, CatalogItemResponse> = {}
     for (const c of catalogItems) catMap[c.id] = c
     const provMap: Record<string, ProviderResponse> = {}
     for (const p of providers) provMap[p.id] = p
+    const ontMap: Record<string, OntologyDefinitionResponse> = {}
+    for (const o of ontologies) ontMap[o.id] = o
 
     const result: Record<string, DataSourceProviderInfo> = {}
     for (const ws of workspaces) {
@@ -69,6 +90,7 @@ export function useDataSourceProviderMap() {
         const providerId = cat?.providerId ?? ds.providerId
         if (!providerId) continue
         const prov = provMap[providerId]
+        const ont = ds.ontologyId ? ontMap[ds.ontologyId] : undefined
         result[ds.id] = {
           providerId,
           providerName: prov?.name || providerId,
@@ -77,11 +99,15 @@ export function useDataSourceProviderMap() {
           catalogItemName: cat?.name ?? ds.label,
           host: prov?.host,
           port: prov?.port,
+          // Only ever the resolved NAME. An unresolved id must stay absent
+          // rather than surface as a raw identifier the reader cannot use.
+          ontologyName: ont?.name,
+          ontologyVersion: ont?.version,
         }
       }
     }
     return result
-  }, [workspaces, catalogItems, providers])
+  }, [workspaces, catalogItems, providers, ontologies])
 
   const resolve = useCallback(
     (dataSourceId?: string | null): DataSourceProviderInfo | undefined =>
