@@ -207,3 +207,33 @@ async def test_the_lens_still_renders_when_the_lookup_fails(
     assert resp.status_code == 200, resp.text
     ev = next(e for e in resp.json()["events"] if e["actorId"] == "usr_x")
     assert ev["actorName"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_workspace_is_named_too(test_client: AsyncClient, db_session):
+    """"ws_4f21c8" tells a reader nothing they can act on."""
+    from backend.app.db.models import WorkspaceORM
+    db_session.add(WorkspaceORM(id="ws_named", name="Data Platform"))
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.workspace.member_bound",
+        payload={"workspace_id": "ws_named", "user_id": "usr_x", "role": "member"},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    ev = next(e for e in resp.json()["events"] if e["workspaceId"] == "ws_named")
+    assert ev["workspaceName"] == "Data Platform"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_workspace_id_is_not_given_a_name(
+    test_client: AsyncClient, db_session,
+):
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.workspace.member_bound",
+        payload={"workspace_id": "ws_gone", "user_id": "usr_x", "role": "member"},
+    )
+    await db_session.commit()
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    ev = next(e for e in resp.json()["events"] if e["workspaceId"] == "ws_gone")
+    assert ev["workspaceName"] is None

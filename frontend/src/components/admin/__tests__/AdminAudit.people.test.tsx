@@ -139,10 +139,10 @@ describe('the audit log names people', () => {
         expect(screen.getByText(/"extra": "kept"/)).toBeInTheDocument()
     })
 
-    it('links a person to the user list, pre-filtered by their id', async () => {
-        // The round trip: the log names the person, and the link carries the
-        // id so /admin/users arrives already filtered rather than showing
-        // everybody.
+    it('links a person to THEIR DETAILS, not to a list to search', async () => {
+        // The round trip: the log names the person, and the link opens that
+        // person's access drawer on /admin/users — a filtered list would still
+        // leave the reader a click away from the answer.
         list.mockResolvedValue({
             events: [event({
                 targetUserId: 'usr_ac3f19', targetUserName: 'John Doe',
@@ -152,7 +152,7 @@ describe('the audit log names people', () => {
         })
         render(<AdminAudit />)
         const link = (await screen.findByText('John Doe')).closest('a')
-        expect(link).toHaveAttribute('href', '/admin/users?q=usr_ac3f19')
+        expect(link).toHaveAttribute('href', '/admin/users?user=usr_ac3f19')
     })
 
     it('shows an em dash for an event that genuinely has no actor', async () => {
@@ -160,5 +160,26 @@ describe('the audit log names people', () => {
         render(<AdminAudit />)
         await screen.findByText('Role changed')
         expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+    })
+
+    it('names the workspace instead of printing its id', async () => {
+        list.mockResolvedValue({
+            events: [event({ workspaceId: 'ws_4f21c8', workspaceName: 'Data Platform' })],
+            nextCursor: null,
+        })
+        render(<AdminAudit />)
+        expect(await screen.findByText('Data Platform')).toBeInTheDocument()
+        expect(screen.queryByText('ws_4f21c8')).not.toBeInTheDocument()
+    })
+
+    it('keeps the workspace id when it resolves to nothing', async () => {
+        // A permanently removed workspace. Same rule as people: the id is the
+        // record, and a name must never be invented over it.
+        list.mockResolvedValue({
+            events: [event({ workspaceId: 'ws_gone' })],
+            nextCursor: null,
+        })
+        render(<AdminAudit />)
+        expect(await screen.findByText('ws_gone')).toBeInTheDocument()
     })
 })

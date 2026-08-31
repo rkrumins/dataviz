@@ -479,7 +479,7 @@ function AuditPerson({ id, name, email, deleted, role }: {
                 </span>
                 <span className="min-w-0 leading-tight">
                     <a
-                        href={`/admin/users?q=${encodeURIComponent(id)}`}
+                        href={`/admin/users?user=${encodeURIComponent(id)}`}
                         onClick={e => e.stopPropagation()}
                         className={cn(
                             'block truncate hover:text-accent-lineage hover:underline',
@@ -591,15 +591,32 @@ function AuditRow({ event }: { event: AuditEvent }) {
                         role={event.targetRole ? `Role: ${event.targetRole}` : null}
                     />
                 </td>
-                <td className="px-4 py-2.5 text-xs text-ink-secondary">
+                <td className="px-4 py-2.5 text-xs text-ink-secondary max-w-[180px]">
                     {event.workspaceId ? (
-                        <a
-                            href={`/workspaces/${event.workspaceId}`}
-                            onClick={e => e.stopPropagation()}
-                            className="font-mono text-[11px] hover:text-accent-lineage hover:underline"
+                        <HoverTip
+                            label={event.workspaceName ? `Workspace · ${event.workspaceName}` : 'Workspace'}
+                            detail={
+                                event.workspaceName
+                                    ? `${event.workspaceId} — open it`
+                                    : `${event.workspaceId} — no workspace matches this id. It may have been permanently removed.`
+                            }
                         >
-                            {event.workspaceId}
-                        </a>
+                            <a
+                                href={`/workspaces/${event.workspaceId}`}
+                                onClick={e => e.stopPropagation()}
+                                className={cn(
+                                    'block truncate hover:text-accent-lineage hover:underline',
+                                    // Named: read it. Unnamed: the id IS the answer,
+                                    // so it keeps the monospace that makes an
+                                    // identifier scannable.
+                                    event.workspaceName
+                                        ? 'text-xs font-medium text-ink'
+                                        : 'font-mono text-[11px]',
+                                )}
+                            >
+                                {event.workspaceName || event.workspaceId}
+                            </a>
+                        </HoverTip>
                     ) : (
                         <span className="text-ink-muted">—</span>
                     )}
@@ -622,12 +639,12 @@ function AuditRow({ event }: { event: AuditEvent }) {
                             <IdField
                                 label="Actor id"
                                 value={event.actorId}
-                                href={event.actorId ? `/admin/users?q=${encodeURIComponent(event.actorId)}` : undefined}
+                                href={event.actorId ? `/admin/users?user=${encodeURIComponent(event.actorId)}` : undefined}
                             />
                             <IdField
                                 label="Target user id"
                                 value={event.targetUserId}
-                                href={event.targetUserId ? `/admin/users?q=${encodeURIComponent(event.targetUserId)}` : undefined}
+                                href={event.targetUserId ? `/admin/users?user=${encodeURIComponent(event.targetUserId)}` : undefined}
                             />
                             <IdField
                                 label="Workspace id"

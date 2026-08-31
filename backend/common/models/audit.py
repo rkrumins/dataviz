@@ -44,6 +44,7 @@ class AuditEventResponse(BaseModel):
     # `*_deleted` marks an account that is soft-deleted but still named: the
     # log is a record of what happened, and "who was that account we removed"
     # is precisely the question it exists to answer.
+    workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
     actor_name: Optional[str] = Field(default=None, alias="actorName")
     actor_email: Optional[str] = Field(default=None, alias="actorEmail")
     actor_deleted: bool = Field(default=False, alias="actorDeleted")

@@ -606,7 +606,21 @@ async def list_audit_events(
         logger.warning("audit: could not resolve user identities for this page", exc_info=True)
         identities = {}
 
+    # Same treatment for the workspace an event happened in: "ws_4f21c8" tells
+    # a reader nothing they can act on. Deleted workspaces are included for the
+    # same reason deleted users are — an event in a workspace that has since
+    # been torn down is among the more interesting rows in the log.
+    try:
+        workspace_names = await user_repo.get_workspace_names_by_ids(
+            session, [ev.workspace_id for ev in out if ev.workspace_id],
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("audit: could not resolve workspace names for this page", exc_info=True)
+        workspace_names = {}
+
     for ev in out:
+        if ev.workspace_id:
+            ev.workspace_name = workspace_names.get(ev.workspace_id)
         actor = identities.get(ev.actor_id) if ev.actor_id else None
         if actor:
             ev.actor_name = actor["name"] or None

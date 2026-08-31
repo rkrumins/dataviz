@@ -13,7 +13,7 @@
  * hands back the id, and the user list both SHOWS that id and FINDS a user by
  * it.
  */
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -32,6 +32,7 @@ vi.mock('@/components/access/AccessSummary', () => ({ AccessSummary: () => null 
 
 import { AdminUsers } from '../AdminUsers'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
+import { permissionsService } from '@/services/permissionsService'
 
 const listUsers = vi.mocked(adminUserService.listUsers)
 
@@ -51,6 +52,7 @@ function user(over: Partial<AdminUserResponse> = {}): AdminUserResponse {
 
 beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(permissionsService.getUserAccess).mockResolvedValue({} as never)
     listUsers.mockResolvedValue([user()])
     window.history.replaceState({}, '', '/admin/users')
 })
@@ -111,5 +113,23 @@ describe('/admin/users — the id is on the row', () => {
         window.history.replaceState({}, '', '/admin/users?q=nope')
         expect(() => render(<AdminUsers />)).not.toThrow()
         await screen.findByPlaceholderText(/search by name/i)
+    })
+
+    it('opens THAT PERSON when the audit log links with ?user=', async () => {
+        // A filtered list still leaves the reader a click from the answer. The
+        // audit row links to their details, so the drawer opens on arrival.
+        window.history.replaceState({}, '', '/admin/users?user=usr_ac3f19')
+        render(<AdminUsers />)
+        await waitFor(() =>
+            expect(permissionsService.getUserAccess).toHaveBeenCalledWith('usr_ac3f19'))
+    })
+
+    it('ignores a stale ?user= link rather than opening the wrong person', async () => {
+        // An account removed since the log entry was written. Opening the
+        // nearest match would be worse than opening nothing.
+        window.history.replaceState({}, '', '/admin/users?user=usr_deleted_long_ago')
+        render(<AdminUsers />)
+        await screen.findByPlaceholderText(/search by name/i)
+        expect(permissionsService.getUserAccess).not.toHaveBeenCalled()
     })
 })

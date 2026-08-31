@@ -35,6 +35,11 @@ export interface AuditEvent {
      *
      *  `*Deleted` marks an account that is soft-deleted but still named: an
      *  audit log's most valuable row is often about an account that is gone. */
+    /** The workspace's name, same contract: null means unresolved, and the
+     *  id stays authoritative. Deleted workspaces are still named — an event
+     *  in a workspace that has since been torn down is among the more
+     *  interesting rows in a log. */
+    workspaceName?: string | null
     actorName?: string | null
     actorEmail?: string | null
     actorDeleted?: boolean

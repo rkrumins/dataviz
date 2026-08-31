@@ -8,7 +8,7 @@
  * - Admin password reset (direct or generate token)
  * - Password reset request notifications
  */
-import { useState, useEffect, useCallback, useMemo, createElement } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, createElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users, CheckCircle2, XCircle, Clock, Shield, AlertCircle,
@@ -336,13 +336,18 @@ export function AdminUsers() {
     // needed to be and which two existing test files depend on. A mount-time
     // read is all this is: after that the box belongs to the operator, and
     // re-syncing it from the URL would fight their typing.
-    const [search, setSearch] = useState(() => {
+    // `?user=<id>` is the audit log's deep link to ONE person: it seeds the
+    // search so the list behind shows them, and opens their access drawer once
+    // the list has loaded. `?q=` is the plainer "search for this" link.
+    const deepLink = useMemo(() => {
         try {
-            return new URLSearchParams(window.location.search).get('q') ?? ''
+            const p = new URLSearchParams(window.location.search)
+            return { user: p.get('user'), q: p.get('q') }
         } catch {
-            return ''
+            return { user: null, q: null }
         }
-    })
+    }, [])
+    const [search, setSearch] = useState(() => deepLink.user ?? deepLink.q ?? '')
     const [sortField, setSortField] = useState<SortField>('createdAt')
     const [sortDir, setSortDir] = useState<SortDir>('desc')
     const [page, setPage] = useState(0)
@@ -423,6 +428,19 @@ export function AdminUsers() {
     }, [])
 
     useEffect(() => { fetchUsers() }, [fetchUsers])
+
+    // Open the linked person's details once, after the list arrives — the
+    // drawer needs the full user object, which only exists then. `useRef`
+    // rather than clearing the param, so a refresh does not silently drop the
+    // reader back onto a list they arrived past.
+    const deepLinkOpened = useRef(false)
+    useEffect(() => {
+        if (deepLinkOpened.current || !deepLink.user || users.length === 0) return
+        const match = users.find(u => u.id === deepLink.user)
+        if (!match) return          // a stale link, or an account since removed
+        deepLinkOpened.current = true
+        void openAccessDrawer(match)
+    }, [users, deepLink.user, openAccessDrawer])
 
     // Refresh on a permissions change (silent refresh, 60s poller, or
     // cross-tab BroadcastChannel) so a binding/role mutation made

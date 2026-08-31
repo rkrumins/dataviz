@@ -25,6 +25,7 @@ from backend.app.db.models import (
     UserApprovalORM,
     OutboxEventORM,
     RoleBindingORM,
+    WorkspaceORM,
 )
 from backend.common.identity_provenance import (
     managed_fields as _managed_fields,
@@ -964,3 +965,30 @@ async def get_identities_by_ids(
         }
         for r in rows
     }
+
+
+async def get_workspace_names_by_ids(
+    session: AsyncSession, workspace_ids: list[str],
+) -> dict[str, str]:
+    """Name for a batch of workspace ids, keyed by id.
+
+    The sibling of :func:`get_identities_by_ids`, and it exists for the same
+    reason: an audit row that says an event happened in ``ws_4f21c8`` has told
+    the reader nothing they can act on.
+
+    DELETED AND INACTIVE WORKSPACES ARE INCLUDED. A log is a record of what
+    happened, and an event in a workspace that has since been torn down is
+    among the more interesting rows in it — filtering those out would leave
+    exactly those rows unreadable.
+
+    An id that resolves to nothing is ABSENT from the map, and the caller keeps
+    showing the raw id: a hard-deleted workspace is a real state, and inventing
+    a name for it would claim something the database cannot support.
+    """
+    ids = [i for i in dict.fromkeys(workspace_ids) if i]
+    if not ids:
+        return {}
+    rows = (await session.execute(
+        select(WorkspaceORM.id, WorkspaceORM.name).where(WorkspaceORM.id.in_(ids))
+    )).all()
+    return {r[0]: r[1] for r in rows if r[1]}
