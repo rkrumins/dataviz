@@ -40,6 +40,7 @@ import { usePublishReceiptStore } from '@/store/publishReceiptStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
+import { MOTION } from '@/lib/motion'
 
 function Section({ icon: Icon, title, right, children }: {
   icon: React.ComponentType<{ className?: string }>; title: string; right?: React.ReactNode; children: React.ReactNode
@@ -241,7 +242,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           exit is interrupted; without one there is nothing to strand. */}
       <motion.aside
         className="fixed right-0 top-0 h-full w-[520px] max-w-[92vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
-        initial={{ x: 520 }} animate={{ x: 0 }} transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+        initial={{ x: 520 }} animate={{ x: 0 }} transition={MOTION.drawerSlide}
       >
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-4 border-b border-glass-border/60">

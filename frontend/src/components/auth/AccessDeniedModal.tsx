@@ -32,6 +32,7 @@ import {
 } from '@/services/accessRequestsService'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import type { View } from '@/services/viewApiService'
+import { MOTION } from '@/lib/motion'
 
 
 interface DenialEvent {
@@ -142,7 +143,7 @@ export function AccessDeniedModal() {
                     initial={{ opacity: 0, y: 12, scale: 0.96 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: 8, scale: 0.96 }}
-                    transition={{ type: 'spring', damping: 22, stiffness: 320 }}
+                    transition={MOTION.modalSpring}
                     className={cn(
                         'fixed bottom-6 left-1/2 -translate-x-1/2 z-[80]',
                         'w-[min(440px,calc(100vw-2rem))] pointer-events-auto',

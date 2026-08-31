@@ -30,6 +30,7 @@ import { DraftStatusPill, OwnerAvatar } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
 import { CommitDialog } from './CommitDialog'
+import { MOTION } from '@/lib/motion'
 
 type SortKey = 'recent' | 'name'
 
@@ -110,7 +111,7 @@ export function BranchManager({
         <motion.aside
           className="pointer-events-auto relative h-full w-full max-w-md bg-canvas border-l border-glass-border shadow-2xl flex flex-col"
           initial={{ x: 32, opacity: 0.6 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 32, opacity: 0 }}
-          transition={{ type: 'spring', stiffness: 380, damping: 38 }}
+          transition={MOTION.modalSpring}
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
