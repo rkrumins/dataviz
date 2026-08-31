@@ -13,8 +13,10 @@ These tests pin the four things that make such a warning trustworthy:
 the numbers reach every probe that shares ``_redis_info_detail``; they
 are carried PER SHARD (a tier 60% full on average can hold a shard at
 97%); the verdict fires on real pressure; and it stays SILENT on
-``maxmemory: 0`` (unlimited), on absent fields, and under an eviction
-policy — where sitting at the cap is the design, not an outage.
+``maxmemory: 0`` (unlimited), on absent fields, and under an
+``allkeys-*`` eviction policy — where sitting at the cap is the design,
+not an outage — while still reporting a ``volatile-*`` tier, which only
+evicts keys that HAVE a TTL.
 """
 import sys
 import types
@@ -253,7 +255,7 @@ async def test_used_without_a_cap_stays_silent(fake_redis, standalone):
 
 
 @pytest.mark.asyncio
-async def test_eviction_policy_at_the_cap_is_the_design_not_an_outage(
+async def test_allkeys_eviction_at_the_cap_is_the_design_not_an_outage(
         fake_redis, standalone):
     """A cache under ``allkeys-lru`` is SUPPOSED to sit at its cap — it evicts,
     it does not refuse writes. Degrading on that is how a dashboard becomes
@@ -266,6 +268,52 @@ async def test_eviction_policy_at_the_cap_is_the_design_not_an_outage(
     assert res["status"] == "healthy"
     assert res["detail"]["memoryUsedPct"] > 95
     assert "memoryPressure" not in res["detail"]
+
+
+@pytest.mark.asyncio
+async def test_volatile_policy_at_the_cap_is_not_silent(fake_redis):
+    """FOUND BROKEN: the gate silenced ANY policy that was not ``noeviction``,
+    but only ``allkeys-*`` is guaranteed to have something to evict.
+    ``volatile-*`` evicts only keys that carry a TTL and falls back to
+    noeviction semantics — refusing writes — the moment none is left.
+
+    This is the deployment's OWN shipped default: the bus/cache Redis runs
+    ``--maxmemory 2gb --maxmemory-policy volatile-lru`` (docker-compose.yml),
+    and its bulk keys carry NO TTL — the ``job:events:agg_*`` streams and the
+    ``graphcache:gen:*`` markers are all ``ttl=-1``. At 99% of that cap the
+    tile said healthy and reported nothing at all."""
+    from backend.app.services.system_status import probes
+
+    class _Client:
+        async def ping(self):
+            return True
+
+        async def info(self, *a, **kw):
+            return _info(used=int(1.98 * G), maxmemory=2 * G,
+                         policy="volatile-lru")
+
+    res = await probes._redis_probe("busRedis", "Redis · Bus", _Client(), 1.0)
+    assert res["status"] == "degraded"
+    pressure = res["detail"]["memoryPressure"]
+    assert pressure["level"] == "critical"
+    assert pressure["policy"] == "volatile-lru"
+    assert pressure["usedPct"] == 99.0
+    # Says WHY it is still a cliff instead of claiming writes ALREADY fail.
+    assert "no key with a TTL" in pressure["reason"]
+
+
+@pytest.mark.asyncio
+async def test_an_absent_policy_is_reportable_not_silent(fake_redis, standalone):
+    """Redis' own default is ``noeviction``, and a node that does not report
+    the field is not thereby evicting. The ``allkeys`` gate has to survive a
+    missing field rather than crash on it."""
+    fake_redis["default_info"] = _info(used=int(11.4 * G), maxmemory=12 * G)
+    from backend.app.services.system_status import probes
+
+    res = await probes.probe_falkordb()
+    assert res["status"] == "degraded"
+    assert res["detail"]["memoryPressure"]["level"] == "critical"
+    assert "policy noeviction" in res["detail"]["memoryPressure"]["reason"]
 
 
 # ── 4. per shard, not just per tier ──────────────────────────────────

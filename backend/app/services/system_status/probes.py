@@ -285,12 +285,18 @@ def _memory_pressure(detail: dict, scope: str,
     """Used-memory verdict for ONE node, or None when there is nothing to say.
 
     Deliberately silent unless the node has an explicit cap it is genuinely
-    near. ``maxmemory: 0`` is unlimited (0% of nothing, not 100% full), an
+    near. ``maxmemory: 0`` is unlimited (0% of nothing, not 100% full), and an
     absent field is not a fault — a replica, a Memorystore instance that omits
-    the section, a single-node dev box — and under an EVICTION policy sitting
-    at the cap is the design: the instance evicts, it does not refuse writes.
-    Only ``noeviction`` (FalkorDB's mode, and Redis' own default) turns a full
-    instance into rejected writes, so only that degrades a tile.
+    the section, a single-node dev box.
+
+    Only ``allkeys-*`` earns silence AT the cap: it can always evict something,
+    so sitting there is the design, not an outage. ``volatile-*`` evicts only
+    keys that carry a TTL and reverts to noeviction semantics — refused writes
+    — the moment none is left, which is not hypothetical here: the bus/cache
+    Redis ships ``volatile-lru`` while its bulk keys (the ``job:events:agg_*``
+    streams, the ``graphcache:gen:*`` markers) carry no TTL at all. So
+    ``noeviction`` (FalkorDB's mode, and Redis' own default), every
+    ``volatile-*``, and an absent policy all report.
 
     The verdict is its OWN signal rather than a fifth ``status`` word: the tile
     status stays in the healthy/degraded/down/unknown vocabulary the dashboard
@@ -301,13 +307,18 @@ def _memory_pressure(detail: dict, scope: str,
     if pct is None:
         return None
     policy = detail.get("maxmemoryPolicy")
-    if policy is not None and policy != "noeviction":
+    if isinstance(policy, str) and policy.startswith("allkeys"):
         return None
     warn, critical = _memory_thresholds()
+    # Under ``volatile-*`` the cliff is real but conditional; say which, rather
+    # than claim writes are already failing on a node that can still evict.
+    refused = ("writes are refused once no key with a TTL is left to evict"
+               if isinstance(policy, str) and policy.startswith("volatile")
+               else "writes are refused")
     if pct >= critical:
-        level, lead = "critical", "at the cap writes are refused"
+        level, lead = "critical", f"at the cap {refused}"
     elif pct >= warn:
-        level, lead = "warn", "approaching the cap, where writes are refused"
+        level, lead = "warn", f"approaching the cap, where {refused}"
     else:
         return None
     return {
