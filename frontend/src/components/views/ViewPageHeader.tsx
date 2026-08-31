@@ -265,9 +265,12 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // read-only row naming the tier; both are this button — the verb is the
     // label (it is what people come looking for), the audience is the icon and
     // the sentence on hover.
+    // No trailing full stop — every tip on this bar is a fragment or a single
+    // sentence and they all end the same way, which is half of what "one
+    // voice" means.
     const shareTip = visibility
-        ? `Who can see this view: ${visibilityDescription(visibility, { appName, workspaceName })}.`
-        : 'Choose who can see this view, and who to share it with.'
+        ? `Who can see this view: ${visibilityDescription(visibility, { appName, workspaceName })}`
+        : 'Choose who can see this view, and who to share it with'
 
     // A pending ask to publish is state OF THE VIEW, so it belongs on the
     // view — not only in the admin queue and the Share dialog, which is

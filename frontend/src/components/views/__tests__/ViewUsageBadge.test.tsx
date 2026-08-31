@@ -99,13 +99,16 @@ describe('ViewUsageBadge', () => {
         })
         const { container } = renderBadge()
         const caption = await screen.findByText('opens per day')
-        expect(container.querySelector('svg > title')).toBeNull()
+        // ANY <title> in the chart, not just the root one: the per-point hit
+        // rects carried one each, so hovering a point raised an OS pill with a
+        // bare number ON TOP of the card below. Two tooltips, one hover.
+        expect(container.querySelectorAll('svg title')).toHaveLength(0)
 
         await user.hover(caption)
         const tip = await screen.findByRole('tooltip')
         expect(tip).toHaveTextContent('12 opens on the busiest day')
         // The figure is not on the surface, so the tip earns its keep.
-        expect(tip).toHaveTextContent(/No opens at all on|Opened on every one/)
+        expect(tip).toHaveTextContent(/No opens at all on|Opened on every day/)
     })
 
     it('calls out a view nobody opens — and names the window it looked at', async () => {

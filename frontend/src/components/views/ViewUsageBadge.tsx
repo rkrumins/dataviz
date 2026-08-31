@@ -130,9 +130,12 @@ export function ViewUsageBadge({ viewId, className }: {
                             accent={TIP_ACCENT.trend}
                             figure={`${compact(peak)} ${peak === 1 ? 'open' : 'opens'} on the busiest day`}
                             caption={`${daysAgoPhrase(peakAgo)}, in the last ${USAGE_WINDOW_DAYS} days`}
+                            /* The series can carry one more sample than the
+                               window is named for, so it never states a total
+                               that disagrees with the "last 30 days" above. */
                             footnote={quietDays > 0
-                                ? `No opens at all on ${quietDays} of those ${trend.length} days`
-                                : `Opened on every one of those ${trend.length} days`}
+                                ? `No opens at all on ${quietDays} of those days`
+                                : 'Opened on every day in the window'}
                         />
                     )}
                 >
