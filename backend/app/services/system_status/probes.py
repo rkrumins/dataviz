@@ -76,6 +76,38 @@ DEAD_CONSUMER_IDLE_MS = 5 * 60 * 1000
 # How many recent DLQ entries to sample for the reason/offender breakdown.
 _DLQ_SAMPLE = 200
 
+# ── Used-memory thresholds (percent of maxmemory) ────────────────────
+# Overridable per deployment via REDIS_MEMORY_WARN_PCT / _CRITICAL_PCT.
+#
+# WHY these numbers. Redis/FalkorDB enforce maxmemory against used_memory,
+# and under `noeviction` crossing it does not slow down — it REFUSES every
+# write with "OOM command not allowed". So the useful question is not "is
+# memory high" but "how many more writes fit".
+#
+# 85% warn: on the reference topology (40gb per shard, ~22GB planned — see
+# falkordb_materialize._max_materialized_edges) that leaves ~6GB, about one
+# large aggregated layer, and rebalancing means MOVING A GRAPH — an operator
+# task measured in hours, not seconds. Planned steady state is ~55%, so a
+# healthy cluster never reaches this.
+# 95% critical: a graph write allocates in bursts, and the materializer's own
+# backstop is sized at ~12.5GB per shard; the last 5% of a 40GB shard is far
+# less than one materialization's step. At 95% the NEXT publish is the one
+# that gets the OOM. (The incident instance was at 12.93G of a 12.00G cap.)
+_MEMORY_WARN_PCT = 85.0
+_MEMORY_CRITICAL_PCT = 95.0
+
+# The consequence clause for a graph node — what an operator actually loses
+# when FalkorDB refuses writes (the 14-hour silent outage this warning exists
+# to prevent). Other tiers get the generic clause.
+_MEMORY_IMPACT_GRAPH = (
+    "publishes fail, projection heals stall behind the watermark and a data "
+    "source's aggregated lineage silently disappears until it is rebuilt; "
+    "free memory or move a graph to another shard"
+)
+_MEMORY_IMPACT_DEFAULT = (
+    "writes fail until memory is freed or maxmemory is raised"
+)
+
 
 # ── Shared lazy singletons (never created at import time) ───────────
 
@@ -171,16 +203,37 @@ def _msg_id_to_ms(msg_id: Any) -> Optional[int]:
 
 # ── Redis INFO curation (shared by bus / cache / falkordb probes) ────
 
+def _as_int(value: Any) -> Optional[int]:
+    """INFO numbers arrive as int or str depending on client/parser."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _redis_info_detail(info: dict) -> dict:
     """Curated, host-free subset of INFO. Missing fields → None
-    (Memorystore blocks/omits some sections — absence is never a fault)."""
+    (Memorystore blocks/omits some sections — absence is never a fault).
+
+    ``usedMemory``/``maxmemory`` are the NUMERIC pair: ``used_memory_human``
+    alone cannot be compared to a cap, so nothing downstream could compute
+    headroom and a full instance was invisible until it started refusing
+    writes. ``memoryUsedPct`` is None whenever there is no answer — no cap
+    (``maxmemory: 0`` is unlimited, not full) or a missing field."""
     def g(key: str):
         return info.get(key)
 
+    used_memory = _as_int(g("used_memory"))
+    maxmemory = _as_int(g("maxmemory"))
     return {
         "version": g("redis_version"),
         "uptimeS": g("uptime_in_seconds"),
         "usedMemoryHuman": g("used_memory_human"),
+        "usedMemory": used_memory,
+        "maxmemory": maxmemory,
+        "maxmemoryPolicy": g("maxmemory_policy"),
+        "memoryUsedPct": (round(used_memory / maxmemory * 100, 1)
+                          if used_memory is not None and maxmemory else None),
         "memFragmentationRatio": g("mem_fragmentation_ratio"),
         "connectedClients": g("connected_clients"),
         "blockedClients": g("blocked_clients"),
@@ -202,6 +255,75 @@ def _redis_persistence_reasons(detail: dict) -> list[str]:
     if detail.get("loading"):
         reasons.append("loading dataset")
     return reasons
+
+
+def _memory_thresholds() -> tuple[float, float]:
+    """(warn, critical) used-memory percentages; env overrides the defaults.
+    A junk value must never silently DISABLE the warning, so it falls back."""
+    def pct(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("%s=%r is not a number; using %s", name, raw, default)
+            return default
+        return value if 0 < value <= 100 else default
+
+    warn = pct("REDIS_MEMORY_WARN_PCT", _MEMORY_WARN_PCT)
+    return warn, max(pct("REDIS_MEMORY_CRITICAL_PCT", _MEMORY_CRITICAL_PCT), warn)
+
+
+def _gb(num_bytes: Optional[int]) -> str:
+    """Redis' own INFO units, so the message reads like the incident did."""
+    return "?" if num_bytes is None else f"{num_bytes / 1024 ** 3:.2f}G"
+
+
+def _memory_pressure(detail: dict, scope: str,
+                     impact: str = _MEMORY_IMPACT_DEFAULT) -> Optional[dict]:
+    """Used-memory verdict for ONE node, or None when there is nothing to say.
+
+    Deliberately silent unless the node has an explicit cap it is genuinely
+    near. ``maxmemory: 0`` is unlimited (0% of nothing, not 100% full), an
+    absent field is not a fault — a replica, a Memorystore instance that omits
+    the section, a single-node dev box — and under an EVICTION policy sitting
+    at the cap is the design: the instance evicts, it does not refuse writes.
+    Only ``noeviction`` (FalkorDB's mode, and Redis' own default) turns a full
+    instance into rejected writes, so only that degrades a tile.
+
+    The verdict is its OWN signal rather than a fifth ``status`` word: the tile
+    status stays in the healthy/degraded/down/unknown vocabulary the dashboard
+    already speaks — a full instance still answers PING and serves reads, so
+    "down" would be a lie — while ``level`` lets the UI and the operator tell
+    "this shard is filling" apart from "this shard is unreachable"."""
+    pct = detail.get("memoryUsedPct")
+    if pct is None:
+        return None
+    policy = detail.get("maxmemoryPolicy")
+    if policy is not None and policy != "noeviction":
+        return None
+    warn, critical = _memory_thresholds()
+    if pct >= critical:
+        level, lead = "critical", "at the cap writes are refused"
+    elif pct >= warn:
+        level, lead = "warn", "approaching the cap, where writes are refused"
+    else:
+        return None
+    return {
+        "level": level,
+        "usedPct": pct,
+        "usedMemory": detail.get("usedMemory"),
+        "maxmemory": detail.get("maxmemory"),
+        "policy": policy,
+        "scope": scope,
+        "reason": (
+            f"{scope} memory {pct:.0f}% full "
+            f"({_gb(detail.get('usedMemory'))} of a {_gb(detail.get('maxmemory'))} "
+            f"cap, policy {policy or 'noeviction'}) — "
+            f"{lead} (OOM command not allowed): {impact}"
+        ),
+    }
 
 
 # ── Postgres stats (shared by management / graphver probes) ─────────
@@ -372,7 +494,12 @@ async def probe_graphver_db() -> dict:
 
 
 async def _redis_probe(key: str, label: str, client, budget: float,
-                       extra: Optional[dict] = None) -> dict:
+                       extra: Optional[dict] = None,
+                       scope: Optional[str] = None,
+                       memory_impact: str = _MEMORY_IMPACT_DEFAULT) -> dict:
+    """``scope`` names the node in the memory message (an endpoint where the
+    caller knows one); ``memory_impact`` is the consequence clause for THIS
+    tier — what the operator loses when it starts refusing writes."""
     started = time.monotonic()
     try:
         async with asyncio.timeout(budget):
@@ -389,6 +516,10 @@ async def _redis_probe(key: str, label: str, client, budget: float,
     if extra:
         detail.update(extra)
     reasons = _redis_persistence_reasons(detail)
+    pressure = _memory_pressure(detail, scope or label, memory_impact)
+    if pressure:
+        detail["memoryPressure"] = pressure
+        reasons.append(pressure["reason"])
     if reasons:
         detail["reasons"] = reasons
     return _svc(key, label, "degraded" if reasons else "healthy",
@@ -462,8 +593,9 @@ async def probe_cache_redis() -> dict:
                 "hitRate": hit_rate,
                 "evictedKeys": info.get("evicted_keys"),
                 "expiredKeys": info.get("expired_keys"),
-                "maxmemory": info.get("maxmemory"),
-                "maxmemoryPolicy": info.get("maxmemory_policy"),
+                # maxmemory / maxmemoryPolicy now come from the SHARED detail
+                # (every tier has a cap and the same cliff), so they are no
+                # longer re-read here.
                 "keys": await client.dbsize(),
             })
     except Exception as exc:
@@ -508,7 +640,10 @@ async def _falkor_node_probe(
         connect_timeout=connect_timeout, socket_timeout=socket_timeout,
     )
     try:
-        result = await _redis_probe("falkordbNode", label, client, budget)
+        result = await _redis_probe(
+            "falkordbNode", label, client, budget,
+            scope=f"{host}:{port}", memory_impact=_MEMORY_IMPACT_GRAPH,
+        )
         if result["status"] != "down":
             # Best-effort — GRAPH.LIST failing alone is not a fault. On a cluster
             # this is the count of keys in THIS node's slots.
@@ -603,6 +738,11 @@ async def probe_falkordb() -> dict:
         result = await _falkor_node_probe(
             host, port, "FalkorDB · Sentinel", **node_probe_kw,
         )
+        # The node probe stamps its own "falkordbNode" key; the TILE key is
+        # "falkordb" (what the dashboard switches on, and what the cluster
+        # branch already emits). Without this the standalone/sentinel tile
+        # rendered no work signal at all — no graph count, no memory, no master.
+        result["key"] = "falkordb"
         result["detail"]["mode"] = "sentinel"
         result["detail"]["master"] = f"{host}:{port}"
         result["detail"].update(graph_conf_detail)
@@ -612,6 +752,7 @@ async def probe_falkordb() -> dict:
         result = await _falkor_node_probe(
             cfg.host, cfg.port, "FalkorDB", **node_probe_kw,
         )
+        result["key"] = "falkordb"                       # see the sentinel branch
         result["detail"]["mode"] = "standalone"
         result["detail"].update(graph_conf_detail)
         if result["status"] == "down" and os.getenv("FALKORDB_HOST") is None:
@@ -651,6 +792,13 @@ async def probe_falkordb() -> dict:
     else:
         status = "healthy"
 
+    # Memory is a PER-SHARD fact: a graph key lives entirely on one node, so a
+    # tier 60% full on average can hold a shard at 97% — one publish from the
+    # same outage. Carry each shard's numbers through and name the worst.
+    pressured = [s for s in up if s["detail"].get("memoryPressure")]
+    if pressured and status == "healthy":
+        status = "degraded"
+
     counts = [s["detail"].get("graphCount") for s in up]
     detail = {
         "mode": "cluster",
@@ -660,14 +808,21 @@ async def probe_falkordb() -> dict:
         "graphCount": sum(c for c in counts if c is not None) if counts else None,
         "shards": [
             {"endpoint": s["detail"].get("endpoint"), "status": s["status"],
-             "latencyMs": s.get("latencyMs"), "graphCount": s["detail"].get("graphCount")}
+             "latencyMs": s.get("latencyMs"), "graphCount": s["detail"].get("graphCount"),
+             "usedMemory": s["detail"].get("usedMemory"),
+             "maxmemory": s["detail"].get("maxmemory"),
+             "memoryUsedPct": s["detail"].get("memoryUsedPct"),
+             "memoryLevel": (s["detail"].get("memoryPressure") or {}).get("level")}
             for s in shards
         ],
     }
-    if down:
-        detail["reasons"] = [
-            f"shard {s['detail'].get('endpoint')} unreachable" for s in down
-        ]
+    reasons = [f"shard {s['detail'].get('endpoint')} unreachable" for s in down]
+    if pressured:
+        worst = max(pressured, key=lambda s: s["detail"]["memoryUsedPct"])
+        detail["memoryPressure"] = worst["detail"]["memoryPressure"]
+        reasons += [s["detail"]["memoryPressure"]["reason"] for s in pressured]
+    if reasons:
+        detail["reasons"] = reasons
     latencies = [s["latencyMs"] for s in up if s.get("latencyMs") is not None]
     return _svc("falkordb", "FalkorDB · Cluster", status,
                 latency_ms=max(latencies) if latencies else None,
