@@ -17,7 +17,21 @@
  * that nothing the block carried was simply dropped on the floor.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+
+/** Hover a control and read the app's own tooltip off it.
+ *
+ *  The toolbar spoke OS chrome — a one-second native pill in a register that
+ *  belongs to no part of this product — for every control in it. It speaks
+ *  `HoverTip` now, like the page header above it. A disabled control
+ *  dispatches no mouse events of its own, which is exactly why HoverTip lets
+ *  the pointer fall through to its wrapper: the "why is this greyed out?" tip
+ *  is the one that matters most. */
+async function tipOf(el: HTMLElement): Promise<HTMLElement> {
+  await userEvent.setup().hover(el)
+  return screen.findByRole('tooltip')
+}
 import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
 import { stubSession } from '@/test/stubSearchSession'
 
@@ -104,15 +118,17 @@ describe('ContextViewHeader — View mode (Published)', () => {
     expect(props.onEnterEdit).toHaveBeenCalledTimes(1)
   })
 
-  it('disables Edit with an explanation when version control is not set up', () => {
+  it('disables Edit with an explanation when version control is not set up', async () => {
     const props = baseProps({ canManage: true, canEnterEdit: false })
     renderHeader(props)
 
     const edit = screen.getByRole('button', { name: 'Edit' })
     expect(edit).toBeDisabled()
-    expect(edit).toHaveAttribute('title', "Version control isn't set up for this data source yet")
     fireEvent.click(edit)
     expect(props.onEnterEdit).not.toHaveBeenCalled()
+
+    expect(await tipOf(edit))
+      .toHaveTextContent("Version control isn't set up for this data source yet")
   })
 })
 
@@ -265,12 +281,24 @@ describe('ContextViewHeader — Focus Lens launcher', () => {
     expect(props.onOpenLens).toHaveBeenCalledTimes(1)
   })
 
-  it('without a selection, Focus Lens is disabled with guidance', () => {
+  it('without a selection, Focus Lens is disabled with guidance', async () => {
     const props = baseProps({ canTrace: false, onOpenLens: vi.fn() })
     renderHeader(props)
     const btn = screen.getByRole('button', { name: /focus lens/i })
     expect(btn).toBeDisabled()
-    expect(btn).toHaveAttribute('title', expect.stringMatching(/select a single entity/i))
+    expect(await tipOf(btn)).toHaveTextContent(/select a single entity/i)
+  })
+
+  it('leaves no control in the toolbar speaking OS chrome', async () => {
+    // The seam this replaced: a row where every explanation arrived as a
+    // native pill after a second, in a register that matches nothing else on
+    // the page — and where a `title` on an icon-only control was also its
+    // only accessible name.
+    const { container } = renderHeader(baseProps({
+      canManage: true, canEnterEdit: true, canTrace: true, onOpenLens: vi.fn(),
+    }))
+    const withTitles = container.querySelectorAll('button[title], a[title]')
+    expect(Array.from(withTitles).map(c => c.getAttribute('title'))).toEqual([])
   })
 
   it('hosts that do not wire the lens see no button', () => {

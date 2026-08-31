@@ -761,7 +761,11 @@ export async function renderCanvasWithTrace(
       const rows = [...(panel?.querySelectorAll<HTMLElement>('[data-history-resume]') ?? [])]
       const row = rows.find(r => r.textContent?.includes(label))
       if (!row) throw new Error(`no trace history entry for ${label}`)
-      const share = row.parentElement?.querySelector<HTMLButtonElement>('[data-history-share]')
+      // Not `row.parentElement`: each control in the row is wrapped by its own
+      // HoverTip anchor, so the two buttons are cousins rather than siblings.
+      // The row itself is marked, and that is what they share.
+      const share = row.closest('[data-history-row]')
+        ?.querySelector<HTMLButtonElement>('[data-history-share]')
       if (!share) throw new Error(`no share action on the ${label} entry`)
       clipboard.text = ''
       await act(async () => { fireEvent.click(share) })

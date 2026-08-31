@@ -21,6 +21,7 @@ import { useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 
 
 export const PROPERTY_MANAGER_SEEN_KEY = 'synodic.propertyManager.seen.v1'
@@ -80,15 +81,24 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
 
     return (
         <div className="relative">
+            <HoverTip
+                className="inline-flex"
+                label="Browse the properties in use and tag the entities that match"
+                detail="Colours the canvas by a rule you write — the data is untouched"
+            >
             <button
                 ref={setTriggerEl}
                 onClick={handleClick}
-                title="Property Manager — browse properties and tag matched entities"
                 className={cn(
                     'relative flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
                     open
                         ? 'bg-gradient-to-r from-accent-lineage/30 to-purple-500/20 text-accent-lineage border border-accent-lineage/60 shadow-md shadow-accent-lineage/20'
-                        : 'bg-canvas-elevated/95 backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
+                        /* A PLAIN token, not `bg-canvas-elevated/95`: the
+                           canvas colours are complete CSS variables, so an
+                           alpha suffix on one emits NO rule at all and this
+                           was the only transparent button on a row where every
+                           sibling paints a real fill. */
+                        : 'bg-canvas-elevated backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
                     className,
                 )}
             >
@@ -99,6 +109,7 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
                 <SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
                 <span>Properties</span>
             </button>
+            </HoverTip>
 
             {/* First-run coachmark — portaled so no header stacking context
                 or overflow can clip it. No AnimatePresence/exit: it unmounts
@@ -119,7 +130,6 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
                         type="button"
                         onClick={dismissHint}
                         aria-label="Got it"
-                        title="Got it"
                         className="absolute top-1.5 right-1.5 p-1 rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
                     >
                         <X className="w-3.5 h-3.5" />

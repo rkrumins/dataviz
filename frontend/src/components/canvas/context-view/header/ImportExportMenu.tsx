@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useFeature } from '@/store/features'
 
 export interface ImportExportMenuProps {
@@ -73,6 +74,13 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
 
   return (
     <>
+      {/* Below 2000px the words stand down and this is an icon-only button —
+          so the hover is the ONLY thing that says what it does, and a
+          one-second native pill that repeated the label said nothing. */}
+      <HoverTip
+        className="inline-flex"
+        label="Bring entities in from a file, or download this graph"
+      >
       <button
         ref={triggerRef}
         type="button"
@@ -80,7 +88,6 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Import / Export"
-        title="Import / Export"
         className={cn(
           'flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11.5px] font-semibold tracking-tight transition-all',
           open
@@ -101,6 +108,7 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
         <span className="hidden min-[2000px]:inline">Import / Export</span>
         <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform duration-200', open && 'rotate-180')} />
       </button>
+      </HoverTip>
 
       {/* No AnimatePresence: the popover unmounts instantly on close so an
           interrupted exit can never strand an invisible click-blocker at
@@ -116,16 +124,26 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
               role="menu"
               aria-label="Import and export"
               style={{ position: 'fixed', top: anchor.top, right: anchor.right, width: POPOVER_WIDTH, zIndex: 1000 }}
-              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden py-1.5"
+              className="rounded-xl bg-canvas-elevated backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden py-1.5"
             >
               {/* Import — needs Edit mode + a branch (import writes to the working draft). */}
               {versioningEnabled && (
+                // The disabled rule is PRINTED INLINE two lines below, so the
+                // tooltip only said it a second time in different words. The
+                // tip is now reserved for the thing the row cannot say: where
+                // an import lands.
+                <HoverTip
+                  className="block"
+                  label={isDraft
+                    ? 'Add entities to your draft from a file'
+                    : 'Import needs Edit mode — start a draft first'}
+                  detail={isDraft ? 'Nothing reaches the published version until you publish' : undefined}
+                >
                 <button
                   type="button"
                   role="menuitem"
                   disabled={!isDraft || !onImport}
                   onClick={() => { if (isDraft && onImport) runItem(onImport) }}
-                  title={isDraft ? undefined : 'Import needs Edit mode — start a branch first'}
                   className={cn(
                     'w-full flex items-start gap-2.5 px-3 py-2 text-left transition-colors',
                     isDraft
@@ -139,16 +157,26 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
                     <span className="block text-[11px] text-ink-muted/80 leading-snug">
                       {isDraft
                         ? 'Bring entities in from CSV, Excel or NDJSON.'
-                        : 'Available in Edit mode — start a branch to import.'}
+                        : 'Available in Edit mode — start a draft to import.'}
                     </span>
                   </span>
                 </button>
+                </HoverTip>
               )}
 
               {/* Export — the door the DATA leaves by, and the server now refuses it when the
                   admin has turned it off. Hidden rather than disabled: a greyed-out control invites
                   people to hunt for the permission they think they're missing. */}
               {exportEnabled && (
+                // WHICH version leaves the building — the one thing neither
+                // the label nor the line under it says, and the one thing a
+                // person about to send this file to somebody needs.
+                <HoverTip
+                  className="block"
+                  label={isDraft
+                    ? 'Downloads the canvas as it stands in your draft'
+                    : 'Downloads the published version, as everyone else sees it'}
+                >
                 <button
                   type="button"
                   role="menuitem"
@@ -164,6 +192,7 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
                     </span>
                   </span>
                 </button>
+                </HoverTip>
               )}
             </motion.div>
           )}

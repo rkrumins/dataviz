@@ -29,6 +29,7 @@
 
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { BranchSwitcher } from '@/features/versioning/components/BranchSwitcher'
 import { HeaderSearch } from './header/HeaderSearch'
@@ -232,7 +233,14 @@ export function ContextViewHeader({
   }
 
   return (
-    <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-black/[0.08] dark:border-white/[0.06] px-6 py-3 relative">
+    /* A PLAIN token, not a gradient of alpha'd ones. The canvas colours are
+       complete CSS variables, so `from-canvas-elevated/90` emits no rule and
+       `--tw-gradient-stops` is never set — which makes the `background-image`
+       invalid and paints NOTHING. This toolbar therefore had no fill at all:
+       it sat directly under the page header, which uses the plain token and is
+       solid, so one bar was opaque and the one below it was see-through, with
+       its words floating over blurred canvas. */
+    <div className="flex-shrink-0 bg-canvas-elevated backdrop-blur-xl border-b border-black/[0.08] dark:border-white/[0.06] px-6 py-3 relative">
       {/* Subtle gradient overlay — dark-mode decoration */}
       <div className="absolute inset-0 hidden dark:block bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />
 
@@ -267,19 +275,34 @@ export function ContextViewHeader({
             />
           )}
 
+          {/* A spinner and an error link, both unexplained: `aria-label` told a
+              screen reader what was happening and a sighted user got an
+              unlabelled glyph in the toolbar. */}
           {syncStatus === 'saving' && (
-            <Loader2
-              className="w-3.5 h-3.5 animate-spin text-ink-muted flex-shrink-0"
-              aria-label="Saving changes"
-            />
+            <HoverTip
+              className="inline-flex flex-shrink-0"
+              label="Saving where things sit on the canvas"
+              detail="Layout only — your entities and lineage are untouched"
+            >
+              <Loader2
+                className="w-3.5 h-3.5 animate-spin text-ink-muted flex-shrink-0"
+                aria-label="Saving changes"
+              />
+            </HoverTip>
           )}
           {syncStatus === 'error' && onRetrySync && (
-            <button
-              onClick={onRetrySync}
-              className="flex-shrink-0 text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline underline-offset-2 transition-colors"
+            <HoverTip
+              className="inline-flex flex-shrink-0"
+              label="Try saving the canvas layout again"
+              detail="The last save did not reach the server — nothing you did was lost"
             >
-              Sync issue — retry
-            </button>
+              <button
+                onClick={onRetrySync}
+                className="flex-shrink-0 text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline underline-offset-2 transition-colors"
+              >
+                Sync issue — retry
+              </button>
+            </HoverTip>
           )}
         </div>
 

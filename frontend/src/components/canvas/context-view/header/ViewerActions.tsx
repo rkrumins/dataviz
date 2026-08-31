@@ -28,6 +28,7 @@ import { PropertyManagerButton } from '../../property-manager/PropertyManagerBut
 import { DisplayMenu } from './DisplayMenu'
 import { ImportExportMenu } from './ImportExportMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
+import { HoverTip } from '@/components/ui/HoverTip'
 
 export interface ComprehensionToolsProps {
   // Lineage flow
@@ -153,10 +154,16 @@ export function ComprehensionTools({
       {/* Lineage Flow Toggle — single stable label. State is conveyed
           through the colored dot + active gradient. Trace state lives
           on its own button below; this label no longer encodes it. */}
+      <HoverTip
+        className="inline-flex"
+        label={showLineageFlow
+          ? 'Hide the lineage mesh on the canvas'
+          : 'Show the lineage mesh on the canvas'}
+        detail="The lines between entities, not the entities themselves"
+      >
       <button
         data-tour="canvas-lineage-toggle"
         onClick={onToggleLineageFlow}
-        title={showLineageFlow ? 'Hide the lineage mesh on the canvas' : 'Show the lineage mesh on the canvas'}
         className={cn(
           "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
           showLineageFlow
@@ -173,6 +180,7 @@ export function ComprehensionTools({
           showLineageFlow ? "bg-green-500 dark:bg-green-400 dark:shadow-lg dark:shadow-green-400/50" : "bg-ink-muted/30"
         )} />
       </button>
+      </HoverTip>
 
       {/* Display menu — consolidates canvas display settings (zoom,
           density, type-badge, subtle lines) and lineage appearance
@@ -212,12 +220,16 @@ export function ComprehensionTools({
           hop by hop. Same gating as Trace (single non-logical entity);
           same feature flag (the lens rides the same trace backend). */}
       {traceEnabled && onOpenLens && !traceActive && (
+        <HoverTip
+          className="inline-flex"
+          label={canTrace
+            ? 'Walk this entity’s connections one hop at a time'
+            : 'Select a single entity to focus its connections'}
+          detail={canTrace ? 'Opens the Lineage Lens over the canvas' : undefined}
+        >
         <button
           onClick={canTrace ? onOpenLens : undefined}
           disabled={!canTrace}
-          title={canTrace
-            ? 'Open the Lineage Lens — walk this entity’s connections hop by hop'
-            : 'Select a single entity to focus its connections'}
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
             canTrace
@@ -228,13 +240,16 @@ export function ComprehensionTools({
           <LucideIcons.Focus className="w-4 h-4" strokeWidth={2.2} />
           <span>Focus Lens</span>
         </button>
+        </HoverTip>
       )}
 
       {!traceEnabled ? null : traceActive ? (
+        // No tooltip: "Exit trace mode" is what the button already says, and a
+        // tip that repeats its own label is what teaches people the rest are
+        // not worth hovering.
         <button
           data-tour="canvas-trace"
           onClick={onExitTrace}
-          title="Exit trace mode"
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-rose-500/20 to-rose-500/10 text-rose-700 border border-rose-400/50 hover:from-rose-500/30 hover:to-rose-500/20 hover:border-rose-400/70 dark:text-rose-200 dark:border-rose-400/40 dark:hover:border-rose-300/60 dark:hover:shadow-lg dark:hover:shadow-rose-500/20 transition-all duration-300"
         >
           <LucideIcons.X className="w-4 h-4" strokeWidth={2.4} />
@@ -242,11 +257,15 @@ export function ComprehensionTools({
           <span className="w-2 h-2 rounded-full bg-rose-500 dark:bg-rose-300 dark:shadow-lg dark:shadow-rose-300/60 animate-pulse" />
         </button>
       ) : !lineageReady ? (
+        <HoverTip
+          className="inline-flex"
+          label="Lineage data is still loading"
+          detail="Trace becomes available the moment it finishes"
+        >
         <button
           data-tour="canvas-trace"
           onClick={warnLineageNotReady}
           aria-busy="true"
-          title="Lineage data is still loading — Trace will become available once it finishes"
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 cursor-wait",
             "bg-gradient-to-r from-accent-lineage/12 to-purple-500/[0.06] text-accent-lineage/85 border border-accent-lineage/30",
@@ -261,6 +280,7 @@ export function ComprehensionTools({
             aria-hidden
           />
         </button>
+        </HoverTip>
       ) : (
         // Split control. Main zone: traces the selection; with NOTHING
         // selected it opens the trail launcher instead of being a dead
@@ -268,6 +288,16 @@ export function ComprehensionTools({
         // hard-disabled only when there is nothing to trace AND no trail
         // to resume. Chevron zone: the launcher, any time trails exist.
         <div ref={traceLauncherRef} className="relative flex items-stretch">
+          <HoverTip
+            className="inline-flex"
+            label={
+              canTrace
+                ? 'Map everything upstream and downstream of the selected entity'
+                : hasTraceHistory
+                  ? 'Pick up a trace you ran earlier in this view'
+                  : 'Select a single entity to trace its lineage'
+            }
+          >
           <button
             data-tour="canvas-trace"
             onClick={
@@ -278,13 +308,6 @@ export function ComprehensionTools({
                   : undefined
             }
             disabled={!canTrace && !hasTraceHistory}
-            title={
-              canTrace
-                ? 'Trace lineage of selected entity'
-                : hasTraceHistory
-                  ? 'Resume a previous trace'
-                  : 'Select a single entity to trace its lineage'
-            }
             className={cn(
               "flex items-center gap-2 px-4 py-2 text-sm font-medium transition-all duration-300",
               hasTraceHistory ? "rounded-l-xl border-r-0" : "rounded-xl",
@@ -296,14 +319,15 @@ export function ComprehensionTools({
             <LucideIcons.Workflow className="w-4 h-4" strokeWidth={2.2} />
             <span>Trace Lineage</span>
           </button>
+          </HoverTip>
           {hasTraceHistory && (
+            <HoverTip className="inline-flex" label="Pick up a trace you ran earlier in this view">
             <button
               type="button"
               aria-label="Trace history"
               aria-haspopup="menu"
               aria-expanded={traceHistoryOpen}
               onClick={() => setTraceHistoryOpen(v => !v)}
-              title="Pick up where you left off"
               className={cn(
                 "flex items-center px-1.5 rounded-r-xl border border-l-accent-lineage/20 text-sm transition-all duration-300",
                 "bg-gradient-to-r from-accent-lineage/20 to-purple-500/10 text-accent-lineage border-accent-lineage/40 hover:from-accent-lineage/30 hover:to-purple-500/20 hover:border-accent-lineage/60",
@@ -311,6 +335,7 @@ export function ComprehensionTools({
             >
               <LucideIcons.ChevronDown className={cn('w-3.5 h-3.5 transition-transform', traceHistoryOpen && 'rotate-180')} />
             </button>
+            </HoverTip>
           )}
           {traceHistoryOpen && (
             <TraceHistoryPanel
@@ -378,12 +403,16 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
       {canManage && versioningEnabled && (
         <>
           <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
+          <HoverTip
+            className="inline-flex"
+            label={canEnterEdit
+              ? 'Make changes in a private draft'
+              : "Version control isn't set up for this data source yet"}
+            detail={canEnterEdit ? 'The published version stays untouched until you publish' : undefined}
+          >
           <button
             onClick={canEnterEdit ? onEnterEdit : undefined}
             disabled={!canEnterEdit}
-            title={canEnterEdit
-              ? 'Make changes in a private draft — the published version stays untouched'
-              : "Version control isn't set up for this data source yet"}
             className={cn(
               "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
               canEnterEdit
@@ -394,6 +423,7 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
             <LucideIcons.PenLine className="w-4 h-4" strokeWidth={2.2} />
             <span>Edit</span>
           </button>
+          </HoverTip>
         </>
       )}
     </>

@@ -483,16 +483,21 @@ export function HeaderSearch() {
                 "bg-accent-lineage/10 border border-accent-lineage/30",
               )}
             >
-              <span className="max-w-[90px] truncate">inside {scope.label}</span>
-              <button
-                type="button"
-                onClick={() => clearScope()}
-                aria-label="Search the whole view"
-                title="Search the whole view"
-                className="p-0.5 rounded hover:bg-accent-lineage/20 transition-colors"
+              <span className="max-w-[90px] truncate" title={scope.label}>inside {scope.label}</span>
+              <HoverTip
+                className="inline-flex"
+                label="Search the whole view"
+                detail={`Results are limited to ${scope.label} right now`}
               >
-                <LucideIcons.X className="w-3 h-3" strokeWidth={2.6} />
-              </button>
+                <button
+                  type="button"
+                  onClick={() => clearScope()}
+                  aria-label="Search the whole view"
+                  className="p-0.5 rounded hover:bg-accent-lineage/20 transition-colors"
+                >
+                  <LucideIcons.X className="w-3 h-3" strokeWidth={2.6} />
+                </button>
+              </HoverTip>
             </span>
           )}
 
@@ -551,19 +556,27 @@ export function HeaderSearch() {
             </button>
           </HoverTip>
 
+          {/* Third control in a 40px stretch that had three treatments: a
+              native pill, a HoverTip, and — here — nothing at all. */}
           {quick.text && (
-            <button
-              type="button"
-              onClick={() => clearQuery()}
-              aria-label="Clear search"
-              className={cn(
-                "shrink-0 p-1 rounded-md transition-all",
-                "text-ink-muted/70 hover:text-ink",
-                "hover:bg-black/[0.06] dark:hover:bg-white/[0.08]",
-              )}
+            <HoverTip
+              className="inline-flex shrink-0"
+              label="Clear what you typed"
+              detail="Keeps where you are looking and how it matches"
             >
-              <LucideIcons.X className="w-3.5 h-3.5" strokeWidth={2.4} />
-            </button>
+              <button
+                type="button"
+                onClick={() => clearQuery()}
+                aria-label="Clear search"
+                className={cn(
+                  "shrink-0 p-1 rounded-md transition-all",
+                  "text-ink-muted/70 hover:text-ink",
+                  "hover:bg-black/[0.06] dark:hover:bg-white/[0.08]",
+                )}
+              >
+                <LucideIcons.X className="w-3.5 h-3.5" strokeWidth={2.4} />
+              </button>
+            </HoverTip>
           )}
         </div>
 
@@ -855,7 +868,7 @@ function AnchoredMenu({ icon: Icon, current, label, active, children }: {
                 zIndex: 1000,
                 maxHeight: `calc(100vh - ${anchor.top}px - 16px)`,
               }}
-              className="min-w-[180px] overflow-y-auto custom-scrollbar p-1 rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40"
+              className="min-w-[180px] overflow-y-auto custom-scrollbar p-1 rounded-xl bg-canvas-elevated backdrop-blur-xl border border-black/[0.10] dark:border-white/[0.08] shadow-2xl shadow-black/20 dark:shadow-black/40"
             >
               <div className="pt-0.5 px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/60">
                 {label} · {current}
