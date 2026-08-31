@@ -159,7 +159,7 @@ export function DisplayMenu({
               ref={popoverRef}
               initial={{ opacity: 0, y: -6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ duration: 0.15, ease: 'easeOut' }}
+              transition={{ duration: 0.1, ease: 'easeOut' }}
               role="dialog"
               aria-label="Display"
               style={{

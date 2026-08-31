@@ -171,7 +171,7 @@ export function ComprehensionTools({
             : "bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]"
         )}
       >
-        <motion.div animate={{ rotate: showLineageFlow ? 0 : -180 }} transition={{ duration: 0.3 }}>
+        <motion.div animate={{ rotate: showLineageFlow ? 0 : -180 }} transition={{ duration: 0.18 }}>
           <LucideIcons.GitBranch className="w-4 h-4" />
         </motion.div>
         <span>Lineage</span>

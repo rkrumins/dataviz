@@ -113,7 +113,7 @@ export function TraceHistoryPanel({
       aria-label="Trace history"
       initial={{ opacity: 0, y: -4, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.15, ease: 'easeOut' }}
+      transition={{ duration: 0.1, ease: 'easeOut' }}
       style={{ position: 'fixed', right: anchor.right, top: anchor.top, zIndex: 1000 }}
       className={cn(
         'w-[300px] py-1.5 rounded-xl overflow-hidden',

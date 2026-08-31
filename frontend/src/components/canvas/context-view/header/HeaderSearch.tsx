@@ -857,7 +857,7 @@ function AnchoredMenu({ icon: Icon, current, label, active, children }: {
               ref={listRef}
               initial={{ opacity: 0, y: -4, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ duration: 0.13, ease: 'easeOut' }}
+              transition={{ duration: 0.1, ease: 'easeOut' }}
               role="dialog"
               aria-label={label}
               data-view-search-popover="true"

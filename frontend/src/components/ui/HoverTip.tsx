@@ -73,7 +73,7 @@ import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
 
-const SHOW_DELAY_MS = 120
+const SHOW_DELAY_MS = 60
 const GAP = 8
 const EDGE = 8
 /** Keeps the caret inside the panel's rounded corners. */
@@ -229,7 +229,7 @@ export function HoverTip({ label, detail, shortcut, width, children, className }
                         // its own floats; the tight pair sits.
                         'shadow-[0_1px_2px_rgba(15,23,42,0.10),0_10px_30px_-10px_rgba(15,23,42,0.35)]',
                         'dark:shadow-[0_1px_2px_rgba(0,0,0,0.60),0_14px_36px_-12px_rgba(0,0,0,0.85)]',
-                        'animate-in fade-in-0 zoom-in-95 duration-[120ms] ease-out',
+                        'animate-in fade-in-0 zoom-in-95 duration-[90ms] ease-out',
                         at.above ? 'slide-in-from-bottom-1' : 'slide-in-from-top-1',
                     )}
                 >
