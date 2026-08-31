@@ -4,11 +4,24 @@
  * the canvases' own floating toolbars. Renders nothing when the data source has no
  * versioned graph, so non-versioned views are untouched.
  *
- * On main: just the BranchSwitcher. On a draft: an amber strip with the switcher,
- * the committed change counts (+ unsaved-edit hint), and Review / Publish / Discard.
+ * On a draft: an amber strip with the committed change counts (+ unsaved-edit hint),
+ * and Review / Publish / Discard.
+ *
+ * On main it renders NOTHING, most of the time — and that is the point. It used to
+ * hold the branch switcher on the left and Reviews on the right and nothing else: a
+ * whole band of chrome for two controls, stacked under a page header that named the
+ * view and above a canvas toolbar that named it again. Reviews moved up into the page
+ * header (ViewReviewsButton) and the switcher moved down into the Context View's
+ * toolbar, which had a title slot going spare. What is left here on main is three
+ * TRANSIENT chips — projection sync, rollup sync, an open-review count — so the row
+ * is `empty:hidden`: when every child renders null there is no bar, no border and no
+ * padding, and the canvas takes the space back.
+ *
+ * `showBranchSwitcher` is false only for the canvas that hosts the switcher itself
+ * (the Context View). Every other canvas has no toolbar slot for it and keeps it here.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, PanelRight } from 'lucide-react'
+import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
@@ -36,9 +49,16 @@ import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 interface CanvasVersioningBarProps {
   workspaceId: string
   dataSourceId: string | null
+  /** False when the host canvas renders the BranchSwitcher in its own toolbar
+   *  (the Context View does). Every other canvas keeps it here. */
+  showBranchSwitcher?: boolean
 }
 
-export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersioningBarProps) {
+export function CanvasVersioningBar({
+  workspaceId,
+  dataSourceId,
+  showBranchSwitcher = true,
+}: CanvasVersioningBarProps) {
   const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   // Hoisted so the resolve below can carry the view id (capability context +
@@ -232,13 +252,16 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
       <PublishReceiptBanner graphId={graphId} onViewCommit={() => setPanelTab('history')} />
       <div
         className={cn(
-          // flex-wrap + min-w-0: on a narrow canvas the controls wrap to a second line
-          // instead of overflowing — the indicator/Reviews/Publish actions stay reachable.
-          'flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 border-b text-sm shrink-0 min-w-0',
+          // empty:hidden is what collapses the band. On main every child below is
+          // conditional or self-hiding, so when none of them has anything to say the
+          // row has no child NODES at all, `:empty` matches, and the border and
+          // padding go with it — CanvasRouter's flex-1 canvas takes the height back.
+          // A draft always renders its change-count block, so it is never empty.
+          'empty:hidden flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 border-b text-sm shrink-0 min-w-0',
           isDraft ? 'bg-amber-500/10 border-amber-500/20' : 'bg-canvas-elevated/40 border-glass-border',
         )}
       >
-        <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />
+        {showBranchSwitcher && <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />}
         <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
         {/* Publish → rollup visibility for hand-built models: when the published head
             advances, poll aggregation readiness and show Syncing → Synced. */}
@@ -269,18 +292,15 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
           </div>
         )}
 
-        <div className="flex-1" />
+        {/* Draft-only spacer. On main it would be a child of its own, and the row
+            could never be empty — the one thing standing between this bar and the
+            band it gives back. `ml-auto` below keeps the review chip right-aligned
+            in both states instead. */}
+        {isDraft && branchId && <div className="flex-1" />}
 
-        {/* Review layer — shown on both main and draft strips. */}
-        <ViewPrIndicator wsId={workspaceId} viewId={viewId} onOpen={() => setPanelTab('prs')} />
-        <button
-          onClick={() => setPanelTab(isDraft ? 'changes' : 'history')}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-ink-muted hover:bg-canvas-overlay transition-colors"
-          title="Changes, pull requests & history for this view"
-        >
-          <PanelRight className="w-3.5 h-3.5" />
-          Reviews
-        </button>
+        {/* Review SIGNAL — hides itself when there is nothing open. The Reviews
+            BUTTON that stood beside it now lives in the page header. */}
+        <ViewPrIndicator wsId={workspaceId} viewId={viewId} onOpen={() => setPanelTab('prs')} className="ml-auto" />
 
         {isDraft && branchId && (
           <>

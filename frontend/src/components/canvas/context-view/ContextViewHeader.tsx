@@ -14,8 +14,13 @@
  *   - Edit mode (on a draft): the same comprehension tools + the authoring
  *     cluster — Undo/Redo, Review & Save, Done (see header/EditorActions.tsx)
  *     — plus a thin amber strip along the top edge matching the
- *     CanvasVersioningBar's draft tint. Branch lifecycle (switcher /
- *     Publish / Discard) lives in that bar, never here.
+ *     CanvasVersioningBar's draft tint. Publish / Discard stay in that bar.
+ *
+ * The left slot holds the BRANCH SWITCHER, not a title. It used to repeat the
+ * view's name and type count, both of which the page header already prints
+ * larger — one view, two names, three stacked bands. The name stayed upstairs
+ * and the switcher came down into the slot it freed (see CanvasVersioningBar,
+ * which now renders nothing at all in its idle Published state).
  *
  * The header is INTENTIONALLY trace-agnostic. Trace UI lives in the
  * `TraceBottomDock` mounted inside ContextViewCanvas's canvas-body, in a
@@ -23,12 +28,13 @@
  */
 
 import { motion, AnimatePresence } from 'framer-motion'
+import { Loader2 } from 'lucide-react'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
+import { BranchSwitcher } from '@/features/versioning/components/BranchSwitcher'
 import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
-import { ViewTitleMenu } from './header/ViewTitleMenu'
 
 export interface ContextViewHeaderProps {
   // Lineage flow
@@ -89,22 +95,16 @@ export interface ContextViewHeaderProps {
   onTogglePropertyManager?: () => void
   propertyManagerOpen?: boolean
 
-  // Title — actual view name + entity-type count, shown in the header.
-  viewName?: string
-  entityTypeCount?: number
-  /** Folded into the title subline ({N} types · {model name}). */
-  activeContextModelName: string | null
-
-  // View-level capabilities + metadata actions. Independent of
-  // isDraft/canManage — view metadata is not graph data, so the title menu
-  // behaves identically on Published and drafts (see the header design spec).
-  // With neither capability, the title stays a plain label (calm-view rule).
-  canEditView?: boolean
-  canShareView?: boolean
-  viewVisibility?: 'private' | 'workspace' | 'enterprise'
-  onRenameView?: (name: string) => void
-  onEditViewDetails?: () => void
-  onShareView?: () => void
+  /** Branch switcher slot. The view's workspace when versioning chrome is
+   *  available to this caller, `null` when it is not (flag off, read-only
+   *  session, no workspace) — the switcher is then absent, exactly as the
+   *  versioning bar was. The switcher hides itself when the data source has
+   *  no versioned graph.
+   *
+   *  Only THIS canvas hosts it; the others keep it in CanvasVersioningBar,
+   *  which is why that bar takes `showBranchSwitcher`. */
+  branchWorkspaceId?: string | null
+  branchDataSourceId?: string | null
 
   // Blueprint sync — surfaces only as a tiny subline spinner ('saving')
   // or a "Sync issue — retry" text button ('error' → onRetrySync).
@@ -167,15 +167,8 @@ export function ContextViewHeader({
   onExitEdit,
   onTogglePropertyManager,
   propertyManagerOpen = false,
-  viewName,
-  entityTypeCount,
-  activeContextModelName,
-  canEditView = false,
-  canShareView = false,
-  viewVisibility,
-  onRenameView,
-  onEditViewDetails,
-  onShareView,
+  branchWorkspaceId,
+  branchDataSourceId,
   syncStatus,
   onRetrySync,
   pendingChangeCount = 0,
@@ -238,13 +231,6 @@ export function ContextViewHeader({
     isDraft,
   }
 
-  const subline = [
-    typeof entityTypeCount === 'number'
-      ? `${entityTypeCount} type${entityTypeCount === 1 ? '' : 's'}`
-      : null,
-    activeContextModelName ?? 'Context View',
-  ].filter(Boolean).join(' · ')
-
   return (
     <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-black/[0.08] dark:border-white/[0.06] px-6 py-3 relative">
       {/* Subtle gradient overlay — dark-mode decoration */}
@@ -268,22 +254,34 @@ export function ContextViewHeader({
       </AnimatePresence>
 
       <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 relative">
-        {/* Zone 1 — Title. The whole title block (icon, name, subline with
-            its sync spinner/retry) plus the view-metadata affordances (rename,
-            Edit details, Share) live in ViewTitleMenu. The chevron/menu appear
-            only when the user holds a view-level capability. */}
-        <ViewTitleMenu
-          viewName={viewName ?? 'Context View'}
-          subline={subline}
-          canEditView={canEditView}
-          canShareView={canShareView}
-          viewVisibility={viewVisibility}
-          onRenameView={onRenameView}
-          onEditViewDetails={onEditViewDetails}
-          onShareView={onShareView}
-          syncStatus={syncStatus}
-          onRetrySync={onRetrySync}
-        />
+        {/* Zone 1 — which version am I on, and did my layout save. The view's
+            name, type count and metadata actions all live in the page header
+            now; what is left here is the branch switcher (moved down out of
+            CanvasVersioningBar) and the blueprint-sync signal that used to
+            ride the title's subline. */}
+        <div className="flex items-center gap-2 min-w-0">
+          {branchWorkspaceId && (
+            <BranchSwitcher
+              workspaceId={branchWorkspaceId}
+              dataSourceId={branchDataSourceId ?? null}
+            />
+          )}
+
+          {syncStatus === 'saving' && (
+            <Loader2
+              className="w-3.5 h-3.5 animate-spin text-ink-muted flex-shrink-0"
+              aria-label="Saving changes"
+            />
+          )}
+          {syncStatus === 'error' && onRetrySync && (
+            <button
+              onClick={onRetrySync}
+              className="flex-shrink-0 text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline underline-offset-2 transition-colors"
+            >
+              Sync issue — retry
+            </button>
+          )}
+        </div>
 
         {/* Zone 2 — Search. Reads the canvas's search session off a
             context; see header/HeaderSearch.tsx. */}

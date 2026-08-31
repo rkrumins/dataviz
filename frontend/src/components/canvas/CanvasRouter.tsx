@@ -169,6 +169,10 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
         <CanvasVersioningBar
           workspaceId={activeView.workspaceId}
           dataSourceId={activeView.dataSourceId ?? null}
+          // The Context View hosts the branch switcher in its own toolbar — the slot
+          // freed by removing the title it duplicated from the page header. Every
+          // other canvas has no such slot, so the bar keeps the switcher for them.
+          showBranchSwitcher={CanvasComponent !== ReferenceModelCanvas}
         />
       )}
       <RestoredDraftBanner

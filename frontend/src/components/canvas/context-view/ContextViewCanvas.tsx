@@ -225,10 +225,8 @@ import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type Norm
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
-import { EditViewDetailsDialog } from './EditViewDetailsDialog'
-import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
-import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
+import { getView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import {
@@ -785,6 +783,7 @@ export function ContextViewCanvas({
   // (which never touch those routes) still only need isDraft.
   const editModeEnabled = useFeature('editModeEnabled')
   const canEditGraph = isDraft && editModeEnabled
+  const versioningEnabled = useFeature('versioningEnabled')
   // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
   // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
   useDeletionGhosts(isDraft)
@@ -795,6 +794,12 @@ export function ContextViewCanvas({
   const viewExecCtx = useViewExecutionContext()
   const readOnly = viewExecCtx?.readOnly ?? false
   const canEnterEdit = !!graphId && !readOnly
+  // The branch switcher moved down here out of CanvasVersioningBar, into the slot
+  // the duplicated title block used to occupy. It must appear on exactly the terms
+  // the bar did — CanvasRouter mounts that bar only when versioning is on, the view
+  // has a workspace, and the session can write — or the control would surface on a
+  // canvas that previously had no versioning chrome at all.
+  const branchWorkspaceId = versioningEnabled && !readOnly ? scopeWsId : null
   // Blank (hand-built) models drive the guided empty state + first-steps
   // companion; react-query dedupes this against CanvasVersioningBar's resolve.
   // Threading the view id keeps every resolve consumer on ONE cache entry per
@@ -819,9 +824,6 @@ export function ContextViewCanvas({
     canAdminPerm,
     canPublishPerm,
   })
-  const canEditView = viewCaps.canEdit
-  const canShareView = viewCaps.canManageGrants
-
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
@@ -1265,17 +1267,6 @@ export function ContextViewCanvas({
   // rule matches and publishes them so FlatTreeItem can render chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   useDisplayRuleEngine(activeView?.id ?? null)
-
-  // View-metadata dialogs (title menu). EditViewDetailsDialog is prop-driven
-  // (open flag); Share mirrors ExplorerPage — mounted while shareSeed is set,
-  // seeded from a fresh getView. viewVisibility feeds the menu's read-only
-  // row and is only ever populated from that fetch (undefined until first
-  // Share open — the menu hides the row while unknown).
-  const [viewDetailsOpen, setViewDetailsOpen] = useState(false)
-  const [shareSeed, setShareSeed] = useState<
-    { id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null
-  >(null)
-  const [viewVisibility, setViewVisibility] = useState<'private' | 'workspace' | 'enterprise' | undefined>(undefined)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
@@ -3392,60 +3383,6 @@ export function ContextViewCanvas({
     useBranchStore.getState().switchToMain()
   }, [stagedChangeList.length, openStagedChangesPanel, notify])
 
-  // ── View-metadata actions (title menu) ──────────────────────────────
-  // All read the live view from the store at call time so they carry no
-  // stale-closure risk and keep their dep lists minimal.
-
-  // Inline rename — optimistic: patch the store immediately (header updates
-  // instantly), persist, and on failure revert to the previous name + notification.
-  const handleRenameView = useCallback((name: string) => {
-    const view = useSchemaStore.getState().getActiveView()
-    if (!view?.id) return
-    const viewId = view.id
-    const previousName = view.name
-    useSchemaStore.getState().updateView(viewId, { name })
-    updateView(viewId, { name }).catch(err => {
-      useSchemaStore.getState().updateView(viewId, { name: previousName })
-      notify('error', err instanceof Error ? err.message : 'Failed to rename view')
-    })
-  }, [notify])
-
-  const handleEditViewDetails = useCallback(() => setViewDetailsOpen(true), [])
-
-  // The dialog persists to the backend itself; here we mirror the fields the
-  // store knows (name/description) so the header reflects the edit at once.
-  const handleViewDetailsSaved = useCallback(
-    (updated: { name: string; description?: string; tags?: string[] }) => {
-      const viewId = useSchemaStore.getState().getActiveView()?.id
-      if (!viewId) return
-      useSchemaStore.getState().updateView(viewId, {
-        name: updated.name,
-        description: updated.description,
-      })
-    },
-    [],
-  )
-
-  // Share — the store config carries the tier now (viewToViewConfig), so the
-  // dialog seeds synchronously; the fetch survives only as a fallback for
-  // store entries that predate the field.
-  const handleShareView = useCallback(async () => {
-    const view = useSchemaStore.getState().getActiveView()
-    if (!view?.id) return
-    if (view.visibility) {
-      setShareSeed({ id: view.id, name: view.name, visibility: view.visibility })
-      setViewVisibility(view.visibility)
-      return
-    }
-    try {
-      const full = await getView(view.id)
-      setShareSeed({ id: full.id, name: full.name, visibility: full.visibility })
-      setViewVisibility(full.visibility)
-    } catch (err) {
-      notify('error', err instanceof Error ? err.message : 'Failed to open sharing')
-    }
-  }, [notify])
-
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
   const pendingLoadRef = useRef<Set<string>>(new Set())
@@ -4706,15 +4643,8 @@ export function ContextViewCanvas({
         }}
         onTogglePropertyManager={() => setPropertyManagerOpen((open) => !open)}
         propertyManagerOpen={propertyManagerOpen}
-        viewName={activeView?.name}
-        entityTypeCount={activeView?.content.visibleEntityTypes.length}
-        activeContextModelName={null}
-        canEditView={canEditView}
-        canShareView={canShareView}
-        viewVisibility={viewVisibility}
-        onRenameView={handleRenameView}
-        onEditViewDetails={handleEditViewDetails}
-        onShareView={() => void handleShareView()}
+        branchWorkspaceId={branchWorkspaceId}
+        branchDataSourceId={dataSourceId}
         syncStatus={layoutSyncStatus}
         onRetrySync={() => { void flushLayoutSave() }}
         isDraft={isDraft}
@@ -5640,28 +5570,6 @@ export function ContextViewCanvas({
           block so it floats over whatever panel is open. */}
       <CreateLinkPopover onCreateLink={(s, t, e) => interactions.stageEdgeCreate(s, t, e)} />
 
-      {/* View-metadata dialogs (title menu). EditViewDetailsDialog is
-          prop-driven; Share is reused unchanged from the Explorer, mounted
-          while shareSeed holds its fetched identity + visibility. */}
-      {activeView?.id && (
-        <EditViewDetailsDialog
-          open={viewDetailsOpen}
-          viewId={activeView.id}
-          onClose={() => setViewDetailsOpen(false)}
-          onSaved={handleViewDetailsSaved}
-        />
-      )}
-      {shareSeed && (
-        <ShareViewDialog
-          viewId={shareSeed.id}
-          viewName={shareSeed.name}
-          currentVisibility={shareSeed.visibility}
-          workspaceId={scopeWsId ?? undefined}
-          access={viewExecCtx?.access ?? null}
-          isOpen={true}
-          onClose={() => setShareSeed(null)}
-        />
-      )}
       </ViewRowSearchContext.Provider>
       </ViewSearchSessionContext.Provider>
     </div>
