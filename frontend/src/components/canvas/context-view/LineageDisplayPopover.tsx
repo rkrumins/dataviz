@@ -180,7 +180,7 @@ export function LineageDisplayPopover({
                 width: POPOVER_WIDTH,
                 zIndex: 1000,
               }}
-              className="rounded-xl bg-canvas-elevated/95 backdrop-blur-xl border border-glass-border shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
+              className="rounded-xl bg-canvas-elevated backdrop-blur-xl border border-glass-border shadow-2xl shadow-black/20 dark:shadow-black/40 overflow-hidden"
             >
               {/* Title bar — mirrors TraceDepthControl's header so the two
                   popovers read as a matched pair. */}
