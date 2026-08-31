@@ -26,6 +26,21 @@ describe('useProviderTypes', () => {
         expect(result.current.isLoading).toBe(true)
     })
 
+    it('renders the static snapshot when the catalog resolves to no rows', async () => {
+        // A wire-shape change that makes `parseProviderTypeList` drop every
+        // row resolves the query with `[]`. Serving that verbatim leaves the
+        // wizard with no provider cards at all; the offline snapshot is the
+        // better answer, and `source` has to say so rather than claiming the
+        // rows came from the backend.
+        listTypes.mockResolvedValue([])
+        const { result } = renderHook(() => useProviderTypes(), { wrapper })
+
+        await waitFor(() => expect(result.current.isLoading).toBe(false))
+        expect(result.current.types).toEqual(STATIC_PROVIDER_TYPES)
+        expect(result.current.source).toBe('static')
+        expect(result.current.byId.falkordb).toBeDefined()
+    })
+
     it('merges the live catalog with brand visuals once it resolves', async () => {
         listTypes.mockResolvedValue([
             {

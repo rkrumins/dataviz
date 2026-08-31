@@ -17,8 +17,10 @@ export interface UseProviderTypesResult {
     types: ProviderTypeEntry[]
     byId: Record<string, ProviderTypeEntry>
     isLoading: boolean
-    /** 'backend' once the live catalog has resolved at least once this
-     *  session; 'static' before that (including a query that errors). */
+    /** Where `types` actually came from — 'backend' once the live catalog
+     *  has resolved at least one row this session; 'static' before that
+     *  (including a query that errors, and a resolved-but-empty response,
+     *  which `mergeCatalog` also answers from the snapshot). */
     source: 'backend' | 'static'
 }
 
@@ -38,7 +40,7 @@ export function useProviderTypes(): UseProviderTypesResult {
             types,
             byId,
             isLoading: q.isLoading,
-            source: q.data ? 'backend' : 'static',
+            source: q.data?.length ? 'backend' : 'static',
         }
     }, [q.data, q.isLoading])
 }

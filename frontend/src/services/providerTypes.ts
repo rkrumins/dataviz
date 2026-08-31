@@ -397,9 +397,18 @@ export const STATIC_PROVIDER_TYPES: ProviderTypeEntry[] = [...BACKEND_PROVIDER_T
 // ── catalog helpers ──────────────────────────────────────────────────────
 
 /** Attaches each info row's visual, or falls back to the static snapshot
- *  when the live catalog query hasn't resolved yet. */
+ *  when the live catalog query hasn't resolved yet.
+ *
+ *  An EMPTY array falls back too, not just `undefined`. `[]` is truthy, so
+ *  `!infos` let an all-rows-dropped parse through as a legitimate answer of
+ *  "this deployment has no provider types" — the exact scenario
+ *  `parseProviderTypeList`'s defensive parsing exists for (a wire-shape
+ *  change drops every row). Every list-iterating surface then renders
+ *  nothing: `ProviderOnboardingWizard`'s type cards, `RegistryConnections`,
+ *  `useBlankScopeOptions`. No deployment has zero provider types, so the
+ *  offline snapshot is always the better answer than none. */
 export function mergeCatalog(infos: ProviderTypeInfo[] | undefined): ProviderTypeEntry[] {
-    if (!infos) return STATIC_PROVIDER_TYPES
+    if (!infos?.length) return STATIC_PROVIDER_TYPES
     return infos.map(info => ({ ...info, visual: providerVisual(info.id) }))
 }
 

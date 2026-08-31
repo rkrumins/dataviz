@@ -98,6 +98,15 @@ describe('mergeCatalog', () => {
         expect(mergeCatalog(undefined)).toBe(STATIC_PROVIDER_TYPES)
     })
 
+    it('falls back for an EMPTY array too, not just undefined', () => {
+        // `[]` is truthy, so a `!infos` guard let this through as a real
+        // answer and every list-iterating surface rendered nothing — the
+        // wizard's type cards included. An all-rows-dropped parse is
+        // exactly what the offline snapshot exists for; no deployment has
+        // zero provider types.
+        expect(mergeCatalog([])).toBe(STATIC_PROVIDER_TYPES)
+    })
+
     it('renders a type this bundle does not know about with the unknown visual', () => {
         const arcadedb: ProviderTypeInfo = {
             id: 'arcadedb',
