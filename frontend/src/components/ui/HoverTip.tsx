@@ -193,13 +193,33 @@ export function HoverTip({ label, detail, shortcut, width, children, className }
                         position: 'fixed',
                         left: at.x,
                         top: at.y,
+                        // `max-content` FIRST, then the cap. Without it the
+                        // panel is shrink-to-fit against the space between
+                        // `left` and the right edge of the window — so a tip on
+                        // a control near the right edge (Details, Activity,
+                        // Reviews, Edit: exactly the row in the complaint)
+                        // collapsed to a ~130px column of wrapped words while
+                        // its neighbours on the left got the full 248. The
+                        // transform that centres it runs afterwards and cannot
+                        // give the width back.
+                        width: 'max-content',
                         maxWidth,
                         transform: at.above
                             ? 'translate(-50%, -100%)'
                             : 'translate(-50%, 0)',
                     }}
                     className={cn(
-                        'z-[60] block pointer-events-none rounded-xl tabular-nums',
+                        // ABOVE THE MENUS IT EXPLAINS. Every portaled popover
+                        // in this app sits at z-index 1000 (search results,
+                        // trace history, the branch switcher, the display and
+                        // import menus), so at z-60 a tip on a row INSIDE one
+                        // of them rendered behind it. Below the tour overlay
+                        // (9999), which must cover everything.
+                        'z-[9998] block pointer-events-none rounded-xl',
+                        // Set here, not left to whatever the document body
+                        // gives a portaled node — measured at 16px/24px before
+                        // this, which is the size of body copy, not of chrome.
+                        'text-[12px] leading-[1.45] tabular-nums',
                         // A REAL neutral edge. `glass-border` is
                         // rgba(255,255,255,.4) in light mode — a white outline
                         // on a white panel, i.e. no outline at all.

@@ -169,4 +169,21 @@ describe('HoverTip', () => {
         expect(await screen.findByRole('tooltip'))
             .toHaveTextContent('Nothing has changed yet')
     })
+
+    it('keeps its width near the right edge of the window', async () => {
+        // A `position: fixed` box with only `left` set is shrink-to-fit against
+        // the space between `left` and the right edge — so a tip on a control
+        // in the right-hand cluster (Details, Activity, Reviews, Edit: exactly
+        // the row this work started from) collapsed to a narrow column of
+        // wrapped words while its neighbours to the left got the full box. The
+        // centring transform runs afterwards and cannot give the width back.
+        // Measured in a real browser at 1600px: 132px vs 248px.
+        const user = userEvent.setup()
+        render(<HoverTip label="A sentence long enough to wrap"><span>e</span></HoverTip>)
+        await user.hover(screen.getByText('e'))
+
+        const tip = await screen.findByRole('tooltip')
+        expect(tip.style.width).toBe('max-content')
+        expect(tip.style.maxWidth).toBe('248px')
+    })
 })
