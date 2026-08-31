@@ -467,6 +467,40 @@ async def get_alignment_analysis(
 
     # ── Findings (predictive — derived from cached data, not observed) ───
     findings = []
+
+    # A STALE PROJECTION IS THE LOUDEST THING THIS PAGE CAN SAY, and until now it
+    # said nothing. When `projected_commit_seq < main_head_commit_seq` the engine
+    # routes EVERY main read through the Postgres branch provider, which holds no
+    # rollups — so aggregated lineage silently disappears from the canvas while
+    # `aggregation_status` still reads "ready" from a cache written before the
+    # projection fell behind. That combination hid a wedged projection for 14
+    # hours: the board drew no lineage on drill-down and every surface claimed
+    # to be healthy.
+    try:
+        from sqlalchemy import select as _select
+        from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+        row = (await session.execute(
+            _select(ProjectionStateORM.projected_commit_seq,
+                   GraphORM.main_head_commit_seq,
+                   ProjectionStateORM.last_error)
+            .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+            .where(GraphORM.data_source_id == ds_id,
+                   ProjectionStateORM.falkor_graph_name.isnot(None))
+        )).first()
+        if row is not None and row[0] is not None and row[1] is not None and row[0] < row[1]:
+            findings.append({
+                "severity": "critical",
+                "code": "PROJECTION_STALE",
+                "message": (
+                    f"This source's graph is {row[1] - row[0]} commit(s) behind what has been "
+                    f"published (projected {row[0]}, published {row[1]}). Until it catches up, "
+                    f"reads are served from the version log, which holds no aggregated lineage — "
+                    f"so rolled-up connections will not appear on a canvas."
+                    + (f" Last error: {row[2]}" if row[2] else "")
+                ),
+            })
+    except Exception:  # versioning schema absent (test contexts) — never break Data health
+        pass
     drift_instances = adopt.nodes.drift_instances + adopt.edges.drift_instances
     for entry in unindexed_physical:
         if entry["reason"] != "case_drift":
