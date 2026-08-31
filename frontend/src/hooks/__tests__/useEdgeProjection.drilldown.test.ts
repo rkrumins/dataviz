@@ -6,12 +6,21 @@
  * pointing at the dashboards. "Nothing is redrawn as drill down happens."
  *
  * These pin the BEHAVIOUR the user requires: an edge follows the drill-down.
- * They do NOT yet reproduce the reported failure — all four pass against the
- * code that fails in the browser, because this harness hands the hook a fresh
- * `nodesByLayer` each render and so always takes the full-rebuild path, while
- * the real canvas memoizes it. Reproducing it needs a stable `nodesByLayer`
- * identity across a lazy child load; until that exists, treat these as a
- * contract, not as the regression guard.
+ * They do NOT catch the regression. A fresh `nodesByLayer` Map is built on
+ * every render here, so the hook's `prevNodesByLayerRef` check always fires
+ * and every case takes the FULL-rebuild path; the incremental patch — the
+ * `expandedNodes` diff and the cached `ancestorMapRef` it mutates, which is
+ * what the memoizing canvas actually runs — is never executed by this file.
+ * Measured: breaking the incremental branch outright (return the cached map
+ * and never patch it) leaves all six of these green.
+ *
+ * The guard lives in `useEdgeProjection.incremental.test.ts`, which holds
+ * `nodesByLayer` identity stable so the incremental branch is the one under
+ * test, and gives nodes urns distinct from their ids so the ancestorMap is
+ * the only thing that can route an edge. (The `urn: id` shortcut below lets
+ * the `displayMap` fallback resolve every endpoint by itself, which is the
+ * second reason a dead ancestorMap goes unnoticed here.) Treat this file as
+ * the contract; treat that one as the regression guard.
  *
  */
 import { renderHook } from '@testing-library/react'

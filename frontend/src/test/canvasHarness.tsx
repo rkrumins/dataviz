@@ -91,6 +91,11 @@ export interface TraceCanvasHarness {
    *  view-only control must never move: direction, view depth and expansion
    *  are all re-projections of the walk the session already holds. */
   providerCalls(): number
+  /** The `granularity` every `/edges/aggregated` request carried, in order.
+   *  The aggregated fan-out is DEBOUNCED 300 ms, so a test that only calls
+   *  `settle()` (which barely advances the clock) will read an empty list —
+   *  wait past the debounce first. */
+  aggregatedGranularities(): Array<string | null>
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -307,7 +312,7 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null> },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
@@ -371,6 +376,14 @@ function stubProvider(
       return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
     },
     getEdges: async () => [],
+    // The aggregated fan-out the browse canvas fires for its visible
+    // containers. It answers nothing — what a test reads is the LEVEL the
+    // canvas asked for, which is the whole blast radius of the granularity
+    // it auto-selects.
+    getAggregatedEdges: async (request: { granularity?: string | null }) => {
+      calls.aggregated.push(request?.granularity ?? null)
+      return { aggregatedEdges: [], totalSourceEdges: 0 }
+    },
     computeLayerAssignments: async () => ({
       assignments,
       parentMap,
@@ -553,7 +566,7 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0 }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null> }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // A Router, because the header's BranchSwitcher keeps the active branch in the
   // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
@@ -841,6 +854,7 @@ export async function renderCanvasWithTrace(
       await settle()
     },
     providerCalls: () => providerCalls.traceClosure,
+    aggregatedGranularities: () => [...providerCalls.aggregated],
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })
