@@ -559,7 +559,7 @@ The recipe for adding a type is in
 ### FalkorDB Implementation Details
 
 **Location:** `backend/app/providers/falkordb/` (a package — see "FalkorDB Package
-Layout" below). `backend/app/providers/falkordb_provider.py` is now a 161-line
+Layout" below). `backend/app/providers/falkordb_provider.py` is now a 163-line
 compatibility shim that re-exports the package's names unchanged, so every
 existing import site keeps working without an edit.
 

@@ -29,11 +29,17 @@ just declared from the other end. One consequence: something must import
 shim ``backend.app.providers.falkordb_provider``) before
 ``descriptor_for("falkordb")`` / ``create_provider_instance`` for
 ``"falkordb"`` will resolve -- importing this package alone is not enough
-for that one type. PR 3's ``arcadedb`` does not inherit this exception:
-its concrete class is planned to live under ``backend.graph.adapters``
-(like neo4j/datahub/spanner below), which this kernel may reference
-freely, so its descriptor can self-register from ``catalog/arcadedb.py``
-the ordinary way.
+for that one type. **PR 3's ``arcadedb`` inherits the same exception**, for
+the same reason: it subclasses ``CypherGraphProvider``, which lives at
+``backend.app.providers.cypher`` because the code lifted into it carries
+app-layer lazy imports (``backend.app.config.resilience``,
+``services.ontology_levels``) -- and a subclass cannot sit below its own
+base in the layering. So its class is ``backend.app.providers.arcadedb``,
+its descriptor follows falkordb's pattern
+(``backend/app/providers/arcadedb/catalog_descriptor.py``, eagerly imported
+by the registry) rather than neo4j/datahub/spanner's, and there is no
+``catalog/arcadedb.py`` in this package. A descriptor placed here that
+imported the ArcadeDB class would trip the kernel-purity guard.
 """
 from __future__ import annotations
 
