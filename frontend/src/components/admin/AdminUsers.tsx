@@ -35,6 +35,7 @@ import { CreateUserWizard } from './CreateUserWizard'
 import { permissionsService, type UserAccessResponse } from '@/services/permissionsService'
 import { usePermission } from '@/store/auth'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -265,6 +266,7 @@ export function AdminUsers() {
     // ``PUT /admin/users/{id}/role`` (which checks ``system:admin``
     // legacy + claim) so the FE filter agrees with the BE gate.
     const canGrantSuperAdmin = usePermission('system:admin')
+    const { notify } = useAppNotifications()
     const assignableRoles = useMemo(
         () =>
             canGrantSuperAdmin
@@ -275,8 +277,10 @@ export function AdminUsers() {
 
     const [users, setUsers] = useState<AdminUserResponse[]>([])
     const [loading, setLoading] = useState(true)
+    /** The LIST failed to load — still true while it is read, so it stays on the
+     *  page. Everything that merely happened speaks through the app's one
+     *  notification stack instead. */
     const [error, setError] = useState<string | null>(null)
-    const [successMsg, setSuccessMsg] = useState<string | null>(null)
     const [filter, setFilter] = useState<StatusFilter>('all')
     const [search, setSearch] = useState('')
     const [sortField, setSortField] = useState<SortField>('createdAt')
@@ -369,13 +373,6 @@ export function AdminUsers() {
         return () => window.removeEventListener('permissions:changed', onChange)
     }, [fetchUsers])
 
-    // Auto-dismiss success message
-    useEffect(() => {
-        if (!successMsg) return
-        const t = setTimeout(() => setSuccessMsg(null), 4000)
-        return () => clearTimeout(t)
-    }, [successMsg])
-
     // ── KPI computation ──────────────────────────────────────────────
 
     const kpis = useMemo(() => ({
@@ -432,34 +429,52 @@ export function AdminUsers() {
 
     // ── Actions ──────────────────────────────────────────────────────
 
-    const withAction = async (userId: string, fn: () => Promise<unknown>, msg?: string) => {
+    /** The account this action is about, in the words the admin sees in the table. */
+    const nameOf = (userId: string) => {
+        const u = users.find(x => x.id === userId)
+        return u?.displayName || u?.email || 'this account'
+    }
+
+    const withAction = async (
+        userId: string,
+        fn: () => Promise<unknown>,
+        msg?: string,
+        /** What to say when the server sends nothing readable — never a bare
+         *  empty string, and never a generic "action failed". */
+        failureMsg?: string,
+    ) => {
         setActionLoading(userId)
-        setError(null)
         try {
             await fn()
-            if (msg) setSuccessMsg(msg)
+            if (msg) notify('success', msg)
             await fetchUsers()
         } catch (err: any) {
-            setError(err.message)
+            notify('error', err?.message || failureMsg || `Could not complete that change to ${nameOf(userId)}.`)
         } finally {
             setActionLoading(null)
         }
     }
 
     const handleApprove = (userId: string) =>
-        withAction(userId, () => adminUserService.approveUser(userId), 'User approved successfully')
+        withAction(userId, () => adminUserService.approveUser(userId),
+            `${nameOf(userId)} is approved — they can sign in now.`,
+            `Could not approve ${nameOf(userId)}.`)
 
     const handleRejectConfirm = async () => {
         if (modal?.kind !== 'reject') return
         await withAction(modal.userId, () =>
-            adminUserService.rejectUser(modal.userId, modalInput || undefined), 'User rejected')
+            adminUserService.rejectUser(modal.userId, modalInput || undefined),
+            `${nameOf(modal.userId)} was turned down — they cannot sign in.`,
+            `Could not turn down ${nameOf(modal.userId)}.`)
         closeModal()
     }
 
     const handleSuspendConfirm = async () => {
         if (modal?.kind !== 'suspend') return
         await withAction(modal.userId, () =>
-            adminUserService.suspendUser(modal.userId), 'User suspended')
+            adminUserService.suspendUser(modal.userId),
+            `${nameOf(modal.userId)} is suspended — they are signed out and cannot sign back in.`,
+            `Could not suspend ${nameOf(modal.userId)}.`)
         closeModal()
     }
 
@@ -468,18 +483,24 @@ export function AdminUsers() {
         await withAction(modal.userId, () =>
             adminUserService.setSystemAccount(modal.userId, modal.makeSystem),
             modal.makeSystem
-                ? 'Marked as a system account'
-                : 'No longer a system account')
+                ? `${nameOf(modal.userId)} is a system account — it keeps password sign-in under SSO enforcement.`
+                : `${nameOf(modal.userId)} is no longer a system account.`,
+            `Could not change whether ${nameOf(modal.userId)} is a system account.`)
         closeModal()
     }
 
     const handleReactivate = (userId: string) =>
-        withAction(userId, () => adminUserService.reactivateUser(userId), 'User reactivated')
+        withAction(userId, () => adminUserService.reactivateUser(userId),
+            `${nameOf(userId)} is active again — they can sign in.`,
+            `Could not reactivate ${nameOf(userId)}.`)
 
     const handleRoleChange = async () => {
         if (modal?.kind !== 'role' || !selectedRole) return
+        const roleLabel = AVAILABLE_ROLES.find(r => r.value === selectedRole)?.label ?? selectedRole
         await withAction(modal.userId, () =>
-            adminUserService.changeRole(modal.userId, selectedRole), `Role changed to ${selectedRole}`)
+            adminUserService.changeRole(modal.userId, selectedRole),
+            `${nameOf(modal.userId)} is now ${roleLabel}.`,
+            `Could not change the role for ${nameOf(modal.userId)}.`)
         closeModal()
     }
 
@@ -487,23 +508,24 @@ export function AdminUsers() {
         if (modal?.kind !== 'resetPassword') return
         if (resetMode === 'direct') {
             if (!modalInput || modalInput.length < 8) {
-                setError('Password must be at least 8 characters')
+                notify('error', 'Password must be at least 8 characters.')
                 return
             }
             await withAction(modal.userId, () =>
-                adminUserService.resetPassword(modal.userId, modalInput), 'Password has been reset')
+                adminUserService.resetPassword(modal.userId, modalInput),
+                `New password set for ${nameOf(modal.userId)}.`,
+                `Could not set a new password for ${nameOf(modal.userId)}.`)
             closeModal()
         } else {
             // Generate token
             setActionLoading(modal.userId)
-            setError(null)
             try {
                 const resp = await adminUserService.generateResetToken(modal.userId)
                 setGeneratedToken({ token: resp.resetToken, expiresAt: resp.expiresAt })
-                setSuccessMsg('Reset token generated')
+                notify('success', `Reset link created for ${nameOf(modal.userId)} — copy it before you close this.`)
                 await fetchUsers()
             } catch (err: any) {
-                setError(err.message)
+                notify('error', err?.message || `Could not create a reset link for ${nameOf(modal.userId)}.`)
             } finally {
                 setActionLoading(null)
             }
@@ -541,8 +563,9 @@ export function AdminUsers() {
         setCreateError(null)
         try {
             const resp = await adminUserService.createUser(body)
+            // No notify: the wizard shows the account it just made, on its own
+            // success screen. Saying it twice is the noise this sweep removes.
             setCreatedUser(resp)
-            setSuccessMsg(`${resp.email} added`)
             void fetchUsers()
         } catch (err: any) {
             setCreateError(err.message || 'Could not create the account')
@@ -557,11 +580,6 @@ export function AdminUsers() {
         try {
             const resp = await adminUserService.createUsersBulk(body)
             setBulkCreated(resp)
-            setSuccessMsg(
-                resp.skipped === 0
-                    ? `${resp.created} accounts added`
-                    : `${resp.created} added, ${resp.skipped} skipped`,
-            )
             void fetchUsers()
         } catch (err: any) {
             setCreateError(err.message || 'Could not create the accounts')
@@ -575,13 +593,11 @@ export function AdminUsers() {
         opts: CreateInviteOptions,
     ) => {
         setInviteLoading(true)
-        setError(null)
         try {
-            const resp = await adminUserService.createInvite(role, opts)
-            setInviteResult(resp)
-            setSuccessMsg('Invite link generated')
+            // The wizard shows the link it just created — the page adds nothing.
+            setInviteResult(await adminUserService.createInvite(role, opts))
         } catch (err: any) {
-            setError(err.message || 'Failed to create invite')
+            notify('error', err?.message || 'Could not create the invite link.')
         } finally {
             setInviteLoading(false)
         }
@@ -593,17 +609,10 @@ export function AdminUsers() {
         opts: CreateInviteOptions,
     ) => {
         setInviteLoading(true)
-        setError(null)
         try {
-            const resp = await adminUserService.createBulkInvites(emails, role, opts)
-            setBulkResult(resp)
-            setSuccessMsg(
-                resp.created === emails.length
-                    ? `${resp.created} invite links created`
-                    : `${resp.created} of ${emails.length} invite links created`,
-            )
+            setBulkResult(await adminUserService.createBulkInvites(emails, role, opts))
         } catch (err: any) {
-            setError(err.message || 'Failed to create invites')
+            notify('error', err?.message || `Could not create invite links for ${emails.length} people.`)
         } finally {
             setInviteLoading(false)
         }
@@ -650,13 +659,14 @@ export function AdminUsers() {
         const first = profileFirstName.trim()
         const last = profileLastName.trim()
         if (!first || !last) {
-            setError('First and last name are required')
+            notify('error', 'First and last name are both required.')
             return
         }
         await withAction(
             modal.userId,
             () => adminUserService.updateUser(modal.userId, { firstName: first, lastName: last }),
-            'Profile updated',
+            `Name updated to ${first} ${last}.`,
+            `Could not update the name for ${nameOf(modal.userId)}.`,
         )
         closeModal()
     }
@@ -820,25 +830,6 @@ export function AdminUsers() {
                 )}
             </AnimatePresence>
 
-            {/* Success toast */}
-            <AnimatePresence>
-                {successMsg && (
-                    <motion.div
-                        initial={{ opacity: 0, y: -8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, height: 0, marginBottom: 0 }}
-                        transition={{ duration: 0.2 }}
-                        className="flex items-center gap-2 p-3 mb-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-sm"
-                    >
-                        <CheckCircle2 className="w-4 h-4 shrink-0" />
-                        <p className="flex-1">{successMsg}</p>
-                        <button onClick={() => setSuccessMsg(null)} className="p-1 rounded-lg hover:bg-emerald-500/10 transition-colors">
-                            <X className="w-3.5 h-3.5" />
-                        </button>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-
             {/* Toolbar */}
             <div className="flex items-center gap-4 mb-6">
                 <div className="flex gap-1 bg-black/5 dark:bg-white/5 rounded-xl p-1">
@@ -878,7 +869,9 @@ export function AdminUsers() {
                 </div>
             </div>
 
-            {/* Error */}
+            {/* The list failed to load. Not a report of something that happened —
+                a description of what is on the screen, still true while it is
+                read, so it belongs here rather than in the notification stack. */}
             <AnimatePresence>
                 {error && (
                     <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}

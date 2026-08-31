@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { ArrowUpLeft, ArrowDownRight, Check, GitBranch, History, Link2, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { relativeTime } from '@/lib/relativeTime'
 
 export interface TraceHistoryPanelEntry {
   /** Index into the underlying history STACK (not the display order). */
@@ -48,16 +49,6 @@ const MODE_GLYPH = {
   both: { Icon: GitBranch, tone: 'text-violet-600 dark:text-violet-400 bg-violet-500/10', title: 'Full Lineage — both directions' },
 } as const
 
-function relativeTime(ts: number): string {
-  const seconds = Math.floor((Date.now() - ts) / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
-}
-
 export function TraceHistoryPanel({
   entries,
   onResume,
@@ -68,7 +59,7 @@ export function TraceHistoryPanel({
 }: TraceHistoryPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   /** Which row just yielded a link, and whether the clipboard took it. The
-   *  confirmation lives on the row itself: a toast for a two-word answer is
+   *  confirmation lives on the row itself: a notification for a two-word answer is
    *  more interruption than the gesture is worth. */
   const [copied, setCopied] = useState<{ index: number; ok: boolean } | null>(null)
   const copy = async (index: number) => {

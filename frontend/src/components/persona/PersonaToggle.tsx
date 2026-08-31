@@ -5,9 +5,14 @@ import { cn } from '@/lib/utils'
 
 /**
  * PersonaToggle - Switch between Business and Technical views
- * 
- * Business View: High-level domains, business terminology, simplified relationships
- * Technical View: Detailed assets, URNs, schema information, confidence scores
+ *
+ * Business: the name a person recognises — a curated `businessLabel` override
+ * when one exists, otherwise the entity's display name.
+ * Technical: the same name, with the entity's technical identity revealed under
+ * it — the qualified name, or the URN when the qualified name is only the
+ * display name again. Applies to context-view rows, graph node cards and the
+ * entity drawer. `lib/entityDisplayName.ts` owns the rule; the tooltips below
+ * must keep naming what it actually does.
  */
 export function PersonaToggle() {
   const { mode, toggleMode } = usePersonaStore()
@@ -20,7 +25,11 @@ export function PersonaToggle() {
         "bg-black/5 dark:bg-white/5",
         "transition-colors duration-200"
       )}
-      title={`Switch to ${mode === 'business' ? 'Technical' : 'Business'} View`}
+      title={
+        mode === 'business'
+          ? 'Business view: names only. Switch to Technical to show each entity’s qualified name (or URN) under its name.'
+          : 'Technical view: each entity’s qualified name (or URN) is shown under its name. Switch to Business for names only.'
+      }
     >
       {/* Sliding Background */}
       <motion.div
@@ -38,6 +47,7 @@ export function PersonaToggle() {
 
       {/* Business Option */}
       <div
+        title="Business — the name people use, and nothing else"
         className={cn(
           "relative z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-md",
           "transition-colors duration-200",
@@ -52,6 +62,7 @@ export function PersonaToggle() {
 
       {/* Technical Option */}
       <div
+        title="Technical — adds the qualified name (or the URN) under every name, on the canvas and in the entity drawer"
         className={cn(
           "relative z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-md",
           "transition-colors duration-200",

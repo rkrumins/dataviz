@@ -15,22 +15,22 @@ vi.mock('react-router-dom', async () => {
     const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
     return { ...actual, useNavigate: () => navigate }
 })
-vi.mock('@/services/notificationsService', () => ({
-    listNotifications: vi.fn(),
-    markNotificationsRead: vi.fn(),
+vi.mock('@/services/inboxService', () => ({
+    listInbox: vi.fn(),
+    markInboxRead: vi.fn(),
 }))
 
 import {
-    listNotifications,
-    markNotificationsRead,
-    type Notification,
-} from '@/services/notificationsService'
-import { NotificationBell } from '../NotificationBell'
+    listInbox,
+    markInboxRead,
+    type InboxItem,
+} from '@/services/inboxService'
+import { InboxBell } from '../InboxBell'
 
-const mockList = vi.mocked(listNotifications)
-const mockMarkRead = vi.mocked(markNotificationsRead)
+const mockList = vi.mocked(listInbox)
+const mockMarkRead = vi.mocked(markInboxRead)
 
-function notification(overrides: Partial<Notification> = {}): Notification {
+function message(overrides: Partial<InboxItem> = {}): InboxItem {
     return {
         id: 'ntf_1',
         kind: 'view.shared',
@@ -51,41 +51,41 @@ function renderBell() {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
         <QueryClientProvider client={qc}>
-            <NotificationBell />
+            <InboxBell />
         </QueryClientProvider>,
     )
 }
 
 beforeEach(() => {
     vi.clearAllMocks()
-    mockList.mockResolvedValue({ items: [notification()], unread: 1 })
+    mockList.mockResolvedValue({ items: [message()], unread: 1 })
     mockMarkRead.mockResolvedValue({ items: [], unread: 0 })
 })
 
 describe('the badge', () => {
-    it('counts unread notifications', async () => {
+    it('counts unread messages', async () => {
         mockList.mockResolvedValue({
-            items: [notification(), notification({ id: 'ntf_2' })],
+            items: [message(), message({ id: 'ntf_2' })],
             unread: 2,
         })
         renderBell()
-        expect(await screen.findByLabelText('Notifications, 2 unread')).toBeTruthy()
+        expect(await screen.findByLabelText('Inbox, 2 unread')).toBeTruthy()
     })
 
     it('is absent when nothing is unread', async () => {
         mockList.mockResolvedValue({
-            items: [notification({ readAt: new Date().toISOString() })],
+            items: [message({ readAt: new Date().toISOString() })],
             unread: 0,
         })
         renderBell()
-        expect(await screen.findByLabelText('Notifications')).toBeTruthy()
+        expect(await screen.findByLabelText('Inbox')).toBeTruthy()
     })
 })
 
 describe('opening an item', () => {
     it('marks it read and navigates to what happened', async () => {
         renderBell()
-        fireEvent.click(await screen.findByLabelText('Notifications, 1 unread'))
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
         fireEvent.click(await screen.findByText(/was shared with you/))
         await waitFor(() => expect(mockMarkRead).toHaveBeenCalledWith(['ntf_1']))
         expect(navigate).toHaveBeenCalledWith('/views/view_abc')
@@ -93,11 +93,11 @@ describe('opening an item', () => {
 
     it('does not re-mark an already-read item', async () => {
         mockList.mockResolvedValue({
-            items: [notification({ readAt: new Date().toISOString() })],
+            items: [message({ readAt: new Date().toISOString() })],
             unread: 0,
         })
         renderBell()
-        fireEvent.click(await screen.findByLabelText('Notifications'))
+        fireEvent.click(await screen.findByLabelText('Inbox'))
         fireEvent.click(await screen.findByText(/was shared with you/))
         await waitFor(() => expect(navigate).toHaveBeenCalled())
         expect(mockMarkRead).not.toHaveBeenCalled()
@@ -107,9 +107,9 @@ describe('opening an item', () => {
 describe('mark all read', () => {
     it('clears the badge in one request', async () => {
         renderBell()
-        fireEvent.click(await screen.findByLabelText('Notifications, 1 unread'))
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
         fireEvent.click(await screen.findByText('Mark all read'))
-        // The backend's "omit ids" case means every notification.
+        // The backend's "omit ids" case means every message.
         await waitFor(() => expect(mockMarkRead).toHaveBeenCalledWith(undefined))
     })
 })
@@ -118,7 +118,7 @@ describe('empty state', () => {
     it('says so calmly instead of rendering a blank panel', async () => {
         mockList.mockResolvedValue({ items: [], unread: 0 })
         renderBell()
-        fireEvent.click(await screen.findByLabelText('Notifications'))
+        fireEvent.click(await screen.findByLabelText('Inbox'))
         expect(await screen.findByText(/all caught up/i)).toBeTruthy()
     })
 })

@@ -16,7 +16,7 @@ import type { WorkspaceSchema } from '@/types/schema'
 // them has an opinion about the search box.
 vi.mock('@/components/layout/BookmarksPopover', () => ({ BookmarksPopover: () => null }))
 vi.mock('@/components/layout/NotificationBell', () => ({ NotificationBell: () => null }))
-vi.mock('@/components/notifications/NotificationBell', () => ({ NotificationBell: () => null }))
+vi.mock('@/components/inbox/InboxBell', () => ({ InboxBell: () => null }))
 
 import { TopBar } from '../TopBar'
 

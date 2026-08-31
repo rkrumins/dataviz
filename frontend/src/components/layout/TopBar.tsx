@@ -6,7 +6,7 @@ import { BrandLogo } from '@/components/brand/BrandLogo'
 import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
 import { NotificationBell as InviteActivityBell } from '@/components/layout/NotificationBell'
-import { NotificationBell } from '@/components/notifications/NotificationBell'
+import { InboxBell } from '@/components/inbox/InboxBell'
 import { AvatarPickerDialog } from '@/components/layout/AvatarPickerDialog'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { initialsOf } from '@/lib/avatar'
@@ -16,6 +16,7 @@ import {
   useAuthStore,
   usePermission,
   usePermissionClaims,
+  useAnyWorkspacePermission,
   effectiveRoleFor,
   SYSTEM_ROLE_LABELS,
   type SystemRole,
@@ -41,6 +42,15 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const isSystemAdmin = usePermission('system:admin')
   const isOrgAdmin = usePermission('system:org-admin')
   const claims = usePermissionClaims()
+  // The invite-activity bell answers "did the links I sent work?" — so it is
+  // worth showing only to someone who can send one. Creating an invite needs
+  // `system:admin`, or `workspace:admin` on the target workspace under the
+  // ceiling `_enforce_invite_ceiling` applies (backend users.py `create_invite`);
+  // `useAnyWorkspacePermission` asks exactly that, short-circuiting on the two
+  // global roles. For everyone else the bell could never hold anything: the
+  // endpoint is scoped to the caller's own links, so it returned an empty list
+  // forever — a third look-alike icon in a row of them, for a thing they cannot do.
+  const canInvite = useAnyWorkspacePermission('workspace:admin')
   const location = useLocation()
   const navigate = useNavigate()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
@@ -202,8 +212,8 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
 
           {/* Group 2: Content shortcuts */}
           <BookmarksPopover />
-          <InviteActivityBell />
-          <NotificationBell />
+          {canInvite && <InviteActivityBell />}
+          <InboxBell />
 
           <div className="w-px h-6 bg-glass-border mx-1" />
 
@@ -230,8 +240,13 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
             </button>
           )}
 
-          {/* User Menu */}
-          <DropdownMenu.Root>
+          {/* User Menu — non-modal, like every other dropdown in this app. A
+              MODAL Radix layer sets `body { pointer-events: none }` and only
+              clears it on effect cleanup; unmounting while open (a re-render
+              from an auth/branding/feature store, a route change) strands that
+              lock and the whole app goes click-dead until a reload. This menu
+              is mounted on every page, which made it the widest exposure left. */}
+          <DropdownMenu.Root modal={false}>
             <DropdownMenu.Trigger asChild>
               <button
                 className={cn(

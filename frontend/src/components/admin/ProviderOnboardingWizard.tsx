@@ -44,7 +44,7 @@ import {
   type ProviderTypeEntry,
 } from '@/services/providerTypes'
 import { fetchRedisConfig } from '@/services/redisConfigService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { DocsLink } from '@/components/help/DocsLink'
 import { useWizardKeyboard } from './AssetOnboardingWizard/hooks/useWizardKeyboard'
 import { NodeIdentityField } from '@/components/dataSource/NodeIdentity'
@@ -832,7 +832,7 @@ export function ProviderOnboardingWizard({
 }: ProviderOnboardingWizardProps) {
   const navigate = useNavigate()
   const { appName } = useBrand()
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const modalRef = useRef<HTMLDivElement>(null)
 
   // FalkorDB gets its own dedicated panels below (topology, TLS, dedicated
@@ -1296,7 +1296,7 @@ export function ProviderOnboardingWizard({
         }
         const updated = await providerService.update(provider.id, req)
         await onUpdated?.(updated)
-        showToast('success', `Updated ${updated.name}`)
+        notify('success', `Updated ${updated.name}`)
         onClose()
         return
       }
@@ -1315,7 +1315,7 @@ export function ProviderOnboardingWizard({
       setCreatedProvider(created)
       setConnectionResult(health)
       setWizardPhase('success')
-      showToast(
+      notify(
         health.success ? 'success' : 'warning',
         health.success
           ? `${created.name} connected successfully`
@@ -1326,7 +1326,7 @@ export function ProviderOnboardingWizard({
     } finally {
       setIsSubmitting(false)
     }
-  }, [connectivityCheck.result, connectivityCheck.state, formData, mode, onClose, onCreated, onUpdated, provider, providerTypes, showToast])
+  }, [connectivityCheck.result, connectivityCheck.state, formData, mode, onClose, onCreated, onUpdated, provider, providerTypes, notify])
 
   const requiresConnectivityTest = mode === 'create' && currentStep === 'review'
   const shouldRunConnectivityTest = requiresConnectivityTest && connectivityCheck.state === 'idle'

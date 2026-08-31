@@ -49,11 +49,15 @@ export function DeleteProviderDialog({
             await onConfirm()
             onClose()
         } catch (err) {
-            setError(err instanceof Error ? err.message : 'Failed to delete provider')
+            // `err.message` can be an empty string, and an empty error box is a
+            // failure the user cannot see. Name the provider when it is.
+            setError(err instanceof Error && err.message
+                ? err.message
+                : `Could not delete “${providerName}”. Nothing was deleted.`)
         } finally {
             setDeleting(false)
         }
-    }, [canDelete, onConfirm, onClose])
+    }, [canDelete, onConfirm, onClose, providerName])
 
     const handleClose = useCallback(() => {
         if (deleting) return

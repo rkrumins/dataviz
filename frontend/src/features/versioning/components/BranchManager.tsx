@@ -17,7 +17,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { timeAgo } from '@/lib/timeAgo'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { Branch } from '@/services/versioningApiService'
 import {
   useBranches, useOpenDraft, useAbandonDraft, useDiffVsMain,
@@ -51,7 +51,7 @@ export function BranchManager({
   switchToDraft: (branchId: string, originatingViewId?: string | null) => void
   onClose: () => void
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const hasView = !!viewId
   // Branch-per-view: default to THIS view's own drafts. "Show all data-source drafts" is an
   // explicit, secondary toggle (default OFF) for the data-source-wide rollup — mirrors the
@@ -91,12 +91,12 @@ export function BranchManager({
       {
         onSuccess: (r) => {
           switchToDraft(r.branchId, viewId)
-          showToast('success', `Draft "${newName.trim() || 'Untitled'}" created — your edits stay private until you publish.`)
+          notify('success', `Draft "${newName.trim() || 'Untitled'}" created — your edits stay private until you publish.`)
           setNewName('')
           setCreating(false)
           onClose()
         },
-        onError: (e) => showToast('error', (e as Error).message),
+        onError: (e) => notify('error', (e as Error).message),
       },
     )
   }
@@ -412,12 +412,12 @@ function ArchiveConfirm({
   isCurrent: boolean
   onClose: () => void
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const abandon = useAbandonDraft(wsId, graphId)
   const run = () => {
     abandon.mutate(branch.branchId, {
-      onSuccess: () => { showToast('success', `Draft "${branch.name || 'Untitled'}" archived.`); onClose() },
-      onError: (e) => showToast('error', (e as Error).message),
+      onSuccess: () => { notify('success', `Draft "${branch.name || 'Untitled'}" archived.`); onClose() },
+      onError: (e) => notify('error', (e as Error).message),
     })
   }
   return createPortal(

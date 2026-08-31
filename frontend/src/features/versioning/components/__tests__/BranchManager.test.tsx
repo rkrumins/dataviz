@@ -7,7 +7,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const showToast = vi.fn()
+const notify = vi.fn()
 const abandonMutate = vi.fn()
 const openMutate = vi.fn()
 
@@ -17,7 +17,7 @@ const useBranchesMock = vi.fn(
   (_wsId?: string, _gid?: string | null, _viewId?: string | null) => ({ data: branchesData, isLoading: false }),
 )
 
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('../PullLatestButton', () => ({ PullLatestButton: () => null }))
 vi.mock('../BranchSettingsModal', () => ({ BranchSettingsModal: () => null }))
 vi.mock('../CommitDialog', () => ({ CommitDialog: () => null }))
@@ -48,7 +48,7 @@ const renderManager = () =>
 
 describe('BranchManager', () => {
   beforeEach(() => {
-    showToast.mockClear(); abandonMutate.mockClear(); openMutate.mockClear(); useBranchesMock.mockClear()
+    notify.mockClear(); abandonMutate.mockClear(); openMutate.mockClear(); useBranchesMock.mockClear()
   })
 
   it('defaults to this view\'s drafts (passes viewId to useBranches)', () => {

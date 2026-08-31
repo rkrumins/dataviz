@@ -33,6 +33,7 @@ import {
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { privilegedRuleBlock } from './privilegedRule'
 import { RuleTarget, providerLabel } from './MappingGroupCard'
 import type { IdpGroupMapping } from '@/services/ssoAdminService'
@@ -81,12 +82,12 @@ function Slot({
 }
 
 export function MappingComposer({
-    providers, onCreated, onError,
+    providers, onCreated,
 }: {
     providers: IdpProvider[]
     onCreated: () => void | Promise<void>
-    onError: (m: string) => void
 }) {
+    const { notify } = useAppNotifications()
     const [roles, setRoles] = useState<RoleDefinitionResponse[]>([])
     const [workspaces, setWorkspaces] = useState<WorkspaceResponse[]>([])
     const [groups, setGroups] = useState<GroupResponse[]>([])
@@ -175,6 +176,10 @@ export function MappingComposer({
     async function submit(e: React.FormEvent) {
         e.preventDefault()
         if (!ready) return
+        // Read before the fields are cleared: the sentence under the row
+        // is already the plain-language statement of what was saved, so
+        // the confirmation says the same thing rather than "Created".
+        const summary = draftSentence
         setBusy(true)
         try {
             if (kind === 'role_binding') {
@@ -197,8 +202,11 @@ export function MappingComposer({
             setWorkspaceId('')
             setTargetGroupId('')
             await onCreated()
+            notify('success', `Rule created. ${summary}`)
         } catch (err) {
-            onError((err as Error).message)
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : 'Could not create the rule.')
         } finally {
             setBusy(false)
         }

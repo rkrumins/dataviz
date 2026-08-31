@@ -21,7 +21,7 @@ import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useFeature } from '@/store/features'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { TraceDepthControl } from '../TraceDepthControl'
 import { PropertyManagerButton } from '../../property-manager/PropertyManagerButton'
@@ -60,7 +60,7 @@ export interface ComprehensionToolsProps {
   /** True once the canvas finishes hydrating (entities + edges). When
    *  false, Trace is unsafe to fire — the backend hasn't fully loaded the
    *  lineage graph yet and the trace would return nothing. Surfaced as a
-   *  distinct "loading" button state with a toast on attempted click. */
+   *  distinct "loading" button state with a notification on attempted click. */
   lineageReady: boolean
   traceUpstreamDepth: number
   traceDownstreamDepth: number
@@ -127,7 +127,7 @@ export function ComprehensionTools({
   onCopyTraceHistoryLink,
   onOpenLens,
 }: ComprehensionToolsProps) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
   const traceLauncherRef = useRef<HTMLDivElement>(null)
   const hasTraceHistory = traceHistory.length > 0 && !!onResumeTraceHistory
@@ -140,9 +140,9 @@ export function ComprehensionTools({
 
   // Warn the user when they try to trace before the lineage data has
   // finished hydrating. Keyed so rapid repeat clicks coalesce instead of
-  // stacking dozens of identical toasts.
+  // stacking dozens of identical notifications.
   const warnLineageNotReady = () => {
-    showToast(
+    notify(
       'warning',
       'Trace is unavailable until lineage finishes loading. Please wait a moment.',
     )
@@ -201,7 +201,7 @@ export function ComprehensionTools({
       {/* Trace toggle — three visual states:
           1. `traceActive` → Exit Trace (rose, pulsing dot)
           2. `!lineageReady` → "Loading lineage…" (indigo pulse + spinner).
-             Stays clickable to fire a warning toast, so the affordance
+             Stays clickable to fire a warning notification, so the affordance
              reads as "not yet" rather than "broken".
           3. ready → Trace Lineage (existing indigo gradient). Hard-
              disabled when no entity selected.

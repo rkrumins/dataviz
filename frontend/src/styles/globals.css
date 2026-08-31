@@ -157,9 +157,9 @@
     opacity: 1;
   }
 
-  /* Toast auto-dismiss bar. Driven by the compositor rather than a 30ms
+  /* Notification auto-dismiss bar. Driven by the compositor rather than a 30ms
    * setInterval + setState, which re-rendered a `<motion.div layout>` ~33 times
-   * a second for the life of every toast. `width` is set inline to where the bar
+   * a second for the life of every notification. `width` is set inline to where the bar
    * should START (a remount mid-life resumes correctly); this runs it to zero
    * over whatever time is left. */
   @keyframes nx-toast-progress {

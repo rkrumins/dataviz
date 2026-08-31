@@ -23,7 +23,7 @@ import {
     type GroupMemberResponse,
 } from '@/services/groupsService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
@@ -146,12 +146,12 @@ export function AdminGroups() {
     const [modal, setModal] = useState<ModalType>(null)
     const [page, setPage] = useState(0)
     const PAGE_SIZE = 25
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // The whole page requires ``system:groups:manage`` on the
     // backend; show the actions to viewers as disabled-with-tooltip
     // so they understand WHY they can't act, rather than letting them
-    // click into a 403 toast.
+    // click into a 403 notification.
     const canManageGroups = usePermission('system:groups:manage')
 
 
@@ -230,18 +230,21 @@ export function AdminGroups() {
         key: string,
         fn: () => Promise<T>,
         successMsg?: string,
+        /** What to say when the server sends nothing readable. Never
+         *  "Action failed" — one withAction serves create, rename and delete,
+         *  and only the caller knows which of them the user just tried. */
+        failureMsg?: string,
     ): Promise<T | undefined> => {
         setActionLoading(key)
-        setError(null)
         try {
             const result = await fn()
-            if (successMsg) showToast('success', successMsg)
+            if (successMsg) notify('success', successMsg)
             await fetchGroups()
             return result
         } catch (err) {
-            const message = err instanceof Error ? err.message : 'Action failed'
-            showToast('error', message)
-            setError(message)
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : failureMsg ?? 'Could not complete that change to the group.')
             return undefined
         } finally {
             setActionLoading(null)
@@ -343,7 +346,10 @@ export function AdminGroups() {
                 )}
             </AnimatePresence>
 
-            {/* Error banner (in addition to toast) */}
+            {/* The list itself failed to load — still true while it is read, so it
+                stays on the page. Everything that merely HAPPENED (a group created,
+                renamed, deleted) speaks through the app's notification stack, and
+                used to be reported twice: once here and once there. */}
             <AnimatePresence>
                 {error && (
                     <motion.div
@@ -578,7 +584,7 @@ export function AdminGroups() {
                                     onSubmit={async (vals) => {
                                         const created = await withAction('create', async () => {
                                             return await groupsService.create(vals)
-                                        }, `Group "${vals.name}" created`)
+                                        }, `Group "${vals.name}" created`, `Could not create the group "${vals.name}".`)
                                         if (created) setModal(null)
                                     }}
                                     submitting={actionLoading === 'create'}
@@ -591,7 +597,7 @@ export function AdminGroups() {
                                     onSubmit={async (vals) => {
                                         const updated = await withAction(`edit-${modal.group.id}`, async () => {
                                             return await groupsService.update(modal.group.id, vals)
-                                        }, 'Group updated')
+                                        }, 'Group updated', `Could not save the changes to "${modal.group.name}".`)
                                         if (updated) setModal(null)
                                     }}
                                     submitting={actionLoading === `edit-${modal.group.id}`}
@@ -605,7 +611,7 @@ export function AdminGroups() {
                                         const ok = await withAction(`del-${modal.group.id}`, async () => {
                                             await groupsService.delete(modal.group.id)
                                             return true
-                                        }, `Deleted "${modal.group.name}"`)
+                                        }, `Deleted "${modal.group.name}"`, `Could not delete "${modal.group.name}".`)
                                         if (ok) setModal(null)
                                     }}
                                     submitting={actionLoading === `del-${modal.group.id}`}
@@ -818,7 +824,7 @@ function ManageMembersModal({
     const [users, setUsers] = useState<AdminUserResponse[] | null>(null)
     const [busy, setBusy] = useState<string | null>(null)
     const [search, setSearch] = useState('')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
         try {
@@ -829,9 +835,11 @@ function ManageMembersModal({
             setMembers(m)
             setUsers(u)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to load members')
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not load the members of "${group.name}".`)
         }
-    }, [group.id, showToast])
+    }, [group.id, group.name, notify])
 
     useEffect(() => { void refresh() }, [refresh])
 
@@ -927,9 +935,11 @@ function ManageMembersModal({
                                                         await groupsService.removeMember(group.id, member.userId)
                                                         await refresh()
                                                         onChange()
-                                                        showToast('success', `Removed ${name}`)
+                                                        notify('success', `Removed ${name} from "${group.name}".`)
                                                     } catch (err) {
-                                                        showToast('error', err instanceof Error ? err.message : 'Remove failed')
+                                                        notify('error', err instanceof Error && err.message
+                                                            ? err.message
+                                                            : `Could not remove ${name} from "${group.name}".`)
                                                     } finally {
                                                         setBusy(null)
                                                     }
@@ -996,9 +1006,11 @@ function ManageMembersModal({
                                                     await groupsService.addMember(group.id, u.id)
                                                     await refresh()
                                                     onChange()
-                                                    showToast('success', `Added ${u.displayName}`)
+                                                    notify('success', `Added ${u.displayName} to "${group.name}".`)
                                                 } catch (err) {
-                                                    showToast('error', err instanceof Error ? err.message : 'Add failed')
+                                                    notify('error', err instanceof Error && err.message
+                                                        ? err.message
+                                                        : `Could not add ${u.displayName} to "${group.name}".`)
                                                 } finally {
                                                     setBusy(null)
                                                 }

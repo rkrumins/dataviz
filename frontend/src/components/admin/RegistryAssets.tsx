@@ -38,7 +38,7 @@ import { workspaceService } from '@/services/workspaceService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderHealth, PROVIDER_HEALTH_META } from '@/store/providerHealthModel'
 import { aggregationService } from '@/services/aggregationService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { AccessDeniedNotice } from '@/components/feedback/AccessDeniedNotice'
 import { providerVisual } from '@/services/providerTypes'
@@ -163,7 +163,7 @@ function AssetRow({
     const [refreshPending, setRefreshPending] = useState(false)
     const ref = useRef<HTMLDivElement>(null)
     const queryClient = useQueryClient()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // Lazy-load: only fetch stats once the row scrolls into view (or
     // close to it). One IntersectionObserver instance is shared across
@@ -190,7 +190,7 @@ function AssetRow({
     // force-enqueues a discovery job. Used by the per-row ⟳ icon. The
     // ``refreshPending`` state gives an immediate visual confirmation
     // (spinner + "queued" tint) before the backend's ``refreshing=true``
-    // envelope comes back on the next poll. Errors surface as a toast
+    // envelope comes back on the next poll. Errors surface as a notification
     // because a silent failure here is indistinguishable from "nothing
     // happened" — and that's what the user reported as the original UX
     // pain point.
@@ -204,25 +204,25 @@ function AssetRow({
                 queryKey: [ASSET_STATS_QUERY_KEY_PREFIX, providerId, assetName],
             })
             if (res.status === 'redis_unavailable') {
-                showToast(
+                notify(
                     'warning',
                     `Refresh queue unreachable for ${assetName} — retry shortly.`,
                 )
             } else {
-                showToast(
+                notify(
                     'success',
                     `Refresh queued for ${assetName} — chip will update when the worker completes.`,
                 )
             }
         } catch (err: any) {
-            showToast(
+            notify(
                 'error',
                 `Refresh failed for ${assetName}: ${err?.message ?? 'unknown error'}`,
             )
         } finally {
             setRefreshPending(false)
         }
-    }, [providerId, assetName, queryClient, showToast, refreshPending])
+    }, [providerId, assetName, queryClient, notify, refreshPending])
 
     // Auto-refresh when a computing/stale job completes. ``useInsightsJob``
     // polls /admin/insights/jobs/{id}; on completion we invalidate the
@@ -756,7 +756,7 @@ function UnregisterDialog({
 export function RegistryAssets() {
     const [searchParams, setSearchParams] = useSearchParams()
     const initialProvider = searchParams.get('provider')
-    const { showToast, showLoading, hideLoading } = useToast()
+    const { notify, showLoading, hideLoading } = useAppNotifications()
 
     // Providers (React Query — shared cache with the counts fan-out below).
     const { data: providers = [], isLoading: providersLoading } = useProviders()
@@ -953,7 +953,7 @@ export function RegistryAssets() {
             hideLoading('reaggregate')
 
             if (dataSourcesToTrigger.length === 0) {
-                showToast('warning', 'No data sources found for this catalog item. Ensure it is bound to a workspace first.')
+                notify('warning', 'No data sources found for this catalog item. Ensure it is bound to a workspace first.')
                 return
             }
 
@@ -974,9 +974,9 @@ export function RegistryAssets() {
             })
         } catch (e: any) {
             hideLoading('reaggregate')
-            showToast('error', e?.message ?? 'Failed to discover data sources')
+            notify('error', e?.message ?? 'Failed to discover data sources')
         }
-    }, [existingCatalogs, showToast, showLoading, hideLoading])
+    }, [existingCatalogs, notify, showLoading, hideLoading])
 
     /**
      * Step 2 of re-aggregate: fan-out trigger calls with the user's overrides.
@@ -1004,14 +1004,14 @@ export function RegistryAssets() {
 
             hideLoading('reaggregate')
             if (failed === 0) {
-                showToast('success', `Aggregation triggered for ${succeeded} data source(s). Switching to Job History…`)
+                notify('success', `Aggregation triggered for ${succeeded} data source(s). Switching to Job History…`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else if (succeeded > 0) {
-                showToast('warning', `Triggered ${succeeded}, failed ${failed} data source(s). A job may already be active.`)
+                notify('warning', `Triggered ${succeeded}, failed ${failed} data source(s). A job may already be active.`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else {
                 const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
-                showToast('error', firstError?.message ?? 'Failed to trigger aggregation')
+                notify('error', firstError?.message ?? 'Failed to trigger aggregation')
                 throw firstError instanceof Error ? firstError : new Error('Failed to trigger aggregation')
             }
         } catch (e: any) {
@@ -1019,7 +1019,7 @@ export function RegistryAssets() {
             // Re-throw so RetriggerDialog stays open with the user's overrides intact.
             throw e
         }
-    }, [reaggregateCtx, showToast, showLoading, hideLoading, setSearchParams])
+    }, [reaggregateCtx, notify, showLoading, hideLoading, setSearchParams])
 
     const handlePurge = useCallback(async (assetName: string, opts?: { skipReaggregate?: boolean }) => {
         const item = existingCatalogs.find(c => c.sourceIdentifier === assetName)
@@ -1034,7 +1034,7 @@ export function RegistryAssets() {
 
             if (dataSources.length === 0) {
                 hideLoading('purge')
-                showToast('warning', 'No data sources found for this catalog item.')
+                notify('warning', 'No data sources found for this catalog item.')
                 return
             }
 
@@ -1052,22 +1052,22 @@ export function RegistryAssets() {
 
             hideLoading('purge')
             if (failed === 0) {
-                showToast('success', opts?.skipReaggregate
+                notify('success', opts?.skipReaggregate
                     ? `Purge queued for ${succeeded} data source(s). Aggregation will stay empty until you re-trigger it.`
                     : `Purge queued for ${succeeded} data source(s) — re-aggregation starts automatically when each purge completes. Switching to Job History to monitor…`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else if (succeeded > 0) {
-                showToast('warning', `Queued ${succeeded} purge job(s); ${failed} source(s) failed to enqueue (a job may already be active).`)
+                notify('warning', `Queued ${succeeded} purge job(s); ${failed} source(s) failed to enqueue (a job may already be active).`)
                 setTimeout(() => setSearchParams({ tab: 'jobs' }), 600)
             } else {
                 const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult)?.reason
-                showToast('error', firstError?.message ?? 'Failed to queue purge job')
+                notify('error', firstError?.message ?? 'Failed to queue purge job')
             }
         } catch (e: any) {
             hideLoading('purge')
-            showToast('error', e?.message ?? 'Failed to purge aggregated edges')
+            notify('error', e?.message ?? 'Failed to purge aggregated edges')
         }
-    }, [existingCatalogs, showToast, showLoading, hideLoading, setSearchParams])
+    }, [existingCatalogs, notify, showLoading, hideLoading, setSearchParams])
 
     const toggleSelection = (g: string) => {
         setSelected(prev => {
@@ -1147,7 +1147,7 @@ export function RegistryAssets() {
         try {
             const result = await providerService.refreshAllAssets(providerId)
             const n = result.jobs_queued
-            showToast(
+            notify(
                 'success',
                 `Refreshing all ${n} source${n !== 1 ? 's' : ''}${result.truncated ? ' (capped at 200)' : ''} — figures update as each completes.`,
             )
@@ -1155,7 +1155,7 @@ export function RegistryAssets() {
             // err.message is already run through friendlyError at the
             // service boundary, so this reads as human copy (e.g. "The
             // database is busy right now…") rather than raw JSON.
-            showToast(
+            notify(
                 'warning',
                 err?.message
                     ? `${err.message} Showing the latest available data.`
@@ -1224,7 +1224,7 @@ export function RegistryAssets() {
         // throughout (React Query keeps prior data during the refetch).
         queryClient.invalidateQueries({ queryKey: [PROVIDER_ASSETS_QUERY_KEY, providerId] })
         queryClient.invalidateQueries({ queryKey: [PROVIDER_CATALOG_QUERY_KEY, providerId] })
-    }, [selectedProviderId, pagedAssets, queryClient, showToast])
+    }, [selectedProviderId, pagedAssets, queryClient, notify])
 
     // ── Render ──────────────────────────────────────────────────────────────
     return (

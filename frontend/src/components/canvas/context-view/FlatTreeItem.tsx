@@ -11,7 +11,10 @@ import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
@@ -230,6 +233,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
   const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
+
+  // Business/Technical. `node.name` is the business-facing name the hierarchy
+  // was built with; the persona mode is applied here, at render, so switching
+  // it never rebuilds the tree. Technical mode reveals the qualified name (or
+  // the URN) on a second line — and only when it says something the name on the
+  // row does not, so no row ever prints the same string twice. The row grows by
+  // one line when it does; LayerColumn measures every row via
+  // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
+  const personaMode = usePersonaMode()
+  const displayName = resolveEntityName(node.data, personaMode, node.name)
+  const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
   const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
@@ -619,7 +633,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           unreadable widths). */}
       <div
         className="flex-1 min-w-0 flex flex-col justify-center"
-        title={stagedSummary ?? node.name}
+        title={stagedSummary ?? displayName}
       >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
@@ -638,8 +652,28 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // their successors without scroll-jump.
           "line-clamp-3 break-words"
         )}>
-          {node.name}
+          {displayName}
         </span>
+        {/* Technical identity (Business/Technical toggle) — one truncated line,
+            full value on hover.
+
+            TRUNCATED FROM THE HEAD, not the tail. Every URN from one source
+            shares a long prefix (`urn:synodic:solidatus:node:OBJ-…`) and the
+            column gives this line ~143px against a ~234px string, so an end
+            ellipsis cuts off precisely the part that tells two rows apart —
+            a screenful of siblings then reads the identical
+            `urn:synodic:solidatus:n…`. An RTL inline direction puts the
+            ellipsis at the start and keeps the discriminating tail; the runs
+            inside are still read left-to-right. */}
+        {technicalLine && (
+          <span
+            className="text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
+            style={{ direction: 'rtl', textAlign: 'left' }}
+            title={technicalLine}
+          >
+            {technicalLine}
+          </span>
+        )}
         {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
             users can reclaim vertical space in dense canvases. */}
         {showTypeBadge && (
@@ -830,7 +864,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
             opacity: 0.6 + lineageIntensityIn * 0.4,
           }}
-          title={`${lineageIn.toLocaleString()} incoming connection${lineageIn === 1 ? '' : 's'}`}
+          title={`${lineageIn.toLocaleString()} incoming ${unitNoun(lineageIn, 'lines')} on this canvas — ${unitMeaning('lines')}`}
         />
       )}
       {lineageOut > 0 && (
@@ -840,21 +874,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
             opacity: 0.6 + lineageIntensityOut * 0.4,
           }}
-          title={`${lineageOut.toLocaleString()} outgoing connection${lineageOut === 1 ? '' : 's'}`}
+          title={`${lineageOut.toLocaleString()} outgoing ${unitNoun(lineageOut, 'lines')} on this canvas — ${unitMeaning('lines')}`}
         />
       )}
       {externalIn > 0 && (
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming connection${externalIn === 1 ? '' : 's'} outside this view`}
+          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing connection${externalOut === 1 ? '' : 's'} outside this view`}
+          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
     </div>

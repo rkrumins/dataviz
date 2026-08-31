@@ -40,7 +40,7 @@ import { useGraphProvider } from '@/providers/GraphProviderContext'
 import type { ActiveTarget } from '@/components/views/LayerHierarchyPanel'
 
 import { useEntityBrowser } from '@/hooks/useEntityBrowser'
-import { useLoadingToast } from '@/components/ui/toast'
+import { useLoadingNotification } from '@/components/ui/notifications'
 
 
 // ============================================
@@ -412,8 +412,8 @@ export function WizardAssignmentTree({
         entityTypeDefinitions,
         enabled: !isSchemaLoading,
     })
-    useLoadingToast('wizard-entities', browser.isLoading, 'Loading entities')
-    useLoadingToast('wizard-schema', isSchemaLoading, 'Loading schema')
+    useLoadingNotification('wizard-entities', browser.isLoading, 'Loading entities')
+    useLoadingNotification('wizard-schema', isSchemaLoading, 'Loading schema')
 
     // Load top-level entities from API when schema is ready.
     useEffect(() => {

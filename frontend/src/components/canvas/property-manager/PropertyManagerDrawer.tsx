@@ -19,7 +19,7 @@ import { SlidersHorizontal, Tags, Layers, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     useDisplayRules,
     useReferenceModelStore,
@@ -70,7 +70,7 @@ export function PropertyManagerDrawer({
     const removeDisplayRule = useReferenceModelStore((s) => s.removeDisplayRule)
     const toggleDisplayRule = useReferenceModelStore((s) => s.toggleDisplayRule)
     const reorderDisplayRules = useReferenceModelStore((s) => s.reorderDisplayRules)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const handleSaveRule = (rule: DisplayRuleConfig) => {
         const isUpdate = rules.some((r) => r.id === rule.id)
@@ -81,9 +81,9 @@ export function PropertyManagerDrawer({
         }
         setEditor({ mode: 'closed' })
         // Premium feedback: confirm the rule applied. The engine recomputes
-        // the match set asynchronously; the toast reassures the user the
+        // the match set asynchronously; the notification reassures the user the
         // tag is now live on the canvas.
-        showToast('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
+        notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
     }
 
     /** Reveal a rule's matched nodes on the canvas by publishing them
@@ -93,7 +93,7 @@ export function PropertyManagerDrawer({
     const handleRevealRule = (rule: DisplayRuleConfig) => {
         const urns = useDisplayRuleMatchStore.getState().matchUrnsByRule.get(rule.id)
         if (!urns || urns.size === 0) {
-            showToast('info', `“${rule.name}” has no matches on the canvas yet`)
+            notify('info', `“${rule.name}” has no matches on the canvas yet`)
             return
         }
         useSearchStore.getState().setResult({
@@ -101,7 +101,7 @@ export function PropertyManagerDrawer({
             matchUrns: urns,
             queryHash: `display-rule:${rule.id}`,
         })
-        showToast('info', `Spotlighting ${urns.size} match${urns.size === 1 ? '' : 'es'} for “${rule.name}”`)
+        notify('info', `Spotlighting ${urns.size} match${urns.size === 1 ? '' : 'es'} for “${rule.name}”`)
     }
 
     // Names of OTHER rules — feeds the editor's duplicate-name guard.

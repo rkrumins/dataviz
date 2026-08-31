@@ -41,3 +41,29 @@ export function useBandReservation(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ref, varName])
 }
+
+/**
+ * Publish the element's full height as `varName` on the DOCUMENT ELEMENT, for
+ * app-level chrome that shares this corner but lives outside the canvas tree —
+ * the notification stack, which would otherwise paint over the dock and swallow the
+ * clicks meant for it. Withdrawn on unmount, so the var is simply absent (and
+ * the fallback applies) on every other page.
+ */
+export function useViewportReservation(
+  ref: RefObject<HTMLElement | null>,
+  varName: `--${string}`,
+): void {
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || typeof document === 'undefined') return
+    const root = document.documentElement
+    const publish = () => root.style.setProperty(varName, `${el.offsetHeight + BAND_GAP_PX}px`)
+    publish()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(publish) : null
+    ro?.observe(el)
+    return () => {
+      ro?.disconnect()
+      root.style.removeProperty(varName)
+    }
+  }, [ref, varName])
+}

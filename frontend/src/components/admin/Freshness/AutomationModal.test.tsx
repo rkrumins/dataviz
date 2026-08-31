@@ -580,9 +580,9 @@ describe('admin automation save', () => {
         await waitFor(() => expect(putAggregationCadence).toHaveBeenCalled())
         // The policy PUT already committed fleet-wide; a generic "could not
         // save" would be a lie about half the form.
-        const { useToastStore } = await import('@/components/ui/toast')
+        const { useNotificationStore } = await import('@/components/ui/notifications')
         await waitFor(() => expect(
-            useToastStore.getState().toasts.some(t =>
+            useNotificationStore.getState().notifications.some(t =>
                 /watch policy saved, but/i.test(t.message)),
         ).toBe(true))
         // The modal stays open and dirty-guarded for the retry.

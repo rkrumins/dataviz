@@ -11,7 +11,7 @@ import {
 } from '@/lib/viewVisibility'
 import { usePublishGate } from '@/hooks/usePublishGate'
 import { useBrand } from '@/store/branding'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { cn } from '@/lib/utils'
 import { updateViewVisibility } from '@/services/viewApiService'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
@@ -49,7 +49,7 @@ export function ViewCardOverflowMenu({
   const [isOpen, setIsOpen] = useState(false)
   const [visibilitySubmenu, setVisibilitySubmenu] = useState(false)
   const [saving, setSaving] = useState<string | null>(null)
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const { appName } = useBrand()
   const [activityOpen, setActivityOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -76,7 +76,7 @@ export function ViewCardOverflowMenu({
       // reader checking the card to find out what they just agreed to —
       // and until the parent wired this callback, the card still showed
       // the old tier, so there was nothing to check against.
-      showToast(
+      notify(
         'success',
         `"${viewName}" — ${visibilityDescription(newVisibility, { appName })
           .replace(/^Only you/, 'only you')}`,
@@ -85,7 +85,7 @@ export function ViewCardOverflowMenu({
     } catch (err) {
       // A silent console.error left the menu claiming success on a 403.
       const detail = err instanceof Error ? err.message : 'Failed to update visibility'
-      showToast(
+      notify(
         'error',
         detail.includes('workspace:view:publish')
           ? 'Publishing to everyone needs approval — open Share to ask.'
@@ -96,7 +96,7 @@ export function ViewCardOverflowMenu({
     }
     setIsOpen(false)
     setVisibilitySubmenu(false)
-  }, [viewId, viewName, visibility, appName, onVisibilityChange, showToast])
+  }, [viewId, viewName, visibility, appName, onVisibilityChange, notify])
 
   // The same ladder every other surface resolves — permission, workspace
   // policy, restricted source, platform ceiling — so a tier this person

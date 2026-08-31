@@ -706,10 +706,10 @@ export async function renderCanvasWithTrace(
     connectPickerOpen: () =>
       [...document.querySelectorAll('h3')].some(h => h.textContent?.trim() === 'Connect'),
     missingConnections: () => {
-      // The chip reads "<n> connections outside this view" (curated) or
+      // The chip reads "<n> flows outside this view" (curated) or
       // "… not on canvas" (open). Absent entirely when the count is 0.
       const label = [...document.querySelectorAll<HTMLElement>('span')]
-        .find(el => /^connections (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
+        .find(el => /^flows (outside this view|not on canvas)$/.test(el.textContent?.trim() ?? ''))
       const count = label?.previousElementSibling?.textContent?.trim()
       if (count === undefined) return null
       return Number(count.replace(/,/g, ''))
@@ -717,10 +717,11 @@ export async function renderCanvasWithTrace(
     async layerContextMenu() {
       // Right-click EMPTY layer space — the column's scroll area, which is
       // what carries `onLayerContextMenu` (cards handle their own).
-      // The FIRST scroller belongs to a chrome panel that marks itself
-      // interactive, and the handler deliberately bails for those; the layer
-      // columns' own scrollers are the ones that carry the menu.
-      const area = [...document.querySelectorAll<HTMLElement>('.custom-scrollbar')]
+      // Scoped to a column: the app styles several scrollers with
+      // `custom-scrollbar` — chrome panels (which mark themselves
+      // interactive, and the handler deliberately bails for those) and the
+      // canvas's own horizontal scroller, which carries no menu at all.
+      const area = [...document.querySelectorAll<HTMLElement>('[data-layer-id] .custom-scrollbar')]
         .find(el => !el.closest('[data-canvas-interactive]'))
       if (!area) throw new Error('no layer scroll area')
       await act(async () => { fireEvent.contextMenu(area) })

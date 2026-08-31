@@ -1,5 +1,5 @@
 /**
- * NotificationBell — the notification centre.
+ * InboxBell — the messages addressed to you.
  *
  * Every sharing flow in this product used to end in silence. A view was
  * shared with you and you found out by being told in a meeting; a
@@ -29,9 +29,9 @@ import {
 } from 'lucide-react'
 import * as Popover from '@radix-ui/react-popover'
 import { useNavigate } from 'react-router-dom'
-import { useNotifications } from '@/hooks/useNotifications'
+import { useInbox } from '@/hooks/useInbox'
 import { formatUtc, timeAgo } from '@/lib/timeAgo'
-import type { Notification } from '@/services/notificationsService'
+import type { InboxItem } from '@/services/inboxService'
 import { cn } from '@/lib/utils'
 
 interface KindVisual {
@@ -84,12 +84,12 @@ function visualFor(kind: string): KindVisual {
     return KIND_VISUALS[kind] ?? DEFAULT_VISUAL
 }
 
-export function NotificationBell() {
+export function InboxBell() {
     const [isOpen, setIsOpen] = useState(false)
     const navigate = useNavigate()
-    const { items, unread, isLoading, markAllRead, markRead } = useNotifications()
+    const { items, unread, isLoading, markAllRead, markRead } = useInbox()
 
-    const handleOpenItem = (item: Notification) => {
+    const handleOpenItem = (item: InboxItem) => {
         // Only spend a request when there is something to change. Re-marking
         // an already-read row would be a POST that alters nothing.
         if (!item.readAt) markRead(item.id)
@@ -104,13 +104,13 @@ export function NotificationBell() {
                     className="btn btn-ghost p-2 rounded-lg relative"
                     aria-label={
                         unread > 0
-                            ? `Notifications, ${unread} unread`
-                            : 'Notifications'
+                            ? `Inbox, ${unread} unread`
+                            : 'Inbox'
                     }
                     title={
                         unread > 0
-                            ? `${unread} unread notification${unread !== 1 ? 's' : ''}`
-                            : 'Notifications'
+                            ? `${unread} unread message${unread !== 1 ? 's' : ''}`
+                            : 'Inbox'
                     }
                 >
                     <Bell
@@ -135,7 +135,7 @@ export function NotificationBell() {
                 >
                     {/* Header */}
                     <div className="flex items-center justify-between px-4 py-3 border-b border-glass-border">
-                        <span className="text-sm font-semibold text-ink">Notifications</span>
+                        <span className="text-sm font-semibold text-ink">Inbox</span>
                         {unread > 0 && (
                             <button
                                 onClick={() => markAllRead()}
@@ -165,7 +165,7 @@ export function NotificationBell() {
                         ) : (
                             <div className="py-1">
                                 {items.map((item) => (
-                                    <NotificationRow
+                                    <InboxRow
                                         key={item.id}
                                         item={item}
                                         onClick={() => handleOpenItem(item)}
@@ -180,13 +180,13 @@ export function NotificationBell() {
     )
 }
 
-// ── Notification Row ──────────────────────────────────────────────────
+// ── Inbox row ──────────────────────────────────────────────────────
 
-function NotificationRow({
+function InboxRow({
     item,
     onClick,
 }: {
-    item: Notification
+    item: InboxItem
     onClick: () => void
 }) {
     const { Icon, icon, tile } = visualFor(item.kind)

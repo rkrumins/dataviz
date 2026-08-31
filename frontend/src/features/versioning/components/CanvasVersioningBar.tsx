@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, PanelRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
@@ -39,7 +39,7 @@ interface CanvasVersioningBarProps {
 }
 
 export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersioningBarProps) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   // Hoisted so the resolve below can carry the view id (capability context +
   // shared cache entry with the canvas's own resolve).
@@ -117,7 +117,7 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
       if (hadUnsavedEdits) {
         // Never silently drop the optimistic canvas — the edits are still in the staged store and
         // can be re-saved onto a fresh draft, but the user has to know they didn't land.
-        showToast(
+        notify(
           'warning',
           merged
             ? 'This draft was published while you had unsaved edits — they were not included. You’re now on Published; start a new draft to save them.'
@@ -125,11 +125,11 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
         )
         return
       }
-      showToast('info', merged
+      notify('info', merged
         ? 'This draft has been published — you’re now on the Published version.'
         : 'This draft is no longer available — you’re now on the Published version.')
     },
-    [showToast],
+    [notify],
   )
   useActiveBranchGuard({
     enabled: !!graphId,
@@ -219,9 +219,9 @@ export function CanvasVersioningBar({ workspaceId, dataSourceId }: CanvasVersion
     abandon.mutate(branchId, {
       onSuccess: () => {
         switchToMain()
-        showToast('success', 'Draft discarded.')
+        notify('success', 'Draft discarded.')
       },
-      onError: (e) => showToast('error', (e as Error).message),
+      onError: (e) => notify('error', (e as Error).message),
     })
   }
 

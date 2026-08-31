@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { useBrand } from '@/store/branding'
 import { providerService, friendlyError, type ConnectionTestResult, type ProviderImpactResponse, type ProviderResponse } from '@/services/providerService'
 import { usePermission } from '@/store/auth'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ProviderAdmissionEditor } from '@/components/insights/ProviderAdmissionEditor'
 import { StatusChip } from '@/components/insights/StatusChip'
 import type { InsightsMeta, ProviderHealth as InsightsProviderHealth } from '@/types/insights'
@@ -180,6 +181,7 @@ export function RegistryConnections() {
     // platform-admin-only because the rows carry credentials.
     const canManage = usePermission('system:admin')
     const { types: providerTypes } = useProviderTypes()
+    const { notify } = useAppNotifications()
     const [providers, setProviders] = useState<ProviderResponse[]>([])
     const { healthMap, testOne, refresh: refreshHealth, setHealth } = useProviderHealthSweep(providers)
     // Backend-published per-provider status — populated by the global
@@ -235,8 +237,22 @@ export function RegistryConnections() {
 
     const deleteProvider = async () => {
         if (!deleteTarget) return
+        const name = deleteTarget.name
+        // The dialog just warned about these by name. Say which way it went — a
+        // rejection is reported by the dialog itself, which stays open with it.
+        // `null` is a third state, not a zero: the impact probe failed, so the
+        // dialog showed neither the blast radius nor "Safe to delete" and nobody
+        // established what depended on this. Say only what was actually done.
+        const dependents = deleteImpact
+            ? deleteImpact.catalogItems.length + deleteImpact.workspaces.length + deleteImpact.views.length
+            : null
         await providerService.delete(deleteTarget.id)
         await loadProviders()
+        notify('success', dependents === null
+            ? `Deleted “${name}”.`
+            : dependents > 0
+                ? `Deleted “${name}” and the ${dependents} ${dependents === 1 ? 'asset' : 'assets'} that depended on it.`
+                : `Deleted “${name}”. Nothing else depended on it.`)
     }
 
     const handleEditProvider = (p: ProviderResponse) => {

@@ -22,6 +22,7 @@ import { ConnectionsPanel, type ConnectionsPanelProps } from '../ConnectionsPane
 import type { ConnectionModel, ConnectionTypeRow } from '../connectionModel'
 import type { EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
+import { unitMeaning } from '../connectionUnits'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -104,11 +105,18 @@ const modelOf = (rows: ConnectionModel['rows']): ConnectionModel => ({
   untyped: 0,
 })
 
-const headerButton = () => screen.getByRole('button', { name: /connections/i })
+// The panel's own header, not a row's pin. Now that both say "Flows", a
+// loose name match finds two: the header ("Flows 47") and the pin for the
+// FLOWS_TO row ("Flows to 30"). `data-dock-header` is the marker the canvas
+// itself measures the reserved band from, so it is the right handle; the
+// accessible NAME is pinned separately, below.
+const headerButton = () =>
+  document.querySelector<HTMLElement>('button[data-dock-header]') as HTMLElement
 const rowFor = (type: string) =>
   document.querySelector<HTMLElement>(`[data-connection-row="${type}"]`) as HTMLElement
 const rowList = () => document.querySelector<HTMLElement>('[data-connection-rows]') as HTMLElement
 const lastHighlight = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.at(-1)?.[0] as ReadonlySet<string> | null
+const DIRECTION_TITLE = '→ flows with the layer order · ← flows back upstream · ⇄ both ways'
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -121,10 +129,15 @@ describe('ConnectionsPanel', () => {
     vi.restoreAllMocks()
   })
 
-  it('the collapsed pill reads Connections and the relationship total', () => {
+  it('the collapsed pill reads Flows and the flow total', () => {
     mount()
     const header = headerButton()
-    expect(header.textContent).toMatch(/Connections/)
+    expect(header.textContent).toMatch(/Flows/)
+    expect(header.textContent).not.toMatch(/Connections/)
+    // The accessible name follows the label — a screen reader hears "Flows"
+    // too. `expanded` separates it from the FLOWS_TO row's pin, which is
+    // aria-pressed rather than aria-expanded.
+    expect(screen.getByRole('button', { name: /^Flows/, expanded: false })).toBe(header)
     expect(header.textContent).toMatch(/47/)
     expect(header.textContent).not.toMatch(/hidden/)
   })
@@ -134,17 +147,29 @@ describe('ConnectionsPanel', () => {
     expect(headerButton().textContent).toMatch(/47 · 2 hidden/)
   })
 
-  it('the expanded header reads {n} connections · {d} drawn · {t} types', () => {
+  it('the expanded header names the unit of every number it shows', () => {
+    // The total and the drawn count are DIFFERENT units — the whole reason
+    // the two numbers disagree. Each says which it is, and the line carries
+    // both definitions for the reader who wants them.
     useDrawnEdgesStore.setState({ drawn: 12 })
     mount({ defaultExpanded: true })
-    expect(screen.getByText('47 connections · 12 drawn · 2 types')).toBeTruthy()
+    const line = screen.getByText('47 underlying flows · 12 lines drawn · 2 types')
+    expect(line.getAttribute('title')).toContain(unitMeaning('flows'))
+    expect(line.getAttribute('title')).toContain(unitMeaning('lines'))
+  })
+
+  it('a row says its count is in underlying flows', () => {
+    mount({ defaultExpanded: true })
+    const title = rowFor('FLOWS_TO').getAttribute('title') ?? ''
+    expect(title).toContain('30 underlying flows in view carry this type')
+    expect(title).toContain(unitMeaning('flows'))
   })
 
   it('Lineage off shows "Lineage is off" and renders no totals', () => {
     useDrawnEdgesStore.setState({ drawn: 12 })
     const { container } = mount({ lineageOn: false, defaultExpanded: true })
     expect(screen.getByText('Lineage is off')).toBeTruthy()
-    expect(screen.getByText('Turn Lineage on in the header to see connections.')).toBeTruthy()
+    expect(screen.getByText('Turn Lineage on in the header to see flows.')).toBeTruthy()
     expect(headerButton().textContent).toMatch(/Off/)
     // No number of any kind while lineage is off — not the total, not "drawn".
     expect(container.textContent).not.toMatch(/\d/)
@@ -168,8 +193,16 @@ describe('ConnectionsPanel', () => {
     )
     expect(order).toEqual(['FLOWS_TO', 'DERIVES_FROM', 'OWNS'])
 
+    // Its tooltip names the kind too — what is not drawn is flows.
+    expect(hidden.getAttribute('title')).toContain('Its flows are not drawn and not counted.')
+
     fireEvent.click(screen.getByTitle('Show this type'))
     expect(onToggleType).toHaveBeenCalledWith('OWNS')
+  })
+
+  it('an empty board says there are no flows, not no connections', () => {
+    mount({ model: modelOf([]), defaultExpanded: true })
+    expect(screen.getByText('No flows in view')).toBeTruthy()
   })
 
   it('hovering a row emits that type bundle ids; leaving emits null', () => {
@@ -375,7 +408,7 @@ describe('ConnectionsPanel', () => {
   })
 
   it('says what a row does, whenever there is a row to do it to', () => {
-    const hint = 'Hover a row to spotlight its connections · click to keep it lit.'
+    const hint = 'Hover a row to spotlight its lines · click to keep it lit.'
     const { unmount } = mount({ defaultExpanded: true })
     expect(screen.getByText(hint)).toBeTruthy()
     unmount()
@@ -422,7 +455,7 @@ describe('ConnectionsPanel', () => {
     // per member. A trace cannot: its lines carry a total, not a list, so
     // the reader is told rather than left to wonder why nothing moved.
     const clause =
-      'During a trace, a connection that carries several types keeps its full count when one of them is hidden.'
+      'During a trace, a line that carries several types keeps its full underlying-flow count when one of them is hidden.'
     const { unmount } = mount({ defaultExpanded: true })
     expect(rowFor('FLOWS_TO').getAttribute('title')).not.toMatch(/During a trace/)
     unmount()
@@ -468,5 +501,84 @@ describe('ConnectionsPanel', () => {
     expect(split.className.split(/\s+/)).toEqual(
       expect.arrayContaining(['group-hover/row:hidden', 'group-focus-within/row:hidden']),
     )
+  })
+
+  // ─── Fix round 3 (the dock: one surface, two panels) ───────────────────────
+
+  it('the description wraps instead of being cut off mid-word', () => {
+    // Measured at the dock's real 320px: the description was hard-truncated to
+    // one line — "Many detailed flows…" — while the direction split sat on the
+    // same line taking the rest of it. A sentence the ontology wrote to explain
+    // the type is worth two lines; it is never worth half of one.
+    mount({
+      defaultExpanded: true,
+      resolveType: (type) => ({
+        ...resolveType(type),
+        label: 'Combined flow',
+        description: 'Many detailed flows between two items, shown as one connection.',
+      }),
+    })
+    const desc = rowFor('FLOWS_TO').querySelector<HTMLElement>('[data-connection-description]')!
+    expect(desc.textContent).toBe('Many detailed flows between two items, shown as one connection.')
+    expect(desc.className.split(/\s+/)).toEqual(expect.arrayContaining(['line-clamp-2']))
+    expect(desc.className).not.toMatch(/\btruncate\b/)
+  })
+
+  it('the description has the line to itself — the direction split never shares it', () => {
+    mount({ defaultExpanded: true })
+    const row = rowFor('FLOWS_TO')
+    const desc = row.querySelector<HTMLElement>('[data-connection-description]')!
+    const split = within(row).getByTitle(DIRECTION_TITLE)
+    expect(desc.parentElement).toBe(row)
+    expect(split.parentElement).not.toBe(desc.parentElement)
+    expect(desc.contains(split)).toBe(false)
+  })
+
+  it('a type with nothing to say leaves no empty slot behind', () => {
+    // The description is a LINE of the row, not a box inside one: with no
+    // description there must be no element and no gap where one would be.
+    mount({
+      defaultExpanded: true,
+      resolveType: (type) =>
+        type === 'FLOWS_TO' ? { ...resolveType(type), description: '' } : resolveType(type),
+    })
+    expect(rowFor('FLOWS_TO').querySelector('[data-connection-description]')).toBeNull()
+    expect(rowFor('FLOWS_TO').children).toHaveLength(2)
+    expect(rowFor('DERIVES_FROM').children).toHaveLength(3)
+  })
+
+  it('a long ontology label keeps the whole top line to itself', () => {
+    const label = 'Physically materialises into a downstream reporting table'
+    mount({
+      defaultExpanded: true,
+      resolveType: (type) => ({ ...resolveType(type), label }),
+    })
+    const row = rowFor('FLOWS_TO')
+    const labelEl = within(row).getByText(label)
+    // Nothing but the swatch and the count shares the label's line, so the
+    // name loses characters only when the panel itself runs out of width.
+    const topLine = row.children[0]
+    expect(topLine.contains(labelEl)).toBe(true)
+    expect(topLine.contains(row.querySelector('[data-connection-description]')!)).toBe(false)
+    expect(topLine.contains(within(row).getByTitle(DIRECTION_TITLE))).toBe(false)
+  })
+
+  it('the rows read at the Data loads card scale, and every number is tabular', () => {
+    // 13px primary / 11px secondary, the same as the notification cards the
+    // panel above it records — the two panels are one dock, not two designs.
+    mount({ hiddenTypes: new Set(['OWNS']), defaultExpanded: true })
+    const row = rowFor('FLOWS_TO')
+
+    expect(within(row).getByText('Flows to').className).toMatch(/text-\[13px\]/)
+    expect(within(row).getByText('30').className).toMatch(/text-\[13px\]/)
+    expect(row.querySelector('[data-connection-description]')!.className).toMatch(/text-\[11px\]/)
+
+    const split = within(row).getByTitle(DIRECTION_TITLE)
+    expect(split.className).toMatch(/text-\[11px\]/)
+    // Counts and the split are read against each other down the column.
+    expect(split.className).toMatch(/tabular-nums/)
+    expect(within(row).getByText('30').className).toMatch(/tabular-nums/)
+    // A hidden row is still a row: same label scale, so nothing jumps.
+    expect(within(rowFor('OWNS')).getByText('Owns').className).toMatch(/text-\[13px\]/)
   })
 })

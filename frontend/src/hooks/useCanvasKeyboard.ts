@@ -72,6 +72,27 @@ export interface UseCanvasKeyboardOptions {
 }
 
 // ============================================
+// Interactive-target guard
+// ============================================
+
+/**
+ * Roles whose focused element is activated by Enter. Cancelling Enter on one
+ * of these breaks the control — the canvas has no claim on the key there.
+ */
+const ACTIVATION_ROLES = new Set([
+    'button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+    'option', 'tab', 'checkbox', 'radio', 'switch',
+])
+
+/** Does Enter already do something on this element without our help? */
+function activatesOnEnter(el: HTMLElement): boolean {
+    if (el.tagName === 'BUTTON') return true
+    if (el.tagName === 'A' && el.hasAttribute('href')) return true
+    const role = el.getAttribute('role')
+    return role !== null && ACTIVATION_ROLES.has(role)
+}
+
+// ============================================
 // Hook Implementation
 // ============================================
 
@@ -206,9 +227,18 @@ export function useCanvasKeyboard({
         }
         
         // Edit: Enter (when node selected)
+        //
+        // Enter is also how the browser activates a focused button or link, and
+        // this listener sits on `document` — so cancelling it unconditionally
+        // (which the old code did, BEFORE the optional-chained call, so it fired
+        // with no handler wired too) killed every button and link in the app for
+        // as long as any canvas was mounted. Act only when there is something to
+        // do, and never when the key already belongs to the focused control.
         if (e.key === 'Enter' && !isMod) {
-            e.preventDefault()
-            handlersRef.current.onEdit?.()
+            if (handlersRef.current.onEdit && !activatesOnEnter(target)) {
+                e.preventDefault()
+                handlersRef.current.onEdit()
+            }
             return
         }
         

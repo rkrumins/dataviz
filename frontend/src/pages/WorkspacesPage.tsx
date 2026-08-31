@@ -24,6 +24,7 @@ import { deriveWorkspaceHealth } from '@/components/admin/workspace/WorkspaceHea
 import { CreateWorkspaceWizard } from '@/components/admin/CreateWorkspaceWizard'
 import { WorkspaceBulkBar } from '@/components/admin/workspace/WorkspaceBulkBar'
 import { DangerConfirmDialog } from '@/components/ui/DangerConfirmDialog'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     useWorkspaceDeletion, impactSections, DELETE_CAVEAT,
 } from '@/components/admin/workspace/useWorkspaceDeletion'
@@ -45,6 +46,7 @@ function compactNum(n: number): string {
 export function WorkspacesPage() {
     const navigate = useNavigate()
     const queryClient = useQueryClient()
+    const { notify } = useAppNotifications()
     const [searchParams, setSearchParams] = useSearchParams()
     // Per-card permission check — read the resolver fn from the auth
     // store so we can call it inline for each row without violating
@@ -105,6 +107,10 @@ export function WorkspacesPage() {
     const [isLoading, setIsLoading] = useState(true)
     /** A provider/catalog/ontology probe failed — the extras on screen may be stale. */
     const [probeFailed, setProbeFailed] = useState(false)
+    /** The workspace list itself failed — what's on screen is the last known list. */
+    const [listFailed, setListFailed] = useState(false)
+    /** The last list the server actually gave us; a failed refresh keeps it. */
+    const lastWorkspacesRef = useRef<WorkspaceResponse[]>([])
 
     /* ── Create-workspace wizard ── */
     const [showWizard, setShowWizard] = useState(false)
@@ -265,8 +271,19 @@ export function WorkspacesPage() {
                 withTimeout(workspaceService.list(), TIMEOUTS.ADMIN_LIST_MS, 'workspaces.list'),
                 ...adminProbes,
             ])
-            const wsList = settled[0].status === 'fulfilled' ? settled[0].value as WorkspaceResponse[] : ([] as WorkspaceResponse[])
+            // The workspace list gets the same treatment as the three probes
+            // below — it just never got it. It fell back to [] on rejection and
+            // was set unconditionally, so an 8s ADMIN_LIST_MS timeout emptied the
+            // page and the empty state announced "No workspaces yet". That is the
+            // blank-and-false the note below forbids, on the one list that is the
+            // whole page. `degraded` even skipped index 0, so nothing said a word.
+            const listResult = settled[0]
+            if (listResult.status === 'fulfilled') {
+                lastWorkspacesRef.current = listResult.value as WorkspaceResponse[]
+            }
+            const wsList = lastWorkspacesRef.current
             setWorkspaces(wsList)
+            setListFailed(listResult.status === 'rejected')
 
             // Keep what we already had when a probe FAILS.
             //
@@ -366,7 +383,17 @@ export function WorkspacesPage() {
     }, [workspaces, deletion])
 
     const handleSetDefault = async (wsId: string) => {
-        await workspaceService.setDefault(wsId)
+        const name = workspaces.find(w => w.id === wsId)?.name ?? 'this workspace'
+        try {
+            await workspaceService.setDefault(wsId)
+            notify('success', `“${name}” is now the default workspace — it opens first for everyone.`)
+        } catch (err) {
+            notify('error', err instanceof Error && err.message
+                ? err.message
+                : `Could not make “${name}” the default workspace.`)
+        }
+        // Either way: on success this picks up the new default, and on failure it
+        // puts the old one back on screen instead of leaving the click half-applied.
         loadData()
     }
 
@@ -469,11 +496,13 @@ export function WorkspacesPage() {
 
             {/* A failed refresh used to erase the provider/ontology detail silently.
                 Now it keeps it and admits it might be stale. */}
-            {probeFailed && !isLoading && (
+            {(listFailed || probeFailed) && !isLoading && (
                 <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-2.5 flex items-center gap-2.5">
                     <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
                     <p className="text-xs text-ink-muted flex-1">
-                        Couldn't refresh provider and semantic-layer details — showing the last known values.
+                        {listFailed
+                            ? "Couldn't refresh the workspace list — what's shown may be out of date."
+                            : "Couldn't refresh provider and semantic-layer details — showing the last known values."}
                     </p>
                     <button
                         onClick={() => loadData()}
@@ -694,8 +723,19 @@ export function WorkspacesPage() {
             ) : filtered.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed border-glass-border rounded-2xl">
                     <Database className="w-12 h-12 text-ink-muted mb-4" />
-                    <h3 className="text-lg font-bold text-ink mb-1">{searchQuery ? 'No matching workspaces' : 'No workspaces yet'}</h3>
-                    <p className="text-sm text-ink-muted">{searchQuery ? 'Try a different search term' : 'Create a workspace to get started'}</p>
+                    {/* Nothing on screen AND the list request failed: we do not
+                        know what is here, so we must not say there is nothing. */}
+                    {listFailed && workspaces.length === 0 ? (
+                        <>
+                            <h3 className="text-lg font-bold text-ink mb-1">Couldn't load your workspaces</h3>
+                            <p className="text-sm text-ink-muted">The request failed — retry above to see what's here.</p>
+                        </>
+                    ) : (
+                        <>
+                            <h3 className="text-lg font-bold text-ink mb-1">{searchQuery ? 'No matching workspaces' : 'No workspaces yet'}</h3>
+                            <p className="text-sm text-ink-muted">{searchQuery ? 'Try a different search term' : 'Create a workspace to get started'}</p>
+                        </>
+                    )}
                 </div>
             ) : layout === 'grid' ? (
                 <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">

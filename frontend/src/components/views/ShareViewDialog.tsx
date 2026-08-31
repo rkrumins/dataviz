@@ -58,7 +58,7 @@ import {
     type DirectoryGroup,
     type DirectoryUser,
 } from '@/services/userDirectoryService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -124,7 +124,7 @@ export function ShareViewDialog({
     const [denialReason, setDenialReason] = useState('')
     const [requestBusy, setRequestBusy] = useState(false)
 
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const { appName } = useBrand()
     const queryClient = useQueryClient()
     const currentUserId = useAuthStore(s => s.user?.id ?? null)
@@ -224,12 +224,12 @@ export function ShareViewDialog({
         try {
             await updateViewVisibility(viewId, newVisibility)
             onVisibilityChange?.(newVisibility)
-            showToast('success', `Visibility set to ${newVisibility}`)
+            notify('success', `Visibility set to ${newVisibility}`)
         } catch (err) {
             // Revert on error
             setVisibility(prev)
             const message = err instanceof Error ? err.message : 'Failed to update visibility'
-            showToast(
+            notify(
                 'error',
                 message.includes('workspace:view:publish')
                     ? 'Publishing to everyone needs the "Publish views" permission — ask a workspace admin.'
@@ -238,7 +238,7 @@ export function ShareViewDialog({
         } finally {
             setSavingVisibility(false)
         }
-    }, [viewId, visibility, onVisibilityChange, showToast])
+    }, [viewId, visibility, onVisibilityChange, notify])
 
     // ── Publication requests ────────────────────────────────────────
 
@@ -262,17 +262,17 @@ export function ShareViewDialog({
         try {
             await action()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : fallbackError)
+            notify('error', err instanceof Error ? err.message : fallbackError)
         } finally {
             setRequestBusy(false)
         }
-    }, [showToast])
+    }, [notify])
 
     const handleSendRequest = () => runRequestAction(async () => {
         applyView(await requestViewPublication(viewId, requestNote))
         setComposingRequest(false)
         setRequestNote('')
-        showToast(
+        notify(
             'success',
             "Sent to your workspace admins — you'll see it here when it's approved",
         )
@@ -282,21 +282,21 @@ export function ShareViewDialog({
         await withdrawViewPublicationRequest(viewId)
         setAnswered(null)
         invalidateView()
-        showToast('success', 'Publication request withdrawn')
+        notify('success', 'Publication request withdrawn')
     }, 'Could not withdraw the request')
 
     const handleApproveRequest = () => runRequestAction(async () => {
         const updated = await approveViewPublication(viewId)
         applyView(updated)
         onVisibilityChange?.(updated.visibility)
-        showToast('success', `"${viewName}" is now visible to everyone`)
+        notify('success', `"${viewName}" is now visible to everyone`)
     }, 'Could not approve the request')
 
     const handleDenyRequest = () => runRequestAction(async () => {
         applyView(await denyViewPublication(viewId, denialReason))
         setComposingDenial(false)
         setDenialReason('')
-        showToast('success', 'Publication request declined')
+        notify('success', 'Publication request declined')
     }, 'Could not decline the request')
 
     const handleAddGrant = async (
@@ -311,9 +311,9 @@ export function ShareViewDialog({
                 subjectType, subjectId, role,
             })
             setGrants(prev => [...(prev ?? []), grant])
-            showToast('success', `Shared with ${label} as ${role}`)
+            notify('success', `Shared with ${label} as ${role}`)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to add grant')
+            notify('error', err instanceof Error ? err.message : 'Failed to add grant')
         } finally {
             setAdding(false)
         }
@@ -330,7 +330,7 @@ export function ShareViewDialog({
             setGrants(g => (g ?? []).map(x => x.grantId === grant.grantId ? updated : x))
         } catch (err) {
             setGrants(prev)
-            showToast('error', err instanceof Error ? err.message : 'Failed to change role')
+            notify('error', err instanceof Error ? err.message : 'Failed to change role')
         } finally {
             setBusyGrantId(null)
         }
@@ -341,9 +341,9 @@ export function ShareViewDialog({
         try {
             await viewGrantsService.delete(viewId, grant.grantId)
             setGrants(prev => (prev ?? []).filter(g => g.grantId !== grant.grantId))
-            showToast('success', `Removed ${grant.subject.displayName ?? grant.subject.id}`)
+            notify('success', `Removed ${grant.subject.displayName ?? grant.subject.id}`)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Failed to remove grant')
+            notify('error', err instanceof Error ? err.message : 'Failed to remove grant')
         } finally {
             setBusyGrantId(null)
         }
@@ -801,7 +801,7 @@ function AddGrantPicker({
                 if (subjectType === 'user') setUsers(result.users)
                 else setGroups(result.groups)
             } catch {
-                /* errors surface via toast in onAdd */
+                /* errors surface via notification in onAdd */
             }
         }, 200)
         return () => { cancelled = true; clearTimeout(timer) }

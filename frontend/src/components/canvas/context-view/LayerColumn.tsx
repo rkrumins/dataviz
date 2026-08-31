@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
 import {
   useAncestorMatchCounts,
   useCanvasFilterMode,
@@ -31,8 +32,9 @@ import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { SearchHitInlineRow } from './SearchHitInlineRow'
 import { GhostFlatTreeItem, GHOST_COUNT_PER_LAYER } from './GhostFlatTreeItem'
-import { densityRowHeights } from './density'
+import { densityRowHeights, TECHNICAL_LINE_HEIGHT } from './density'
 import { inlineSearchHits, type InlineSearchHitRow } from './inlineSearchHits'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { useColumnPeripheryStore } from '@/store/columnPeriphery'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
@@ -76,7 +78,7 @@ interface LayerColumnProps {
   isHighlightActive?: boolean
   isHoverHighlight?: boolean
   onAnimationComplete?: () => void
-  onLoadMore?: (parentId: string) => void
+  onLoadMore?: (parentId: string, auto?: boolean) => void
   /** Walk a search hit's ancestors open and scroll to it. The inline hit
    *  rows are pointers into the result set — the entity itself may be
    *  nowhere near loaded — so clicking one has to go through the canvas's
@@ -135,7 +137,7 @@ interface LayerColumnProps {
   /** Render the per-row ambient in/out hairlines (follows the lineage-
    *  flow master switch). Now anchored to the row box, not the overlay. */
   showLineageIndicators?: boolean
-  /** Show the connection-density gutter (summarized edge modes only). */
+  /** Show the flow-density gutter (summarized edge modes only). */
   showDensityGutter?: boolean
   /** Anchor Rail — the selected node's off-screen partners that live in
    *  THIS column, docked as proxy chips the edge overlay anchors to. */
@@ -172,7 +174,7 @@ function getItemKey(item: FlatTreeNode, _index: number): string {
  * scrolls the hit into view — which drops that row into the viewport for
  * every ancestor on the spine without the reader having scrolled at all.
  * Each one then pages itself, which is exactly the cost the reveal exists to
- * avoid (three `children-with-edges` and three toasts for one three-deep
+ * avoid (three `children-with-edges` and three notifications for one three-deep
  * hit). Being carried somewhere is not the same as scrolling there, so the
  * sentinel stays disarmed until the container holds something the reader
  * actually asked for. The button is unaffected.
@@ -653,8 +655,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   // Fetch the next page of a parent's children. Stable identity — the row that
   // calls this used to be an IntersectionObserver sentinel whose one-shot latch
   // was reset every time this callback's identity churned.
-  const handleLoadMore = useCallback((nodeId: string) => {
-    onLoadMore?.(nodeId)
+  const handleLoadMore = useCallback((nodeId: string, auto?: boolean) => {
+    onLoadMore?.(nodeId, auto)
   }, [onLoadMore])
 
   // Handle focus (zoom into subtree)
@@ -769,6 +771,13 @@ export const LayerColumn = React.memo(function LayerColumn({
   // users whose persisted preferences predate this field.
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const rowHeights = useMemo(() => densityRowHeights(density), [density])
+  // Technical mode adds a second line to every FlatTreeItem row, so the
+  // estimate has to grow with it — the estimate is all a row the virtualizer
+  // has never mounted contributes to `getTotalSize()` and to every
+  // `scrollToIndex` offset. The chrome rows below (search box, search hit,
+  // skeleton, load-more, error) render no technical line and keep their size.
+  const personaMode = usePersonaMode()
+  const technicalExtra = personaMode === 'technical' ? TECHNICAL_LINE_HEIGHT : 0
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -779,18 +788,20 @@ export const LayerColumn = React.memo(function LayerColumn({
       if (item.isSkeleton) return rowHeights.skeleton
       if (item.isFailed) return rowHeights.failed
       if (item.isLoadMore) return rowHeights.loadMore
-      return item.depth === 0 ? rowHeights.root : rowHeights.child
+      return (item.depth === 0 ? rowHeights.root : rowHeights.child) + technicalExtra
     },
     overscan,
     getItemKey: (index) => getItemKey(flatTree[index], index),
   })
 
-  // Re-measure all virtualized rows when density flips so the cached
-  // measurements from the previous density don't leave the row stack
-  // pinned to stale heights.
+  // Re-measure all virtualized rows when density or the persona flips so the
+  // cached measurements from the previous mode don't leave the row stack
+  // pinned to stale heights. `itemSizeCache` survives unmount and is read
+  // ahead of `estimateSize`, so without this a row first measured in Business
+  // mode keeps its shorter height for the rest of the session.
   useEffect(() => {
     virtualizer.measure()
-  }, [density, virtualizer])
+  }, [density, personaMode, virtualizer])
 
   // Auto-scroll keyboard-focused row into view via virtualizer
   const focusedNodeId = navigableItems[focusIndex]?.node.id ?? null
@@ -976,7 +987,18 @@ export const LayerColumn = React.memo(function LayerColumn({
       }
       case 'Enter': {
         const item = navigableItems[focusIndex]
-        if (item) onSelect(item.node.id)
+        if (!item) break
+        // Enter on the row that is ALREADY selected is the canvas's documented
+        // "Enter — Edit Selected": let it through. Swallowing every Enter left
+        // keyboard users re-selecting the row they were on, forever.
+        if (item.node.id === selectedNodeId) break
+        // End the SELECTING keystroke at the React root. This scroller is a
+        // plain div, so useCanvasKeyboard's document listener does not treat it
+        // as an activatable control: without this, one Enter selected the row
+        // here AND fired the canvas `onEdit` — on the node selected BEFORE this
+        // keystroke, since React has not flushed onSelect by then.
+        e.stopPropagation()
+        onSelect(item.node.id)
         break
       }
       case 'Home':
@@ -988,7 +1010,7 @@ export const LayerColumn = React.memo(function LayerColumn({
         setFocusIndex(count - 1)
         break
     }
-  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, reorderEnabled, onReorderNudge])
+  }, [navigableItems, focusIndex, expandedNodes, onToggle, onSelect, selectedNodeId, reorderEnabled, onReorderNudge])
 
   // After a keyboard reorder, re-point focus at the moved node's new row
   // (its index shifts by the displaced neighbor's visible subtree size).
@@ -1067,11 +1089,11 @@ export const LayerColumn = React.memo(function LayerColumn({
     return { above, below }
   }, [scrollTick, flatTree, virtualizer, isRealRow])
 
-  // Periphery summary — connections from visible entities to partners
-  // beyond THIS column's fold, computed by the edge overlay. Merged into
-  // the "N above/below" chips so rows and connections read as one
-  // labeled statement ("↑ 97 rows · 306 connections") instead of two
-  // unlabeled numbers in different units floating near each other.
+  // Periphery summary — flows from visible entities to partners beyond
+  // THIS column's fold, computed by the edge overlay. Merged into the
+  // "N above/below" chips so rows and lines read as one labeled statement
+  // ("↑ 97 rows · 306 lines") instead of two unlabeled numbers in
+  // different units floating near each other.
   const periphery = useColumnPeripheryStore(s => s.summaries[layer.id])
 
   // ── End-reached sentinel (roots auto-paging) ─────────────────────────
@@ -1112,7 +1134,7 @@ export const LayerColumn = React.memo(function LayerColumn({
     return Math.log2(1 + Math.max(1, maxCount))
   }, [showLineageIndicators, lineageCounts])
 
-  // Where does connection mass live across the WHOLE column (not just the
+  // Where does flow mass live across the WHOLE column (not just the
   // viewport)? Bucket the flat tree by index; each bucket sums the in+out
   // lineage counts of its rows. Normalized 0..1 for the heat strip.
   const densityBuckets = useMemo(() => {
@@ -1631,7 +1653,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               column edges. A gradient veil lets the boundary rows fade
               out beneath it (the veil IS the signal that more follows),
               and one compact centered label states exactly how much:
-              "↑ N more · M connections". Scrims float, so scrolling
+              "↑ N more · M lines". Scrims float, so scrolling
               never shifts layout, and unlike the old floating pill the
               occlusion reads as an intentional fade — never as chrome
               covering a card. Click scrolls the column. ── */}
@@ -1656,7 +1678,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       {(periphery?.upEdges ?? 0) > 0 && (
                         <>
                           <p className="text-ink-muted">
-                            {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'} from
+                            {periphery!.upEdges.toLocaleString()} {unitNoun(periphery!.upEdges, 'lines')} from
                             entities on screen lead up there:
                           </p>
                           <div className="mt-1">
@@ -1672,6 +1694,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                               </p>
                             )}
                           </div>
+                          <p className="mt-1 text-ink-muted/70">{unitMeaning('lines')}</p>
                         </>
                       )}
                       <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll up</p>
@@ -1693,7 +1716,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <>
                         {overflowCounts.above > 0 && <span className="opacity-40">·</span>}
                         <span className="tabular-nums opacity-80">
-                          {periphery!.upEdges.toLocaleString()} connection{periphery!.upEdges === 1 ? '' : 's'}
+                          {periphery!.upEdges.toLocaleString()} {unitNoun(periphery!.upEdges, 'lines')}
                         </span>
                       </>
                     )}
@@ -1725,7 +1748,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       {(periphery?.downEdges ?? 0) > 0 && (
                         <>
                           <p className="text-ink-muted">
-                            {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'} from
+                            {periphery!.downEdges.toLocaleString()} {unitNoun(periphery!.downEdges, 'lines')} from
                             entities on screen lead down there:
                           </p>
                           <div className="mt-1">
@@ -1741,6 +1764,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                               </p>
                             )}
                           </div>
+                          <p className="mt-1 text-ink-muted/70">{unitMeaning('lines')}</p>
                         </>
                       )}
                       <p className="mt-1.5 text-ink-muted/60 italic">Click to scroll down</p>
@@ -1762,7 +1786,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       <>
                         {overflowCounts.below > 0 && <span className="opacity-40">·</span>}
                         <span className="tabular-nums opacity-80">
-                          {periphery!.downEdges.toLocaleString()} connection{periphery!.downEdges === 1 ? '' : 's'}
+                          {periphery!.downEdges.toLocaleString()} {unitNoun(periphery!.downEdges, 'lines')}
                         </span>
                       </>
                     )}
@@ -1811,7 +1835,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                   type="button"
                   data-canvas-interactive
                   onClick={(e) => { e.stopPropagation(); onProxyMore() }}
-                  title="Every connection of the selected entity, grouped and searchable"
+                  title="Every flow of the selected entity, grouped and searchable"
                   className="pointer-events-auto w-full flex items-center justify-center gap-1.5 px-2 py-1 rounded-md bg-canvas-elevated/90 border border-black/10 dark:border-white/10 shadow-md text-[10.5px] font-medium text-ink-muted hover:text-ink hover:scale-[1.02] active:scale-[0.98] transition-all"
                 >
                   <LucideIcons.Focus className="w-3 h-3 flex-shrink-0" />
@@ -1845,7 +1869,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           </AnimatePresence>
 
           {/* Density gutter — a slim heat strip on the column's right edge
-              showing where connection mass lives across the FULL scroll
+              showing where flow mass lives across the FULL scroll
               range (the budget/stub modes summarize edges, this shows
               where the summarized mass is). Click a hot zone to jump. */}
           {densityBuckets && (
@@ -1853,7 +1877,7 @@ export const LayerColumn = React.memo(function LayerColumn({
               type="button"
               data-canvas-interactive
               onClick={handleGutterClick}
-              title="Connection density across this column — click to jump"
+              title="Flow density across this column — click to jump"
               className="absolute right-[2px] top-8 bottom-8 w-[4px] z-20 pointer-events-auto cursor-pointer flex flex-col gap-[1px] opacity-60 hover:opacity-100 transition-opacity"
             >
               {densityBuckets.map((v, i) => (
@@ -2173,7 +2197,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         parentIsLast={item.parentIsLast}
                         count={item.loadMoreCount!}
                         isLoading={loadingNodes?.has(item.node.id) ?? false}
-                        onLoadMore={() => handleLoadMore(item.node.id)}
+                        onLoadMore={(auto) => handleLoadMore(item.node.id, auto)}
                         // One-page-ahead auto-load — OFF in Isolate/Hide
                         // filter modes, where freshly-loaded children are
                         // filtered out of the tree and the pinned row

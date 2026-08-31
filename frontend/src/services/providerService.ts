@@ -216,7 +216,7 @@ export function friendlyError(raw: string): string {
         if (typeof parsed.error === 'string' && !code) code = parsed.error
         // Top-level structured errors, e.g. the async-refresh enqueue
         // failure {"code":"DB_UNAVAILABLE","reason":"Too many connections"}.
-        // Without this, the raw JSON leaked into toasts and banners.
+        // Without this, the raw JSON leaked into notifications and banners.
         if (!code && typeof parsed.code === 'string') code = parsed.code
         if (!code && typeof parsed.reason === 'string') code = parsed.reason
         // If there's a human 'reason' but no mapped code, prefer it over

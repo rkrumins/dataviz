@@ -13,6 +13,9 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SettingsTab } from '../SettingsTab'
+import {
+    NotificationStack, useNotificationStore,
+} from '@/components/ui/notifications'
 import { ssoAdminService, type AuthConfig } from '@/services/ssoAdminService'
 
 vi.mock('@/services/ssoAdminService', () => ({
@@ -40,8 +43,14 @@ function cfg(over: Partial<AuthConfig> = {}): AuthConfig {
     }
 }
 
+/** Outcomes land in the app's one stack, not a green block of this tab's
+ *  own — so the tests render it and read what it is holding. */
+const raised = () => useNotificationStore.getState().notifications
+const page = () => render(<><SettingsTab /><NotificationStack /></>)
+
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     svc.getAuthConfig.mockResolvedValue(cfg())
     svc.listProviders.mockResolvedValue([])
     svc.updateAuthConfig.mockResolvedValue(cfg({ ssoEnabled: false, version: 4 }))
@@ -57,7 +66,7 @@ beforeEach(() => {
 describe('turning the master switch off', () => {
     it('asks the session question in the same confirm, with the count', async () => {
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Single sign-on' }),
         )
@@ -71,7 +80,7 @@ describe('turning the master switch off', () => {
 
     it('flips only the switch when the checkbox stays unticked', async () => {
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Single sign-on' }),
         )
@@ -93,7 +102,7 @@ describe('turning the master switch off', () => {
             .mockResolvedValueOnce({ usersAffected: 3, tokensRevoked: 5, dryRun: true })
             .mockResolvedValueOnce({ usersAffected: 2, tokensRevoked: 4, dryRun: false })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Single sign-on' }),
         )
@@ -111,7 +120,7 @@ describe('turning the master switch off', () => {
             usersAffected: 0, tokensRevoked: 0, dryRun: true,
         })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', { name: 'Single sign-on' }),
         )
@@ -122,11 +131,28 @@ describe('turning the master switch off', () => {
         expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
     })
 
+    it('says what the sign-in page now does, not merely that it saved', async () => {
+        const user = userEvent.setup()
+        page()
+        await user.click(
+            await screen.findByRole('switch', { name: 'Single sign-on' }),
+        )
+        await screen.findByRole('checkbox')
+        await user.click(screen.getByRole('button', { name: /turn it off/i }))
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('success')
+        expect(raised()[0].message).toBe(
+            'Single sign-on is off — no connection signs anyone in now, and '
+            + 'nothing was deleted.',
+        )
+    })
+
     it('gives the other confirmable switches no session checkbox', async () => {
         // Both doors carry a session offer now (each its own sweep), so
         // the switch with none left is JIT provisioning.
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
         await user.click(
             await screen.findByRole('switch', {
                 name: 'Create accounts automatically',
@@ -145,7 +171,7 @@ describe('turning the master switch off', () => {
 
 describe('the standalone sign-out, once the switch is already off', () => {
     it('is absent while single sign-on is on', async () => {
-        render(<SettingsTab />)
+        page()
         await screen.findByRole('switch', { name: 'Single sign-on' })
         expect(
             screen.queryByText(/sessions that outlived the switch/i),
@@ -158,7 +184,7 @@ describe('the standalone sign-out, once the switch is already off', () => {
             .mockResolvedValueOnce({ usersAffected: 3, tokensRevoked: 5, dryRun: true })
             .mockResolvedValueOnce({ usersAffected: 3, tokensRevoked: 5, dryRun: false })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
 
         await screen.findByText(/sessions that outlived the switch/i)
         await user.click(screen.getByRole('button', { name: /sign them out now/i }))
@@ -180,7 +206,7 @@ describe('the standalone sign-out, once the switch is already off', () => {
             usersAffected: 0, tokensRevoked: 0, dryRun: true,
         })
         const user = userEvent.setup()
-        render(<SettingsTab />)
+        page()
 
         await screen.findByText(/sessions that outlived the switch/i)
         await user.click(screen.getByRole('button', { name: /sign them out now/i }))

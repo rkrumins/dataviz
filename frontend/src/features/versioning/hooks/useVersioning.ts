@@ -602,7 +602,7 @@ export function useRebuildProjection(wsId: string, graphId: string) {
 }
 
 /** Check the fast read layer against the source of truth (user-triggered). Returns the DriftReport;
- *  a 409 (a check already running) surfaces as a plain error for the caller to toast. */
+ *  a 409 (a check already running) surfaces as a plain error for the caller to notify. */
 export function useReconcileProjection(wsId: string, graphId: string) {
   return useMutation({
     mutationFn: (v: { deep?: boolean } = {}) => api.reconcileProjection(wsId, graphId, v),

@@ -12,7 +12,7 @@
 import { useMemo, useState } from 'react'
 import { ArrowDownToLine, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { IncomingChanges, ResolutionMap } from '@/services/versioningApiService'
 import { ConflictResolver } from '@/features/reviews/components/ConflictResolver'
 import { useDiffVsMain, usePullLatestDraft } from '../hooks/useVersioning'
@@ -37,12 +37,12 @@ export function PullLatestButton({
   variant?: keyof typeof VARIANTS
   className?: string
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const pull = usePullLatestDraft(wsId, graphId)
   const [started, setStarted] = useState(false)
   const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
   const [error, setError] = useState<string | null>(null)
-  /** What the pull brought in — shown for review instead of a content-free toast. */
+  /** What the pull brought in — shown for review instead of a content-free notification. */
   const [incoming, setIncoming] = useState<IncomingChanges | null>(null)
 
   // Lazy: the diff only loads once a Pull is in flight. Seeds are read at resolve-submit time, by
@@ -68,14 +68,14 @@ export function PullLatestButton({
           }
           setConflicts(null); setError(null); setStarted(false)
           // Show WHAT came in, rather than asserting that something did. A pull takes other people's
-          // work into your branch; ending that in a toast told the user nothing about it.
+          // work into your branch; ending that in a notification told the user nothing about it.
           if (res.incoming && res.incoming.commitCount > 0) {
             setIncoming(res.incoming)
           } else {
-            showToast('info', 'Already up to date — nothing new to bring in.')
+            notify('info', 'Already up to date — nothing new to bring in.')
           }
         },
-        onError: (e) => { setError(null); showToast('error', (e as Error).message) },
+        onError: (e) => { setError(null); notify('error', (e as Error).message) },
       },
     )
   }

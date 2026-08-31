@@ -34,7 +34,7 @@ import {
 } from '@/services/accessRequestsService'
 import type { ImpactPreviewResponse } from '@/services/permissionsService'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -229,7 +229,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
 
     // ── Data fetching ────────────────────────────────────────────────
@@ -324,11 +324,11 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             })
             await fetchMembers()
             const suffix = expiresIn ? ` (expires in ${expiresIn})` : ''
-            showToast('success', `Granted ${roleVisualFor(role).label} to ${label}${suffix}`)
+            notify('success', `Granted ${roleVisualFor(role).label} to ${label}${suffix}`)
             setModal(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to add member'
-            showToast('error', msg)
+            notify('error', msg)
             setError(msg)
         } finally {
             setActionLoading(null)
@@ -341,12 +341,12 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         try {
             await workspaceMembersService.revoke(workspaceId, member.bindingId)
             await fetchMembers()
-            showToast('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
+            notify('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
             setModal(null)
             setRevokePreview(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to revoke binding'
-            showToast('error', msg)
+            notify('error', msg)
             setError(msg)
         } finally {
             setActionLoading(null)
@@ -705,7 +705,7 @@ function AddMemberModal({
     // we send the duration shortcut to the backend which normalises
     // it to an ISO ``expires_at`` on the server side.
     const [expiresIn, setExpiresIn] = useState<string>('')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // Phase 3: pull the bindable roles for *this* workspace — global
     // roles plus any role scoped to this workspace. The picker only
@@ -735,10 +735,10 @@ function AddMemberModal({
                 })
                 setAvailableRoles(bindable)
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load roles')
+                notify('error', err instanceof Error ? err.message : 'Failed to load roles')
             }
         })()
-    }, [workspaceId, showToast])
+    }, [workspaceId, notify])
 
     // Subject id → role pairs already bound, so we can disable them in
     // the picker (the API would 409 anyway).
@@ -764,10 +764,10 @@ function AddMemberModal({
                     setGroups(data)
                 }
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load')
+                notify('error', err instanceof Error ? err.message : 'Failed to load')
             }
         })()
-    }, [subjectType, users, groups, showToast])
+    }, [subjectType, users, groups, notify])
 
     // Reset selection when toggling subject type
     useEffect(() => { setSelected(null) }, [subjectType])
@@ -1057,7 +1057,7 @@ function PendingRequestsPanel({
     const [acting, setActing] = useState<string | null>(null)
     const [denyingId, setDenyingId] = useState<string | null>(null)
     const [denyNote, setDenyNote] = useState('')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const fetchPending = useCallback(async () => {
         setError(null)
@@ -1077,11 +1077,11 @@ function PendingRequestsPanel({
         setActing(req.id)
         try {
             await accessRequestsService.approve(req.id)
-            showToast('success', `Approved access for ${req.requester.displayName ?? req.requester.id}`)
+            notify('success', `Approved access for ${req.requester.displayName ?? req.requester.id}`)
             await fetchPending()
             await onResolved()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Approve failed')
+            notify('error', err instanceof Error ? err.message : 'Approve failed')
         } finally {
             setActing(null)
         }
@@ -1091,12 +1091,12 @@ function PendingRequestsPanel({
         setActing(req.id)
         try {
             await accessRequestsService.deny(req.id, { note: denyNote.trim() || null })
-            showToast('success', `Denied request from ${req.requester.displayName ?? req.requester.id}`)
+            notify('success', `Denied request from ${req.requester.displayName ?? req.requester.id}`)
             setDenyingId(null)
             setDenyNote('')
             await fetchPending()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Deny failed')
+            notify('error', err instanceof Error ? err.message : 'Deny failed')
         } finally {
             setActing(null)
         }

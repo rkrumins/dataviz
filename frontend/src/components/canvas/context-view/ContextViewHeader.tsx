@@ -55,7 +55,7 @@ export interface ContextViewHeaderProps {
   /** True once the canvas finishes hydrating (entities + edges). When
    *  false, Trace is unsafe to fire — the backend hasn't fully loaded the
    *  lineage graph yet and the trace would return nothing. The header
-   *  surfaces this as a distinct "loading" button state with a toast on
+   *  surfaces this as a distinct "loading" button state with a notification on
    *  attempted click. */
   lineageReady: boolean
 

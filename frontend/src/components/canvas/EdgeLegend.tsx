@@ -16,6 +16,7 @@ import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { getAllEdgeTypeDefinitions, normalizeEdgeType } from '@/utils/edgeTypeUtils'
 import { generateEdgeColorFromType } from '@/lib/type-visuals'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 
 // ─── Data-shape helpers ───────────────────────────────────────────────────────
 // Projected edges (from useEdgeProjection) carry a `types: string[]` array and
@@ -109,9 +110,9 @@ export function EdgeLegend({ className, defaultExpanded = false, visibleEdges }:
             )
             return schemaDef ?? {
                 type: typeKey,
-                label: typeKey,
+                label: edgeTypeCopy(typeKey)?.label ?? typeKey,
                 color: generateEdgeColorFromType(typeKey),
-                description: `Relationship type: ${typeKey}`,
+                description: edgeTypeCopy(typeKey)?.description ?? `Relationship type: ${typeKey}`,
                 strokeStyle: 'solid' as const,
                 animated: false,
                 icon: null,

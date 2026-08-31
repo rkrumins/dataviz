@@ -15,7 +15,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   useRetryBootstrap: () => ({ mutate: retryMutate, isPending: false }),
   useAbandonBootstrap: () => ({ mutate: abandonMutate, isPending: false }),
 }))
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
 vi.mock('@/store/versioningPanelStore', () => ({
   useVersioningPanelStore: (sel: (s: unknown) => unknown) => sel({ openPanel }),
 }))

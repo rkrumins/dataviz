@@ -35,6 +35,7 @@ import {
     visibilityGrants,
     visibilityLabel,
     VISIBILITY_ICON,
+    isKnownVisibility,
     type ViewVisibility,
 } from '@/lib/viewVisibility'
 import { useBrand } from '@/store/branding'
@@ -114,6 +115,46 @@ export function VisibilityImpact({
 }) {
     const { appName } = useBrand()
     const counts = rawCounts ?? {}
+
+    // The database's domain is wider than this app's: `ck_views_visibility`
+    // still permits 'public', and live rows carry it. Every per-tier map here
+    // has three keys, so an unknown tier used to reach `accent.chipBg` on
+    // undefined and take the whole Details panel down with it.
+    //
+    // It renders a statement of what is known instead of a guess. Deliberately
+    // NOT mapped onto the nearest tier: 'public' may be MORE exposed than
+    // 'Anyone signed in', and under-stating the audience on the panel whose one
+    // job is naming the audience is the one wrong answer here.
+    if (!isKnownVisibility(selected)) {
+        return (
+            <section
+                aria-label="Who will see this view"
+                className={cn(
+                    'rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden',
+                    className,
+                )}
+            >
+                <header className="flex items-start gap-3 px-4 py-3.5">
+                    <span className="w-9 h-9 rounded-xl border border-amber-500/30 bg-canvas-elevated flex items-center justify-center shrink-0">
+                        <Info className="w-4.5 h-4.5 text-amber-400" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                        <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
+                            Who will see this
+                        </p>
+                        <p className="text-sm font-bold text-ink leading-snug mt-0.5">
+                            Set to &ldquo;{String(selected)}&rdquo;, which isn&rsquo;t one of the sharing options
+                        </p>
+                        <p className="text-[11px] text-ink-muted mt-1 leading-relaxed">
+                            This view predates the current sharing settings, so its audience can&rsquo;t be
+                            shown here. Choosing one of the options above will replace it.
+                        </p>
+                    </div>
+                </header>
+            </section>
+        )
+    }
+
     const accent = VISIBILITY_ACCENT[selected]
     const Icon = VISIBILITY_ICON[selected]
 

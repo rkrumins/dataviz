@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { GitBranch, GitPullRequest, Check, Plus, ChevronDown, Loader2, Globe, Settings2, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useActiveView } from '@/store/schema'
@@ -38,7 +38,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const [settingsBranch, setSettingsBranch] = useState<Branch | null>(null)
   const [managerOpen, setManagerOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
 
   // The active view — attributes a newly-created draft's commits to it (so the view's History
@@ -121,11 +121,11 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
         onSuccess: (r) => {
           switchToDraft(r.branchId, originatingViewId)
           setOpen(false)
-          showToast('success', `Draft "${newName.trim() || 'Untitled'}" created — your edits stay private until you publish.`)
+          notify('success', `Draft "${newName.trim() || 'Untitled'}" created — your edits stay private until you publish.`)
           setNewName('')
           setCreating(false)
         },
-        onError: (e) => showToast('error', (e as Error).message),
+        onError: (e) => notify('error', (e as Error).message),
       },
     )
   }

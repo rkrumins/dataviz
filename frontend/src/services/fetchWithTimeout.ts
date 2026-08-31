@@ -836,7 +836,7 @@ export async function fetchWithTimeout(
   // NOT short-circuit the request — the calling service still gets the
   // Response and can shape its own error handling — we just announce
   // the denial centrally so the user sees a clear "you don't have X"
-  // message instead of a generic toast.
+  // message instead of a generic notification.
   //
   // Callers can opt out with ``silent403: true`` when the 403 is an
   // expected outcome for a user tier (a background probe firing an
