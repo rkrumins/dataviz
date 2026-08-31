@@ -38,6 +38,17 @@ describe('the Data loads panel is docked with Connections in one bottom-right st
     expect(block).not.toMatch(/\bw-64\b/)
   })
 
+  it('hands Data loads the view\u2019s own data source, so a load can say whether it is queryable yet', () => {
+    // Without it the panel cannot tell a load that FINISHED from one that is
+    // published but whose connections have not caught up — the two rows are
+    // identical, which is the silence the panel exists to end. The canvas
+    // already derives `dataSourceId` from the active view; passing it costs
+    // one prop and is the panel's only route to the reading.
+    const wrapperStart = canvas.indexOf('ref={edgeLegendRef}')
+    const block = canvas.slice(wrapperStart, canvas.indexOf('</div>', wrapperStart))
+    expect(block).toMatch(/<DataLoadsPanel[^/>]*dataSourceId=\{dataSourceId\}/)
+  })
+
   it('the band reservation measures every docked header, not just the first button', () => {
     expect(canvas).toMatch(/const measureLegendHeader[\s\S]{0,400}?\[data-dock-header\]/)
     expect(canvas).not.toContain("el.querySelector<HTMLElement>('button')?.offsetHeight")

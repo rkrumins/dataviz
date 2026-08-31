@@ -384,8 +384,10 @@ class VersionedBranchProvider:
         not double-draw over them.
 
         Bounded, and honest about it: the descent stops at ``_DERIVE_HOP_BOUND`` hops and
-        ``_DERIVE_SCOPE_CAP`` nodes and then says ``truncated``/``stale`` — never a short
-        answer that reads as a complete one, which was the whole defect."""
+        ``_DERIVE_SCOPE_CAP`` nodes — and a single edge read stops at that same cap — and
+        each of the three says ``truncated``/``stale`` with the bound that bit as the
+        reason, never a short answer that reads as a complete one, which was the whole
+        defect."""
         from backend.common.providers.pair_rules import ancestor_closure, cube_pairs
 
         srcs = [u for u in (source_urns or []) if u]
@@ -399,23 +401,31 @@ class VersionedBranchProvider:
         ctypes = [t for t in (containment_edges or []) if t]
 
         chunk = 200
+        # Which bound bit, if any — the whole answer's honesty in one variable:
+        # it is the `truncated`/`stale` flags AND the reason on the wire.
+        bound: Optional[str] = None
 
         async def _out_edges(urns: List[str], types: List[str]) -> List[GraphEdge]:
+            nonlocal bound
             out: List[GraphEdge] = []
             for i in range(0, len(urns), chunk):
-                out.extend(await self.get_edges(EdgeQuery(
+                rows = await self.get_edges(EdgeQuery(
                     source_urns=urns[i:i + chunk], edge_types=types,
-                    limit=_DERIVE_SCOPE_CAP)))
+                    limit=_DERIVE_SCOPE_CAP))
+                # A chunk that comes back AT the limit dropped edges we will
+                # never see, so everything built on it is short.
+                if len(rows) >= _DERIVE_SCOPE_CAP:
+                    bound = bound or "derive_scope_cap"
+                out.extend(rows)
             return out
 
         # ── Containment descent from the asked-about set: the raw lineage that rolls
         # up into a visible pair lives somewhere underneath it.
         parents: Dict[str, List[str]] = {}
         scope = set(srcs) | set(tgts)
-        truncated = False
         frontier = list(scope)
         for _ in range(_DERIVE_HOP_BOUND if ctypes else 0):
-            if not frontier or truncated:
+            if not frontier or bound:
                 break
             nxt: List[str] = []
             for e in await _out_edges(frontier, ctypes):
@@ -427,11 +437,16 @@ class VersionedBranchProvider:
                 if e.target_urn in scope:
                     continue
                 if len(scope) >= _DERIVE_SCOPE_CAP:
-                    truncated = True
+                    bound = "derive_scope_cap"
                     break
                 scope.add(e.target_urn)
                 nxt.append(e.target_urn)
             frontier = nxt
+        # A live frontier means the chain runs deeper than the hop bound: the
+        # lineage under it never entered `scope` and the answer is short. This
+        # was the silent half — falling out of the loop said nothing at all.
+        if ctypes and frontier:
+            bound = bound or "derive_hop_bound"
 
         # ── Roll the raw lineage inside that scope up to the requested pairs.
         asked_src, asked_tgt = set(srcs), set(tgts)
@@ -464,9 +479,9 @@ class VersionedBranchProvider:
         return AggregatedEdgeResult(
             aggregatedEdges=edges,
             totalSourceEdges=sum(e.edge_count for e in edges),
-            truncated=truncated,
-            stale=truncated,
-            staleReason="derive_scope_cap" if truncated else None,
+            truncated=bound is not None,
+            stale=bound is not None,
+            staleReason=bound,
         )
 
     async def get_ontology_metadata(self):

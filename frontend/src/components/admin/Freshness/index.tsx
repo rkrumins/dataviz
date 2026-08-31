@@ -53,7 +53,7 @@ const SCOPE_LABEL: Record<RefreshScope, string> = {
 
 const COLS = 7
 
-const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended']
+const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended', 'projectionStalled']
 const FAILURE_FACETS: readonly FailureFacet[] = [
     'out_of_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
 ]

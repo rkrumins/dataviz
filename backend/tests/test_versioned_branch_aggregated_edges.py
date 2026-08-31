@@ -134,3 +134,81 @@ def test_no_lineage_types_means_no_derivation_and_no_reads():
         source_urns=EXPANDED, target_urns=EXPANDED, granularity=None,
         containment_edges=["CONTAINS"], lineage_edges=[]))
     assert r.aggregated_edges == [] and svc.edge_reads == 0
+
+
+def test_a_bounded_derivation_says_stale_instead_of_answering_short(monkeypatch):
+    """THE SILENCE THAT COST 14 HOURS. This method used to return a bare empty
+    result, which on the wire is indistinguishable from "these nodes genuinely
+    have no roll-ups between them" — so a wedged projection read as data loss
+    and nobody could tell which. The derivation is bounded (hop count, scope
+    size); when a bound bites, the short answer must be LABELLED, never handed
+    over as a complete one.
+
+    Squeeze the scope cap so the containment descent stops one hop short of
+    ``sf_table`` — the source endpoint of every lineage edge. The honest
+    outcome is exactly the outage's shape (no cells at all) plus the two fields
+    that say why."""
+    import backend.app.providers.versioned_branch_provider as vbp
+
+    monkeypatch.setattr(vbp, "_DERIVE_SCOPE_CAP", 7)
+    r = _agg(_provider(), EXPANDED)
+
+    assert r.aggregated_edges == [], "premise: the cap must hide the lineage"
+    assert r.truncated is True, "a bounded descent must report truncated"
+    assert r.stale is True, (
+        "an incomplete roll-up answer went out unmarked — this is the wire "
+        "shape that made a wedged projection look like empty data"
+    )
+    assert r.stale_reason == "derive_scope_cap", r.stale_reason
+
+
+def test_a_chain_deeper_than_the_hop_bound_says_stale_too(monkeypatch):
+    """THE OTHER BOUND, AND THE SILENT ONE. The scope cap sets the flag on its
+    way out; the hop bound simply fell out of ``for _ in range(...)`` with
+    ``truncated`` still False, so a containment chain deeper than the bound
+    produced the very wire shape the guard above exists to eliminate — ``cells:
+    [], truncated: False, stale: False, reason: None`` — while the docstring
+    claimed both bounds report.
+
+    Squeeze the hop bound to 1 against the 2-deep ``snowflake ⊃ sf_db ⊃
+    sf_table`` chain: the descent reaches sf_db and stops, so sf_table — the
+    source endpoint of every lineage edge — never enters the scope."""
+    import backend.app.providers.versioned_branch_provider as vbp
+
+    monkeypatch.setattr(vbp, "_DERIVE_HOP_BOUND", 1)
+    r = _agg(_provider(), EXPANDED)
+
+    assert r.aggregated_edges == [], "premise: one hop short of sf_table hides the lineage"
+    assert r.truncated is True, "the hop bound bit and the answer went out unmarked"
+    assert r.stale is True
+    assert r.stale_reason == "derive_hop_bound", r.stale_reason
+
+
+def test_an_edge_read_that_fills_its_page_says_stale_even_with_cells(monkeypatch):
+    """The third bound: every read is issued with ``limit=_DERIVE_SCOPE_CAP``,
+    so a chunk that comes back AT the limit has silently dropped edges. Unlike
+    the two above this one still returns cells — a short answer that looks
+    complete is exactly the shape that costs the hours.
+
+    No containment types, so the descent is skipped and only the lineage read
+    can bite: four flows against a cap of four."""
+    import backend.app.providers.versioned_branch_provider as vbp
+
+    monkeypatch.setattr(vbp, "_DERIVE_SCOPE_CAP", 4)
+    r = _run(_provider().get_aggregated_edges_between(
+        source_urns=["sf_table"], target_urns=list(DASHBOARDS), granularity=None,
+        containment_edges=[], lineage_edges=["FLOWS_TO"]))
+
+    assert len(r.aggregated_edges) == 4, f"premise: the page is full, {_cells(r)}"
+    assert r.truncated is True, "a full page dropped edges and the answer did not say so"
+    assert r.stale is True
+    assert r.stale_reason == "derive_scope_cap", r.stale_reason
+
+
+def test_a_derivation_that_hits_no_bound_is_not_marked():
+    """The other direction. `truncated` on a complete answer is noise, and the
+    canvas treats stale as "this picture may be missing lines" — a guard that
+    only checked the flag going up would be satisfied by a provider that always
+    sets it."""
+    r = _agg(_provider(), EXPANDED)
+    assert r.truncated is False and r.stale is False and r.stale_reason is None

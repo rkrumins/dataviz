@@ -91,6 +91,11 @@ export interface TraceCanvasHarness {
    *  view-only control must never move: direction, view depth and expansion
    *  are all re-projections of the walk the session already holds. */
   providerCalls(): number
+  /** The `granularity` every `/edges/aggregated` request carried, in order.
+   *  The aggregated fan-out is DEBOUNCED 300 ms, so a test that only calls
+   *  `settle()` (which barely advances the clock) will read an empty list —
+   *  wait past the debounce first. */
+  aggregatedGranularities(): Array<string | null>
   /** Click one of the dock's direction radios. */
   setDirection(dir: 'up' | 'both' | 'down'): Promise<void>
   /** Open the header's Depth chip and click a preset by label. */
@@ -307,12 +312,17 @@ function childrenOf(estate: TraceEstate): Map<string, string[]> {
 function stubProvider(
   estate: TraceEstate,
   focusUrn: string,
-  calls: { traceClosure: number; getNodes: number },
+  calls: { traceClosure: number; getNodes: number; aggregated: Array<string | null> },
   gate?: { promise: Promise<void> },
   stall?: boolean,
   /** `deferTrace` holds BOTH legs of the first paint; `deferFine` holds
    *  only the fine page, so the coarse cells land alone first (Part G). */
   gateFineOnly?: boolean,
+  /** Extra fields merged onto every aggregated-edge answer — `staleReason`
+   *  and friends. The canvas reads these to decide what it tells the reader
+   *  about the completeness of the wires it drew, and that decision has no
+   *  other observable. */
+  aggregatedExtra?: Record<string, unknown>,
 ): GraphDataProvider {
   const closure = closureFor(estate, focusUrn, stall)
   const coarsePage = closureFor(estate, focusUrn, stall, 'coarse')
@@ -371,6 +381,14 @@ function stubProvider(
       return urns.map(u => byUrn.get(u)).filter((n): n is GraphNode => !!n)
     },
     getEdges: async () => [],
+    // The aggregated fan-out the browse canvas fires for its visible
+    // containers. It answers nothing — what a test reads is the LEVEL the
+    // canvas asked for, which is the whole blast radius of the granularity
+    // it auto-selects.
+    getAggregatedEdges: async (request: { granularity?: string | null }) => {
+      calls.aggregated.push(request?.granularity ?? null)
+      return { aggregatedEdges: [], totalSourceEdges: 0, ...(aggregatedExtra ?? {}) }
+    },
     computeLayerAssignments: async () => ({
       assignments,
       parentMap,
@@ -447,16 +465,26 @@ function seedBrowse(estate: TraceEstate, holds?: readonly string[]): void {
   store.clearSelection()
 }
 
-function seedView(estate: TraceEstate): void {
+/** `dataSourceId` is OPT-IN and defaults to absent, exactly as it was before
+ *  this parameter existed. Several canvas hooks (branch resolution, graph
+ *  resolve, the readiness loops) only run once the view names a data source,
+ *  so setting it unconditionally would have changed what all nine harness
+ *  modules exercise. Only a test that needs those paths asks for it. */
+function seedView(
+  estate: TraceEstate,
+  entityTypes: readonly unknown[] = [],
+  dataSourceId?: string,
+): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
     schema: {
       id: 'harness', name: 'harness', version: '1',
-      entityTypes: [], relationshipTypes: [], globalVisuals: {},
+      entityTypes, relationshipTypes: [], globalVisuals: {},
       containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['TRANSFORMS', 'AGGREGATED'],
       rootEntityTypes: [], defaultViewId: 'harness-view',
       views: [{
         id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
+        ...(dataSourceId ? { dataSourceId } : {}),
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
           defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope: 'curated',
@@ -486,6 +514,17 @@ export async function renderCanvasWithTrace(
     /** The search string the canvas mounts on — `?trace=…` for a shared
      *  trace link, exactly as a recipient's browser would present it. */
     search?: string
+    /** The ontology's entity types, in place BEFORE the first render. The
+     *  canvas picks its aggregation granularity from them on mount and the
+     *  fan-out is debounced behind that, so a test that installs the schema
+     *  after this call returns can miss the round it exists to read. */
+    entityTypes?: readonly unknown[]
+    /** Extra fields on every aggregated-edge answer (e.g. `staleReason`),
+     *  so a test can put the canvas in a degraded-rollup state. */
+    aggregatedExtra?: Record<string, unknown>
+    /** Give the seeded view a data source, arming the canvas hooks that are
+     *  inert without one. Absent by default. */
+    dataSourceId?: string
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -517,7 +556,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate)
+  seedView(estate, opts.entityTypes, opts.dataSourceId)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
@@ -553,7 +592,7 @@ export async function renderCanvasWithTrace(
     ? { promise: new Promise<void>(resolve => { releaseTrace = resolve }) }
     : undefined
 
-  const providerCalls = { traceClosure: 0, getNodes: 0 }
+  const providerCalls = { traceClosure: 0, getNodes: 0, aggregated: [] as Array<string | null> }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   // A Router, because the header's BranchSwitcher keeps the active branch in the
   // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
@@ -562,7 +601,7 @@ export async function renderCanvasWithTrace(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ProviderOverride value={{
-          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace, opts.aggregatedExtra),
           isLoading: false, error: null, scopeKind: 'ready',
           workspaceId: 'harness-ws', dataSourceId: null,
           providerReady: true, providerVersion: 1,
@@ -841,6 +880,7 @@ export async function renderCanvasWithTrace(
       await settle()
     },
     providerCalls: () => providerCalls.traceClosure,
+    aggregatedGranularities: () => [...providerCalls.aggregated],
     async setDirection(dir: 'up' | 'both' | 'down') {
       const name = dir === 'both' ? /both directions/i : dir === 'up' ? /upstream only/i : /downstream only/i
       await act(async () => { fireEvent.click(screen.getByRole('radio', { name })) })

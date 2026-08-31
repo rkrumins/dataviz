@@ -154,6 +154,14 @@ export interface DataSourceReadinessResponse {
   lastReconcileReason?: string | null;
   /** Resolved per-source → global → env. */
   autoReconcile?: boolean | null;
+  /** Is this source's read cache caught up with its published history?
+   *  NULL MEANS UNKNOWN, NEVER HEALTHY — null for an unversioned source, for
+   *  a versioned graph pinned to no graph target, and when the store could
+   *  not be read. Only `=== false` is the affirmative "it is behind". */
+  projectorCurrent?: boolean | null;
+  /** How far behind, as a count of published changes. 0 when current; null
+   *  under the same three unknown cases as `projectorCurrent`. */
+  projectionCommitsBehind?: number | null;
   message: string;
 }
 
