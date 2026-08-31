@@ -52,3 +52,52 @@ async def test_skips_when_host_is_set_but_unreachable(monkeypatch):
     contract_test = _runner.make_contract_test("neo4j", env_prefix="ZZTEST", cleanup=_cleanup)
     with pytest.raises(pytest.skip.Exception):
         await contract_test()
+
+
+@pytest.mark.asyncio
+async def test_the_pre_run_cleanup_gets_a_connected_provider(monkeypatch):
+    """The clean slate has to actually clean. Adapters connect lazily, so
+    a cleanup callback handed a freshly-built instance drives a `None`
+    engine handle, raises into its own `except`, and does nothing at all —
+    silently, leaving the next run to seed on top of a crashed run's
+    leftovers. Pin the ORDER rather than the mechanism: the connection is
+    opened first, and it is opened even though the opening read fails,
+    which is the normal state of a graph that does not exist yet."""
+    order = []
+
+    class _FakeProvider:
+        async def get_node(self, urn):
+            order.append("connect")
+            # What FalkorDB answers on a graph that has never been created.
+            raise RuntimeError("Invalid graph operation on empty key")
+
+        async def close(self):
+            order.append("close")
+
+    async def _record_cleanup(provider):
+        order.append("cleanup")
+
+    async def _record_seed(provider):
+        order.append("seed")
+
+    async def _record_run_all(provider, **kwargs):
+        order.append("run_all")
+
+    monkeypatch.setattr(
+        "backend.common.providers.catalog.create_provider_instance",
+        lambda spec: _FakeProvider(),
+    )
+    monkeypatch.setattr(_runner, "seed", _record_seed)
+    monkeypatch.setattr(_runner, "run_all", _record_run_all)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listening:
+        listening.bind(("127.0.0.1", 0))
+        listening.listen(1)
+        monkeypatch.setenv("ZZTEST_HOST", "127.0.0.1")
+        monkeypatch.setenv("ZZTEST_PORT", str(listening.getsockname()[1]))
+        contract_test = _runner.make_contract_test(
+            "neo4j", env_prefix="ZZTEST", cleanup=_record_cleanup,
+        )
+        await contract_test()
+
+    assert order == ["connect", "cleanup", "seed", "run_all", "cleanup", "close"]

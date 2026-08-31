@@ -434,6 +434,35 @@ def _tcp_reachable(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+async def _open_connection(provider: GraphDataProvider) -> None:
+    """Force a lazily-connecting adapter to open its engine handle.
+
+    Adapters connect on their first query, so a freshly-built instance has
+    no handle yet -- and the first two things this harness does need one.
+    The pre-run ``cleanup`` callback drives an engine primitive
+    (FalkorDB's ``provider._graph.delete()``); against ``None`` that
+    raises ``AttributeError`` straight into the callback's own ``except``,
+    so the "clean slate" was a **silent no-op**: a run that died mid-way
+    left its graph behind and the next run seeded the fixture ON TOP of
+    it, then either failed a snapshot or passed one computed over polluted
+    data. ``seed``'s ``ensure_indices`` had the same problem one line
+    later -- measured, 36/36 index statements failing with ``'NoneType'
+    object has no attribute 'query'``, logged at WARNING and swallowed, so
+    every contract run was pinning an UNINDEXED graph.
+
+    One read through the ABC fixes both. Its *result* is deliberately
+    ignored: on a graph that does not exist yet FalkorDB answers "Invalid
+    graph operation on empty key", which is the normal first-run state,
+    and ``_tcp_reachable`` has already gated on the endpoint being up.
+    What this call is for is the handle -- and the pre-run cleanup on the
+    very next line is what proves it opened.
+    """
+    try:
+        await provider.get_node("urn:contract-harness:connect-probe")
+    except Exception:
+        pass
+
+
 def make_contract_test(
     type_id: str,
     *,
@@ -448,6 +477,13 @@ def make_contract_test(
     ``host:port`` accepts a TCP connection -- a developer without a live
     instance handy sees "skipped", and CI only exercises the providers it
     has actually stood up.
+
+    ``cleanup`` is called twice: once before ``seed`` (the clean slate, so
+    a crashed previous run cannot pollute this one) and once in a
+    ``finally``. It is handed a **connected** provider both times -- the
+    factory opens the connection first -- so a callback may drive engine
+    primitives directly; it does not have to connect for itself, and it
+    must not assume it is the first thing to touch the instance.
 
     The provider is built **through the catalog**
     (``create_provider_instance(ProviderSpec(...))``) -- the same
@@ -509,6 +545,7 @@ def make_contract_test(
             extra_config=extra_config,
         )
         provider = create_provider_instance(spec)
+        await _open_connection(provider)
         await cleanup(provider)
         try:
             await seed(provider)
