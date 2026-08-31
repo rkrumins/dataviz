@@ -66,13 +66,17 @@ export default {
           border: 'var(--nx-border-glass)',
         },
         // Semantic accents
+        // Raw channels + <alpha-value> so `accent-lineage/15` actually emits a
+        // rule. As bare `var()`s these tokens silently dropped EVERY alpha
+        // suffix — 1,066 of them across 208 files — which is why accent tints,
+        // rings and gradients rendered as nothing and the app read as grey.
         accent: {
-          lineage: 'var(--nx-accent-lineage)',
-          business: 'var(--nx-accent-business)',
-          explore: 'var(--nx-accent-explore)',
-          technical: 'var(--nx-accent-technical)',
-          warning: 'var(--nx-accent-warning)',
-          muted: 'var(--nx-accent-muted)',
+          lineage: 'rgb(var(--nx-accent-lineage-rgb) / <alpha-value>)',
+          business: 'rgb(var(--nx-accent-business-rgb) / <alpha-value>)',
+          explore: 'rgb(var(--nx-accent-explore-rgb) / <alpha-value>)',
+          technical: 'rgb(var(--nx-accent-technical-rgb) / <alpha-value>)',
+          warning: 'rgb(var(--nx-accent-warning-rgb) / <alpha-value>)',
+          muted: 'rgb(var(--nx-accent-muted-rgb) / <alpha-value>)',
         },
         // Text colors
         ink: {

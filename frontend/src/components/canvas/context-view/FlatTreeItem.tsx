@@ -402,7 +402,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // reads on both grounds; this one was not. A dark tint in light mode and
         // a slightly stronger light tint in dark gives the same weight on both.
         "hover:bg-gradient-to-r hover:to-transparent",
-        "hover:from-black/[0.045] dark:hover:from-white/[0.07]",
+        "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
         isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
         // Search result highlight — direct match (advanced search or quick search)
