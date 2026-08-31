@@ -116,18 +116,30 @@ def _scan(pattern: "re.Pattern[str]", allowed: dict) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Check 1 — ``provider_type`` compared to a hardcoded string, directly or
-# via a ``.lower()`` normalization. Two regexes because both shapes are
-# live in the tree today: a bare ``row.provider_type != "falkordb"`` and a
-# normalized ``(p.provider_type or "").lower() == "falkordb"``. The second
-# form would evade a regex that requires ``provider_type`` immediately
-# adjacent to the operator, so it gets its own pattern keyed on the known
-# provider ids instead of on the ``provider_type`` token.
+# Check 1 — a provider id compared, or tested for membership. Two regexes,
+# one per grammar.
+#
+# The comparison one is keyed on the ID, not on the ``provider_type``
+# token, so ANY left-hand spelling is caught. That is the realistic shape:
+# ``app/api/v1/endpoints/graph.py`` binds ``ptype = getattr(prov,
+# "provider_type", None)`` immediately above the capability check this PR
+# added, so the next branch written there says ``ptype ==``, not
+# ``provider_type ==``. Matching the literal case-insensitively folds in
+# every case normalization at once -- ``.lower() == "falkordb"``,
+# ``.upper() == "FALKORDB"`` -- which is why there is no longer a separate
+# normalized regex. ``provider_type == <any string>`` survives as a second
+# alternative so a comparison against an id the catalog has not heard of is
+# still caught.
+#
+# The membership one covers ``prov.provider_type in ("falkordb", "neo4j")``
+# -- the same dispatch with no comparison operator in it anywhere.
 # ---------------------------------------------------------------------------
 
-_DIRECT_COMPARISON_RE = re.compile(r"provider_type\s*(?:==|!=)\s*[\"']")
-_NORMALIZED_COMPARISON_RE = re.compile(
-    rf"\.lower\(\)\s*(?:==|!=)\s*[\"'](?:{_PROVIDER_ID_ALT})[\"']"
+_DIRECT_COMPARISON_RE = re.compile(
+    rf"(?:provider_type\s*(?:==|!=)\s*[\"']|(?:==|!=)\s*[\"'](?i:{_PROVIDER_ID_ALT})[\"'])"
+)
+_MEMBERSHIP_RE = re.compile(
+    rf"\bin\s*[\(\[\{{][^)\]\}}]*[\"'](?i:{_PROVIDER_ID_ALT})[\"']"
 )
 
 # Re-derived by direct verification against this tree (2026-08-30), not
@@ -173,7 +185,7 @@ def test_no_provider_type_string_literal_dispatch():
     (behavior gating) instead.
     """
     violations = _scan(_DIRECT_COMPARISON_RE, _PROVIDER_TYPE_COMPARISON_ALLOWED)
-    violations += _scan(_NORMALIZED_COMPARISON_RE, _PROVIDER_TYPE_COMPARISON_ALLOWED)
+    violations += _scan(_MEMBERSHIP_RE, _PROVIDER_TYPE_COMPARISON_ALLOWED)
     assert not violations, (
         "provider_type compared to a hardcoded string literal outside the "
         "allow-list in this file. Route through the catalog / "
@@ -203,8 +215,14 @@ _ISINSTANCE_EXEMPT_CLASSES = {
     ),
 }
 
+# The first argument, allowed to contain a nested call. A plain ``[^)]*``
+# stops at the first ``)``, so ``isinstance(unwrap_provider(p),
+# FalkorDBProvider)`` -- the shape that turns up wherever a wrapper has to
+# be unwrapped before the check -- walked straight past it.
+_ISINSTANCE_ARG_RE = r"[^,()]*(?:\([^()]*\)[^,()]*)*"
+
 _ISINSTANCE_CONCRETE_PROVIDER_RE = re.compile(
-    r"isinstance\([^)]*,\s*\(?\s*"
+    rf"isinstance\({_ISINSTANCE_ARG_RE},\s*\(?\s*"
     rf"(?!(?:{'|'.join(sorted(_ISINSTANCE_EXEMPT_CLASSES))})\b)[A-Z]\w*Provider\b"
 )
 
