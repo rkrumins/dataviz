@@ -5,8 +5,9 @@
  * seeded with.
  *
  * All provider types are surfaced so the picker is a complete, honest catalog,
- * but only FalkorDB providers can actually back a blank model today (the backend
- * 422s the rest) — that gate travels on each option as `blankSupported`.
+ * but only providers whose catalog entry supports `blank_models` can actually
+ * back one today (the backend 422s the rest) — that gate travels on each
+ * option as `blankSupported`.
  */
 import { useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -15,6 +16,8 @@ import { catalogService } from '@/services/catalogService'
 import { useOntologies } from '@/features/ontology/hooks/useOntologies'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderStatusStore } from '@/store/providerStatus'
+import { useProviderTypes } from '@/hooks/useProviderTypes'
+import { supportsFeature } from '@/services/providerTypes'
 import type { OntologyDefinitionResponse } from '@/services/ontologyDefinitionService'
 
 /** A provider surfaced in the blank picker, enriched with catalog + usage counts. */
@@ -24,7 +27,7 @@ export interface ProviderScopeOption {
   graphCount: number
   /** Data sources across the loaded workspaces that are built on this provider. */
   inUseCount: number
-  /** Blank models can only be provisioned on FalkorDB today. */
+  /** Whether this provider's catalog entry supports blank models. */
   blankSupported: boolean
 }
 
@@ -58,6 +61,7 @@ export function useBlankScopeOptions(wsId: string | null): BlankScopeOptions {
     staleTime: 30_000,
   })
   const ontologiesQuery = useOntologies()
+  const { types: providerTypes } = useProviderTypes()
 
   // Freshen provider health the moment the picker opens, so a provider that went
   // down since the last background poll shows offline immediately rather than up to
@@ -94,14 +98,14 @@ export function useBlankScopeOptions(wsId: string | null): BlankScopeOptions {
         provider,
         graphCount: graphByProvider[provider.id] ?? 0,
         inUseCount: inUseByProvider[provider.id] ?? 0,
-        blankSupported: provider.providerType === 'falkordb',
+        blankSupported: supportsFeature(provider.providerType, 'blank_models', providerTypes),
       }))
       .sort((a, b) => {
         // Supported (selectable) providers first, then alphabetically by name.
         if (a.blankSupported !== b.blankSupported) return a.blankSupported ? -1 : 1
         return a.provider.name.localeCompare(b.provider.name)
       })
-  }, [providersQuery.data, catalogQuery.data, workspaces, wsId])
+  }, [providersQuery.data, catalogQuery.data, workspaces, wsId, providerTypes])
 
   const ontologies = useMemo(
     () => (ontologiesQuery.data ?? []).filter(o => o.isPublished && !o.deletedAt),
