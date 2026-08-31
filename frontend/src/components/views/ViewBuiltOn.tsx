@@ -59,6 +59,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Boxes, ChevronRight, Database, Layers, Server } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { providerService } from '@/services/providerService'
 import { resolveSourceMode } from '@/services/workspaceService'
@@ -317,7 +318,16 @@ function RungRow({ rung, last }: { rung: Rung; last: boolean }) {
             ) : (
                 <>
                     <div className="mt-0.5 flex items-center gap-2">
-                        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">
+                        {/* THE ONE SHAPE `title` SURVIVES ON, app-wide: a
+                            non-interactive text node that truncates, where the
+                            tip's text IS the full value of that node. A proper
+                            noun cut off mid-word with no way to read it is the
+                            case the attribute was invented for; everything
+                            else in this tree is a HoverTip. */}
+                        <span
+                            title={rung.value}
+                            className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink"
+                        >
                             {rung.value}
                         </span>
                         {rung.badge && (
@@ -335,7 +345,9 @@ function RungRow({ rung, last }: { rung: Rung; last: boolean }) {
                         )}
                     </div>
                     {rung.secondary && (
-                        <p className="mt-px truncate text-[11px] text-ink-muted">{rung.secondary}</p>
+                        <p title={rung.secondary} className="mt-px truncate text-[11px] text-ink-muted">
+                            {rung.secondary}
+                        </p>
                     )}
                 </>
             )}
@@ -364,13 +376,19 @@ function RungRow({ rung, last }: { rung: Rung; last: boolean }) {
             </span>
 
             {rung.to ? (
-                <Link
-                    to={rung.to}
-                    aria-label={rung.linkLabel}
-                    className="group/rung -mx-2 min-w-0 flex-1 rounded-lg px-2 py-0.5 transition-colors hover:bg-black/5 dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                >
-                    {body}
-                </Link>
+                // The chevron says "this goes somewhere" and nothing said
+                // where. `linkLabel` already knew — it was spent entirely on
+                // the accessible name, so a sighted reader was the only one
+                // who could not have it.
+                <HoverTip className="flex min-w-0 flex-1" label={rung.linkLabel ?? 'Open this'}>
+                    <Link
+                        to={rung.to}
+                        aria-label={rung.linkLabel}
+                        className="group/rung -mx-2 min-w-0 flex-1 rounded-lg px-2 py-0.5 transition-colors hover:bg-black/5 dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                    >
+                        {body}
+                    </Link>
+                </HoverTip>
             ) : (
                 <div className="min-w-0 flex-1 py-0.5">{body}</div>
             )}

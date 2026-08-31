@@ -21,9 +21,11 @@
  * session, exactly as CanvasRouter withholds the bar.
  */
 import { PanelRight } from 'lucide-react'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useEffectiveBranchId } from '@/store/branchStore'
 import { useFeature } from '@/store/features'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
+import { BRANCH_VOCAB } from '../model/branchVocab'
 import { useResolveGraph } from '../hooks/useVersioning'
 
 export function ViewReviewsButton({
@@ -53,15 +55,27 @@ export function ViewReviewsButton({
   if (!versioningEnabled || !graphId || !seeded) return null
 
   return (
-    <button
-      type="button"
-      onClick={() => openPanel(isDraft ? 'changes' : 'history')}
-      className={className}
-      aria-label="Reviews"
-      title="Changes, pull requests & history for this view"
+    // "Changes, pull requests & history" was the old native pill, and "pull
+    // request" is not this app's vocabulary — BRANCH_VOCAB exists precisely so
+    // the product does not lapse into git. It also said what the panel IS; the
+    // tip now says what opening it gets you, and which half it lands on, which
+    // is the one thing the label "Reviews" cannot.
+    <HoverTip
+      className="inline-flex"
+      label={`Every edit, ${BRANCH_VOCAB.reviewRequest.toLowerCase()} and save point for this view`}
+      detail={isDraft
+        ? 'Opens on the changes in your draft'
+        : `Opens on the history of the ${BRANCH_VOCAB.published.toLowerCase()} version`}
     >
-      <PanelRight className="w-3.5 h-3.5" aria-hidden />
-      <span className="hidden lg:inline">Reviews</span>
-    </button>
+      <button
+        type="button"
+        onClick={() => openPanel(isDraft ? 'changes' : 'history')}
+        className={className}
+        aria-label="Reviews"
+      >
+        <PanelRight className="w-3.5 h-3.5" aria-hidden />
+        <span className="hidden lg:inline">Reviews</span>
+      </button>
+    </HoverTip>
   )
 }

@@ -128,6 +128,10 @@ function shortDate(value: string): string {
     return new Date(value).toLocaleDateString()
 }
 
+/** How many entity-type names a tooltip will list before it starts counting
+ *  instead. Beyond this the list is no longer readable at a glance. */
+const TYPES_IN_TIP = 6
+
 /** The separator between two facts on one line. */
 function Dot() {
     return <span aria-hidden className="text-ink-muted">·</span>
@@ -230,6 +234,16 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // facts. Free — the same config blob the header already fetched carries it.
     const visibleEntityTypes = view.config?.content?.visibleEntityTypes
     const entityTypeCount = Array.isArray(visibleEntityTypes) ? visibleEntityTypes.length : 0
+    // WHICH types, not how many — the count is already on the surface, so a
+    // tip that only restates it teaches people that hovering is not worth
+    // doing. Capped: past a handful the list stops being readable at a glance
+    // and the remainder is a number again.
+    const typeNames = (Array.isArray(visibleEntityTypes) ? visibleEntityTypes : [])
+        .filter((t): t is string => typeof t === 'string')
+    const namedTypes = typeNames.slice(0, TYPES_IN_TIP).join(', ')
+        + (typeNames.length > TYPES_IN_TIP
+            ? `, and ${typeNames.length - TYPES_IN_TIP} more`
+            : '')
     const wsTint = workspaceColor(view.workspaceId).text
     const isMember = myWorkspaces.some(w => w.id === view.workspaceId)
 
@@ -261,12 +275,11 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // decision is outstanding; only someone who can answer gets a route in.
     const pendingRequest = view.publishRequest ?? null
     const canAnswerRequest = access?.canAnswerPublishRequest ?? false
+    // WHO asked and WHEN — the detail line. What to do about it is the lead,
+    // and it differs by who is reading, so the two are no longer one string.
     const requestTip = pendingRequest
         ? `Asked by ${pendingRequest.requestedByName ?? 'a workspace member'}`
             + ` ${timeAgo(pendingRequest.requestedAt)}`
-            + (canAnswerRequest
-                ? ' — open sharing to approve or decline'
-                : ' — a workspace admin decides')
         : undefined
 
     // Same path a Details save takes, so both routes to a new name settle the
@@ -292,12 +305,21 @@ export function ViewPageHeader({ viewId, workspaceName }: {
         <>
             <header className="relative flex items-start gap-3 px-4 py-2.5 border-b border-glass-border bg-canvas-elevated shrink-0">
 
-                <span className={cn(
-                    'relative mt-0.5 h-9 w-9 rounded-xl border flex items-center justify-center shrink-0',
-                    meta.iconBg,
-                )}>
-                    <DynamicIcon name={icon} className="h-[18px] w-[18px]" />
-                </span>
+                {/* The tile is the only colour-coded identity on the bar and
+                    it explained nothing: the hue IS the view type, and nothing
+                    said so. */}
+                <HoverTip
+                    className="shrink-0"
+                    label={viewTypeLabel(view.viewType)}
+                    detail={meta.what}
+                >
+                    <span className={cn(
+                        'relative mt-0.5 h-9 w-9 rounded-xl border flex items-center justify-center shrink-0',
+                        meta.iconBg,
+                    )}>
+                        <DynamicIcon name={icon} className="h-[18px] w-[18px]" />
+                    </span>
+                </HoverTip>
 
                 <div className="relative min-w-0 flex-1">
                     {/* 1 — what this is. The name leads at a size nothing else
@@ -311,43 +333,68 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 onCancel={() => setRenaming(false)}
                             />
                         ) : (
+                            /* THE ONE SHAPE `title` SURVIVES ON: a
+                               non-interactive text node that truncates, where
+                               the tip's text IS the full value of that node.
+                               Everything else on this bar is a HoverTip.
+
+                               It used to spend this on "Double-click to
+                               rename" for editors — so the people most likely
+                               to have long names were the only ones who could
+                               not read them. The rename hint moved to the
+                               Details button, which is an affordance. */
                             <h1
                                 className="text-[15px] font-bold text-ink leading-tight truncate"
-                                title={canEditDetails ? 'Double-click to rename' : view.name}
+                                title={view.name}
                                 onDoubleClick={canEditDetails ? () => setRenaming(true) : undefined}
                             >
                                 {view.name}
                             </h1>
                         )}
                         {readOnly && (
-                            <span
-                                className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-400 shrink-0"
-                                title="You can explore everything in this view — expanding, tracing and searching — but nothing can be changed."
+                            <HoverTip
+                                className="inline-flex shrink-0"
+                                label="Explore everything here — expand, trace and search"
+                                detail="Nothing in this view can be changed"
                             >
-                                <Eye className="w-3 h-3" aria-hidden />
-                                {/* "Shared with you" is only true for grant/enterprise
-                                    reach — a workspace viewer on their own workspace's
-                                    views just has read-only rights, nothing was shared. */}
-                                {access?.accessVia === 'grant' || access?.accessVia === 'enterprise'
-                                    ? 'Shared with you · read-only'
-                                    : 'Read-only'}
-                            </span>
+                                <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-semibold text-sky-600 dark:text-sky-400 shrink-0">
+                                    <Eye className="w-3 h-3" aria-hidden />
+                                    {/* "Shared with you" is only true for grant/enterprise
+                                        reach — a workspace viewer on their own workspace's
+                                        views just has read-only rights, nothing was shared. */}
+                                    {access?.accessVia === 'grant' || access?.accessVia === 'enterprise'
+                                        ? 'Shared with you · read-only'
+                                        : 'Read-only'}
+                                </span>
+                            </HoverTip>
                         )}
                         {pendingRequest && (canAnswerRequest ? (
-                            <button
-                                type="button"
-                                onClick={() => setShareOpen(true)}
-                                title={requestTip}
-                                className={cn(PENDING_BADGE, 'hover:bg-amber-500/20 transition-colors')}
+                            <HoverTip
+                                className="inline-flex shrink-0"
+                                label="Open sharing to approve or decline this request"
+                                detail={requestTip}
                             >
-                                <Clock className="w-3 h-3" aria-hidden />
-                                Publication requested
-                            </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setShareOpen(true)}
+                                    aria-label="Publication requested — open sharing to approve or decline"
+                                    className={cn(PENDING_BADGE, 'hover:bg-amber-500/20 transition-colors')}
+                                >
+                                    <Clock className="w-3 h-3" aria-hidden />
+                                    Publication requested
+                                </button>
+                            </HoverTip>
                         ) : (
-                            <span className={PENDING_BADGE} title={requestTip}>
-                                <Clock className="w-3 h-3" aria-hidden />
-                                Publication requested
-                            </span>
+                            <HoverTip
+                                className="inline-flex shrink-0"
+                                label="A workspace admin decides whether this view is published"
+                                detail={requestTip}
+                            >
+                                <span className={PENDING_BADGE}>
+                                    <Clock className="w-3 h-3" aria-hidden />
+                                    Publication requested
+                                </span>
+                            </HoverTip>
                         ))}
                     </div>
 
@@ -356,26 +403,34 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         and its own colour, and the two that go somewhere are
                         real targets rather than dot-separated prose. */}
                     <div className="mt-1 flex items-center gap-2 min-w-0 text-[11px] font-medium text-ink-secondary">
-                        <span className={cn(IDENTITY_ITEM, 'shrink-0')}>
-                            <DynamicIcon
-                                name={typeIcon}
-                                className={cn('h-3 w-3 shrink-0', viewTypeColor(view.viewType))}
-                            />
-                            {viewTypeLabel(view.viewType)}
-                        </span>
+                        {/* "Context View" is two words most people meet for the
+                            first time on this bar. The kind of view decides how
+                            the canvas behaves, and nothing said what it was. */}
+                        <HoverTip className={cn(IDENTITY_ITEM, 'shrink-0')} label={meta.what}>
+                            <span className={IDENTITY_ITEM}>
+                                <DynamicIcon
+                                    name={typeIcon}
+                                    className={cn('h-3 w-3 shrink-0', viewTypeColor(view.viewType))}
+                                />
+                                {viewTypeLabel(view.viewType)}
+                            </span>
+                        </HoverTip>
 
                         {/* How much of the model this view shows — next to the
                             KIND of view, which is the fact it qualifies. */}
                         {entityTypeCount > 0 && (
                             <>
                                 <Dot />
-                                <span
+                                <HoverTip
                                     className={cn(IDENTITY_ITEM, 'shrink-0')}
-                                    title={`This view shows ${entityTypeCount} entity type${entityTypeCount === 1 ? '' : 's'}`}
+                                    label="This view is scoped to these entity types — nothing else reaches the canvas"
+                                    detail={namedTypes || undefined}
                                 >
-                                    <Shapes className="h-3 w-3 shrink-0 text-ink-muted" aria-hidden />
-                                    {entityTypeCount} type{entityTypeCount === 1 ? '' : 's'}
-                                </span>
+                                    <span className={IDENTITY_ITEM}>
+                                        <Shapes className="h-3 w-3 shrink-0 text-ink-muted" aria-hidden />
+                                        {entityTypeCount} type{entityTypeCount === 1 ? '' : 's'}
+                                    </span>
+                                </HoverTip>
                             </>
                         )}
 
@@ -383,20 +438,35 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             <>
                                 <Dot />
                                 {isMember ? (
-                                    <Link
-                                        to={`/workspaces/${view.workspaceId}`}
-                                        aria-label={`Open the ${workspaceName} workspace`}
-                                        className={cn(IDENTITY_ITEM, IDENTITY_LINK)}
+                                    <HoverTip
+                                        className={cn(IDENTITY_ITEM, 'min-w-0')}
+                                        label={`Open the ${workspaceName} workspace`}
+                                        detail="Leaves the canvas"
                                     >
-                                        <Boxes className={cn('h-3 w-3 shrink-0', wsTint)} aria-hidden />
-                                        <span className="truncate">{workspaceName}</span>
-                                        <ArrowUpRight className="h-2.5 w-2.5 shrink-0 text-ink-muted" aria-hidden />
-                                    </Link>
+                                        <Link
+                                            to={`/workspaces/${view.workspaceId}`}
+                                            aria-label={`Open the ${workspaceName} workspace`}
+                                            className={cn(IDENTITY_ITEM, IDENTITY_LINK)}
+                                        >
+                                            <Boxes className={cn('h-3 w-3 shrink-0', wsTint)} aria-hidden />
+                                            <span className="truncate">{workspaceName}</span>
+                                            <ArrowUpRight className="h-2.5 w-2.5 shrink-0 text-ink-muted" aria-hidden />
+                                        </Link>
+                                    </HoverTip>
                                 ) : (
-                                    <span className={IDENTITY_ITEM}>
-                                        <Boxes className={cn('h-3 w-3 shrink-0', wsTint)} aria-hidden />
-                                        <span className="truncate">{workspaceName}</span>
-                                    </span>
+                                    /* A name that truncates with no way to read
+                                       it, and no explanation of why it is the
+                                       one fact here that goes nowhere. */
+                                    <HoverTip
+                                        className={cn(IDENTITY_ITEM, 'min-w-0')}
+                                        label={workspaceName}
+                                        detail="You are not a member of this workspace, so it cannot be opened from here"
+                                    >
+                                        <span className={IDENTITY_ITEM}>
+                                            <Boxes className={cn('h-3 w-3 shrink-0', wsTint)} aria-hidden />
+                                            <span className="truncate">{workspaceName}</span>
+                                        </span>
+                                    </HoverTip>
                                 )}
                             </>
                         )}
@@ -413,7 +483,8 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 <Dot />
                                 <HoverTip
                                     className="hidden sm:inline-flex min-w-0"
-                                    label={`Everything on this canvas is drawn from ${builtOnLabel}. Opens the data source, graph data provider and semantic layer behind this view.`}
+                                    label={`Everything on this canvas is drawn from ${builtOnLabel}`}
+                                    detail="Opens the data source, graph data provider and semantic layer behind this view"
                                 >
                                     <button
                                         type="button"
@@ -447,7 +518,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         no verb — just the tier, as a badge, which is all the
                         old menu's read-only row ever gave them. */}
                     {canOpenSharing ? (
-                        <HoverTip className="inline-flex" label={`${shareTip} Opens sharing.`}>
+                        <HoverTip className="inline-flex" label={shareTip} detail="Opens sharing">
                             <button
                                 type="button"
                                 onClick={() => setShareOpen(true)}
@@ -477,28 +548,37 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     <span aria-hidden className="mx-0.5 h-5 w-px bg-glass-border" />
 
                     {canEditDetails && (
-                        <button
-                            type="button"
-                            onClick={() => openDetails('edit')}
-                            className={ACTION_BUTTON}
-                            aria-label="Details"
-                            title="Rename, describe, tag, or change who can see this view"
+                        <HoverTip
+                            className="inline-flex"
+                            label="Rename, describe, tag, or change who can see this view"
+                            detail="Double-click the view's name to rename it in place"
                         >
-                            <Pencil className="w-3.5 h-3.5" aria-hidden />
-                            <span className="hidden lg:inline">Details</span>
-                        </button>
+                            <button
+                                type="button"
+                                onClick={() => openDetails('edit')}
+                                className={ACTION_BUTTON}
+                                aria-label="Details"
+                            >
+                                <Pencil className="w-3.5 h-3.5" aria-hidden />
+                                <span className="hidden lg:inline">Details</span>
+                            </button>
+                        </HoverTip>
                     )}
 
-                    <button
-                        type="button"
-                        onClick={() => setActivityOpen(true)}
-                        className={ACTION_BUTTON}
-                        aria-label="Activity"
-                        title="Who changed this view, and when its data was last refreshed"
+                    <HoverTip
+                        className="inline-flex"
+                        label="Who changed this view, and when its data was last refreshed"
                     >
-                        <History className="w-3.5 h-3.5" aria-hidden />
-                        <span className="hidden lg:inline">Activity</span>
-                    </button>
+                        <button
+                            type="button"
+                            onClick={() => setActivityOpen(true)}
+                            className={ACTION_BUTTON}
+                            aria-label="Activity"
+                        >
+                            <History className="w-3.5 h-3.5" aria-hidden />
+                            <span className="hidden lg:inline">Activity</span>
+                        </button>
+                    </HoverTip>
 
                     {/* Came up from CanvasVersioningBar, which held it and the
                         branch switcher and nothing else. A read-only session

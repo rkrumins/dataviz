@@ -154,4 +154,19 @@ describe('HoverTip', () => {
         expect(tip).toHaveClass('animate-in')
         expect(tip.className).not.toContain('animate-out')
     })
+
+    it('still explains a control that is greyed out', async () => {
+        // The highest-value tip in the app is "why can I not press this?", and
+        // it was the one that could never fire: a disabled button dispatches no
+        // mouse events, and they do not bubble to a wrapper either.
+        const user = userEvent.setup()
+        render(
+            <HoverTip label="Nothing has changed yet">
+                <button type="button" disabled>Save changes</button>
+            </HoverTip>,
+        )
+        await user.hover(screen.getByText('Save changes'))
+        expect(await screen.findByRole('tooltip'))
+            .toHaveTextContent('Nothing has changed yet')
+    })
 })

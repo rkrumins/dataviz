@@ -26,7 +26,21 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { fireEvent, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+/** Hover a control and read the app's own tooltip off it.
+ *
+ *  These assertions used to read a native `title`. The header now speaks one
+ *  tooltip language — `HoverTip` — because four adjacent buttons were showing
+ *  two different kinds of hover, and a control's explanation is not the
+ *  browser's job. `title` survives on exactly one shape here: the view name,
+ *  a non-interactive text node that truncates, where the tip IS the full
+ *  value. */
+async function tipOf(el: HTMLElement): Promise<HTMLElement> {
+  await userEvent.setup().hover(el)
+  return screen.findByRole('tooltip')
+}
 
 vi.mock('@/services/viewApiService', async () => {
   const actual = await vi.importActual<typeof import('@/services/viewApiService')>(
@@ -165,15 +179,21 @@ describe('pending publication request', () => {
     renderHeader(viewResponse({ access: OWNER_ACCESS, publishRequest: PENDING }))
     const badge = await screen.findByText('Publication requested')
     expect(badge.tagName).toBe('SPAN')
-    expect(badge.getAttribute('title')).toMatch(/Asked by Ada Lovelace 3d ago/)
-    expect(badge.getAttribute('title')).toMatch(/a workspace admin decides/)
+    const tip = await tipOf(badge)
+    expect(tip).toHaveTextContent(/Asked by Ada Lovelace 3d ago/)
+    expect(tip).toHaveTextContent(/a workspace admin decides/i)
   })
 
   it('becomes a button into the share dialog when the caller can answer it', async () => {
     renderHeader(viewResponse({ access: ANSWERER_ACCESS, publishRequest: PENDING }))
     const badge = await screen.findByText('Publication requested')
     expect(badge.tagName).toBe('BUTTON')
-    expect(badge.getAttribute('title')).toMatch(/Asked by Ada Lovelace 3d ago/)
+    // The `title` was the accessible name of this control; converting it must
+    // not leave the button nameless.
+    expect(badge).toHaveAccessibleName(/publication requested/i)
+    const tip = await tipOf(badge)
+    expect(tip).toHaveTextContent(/Asked by Ada Lovelace 3d ago/)
+    expect(tip).toHaveTextContent(/approve or decline/i)
 
     expect(screen.queryByTestId('share-dialog')).toBeNull()
     fireEvent.click(badge)
@@ -186,7 +206,7 @@ describe('pending publication request', () => {
       publishRequest: { ...PENDING, requestedByName: null },
     }))
     const badge = await screen.findByText('Publication requested')
-    expect(badge.getAttribute('title')).toMatch(/Asked by a workspace member/)
+    expect(await tipOf(badge)).toHaveTextContent(/Asked by a workspace member/)
   })
 
   it('renders no badge without a request', async () => {
@@ -215,6 +235,54 @@ describe('the identity line', () => {
     renderHeader(viewResponse({ access: VIEWER_ACCESS }))
     expect(await screen.findByText('Finance')).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /Finance workspace/i })).toBeNull()
+  })
+
+  // ── EVERY CHIP ON THIS LINE SAYS WHAT IT IS ─────────────────────────────
+  // The user's own complaint: a row of facts where the one that was explained
+  // was explained in a different language from the three that were not, and
+  // three of them were not explained at all.
+
+  it('says what KIND of view this is, not just its name for the kind', async () => {
+    // "Context View" is two words most people meet for the first time here.
+    renderHeader(viewResponse({ access: OWNER_ACCESS, viewType: 'reference' }))
+    const chip = await screen.findByText('Context View')
+    expect(await tipOf(chip)).toHaveTextContent(/columns you define/i)
+  })
+
+  it('warns that the workspace chip walks off the canvas', async () => {
+    joinWorkspace()
+    renderHeader(viewResponse({ access: OWNER_ACCESS }))
+    const link = await screen.findByRole('link', { name: /open the Finance workspace/i })
+    expect(await tipOf(link)).toHaveTextContent(/leaves the canvas/i)
+  })
+
+  it('gives a non-member the workspace name in full, and says why it goes nowhere', async () => {
+    // The worst cell on the bar before this: a proper noun that truncates,
+    // with no way to read it and no accessible name at all.
+    renderHeader(viewResponse({ access: VIEWER_ACCESS }))
+    const chip = await screen.findByText('Finance')
+    const tip = await tipOf(chip)
+    expect(tip).toHaveTextContent('Finance')
+    expect(tip).toHaveTextContent(/not a member/i)
+  })
+
+  it('leaves no interactive control on the bar speaking OS chrome', async () => {
+    // The complaint in one assertion: Share was a designed card and the three
+    // buttons beside it were native pills. A `title` on a control is also its
+    // accessible name, so this is the regression that would silently un-name
+    // half the header.
+    joinWorkspace()
+    const { container } = renderHeader(viewResponse({
+      access: ANSWERER_ACCESS,
+      publishRequest: PENDING,
+      dataSourceId: 'ds_1',
+      dataSourceName: 'Snowflake',
+      config: { content: { visibleEntityTypes: ['table'] } },
+    }))
+    await screen.findByText('Test View')
+
+    const controls = container.querySelectorAll('button[title], a[title]')
+    expect(Array.from(controls).map(c => c.getAttribute('title'))).toEqual([])
   })
 })
 
@@ -428,8 +496,13 @@ describe('what the duplicated canvas title block left behind', () => {
       access: OWNER_ACCESS,
       config: { content: { visibleEntityTypes: ['table', 'column'] } },
     }))
+    // The old tip said "This view shows 2 entity types" — the count is already
+    // on screen, so it added nothing. WHICH types is the thing only the tip
+    // can say, and the fact that nothing else reaches the canvas.
     const chip = await screen.findByText('2 types')
-    expect(chip.getAttribute('title')).toMatch(/shows 2 entity types/i)
+    const tip = await tipOf(chip)
+    expect(tip).toHaveTextContent(/scoped to these entity types/i)
+    expect(tip).toHaveTextContent('table, column')
   })
 
   it('says "1 type", not "1 types"', async () => {
@@ -451,7 +524,11 @@ describe('what the duplicated canvas title block left behind', () => {
     renderHeader(viewResponse({ access: OWNER_ACCESS }))
 
     const title = await screen.findByText('Test View')
-    expect(title.getAttribute('title')).toBe('Double-click to rename')
+    // The one legitimate `title` on this bar: a truncated text node whose tip
+    // IS its full value. It used to spend that on "Double-click to rename" for
+    // editors — so the people most likely to have long names were the only
+    // ones who could not read them. The hint moved to the Details button.
+    expect(title.getAttribute('title')).toBe('Test View')
     fireEvent.doubleClick(title)
 
     const input = screen.getByRole('textbox', { name: 'View name' })

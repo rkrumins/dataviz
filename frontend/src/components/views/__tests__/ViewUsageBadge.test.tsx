@@ -14,6 +14,7 @@
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ViewUsageBadge } from '../ViewUsageBadge'
@@ -77,10 +78,34 @@ describe('ViewUsageBadge', () => {
             },
         })
         renderBadge()
+        expect(await screen.findByText('opens per day')).toBeInTheDocument()
         expect(
-            await screen.findByRole('img', { name: /opens per day over the last 30 days/i }),
-        ).toBeInTheDocument()
-        expect(screen.getByText('opens per day')).toBeInTheDocument()
+            screen.getByText(/opens per day over the last 30 days/i),
+        ).toHaveClass('sr-only')
+    })
+
+    it('explains the trend in the app\u2019s own tooltip, not in OS chrome', async () => {
+        // The chart used to name itself with an SVG <title> holding all thirty
+        // plotted values — an unreadable accessible name AND a native pill that
+        // paints over the header, inside a row whose other two figures already
+        // used HoverTip. The shape gets a real tip like everything else here.
+        const user = userEvent.setup()
+        vi.mocked(service.getViewUsage).mockResolvedValue({
+            v1: {
+                viewId: 'v1', opens: 35, uniqueViewers: 4, lastOpenedAt: null,
+                trend: [3, 9, 4, 12, 7], windowDays: 30, lifetimeOpens: 35, onlyAuthor: false,
+            yourOpens: 0, yourLastOpenedAt: null,
+            },
+        })
+        const { container } = renderBadge()
+        const caption = await screen.findByText('opens per day')
+        expect(container.querySelector('svg > title')).toBeNull()
+
+        await user.hover(caption)
+        const tip = await screen.findByRole('tooltip')
+        expect(tip).toHaveTextContent('12 opens on the busiest day')
+        // The figure is not on the surface, so the tip earns its keep.
+        expect(tip).toHaveTextContent(/No opens at all on|Opened on every one/)
     })
 
     it('calls out a view nobody opens — and names the window it looked at', async () => {

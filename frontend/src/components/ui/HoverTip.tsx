@@ -165,7 +165,16 @@ export function HoverTip({ label, detail, shortcut, width, children, className }
         <>
             <span
                 ref={anchorRef}
-                className={className}
+                className={cn(
+                    // A DISABLED CONTROL DISPATCHES NO MOUSE EVENTS, and they
+                    // do not reach this wrapper either — so the tips that
+                    // matter most (why is this greyed out?) would be the only
+                    // ones that never appeared. Letting the pointer fall
+                    // through to the wrapper is the standard fix; `:has` keeps
+                    // the not-allowed cursor the control was drawing itself.
+                    '[&_:disabled]:pointer-events-none [&:has(:disabled)]:cursor-not-allowed',
+                    className,
+                )}
                 aria-describedby={at ? tipId : undefined}
                 onMouseEnter={() => open(SHOW_DELAY_MS)}
                 onMouseLeave={close}

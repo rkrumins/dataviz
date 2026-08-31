@@ -11,8 +11,9 @@
  * icon maps and the activity feed rows were pulled into shared modules after each
  * had silently drifted between surfaces.
  */
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { Save, Settings2, Check, X, ChevronRight } from 'lucide-react'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { updateView, updateViewVisibility, type View as ViewT } from '@/services/viewApiService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePublishGate } from '@/hooks/usePublishGate'
@@ -129,6 +130,22 @@ export function EditDetailsPanel({
     workspaceName: view.workspaceName,
   })
 
+  // Four <label>s with no `htmlFor` and four controls with no `id` is four
+  // form fields with no accessible name — clicking the word did nothing, and a
+  // screen reader announced "edit text" four times.
+  const fieldId = useId()
+  const nameId = `${fieldId}-name`
+  const descriptionId = `${fieldId}-description`
+  const tagsId = `${fieldId}-tags`
+
+  // WHY the primary action is greyed. It was the highest-value missing tip in
+  // the panel: a disabled Save with no explanation reads as a broken form.
+  const saveBlocked = !name.trim()
+    ? 'A view needs a name before this can be saved'
+    : !dirty
+      ? 'Nothing has changed yet — edit a field above and this lights up'
+      : null
+
   const labelCls = 'block text-[11px] font-bold uppercase tracking-wider text-ink-muted mb-1.5'
   const inputCls = 'w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 focus:border-accent-lineage/40 transition-shadow'
 
@@ -144,17 +161,17 @@ export function EditDetailsPanel({
       )}
 
       <div>
-        <label className={labelCls}>Name</label>
-        <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="View name" autoFocus={autoFocusName} />
+        <label htmlFor={nameId} className={labelCls}>Name</label>
+        <input id={nameId} value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="View name" autoFocus={autoFocusName} />
       </div>
 
       <div>
-        <label className={labelCls}>Description</label>
-        <textarea value={description} onChange={e => setDescription(e.target.value)} rows={3} className={cn(inputCls, 'resize-none')} placeholder="What does this view show? (optional)" />
+        <label htmlFor={descriptionId} className={labelCls}>Description</label>
+        <textarea id={descriptionId} value={description} onChange={e => setDescription(e.target.value)} rows={3} className={cn(inputCls, 'resize-none')} placeholder="What does this view show? (optional)" />
       </div>
 
       <div>
-        <label className={labelCls}>Tags</label>
+        <label htmlFor={tagsId} className={labelCls}>Tags</label>
         <div className={cn(inputCls, 'flex flex-wrap items-center gap-1.5 py-2 cursor-text')}>
           {tagList.map(t => (
             <span key={t} className="inline-flex items-center gap-1 rounded-full bg-accent-lineage/10 text-accent-lineage border border-accent-lineage/20 pl-2 pr-1 py-0.5 text-xs font-medium">
@@ -165,6 +182,7 @@ export function EditDetailsPanel({
             </span>
           ))}
           <input
+            id={tagsId}
             value={tagInput}
             onChange={e => { const v = e.target.value; if (v.endsWith(',')) addTag(v); else setTagInput(v) }}
             onKeyDown={e => {
@@ -180,8 +198,10 @@ export function EditDetailsPanel({
       </div>
 
       <div>
-        <label className={labelCls}>Visibility</label>
-        <div className="space-y-2">
+        {/* A group of radio-like buttons, not a single control — so the word
+            names the group rather than pointing at one of them. */}
+        <span className={labelCls} id={`${fieldId}-visibility`}>Visibility</span>
+        <div className="space-y-2" role="group" aria-labelledby={`${fieldId}-visibility`}>
           {VIS.map(({
             id, icon: Icon, label, description: desc,
             disabled, disabledReason, requiresApproval, approvalHint,
@@ -193,7 +213,10 @@ export function EditDetailsPanel({
                 type="button"
                 onClick={() => { if (!disabled) setVisibility(id) }}
                 disabled={disabled}
-                title={disabledReason ?? approvalHint}
+                /* No tooltip: `disabledReason` / `approvalHint` are printed
+                   INLINE under the label a few lines below, word for word. A
+                   tip that repeats what is already on screen is what teaches
+                   people the rest of them are not worth hovering. */
                 className={cn(
                   'w-full flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors',
                   active
@@ -247,11 +270,17 @@ export function EditDetailsPanel({
       {onEditLayout && (
         <div className="pt-2 border-t border-glass-border/60">
           <p className="text-[11px] font-bold uppercase tracking-wider text-ink-muted mb-2 mt-2">Want to change the data or layout?</p>
+          <HoverTip
+            className="block"
+            label={editDisabled
+              ? "Switch to this view's workspace to edit its layout"
+              : 'Change which entities appear, how they are grouped, and where they sit'}
+            detail={editDisabled ? undefined : 'Opens the builder — this form stays as you left it'}
+          >
           <button
             type="button"
             onClick={() => { if (!editDisabled) onEditLayout() }}
             disabled={editDisabled}
-            title={editDisabled ? "Switch to this view's workspace to edit" : undefined}
             className={cn(
               'group/cta w-full flex items-center gap-3 rounded-xl border px-3.5 py-3 text-left',
               'border-accent-lineage/45 bg-gradient-to-r from-accent-lineage/[0.10] to-violet-500/[0.06]',
@@ -268,17 +297,24 @@ export function EditDetailsPanel({
             </span>
             <ChevronRight className="h-5 w-5 text-accent-lineage shrink-0 transition-transform group-hover/cta:translate-x-0.5" />
           </button>
+          </HoverTip>
         </div>
       )}
 
       <div className="flex items-center gap-2 pt-1">
+        <HoverTip
+          className="flex-1"
+          label={saveBlocked ?? 'Save the name, description, tags and audience'}
+          detail={saveBlocked ? undefined : 'The layout and entity scope are edited in the builder'}
+        >
         <button
           onClick={handleSave}
           disabled={saving || !dirty || !name.trim()}
-          className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold shadow-lg shadow-accent-lineage/25 hover:shadow-xl hover:-translate-y-0.5 disabled:opacity-50 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed transition-all duration-200"
+          className="w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 bg-gradient-to-r from-accent-lineage to-violet-600 text-white text-sm font-semibold shadow-lg shadow-accent-lineage/25 hover:shadow-xl hover:-translate-y-0.5 disabled:opacity-50 disabled:shadow-none disabled:translate-y-0 disabled:cursor-not-allowed transition-all duration-200"
         >
           <Save className="h-4 w-4" /> {saving ? 'Saving…' : 'Save changes'}
         </button>
+        </HoverTip>
         <button
           onClick={onCancel}
           disabled={saving}
