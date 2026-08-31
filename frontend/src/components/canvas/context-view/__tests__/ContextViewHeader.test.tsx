@@ -8,11 +8,41 @@
  * Everything but search renders from plain props; the search box reads the
  * canvas's one session off a context, so every render here provides a
  * stub one.
+ *
+ * The left slot no longer holds a title. It held the view's name and type
+ * count, both of which the PAGE HEADER above prints larger — and between the
+ * two sat a third band whose idle state was a branch switcher and a Reviews
+ * button. The switcher came down into this slot; the name, the count and the
+ * title menu's actions went up. These specs pin that the duplicate is gone and
+ * that nothing the block carried was simply dropped on the floor.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
+
+/** Hover a control and read the app's own tooltip off it.
+ *
+ *  The toolbar spoke OS chrome — a one-second native pill in a register that
+ *  belongs to no part of this product — for every control in it. It speaks
+ *  `HoverTip` now, like the page header above it. A disabled control
+ *  dispatches no mouse events of its own, which is exactly why HoverTip lets
+ *  the pointer fall through to its wrapper: the "why is this greyed out?" tip
+ *  is the one that matters most. */
+async function tipOf(el: HTMLElement): Promise<HTMLElement> {
+  await userEvent.setup().hover(el)
+  return screen.findByRole('tooltip')
+}
 import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
 import { stubSession } from '@/test/stubSearchSession'
+
+// The switcher is a store + react-query citizen with its own suite; here it
+// only needs to prove it lands in the slot on the terms the header sets.
+vi.mock('@/features/versioning/components/BranchSwitcher', () => ({
+  BranchSwitcher: ({ workspaceId, dataSourceId }: { workspaceId: string; dataSourceId: string | null }) => (
+    <div data-testid="branch-switcher" data-ws={workspaceId} data-ds={dataSourceId ?? ''} />
+  ),
+}))
+
 import { ContextViewHeader, type ContextViewHeaderProps } from '../ContextViewHeader'
 
 function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextViewHeaderProps {
@@ -38,9 +68,6 @@ function baseProps(overrides: Partial<ContextViewHeaderProps> = {}): ContextView
     onExitEdit: vi.fn(),
     onTogglePropertyManager: vi.fn(),
     propertyManagerOpen: false,
-    viewName: 'Data Landscape',
-    entityTypeCount: 4,
-    activeContextModelName: 'Enterprise Blueprint',
     syncStatus: 'idle',
     onRetrySync: vi.fn(),
     pendingChangeCount: 0,
@@ -91,15 +118,17 @@ describe('ContextViewHeader — View mode (Published)', () => {
     expect(props.onEnterEdit).toHaveBeenCalledTimes(1)
   })
 
-  it('disables Edit with an explanation when version control is not set up', () => {
+  it('disables Edit with an explanation when version control is not set up', async () => {
     const props = baseProps({ canManage: true, canEnterEdit: false })
     renderHeader(props)
 
     const edit = screen.getByRole('button', { name: 'Edit' })
     expect(edit).toBeDisabled()
-    expect(edit).toHaveAttribute('title', "Version control isn't set up for this data source yet")
     fireEvent.click(edit)
     expect(props.onEnterEdit).not.toHaveBeenCalled()
+
+    expect(await tipOf(edit))
+      .toHaveTextContent("Version control isn't set up for this data source yet")
   })
 })
 
@@ -156,7 +185,7 @@ describe('ContextViewHeader — Edit mode (on a draft)', () => {
 
 })
 
-describe('ContextViewHeader — blueprint sync subline', () => {
+describe('ContextViewHeader — blueprint sync signal', () => {
   it('offers a retry affordance on sync error', () => {
     const props = baseProps({ syncStatus: 'error' })
     renderHeader(props)
@@ -165,23 +194,50 @@ describe('ContextViewHeader — blueprint sync subline', () => {
     expect(props.onRetrySync).toHaveBeenCalledTimes(1)
   })
 
-  it('folds the context model name into the subline', () => {
+  it('shows a labelled spinner while the layout is saving', () => {
+    renderHeader(baseProps({ syncStatus: 'saving' }))
+    expect(screen.getByLabelText('Saving changes')).toBeInTheDocument()
+  })
+
+  it('says nothing at rest', () => {
     renderHeader(baseProps())
-    expect(screen.getByText('4 types · Enterprise Blueprint')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Saving changes')).toBeNull()
+    expect(screen.queryByRole('button', { name: /sync issue/i })).toBeNull()
   })
 })
 
-describe('ContextViewHeader — view title (calm-view default)', () => {
-  it('renders a plain title with no view-options menu when no view capability is granted', () => {
+describe('ContextViewHeader — the vacated title slot', () => {
+  it('no longer repeats the view name, its type count, or the title menu', () => {
+    // All three are the page header's now. A second, smaller copy of the name
+    // is what cost this page a band it did not need.
     renderHeader(baseProps())
 
-    expect(screen.getByText('Data Landscape')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'View options' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Data Landscape')).toBeNull()
+    expect(screen.queryByText(/\d+ types?/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'View options' })).toBeNull()
+    expect(screen.queryByText(/edit details/i)).toBeNull()
+    expect(screen.queryByText(/^share/i)).toBeNull()
   })
 
-  it('surfaces the view-options chevron once a view capability is granted', () => {
-    renderHeader(baseProps({ canEditView: true }))
-    expect(screen.getByRole('button', { name: 'View options' })).toBeInTheDocument()
+  it('holds the branch switcher instead, scoped to the view', () => {
+    renderHeader(baseProps({ branchWorkspaceId: 'ws_1', branchDataSourceId: 'ds_1' }))
+
+    const switcher = screen.getByTestId('branch-switcher')
+    expect(switcher.getAttribute('data-ws')).toBe('ws_1')
+    expect(switcher.getAttribute('data-ds')).toBe('ds_1')
+  })
+
+  it('withholds the switcher entirely when versioning chrome is not this session\u2019s to have', () => {
+    // Null is what the canvas passes when the flag is off, the session is
+    // read-only, or the view has no workspace — the same three conditions that
+    // stop CanvasRouter mounting the versioning bar at all.
+    renderHeader(baseProps({ branchWorkspaceId: null, branchDataSourceId: 'ds_1' }))
+    expect(screen.queryByTestId('branch-switcher')).toBeNull()
+  })
+
+  it('keeps the switcher in the slot on a draft too', () => {
+    renderHeader(baseProps({ isDraft: true, branchWorkspaceId: 'ws_1', branchDataSourceId: 'ds_1' }))
+    expect(screen.getByTestId('branch-switcher')).toBeInTheDocument()
   })
 })
 
@@ -225,12 +281,24 @@ describe('ContextViewHeader — Focus Lens launcher', () => {
     expect(props.onOpenLens).toHaveBeenCalledTimes(1)
   })
 
-  it('without a selection, Focus Lens is disabled with guidance', () => {
+  it('without a selection, Focus Lens is disabled with guidance', async () => {
     const props = baseProps({ canTrace: false, onOpenLens: vi.fn() })
     renderHeader(props)
     const btn = screen.getByRole('button', { name: /focus lens/i })
     expect(btn).toBeDisabled()
-    expect(btn).toHaveAttribute('title', expect.stringMatching(/select a single entity/i))
+    expect(await tipOf(btn)).toHaveTextContent(/select a single entity/i)
+  })
+
+  it('leaves no control in the toolbar speaking OS chrome', async () => {
+    // The seam this replaced: a row where every explanation arrived as a
+    // native pill after a second, in a register that matches nothing else on
+    // the page — and where a `title` on an icon-only control was also its
+    // only accessible name.
+    const { container } = renderHeader(baseProps({
+      canManage: true, canEnterEdit: true, canTrace: true, onOpenLens: vi.fn(),
+    }))
+    const withTitles = container.querySelectorAll('button[title], a[title]')
+    expect(Array.from(withTitles).map(c => c.getAttribute('title'))).toEqual([])
   })
 
   it('hosts that do not wire the lens see no button', () => {

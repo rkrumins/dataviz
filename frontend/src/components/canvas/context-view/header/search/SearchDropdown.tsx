@@ -292,7 +292,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
         <motion.div
             initial={{ opacity: 0, y: -4, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            transition={{ duration: 0.13, ease: 'easeOut' }}
+            transition={{ duration: 0.1, ease: 'easeOut' }}
             onMouseDown={(e) => e.preventDefault()}
             // The box's outside-click handler cannot use containment to
             // find this surface — it lives at the end of <body>. The
@@ -308,7 +308,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
             }}
             className={cn(
                 'relative flex flex-col overflow-hidden',
-                'rounded-xl bg-canvas-elevated/95 backdrop-blur-xl',
+                'rounded-xl bg-canvas-elevated backdrop-blur-xl',
                 'border border-black/[0.10] dark:border-white/[0.08]',
                 'shadow-2xl shadow-black/20 dark:shadow-black/40',
             )}

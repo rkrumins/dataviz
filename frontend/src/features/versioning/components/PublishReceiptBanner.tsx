@@ -15,6 +15,7 @@
  */
 import { CheckCircle2, X, History } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
 
 export function PublishReceiptBanner({
@@ -81,13 +82,15 @@ export function PublishReceiptBanner({
         <History className="w-3.5 h-3.5" />
         View in history
       </button>
-      <button
-        onClick={clear}
-        title="Dismiss"
-        className="shrink-0 p-1.5 rounded-lg text-ink-muted hover:bg-canvas-overlay transition-colors"
-      >
-        <X className="w-3.5 h-3.5" />
-      </button>
+      <HoverTip className="inline-flex shrink-0" label="Hide this notice">
+        <button
+          onClick={clear}
+          aria-label="Dismiss"
+          className="shrink-0 p-1.5 rounded-lg text-ink-muted hover:bg-canvas-overlay transition-colors"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </HoverTip>
     </div>
   )
 }

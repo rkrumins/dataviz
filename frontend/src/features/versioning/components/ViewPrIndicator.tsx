@@ -5,6 +5,7 @@
  */
 import { GitPullRequest } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useViewPrCounts } from '../hooks/useVersioning'
 
 export function ViewPrIndicator({
@@ -24,13 +25,16 @@ export function ViewPrIndicator({
   if (fromView === 0 && onDs === 0) return null
 
   return (
+    <HoverTip
+      className={cn('inline-flex', className)}
+      label="Open the reviews raised from this view"
+      detail="Drafts waiting on somebody before they can be published"
+    >
     <button
       onClick={onOpen}
-      title="Open changes & reviews for this view"
       className={cn(
         'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors',
         'border border-indigo-500/25 bg-indigo-500/[0.07] text-indigo-600 dark:text-indigo-300 hover:bg-indigo-500/15',
-        className,
       )}
     >
       <GitPullRequest className="w-3.5 h-3.5 shrink-0" />
@@ -46,5 +50,6 @@ export function ViewPrIndicator({
         </span>
       )}
     </button>
+    </HoverTip>
   )
 }

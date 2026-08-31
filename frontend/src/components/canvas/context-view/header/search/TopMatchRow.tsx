@@ -27,6 +27,7 @@
 import { type FC } from 'react'
 
 import { HighlightedText } from '@/components/ui/HighlightedText'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import { styleFor } from '@/components/canvas/search/SearchHitRow'
@@ -62,6 +63,13 @@ export const TopMatchRow: FC<TopMatchRowProps> = ({
     const style = styleFor(hit.node.entityType)
     const { crumbs, depth, full } = formatPath(hit.ancestorPath ?? [])
     const note = depthNote(depth)
+    // The path is ABBREVIATED — "Finance › … › Orders" — and the row used to
+    // put the whole of it in a native `title` on the option itself: a pill
+    // that painted over the next two results after a one-second wait. The
+    // full path belongs to the crumb line, and only when crumbs are actually
+    // being hidden; otherwise the tip would restate what is on screen.
+    const abbreviated = crumbs.some((c) => 'ellipsis' in c)
+    const pathLineCls = 'mt-1 flex items-center gap-1 min-w-0 text-[10.5px] text-ink-muted/80'
 
     return (
         <div
@@ -70,7 +78,6 @@ export const TopMatchRow: FC<TopMatchRowProps> = ({
             aria-selected={active}
             onMouseEnter={onActivate}
             onClick={onPick}
-            title={full || undefined}
             className={cn(
                 'flex items-start gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer',
                 'transition-colors duration-100',
@@ -107,7 +114,7 @@ export const TopMatchRow: FC<TopMatchRowProps> = ({
                     </span>
                 </div>
 
-                <div className="mt-1 flex items-center gap-1 min-w-0 text-[10.5px] text-ink-muted/80">
+                <PathLine className={pathLineCls} full={abbreviated ? full : null}>
                     {layer && (
                         <>
                             <span className="shrink-0 font-medium text-ink-muted">{layer}</span>
@@ -148,8 +155,28 @@ export const TopMatchRow: FC<TopMatchRowProps> = ({
                     {note && (
                         <span className="ml-auto shrink-0 text-ink-muted/55">{note}</span>
                     )}
-                </div>
+                </PathLine>
             </div>
         </div>
     )
+}
+
+/**
+ * The crumb line, with the whole path on hover when crumbs are hidden.
+ *
+ * A `HoverTip` rather than the `title` this row used to carry: the row is an
+ * ARIA `option` inside an open combobox, and a native pill there waits a
+ * second and then paints over the next two results. It wraps the LINE, not
+ * the option — the path is what the tip is about, and an extra element around
+ * the option would come between the listbox and the thing it owns.
+ */
+function PathLine({ className, full, children }: {
+    className: string
+    /** The full path, or null when nothing is being hidden — in which case a
+     *  tip would only restate the crumbs already on screen. */
+    full: string | null
+    children: React.ReactNode
+}) {
+    if (!full) return <div className={className}>{children}</div>
+    return <HoverTip className={className} label={full}>{children}</HoverTip>
 }

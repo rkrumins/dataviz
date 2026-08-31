@@ -15,6 +15,7 @@
 
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { BRANCH_VOCAB } from '@/features/versioning/model/branchVocab'
 import { ComprehensionTools, type ComprehensionToolsProps } from './ViewerActions'
 
@@ -51,10 +52,10 @@ export function EditorActions({
       {/* Undo / Redo — labelled segmented pair (icon + word, mirrored like
           bookends) so both actions read at a glance, not only on hover. */}
       <div className="flex items-stretch rounded-xl overflow-hidden bg-black/[0.03] dark:bg-gradient-to-b dark:from-white/[0.06] dark:to-white/[0.02] border border-black/[0.10] dark:border-white/[0.08]">
+        <HoverTip className="flex" label="Undo the last change on the canvas" shortcut="⌘Z">
         <button
           onClick={onUndo}
           disabled={!canUndo}
-          title="Undo last change (⌘Z)"
           aria-label="Undo"
           className={cn(
             "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
@@ -66,11 +67,12 @@ export function EditorActions({
           <LucideIcons.Undo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
           <span>Undo</span>
         </button>
+        </HoverTip>
         <div className="w-px bg-black/[0.10] dark:bg-white/[0.08]" />
+        <HoverTip className="flex" label="Put back the change you just undid" shortcut="⌘⇧Z">
         <button
           onClick={onRedo}
           disabled={!canRedo}
-          title="Redo (⌘⇧Z)"
           aria-label="Redo"
           className={cn(
             "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
@@ -82,18 +84,25 @@ export function EditorActions({
           <span>Redo</span>
           <LucideIcons.Redo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
         </button>
+        </HoverTip>
       </div>
 
       {/* Review & Save — THE primary action of edit mode: filled accent,
           count chip while edits are pending, muted until there's
           something to review. Opens the staged-changes panel where the
           actual save is confirmed. */}
+      <HoverTip
+        className="inline-flex"
+        label={pendingChangeCount > 0
+          ? `Review and save ${pendingChangeCount} pending change${pendingChangeCount === 1 ? '' : 's'}`
+          : 'No changes yet — edits you make collect here for review'}
+        detail={pendingChangeCount > 0
+          ? 'Saves to your draft, not to the published version'
+          : undefined}
+      >
       <button
         onClick={onOpenStagedChanges}
         disabled={pendingChangeCount === 0}
-        title={pendingChangeCount > 0
-          ? `Review and save ${pendingChangeCount} pending change${pendingChangeCount === 1 ? '' : 's'}`
-          : 'No changes yet — edits you make will collect here for review'}
         className={cn(
           "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-300 border",
           pendingChangeCount > 0
@@ -109,16 +118,22 @@ export function EditorActions({
           </span>
         )}
       </button>
+      </HoverTip>
 
       {/* Done — ghost exit back to Published. The "you have pending
           edits" guard lives in the canvas's onExitEdit wiring. */}
-      <button
-        onClick={onExitEdit}
-        title={`Leave the draft and return to ${BRANCH_VOCAB.published}`}
-        className="flex items-center px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-all duration-300"
+      <HoverTip
+        className="inline-flex"
+        label={`Leave the draft and return to ${BRANCH_VOCAB.published}`}
+        detail="Your draft is kept — nothing is discarded"
       >
-        Done
-      </button>
+        <button
+          onClick={onExitEdit}
+          className="flex items-center px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.08] transition-all duration-300"
+        >
+          Done
+        </button>
+      </HoverTip>
     </>
   )
 }

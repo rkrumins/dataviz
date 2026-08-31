@@ -40,6 +40,7 @@
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { ContextViewCanvas } from '@/components/canvas/context-view/ContextViewCanvas'
 import { toCanvasNode } from '@/lib/canvasNodeMapper'
@@ -554,17 +555,22 @@ export async function renderCanvasWithTrace(
 
   const providerCalls = { traceClosure: 0, getNodes: 0 }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  // A Router, because the header's BranchSwitcher keeps the active branch in the
+  // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
+  // and every canvas test dies before it can look at the canvas.
   render(
-    <QueryClientProvider client={queryClient}>
-      <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
-        isLoading: false, error: null, scopeKind: 'ready',
-        workspaceId: 'harness-ws', dataSourceId: null,
-        providerReady: true, providerVersion: 1,
-      } as never}>
-        <ContextViewCanvas />
-      </ProviderOverride>
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ProviderOverride value={{
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
+          isLoading: false, error: null, scopeKind: 'ready',
+          workspaceId: 'harness-ws', dataSourceId: null,
+          providerReady: true, providerVersion: 1,
+        } as never}>
+          <ContextViewCanvas />
+        </ProviderOverride>
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 
   // REAL TIME, for the surfaces that animate. `settle` drains microtasks and
@@ -755,7 +761,11 @@ export async function renderCanvasWithTrace(
       const rows = [...(panel?.querySelectorAll<HTMLElement>('[data-history-resume]') ?? [])]
       const row = rows.find(r => r.textContent?.includes(label))
       if (!row) throw new Error(`no trace history entry for ${label}`)
-      const share = row.parentElement?.querySelector<HTMLButtonElement>('[data-history-share]')
+      // Not `row.parentElement`: each control in the row is wrapped by its own
+      // HoverTip anchor, so the two buttons are cousins rather than siblings.
+      // The row itself is marked, and that is what they share.
+      const share = row.closest('[data-history-row]')
+        ?.querySelector<HTMLButtonElement>('[data-history-share]')
       if (!share) throw new Error(`no share action on the ${label} entry`)
       clipboard.text = ''
       await act(async () => { fireEvent.click(share) })

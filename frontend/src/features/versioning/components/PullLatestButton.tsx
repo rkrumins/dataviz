@@ -12,6 +12,7 @@
 import { useMemo, useState } from 'react'
 import { ArrowDownToLine, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import type { IncomingChanges, ResolutionMap } from '@/services/versioningApiService'
 import { ConflictResolver } from '@/features/reviews/components/ConflictResolver'
@@ -84,15 +85,20 @@ export function PullLatestButton({
 
   return (
     <>
+      <HoverTip
+        className="inline-flex"
+        label="Bring the latest published updates into this draft"
+        detail="Your own unsaved edits are kept; conflicts are shown before anything changes"
+      >
       <button
         onClick={() => run()}
         disabled={pull.isPending}
-        title="Get the latest updates from the published version into this draft"
         className={cn(VARIANTS[variant], className)}
       >
         {pull.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowDownToLine className="w-3.5 h-3.5" />}
         {pull.isPending ? (variant === 'row' ? 'Updating' : 'Updating…') : IDLE_LABEL[variant]}
       </button>
+      </HoverTip>
 
       {conflicts && (
         <ConflictResolver

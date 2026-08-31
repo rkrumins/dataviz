@@ -27,19 +27,19 @@ const UNKNOWN = 'public' as unknown as ViewVisibility
 describe('VisibilityImpact with a tier the app does not implement', () => {
   it('renders instead of crashing', () => {
     expect(() =>
-      render(<VisibilityImpact selected={UNKNOWN} counts={{ workspace: 12 }} />),
+      render(<VisibilityImpact selected={UNKNOWN} counts={{ workspaceMemberCount: 12 }} />),
     ).not.toThrow()
     expect(screen.getByLabelText('Who will see this view')).toBeInTheDocument()
   })
 
   it('names the stored value rather than guessing a tier', () => {
-    render(<VisibilityImpact selected={UNKNOWN} counts={{ workspace: 12 }} />)
+    render(<VisibilityImpact selected={UNKNOWN} counts={{ workspaceMemberCount: 12 }} />)
     expect(screen.getByText(/isn’t one of the sharing options/)).toBeInTheDocument()
     expect(screen.getByText(/“public”/)).toBeInTheDocument()
   })
 
   it('claims no audience size, because it cannot know one', () => {
-    render(<VisibilityImpact selected={UNKNOWN} counts={{ workspace: 12, enterprise: 400 }} />)
+    render(<VisibilityImpact selected={UNKNOWN} counts={{ workspaceMemberCount: 12, platformUserCount: 400 }} />)
     expect(screen.queryByText(/About /)).not.toBeInTheDocument()
     expect(screen.queryByText(/12 people/)).not.toBeInTheDocument()
     expect(screen.queryByText(/400/)).not.toBeInTheDocument()
@@ -47,7 +47,7 @@ describe('VisibilityImpact with a tier the app does not implement', () => {
 
   it('still renders every known tier as before', () => {
     for (const tier of ['private', 'workspace', 'enterprise'] as ViewVisibility[]) {
-      const { unmount } = render(<VisibilityImpact selected={tier} counts={{ workspace: 12 }} />)
+      const { unmount } = render(<VisibilityImpact selected={tier} counts={{ workspaceMemberCount: 12 }} />)
       expect(screen.getByLabelText('Who will see this view')).toBeInTheDocument()
       expect(screen.queryByText(/isn’t one of the sharing options/)).not.toBeInTheDocument()
       unmount()
