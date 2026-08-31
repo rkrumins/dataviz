@@ -84,3 +84,26 @@ describe('FreshnessRow — quiet activity + automation chip', () => {
         expect(screen.queryByRole('button', { name: /Automation off/i })).not.toBeInTheDocument()
     })
 })
+
+describe('FreshnessRow — a wedged projection is never a healthy row', () => {
+    it('never reads "Up to date" while the rolled-up connections are missing', () => {
+        // The source's last aggregation job succeeded and no marker is set, so
+        // every existing signal says healthy. It is not: main reads are
+        // falling back to the version log, which carries no rolled-up
+        // connections at all.
+        renderRow({
+            dataSourceId: 'ds-wedged', name: 'Wedged Source',
+            aggregationStatus: 'ready', driftState: 'projectionStalled',
+            platformMastered: true,
+        })
+        expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Connections not up to date')).toBeInTheDocument()
+    })
+
+    it('says automation will not rescue it, rather than staying silent', () => {
+        const chip = automationChip({ driftState: 'projectionStalled' })
+        expect(chip?.label).toBe("Rebuild won't fix this")
+        expect(chip?.facet).toBe('projectionStalled')
+        expect(chip?.title).toMatch(/version control/i)
+    })
+})

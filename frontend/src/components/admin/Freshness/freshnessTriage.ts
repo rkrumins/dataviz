@@ -16,7 +16,7 @@ import { asFailureCategory } from './failureGuidance'
 // ── Status facets (tile ⇄ filter) ────────────────────────────────────
 
 /** The status facet carried in the URL (``?fstatus=``). Empty string = all. */
-export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended'
+export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended' | 'projectionStalled'
 
 /** Failure-cause facet (``?ffail=``). Empty = any cause. */
 export type FailureFacet = '' | FailureCategory
@@ -38,12 +38,31 @@ export function isReconcileSuspended(row: FreshnessRow): boolean {
     return row.driftState === 'suspended'
 }
 
+/** Version control owns this source's rollups. Both verdicts mean "mastered
+ *  here"; they differ only in whether the projector maintaining those rollups
+ *  is actually current. Mirrors the widened ``platform_mastered`` fallback in
+ *  service.py — a wedged source keeps its "mastered here" badge at exactly the
+ *  moment an operator most needs to know who owns it. */
+const VERSION_CONTROLLED_STATES = new Set(['managed', 'projectionStalled'])
+
+/** Mastered here, but the projector that maintains its rolled-up connections
+ *  is behind the published head or erroring. Main reads fall back to the
+ *  version log, which carries no rollups, so aggregated lineage is missing
+ *  from the product right now.
+ *
+ *  Deliberately NOT part of ``isDrifting``: that tile means "the rollup no
+ *  longer matches the data, rebuild it", and a rebuild does not restart a
+ *  projector. Mirrors ``stalled_ids`` in ``_assemble_fleet_summary``. */
+export function isProjectionStalled(row: FreshnessRow): boolean {
+    return row.driftState === 'projectionStalled'
+}
+
 /** Mastered here (live versioned graph), not an external provider graph.
  *  Prefer the fleet ``platformMastered`` bit; fall back to the sweep stamp. */
 export function isPlatformMastered(row: FreshnessRow): boolean {
     if (row.platformMastered === true) return true
     if (row.platformMastered === false) return false
-    return row.driftState === 'managed'
+    return VERSION_CONTROLLED_STATES.has(row.driftState ?? '')
 }
 
 /** A source that has never produced an aggregation: no state row, or an
@@ -74,6 +93,11 @@ export function needsAttention(row: FreshnessRow): boolean {
         || row.aggregationStatus === 'failed'
         || isDrifting(row)
         || isReconcileSuspended(row)
+        // A wedged projection is otherwise in NO bucket at all — not failed,
+        // not marked, not drifting, not suspended — so a whole wedged fleet
+        // read as needing nothing. Mirrors the same OR in
+        // ``_summarize_freshness``.
+        || isProjectionStalled(row)
 }
 
 /** A cooldown is holding the next rebuild off (``cooldownUntil`` in the future). */
@@ -105,6 +129,8 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
             return isDrifting(row)
         case 'suspended':
             return isReconcileSuspended(row)
+        case 'projectionStalled':
+            return isProjectionStalled(row)
         case '':
         default:
             return true
@@ -158,22 +184,27 @@ export function freshnessState(row: FreshnessRow): FreshnessState {
  * Where a row sits in the triage queue — lower is more urgent. The cascade
  * is first-match-wins, so a row that is both failed and stale ranks as failed:
  *
- *   0 failed → 1 drifting → 2 recomputing (stale marker)
- *   → 3 pending (rebuild in flight) → 4 cooldown-active → 5 ready
- *   → 6 not built / other.
+ *   0 failed → 1 connections not up to date → 2 drifting
+ *   → 3 recomputing (stale marker) → 4 pending (rebuild in flight)
+ *   → 5 cooldown-active → 6 ready → 7 not built / other.
  *
  * Drifting outranks recomputing because a recomputing source is already on
  * its way to correct, while a drifting one is serving a picture that no
- * longer matches its data and nothing is yet in flight for it.
+ * longer matches its data and nothing is yet in flight for it. A stalled
+ * projection outranks drifting in turn: a drifting source is still serving
+ * rolled-up connections, just stale ones, while a stalled one is serving none
+ * at all — and no rebuild will change that, so it will not clear on its own
+ * the way a drifting row does.
  */
 export function severityRank(row: FreshnessRow): number {
     if (row.aggregationStatus === 'failed') return 0
-    if (isDrifting(row) || isReconcileSuspended(row)) return 1
-    if (hasStaleMarker(row)) return 2
-    if (isRebuilding(row)) return 3
-    if (isCooldownActive(row)) return 4
-    if (row.aggregationStatus === 'ready') return 5
-    return 6
+    if (isProjectionStalled(row)) return 1
+    if (isDrifting(row) || isReconcileSuspended(row)) return 2
+    if (hasStaleMarker(row)) return 3
+    if (isRebuilding(row)) return 4
+    if (isCooldownActive(row)) return 5
+    if (row.aggregationStatus === 'ready') return 6
+    return 7
 }
 
 function lastAggregatedMs(row: FreshnessRow): number {
@@ -204,4 +235,5 @@ export function isGroupAttention(row: FreshnessRow): boolean {
         || isRebuilding(row)
         || isDrifting(row)
         || isReconcileSuspended(row)
+        || isProjectionStalled(row)
 }

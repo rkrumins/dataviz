@@ -66,7 +66,8 @@ import { Freshness } from './index'
 import { FreshnessRow, primaryAction, overflowActions } from './FreshnessRow'
 import { FreshnessDrawer } from './FreshnessDrawer'
 import {
-    compareSeverity, freshnessState, isDrifting, isPlatformMastered, needsAttention, severityRank,
+    compareSeverity, freshnessState, isDrifting, isGroupAttention, isPlatformMastered,
+    isProjectionStalled, matchesFacet, needsAttention, severityRank,
 } from './freshnessTriage'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
@@ -366,11 +367,15 @@ describe('Freshness cockpit', () => {
         // no longer matches its data with nothing yet in flight for it.
         const drifting = mk({ name: 'drifting', aggregationStatus: 'ready', driftState: 'overlayMissing' })
 
+        // Rank 1 is now "connections not up to date" — a versioned source
+        // serving NO rolled-up connections outranks one serving stale ones,
+        // and unlike drifting it will not clear itself. Every band below it
+        // shifted down one; the relative order above is unchanged.
         expect([
             severityRank(failed), severityRank(drifting), severityRank(recomputing),
             severityRank(pending), severityRank(cooldown), severityRank(ready),
             severityRank(notBuilt),
-        ]).toEqual([0, 1, 2, 3, 4, 5, 6])
+        ]).toEqual([0, 2, 3, 4, 5, 6, 7])
 
         // A version-controlled source is NOT drifting and does not need
         // attention. It is deliberately excluded from every detector because
@@ -986,5 +991,132 @@ describe('state-driven row actions', () => {
         )
         expect(screen.queryByRole('button', { name: /View progress/ })).not.toBeInTheDocument()
         permissionFn.mockReturnValue(true)
+    })
+})
+
+// ── A wedged projection ──────────────────────────────────────────────
+//
+// The source is mastered here and its last aggregation job succeeded, so
+// every pre-existing signal reads healthy. It is not: the projector that
+// maintains its rolled-up connections is behind the published head, main
+// reads fall back to the version log, and that carries no rollups — so
+// aggregated lineage is missing from the canvas right now. A rebuild does
+// not fix it, which is why it is its own tier and not "drifting".
+describe('a wedged projection across the cockpit', () => {
+    beforeEach(() => {
+        vi.clearAllMocks()
+        listFleet.mockResolvedValue(fleet)
+        listProviders.mockResolvedValue([{ id: 'prov-1', name: 'Warehouse' }])
+        listWorkspaces.mockResolvedValue([{ id: 'ws-1', name: 'Analytics' }])
+        listJobsGlobal.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
+        getReconciliation.mockResolvedValue({
+            policy: {
+                enabled: true, checkIntervalSecs: 3600,
+                envEnabled: true, envCheckIntervalSecs: 3600, envMaxActionsPerRun: 10,
+                envShrinkTolerancePct: 10, envStatsMaxAgeSecs: 2700, allDetectors: [],
+            },
+            runs: [],
+        })
+        getReconciliationActivity.mockResolvedValue({ since: recent, items: [] })
+        permissionFn.mockImplementation((perm: string) => perm === 'workspace:datasource:manage')
+    })
+
+    const mk = (p: Partial<FreshnessRowData>): FreshnessRowData =>
+        ({ dataSourceId: p.name ?? 'x', name: p.name, ...p } as FreshnessRowData)
+
+    const wedged = mk({
+        name: 'wedged', aggregationStatus: 'ready', driftState: 'projectionStalled',
+        platformMastered: true, projectorCurrent: false, projectionCommitsBehind: 3,
+    })
+
+    it('lands in the attention bucket, not the managed-and-quiet one', () => {
+        expect(isProjectionStalled(wedged)).toBe(true)
+        expect(needsAttention(wedged)).toBe(true)
+        expect(isGroupAttention(wedged)).toBe(true)
+        // Its own tier. Folding it into Drifting would point the operator at
+        // a rebuild, and a rebuild does not restart a projector.
+        expect(isDrifting(wedged)).toBe(false)
+        expect(matchesFacet(wedged, 'drifting')).toBe(false)
+        expect(matchesFacet(wedged, 'projectionStalled')).toBe(true)
+        expect(matchesFacet(wedged, 'needsAttention')).toBe(true)
+        // Still mastered here — the moment an operator most needs to know
+        // who owns this graph is the moment it stops serving.
+        expect(isPlatformMastered(wedged)).toBe(true)
+        expect(isPlatformMastered(mk({ driftState: 'projectionStalled' }))).toBe(true)
+    })
+
+    it('outranks drifting in the triage queue', () => {
+        const drifting = mk({ name: 'drifting', aggregationStatus: 'ready', driftState: 'drifting' })
+        const failed = mk({ name: 'failed', aggregationStatus: 'failed' })
+        expect(severityRank(wedged)).toBeLessThan(severityRank(drifting))
+        expect(severityRank(failed)).toBeLessThan(severityRank(wedged))
+        expect([drifting, wedged, failed].sort(compareSeverity).map(r => r.name))
+            .toEqual(['failed', 'wedged', 'drifting'])
+    })
+
+    it('gets its own tile and facet instead of vanishing from every bucket', async () => {
+        const user = userEvent.setup()
+        listFleet.mockResolvedValue({
+            total: 2,
+            rows: [
+                {
+                    ...fleet.rows[0], name: 'Wedged Source', staleReason: null,
+                    driftState: 'projectionStalled', platformMastered: true,
+                },
+                { ...fleet.rows[1], name: 'Healthy Source', driftState: 'inSync' },
+            ],
+            summary: {
+                total: 2, ready: 2, pending: 0, failed: 0, notBuilt: 0,
+                recomputing: 0, needsAttention: 1, cacheStamped: 2,
+                drifting: 0, suspended: 0, projectionStalled: 1,
+            },
+        })
+        renderTab('/?tab=freshness&fstatus=')
+
+        // The provider group must force itself open: a wedged source hidden
+        // inside a collapsed "healthy" group is the failure this replaces.
+        const group = await screen.findByRole('button', { name: /warehouse/i, expanded: true })
+        expect(group).toHaveTextContent('1 not serving connections')
+        // ...and the briefing at the top names it too, beside "drifting now".
+        expect(screen.getAllByRole('button', { name: /1 not serving connections/i }).length)
+            .toBeGreaterThan(1)
+
+        await waitFor(() => expect(screen.getByText('Wedged Source')).toBeInTheDocument())
+        const tile = screen.getAllByRole('button', { name: /connections not up to date/i })
+            .find(el => el.getAttribute('aria-pressed') != null)
+        expect(tile).toBeTruthy()
+        await user.click(tile!)
+        await waitFor(() => expect(screen.queryByText('Healthy Source')).not.toBeInTheDocument())
+        expect(screen.getByText('Wedged Source')).toBeInTheDocument()
+        expect(probe.search).toContain('fstatus=projectionStalled')
+    })
+
+    it('tells the drawer what is wrong and what to do, not "nothing here needs to"', async () => {
+        getSourceDoc.mockResolvedValue({
+            dataSourceId: 'ds-1', name: 'Orders Graph', workspaceId: 'ws-1',
+            aggregationStatus: 'ready', lastAggregatedAt: recent, events: [],
+            driftState: 'projectionStalled', platformMastered: true,
+            projectorCurrent: false, projectionCommitsBehind: 3,
+            projectionLastError: 'verify mismatch at seq 902',
+            projectionCheckedAt: recent,
+        })
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        render(
+            <QueryClientProvider client={qc}>
+                <MemoryRouter>
+                    <FreshnessDrawer dsId="ds-1" isOpen onClose={() => {}} />
+                </MemoryRouter>
+            </QueryClientProvider>,
+        )
+
+        expect((await screen.findAllByText('Connections not up to date')).length).toBeGreaterThan(0)
+        // The reassurance written for a healthy versioned source is exactly
+        // the wrong thing to say here.
+        expect(screen.queryByText(/Nothing here needs to/i)).not.toBeInTheDocument()
+        // What is wrong, how far behind, and what the operator should do.
+        expect(screen.getByText(/3 published changes behind/i)).toBeInTheDocument()
+        expect(screen.getByText(/rebuilding this source will not fix it/i)).toBeInTheDocument()
+        // The projector's own words, verbatim, as operator detail.
+        expect(screen.getByText('verify mismatch at seq 902')).toBeInTheDocument()
     })
 })

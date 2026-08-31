@@ -13,7 +13,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, ChevronRight, Database, Eraser,
-    RefreshCw, Radar, RotateCcw, X,
+    RefreshCw, Radar, RotateCcw, Unplug, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useModalA11y } from '@/hooks/useModalA11y'
@@ -343,6 +343,76 @@ function SnoozeRow({ doc, pausedFor, pending, onPatch }: {
 }
 
 /**
+ * The version-controlled source that is NOT serving its rolled-up connections.
+ *
+ * Its sibling block says "version control maintains this, nothing here needs
+ * to" — which is the correct thing to say right up until the projector stops
+ * keeping up, and then it is the worst thing on the page. This says what is
+ * actually wrong, how far behind it is, what the projector's own last words
+ * were, and the one thing that will NOT help: a rebuild. Nothing in the
+ * cockpit can fix this, so the honest action is a link to version control.
+ */
+function ProjectionWedge({ doc }: { doc: FreshnessDoc }) {
+    const behind = doc.projectionCommitsBehind ?? null
+    return (
+        <div className="mt-2 rounded-lg border border-red-500/30 bg-red-500/[0.06] p-2.5 space-y-1.5">
+            <p className="flex items-start gap-1.5 text-[11px] font-semibold text-red-700 dark:text-red-300">
+                <Unplug className="w-3.5 h-3.5 shrink-0 mt-px" />
+                This source is not serving its rolled-up connections.
+            </p>
+            <p className="text-[11px] text-ink-secondary leading-relaxed">
+                This graph is mastered here, but the process that keeps its
+                rolled-up connections current has fallen behind. Until it
+                catches up, reads fall back to the change history, which holds
+                no rolled-up connections — so aggregated lineage is missing
+                from views of this source right now.
+            </p>
+            {behind != null && behind > 0 && (
+                <p className="text-[11px] font-semibold text-red-700 dark:text-red-300 tabular-nums">
+                    {behind} published {behind === 1 ? 'change' : 'changes'} behind
+                </p>
+            )}
+            <p className="text-[11px] text-ink-secondary leading-relaxed">
+                Rebuilding this source will not fix it, which is why nothing is
+                queued for it. Open version control for this source and check
+                that it is publishing; this clears on its own within a minute
+                of the connections catching up.
+            </p>
+            {doc.projectionLastError && (
+                <details className="text-[11px]">
+                    <summary className="cursor-pointer text-ink-muted hover:text-ink-secondary">
+                        What it last reported
+                    </summary>
+                    <code className="mt-1 block break-all font-mono text-[10px] text-red-700 dark:text-red-300">
+                        {doc.projectionLastError}
+                    </code>
+                </details>
+            )}
+            {doc.projectionCheckedAt && (
+                <p className="text-[10px] text-ink-muted">
+                    {/* Read live on this request, unlike "Last checked" below,
+                        which is the sweep's own stamp. They will differ. */}
+                    Read{' '}
+                    <TimeStamp
+                        at={doc.projectionCheckedAt} icon={null} colorByAge={false}
+                        className="text-[10px] text-ink-muted"
+                    />
+                </p>
+            )}
+            {doc.workspaceId && (
+                <Link
+                    to={`/workspaces/${doc.workspaceId}`}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 dark:text-red-300 hover:underline"
+                >
+                    Open version control for this source
+                    <ArrowUpRight className="w-3 h-3" />
+                </Link>
+            )}
+        </div>
+    )
+}
+
+/**
  * ② Check — does this source's rolled-up lineage still match its data, when
  * was that last judged, and what was found.
  *
@@ -362,7 +432,14 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
     // read cache, so version control maintains its rollups on every publish and
     // this section's controls would be inert. Explain that instead of offering
     // switches that do nothing.
-    const isManaged = state === 'managed'
+    //
+    // ``projectionStalled`` is the SAME graph with its projector not keeping
+    // up: the integrity meter is just as meaningless (it would still be
+    // counting the read cache), and the cadence still governs a sweep that
+    // will never act — but the reassurance is now false, so the explanatory
+    // block is swapped, not the gating.
+    const stalled = state === 'projectionStalled'
+    const isManaged = state === 'managed' || stalled
     // ``blocked`` is the one verdict that means this stage is genuinely not
     // running for this source — there is no ontology to judge against.
     const on = state !== 'blocked'
@@ -374,7 +451,7 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
                 {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
             </div>
 
-            {isManaged ? (
+            {stalled ? <ProjectionWedge doc={doc} /> : isManaged ? (
                 <div className="mt-2 rounded-lg border border-sky-500/20 bg-sky-500/[0.05] p-2.5 space-y-1.5">
                     <p className="text-[11px] text-ink-secondary leading-relaxed">
                         This graph is mastered here and stored in Postgres. FalkorDB
@@ -523,7 +600,8 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
     const setSettings = useSetFreshnessSettings()
 
-    const isManaged = doc.driftState === 'managed'
+    const stalled = doc.driftState === 'projectionStalled'
+    const isManaged = doc.driftState === 'managed' || stalled
     const auto = doc.autoReconcile !== false
     // The rebuild-interval override lives on the aggregation state row, which
     // only exists once a source has been built — a never-aggregated source
@@ -550,8 +628,13 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
             )}
             {isManaged ? (
                 <p className="mt-2 text-[11px] text-ink-secondary leading-relaxed">
-                    Version control rebuilds this source's rolled-up lineage on every
-                    publish, so automation never acts on it.
+                    {stalled
+                        ? 'Version control owns this source\u2019s rolled-up lineage, so '
+                          + 'automation never acts on it — and it is deliberately not '
+                          + 'acting now: a rebuild would not restore connections the '
+                          + 'projector is not publishing.'
+                        : 'Version control rebuilds this source\u2019s rolled-up lineage on '
+                          + 'every publish, so automation never acts on it.'}
                 </p>
             ) : (
                 <div className="mt-2.5 border-t border-glass-border/50 divide-y divide-glass-border/50">

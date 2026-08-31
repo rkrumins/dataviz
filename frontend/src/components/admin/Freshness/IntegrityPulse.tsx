@@ -8,7 +8,7 @@
  */
 import type { ReactNode } from 'react'
 import {
-    AlertTriangle, ChevronRight, CircleDashed, Eye, Loader2, RefreshCw, ShieldCheck,
+    AlertTriangle, ChevronRight, CircleDashed, Eye, Loader2, RefreshCw, ShieldCheck, Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TimeStamp } from '@/components/ui/TimeStamp'
@@ -62,6 +62,9 @@ export function IntegrityPulse({
     const nextMs = next ? next.getTime() - Date.now() : null
     const drifting = summary?.drifting ?? 0
     const suspended = summary?.suspended ?? 0
+    // Shown only when it is non-zero: a permanent third zero would dilute a
+    // line that is read at a glance, and this state is rare and red.
+    const stalled = summary?.projectionStalled ?? 0
     const word = policyWord(policy?.enabled, policy?.envEnabled ?? true)
     const intervalLabel = formatCheckInterval(interval)
     const brief = lastPassRun ? lastPassBrief(lastPassRun) : null
@@ -203,6 +206,21 @@ export function IntegrityPulse({
                 >
                     {suspended.toLocaleString()} held by the breaker
                 </button>
+                {stalled > 0 && (
+                    <button
+                        type="button"
+                        aria-pressed={activeFacet === 'projectionStalled'}
+                        onClick={() => onFacet(activeFacet === 'projectionStalled' ? '' : 'projectionStalled')}
+                        className={cn(
+                            'inline-flex items-center gap-1 rounded-md px-1 -mx-1 font-semibold tabular-nums',
+                            'text-red-700 dark:text-red-300',
+                            activeFacet === 'projectionStalled' && 'underline',
+                        )}
+                    >
+                        <Unplug className="w-3.5 h-3.5 shrink-0" />
+                        {stalled.toLocaleString()} not serving connections
+                    </button>
+                )}
                 {brief && (
                     <span className="text-ink-muted tabular-nums">{brief}</span>
                 )}

@@ -229,7 +229,13 @@ export function useWorkspaceDetailData(wsId: string | undefined): UseWorkspaceDe
       : undefined
 
     return deriveWorkspaceHealth(
-      entries.map(r => ({ aggregationStatus: r.aggregationStatus })),
+      // ``projectorCurrent`` rides along because a wedged versioned source
+      // reports ``aggregationStatus: 'ready'`` while serving no rolled-up
+      // connections — status alone cannot see it.
+      entries.map(r => ({
+        aggregationStatus: r.aggregationStatus,
+        projectorCurrent: r.projectorCurrent,
+      })),
       { nodeCount },
     )
   }, [workspace, readinessMap, dsStatsMap])

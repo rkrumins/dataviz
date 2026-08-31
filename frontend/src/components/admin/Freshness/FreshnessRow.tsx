@@ -20,7 +20,7 @@ import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { Link } from 'react-router-dom'
 import {
     Activity, AlertTriangle, ArrowUpRight, CheckCircle2, Clock, Database, Eraser, GitBranch, Loader2,
-    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle,
+    Minus, MoreHorizontal, PauseCircle, RefreshCw, RotateCcw, Sparkles, StopCircle, Unplug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -30,7 +30,7 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import type { FreshnessRow as FreshnessRowData, RefreshScope } from '@/services/freshnessService'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { PHASE_LABELS, PhaseStepper, jobHistoryPath, phaseLabel } from '../job-history/shared'
-import { freshnessState, isDrifting, isPlatformMastered, isReconcileSuspended } from './freshnessTriage'
+import { freshnessState, isDrifting, isPlatformMastered, isProjectionStalled, isReconcileSuspended } from './freshnessTriage'
 import type { FreshnessState, StatusFacet } from './freshnessTriage'
 import {
     DRIFT_SPEC, DriftStateBadge,
@@ -101,6 +101,18 @@ export function automationChip(row: AutomationRow): {
 } | null {
     const neutralTone = 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
 
+    // Ranked above the breaker: automation is not merely stopped here, the
+    // action it would take is the wrong one. Saying nothing in this column
+    // would imply automation has the source covered.
+    if (row.driftState === 'projectionStalled') {
+        return {
+            label: "Rebuild won't fix this", tone: DRIFT_SPEC.projectionStalled.tone,
+            facet: 'projectionStalled', Icon: Unplug,
+            title: 'Automatic reconciliation deliberately never rebuilds this '
+                + 'source, and a rebuild would not restore its rolled-up '
+                + 'connections. Someone has to look at version control for it.',
+        }
+    }
     if (row.driftState === 'suspended') {
         return {
             label: 'Needs a person', tone: DRIFT_SPEC.suspended.tone,
@@ -333,7 +345,13 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 title="Lineage has never been built for this source."
             />,
         )
-    } else if (state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)) {
+    } else if (
+        state === 'upToDate' && !isDrifting(row) && !isReconcileSuspended(row)
+        // A wedged source's last build succeeded and carries no marker, so
+        // every other signal here reads healthy while its rolled-up
+        // connections are not reaching the product at all.
+        && !isProjectionStalled(row)
+    ) {
         badges.push(
             <Badge key="upToDate"
                 tone="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
@@ -345,7 +363,7 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
 
     // Current overlay verdict — additive on failed/queued rows, and the
     // primary freshness label when a ready source is drifting.
-    if (isDrifting(row) || isReconcileSuspended(row)) {
+    if (isDrifting(row) || isReconcileSuspended(row) || isProjectionStalled(row)) {
         badges.push(<DriftStateBadge key="driftState" state={row.driftState} />)
     }
 
