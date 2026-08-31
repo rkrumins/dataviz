@@ -66,7 +66,7 @@ function renderCard(v: View) {
 }
 
 /** The illustration's frame — the element whose top edge must match across a row. */
-const PREVIEW_H = 'h-\\[3\\.25rem\\]'
+const PREVIEW_H = 'h-\\[4rem\\]'
 const previewFrame = (c: HTMLElement) =>
     c.querySelector(`.${PREVIEW_H}`) as HTMLElement
 
@@ -80,14 +80,27 @@ describe('Explorer card — the preview starts at the same height on every card'
         expect([...heading.classList]).toContain('line-clamp-2')
     })
 
-    it('reserves the description block even when the view has none', () => {
+    it('reserves ONE line for the description even when the view has none', () => {
         // The block a "tidy up the empty space" pass deletes first — and the
         // single biggest source of the ragged row, because a description is
-        // the most variable thing above the illustration.
+        // the most variable thing above the illustration. Moving it below the
+        // preview to dodge the reserve was tried and is worse: the row's card
+        // bottoms go ragged, which reads worse than the empty line. One line
+        // rather than two, because most views carry no description at all.
         const { container } = renderCard(view({ description: undefined }))
-        const reserved = container.querySelector('.min-h-\\[2\\.5rem\\]')
-        expect(reserved, 'the description keeps its two lines with nothing in them').toBeTruthy()
+        const reserved = container.querySelector('.min-h-\\[1\\.125rem\\]')
+        expect(reserved, 'the description keeps its line with nothing in it').toBeTruthy()
         expect(reserved!.textContent).toBe('')
+    })
+
+    it('keeps the description ABOVE the preview, where the alignment depends on it', () => {
+        const { container } = renderCard(view({ description: 'A described view' }))
+        const desc = screen.getByText('A described view')
+        const frame = previewFrame(container)
+        expect(
+            frame.compareDocumentPosition(desc) & Node.DOCUMENT_POSITION_PRECEDING,
+            'the description precedes the illustration',
+        ).toBeTruthy()
     })
 
     it('reserves both badge rows, so a view with no data source lines up too', () => {
@@ -100,14 +113,29 @@ describe('Explorer card — the preview starts at the same height on every card'
     it('keeps the illustration SMALL — it is decoration, not the subject', () => {
         // It draws the same picture on every Context View, which is the type,
         // which the label above it already says. Handing it the artwork's own
-        // 5:2 ratio gave it ~112px at full card width and turned a browsable
-        // grid into two and a half rows. Decoration loses that argument: it
-        // takes a modest fixed height and gives up the width.
+        // ratio gave it ~112px at full card width and turned a browsable grid
+        // into two and a half rows. Decoration loses that argument: it takes a
+        // modest fixed height and gives up the width.
         const { container } = renderCard(view())
         const frame = previewFrame(container)
         expect(frame, 'the preview keeps a small fixed height').toBeTruthy()
         expect(container.querySelector('[class*="aspect-["]'), 'never aspect-driven').toBeNull()
-        expect(frame.querySelector('svg')?.getAttribute('viewBox')).toBe('0 0 120 48')
+    })
+
+    it('draws on a canvas shaped like the frame, so the art is not stranded in it', () => {
+        // `preserveAspectRatio` defaults to `meet`, which scales to the SHORTER
+        // side — so a 5:2 drawing in a ~5.4:1 slot landed about 130px wide in a
+        // 280px box and read as a small cluster floating in a large empty
+        // frame. The canvas has to be roughly as wide-to-tall as the slot, or
+        // the art gets letterboxed however big the slot is. Every viewType
+        // shares the frame, so every viewType shares the canvas.
+        for (const viewType of ['reference', 'graph', 'layered-lineage', 'hierarchy']) {
+            const { container } = renderCard(view({ id: viewType, viewType } as Partial<View>))
+            const box = previewFrame(container).querySelector('svg')?.getAttribute('viewBox')
+            expect(box, `${viewType} has an illustration`).toBeTruthy()
+            const [, , w, h] = box!.split(' ').map(Number)
+            expect(w / h, `${viewType} is drawn wide, not letterboxed`).toBeGreaterThan(4)
+        }
     })
 
     it('does NOT reserve height below the preview — the spacer aligns the footers', () => {
@@ -127,8 +155,8 @@ describe('Explorer card — the preview starts at the same height on every card'
         // The end-to-end statement: two cards that differ in every variable way
         // still produce the same sequence of reserved blocks, in the same order.
         const skeleton = (c: HTMLElement) =>
-            [...c.querySelectorAll(`h3, .min-h-\\[2\\.75rem\\], .min-h-\\[2\\.5rem\\], .${PREVIEW_H}`)]
-                .map(el => (el.tagName === 'H3' ? 'title' : el.className.match(/min-h-\[[^\]]+\]|h-\[3\.25rem\]/)![0]))
+            [...c.querySelectorAll(`h3, .min-h-\\[2\\.75rem\\], .min-h-\\[1\\.125rem\\], .${PREVIEW_H}`)]
+                .map(el => (el.tagName === 'H3' ? 'title' : el.className.match(/min-h-\[[^\]]+\]|h-\[4rem\]/)![0]))
 
         const plain = renderCard(view({ name: 'ABCDE' }))
         const busy = renderCard(view({

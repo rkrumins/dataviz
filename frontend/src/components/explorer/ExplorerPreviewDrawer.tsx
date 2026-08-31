@@ -562,9 +562,15 @@ export function ExplorerPreviewDrawer({
                   folds rather than goes. The summary carries the gist, so
                   collapsed is not the same as hidden: whoever only wanted to
                   know who made it and when never has to open it at all.
-                  Native <details>, like the chain's own disclosure — keyboard
-                  reachable and correctly announced without a line of JS. */}
-              <details className="group/details">
+                  OPEN BY DEFAULT, now that the panel fits a screen without
+                  scrolling: folding it was a way to buy back height, and once
+                  the height is no longer needed, hiding facts behind a click
+                  is a cost with nothing bought. It stays a disclosure so a
+                  reader who does not want it can put it away — and so a future
+                  addition to this panel has somewhere to give height back
+                  from. Native <details>, like the chain's own disclosure —
+                  keyboard reachable and correctly announced without JS. */}
+              <details className="group/details" open>
                 <summary className="flex cursor-pointer list-none items-center gap-1.5 -mx-1 rounded-lg px-1 py-1 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                   <ChevronRight
                     aria-hidden
