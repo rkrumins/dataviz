@@ -134,3 +134,29 @@ def test_no_lineage_types_means_no_derivation_and_no_reads():
         source_urns=EXPANDED, target_urns=EXPANDED, granularity=None,
         containment_edges=["CONTAINS"], lineage_edges=[]))
     assert r.aggregated_edges == [] and svc.edge_reads == 0
+
+
+def test_a_bounded_derivation_says_stale_instead_of_answering_short(monkeypatch):
+    """THE SILENCE THAT COST 14 HOURS. This method used to return a bare empty
+    result, which on the wire is indistinguishable from "these nodes genuinely
+    have no roll-ups between them" — so a wedged projection read as data loss
+    and nobody could tell which. The derivation is bounded (hop count, scope
+    size); when a bound bites, the short answer must be LABELLED, never handed
+    over as a complete one.
+
+    Squeeze the scope cap so the containment descent stops one hop short of
+    ``sf_table`` — the source endpoint of every lineage edge. The honest
+    outcome is exactly the outage's shape (no cells at all) plus the two fields
+    that say why."""
+    import backend.app.providers.versioned_branch_provider as vbp
+
+    monkeypatch.setattr(vbp, "_DERIVE_SCOPE_CAP", 7)
+    r = _agg(_provider(), EXPANDED)
+
+    assert r.aggregated_edges == [], "premise: the cap must hide the lineage"
+    assert r.truncated is True, "a bounded descent must report truncated"
+    assert r.stale is True, (
+        "an incomplete roll-up answer went out unmarked — this is the wire "
+        "shape that made a wedged projection look like empty data"
+    )
+    assert r.stale_reason == "derive_scope_cap", r.stale_reason
