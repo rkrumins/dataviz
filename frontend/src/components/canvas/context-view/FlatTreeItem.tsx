@@ -381,7 +381,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         if (draggedId !== node.id) reparent(draggedId, node.id)
       }}
       className={cn(
-        "flex items-center gap-2 mx-1 rounded-xl transition-all duration-200 group/item relative z-[2]",
+        "flex items-center gap-2 mx-1 rounded-xl transition-[background-color,background-image,box-shadow] duration-150 group/item relative z-[2]",
         // Reorderable rows advertise the drag with a grab cursor (+ the
         // hover-revealed grip below); everything else keeps the pointer.
         reorderBandsActive ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
@@ -394,8 +394,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // near-zero so the airy feel of the original cards is preserved;
         // hover / selected gradients below paint over this without conflict.
         "bg-canvas-elevated/10 backdrop-blur-sm",
-        // Base hover state with gradient
-        "hover:bg-gradient-to-r hover:from-white/[0.06] hover:to-transparent",
+        // Base hover state with gradient.
+        //
+        // This was `from-white/[0.06]` alone — 6% white, which over a near-white
+        // row in LIGHT mode is invisible. Hover only ever worked in dark mode.
+        // Every other state on this row is either theme-aware or uses a hue that
+        // reads on both grounds; this one was not. A dark tint in light mode and
+        // a slightly stronger light tint in dark gives the same weight on both.
+        "hover:bg-gradient-to-r hover:to-transparent",
+        "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
         isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
         // Search result highlight — direct match (advanced search or quick search)

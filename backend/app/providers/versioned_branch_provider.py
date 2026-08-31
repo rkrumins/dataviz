@@ -23,11 +23,18 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from backend.common.models.graph import (
-    AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
+    AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, EdgeTypeSummary, EntityTypeSummary,
     GraphEdge, GraphNode, GraphSchemaStats, NodeQuery, TagSummary, TopLevelNodesResult,
     TraceClosureResult, TraceFocus, TraceResult,
 )
 
+
+#: Bounds on the derived-rollup containment descent (see
+#: ``get_aggregated_edges_between``). A branch is draft-scale, so these are a
+#: runaway guard, not a paging scheme — when either bites, the answer is
+#: reported ``truncated``/``stale`` rather than quietly returned short.
+_DERIVE_HOP_BOUND = 16
+_DERIVE_SCOPE_CAP = 20_000
 
 #: Surfaced verbatim as the 501 body, so it is product copy: what
 #: happened and that waiting fixes it — no provider names, no internals.
@@ -354,11 +361,113 @@ class VersionedBranchProvider:
         granularity: Any, containment_edges: List[str], lineage_edges: List[str],
         *, timeout: Optional[float] = None,
     ) -> AggregatedEdgeResult:
-        """AGGREGATED rollups are a published-``main`` projection (FalkorDB) concept — a draft
-        branch has none materialised. Return an empty result, exactly as the FalkorDB provider
-        does before a backfill; the engine finds no ``materialize_*`` hook on this provider and
-        degrades gracefully (no rollups), so the draft canvas still renders from raw edges."""
-        return AggregatedEdgeResult(aggregated_edges=[], total_source_edges=0)
+        """Roll-ups DERIVED from this branch's own committed state.
+
+        This used to return an unconditional empty result, reasoning that ``:AGGREGATED``
+        is a published-``main`` FalkorDB artifact a branch has none of, and that the canvas
+        "still renders from raw edges". It does not, and cannot: ``get_children_with_edges``
+        carries only the lineage BETWEEN a container's children, so this call is the ONLY
+        channel by which lineage from OUTSIDE a container reaches the children an expand
+        just revealed. Answering ``[]`` drew four dashboards with no wires into them — and,
+        because nothing was dropped, nothing said so. That is what a data source whose
+        projection watermark had fallen behind (``projected_commit_seq <
+        main_head_commit_seq`` routes MAIN reads here too) looked like live.
+
+        A rollup is a pure function of two relations this provider already reads from
+        Postgres — containment and raw lineage — so derive it instead of declaring it
+        absent: descend containment from the asked-about set, take the raw lineage inside
+        that scope, and roll each edge up the cross-product of both endpoints' ancestor
+        chains (``common.providers.pair_rules`` — the same rule the FalkorDB pipeline
+        materialises and the projector mirrors, so a branch and a fresh main answer alike).
+        With a collapsed source and an expanded container that is one cell per visible
+        child, plus the coarse container cell the canvas stamps ``isDelegated`` so it does
+        not double-draw over them.
+
+        Bounded, and honest about it: the descent stops at ``_DERIVE_HOP_BOUND`` hops and
+        ``_DERIVE_SCOPE_CAP`` nodes and then says ``truncated``/``stale`` — never a short
+        answer that reads as a complete one, which was the whole defect."""
+        from backend.common.providers.pair_rules import ancestor_closure, cube_pairs
+
+        srcs = [u for u in (source_urns or []) if u]
+        tgts = [u for u in (target_urns or []) if u] if target_urns else list(srcs)
+        # AGGREGATED is the derived layer itself: publishing a draft can commit
+        # materialised rollups into the version log, and replaying those as raw
+        # lineage would count every flow twice.
+        ltypes = [t for t in (lineage_edges or []) if t and t != "AGGREGATED"]
+        if not srcs or not tgts or not ltypes:
+            return AggregatedEdgeResult(aggregatedEdges=[], totalSourceEdges=0)
+        ctypes = [t for t in (containment_edges or []) if t]
+
+        chunk = 200
+
+        async def _out_edges(urns: List[str], types: List[str]) -> List[GraphEdge]:
+            out: List[GraphEdge] = []
+            for i in range(0, len(urns), chunk):
+                out.extend(await self.get_edges(EdgeQuery(
+                    source_urns=urns[i:i + chunk], edge_types=types,
+                    limit=_DERIVE_SCOPE_CAP)))
+            return out
+
+        # ── Containment descent from the asked-about set: the raw lineage that rolls
+        # up into a visible pair lives somewhere underneath it.
+        parents: Dict[str, List[str]] = {}
+        scope = set(srcs) | set(tgts)
+        truncated = False
+        frontier = list(scope)
+        for _ in range(_DERIVE_HOP_BOUND if ctypes else 0):
+            if not frontier or truncated:
+                break
+            nxt: List[str] = []
+            for e in await _out_edges(frontier, ctypes):
+                # Containment is a DAG — a node can have several parents, and the
+                # closure below dedupes on that set.
+                ps = parents.setdefault(e.target_urn, [])
+                if e.source_urn not in ps:
+                    ps.append(e.source_urn)
+                if e.target_urn in scope:
+                    continue
+                if len(scope) >= _DERIVE_SCOPE_CAP:
+                    truncated = True
+                    break
+                scope.add(e.target_urn)
+                nxt.append(e.target_urn)
+            frontier = nxt
+
+        # ── Roll the raw lineage inside that scope up to the requested pairs.
+        asked_src, asked_tgt = set(srcs), set(tgts)
+        memo: Dict[str, Dict[str, int]] = {}
+        cells: Dict[Any, List[Any]] = {}
+        for e in await _out_edges(sorted(scope), ltypes):
+            if e.target_urn not in scope:
+                continue
+            for a, b in cube_pairs(
+                ancestor_closure(parents, e.source_urn, memo),
+                ancestor_closure(parents, e.target_urn, memo),
+                # The raw (s, t) mirror ships when the caller asked about both
+                # endpoints, matching the FalkorDB read path
+                # (`_synthesize_raw_lineage_pairs`): a cross-container leaf-to-leaf
+                # flow reaches the canvas through no other call.
+                include_leaf_mirror=True, s=e.source_urn, t=e.target_urn,
+            ):
+                if a not in asked_src or b not in asked_tgt:
+                    continue
+                cell = cells.setdefault((a, b), [0, set()])
+                cell[0] += 1
+                if e.edge_type:
+                    cell[1].add(e.edge_type)
+
+        edges = [AggregatedEdgeInfo(
+            id=f"agg-{a}-{b}", sourceUrn=a, targetUrn=b, edgeCount=w,
+            edgeTypes=sorted(types), confidence=1.0, sourceEdgeIds=[])
+            for (a, b), (w, types) in cells.items()]
+        edges.sort(key=lambda x: (-x.edge_count, x.source_urn, x.target_urn))
+        return AggregatedEdgeResult(
+            aggregatedEdges=edges,
+            totalSourceEdges=sum(e.edge_count for e in edges),
+            truncated=truncated,
+            stale=truncated,
+            staleReason="derive_scope_cap" if truncated else None,
+        )
 
     async def get_ontology_metadata(self):
         """No ontology surface by design — the engine resolves ontology from the data source

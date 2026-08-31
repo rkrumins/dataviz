@@ -98,7 +98,7 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
                            alpha suffix on one emits NO rule at all and this
                            was the only transparent button on a row where every
                            sibling paints a real fill. */
-                        : 'bg-canvas-elevated backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
+                        : 'bg-canvas-elevated/95 backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
                     className,
                 )}
             >

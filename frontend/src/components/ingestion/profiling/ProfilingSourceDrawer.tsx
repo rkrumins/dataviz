@@ -52,7 +52,7 @@ export function ProfilingSourceDrawer({
                     'overflow-y-auto bg-canvas border-l border-glass-border shadow-2xl',
                 )}
             >
-                <header className="sticky top-0 z-10 bg-canvas/90 backdrop-blur border-b border-glass-border">
+                <header className="sticky top-0 z-10 bg-canvas border-b border-glass-border">
                     <div className="flex items-start justify-between gap-3 px-6 py-4">
                         <div className="min-w-0">
                             <h2 className="text-lg font-bold text-ink truncate">{row.name}</h2>

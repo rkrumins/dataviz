@@ -136,10 +136,7 @@ export function PropertyManagerDrawer({
                     transition={MOTION.drawerSlide}
                     className={cn(
                         'relative h-full flex-shrink-0 overflow-hidden',
-                        // `/98` on a var() token emits no rule — this surface was fully transparent and
-                        // leaning on backdrop-blur-2xl, the costliest radius, on a node whose
-                        // width animates. Opaque instead: nothing shows through, nothing to blur.
-                        'bg-canvas-elevated',
+                        'bg-canvas-elevated/98 backdrop-blur-2xl',
                         'border-l border-glass-border shadow-lg shadow-black/20',
                     )}
                 >

@@ -226,6 +226,10 @@ export function useEdgeProjection({
   // ── Incremental ancestorMap state ──────────────────────────────────────
   const ancestorMapRef = useRef<Map<string, string>>(new Map())
   const prevNodesByLayerRef = useRef<Map<string, HierarchyNode[]> | null>(null)
+  // The hierarchy's CONTENTS, not just its layer buckets. Children arrive
+  // LAZILY on drill-down and land here without `nodesByLayer` changing identity.
+  const prevDisplayFlatRef = useRef<HierarchyNode[] | null>(null)
+  const prevNodeIndexRef = useRef<Map<string, HierarchyNode> | null>(null)
   const prevExpandedNodesRef = useRef<Set<string>>(new Set())
 
   // ── lineageEdges ───────────────────────────────────────────────────────
@@ -287,11 +291,29 @@ export function useEdgeProjection({
   // collapses a tree node). We diff the previous/current Set and only
   // traverse the affected subtrees — O(subtree) instead of O(N).
   const ancestorMap = useMemo(() => {
-    const needsFullRebuild = prevNodesByLayerRef.current !== nodesByLayer
+    // Rebuild when ANY input the map is built from changed, not only the layer
+    // buckets. This read `prevNodesByLayerRef.current !== nodesByLayer` alone
+    // while the memo also depends on `displayFlat` and `nodeIndex`.
+    //
+    // Expanding a container whose children are not loaded yet ran the
+    // incremental patch against an EMPTY `children` array and mapped nothing.
+    // The children then arrived, changing `displayFlat` and `nodeIndex` but not
+    // `nodesByLayer`, so the memo re-ran, found no rebuild needed, found
+    // `prev === expandedNodes`, and returned the STALE cached map. Lazily
+    // loaded children could never enter it, so every edge into them stayed
+    // resolved up to the collapsed ancestor — the board kept drawing one line
+    // into `Tableau` while four `REPORTING -> dashboard` edges sat unused in
+    // the response.
+    const needsFullRebuild =
+      prevNodesByLayerRef.current !== nodesByLayer
+      || prevDisplayFlatRef.current !== displayFlat
+      || prevNodeIndexRef.current !== nodeIndex
 
     if (needsFullRebuild) {
       const map = buildFullAncestorMap(nodesByLayer, expandedNodes, displayFlat)
       prevNodesByLayerRef.current = nodesByLayer
+      prevDisplayFlatRef.current = displayFlat
+      prevNodeIndexRef.current = nodeIndex
       prevExpandedNodesRef.current = expandedNodes
       ancestorMapRef.current = map
       return map
@@ -668,12 +690,23 @@ export function useEdgeProjection({
       // relationship between the two cards it touches.
       const isGhost = isAggregated || isBrowseBundle || members.some((e: any) => e._lifted === true)
 
-      // A roll-up summarises flows that can ALSO be members here in their own
-      // right (a search-revealed leaf lifts to the collapsed ancestor pair the
-      // roll-up covers), so its weight is evidence ABOUT the raw members rather
-      // than flows on top of them — max, not sum, the rule `collapseRecords`
-      // already states for the drawer.
+      // TWO NUMBERS, because this bundle answers two different questions and
+      // one field was doing both jobs.
+      //
+      // `edgeCount` is the WEIGHT: what this line stands for. A roll-up
+      // summarises flows that can also be members here in their own right, so
+      // it is evidence ABOUT them rather than flows on top of them — max, not
+      // sum, the rule `collapseRecords` already states for the drawer. The
+      // panel, the drawer, the badge and the stroke width all want this.
+      //
+      // `bundleSize` is the COUNT: how many lines this one line replaces. The
+      // adaptive edge budget ranks on THIS, because the budget is rationing
+      // room on the board, and a single roll-up occupies one line's worth of
+      // room no matter how many flows it speaks for. Ranking the budget on the
+      // weight let a heavy roll-up outrank — and evict — the raw edges the user
+      // had just expanded to see.
       const edgeCount = Math.max(rawWeight, rollupWeight)
+      const bundleSize = members.length
       const typesArray = Array.from(distinctTypes)
 
       // Reverse-flow annotation: layer-index of target strictly less than
@@ -703,7 +736,7 @@ export function useEdgeProjection({
         isDelegated: false,
         isResidual: false,
         isBidirectional: false,
-        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount }
+        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount, bundleSize }
       })
     })
 

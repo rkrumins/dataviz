@@ -308,7 +308,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
             }}
             className={cn(
                 'relative flex flex-col overflow-hidden',
-                'rounded-xl bg-canvas-elevated backdrop-blur-xl',
+                'rounded-xl bg-canvas-elevated/95 backdrop-blur-xl',
                 'border border-black/[0.10] dark:border-white/[0.08]',
                 'shadow-2xl shadow-black/20 dark:shadow-black/40',
             )}

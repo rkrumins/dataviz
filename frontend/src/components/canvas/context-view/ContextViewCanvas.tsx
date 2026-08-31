@@ -1274,12 +1274,35 @@ export function ContextViewCanvas({
   // — matches the trace v2 contract where only traceable entities can be the
   // level a trace runs at. Tags / glossary terms are excluded.
   const schemaEntityTypes = useViewEntityTypes()
+
+  // Entity types the ontology INTROSPECTED from the graph include labels that
+  // FalkorDB still lists after their last node is gone — `db.labels()` keeps a
+  // label in the schema forever. `SentinelMarker`, left behind by a test, is
+  // one: zero nodes, `hierarchy.level: 0`, `traceable: true`. The real level-0
+  // type here (`domain`) is `traceable: false`, so the zombie won the
+  // coarsest-first sort below and was sent as the granularity on EVERY
+  // aggregated-edge request, app-wide.
+  //
+  // A level nothing is filed under is not a granularity. Require the type to
+  // be present on the canvas: a type with no entities cannot be a meaningful
+  // aggregation level, and this holds for any future zombie without anyone
+  // having to notice it.
+  const presentEntityTypes = useMemo(() => {
+    const present = new Set<string>()
+    for (const n of nodes) {
+      const t = n.data?.type as string | undefined
+      if (t) present.add(t)
+    }
+    return present
+  }, [nodes])
+
   const granularityOptions = useMemo(
     () => schemaEntityTypes
       .filter(et => et.hierarchy?.level !== undefined)
       .filter(et => et.behavior?.traceable !== false)
+      .filter(et => presentEntityTypes.size === 0 || presentEntityTypes.has(et.id))
       .map(et => ({ id: et.id, name: et.name, level: et.hierarchy.level })),
-    [schemaEntityTypes]
+    [schemaEntityTypes, presentEntityTypes]
   )
 
   // Auto-select the coarsest (lowest-level) granularity once options are
@@ -3970,10 +3993,22 @@ export function ContextViewCanvas({
     return visibleLineageEdges.length > autoStubThreshold
   }, [overlay.active, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Significance ranking: bundled edge count first (a 600-edge bundle IS
-  // the macro flow), confidence as the tie-break.
-  const bySignificance = (a: { edgeCount?: number; confidence?: number }, b: { edgeCount?: number; confidence?: number }) =>
-    ((b.edgeCount || 1) - (a.edgeCount || 1)) || ((b.confidence || 0) - (a.confidence || 0))
+  // Significance ranking for the AMBIENT BUDGET, which rations room on the
+  // board. It ranks on `bundleSize` — how many lines this one line replaces —
+  // NOT on `edgeCount`, which is the weight the bundle stands for.
+  //
+  // Those diverge on a roll-up: a "Combined flow" can speak for thousands of
+  // table-level flows while occupying exactly one line. Ranking on the weight
+  // let such a roll-up outrank, and therefore evict, the raw edges a user had
+  // just expanded a container to see — lineage vanishing at the moment they
+  // asked for more of it. `edgeCount` remains the weight everywhere it is
+  // read for display; only the budget's ordering changed.
+  const bySignificance = (
+    a: { bundleSize?: number; edgeCount?: number; confidence?: number },
+    b: { bundleSize?: number; edgeCount?: number; confidence?: number },
+  ) =>
+    ((b.bundleSize ?? b.edgeCount ?? 1) - (a.bundleSize ?? a.edgeCount ?? 1))
+    || ((b.confidence || 0) - (a.confidence || 0))
 
   // Adaptive ambient budget. Above the threshold, "Adaptive" adapts
   // instead of cliffing (old behavior: all ambient edges vanished at
