@@ -160,3 +160,55 @@ def test_a_bounded_derivation_says_stale_instead_of_answering_short(monkeypatch)
         "shape that made a wedged projection look like empty data"
     )
     assert r.stale_reason == "derive_scope_cap", r.stale_reason
+
+
+def test_a_chain_deeper_than_the_hop_bound_says_stale_too(monkeypatch):
+    """THE OTHER BOUND, AND THE SILENT ONE. The scope cap sets the flag on its
+    way out; the hop bound simply fell out of ``for _ in range(...)`` with
+    ``truncated`` still False, so a containment chain deeper than the bound
+    produced the very wire shape the guard above exists to eliminate — ``cells:
+    [], truncated: False, stale: False, reason: None`` — while the docstring
+    claimed both bounds report.
+
+    Squeeze the hop bound to 1 against the 2-deep ``snowflake ⊃ sf_db ⊃
+    sf_table`` chain: the descent reaches sf_db and stops, so sf_table — the
+    source endpoint of every lineage edge — never enters the scope."""
+    import backend.app.providers.versioned_branch_provider as vbp
+
+    monkeypatch.setattr(vbp, "_DERIVE_HOP_BOUND", 1)
+    r = _agg(_provider(), EXPANDED)
+
+    assert r.aggregated_edges == [], "premise: one hop short of sf_table hides the lineage"
+    assert r.truncated is True, "the hop bound bit and the answer went out unmarked"
+    assert r.stale is True
+    assert r.stale_reason == "derive_hop_bound", r.stale_reason
+
+
+def test_an_edge_read_that_fills_its_page_says_stale_even_with_cells(monkeypatch):
+    """The third bound: every read is issued with ``limit=_DERIVE_SCOPE_CAP``,
+    so a chunk that comes back AT the limit has silently dropped edges. Unlike
+    the two above this one still returns cells — a short answer that looks
+    complete is exactly the shape that costs the hours.
+
+    No containment types, so the descent is skipped and only the lineage read
+    can bite: four flows against a cap of four."""
+    import backend.app.providers.versioned_branch_provider as vbp
+
+    monkeypatch.setattr(vbp, "_DERIVE_SCOPE_CAP", 4)
+    r = _run(_provider().get_aggregated_edges_between(
+        source_urns=["sf_table"], target_urns=list(DASHBOARDS), granularity=None,
+        containment_edges=[], lineage_edges=["FLOWS_TO"]))
+
+    assert len(r.aggregated_edges) == 4, f"premise: the page is full, {_cells(r)}"
+    assert r.truncated is True, "a full page dropped edges and the answer did not say so"
+    assert r.stale is True
+    assert r.stale_reason == "derive_scope_cap", r.stale_reason
+
+
+def test_a_derivation_that_hits_no_bound_is_not_marked():
+    """The other direction. `truncated` on a complete answer is noise, and the
+    canvas treats stale as "this picture may be missing lines" — a guard that
+    only checked the flag going up would be satisfied by a provider that always
+    sets it."""
+    r = _agg(_provider(), EXPANDED)
+    assert r.truncated is False and r.stale is False and r.stale_reason is None

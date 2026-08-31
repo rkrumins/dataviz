@@ -43,41 +43,48 @@ const HOW_TO_FIX =
  * Floating surfaces still rendered inside a blurred ancestor, each with the
  * reason it has not been converted. These are NOT absolutions — every one is
  * the same shape as the three bugs above and is expected to be portalled or to
- * lose the blur. The list is pinned exactly so a new one cannot join quietly.
+ * lose the blur.
+ *
+ * Pinned by COUNT, not by file. Keyed on the file alone, a brand-new instance
+ * of exactly this bug was invisible anywhere on this list — an extra
+ * `absolute top-full z-50` menu dropped into GroupRow left the suite green —
+ * and a file fixed two thirds of the way stayed "known" for ever.
  */
-const KNOWN = new Map<string, string>([
+const KNOWN = new Map<string, { count: number; why: string }>([
   [
     'components/canvas/create/HierarchyBuilderPanel.tsx',
-    'Three popovers — parent picker, type chip, edge picker — declared beside the '
+    { count: 3, why: 'Three popovers — parent picker, type chip, edge picker — declared beside the '
       + 'builder aside and rendered inside its `glass-panel`. Same conversion as '
-      + 'BuildPanel below, three times over.',
+      + 'BuildPanel below, three times over.' },
   ],
   [
     'components/canvas/create/buildmode/BuildPanel.tsx',
-    'The build-mode aside is a `glass-panel`; BuildOutline and BuildGrid both reach '
+    { count: 2, why: 'The build-mode aside is a `glass-panel`; BuildOutline and BuildGrid both reach '
       + 'TypePickerPopover (`absolute top-full z-30`) inside it. The aside is also '
       + '`overflow-hidden`, so today those pickers are clipped by their own parent '
       + 'before the stacking context matters — the blur is the second wall, not the '
-      + 'first. Both walls come down with the same anchored-portal conversion.',
+      + 'first. Both walls come down with the same anchored-portal conversion.' },
   ],
   [
     'components/canvas/search/SearchMapPanel.tsx',
-    'ScopeModePicker (`absolute top-full z-40 w-80`) opens inside the panel\'s '
+    { count: 2, why: 'ScopeModePicker (`absolute top-full z-40 w-80`) opens inside the panel\'s '
       + '`backdrop-blur-2xl` surface. It is 80 units wide against a narrow header, so '
-      + 'it is the next one likely to be reported as "the menu opens under something".',
+      + 'it is the next one likely to be reported as "the menu opens under something".' },
   ],
   [
     'components/canvas/search/builder/GroupRow.tsx',
-    'Two of them under the row card\'s `backdrop-blur-sm`: the leaf picker declared '
-      + 'in this file, and UnifiedPicker, which CAN portal but only when its caller '
-      + 'passes `portal` — GroupRow does not, so it takes the inline branch. That one '
-      + 'is a prop away from being fixed, which makes it the cheapest of the four.',
+    { count: 3, why: 'Two surfaces under the row card\'s `backdrop-blur-sm`, three ways in: the '
+      + 'leaf picker declared in this file, reached directly and again through the '
+      + 'nested GroupRow, and UnifiedPicker, which CAN portal but only when its '
+      + 'caller passes `portal` — '
+      + 'GroupRow does not, so it takes the inline branch. That one is a prop away '
+      + 'from being fixed, which makes it the cheapest of the four.' },
   ],
   [
     'components/canvas/trace/TraceBottomDock.tsx',
-    'The dock carries `backdrop-blur-2xl`, and its edge-filter popover sits four '
+    { count: 1, why: 'The dock carries `backdrop-blur-2xl`, and its edge-filter popover sits four '
       + 'components down inside it. The dock already publishes its own height band to '
-      + 'the canvas, so this one wants looking at together with that layout, not on its own.',
+      + 'the canvas, so this one wants looking at together with that layout, not on its own.' },
   ],
 ])
 
@@ -86,9 +93,9 @@ const isBlurred = (tag: string) => /backdrop-blur|backdrop-filter|glass-panel/.t
 
 /**
  * A positioned surface that has to win against something. Deliberately broad —
- * `absolute` plus a z-index — minus the three shapes that provably do NOT need
- * to escape their ancestor, because each of them only ever ranks against its own
- * siblings, which a stacking context still lets it do:
+ * `absolute` or `fixed`, plus a z-index — minus the three shapes that provably
+ * do NOT need to escape their ancestor, because each of them only ever ranks
+ * against its own siblings, which a stacking context still lets it do:
  *
  *   - `inset-0`: a wash that covers its own parent and nothing else;
  *   - `pointer-events-none`: paint, not a surface;
@@ -97,9 +104,15 @@ const isBlurred = (tag: string) => /backdrop-blur|backdrop-filter|glass-panel/.t
  * Narrowing it further to "looks like a menu" was tried and let a real one
  * through: `GroupRow`'s leaf picker is `absolute z-40 mt-1.5 left-0` — a dropdown
  * that hangs off its trigger without ever saying `top-full`.
+ *
+ * `fixed` counts for the same reason `absolute` does, and it is the dangerous
+ * one: backdrop-filter makes a containing block AND a stacking context for
+ * fixed descendants too, and `position: fixed` is half of the fix this guard
+ * recommends. Someone who switches a trapped menu to `fixed` and stops there
+ * has changed nothing — `portalRanges` is what earns the pass, not the word.
  */
 const isFloating = (tag: string) =>
-  /(?<![\w-])absolute(?![\w-])/.test(tag)
+  /(?<![\w-])(?:absolute|fixed)(?![\w-])/.test(tag)
   && /(?<![\w-])z-(?:\d+|\[)/.test(tag)
   && !/(?<![\w-])inset-0(?![\w-])/.test(tag)
   && !/pointer-events-none/.test(tag)
@@ -379,9 +392,14 @@ describe('a floating surface under a backdrop-blur ancestor must portal out', ()
     expect(offenders, HOW_TO_FIX).toEqual([])
   })
 
-  it('the known list is exactly the files that still do it', () => {
-    // Pinned both ways: a file that gets fixed has to leave the list, or the
-    // list stops describing the app and starts hiding the next one.
-    expect([...new Set(found.map((v) => v.host))].sort()).toEqual([...KNOWN.keys()].sort())
+  it('the known list is exactly the files that still do it, and how many each has', () => {
+    // Pinned both ways, and by count: a file that gets fixed has to leave the
+    // list, and a file that gets WORSE has to fail — otherwise the list stops
+    // describing the app and starts hiding the next one inside it.
+    const counts: Record<string, number> = {}
+    for (const v of found) counts[v.host] = (counts[v.host] ?? 0) + 1
+    expect(counts, HOW_TO_FIX).toEqual(
+      Object.fromEntries([...KNOWN].map(([host, k]) => [host, k.count])),
+    )
   })
 })

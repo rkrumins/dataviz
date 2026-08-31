@@ -19,20 +19,23 @@
  *
  * Driven on the real canvas in browse mode, because the auto-select depends on
  * the ontology and the loaded nodes agreeing, and only the canvas holds both.
- * The fetch is debounced 300 ms behind the tree settling, so each spec waits
- * past it rather than calling `settle()` (which barely advances the clock).
+ * The ontology goes in BEFORE the mount and the wait POLLS for a level to
+ * appear: installing it afterwards and then sleeping a fixed span made this
+ * file pass alone and fail three-for-three inside its own directory, where the
+ * 300 ms debounce had already fired during the mount and the only requests on
+ * record were the mount-time ones carrying `granularity: null` — two nulls
+ * which satisfy `not.toContain('SentinelMarker')` perfectly well.
  *
  * NOT covered, deliberately: the `presentEntityTypes.size === 0` pass-through.
  * With no nodes on the canvas the aggregated effect returns before it fetches,
  * so that branch has no observable behaviour to pin from here.
  */
-import { act } from '@testing-library/react'
+import { waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
 import { useAuthStore } from '@/store/auth'
-import { useSchemaStore } from '@/store/schema'
 
 /** An ontology entity type in the shape the schema store holds. */
 const et = (id: string, level: number, traceable: boolean) => ({
@@ -58,16 +61,20 @@ function ontology(...extra: ReturnType<typeof et>[]) {
   ]
 }
 
-/** Mount the browse canvas on `types`, then let the debounced fan-out fire. */
+/** The levels the canvas actually chose, deduped. `null` is the mount-time
+ *  round, before the auto-select has run — it is not a choice. */
+const levels = (h: TraceCanvasHarness): string[] =>
+  [...new Set(h.aggregatedGranularities().filter((g): g is string => g !== null))]
+
+/** Mount the browse canvas on `types`, then wait for the debounced fan-out to
+ *  carry a level. */
 async function canvasOn(types: ReturnType<typeof et>[]): Promise<TraceCanvasHarness> {
-  const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo' })
-  act(() => {
-    const { schema } = useSchemaStore.getState()
-    useSchemaStore.setState({ schema: { ...schema, entityTypes: types } } as never)
-  })
-  await h.settle()
-  // Past the 300 ms aggregation debounce.
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 500)) })
+  const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', entityTypes: types })
+  await waitFor(() => {
+    if (levels(h).length === 0) {
+      throw new Error(`no aggregated request carried a level: ${JSON.stringify(h.aggregatedGranularities())}`)
+    }
+  }, { timeout: 4000 })
   await h.settle()
   return h
 }
@@ -83,12 +90,9 @@ describe('the canvas never aggregates at a level nothing is filed under', () => 
     // no entity of that type.
     const h = await canvasOn(ontology(et('SentinelMarker', 0, true)))
 
-    const asked = h.aggregatedGranularities()
-    expect(asked.length).toBeGreaterThan(0)
-    expect(asked).not.toContain('SentinelMarker')
     // The coarsest type that IS on the canvas: tableau and snowflake are
     // dataPlatform, and domain — coarser still — is not traceable.
-    expect(asked).toEqual(asked.map(() => 'dataPlatform'))
+    expect(levels(h)).toEqual(['dataPlatform'])
   })
 
   it('holds even when several zombies sit above the real levels', async () => {
@@ -98,12 +102,7 @@ describe('the canvas never aggregates at a level nothing is filed under', () => 
       et('MigrationScratch', 1, true),
     ))
 
-    const asked = h.aggregatedGranularities()
-    expect(asked.length).toBeGreaterThan(0)
-    for (const zombie of ['SentinelMarker', 'LoadTestRoot', 'MigrationScratch']) {
-      expect(asked).not.toContain(zombie)
-    }
-    expect(asked).toEqual(asked.map(() => 'dataPlatform'))
+    expect(levels(h)).toEqual(['dataPlatform'])
   })
 
   it('still picks the coarsest level when that level IS on the canvas', async () => {
@@ -120,8 +119,6 @@ describe('the canvas never aggregates at a level nothing is filed under', () => 
       et('schemaField', 5, true),
     ])
 
-    const asked = h.aggregatedGranularities()
-    expect(asked.length).toBeGreaterThan(0)
-    expect(asked).toEqual(asked.map(() => 'container'))
+    expect(levels(h)).toEqual(['container'])
   })
 })

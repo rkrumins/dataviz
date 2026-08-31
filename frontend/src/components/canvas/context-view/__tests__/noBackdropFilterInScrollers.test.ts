@@ -107,36 +107,40 @@ const ALLOWED = new Map<string, string>([
  * leaves them fully transparent and the rows show straight through. It is
  * "choose an opaque background", which is a look, and 75208053 is what happens
  * when that choice is made from a test file instead of from the screen.
+ *
+ * Pinned by COUNT, not by file: keyed on the file alone, a second sticky header
+ * added to any file already here would never be seen, and a file half converted
+ * would stay "known" for ever.
  */
-const KNOWN = new Map<string, string>([
+const KNOWN = new Map<string, { count: number; why: string }>([
   [
     'components/admin/AdminFeatures/ConfirmTurnOff.tsx',
-    'A sticky action bar at the bottom of the dialog body scroller.',
+    { count: 1, why: 'A sticky action bar at the bottom of the dialog body scroller.' },
   ],
   [
     'components/admin/AdminFeatures/FeatureList.tsx',
-    'The sticky group label inside the feature list.',
+    { count: 1, why: 'The sticky group label inside the feature list.' },
   ],
   [
     'components/admin/RegistryJobHistory.tsx',
-    'Two `glass-panel` cards — the empty state and the table wrapper — rendered '
-      + 'inside the page scroller, so both blur it as it moves.',
+    { count: 2, why: 'Two `glass-panel` cards — the empty state and the table wrapper — rendered '
+      + 'inside the page scroller, so both blur it as it moves.' },
   ],
   [
     'components/canvas/trace/TraceDockDrilldownList.tsx',
-    'The drilldown list\'s sticky header, over the longest scroller in the canvas.',
+    { count: 1, why: 'The drilldown list\'s sticky header, over the longest scroller in the canvas.' },
   ],
   [
     'components/dashboard/TemplateGrid.tsx',
-    'The category chips sit in a horizontally scrolling strip and each carries its own blur.',
+    { count: 1, why: 'The category chips sit in a horizontally scrolling strip and each carries its own blur.' },
   ],
   [
     'components/explorer/ExplorerRecentStrip.tsx',
-    'Every card in the recents strip is a `glass-panel` inside that strip\'s own scroller.',
+    { count: 1, why: 'Every card in the recents strip is a `glass-panel` inside that strip\'s own scroller.' },
   ],
   [
     'components/panels/LineageNeighbors.tsx',
-    'A sticky header inside the neighbours list.',
+    { count: 1, why: 'A sticky header inside the neighbours list.' },
   ],
 ])
 
@@ -239,10 +243,17 @@ describe('app-wide: no backdrop-filter inside a scroll container', () => {
     expect(found.filter((v) => !KNOWN.has(v.split(':')[0])), HOW_TO_FIX).toEqual([])
   })
 
-  it('the known list is exactly the files that still do it', () => {
-    // Pinned both ways: a file that gets fixed has to leave the list, or the
-    // list stops describing the app and starts hiding the next one.
-    const files = [...new Set(blurInScrollers(app).map((v) => v.split(':')[0]))].sort()
-    expect(files).toEqual([...KNOWN.keys()].sort())
+  it('the known list is exactly the files that still do it, and how many each has', () => {
+    // Pinned both ways, and by count: a file that gets fixed has to leave the
+    // list, and a file that gets WORSE has to fail — otherwise the list stops
+    // describing the app and starts hiding the next one inside it.
+    const counts: Record<string, number> = {}
+    for (const v of blurInScrollers(app)) {
+      const file = v.split(':')[0]
+      counts[file] = (counts[file] ?? 0) + 1
+    }
+    expect(counts, HOW_TO_FIX).toEqual(
+      Object.fromEntries([...KNOWN].map(([file, k]) => [file, k.count])),
+    )
   })
 })

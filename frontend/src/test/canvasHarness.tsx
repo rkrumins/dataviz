@@ -460,12 +460,12 @@ function seedBrowse(estate: TraceEstate, holds?: readonly string[]): void {
   store.clearSelection()
 }
 
-function seedView(estate: TraceEstate): void {
+function seedView(estate: TraceEstate, entityTypes: readonly unknown[] = []): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
     schema: {
       id: 'harness', name: 'harness', version: '1',
-      entityTypes: [], relationshipTypes: [], globalVisuals: {},
+      entityTypes, relationshipTypes: [], globalVisuals: {},
       containmentEdgeTypes: ['CONTAINS'], lineageEdgeTypes: ['TRANSFORMS', 'AGGREGATED'],
       rootEntityTypes: [], defaultViewId: 'harness-view',
       views: [{
@@ -499,6 +499,11 @@ export async function renderCanvasWithTrace(
     /** The search string the canvas mounts on — `?trace=…` for a shared
      *  trace link, exactly as a recipient's browser would present it. */
     search?: string
+    /** The ontology's entity types, in place BEFORE the first render. The
+     *  canvas picks its aggregation granularity from them on mount and the
+     *  fan-out is debounced behind that, so a test that installs the schema
+     *  after this call returns can miss the round it exists to read. */
+    entityTypes?: readonly unknown[]
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -530,7 +535,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate)
+  seedView(estate, opts.entityTypes)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []
