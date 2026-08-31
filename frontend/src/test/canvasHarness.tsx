@@ -40,6 +40,7 @@
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { ContextViewCanvas } from '@/components/canvas/context-view/ContextViewCanvas'
 import { toCanvasNode } from '@/lib/canvasNodeMapper'
@@ -554,17 +555,22 @@ export async function renderCanvasWithTrace(
 
   const providerCalls = { traceClosure: 0, getNodes: 0 }
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  // A Router, because the header's BranchSwitcher keeps the active branch in the
+  // URL (`useBranchDeepLink` → `useSearchParams`). Without one it throws on mount
+  // and every canvas test dies before it can look at the canvas.
   render(
-    <QueryClientProvider client={queryClient}>
-      <ProviderOverride value={{
-        provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
-        isLoading: false, error: null, scopeKind: 'ready',
-        workspaceId: 'harness-ws', dataSourceId: null,
-        providerReady: true, providerVersion: 1,
-      } as never}>
-        <ContextViewCanvas />
-      </ProviderOverride>
-    </QueryClientProvider>,
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ProviderOverride value={{
+          provider: stubProvider(estate, opts.focus, providerCalls, gate, opts.stallWalk, !!opts.deferFine && !opts.deferTrace),
+          isLoading: false, error: null, scopeKind: 'ready',
+          workspaceId: 'harness-ws', dataSourceId: null,
+          providerReady: true, providerVersion: 1,
+        } as never}>
+          <ContextViewCanvas />
+        </ProviderOverride>
+      </QueryClientProvider>
+    </MemoryRouter>,
   )
 
   // REAL TIME, for the surfaces that animate. `settle` drains microtasks and
