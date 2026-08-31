@@ -10,12 +10,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
     Activity, AlertCircle, ChevronRight, Filter, History, Loader2,
-    RefreshCw, X, Shield, UserCog, KeyRound,
+    RefreshCw, X, Shield, UserCog, KeyRound, Check, Copy
 } from 'lucide-react'
 import { auditService, type AuditEvent, type AuditFilters } from '@/services/auditService'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 
@@ -314,19 +316,28 @@ export function AdminAudit() {
                     )}
                 </div>
 
-                {/* Filter row */}
+                {/* Filter row.
+                    THE BOXES TAKE A PERSON, not only an identifier. They asked
+                    for a user id back when the table showed nothing else, and
+                    an operator now reading names would type one and get an
+                    empty log — which reads as "this person did nothing" rather
+                    than "that is not an id". The server resolves a name or an
+                    email to the ids behind it; an exact id short-circuits, so
+                    every existing link still filters exactly as before. */}
                 <div className="rounded-xl border border-glass-border bg-canvas-elevated p-3 flex flex-wrap items-center gap-2">
                     <Filter className="w-4 h-4 text-ink-muted shrink-0" />
                     <input
                         type="text"
-                        placeholder="Filter by actor user id…"
+                        aria-label="Filter by who did it"
+                        placeholder="Who did it — name, email or user ID…"
                         value={actorFilter}
                         onChange={e => setActorFilter(e.target.value)}
                         className="flex-1 min-w-[180px] bg-transparent border border-glass-border rounded-lg px-3 py-1.5 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40"
                     />
                     <input
                         type="text"
-                        placeholder="Filter by target user id…"
+                        aria-label="Filter by who it affected"
+                        placeholder="Who it affected — name, email or user ID…"
                         value={targetUserFilter}
                         onChange={e => setTargetUserFilter(e.target.value)}
                         className="flex-1 min-w-[180px] bg-transparent border border-glass-border rounded-lg px-3 py-1.5 text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent-lineage/40"
@@ -412,6 +423,137 @@ const SEVERITY_DOT: Record<string, string> = {
 }
 
 
+
+/**
+ * One person in the log, named.
+ *
+ * Actor and Target used to render `event.actorId` — a bare
+ * `usr_ac3f19`-shaped string — as a monospace link. Reading "who changed
+ * whose role" meant opening a tab per row, and once an account was deleted
+ * there was no way to find out at all.
+ *
+ * WHAT IT SHOWS AND WHAT IT REFUSES TO SHOW. A resolved person gets their
+ * name and email, and the id moves to the details panel where it is useful
+ * for joining rather than in the way of reading. An id the server could not
+ * resolve keeps the id, verbatim: a system-generated event, a hard-deleted
+ * row and a payload naming something that was never a user are all real
+ * states, and printing "Unknown user" over them would claim a fact nobody
+ * has. The tip says which of the two you are looking at.
+ *
+ * A soft-deleted account is still NAMED — an audit log's most valuable row
+ * is often about an account that is gone — and carries a marker so the
+ * reader knows the name will not be found in the user list.
+ */
+function AuditPerson({ id, name, email, deleted, role }: {
+    id?: string | null
+    name?: string | null
+    email?: string | null
+    deleted?: boolean
+    /** Rendered under the person for a target that is a role change. */
+    role?: string | null
+}) {
+    if (!id) {
+        return (
+            <div className="flex items-center gap-2">
+                <span className="text-ink-muted">—</span>
+                {role && <span className="text-[11px] text-ink-muted">{role}</span>}
+            </div>
+        )
+    }
+
+    const palette = avatarPaletteFor(id)
+    const resolved = !!name || !!email
+    const label = name || email || id
+
+    return (
+        <HoverTip
+            label={resolved ? label : 'Not in the user directory'}
+            detail={
+                resolved
+                    ? `${email ? email + ' · ' : ''}${id}${deleted ? ' · this account has been deleted' : ''}`
+                    : `${id} — no user record matches this id. It may be a system-generated `
+                      + `event, or an account that has been permanently removed.`
+            }
+        >
+            <span className="flex items-center gap-2 min-w-0">
+                <span
+                    aria-hidden
+                    className={cn(
+                        'shrink-0 grid place-items-center rounded-full h-6 w-6 text-[10px] font-bold',
+                        resolved ? palette.bg : 'bg-black/[0.04] dark:bg-white/[0.06]',
+                        resolved ? palette.text : 'text-ink-muted',
+                    )}
+                >
+                    {resolved ? initialsOf(name || email) : '?'}
+                </span>
+                <span className="min-w-0 leading-tight">
+                    <a
+                        href={`/admin/users?user=${encodeURIComponent(id)}`}
+                        onClick={e => e.stopPropagation()}
+                        className={cn(
+                            'block truncate hover:text-accent-lineage hover:underline',
+                            resolved
+                                ? 'text-xs font-semibold text-ink'
+                                : 'font-mono text-[11px] text-ink-secondary',
+                        )}
+                    >
+                        {label}
+                    </a>
+                    {resolved && email && name && (
+                        <span className="block truncate text-[10px] text-ink-muted">{email}</span>
+                    )}
+                    {deleted && (
+                        <span className="mt-0.5 inline-flex items-center gap-1 rounded-full border border-red-500/20 bg-red-500/[0.08] px-1.5 text-[9px] font-semibold text-red-600 dark:text-red-400">
+                            Deleted
+                        </span>
+                    )}
+                    {role && (
+                        <span className="block truncate text-[10px] text-ink-muted">{role}</span>
+                    )}
+                </span>
+            </span>
+        </HoverTip>
+    )
+}
+
+
+/** A raw identifier, shown where it is useful to copy rather than to read. */
+function IdField({ label, value, href }: { label: string; value?: string | null; href?: string }) {
+    const [copied, setCopied] = useState(false)
+    if (!value) return null
+    return (
+        <div className="min-w-0">
+            <dt className="text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted">{label}</dt>
+            <dd className="mt-0.5 flex items-center gap-1.5 min-w-0">
+                {href ? (
+                    <a href={href} onClick={e => e.stopPropagation()}
+                       className="font-mono text-[11px] text-ink-secondary truncate hover:text-accent-lineage hover:underline">
+                        {value}
+                    </a>
+                ) : (
+                    <span className="font-mono text-[11px] text-ink-secondary truncate">{value}</span>
+                )}
+                <button
+                    type="button"
+                    aria-label={`Copy ${label}`}
+                    onClick={e => {
+                        e.stopPropagation()
+                        // Best effort: a denied clipboard permission must not
+                        // throw inside a log row.
+                        navigator.clipboard?.writeText(value).then(
+                            () => { setCopied(true); setTimeout(() => setCopied(false), 1200) },
+                            () => {},
+                        )
+                    }}
+                    className="shrink-0 rounded p-0.5 text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                >
+                    {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                </button>
+            </dd>
+        </div>
+    )
+}
+
 function AuditRow({ event }: { event: AuditEvent }) {
     const [expanded, setExpanded] = useState(false)
     const severity = event.severity ?? 'info'
@@ -441,44 +583,49 @@ function AuditRow({ event }: { event: AuditEvent }) {
                         {event.eventType}
                     </code>
                 </td>
-                <td className="px-4 py-2.5 text-xs text-ink-secondary">
-                    {event.actorId ? (
-                        <a
-                            href={`/admin/users#${event.actorId}`}
-                            onClick={e => e.stopPropagation()}
-                            className="font-mono text-[11px] hover:text-accent-lineage hover:underline"
-                        >
-                            {event.actorId}
-                        </a>
-                    ) : (
-                        <span className="text-ink-muted">—</span>
-                    )}
+                <td className="px-4 py-2.5 max-w-[220px]">
+                    <AuditPerson
+                        id={event.actorId}
+                        name={event.actorName}
+                        email={event.actorEmail}
+                        deleted={event.actorDeleted}
+                    />
                 </td>
-                <td className="px-4 py-2.5 text-xs text-ink-secondary">
-                    {event.targetUserId ? (
-                        <a
-                            href={`/admin/users#${event.targetUserId}`}
-                            onClick={e => e.stopPropagation()}
-                            className="font-mono text-[11px] hover:text-accent-lineage hover:underline"
-                        >
-                            {event.targetUserId}
-                        </a>
-                    ) : (
-                        <span className="text-ink-muted">—</span>
-                    )}
-                    {event.targetRole && (
-                        <span className="ml-1 text-ink-muted">@ {event.targetRole}</span>
-                    )}
+                <td className="px-4 py-2.5 max-w-[220px]">
+                    <AuditPerson
+                        id={event.targetUserId}
+                        name={event.targetUserName}
+                        email={event.targetUserEmail}
+                        deleted={event.targetUserDeleted}
+                        role={event.targetRole ? `Role: ${event.targetRole}` : null}
+                    />
                 </td>
-                <td className="px-4 py-2.5 text-xs text-ink-secondary">
+                <td className="px-4 py-2.5 text-xs text-ink-secondary max-w-[180px]">
                     {event.workspaceId ? (
-                        <a
-                            href={`/workspaces/${event.workspaceId}`}
-                            onClick={e => e.stopPropagation()}
-                            className="font-mono text-[11px] hover:text-accent-lineage hover:underline"
+                        <HoverTip
+                            label={event.workspaceName ? `Workspace · ${event.workspaceName}` : 'Workspace'}
+                            detail={
+                                event.workspaceName
+                                    ? `${event.workspaceId} — open it`
+                                    : `${event.workspaceId} — no workspace matches this id. It may have been permanently removed.`
+                            }
                         >
-                            {event.workspaceId}
-                        </a>
+                            <a
+                                href={`/workspaces/${event.workspaceId}`}
+                                onClick={e => e.stopPropagation()}
+                                className={cn(
+                                    'block truncate hover:text-accent-lineage hover:underline',
+                                    // Named: read it. Unnamed: the id IS the answer,
+                                    // so it keeps the monospace that makes an
+                                    // identifier scannable.
+                                    event.workspaceName
+                                        ? 'text-xs font-medium text-ink'
+                                        : 'font-mono text-[11px]',
+                                )}
+                            >
+                                {event.workspaceName || event.workspaceId}
+                            </a>
+                        </HoverTip>
                     ) : (
                         <span className="text-ink-muted">—</span>
                     )}
@@ -486,10 +633,57 @@ function AuditRow({ event }: { event: AuditEvent }) {
             </tr>
             {expanded && (
                 <tr className="border-t border-glass-border bg-glass-base/20">
-                    <td colSpan={6} className="px-4 py-3">
-                        <pre className="text-2xs font-mono text-ink-secondary whitespace-pre-wrap break-words">
-                            {JSON.stringify(event.payload, null, 2)}
-                        </pre>
+                    <td colSpan={6} className="px-4 py-4">
+                        {/* FURTHER DETAILS, where the identifiers live now.
+                            This used to be a raw `JSON.stringify` of the
+                            payload and nothing else — which is the right thing
+                            to have available and the wrong thing to lead with:
+                            the four facts an administrator actually needs off a
+                            row (who, whom, where, which event) were in there
+                            somewhere, under keys that differ per event type.
+                            They are named and copyable here; the raw payload
+                            keeps its place one disclosure down, for the times
+                            the summary is not enough. */}
+                        <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
+                            <IdField
+                                label="Actor id"
+                                value={event.actorId}
+                                href={event.actorId ? `/admin/users?user=${encodeURIComponent(event.actorId)}` : undefined}
+                            />
+                            <IdField
+                                label="Target user id"
+                                value={event.targetUserId}
+                                href={event.targetUserId ? `/admin/users?user=${encodeURIComponent(event.targetUserId)}` : undefined}
+                            />
+                            <IdField
+                                label="Workspace id"
+                                value={event.workspaceId}
+                                href={event.workspaceId ? `/workspaces/${event.workspaceId}` : undefined}
+                            />
+                            <IdField label="Event id" value={event.eventId} />
+                            {event.targetRole && (
+                                <div className="min-w-0">
+                                    <dt className="text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted">Role</dt>
+                                    <dd className="mt-0.5 truncate text-[11px] text-ink-secondary">{event.targetRole}</dd>
+                                </div>
+                            )}
+                            <div className="min-w-0">
+                                <dt className="text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted">Recorded</dt>
+                                <dd className="mt-0.5 truncate text-[11px] text-ink-secondary">
+                                    {new Date(event.createdAt).toLocaleString()}
+                                </dd>
+                            </div>
+                        </dl>
+
+                        <details className="group/raw mt-4 rounded-xl border border-black/[0.07] bg-black/[0.02] dark:border-white/[0.08] dark:bg-white/[0.02]">
+                            <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-xl px-3 py-2 text-[11px] font-semibold text-ink-secondary hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                                <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform group-open/raw:rotate-90" />
+                                Raw event payload
+                            </summary>
+                            <pre className="overflow-x-auto px-3 pb-3 text-2xs font-mono text-ink-secondary whitespace-pre-wrap break-words">
+                                {JSON.stringify(event.payload, null, 2)}
+                            </pre>
+                        </details>
                     </td>
                 </tr>
             )}

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import OutboxEventORM
+from backend.app.db.repositories import user_repo
 from backend.auth_service.interface import User
 from backend.common.models.audit import (
     AuditEventResponse,
@@ -570,17 +571,97 @@ async def list_audit_events(
     has_more = len(rows) > limit
     rows = rows[:limit]
 
+    # ── Turn a typed person into the ids to match on ──────────────
+    # The two filters took an exact user id, which was all they could offer
+    # while the rows showed nothing else. The table names people now, so an
+    # operator will type "john" or an email — and matching that against an id
+    # returns nothing, silently, which reads as "this person did nothing"
+    # rather than "that is not an id".
+    #
+    # An exact id short-circuits: it needs no lookup, and it keeps every
+    # existing link and bookmark working unchanged. Anything else is resolved
+    # to a SET of ids once, and the row test becomes membership.
+    async def _subject_ids(term: Optional[str]) -> Optional[set[str]]:
+        if not term:
+            return None
+        term = term.strip()
+        if not term:
+            return None
+        try:
+            matches = await user_repo.find_user_ids_matching(session, term)
+        except Exception:  # noqa: BLE001
+            logger.warning("audit: could not resolve the subject filter %r", term, exc_info=True)
+            # Fall back to the exact-id behaviour rather than dropping the
+            # filter — silently widening a filter shows rows the operator
+            # asked to exclude.
+            return {term}
+        # A term that resolves to nobody must still filter to nothing, not to
+        # everything: `set()` is a real answer, and `None` means "no filter".
+        return matches | ({term} if term.startswith("usr_") else set())
+
+    actor_ids = await _subject_ids(actor_id)
+    target_ids = await _subject_ids(target_user_id)
+
     # ── Python-level predicates (payload introspection) ───────────
     out: list[AuditEventResponse] = []
     for row in rows:
         ev = _row_to_response(row)
-        if actor_id and ev.actor_id != actor_id:
+        if actor_ids is not None and ev.actor_id not in actor_ids:
             continue
-        if target_user_id and ev.target_user_id != target_user_id:
+        if target_ids is not None and ev.target_user_id not in target_ids:
             continue
         if target_role and ev.target_role != target_role:
             continue
         out.append(ev)
+
+    # ── Name the people in the page ───────────────────────────────
+    # ONE query for the whole page, after filtering, so the lookup only ever
+    # covers rows that are actually being returned. Every event carries at most
+    # two user ids and a page is capped at `_MAX_LIMIT`, so this is a single
+    # indexed `IN` over a few dozen keys at worst.
+    #
+    # It runs against the page rather than per row for the obvious reason, but
+    # also because the same actor usually appears on many rows of an audit log —
+    # deduplicating first turns "one lookup per row" into "one lookup per
+    # distinct person".
+    #
+    # A failure here must not take the audit lens down with it: the ids are the
+    # record, the names are an enrichment of it, and a log that renders with raw
+    # ids is enormously more useful than one that 500s.
+    try:
+        identities = await user_repo.get_identities_by_ids(
+            session,
+            [i for ev in out for i in (ev.actor_id, ev.target_user_id) if i],
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("audit: could not resolve user identities for this page", exc_info=True)
+        identities = {}
+
+    # Same treatment for the workspace an event happened in: "ws_4f21c8" tells
+    # a reader nothing they can act on. Deleted workspaces are included for the
+    # same reason deleted users are — an event in a workspace that has since
+    # been torn down is among the more interesting rows in the log.
+    try:
+        workspace_names = await user_repo.get_workspace_names_by_ids(
+            session, [ev.workspace_id for ev in out if ev.workspace_id],
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("audit: could not resolve workspace names for this page", exc_info=True)
+        workspace_names = {}
+
+    for ev in out:
+        if ev.workspace_id:
+            ev.workspace_name = workspace_names.get(ev.workspace_id)
+        actor = identities.get(ev.actor_id) if ev.actor_id else None
+        if actor:
+            ev.actor_name = actor["name"] or None
+            ev.actor_email = actor["email"]
+            ev.actor_deleted = actor["deleted"]
+        target = identities.get(ev.target_user_id) if ev.target_user_id else None
+        if target:
+            ev.target_user_name = target["name"] or None
+            ev.target_user_email = target["email"]
+            ev.target_user_deleted = target["deleted"]
 
     next_cursor = None
     if has_more and rows:
