@@ -612,7 +612,23 @@ an arbitrary query, so use the snippet above for anything else.
 
 Left deliberately unfinished by the FalkorDB package split, for a later PR:
 
-- **No full lane exists over this PR's final tip — run one before trusting this PR is fully measured.**
+- **RESOLVED 2026-08-31 — the full lane has now run.** Over PR 2's tip
+  (`baea8b57`, which contains this PR unchanged): **6,301 passed / 24 failed
+  / 208 skipped / 45 deselected in 667s**, machine load ~10. All 24 are
+  accounted for: 22 are in `failures-0.txt`, and the remaining two
+  (`tests/test_data_source_move.py::test_refuses_to_move_a_source_with_a_view`
+  and `::test_a_data_source_from_another_workspace_is_404_not_moved`) are
+  absent from that ledger only because it is a *required-lane* baseline and
+  neither test matches that lane's `-k` filter. They are pre-existing and
+  unrelated to either PR — they pass run singly and fail run as a file,
+  because `insights_service/enqueue.py:95` (`try_claim`) reuses a
+  module-global async Redis client across pytest-asyncio's per-test event
+  loops (`Event loop is closed` → `got Future attached to a different
+  loop`); it needs a live Redis to manifest, which is why it had never been
+  seen. `git diff --name-only` over both PR ranges
+  (`54980893..1a3e75e9`, `1a3e75e9..baea8b57`) returns nothing matching
+  `insights|enqueue|redis_bus|common/adapters`. See the follow-up below.
+  The original item, kept for the record:
   Measured on the final tree: the required CI lane (1,465 passed / 11 failed,
   `comm -23` against `failures-0.txt` empty — zero new failures), the
   targeted set (98 tests), both goldens, the live contract snapshot on
@@ -630,6 +646,18 @@ Left deliberately unfinished by the FalkorDB package split, for a later PR:
   completes in 580-880s) — machine load average was 34.37 during these
   attempts. Do not infer from this PR's other fifteen tasks' measured
   numbers that this last one was measured too; it wasn't.
+- **A module-global async Redis client is reused across pytest-asyncio's
+  per-test event loops**, surfaced by the first full lane ever completed
+  here (above). `insights_service/enqueue.py:95` (`try_claim`) builds its
+  client on whichever test's loop touches it first; the next test's loop
+  then gets `Event loop is closed` /
+  `RuntimeError: … got Future attached to a different loop`, and the
+  swallowed enqueue failure shows up as an unrelated-looking `assert False`
+  in `tests/test_data_source_move.py`. Only reproduces with a live Redis
+  reachable and only when the file's tests run in sequence — running either
+  test alone passes, which is why it stayed invisible. Same family as the
+  `FALKORDB_PORT` leak below: shared global state outliving a per-test
+  loop. Neither PR 1 nor PR 2 touched this chain; not fixed here.
 - **The full-lane gap above is no longer the only CI-shaped caveat.**
   `.github/workflows/backend-tests.yml`'s `connectivity-suite` job now runs
   a `falkordb/falkordb:v4.18.11` service container and a reachability step
