@@ -79,6 +79,7 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label="Import / Export"
         title="Import / Export"
         className={cn(
           'flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11.5px] font-semibold tracking-tight transition-all',
@@ -88,7 +89,16 @@ export function ImportExportMenu({ onImport, onExport, isDraft }: ImportExportMe
         )}
       >
         <LucideIcons.ArrowDownUp className="w-3.5 h-3.5" strokeWidth={2.4} />
-        <span>Import / Export</span>
+        {/* The header's content budget, spent where it buys the most. This
+            row must also hold the branch switcher, and at ordinary laptop
+            widths the two longest labels here left the switcher a track
+            narrower than itself — so it overflowed and the search box painted
+            over its right-hand half. The icon, the tooltip and the accessible
+            name all stay; only the words stand down, and only until there is
+            room for them. The threshold is where EDIT mode stops being the
+            binding case: it carries Undo/Redo, Review & Save and Done on top of
+            everything View mode shows, so it runs out of row first. */}
+        <span className="hidden min-[2000px]:inline">Import / Export</span>
         <LucideIcons.ChevronDown className={cn('w-3 h-3 transition-transform duration-200', open && 'rotate-180')} />
       </button>
 

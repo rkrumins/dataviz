@@ -388,7 +388,15 @@ export function HeaderSearch() {
   }, [resolveLayer, layers])
 
   return (
-    <div data-tour="canvas-search" className="justify-self-center w-full max-w-xl">
+    // min-w-0 is what makes this the header's ELASTIC element. Without it a
+    // grid item's automatic minimum is its min-content, so the middle track
+    // could never fall below the width of the field's fixed furniture — the
+    // branch switcher beside it was squeezed into a track narrower than
+    // itself, overflowed, and this box painted over its right-hand half,
+    // eating roughly a third of the clicks that landed on it. The field
+    // gives way instead; it has a placeholder and a hint to lose, the
+    // switcher had a control to lose.
+    <div data-tour="canvas-search" className="justify-self-center w-full min-w-0 max-w-xl">
       <div ref={boxRef} className="relative group">
         {/* Accent halo on focus — soft glow behind the field that lifts
             it off the header gradient. Pure decoration; sits behind via

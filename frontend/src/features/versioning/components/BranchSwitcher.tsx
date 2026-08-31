@@ -184,7 +184,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const label = onMain ? BRANCH_VOCAB.published : activeDraft?.name || BRANCH_VOCAB.draft
 
   return (
-    <div className={cn('relative', className)}>
+    <div className={cn('relative min-w-0', className)}>
       <button
         ref={setTriggerEl}
         type="button"
@@ -192,20 +192,26 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
         aria-haspopup="dialog"
         aria-expanded={open}
         className={cn(
-          'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium transition-colors',
+          'flex items-center gap-1.5 min-w-0 max-w-full px-2.5 py-1.5 rounded-lg text-sm font-medium transition-colors',
           'bg-canvas-elevated border border-glass-border hover:bg-canvas-overlay',
           !onMain && 'text-amber-500 border-amber-500/30',
         )}
         title={onMain ? `On the ${BRANCH_VOCAB.published} version` : `On draft: ${label}`}
       >
         {onMain
-          ? <Globe className="w-4 h-4 text-ink-muted" />
-          : <GitBranch className="w-4 h-4 text-amber-500" />}
-        <span className="max-w-[10rem] truncate">{label}</span>
+          ? <Globe className="w-4 h-4 shrink-0 text-ink-muted" />
+          : <GitBranch className="w-4 h-4 shrink-0 text-amber-500" />}
+        {/* min-w-0 so the NAME gives way, never the button. A flex item's
+            automatic minimum is its min-content, so without this the trigger
+            could not shrink into a tight header track — it overflowed instead,
+            and whatever came next in the row painted over its right-hand half.
+            The icon and chevron are not shrinkable, so the control always
+            keeps a clickable body; only the branch name truncates. */}
+        <span className="min-w-0 max-w-[10rem] truncate">{label}</span>
         {!onMain && activeDraft && isBehind(activeDraft) && (
           <span className="w-1.5 h-1.5 rounded-full bg-amber-500" title="Updates available — get the latest before publishing" />
         )}
-        <ChevronDown className="w-3.5 h-3.5 text-ink-muted" />
+        <ChevronDown className="w-3.5 h-3.5 shrink-0 text-ink-muted" />
       </button>
 
       {/* Portalled + fixed — see the anchor above. No AnimatePresence/exit: the menu
