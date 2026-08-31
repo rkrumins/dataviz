@@ -16,6 +16,10 @@ and renders interactive lineage on a canvas. For deeper detail on any area, see 
 - **FalkorDB** is the default graph store (Redis protocol). **Neo4j**, **DataHub**, and
   **Google Cloud Spanner Graph** are supported through the `GraphDataProvider` interface,
   each wrapped in a circuit breaker.
+- Provider types register **once**, in a catalog (`backend/common/providers/catalog/`),
+  which drives construction, capability gating, connection validation, the admin API
+  and the onboarding wizard — so adding an engine is one registration plus a handful of
+  declarative entries, each named by a failing test.
 - Management state (users, workspaces, providers, ontologies, views) lives in
   **PostgreSQL** in production and **SQLite** for the local quickstart. **Redis** backs
   cache, sessions, and job streams.

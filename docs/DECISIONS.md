@@ -655,6 +655,50 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 
 ---
 
+## ADR-023: One registration per graph provider type
+
+**Status:** Accepted
+**Date:** 2026-08
+**Context:** Adding a graph engine meant editing **~22 scattered sites** and satisfying three contracts nobody had written down. Four things made that worse than a tedious checklist.
+
+1. **The dispatch chain existed twice, verbatim.** `ProviderManager._create_provider_instance` (`manager.py:1153-1273`) and `ProviderRegistry._create_provider_instance` (`provider_registry.py:290-395`) were the same `if provider_type == "falkordb": … elif … raise ValueError` body, in two files, with two frozen signatures. A type added to one and not the other worked through one entry point and raised through the other.
+2. **The ontology contract was duck-typed, and failed *silently*.** `ContextEngine` asked `hasattr(provider, 'set_containment_edge_types')` and *skipped* a provider that lacked it. A second engine that simply did not implement the setters got no error — it got a **flat graph**, discovered whenever a user eventually said the canvas looked wrong. The same implicitness produced a live, pre-existing defect: `get_ontology_metadata` cached *classification* (containment vs lineage, the type hierarchy, the root types — a function of the ontology injected into that instance) under a shared graph-scoped key, and the app's own resolution path warms that cache from a deliberately **uninjected** provider. Measured on `solidatus_perf_medium`, identically on the pre-refactor monolith:
+
+   | cache warmed by | containment | lineage | hierarchy | roots |
+   |---|---|---|---|---|
+   | uninjected caller | `[]` | `['FLOWS_TO','HAS']` | 0 | `[]` |
+   | injected caller | `['HAS']` | `['FLOWS_TO']` | 4 | `['layer']` |
+
+   A correctly-configured reader arriving after the uninjected warm got the poisoned row back, with `HAS` presented as a *flow* edge rather than a *structural* one.
+3. **`DataHubGraphQLProvider` had been uninstantiable for months** — six abstract members missing (`create_edge`, `delete_edge`, `get_aggregated_edges_between`, `get_full_lineage`, `get_trace_lineage`, `update_edge`). Registering a DataHub provider wrote a row and every probe raised `TypeError: Can't instantiate abstract class…`. **No test noticed**, because nothing constructed each registered type and checked.
+4. **The frontend enumerated the type list ~15 times.** Three of those enumerations had no Spanner branch at all (`DataSourceGridCard`'s accent ternary, `WorkspaceHeroHeader`, `WorkspaceListRow`), so a Spanner provider rendered a borrowed style or its raw type string. Two more (`ProjectionPanel`'s `PROVIDER_LABEL`, `GraphProvidersPanel`'s `TYPE_LABEL`) were missed by the audit's own list because their maps use **unquoted** object keys, which a `'falkordb'` grep does not match.
+
+**Decision:** One `ProviderDescriptor` per provider type in a catalog (`backend/common/providers/catalog/`) is the single registration point for behaviour — id, label, family, capability, connection shape, `build(spec)`, validation, probe strategy. Both dispatchers delegate to it; `GET /admin/providers/types` serves it; one frontend module (`frontend/src/services/providerTypes.ts`) is the only place that knows what a provider type is.
+
+Around it:
+
+- **The contract is formal and three-tiered**: 25 abstract members, 28 real defaults, 5 feature-gated defaults that raise `ProviderFeatureUnsupportedError`. The ontology-injection setters are **base-class members with working defaults**, so every adapter participates by construction, and `containment_configured` makes "has an ontology been injected into me?" a documented question rather than a private attribute nine call sites reached into.
+- **Two gate kinds, deliberately not merged.** Row-level admission (`capability_for(row.provider_type).supports(F)`) answers before an instance exists and yields a clean 422; instance-level tolerance (catching `ProviderFeatureUnsupportedError`) handles a live, possibly-wrapped instance. Both are needed: a `DraftOverlayProvider` unwraps to a base that *does* support materialization while the overlay itself has no such method, so the row-level check alone passes and the call still fails.
+- **Drift is caught by tests rather than prevented by generation.** `ProviderType` (pydantic/OpenAPI needs static members) and the DB CHECK constraint stay hand-written; `test_provider_catalog_sync.py` asserts they agree with the catalog, `test_provider_catalog_classes.py` asserts every registered class resolves, instantiates and defines its own `preflight`, and `test_provider_type_literals.py` (plus its frontend counterpart) fails CI if `provider_type == "…"` dispatch is reintroduced.
+
+**Reasoning:** The root cause was structural, not a missing feature — the same shape as [ADR-022](#adr-022-central-role-keyed-redis-config-cachestreams-independent). Nothing *forced* a new type through a shared path, so every new type grew its own branch in every file that cared, and every contract that was never declared could be quietly not honoured. Making the descriptor the only construction path removes the duplication; making the ontology setters real base members removes the class of defect where a missing method reads as "nothing to do" instead of "wrong answer". The choice to keep the enum and the CHECK constraint hand-written and *tested* rather than generated is deliberate: generation would have to run somewhere, and a drift test fails in CI with the exact name of the file to edit.
+
+**Trade-offs:**
+- (+) One registration point for behaviour. The remaining five additions are declarative, and a **named test fails for each**: the enum/CHECK/migration sync tests, a `Record<ProviderType, …>` compile error for a missing visual.
+- (+) Both duplicated dispatch chains (127 and 106 changed lines) became a lazy import and one delegating call, signatures byte-for-byte unchanged; the ~22 sites collapsed to the catalog plus ~15 frontend call sites that read one module. Converting them fixed the three missing-Spanner-branch bugs for free — `PROVIDER_VISUALS` is a `Record`, so a visual with a hole in it does not compile.
+- (+) Latent defects the audit surfaced are fixed, not just documented: Neo4j's `set_containment_edge_types` no longer raises `TypeError` on the injection path; `DraftOverlayProvider` forwards all six setters instead of two; `clear_content_caches()` has a base no-op instead of an `AttributeError` for non-FalkorDB types; the wizard's schema discovery no longer creates and deletes a throwaway provider row hard-coded to `providerType: 'neo4j'` regardless of what the user selected.
+- (+) The required backend lane went from **1,466 to 1,557 passing** against the same **11 pre-existing failures**, `comm -23` against the recorded baseline empty; the frontend suite from 4,146 to 4,200, all green. The live FalkorDB contract snapshot is byte-identical — `git status` on `backend/tests/regression/snapshots/falkordb/` is empty after the whole PR.
+- (−) `STATIC_PROVIDER_TYPES` duplicates a little static data on the frontend — an offline snapshot of the backend's rows, so the wizard renders before `GET /types` resolves. It is *generated* from the backend's own test (`UPDATE_PROVIDER_TYPES_FIXTURE=1`) and pinned by a fixture-agreement test, so it cannot silently disagree with the server. It can, however, silently go **stale**: regenerating the fixture is the one declarative step no test catches, and forgetting it means the new type's wizard card is missing until the live query resolves.
+- (−) **`mock` stays in the CHECK constraint** as a legacy DB literal with no adapter class behind it (`LEGACY_DB_ONLY_TYPES`). Removing it needs a narrowing migration that refuses when rows exist — out of scope, and it is accepted by the DB rather than registrable, so it cannot be selected or constructed.
+- (−) **FalkorDB cannot register from the kernel.** `backend/common/providers/` is dependency-free by construction (an AST guard fails on any `backend.app` import, lazy or not) and `FalkorDBProvider` lives under `backend.app`. Its descriptor therefore registers from its own package, and both dispatcher modules carry an eager import to trigger it — an asymmetry with the other three types that a reader has to be told about. It is documented in the catalog package's own docstring and pinned by two fresh-subprocess tests.
+- (−) A CHECK-widening migration is **two** edits, not one: `test_provider_catalog_sync.py` asserts exactly one migration touches the constraint, so the second one must retarget that helper. The assert carries the instruction in its own message, but it is still a test edit inside a "declarative additions" story.
+- (−) One genuine identity-dispatch site survives, allow-listed with a reason: `insights_service/discovery.py` gates FalkorDB-specific registry-drift reconciliation on `provider_type == "falkordb"`, because other providers' `list_graphs()` is not exhaustive enough for that reconciliation to be safe. It should become a `ProviderFeature` the reconciler checks — the same move `versioning.py`'s blank-model gate already made. Tracked, not silently permanent.
+- (−) DataHub remains uninstantiable. The defect is now *pinned* (`KNOWN_UNINSTANTIABLE = {"datahub"}`) rather than invisible, and the catalog test guards every other type, but the six stubs were deliberately deferred.
+
+**Verified** against a live FalkorDB: the ontology-cache fix reproduced end to end (an injected reader after an uninjected warm now sees `containment=['HAS']`, hierarchy 4, roots `['layer']`; the poisoning verdict flips to `false`), and the catalog-built live contract test passes rather than skips, with every existing snapshot unchanged.
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -681,6 +725,7 @@ Admin visibility: `GET /admin/redis/config` (resolved config + per-field provena
 | 020 | Dedicated Redis decoupled from FalkorDB by construction | Accepted | Low |
 | 021 | Build the FalkorDB client ourselves (never `FalkorDB.__init__`) | Accepted | Low |
 | 022 | Central role-keyed Redis config (cache/streams independent) | Accepted | Low |
+| 023 | One registration per graph provider type (descriptor catalog + formal contract) | Accepted | Low |
 
 ---
 

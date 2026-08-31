@@ -24,7 +24,8 @@ flowchart LR
 
 ### Provider
 A **Provider** is a *connection to a graph database* where your lineage data
-actually lives — for example a FalkorDB, Neo4j, DataHub, or Spanner instance. It stores
+actually lives — an instance of any provider type offered under **Admin → Add
+Provider** (FalkorDB, Neo4j, DataHub and Google Spanner Graph today). It stores
 the host, credentials, and health status. You'll only deal with Providers if
 you're an administrator; everyone else benefits from them invisibly.
 

@@ -29,8 +29,9 @@ wizard** appears automatically to walk you through the early steps.
 
 ## Step 1 — Connect a Provider
 
-A **Provider** is a connection to a graph database where lineage data lives
-(FalkorDB, Neo4j, DataHub, or Spanner).
+A **Provider** is a connection to a graph database where lineage data lives —
+any of the provider types offered on the **Add Provider** screen (FalkorDB,
+Neo4j, DataHub and Google Spanner Graph today).
 
 1. Go to **Admin → Overview** (or **Ingestion**) and click **Add Provider**.
 2. Choose the **provider type** and enter connection details (host, port,
