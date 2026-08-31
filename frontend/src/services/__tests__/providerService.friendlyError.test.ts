@@ -54,3 +54,33 @@ describe('isDriftError / cluster_mode_mismatch mapping', () => {
         expect(msg.toLowerCase()).toContain('standalone')
     })
 })
+
+describe('provider catalog reason codes (PR 2)', () => {
+    it('still maps tls_handshake (pre-existing — regression pin, not new here)', () => {
+        const msg = friendlyError('tls_handshake')
+        expect(msg.toLowerCase()).toContain('tls')
+    })
+
+    it('maps the /test-connection error field for an HTTP-speaking provider that did not classify its status', () => {
+        const msg = friendlyError(JSON.stringify({ success: false, error: 'http_status_503' }))
+        expect(msg).toContain('503')
+    })
+
+    it('maps a bare http_status_<nnn> string the same way as the JSON envelope', () => {
+        expect(friendlyError('http_status_503')).toBe(friendlyError(JSON.stringify({ success: false, error: 'http_status_503' })))
+    })
+
+    it('passes the descriptor\'s own message through for provider_config_invalid rather than the raw envelope', () => {
+        const msg = friendlyError(JSON.stringify({
+            detail: { type: 'provider_config_invalid', providerType: 'spanner', message: 'Spanner does not accept a host/port connection.' },
+        }))
+        expect(msg).toBe('Spanner does not accept a host/port connection.')
+    })
+
+    it('passes the descriptor\'s own message through for provider_unsupported the same way', () => {
+        const msg = friendlyError(JSON.stringify({
+            detail: { type: 'provider_unsupported', providerType: 'mock', message: 'mock providers are not supported.' },
+        }))
+        expect(msg).toBe('mock providers are not supported.')
+    })
+})

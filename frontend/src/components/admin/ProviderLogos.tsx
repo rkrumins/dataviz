@@ -118,6 +118,19 @@ export const SpannerLogo: React.FC<LogoProps> = ({ className }) => (
 /**
  * Returns the matching provider logo component for a given provider type string.
  * Falls back to FalkorDBLogo for unknown types.
+ *
+ * Stays defined here (rather than physically moving to
+ * `@/services/providerTypes`, which imports the four logo components above)
+ * because that module already imports FROM this one — a re-export back
+ * from here to there would make the two modules mutually dependent. That
+ * cycle is not just untidy: verified live, whichever of the two modules the
+ * app happens to load first becomes the entry point, and the OTHER
+ * module's top-level `const`s (here, the logo components) are still
+ * uninitialized the first time the entry module's own body runs — so
+ * `PROVIDER_VISUALS`'s `Logo` fields would silently end up `undefined`
+ * depending on unrelated load order. `providerTypes.ts` re-exports this
+ * function from here instead (one-way dependency, no cycle) — see its
+ * `getProviderLogo` export.
  */
 export function getProviderLogo(
   type: string
