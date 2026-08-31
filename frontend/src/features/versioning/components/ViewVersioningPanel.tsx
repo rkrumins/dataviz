@@ -21,6 +21,7 @@ import { ChangeTreePanel } from './ChangeTreePanel'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
 import { ViewHistoryTimeline } from './ViewHistoryTimeline'
 import { DataHealthTab } from './DataHealthTab'
+import { MOTION } from '@/lib/motion'
 
 export type ViewPanelTab = 'changes' | 'prs' | 'history' | 'health'
 
@@ -110,7 +111,7 @@ export function ViewVersioningPanel({
         className="fixed right-0 top-0 h-full w-[560px] max-w-[94vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
         initial={{ x: 560 }}
         animate={{ x: 0 }}
-        transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+        transition={MOTION.modalSpring}
       >
         <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-glass-border/60">
           <div className="min-w-0">

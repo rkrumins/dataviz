@@ -32,6 +32,7 @@ import type { Predicate } from '@/types/search'
 import { DisplayRuleEditor } from './DisplayRuleEditor'
 import { DisplayRuleList } from './DisplayRuleList'
 import { PropertyBrowser } from './PropertyBrowser'
+import { MOTION } from '@/lib/motion'
 
 
 export interface PropertyManagerDrawerProps {
@@ -132,10 +133,13 @@ export function PropertyManagerDrawer({
                     initial={{ width: 0, opacity: 0 }}
                     animate={{ width: 'clamp(380px, 30vw, 520px)', opacity: 1 }}
                     exit={{ width: 0, opacity: 0 }}
-                    transition={{ type: 'spring', stiffness: 400, damping: 35 }}
+                    transition={MOTION.drawerSlide}
                     className={cn(
                         'relative h-full flex-shrink-0 overflow-hidden',
-                        'bg-canvas-elevated/98 backdrop-blur-2xl',
+                        // `/98` on a var() token emits no rule — this surface was fully transparent and
+                        // leaning on backdrop-blur-2xl, the costliest radius, on a node whose
+                        // width animates. Opaque instead: nothing shows through, nothing to blur.
+                        'bg-canvas-elevated',
                         'border-l border-glass-border shadow-lg shadow-black/20',
                     )}
                 >
