@@ -1274,12 +1274,35 @@ export function ContextViewCanvas({
   // — matches the trace v2 contract where only traceable entities can be the
   // level a trace runs at. Tags / glossary terms are excluded.
   const schemaEntityTypes = useViewEntityTypes()
+
+  // Entity types the ontology INTROSPECTED from the graph include labels that
+  // FalkorDB still lists after their last node is gone — `db.labels()` keeps a
+  // label in the schema forever. `SentinelMarker`, left behind by a test, is
+  // one: zero nodes, `hierarchy.level: 0`, `traceable: true`. The real level-0
+  // type here (`domain`) is `traceable: false`, so the zombie won the
+  // coarsest-first sort below and was sent as the granularity on EVERY
+  // aggregated-edge request, app-wide.
+  //
+  // A level nothing is filed under is not a granularity. Require the type to
+  // be present on the canvas: a type with no entities cannot be a meaningful
+  // aggregation level, and this holds for any future zombie without anyone
+  // having to notice it.
+  const presentEntityTypes = useMemo(() => {
+    const present = new Set<string>()
+    for (const n of nodes) {
+      const t = n.data?.type as string | undefined
+      if (t) present.add(t)
+    }
+    return present
+  }, [nodes])
+
   const granularityOptions = useMemo(
     () => schemaEntityTypes
       .filter(et => et.hierarchy?.level !== undefined)
       .filter(et => et.behavior?.traceable !== false)
+      .filter(et => presentEntityTypes.size === 0 || presentEntityTypes.has(et.id))
       .map(et => ({ id: et.id, name: et.name, level: et.hierarchy.level })),
-    [schemaEntityTypes]
+    [schemaEntityTypes, presentEntityTypes]
   )
 
   // Auto-select the coarsest (lowest-level) granularity once options are
