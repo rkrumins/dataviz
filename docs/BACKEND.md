@@ -553,8 +553,10 @@ constraint stay hand-written rather than generated from the catalog;
 `test_provider_type_literals.py` fails CI if `provider_type == "…"` dispatch is
 reintroduced.
 
-The recipe for adding a type is in
-[DEVELOPER_GUIDE.md → Adding a graph data provider](../DEVELOPER_GUIDE.md#adding-a-graph-data-provider).
+The recipe for adding a type is in `DEVELOPER_GUIDE.md` at the repository root,
+under "Adding a graph data provider". (Not a link: that file sits outside the
+`docs/` tree the in-app viewer serves, so a relative link to it 404s in-app —
+which `docsIntegrity.test.ts` enforces.)
 
 ### FalkorDB Implementation Details
 
