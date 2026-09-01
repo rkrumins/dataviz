@@ -12,8 +12,8 @@
  * whole band of chrome for two controls, stacked under a page header that named the
  * view and above a canvas toolbar that named it again. Reviews moved up into the page
  * header (ViewReviewsButton) and the switcher moved down into the Context View's
- * toolbar, which had a title slot going spare. What is left here on main is three
- * TRANSIENT chips — projection sync, rollup sync, an open-review count — so the row
+ * toolbar, which had a title slot going spare. What is left here on main is two
+ * TRANSIENT chips — projection sync and rollup sync — so the row
  * is `empty:hidden`: when every child renders null there is no bar, no border and no
  * padding, and the canvas takes the space back.
  *
@@ -45,7 +45,6 @@ import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
 import { CommitDialog } from './CommitDialog'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
-import { ViewPrIndicator } from './ViewPrIndicator'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 
 interface CanvasVersioningBarProps {
@@ -322,9 +321,13 @@ export function CanvasVersioningBar({
             in both states instead. */}
         {isDraft && branchId && <div className="flex-1" />}
 
-        {/* Review SIGNAL — hides itself when there is nothing open. The Reviews
-            BUTTON that stood beside it now lives in the page header. */}
-        <ViewPrIndicator wsId={workspaceId} viewId={viewId} onOpen={() => setPanelTab('prs')} className="ml-auto" />
+        {/* The review SIGNAL followed the Reviews BUTTON up into the page
+            header, and for the same reason the button went: it is the one
+            thing here that is NOT transient. The other two chips appear while
+            a projection or a rollup catches up and then go; one open review
+            held this whole band for as long as it stood open, above a toolbar,
+            which read as a dead strip. It now sits under the actions it points
+            at, and this row is empty again on main. */}
 
         {isDraft && branchId && (
           <>

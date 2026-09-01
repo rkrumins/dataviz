@@ -357,6 +357,49 @@ async def test_readiness_with_a_current_projector_is_unchanged(
 
 
 @pytest.mark.asyncio
+async def test_readiness_is_current_on_a_caught_up_graph_carrying_a_STALE_error(
+    agg_session, stub_health,
+):
+    """The false alarm, pinned at the surface a user actually saw it on.
+
+    `test_a_stale_error_on_a_caught_up_graph_is_not_a_wedge` pins the verdict
+    inside `evaluate`. This pins the CONSEQUENCE on the wire, because that is
+    where it was reported from: a Context View's Data Loads panel marked every
+    row "Connections still catching up", with a "Catching up" pill on its
+    header, for a graph sitting exactly at its published head. `Nexus Lineage`
+    was projected=8, head=8, status idle — and carrying "FalkorDB has extra
+    entities vs committed main" from a pass that had long since stopped
+    running.
+
+    `last_error` is only ever rewritten by the next projection pass, so on a
+    graph nothing publishes to any more it never clears. Reading it as "not
+    current" tells a user their data has not arrived when it has, on a panel
+    whose entire job is saying whether it has.
+    """
+    stub_health["ds_v"] = _health(
+        last_error=(
+            "FalkorDB has extra entities vs committed main "
+            "(PG n=1907,e=5212; Falkor n=1912,e=2270) — run versioning "
+            "enablement/bootstrap to import them"
+        ),
+    )
+
+    r = await _service().get_readiness("ds_v", agg_session)
+
+    assert r.projector_current is True, (
+        "a graph at its published head is serving its connections; an error "
+        "from a pass that is no longer running does not change that"
+    )
+    assert r.projection_commits_behind == 0
+    # The error still travels — it is evidence an operator may want, and the
+    # infrastructure panel lists it. It simply is not a verdict.
+    assert r.projection_last_error is not None
+    assert r.message == "Aggregation complete. Views can be created.", (
+        "a caught-up source must not be told its connections are catching up"
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_unreadable_projection_store_reports_unknown_not_healthy(
     agg_session, monkeypatch,
 ):
