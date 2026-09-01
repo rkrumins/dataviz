@@ -570,45 +570,19 @@ export function ExplorerPreviewDrawer({
                   addition to this panel has somewhere to give height back
                   from. Native <details>, like the chain's own disclosure —
                   keyboard reachable and correctly announced without JS. */}
-              <details className="group/details" open>
-                <summary className="flex cursor-pointer list-none items-center gap-1.5 -mx-1 rounded-lg px-1 py-1 hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-                  <ChevronRight
-                    aria-hidden
-                    className="h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform group-open/details:rotate-90"
-                  />
-                  <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted">
-                    Details
-                  </span>
-                  {/* The gist, so the fold costs nothing at a glance. Hidden
-                      once open, where the rows say it properly. */}
-                  <span className="ml-1 truncate text-[11px] font-normal normal-case tracking-normal text-ink-muted/70 group-open/details:hidden">
-                    {[
-                      view.createdByName ? `by ${view.createdByName}` : null,
-                      view.updatedAt ? `updated ${timeAgo(view.updatedAt)}` : null,
-                    ].filter(Boolean).join(' · ')}
-                  </span>
-                </summary>
-                <div className="space-y-3 pt-3">
-                  {/* THE TYPE IS ALREADY THE PILL BESIDE THE TITLE, and the
-                      layout is the same word again on nearly every view — this
-                      panel printed "Context View" three times in the top third
-                      of itself, twice of that inside two large cards sitting
-                      side by side. The pill keeps the type; the layout earns a
-                      line only when it actually differs from it, which is the
-                      only case where it tells the reader anything. */}
-                  {(() => {
-                    const layoutLabel = viewTypeLabel(view.config?.layout?.type)
-                    const typeLabel = viewTypeMeta(view.viewType).label
-                    if (!layoutLabel || layoutLabel === typeLabel) return null
-                    return (
-                      <DetailRow
-                        icon={LayoutDashboard}
-                        label="Layout"
-                        value={layoutLabel}
-                      />
-                    )
-                  })()}
-
+              {/* WHO MADE IT IS THE ONE FACT WORTH A LINE UNCONDITIONALLY.
+                  Folding the whole block away hid that too, and it is the
+                  question this panel is opened for most often; showing all
+                  four rows spent about 150px of a 1080px screen on
+                  timestamps, which is what pushed the buttons below the fold.
+                  So: the author stays, and the dates go behind one disclosure.
+                  Native <details>, like the chain's own — keyboard reachable
+                  and correctly announced without a line of JS. */}
+              <div>
+                <h4 className="text-[10px] uppercase tracking-widest font-bold text-ink-muted mb-3">
+                  Details
+                </h4>
+                <div className="space-y-3">
                   {/* Created by — prefer the server-resolved display name;
                       fall back to "Unknown" when unresolvable — never the
                       raw id (kept in a title attr for debugging). Email
@@ -636,6 +610,47 @@ export function ExplorerPreviewDrawer({
                     />
                   )}
 
+
+                  {/* THE DATES, BEHIND ONE DISCLOSURE. Four timestamp rows is
+                      the least-read block on the panel and about 150px of a
+                      1080px screen — the last thing pushing the buttons below
+                      the fold. Whoever needs "when exactly" opens it; whoever
+                      opened this panel to see who built the view already has
+                      their answer above. */}
+                  <details className="group/dates">
+                    <summary className="flex cursor-pointer list-none items-center gap-1.5 -mx-1 rounded-lg px-1 py-1 text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                      <ChevronRight
+                        aria-hidden
+                        className="h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform group-open/dates:rotate-90"
+                      />
+                      See all details
+                      {/* The gist, so the fold costs nothing at a glance. */}
+                      {view.updatedAt && (
+                        <span className="ml-1 truncate font-normal text-ink-muted/70 group-open/dates:hidden">
+                          updated {timeAgo(view.updatedAt)}
+                        </span>
+                      )}
+                    </summary>
+                    <div className="space-y-3 pt-3">
+                  {/* THE TYPE IS ALREADY THE PILL BESIDE THE TITLE, and the
+                      layout is the same word again on nearly every view — this
+                      panel printed "Context View" three times in the top third
+                      of itself, twice of that inside two large cards sitting
+                      side by side. The pill keeps the type; the layout earns a
+                      line only when it actually differs from it, which is the
+                      only case where it tells the reader anything. */}
+                  {(() => {
+                    const layoutLabel = viewTypeLabel(view.config?.layout?.type)
+                    const typeLabel = viewTypeMeta(view.viewType).label
+                    if (!layoutLabel || layoutLabel === typeLabel) return null
+                    return (
+                      <DetailRow
+                        icon={LayoutDashboard}
+                        label="Layout"
+                        value={layoutLabel}
+                      />
+                    )
+                  })()}
                   {/* Created, and Updated only when it says something new. A
                       view nobody has edited since it was made carries the same
                       instant in both — this panel printed
@@ -695,8 +710,10 @@ export function ExplorerPreviewDrawer({
                       )
                     }
                   />
+                    </div>
+                  </details>
                 </div>
-              </details>
+              </div>
 
               {/* Usage — the question somebody opening a details panel is
                   actually asking about a view they do not recognise. */}

@@ -84,6 +84,9 @@ import {
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ViewReviewsButton } from '@/features/versioning/components/ViewReviewsButton'
+import { ViewPrIndicator } from '@/features/versioning/components/ViewPrIndicator'
+import { useViewPrCounts } from '@/features/versioning/hooks/useVersioning'
+import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { ViewActivityDrawer } from '@/components/views/ViewActivityDrawer'
 import { EditDetailsPanel } from '@/components/views/EditDetailsPanel'
 import { ViewBuiltOn } from '@/components/views/ViewBuiltOn'
@@ -107,7 +110,24 @@ const PENDING_BADGE = 'inline-flex items-center gap-1 rounded-full border border
 /** The quiet group: Details, Activity, Reviews. Share is deliberately NOT one
  *  of them — it is bordered, so the action that reaches other people does not
  *  read as a fourth way to look something up. */
-const ACTION_BUTTON = 'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500'
+const ACTION_BUTTON_BASE = 'inline-flex items-center gap-1.5 rounded-lg font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500'
+/**
+ * Two sizes, and which one is used depends on whether the review chip is under
+ * them.
+ *
+ * That chip — "N from this view · N on data source" — used to hold a band of
+ * its own between this header and the canvas toolbar. It is the one thing in
+ * `CanvasVersioningBar` that is NOT transient: the other chips appear while a
+ * projection or a rollup catches up and then go, whereas one open review kept a
+ * whole band alive for as long as it stood open, which read as a dead strip.
+ *
+ * It sits under this cluster now. When it is absent — an external graph with no
+ * version control at all, or a versioned one with nothing open — the cluster
+ * takes the line back and spends it on itself, because four small controls in a
+ * wide header can afford to be legible.
+ */
+const ACTION_BUTTON = `${ACTION_BUTTON_BASE} px-2.5 py-1.5 text-xs`
+const ACTION_BUTTON_ROOMY = `${ACTION_BUTTON_BASE} px-3 py-2 text-[13px]`
 /** An identity fact: quiet by default, a real hover target when it goes
  *  somewhere. The negative margin keeps the hover chip from pushing the run
  *  of facts apart — it grows into its own gap. */
@@ -209,6 +229,24 @@ export function ViewPageHeader({ viewId, workspaceName }: {
         enabled: Boolean(viewId),
     })
 
+    // Whether the review chip will render, which decides how much room the
+    // actions above it get. Shares the chip's own query key, so asking here
+    // costs no request — and the chip is about to ask for exactly this.
+    //
+    // ABOVE THE `!view` GUARD, because everything below it is unreachable on
+    // the first render and a hook called there would change the hook count the
+    // moment the view arrives. `useViewPrCounts` is `enabled`-gated on both
+    // arguments, so an undefined workspace simply asks nothing.
+    //
+    // An EXTERNAL graph never has counts at all — the chip is scoped to a view
+    // whose data source is versioned, and the versioning bar it came from never
+    // rendered without one. So an unversioned view lands in the roomier layout
+    // by construction rather than by a special case for it.
+    const openVersioningPanel = useVersioningPanelStore((st) => st.openPanel)
+    const { data: prCounts } = useViewPrCounts(view?.workspaceId, view?.id)
+    const hasOpenReviews = ((prCounts?.fromView ?? 0) + (prCounts?.onDataSource ?? 0)) > 0
+    const actionButtonClass = hasOpenReviews ? ACTION_BUTTON : ACTION_BUTTON_ROOMY
+
     if (!view) return null
 
     const meta = viewTypeMeta(view.viewType)
@@ -224,6 +262,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     const access = view.access ?? null
     const canEditDetails = access ? access.canEdit : true
     const readOnly = access?.dataAccess === 'readonly'
+
 
     // Never a raw id in the identity line — it has one line and an id spends
     // it on nothing. The full account can still print the id as a last resort.
@@ -510,7 +549,15 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     <ViewUsageBadge viewId={viewId} className="mt-1 hidden md:inline-flex" />
                 </div>
 
-                <div className="relative ml-auto flex items-center gap-1 shrink-0">
+                {/* The action cluster, and UNDER IT the review chip.
+                    That chip used to hold a band of its own between this header
+                    and the canvas toolbar — and it is the one thing in
+                    `CanvasVersioningBar` that is not transient, so a single
+                    open review kept a whole strip alive for as long as it stood
+                    open, reading as dead chrome. It belongs with the controls
+                    it points at. */}
+                <div className="relative ml-auto flex flex-col items-end gap-1 shrink-0">
+                <div className="flex items-center gap-1">
                     {/* SHARE — the one outward-facing action, and the only
                         bordered control here, so it reads as a different sort
                         of thing from the three quiet "tell me about this view"
@@ -559,7 +606,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             <button
                                 type="button"
                                 onClick={() => openDetails('edit')}
-                                className={ACTION_BUTTON}
+                                className={actionButtonClass}
                                 aria-label="Details"
                             >
                                 <Pencil className="w-3.5 h-3.5" aria-hidden />
@@ -575,7 +622,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         <button
                             type="button"
                             onClick={() => setActivityOpen(true)}
-                            className={ACTION_BUTTON}
+                            className={actionButtonClass}
                             aria-label="Activity"
                         >
                             <History className="w-3.5 h-3.5" aria-hidden />
@@ -592,9 +639,22 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             workspaceId={view.workspaceId}
                             dataSourceId={view.dataSourceId ?? null}
                             viewId={view.id}
-                            className={ACTION_BUTTON}
+                            className={actionButtonClass}
                         />
                     )}
+                </div>
+
+                {/* Renders nothing when there is nothing open, which is what
+                    lets the row above take the space back. A read-only session
+                    gets no versioning chrome at all, so it gets no route into
+                    it either — the same rule the Reviews button follows. */}
+                {!readOnly && hasOpenReviews && (
+                    <ViewPrIndicator
+                        wsId={view.workspaceId}
+                        viewId={view.id}
+                        onOpen={() => openVersioningPanel('prs')}
+                    />
+                )}
                 </div>
             </header>
 
