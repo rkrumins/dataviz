@@ -120,16 +120,30 @@ async def test_group_membership_round_trip(test_client: AsyncClient, db_session)
         json={"userId": user_id},
     )
     assert r.status_code == 201
+    # The add route names the person too, off the row its own 404 check
+    # already fetched — so it doesn't return a DTO only IT leaves blank.
+    assert r.json()["displayName"] == "Bob Bobson"
+    assert r.json()["email"] == "bob@example.com"
 
-    # Member count reflected.
+    # Member count reflected, and the first few faces come with it so the
+    # admin table can draw a stack instead of a bare number.
     r = await test_client.get("/api/v1/admin/groups")
     g = next(g for g in r.json() if g["id"] == group_id)
     assert g["memberCount"] == 1
+    assert g["memberPreview"] == [{"id": user_id, "displayName": "Bob Bobson"}]
 
-    # List members.
+    # List members — WITH their identities. The FE used to resolve these by
+    # joining against the admin user list, which returns its 50 newest
+    # accounts and needs `system:admin`; a delegated groups admin got a 403
+    # and an older member rendered as a bare id.
     r = await test_client.get(f"/api/v1/admin/groups/{group_id}/members")
     assert r.status_code == 200
     assert {m["userId"] for m in r.json()} == {user_id}
+    m = r.json()[0]
+    assert m["displayName"] == "Bob Bobson"
+    assert m["email"] == "bob@example.com"
+    assert m["status"] == "active"
+    assert m["deleted"] is False
 
     # Remove.
     r = await test_client.delete(
@@ -669,3 +683,33 @@ async def test_member_provenance_reaches_the_admin(test_client: AsyncClient, db_
     assert r.status_code == 200
     by_user = {m["userId"]: m["source"] for m in r.json()}
     assert by_user == {local_id: "local", sso_id: "sso"}
+
+
+@pytest.mark.asyncio
+async def test_member_with_no_user_row_is_still_listed(test_client: AsyncClient, db_session):
+    """An orphaned membership is a real state, not a row to hide.
+
+    ``display_name`` stays ``None`` so the FE keeps showing the raw id:
+    inventing "Unknown user" over it would claim a fact nobody has, and
+    dropping the row would leave an admin unable to see what to remove.
+    """
+    from backend.app.db.models import GroupMemberORM
+
+    r = await test_client.post("/api/v1/admin/groups", json={"name": "orphans"})
+    group_id = r.json()["id"]
+
+    db_session.add(GroupMemberORM(group_id=group_id, user_id="usr_never_existed"))
+    await db_session.commit()
+
+    r = await test_client.get(f"/api/v1/admin/groups/{group_id}/members")
+    assert r.status_code == 200
+    rows = r.json()
+    assert [m["userId"] for m in rows] == ["usr_never_existed"]
+    assert rows[0]["displayName"] is None
+    assert rows[0]["email"] is None
+
+    # The face-stack simply has nobody to show; the count still counts.
+    r = await test_client.get("/api/v1/admin/groups")
+    g = next(g for g in r.json() if g["id"] == group_id)
+    assert g["memberCount"] == 1
+    assert g["memberPreview"] == []

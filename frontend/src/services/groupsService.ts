@@ -13,6 +13,12 @@ const API = '/api/v1/admin/groups'
 
 // ── Types ────────────────────────────────────────────────────────────
 
+/** One face in a group's avatar stack on the admin table. */
+export interface GroupMemberPreview {
+    id: string
+    displayName: string | null
+}
+
 export interface GroupResponse {
     id: string
     name: string
@@ -22,6 +28,9 @@ export interface GroupResponse {
     createdAt: string
     updatedAt: string
     memberCount: number
+    /** First few members, so the table can draw faces instead of a bare
+     *  number. Optional so an older backend still parses. */
+    memberPreview?: GroupMemberPreview[]
 }
 
 export interface GroupCreateRequest {
@@ -42,6 +51,16 @@ export interface GroupMemberResponse {
     /** "local" (an admin added them) or "sso" (the directory did, via a
      *  group mapping). Optional so an older backend still parses. */
     source?: string
+    /** Server-resolved identity. The member list used to join these
+     *  client-side against the admin user list, which capped at 50 rows
+     *  and 403'd for a delegated groups admin. `null` means the id
+     *  resolves to nothing — show the raw id, never invent a name. */
+    displayName?: string | null
+    email?: string | null
+    status?: string | null
+    /** A soft-deleted account still in the group; the list says so
+     *  rather than showing them as current. */
+    deleted?: boolean
 }
 
 

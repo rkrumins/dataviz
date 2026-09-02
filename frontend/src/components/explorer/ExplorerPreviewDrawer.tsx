@@ -31,7 +31,6 @@ import {
   Trash2,
   Tag,
   Calendar,
-  User,
   ExternalLink,
   Pencil,
   RefreshCw,
@@ -42,6 +41,8 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { UserAvatar } from '@/components/ui/UserAvatar'
+import { CreatorHoverCard } from './CreatorHoverCard'
 import { VISIBILITY_ICON, visibilityDescription, visibilityLabel } from '@/lib/viewVisibility'
 import { timeAgo } from '@/lib/timeAgo'
 import { DynamicIcon, resolveViewIcon, viewTypeMeta, viewTypeLabel } from '@/lib/viewUtils'
@@ -589,12 +590,30 @@ export function ExplorerPreviewDrawer({
                       renders as a subtle secondary line so operators can
                       reach out without leaving the drawer. */}
                   {(view.createdByName || view.createdBy) && (
-                    <DetailRow
-                      icon={User}
-                      label="Created By"
-                      value={
-                        <span className="flex flex-col min-w-0">
-                          <span className="font-medium text-ink truncate" title={view.createdBy}>
+                    <CreatorHoverCard
+                      userId={view.createdBy ?? null}
+                      displayName={view.createdByName ?? null}
+                      email={view.createdByEmail ?? null}
+                    >
+                      <div
+                        tabIndex={0}
+                        className="flex items-start gap-3 -mx-1 rounded-xl px-1 py-1 cursor-default transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                      >
+                        {/* The person, not a generic glyph. `palette` is the
+                            family every other Explorer creator surface uses
+                            (the hover card, the card footer, the creator
+                            filter), so one person is one swatch throughout. */}
+                        <UserAvatar
+                          userId={view.createdBy ?? null}
+                          name={view.createdByName ?? 'Unknown'}
+                          shape="palette"
+                          className="w-9 h-9 text-[11px] font-bold ring-1 ring-black/[0.06] dark:ring-white/[0.08]"
+                        />
+                        <span className="flex flex-col min-w-0 flex-1">
+                          <span className="text-[10px] uppercase tracking-widest font-bold text-ink-muted mb-0.5">
+                            Created By
+                          </span>
+                          <span className="text-sm font-medium text-ink truncate" title={view.createdBy}>
                             {view.createdByName ?? 'Unknown'}
                           </span>
                           {view.createdByEmail && (
@@ -606,8 +625,8 @@ export function ExplorerPreviewDrawer({
                             </a>
                           )}
                         </span>
-                      }
-                    />
+                      </div>
+                    </CreatorHoverCard>
                   )}
 
 
@@ -681,7 +700,15 @@ export function ExplorerPreviewDrawer({
                             <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.updatedAt)})</span>
                           </span>
                           {view.updatedByName && (
-                            <span className="text-[11px] text-ink-muted truncate">by {view.updatedByName}</span>
+                            <span className="mt-0.5 flex items-center gap-1.5 min-w-0">
+                              <UserAvatar
+                                userId={view.updatedBy ?? null}
+                                name={view.updatedByName}
+                                shape="palette"
+                                className="w-5 h-5 text-[8px] font-bold"
+                              />
+                              <span className="text-[11px] text-ink-muted truncate">by {view.updatedByName}</span>
+                            </span>
                           )}
                         </span>
                       }
@@ -702,7 +729,15 @@ export function ExplorerPreviewDrawer({
                             <span className="text-ink-muted text-xs ml-1.5">({timeAgo(view.dataUpdatedAt)})</span>
                           </span>
                           {view.dataUpdatedByName && (
-                            <span className="text-[11px] text-ink-muted truncate">by {view.dataUpdatedByName}</span>
+                            <span className="mt-0.5 flex items-center gap-1.5 min-w-0">
+                              <UserAvatar
+                                userId={view.dataUpdatedBy ?? null}
+                                name={view.dataUpdatedByName}
+                                shape="palette"
+                                className="w-5 h-5 text-[8px] font-bold"
+                              />
+                              <span className="text-[11px] text-ink-muted truncate">by {view.dataUpdatedByName}</span>
+                            </span>
                           )}
                         </span>
                       ) : (

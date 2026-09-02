@@ -12,7 +12,8 @@ from typing import Optional
 from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import GroupORM, GroupMemberORM
+from backend.app.db.models import GroupORM, GroupMemberORM, UserORM
+from backend.common.display_name import resolve_display_name
 
 
 def _now() -> str:
@@ -183,3 +184,54 @@ async def count_members_batch(
         .group_by(GroupMemberORM.group_id)
     )
     return {gid: cnt for gid, cnt in rows.all()}
+
+
+async def member_preview_batch(
+    session: AsyncSession,
+    group_ids: list[str] | set[str],
+    *,
+    per_group: int = 4,
+) -> dict[str, list[dict[str, str]]]:
+    """The first ``per_group`` members of each group, in one query.
+
+    Sibling of :func:`count_members_batch`, and it exists for the same
+    reason: the admin groups table draws a face-stack per row, and a query
+    per row is the N+1 that helper was written to kill.
+
+    Ordered by ``added_at`` so the stack is stable between loads — a
+    reshuffling set of faces reads as "the membership changed" when
+    nothing did.
+
+    Returns ``{group_id: [{"id": ..., "name": ...}, ...]}``; a group with
+    no members is simply absent (callers should ``.get(gid, [])``).
+    """
+    if not group_ids:
+        return {}
+    ranked = (
+        select(
+            GroupMemberORM.group_id,
+            UserORM.id.label("user_id"),
+            UserORM.display_name,
+            UserORM.first_name,
+            UserORM.last_name,
+            UserORM.email,
+            func.row_number().over(
+                partition_by=GroupMemberORM.group_id,
+                order_by=GroupMemberORM.added_at,
+            ).label("rn"),
+        )
+        .join(UserORM, UserORM.id == GroupMemberORM.user_id)
+        .where(GroupMemberORM.group_id.in_(list(group_ids)))
+        .subquery()
+    )
+    rows = (await session.execute(
+        select(ranked).where(ranked.c.rn <= per_group)
+    )).all()
+
+    preview: dict[str, list[dict[str, str]]] = {}
+    for gid, uid, display, first, last, email, _rn in rows:
+        # Through the shared resolver, never a re-join of the halves, so a
+        # stored display name wins here as it does in the member list.
+        name = resolve_display_name(display, first, last) or email
+        preview.setdefault(gid, []).append({"id": uid, "name": name})
+    return preview
