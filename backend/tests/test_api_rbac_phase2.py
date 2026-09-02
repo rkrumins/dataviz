@@ -130,7 +130,9 @@ async def test_group_membership_round_trip(test_client: AsyncClient, db_session)
     r = await test_client.get("/api/v1/admin/groups")
     g = next(g for g in r.json() if g["id"] == group_id)
     assert g["memberCount"] == 1
-    assert g["memberPreview"] == [{"id": user_id, "displayName": "Bob Bobson"}]
+    assert g["memberPreview"] == [
+        {"id": user_id, "displayName": "Bob Bobson", "avatarId": None},
+    ]
 
     # List members — WITH their identities. The FE used to resolve these by
     # joining against the admin user list, which returns its 50 newest
@@ -144,6 +146,9 @@ async def test_group_membership_round_trip(test_client: AsyncClient, db_session)
     assert m["email"] == "bob@example.com"
     assert m["status"] == "active"
     assert m["deleted"] is False
+    # The picked illustration rides along, so the avatar stack and the member
+    # row can draw it instead of falling back to initials.
+    assert "avatarId" in m
 
     # Remove.
     r = await test_client.delete(

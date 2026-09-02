@@ -188,6 +188,7 @@ function MemberStack({ group, onOpen }: { group: GroupResponse; onOpen: () => vo
                         <UserAvatar
                             key={m.id}
                             userId={m.id}
+                            avatarId={m.avatarId}
                             name={m.displayName ?? m.id}
                             shape="gradient"
                             /* The ring cuts each avatar out of the one behind

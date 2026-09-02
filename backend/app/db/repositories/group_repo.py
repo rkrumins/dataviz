@@ -191,7 +191,7 @@ async def member_preview_batch(
     group_ids: list[str] | set[str],
     *,
     per_group: int = 4,
-) -> dict[str, list[dict[str, str]]]:
+) -> dict[str, list[dict[str, str | None]]]:
     """The first ``per_group`` members of each group, in one query.
 
     Sibling of :func:`count_members_batch`, and it exists for the same
@@ -215,6 +215,7 @@ async def member_preview_batch(
             UserORM.first_name,
             UserORM.last_name,
             UserORM.email,
+            UserORM.avatar_id,
             func.row_number().over(
                 partition_by=GroupMemberORM.group_id,
                 order_by=GroupMemberORM.added_at,
@@ -229,9 +230,11 @@ async def member_preview_batch(
     )).all()
 
     preview: dict[str, list[dict[str, str]]] = {}
-    for gid, uid, display, first, last, email, _rn in rows:
+    for gid, uid, display, first, last, email, avatar_id, _rn in rows:
         # Through the shared resolver, never a re-join of the halves, so a
         # stored display name wins here as it does in the member list.
         name = resolve_display_name(display, first, last) or email
-        preview.setdefault(gid, []).append({"id": uid, "name": name})
+        preview.setdefault(gid, []).append(
+            {"id": uid, "name": name, "avatar_id": avatar_id},
+        )
     return preview

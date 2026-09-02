@@ -52,7 +52,7 @@ def _to_response(
     group_orm,
     *,
     member_count: int,
-    member_preview: Sequence[dict[str, str]] = (),
+    member_preview: Sequence[dict[str, str | None]] = (),
 ) -> GroupResponse:
     """Build the DTO from a group row plus counts the CALLER resolved.
 
@@ -71,7 +71,9 @@ def _to_response(
         updated_at=group_orm.updated_at,
         member_count=member_count,
         member_preview=[
-            GroupMemberPreview(id=p["id"], display_name=p["name"])
+            GroupMemberPreview(
+                id=p["id"], display_name=p["name"], avatar_id=p.get("avatar_id"),
+            )
             for p in member_preview
         ],
     )
@@ -99,6 +101,7 @@ def _member_response(member_orm, identity: dict | None) -> GroupMemberResponse:
         email=identity.get("email"),
         status=identity.get("status"),
         deleted=bool(identity.get("deleted")),
+        avatar_id=identity.get("avatar_id"),
     )
 
 
@@ -323,6 +326,7 @@ async def add_member(
         "email": user.email,
         "status": user.status,
         "deleted": user.deleted_at is not None,
+        "avatar_id": user.avatar_id,
     })
 
 

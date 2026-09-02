@@ -408,6 +408,7 @@ function MemberRow({
             {resolved ? (
                 <UserAvatar
                     userId={m.userId}
+                    avatarId={m.avatarId}
                     name={name}
                     shape="gradient"
                     className="w-9 h-9 text-[11px] font-bold shadow-sm"

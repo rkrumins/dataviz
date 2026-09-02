@@ -75,6 +75,8 @@ class GroupMemberPreview(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     id: str
     display_name: Optional[str] = Field(default=None, alias="displayName")
+    #: The picked illustration, so the stack can draw it instead of initials.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
 
 
 class GroupResponse(BaseModel):
@@ -121,6 +123,9 @@ class GroupMemberResponse(BaseModel):
     #: Soft-deleted accounts stay in the group until somebody removes
     #: them, so the list says so rather than showing them as current.
     deleted: bool = False
+    #: The avatar illustration this person picked, when they picked one.
+    #: ``UserAvatar`` prefers the provider photo, then this, then initials.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
 
 
 class GroupMemberAddRequest(BaseModel):

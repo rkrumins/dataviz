@@ -17,6 +17,8 @@ const API = '/api/v1/admin/groups'
 export interface GroupMemberPreview {
     id: string
     displayName: string | null
+    /** The illustration this person picked, when they picked one. */
+    avatarId?: string | null
 }
 
 export interface GroupResponse {
@@ -61,6 +63,9 @@ export interface GroupMemberResponse {
     /** A soft-deleted account still in the group; the list says so
      *  rather than showing them as current. */
     deleted?: boolean
+    /** The picked illustration. `UserAvatar` prefers the provider photo,
+     *  then this, then gradient initials. */
+    avatarId?: string | null
 }
 
 
