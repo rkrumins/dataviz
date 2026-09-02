@@ -193,6 +193,56 @@ def test_a_type_still_present_is_not_reported():
     assert gone == []
 
 
+def test_a_vanished_derived_label_is_not_reported():
+    """`_AggMeta` is the aggregation pipeline's own run stamp — MERGEd per run,
+    wiped by projection seeds and purges. Reporting it drove the amber
+    "One type has disappeared" banner on every rebuild cycle. Snapshots
+    captured before the providers stopped recording it stay readable for the
+    retention window, so this has to hold on the READ side."""
+    gone = ps.types_that_vanished([
+        _o("a", "2026-08-01", types={"Table": 100, "_AggMeta": 1}),
+        _o("a", "2026-08-02", types={"Table": 100}),
+    ], breakdown="entity_type")
+    assert gone == []
+
+
+def test_a_real_type_is_still_reported_alongside_a_derived_one():
+    gone = ps.types_that_vanished([
+        _o("a", "2026-08-01", types={"Table": 100, "Column": 40, "_AggMeta": 1}),
+        _o("a", "2026-08-02", types={"Table": 100}),
+    ], breakdown="entity_type")
+    assert gone == [{"type": "Column", "peak": 40}]
+
+
+def test_a_customer_underscore_label_is_still_reported():
+    """Explicit list, not a "_" prefix rule."""
+    gone = ps.types_that_vanished([
+        _o("a", "2026-08-01", types={"Table": 100, "_internal": 7}),
+        _o("a", "2026-08-02", types={"Table": 100}),
+    ], breakdown="entity_type")
+    assert gone == [{"type": "_internal", "peak": 7}]
+
+
+def test_a_vanished_aggregated_edge_type_is_not_reported():
+    """A purge drops every AGGREGATED edge by design — the platform rebuilding
+    its own overlay, not the source losing relationships."""
+    gone = ps.types_that_vanished([
+        _o("a", "2026-08-01", edge_types={"LINKS": 40, "AGGREGATED": 5000}),
+        _o("a", "2026-08-02", edge_types={"LINKS": 40}),
+    ], breakdown="edge_type")
+    assert gone == []
+
+
+def test_derived_labels_are_kept_out_of_the_drawn_series():
+    """Not just the banner: the type ledger and the chart read the same
+    counts, and `_AggMeta` ranked by PEAK would sit near the top of both."""
+    out = ps.build_series(
+        [_o("a", "2026-08-01", nodes=101, types={"Table": 100, "_AggMeta": 1})],
+        metric="nodes", breakdown="entity_type",
+    )
+    assert [s["key"] for s in out["series"]] == ["Table"]
+
+
 def test_an_empty_window_produces_an_empty_payload_not_an_error():
     out = ps.build_series([], metric="total")
     assert out == {"buckets": [], "series": [], "totals": {}}
