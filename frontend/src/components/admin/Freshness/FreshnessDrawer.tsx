@@ -887,6 +887,17 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         showClear: true, showRetry: true, primary: 'clear',
         retryWarning: 'may fail again until memory is freed.',
     },
+    query_memory: {
+        // NOT the same as out_of_memory: the store is healthy and has room —
+        // a single query wanted too many rows at once. The rebuild now
+        // narrows its scans automatically, so reaching this means it hit the
+        // narrowest slice it will go to, and the fix is to make the rebuild
+        // read less rather than to free memory.
+        why: 'One rebuild query asked the graph store for more rows than a single query is allowed to hold.',
+        how: "Set this source's Rollup storage to Auto so the rebuild stores fewer summary edges, then rebuild. If it recurs, an administrator can raise the graph store's per-query limit alongside its memory limit.",
+        showClear: true, showRetry: true, primary: 'clear',
+        retryWarning: 'will fail the same way until the rollup setting or the store limit changes.',
+    },
     provider_unavailable: {
         why: 'The graph store was unreachable during the rebuild.',
         how: 'Check that the graph store is back online, then retry the rebuild.',

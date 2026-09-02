@@ -410,6 +410,34 @@ def _is_loading_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_query_memory_error(exc: BaseException) -> bool:
+    """True when *exc* is FalkorDB refusing a query that exceeded the
+    server's per-query memory ceiling (``QUERY_MEM_CAPACITY``):
+    ``Query's mem consumption exceeded capacity``.
+
+    This is NOT an outage and NOT the instance-level ``maxmemory`` OOM. The
+    engine tracks live module-heap bytes per query thread and aborts the
+    single offending query; the server, the dataset and every other query
+    are unaffected. It is also DETERMINISTIC for a given query and payload
+    size — re-running it unchanged fails identically — so the only useful
+    reaction is to re-issue the query over a SMALLER slice, which is what
+    the aggregation pipeline's scan ladder does.
+
+    Matched by message, like :func:`_is_missing_graph_error`, because
+    FalkorDB surfaces it as a generic ``ResponseError`` rather than a
+    distinct class; the ``__cause__``/``__context__`` chain is walked like
+    the siblings above since the signal can arrive wrapped.
+    """
+    seen = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        if "mem consumption exceeded" in str(seen).lower():
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 class _EmptyResult:
     """Stand-in for a FalkorDB query result with no rows — returned by the
     tolerant read path when the graph key doesn't exist yet."""

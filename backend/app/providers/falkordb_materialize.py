@@ -301,6 +301,23 @@ class MaterializationPreconditionFailed(ValueError):
     terminally instead of re-running EXTRACT once per retry."""
 
 
+class MaterializationQueryMemoryExceeded(ValueError):
+    """A scan query exceeded the server's per-query memory ceiling
+    (``QUERY_MEM_CAPACITY``) even at the narrowest ID-range width the
+    shrink ladder descends to.
+
+    Deterministic at a fixed width: the engine buffers the whole result set
+    inside the tracked per-query budget, so re-issuing the same query over
+    the same slice fails identically. The worker fails the job terminally
+    rather than re-running EXTRACT once per retry.
+
+    Subclasses ``ValueError`` on purpose, exactly like the two guards above:
+    ``ValueError`` is in the circuit breaker's ignored set, so this reaches
+    the worker unwrapped instead of being relabelled ``ProviderUnavailable``
+    and counted against the breaker. A query too large for its slice is not
+    a sick provider."""
+
+
 # ---------------------------------------------------------------------------
 # Pair-key packing.
 #
@@ -489,12 +506,18 @@ class AggregationPipeline:
         self._pacing_ratio = self._knob_float("write_pacing_ratio", _pacing_ratio, 0.0, 10.0)
         self._phase_started = time.monotonic()
         self._phase_timings: Dict[str, float] = {}
-        # Shrink-on-timeout scan state (see _fetch_range): a per-query
-        # timeout halves the effective sub-range width for the REST of the
-        # run (sticky), re-growing after sustained successes. None = the
-        # knob width is healthy.
+        # Shrink-on-pressure scan state (see _fetch_range): a per-query
+        # timeout OR a per-query memory-ceiling refusal halves the effective
+        # sub-range width for the REST of the run (sticky), re-growing after
+        # sustained successes. None = the knob width is healthy.
         self._scan_subwidth: Optional[int] = None
         self._scan_success_streak = 0
+        # Narrowest width this run actually needed, and how many times the
+        # ladder engaged. Unlike _scan_subwidth these are never re-grown —
+        # they are the run's high-water mark of provider pressure, reported
+        # in run_stats so a run that succeeded only BY degrading is visible.
+        self._scan_min_width: Optional[int] = None
+        self._scan_shrinks = 0
 
         # ── Conformance diagnostics (Phase IV — loud, never silent) ──
         # Structured advisories surfaced in run_stats (and thus the job-detail
@@ -824,6 +847,20 @@ class AggregationPipeline:
                     {"pairs_by_level": self._pairs_by_level}
                     if getattr(self, "_pairs_by_level", None) else {}
                 ),
+                # Provider-pressure high-water mark. Present ONLY when the
+                # scan ladder actually engaged, so a clean run's run_stats
+                # is unchanged. A run that completed only BY degrading is
+                # the signal that the next size increment fails outright —
+                # it must not be invisible. (The terminal path carries its
+                # own diagnostics in the exception message instead:
+                # run_stats is persisted on success only.)
+                **(
+                    {
+                        "scan_width_min": self._scan_min_width,
+                        "scan_shrinks": self._scan_shrinks,
+                    }
+                    if self._scan_min_width is not None else {}
+                ),
                 # Conformance advisories (identity / casing gaps) — present
                 # only when a gap was detected, so a clean run's run_stats is
                 # unchanged. Advisory-only: never flips the job off "completed".
@@ -1073,19 +1110,90 @@ class AggregationPipeline:
         rows = res.result_set or []
         return int(rows[0][0] or 0) if rows and rows[0] else 0
 
-    async def _fetch_range(self, run_one, lo: int, hi: int) -> list:
-        """Run ``run_one(lo, hi) -> rows`` with shrink-on-timeout.
+    def _shrink_scan_width(
+        self, width: int, floor: int, lo: int, hi: int,
+        label: str, reason: str,
+    ) -> None:
+        """Halve the sticky effective scan width after a failed range."""
+        half = max(floor, width // 2)
+        if self._scan_subwidth is None or half < self._scan_subwidth:
+            self._scan_subwidth = half
+        if self._scan_min_width is None or half < self._scan_min_width:
+            self._scan_min_width = half
+        self._scan_shrinks += 1
+        self._scan_success_streak = 0
+        logger.warning(
+            "aggregation pipeline on %s: scan %s [%d, %d) %s — shrinking "
+            "effective range width to %d and re-fetching.",
+            self.p._graph_name, label, lo, hi, reason, self._scan_subwidth,
+        )
 
-        A per-query ``asyncio.TimeoutError`` (deliberately never retried at
-        the connection layer — a slow query must not be multiplied) used to
-        fail the WHOLE run, sending the job back through worker retry into
-        a full EXTRACT re-run. Instead: halve the effective width — sticky
-        for the rest of the run so later ranges don't re-discover it — and
-        re-fetch as sub-ranges; only a floor-width range that still times
-        out (a real outage, not payload size) propagates. Eight consecutive
-        un-split successes double the width back toward the knob ceiling.
-        Outer loops keep knob-width strides, so RECONCILE cursor positions
-        (absolute range lower bounds) are unaffected."""
+    def _query_memory_guidance(self, label: str, lo: int, hi: int) -> str:
+        """Terminal message for a floor-width query-memory failure.
+
+        Everything an operator needs must be HERE: ``run_stats`` is only
+        persisted on a successful run, so on the terminal path the worker's
+        ``job.error_message`` (``str(exc)``) is the entire record.
+
+        Deliberately avoids the substrings ``classify_failure`` matches
+        earlier than ``query_memory`` — ``OOM`` (case-sensitive, so no
+        "headroom"/"room" either), ``timeout``, ``ontology``, ``conflict``
+        — so this text cannot be mis-bucketed into someone else's
+        resolution guidance."""
+        return (
+            f"scan {label} over ID range [{lo}, {hi}) exceeded the graph "
+            f"store's per-query memory ceiling (QUERY_MEM_CAPACITY) even at "
+            f"the narrowest width the shrink ladder descends to "
+            f"({hi - lo}, AGGREGATION_SCAN_SHRINK_FLOOR). The graph store "
+            f"reported: \"Query's mem consumption exceeded capacity\". The "
+            f"engine buffers a query's whole result set inside that "
+            f"ceiling, so this is deterministic at a fixed width and the "
+            f"job is NOT retried. "
+            f"Fixes, most effective first: (1) set this source's Rollup "
+            f"storage to Auto (materializeFinePairs) — a full cube makes the "
+            f"reconcile scan read far more :AGGREGATED rows than any other "
+            f"query in the pipeline; (2) lower AGGREGATION_SCAN_SHRINK_FLOOR "
+            f"below {hi - lo} so the ladder can descend further; (3) raise "
+            f"the server's QUERY_MEM_CAPACITY, but only together with the "
+            f"container memory limit — see docs/FALKORDB_DEPLOYMENT.md for "
+            f"the sizing formula, since the ceiling is charged per "
+            f"concurrent query on top of maxmemory."
+        )
+
+    async def _fetch_range(
+        self, run_one, lo: int, hi: int, *, label: str = "scan",
+    ) -> list:
+        """Run ``run_one(lo, hi) -> rows`` with shrink-on-pressure.
+
+        Two provider signals mean "this slice was too big", and both are
+        deterministic for a given width, so both shrink rather than retry:
+
+        * a per-query ``asyncio.TimeoutError`` (deliberately never retried
+          at the connection layer — a slow query must not be multiplied);
+        * ``QUERY_MEM_CAPACITY`` exhaustion. FalkorDB materializes a
+          query's ENTIRE result set inside its tracked per-query budget
+          (no streaming), and these scans are plain projections with no
+          sort or aggregation buffer — so the tracked bytes scale linearly
+          with the rows returned, and halving the width halves them. The
+          exposure is very uneven across the four callers: the reconcile
+          scan projects 11 columns including ``aggKey`` (two concatenated
+          URNs) and the ``sourceEdgeTypes`` array, hundreds of bytes per
+          row, while the extract scan returns two integers.
+
+        Either used to fail the WHOLE run, sending the job back through
+        worker retry into a full EXTRACT re-run — and for the memory case
+        every retry re-issued the identical query and failed identically,
+        burning the budget and stepping the circuit breaker. Instead:
+        halve the effective width — sticky for the rest of the run so later
+        ranges don't re-discover it — and re-fetch as sub-ranges. Eight
+        consecutive un-split successes double the width back toward the
+        knob ceiling. Outer loops keep knob-width strides, so RECONCILE
+        cursor positions (absolute range lower bounds) are unaffected.
+
+        At floor width the two diverge: a timeout is a real outage and
+        propagates unchanged, while a memory failure is a payload-size
+        fact no retry can alter, so it raises the terminal
+        :class:`MaterializationQueryMemoryExceeded`."""
         floor = _scan_shrink_floor()
         width = hi - lo
         sticky = self._scan_subwidth
@@ -1093,7 +1201,9 @@ class AggregationPipeline:
             rows: list = []
             cur = lo
             while cur < hi:
-                rows.extend(await self._fetch_range(run_one, cur, min(cur + sticky, hi)))
+                rows.extend(await self._fetch_range(
+                    run_one, cur, min(cur + sticky, hi), label=label,
+                ))
                 cur = min(cur + sticky, hi)
             return rows
         try:
@@ -1101,21 +1211,34 @@ class AggregationPipeline:
         except asyncio.TimeoutError:
             if width <= floor:
                 logger.error(
-                    "aggregation pipeline on %s: floor-width scan "
+                    "aggregation pipeline on %s: floor-width scan %s "
                     "[%d, %d) still timed out — treating as a provider "
-                    "outage.", self.p._graph_name, lo, hi,
+                    "outage.", self.p._graph_name, label, lo, hi,
                 )
                 raise
-            half = max(floor, width // 2)
-            if self._scan_subwidth is None or half < self._scan_subwidth:
-                self._scan_subwidth = half
-            self._scan_success_streak = 0
-            logger.warning(
-                "aggregation pipeline on %s: scan [%d, %d) timed out — "
-                "shrinking effective range width to %d and re-fetching.",
-                self.p._graph_name, lo, hi, self._scan_subwidth,
+            self._shrink_scan_width(width, floor, lo, hi, label, "timed out")
+            return await self._fetch_range(run_one, lo, hi, label=label)
+        except Exception as exc:
+            from backend.app.providers.falkordb_provider import (
+                _is_query_memory_error,
             )
-            return await self._fetch_range(run_one, lo, hi)
+            if not _is_query_memory_error(exc):
+                raise
+            if width <= floor:
+                logger.error(
+                    "aggregation pipeline on %s: floor-width scan %s "
+                    "[%d, %d) still exceeded the per-query memory ceiling "
+                    "— failing terminally.", self.p._graph_name, label,
+                    lo, hi,
+                )
+                raise MaterializationQueryMemoryExceeded(
+                    self._query_memory_guidance(label, lo, hi)
+                ) from exc
+            self._shrink_scan_width(
+                width, floor, lo, hi, label,
+                "exceeded the per-query memory ceiling",
+            )
+            return await self._fetch_range(run_one, lo, hi, label=label)
         self._scan_success_streak += 1
         if self._scan_subwidth is not None and self._scan_success_streak >= 8:
             self._scan_success_streak = 0
@@ -1159,7 +1282,9 @@ class AggregationPipeline:
             return res.result_set or []
 
         async def fetch(lo: int):
-            return lo, await self._fetch_range(run_one, lo, lo + width)
+            return lo, await self._fetch_range(
+                run_one, lo, lo + width, label=f"extract:{safe_type}",
+            )
 
         lows = list(range(0, max_id + 1, width))
         for start in range(0, len(lows), conc):
@@ -1671,7 +1796,9 @@ class AggregationPipeline:
             return r.result_set or []
 
         async def fetch(lo: int):
-            return await self._fetch_range(run_one, lo, lo + width)
+            return await self._fetch_range(
+                run_one, lo, lo + width, label="extract:containers",
+            )
 
         lows = list(range(0, max_id + 1, width))
         for start in range(0, len(lows), conc):
@@ -1782,7 +1909,9 @@ class AggregationPipeline:
             return res.result_set or []
 
         async def fetch(lo: int):
-            return await self._fetch_range(run_one, lo, lo + width)
+            return await self._fetch_range(
+                run_one, lo, lo + width, label="apply:node-directory",
+            )
 
         lows = list(range(0, max_id + 1, width))
         for start in range(0, len(lows), conc):
@@ -2229,7 +2358,9 @@ class AggregationPipeline:
         while lo <= max_id:
             hi = lo + width
             self._cancel_check()
-            range_rows = await self._fetch_range(run_one, lo, hi)
+            range_rows = await self._fetch_range(
+                run_one, lo, hi, label="reconcile:AGGREGATED",
+            )
             to_delete: List[str] = []
             to_overwrite: List[int] = []
             to_add: List[int] = []

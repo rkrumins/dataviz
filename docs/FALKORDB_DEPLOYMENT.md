@@ -390,10 +390,56 @@ How the deployed `FALKORDB_ARGS` values are derived:
 - **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
   instead of building a doomed backlog behind a slow query.
 - **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling
-  before the kernel OOM-kills the whole pod.
+  before the kernel OOM-kills the whole pod. Overridable without restating the
+  whole args string: `FALKORDB_QUERY_MEM_CAPACITY` in compose and in the k8s
+  base StatefulSet (expanded into `FALKORDB_ARGS` via `$(VAR)`).
 - **`maxmemory` / `maxmemory-policy noeviction`** (via `REDIS_ARGS`, not
   `FALKORDB_ARGS`): the INSTANCE-level ceiling. `QUERY_MEM_CAPACITY` bounds one
   query; only `maxmemory` bounds the dataset itself, and without it graph growth
-  eventually OOM-kills the pod. Size it ~75% of the pod memory limit;
-  `noeviction` makes writes fail loudly at the ceiling (FalkorDB data must never
-  be silently evicted).
+  eventually OOM-kills the pod. `noeviction` makes writes fail loudly at the
+  ceiling (FalkorDB data must never be silently evicted). Size it with the
+  formula below — **not** at a flat 75% of the pod limit, which double-books
+  the same headroom that query memory needs.
+
+### Sizing: the three ceilings share ONE budget
+
+`maxmemory` and `QUERY_MEM_CAPACITY` are not independent. Query memory is
+charged **per concurrent query, on top of the dataset**, inside the same
+container limit:
+
+```
+container_limit  >=  1.25 x maxmemory                      # dataset + fragmentation + AOF-rewrite COW
+                  +  concurrent x 1.3 x QUERY_MEM_CAPACITY # in-flight queries
+                  +  256Mi                                 # server overhead (1Gi for instances >= 32Gi)
+```
+
+- **`concurrent`** is at most `THREAD_COUNT` (FalkorDB's parallel execution
+  width). In practice 2 is the realistic planning figure: the app sheds above
+  `PROVIDER_MAX_CONCURRENCY` and `AGGREGATION_EXTRACT_CONCURRENCY` defaults to 1.
+  Plan for `THREAD_COUNT` if you run interactive traffic against a
+  materializing instance.
+- **The 1.3** is the reply buffer. FalkorDB materializes a query's ENTIRE result
+  set inside the tracked per-query budget (it does not stream), then serializes
+  the same rows into the client reply buffer — which is Redis-core memory and
+  is **not** counted against `QUERY_MEM_CAPACITY`. Peak RSS per query therefore
+  exceeds the ceiling you configured.
+
+Worked example, the k8s base / Helm defaults: `1.25 x 6gb + 2 x 1.3 x 512Mi +
+256Mi ~= 9.1Gi`, which is why `limits.memory` is **10Gi**. The previous 8Gi
+booked the entire non-`maxmemory` remainder for fragmentation and left nothing
+for query memory at all.
+
+**Raising `QUERY_MEM_CAPACITY` alone converts a caught query error into an
+OOM-killed pod.** Raise the container limit with it, and prefer lowering
+`maxmemory` only on a fresh instance — on a live one, a ceiling below current
+usage denies every write under `noeviction`.
+
+> **It is rarely the right first lever.** A "Query's mem consumption exceeded
+> capacity" failure means one query asked for too many rows, not that the
+> instance is short of memory. The aggregation pipeline reacts by halving its
+> scan range and re-reading (`AGGREGATION_SCAN_RANGE_WIDTH`, floored at
+> `AGGREGATION_SCAN_SHRINK_FLOOR`), so a job normally absorbs this on its own
+> and reports `scan_width_min` in `run_stats`. When it fails terminally, fix
+> the read size first — set the source's Rollup storage to Auto, which is what
+> makes the RECONCILE scan (the pipeline's widest projection: 11 columns
+> including `aggKey` and the `sourceEdgeTypes` array) read far fewer rows.

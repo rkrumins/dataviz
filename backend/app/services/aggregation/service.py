@@ -2947,11 +2947,19 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     """Classify a job's ``error_message`` into a coarse, UI-facing category
     for resolution guidance (spec §9c). ``None`` when there is no error.
 
-    Order matters: ``out_of_memory`` is checked BEFORE
-    ``provider_unavailable`` because a FalkorDB OOM error is often wrapped
-    in connection/availability language (e.g. "provider unavailable: OOM
-    command not allowed..."), which would otherwise misclassify the more
-    actionable OOM case as a generic provider outage."""
+    Order matters, for the same reason twice: a memory-class failure is
+    routinely wrapped in connection/availability language (e.g. "Provider
+    'X' unavailable: OOM command not allowed...") and would otherwise be
+    misclassified as a generic provider outage, which is the least
+    actionable bucket there is.
+
+    ``out_of_memory`` and ``query_memory`` are DIFFERENT ceilings and want
+    different fixes: the former is the instance-level ``maxmemory`` — the
+    dataset no longer fits, free space or grow the store. The latter is
+    ``QUERY_MEM_CAPACITY``, a per-query budget — the store is healthy and
+    one query asked for too many rows at once, so the fix is to make that
+    query read less (or, together with the container limit, to raise the
+    per-query ceiling)."""
     if not error_message:
         return None
     if (
@@ -2960,6 +2968,8 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
         or "OOM" in error_message
     ):
         return "out_of_memory"
+    if "mem consumption exceeded" in error_message.lower():
+        return "query_memory"
     if "timeout" in error_message or "TimeoutError" in error_message:
         return "timeout"
     if "ontology" in error_message or "OntologyResolution" in error_message:

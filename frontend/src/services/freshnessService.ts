@@ -19,6 +19,7 @@ export type RefreshScope = 'auto' | 'read-caches' | 'rollups' | 'full' | 'clear'
  *  resolution guidance. Mirrors the backend ``classify_failure`` categories. */
 export type FailureCategory =
     | 'out_of_memory'
+    | 'query_memory'
     | 'provider_unavailable'
     | 'ontology'
     | 'timeout'
