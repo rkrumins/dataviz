@@ -408,22 +408,30 @@ _DEFAULT_LIMIT = 50
 #: Internal identifiers as they appear inside payloads and summaries.
 #: Every referenceable kind ships a distinct prefix, which is what makes
 #: naming them a lexical pass rather than a schema walk — a payload key
-#: we have never heard of still gets its group named.
-_REF_ID = re.compile(r"\b(?:grp|ws|idp|view)_[A-Za-z0-9]+\b")
+#: we have never heard of still gets its group (or person) named.
+#:
+#: ``usr`` is here as well as in the dedicated actor/target resolution
+#: above: those two cover the person a row is BY and the person it is
+#: ABOUT, but a payload routinely names a third — a ``granted_by``, an
+#: inviter, a member added to a group, the subject of an SSO mapping —
+#: and without this that id rendered raw while every other kind beside it
+#: was named.
+_REF_ID = re.compile(r"\b(?:grp|ws|idp|view|usr)_[A-Za-z0-9]+\b")
 
 
 async def _resolve_reference_names(
     session: AsyncSession, ids: set[str],
 ) -> dict[str, str]:
-    """Display names for a page's worth of internal ids, keyed by id.
+    """Display names for the reference kinds without a dedicated lookup.
 
-    The sibling of ``get_identities_by_ids`` /
-    ``get_workspace_names_by_ids``, for everything else an event can
-    reference: internal groups, IdP connections, views. Same contract
-    throughout — deleted rows are still named (the log is a record of
-    what happened), an id that resolves to nothing stays absent so the
-    caller keeps showing the raw id, and a lookup failure costs the
-    names, never the page.
+    People (``usr``) and workspaces (``ws``) are resolved by the caller,
+    which already queries them for the actor/target and the event's own
+    workspace and folds the payload references into those same two
+    queries. This covers the rest — internal groups, IdP connections,
+    views. Same contract throughout — deleted rows are still named (the
+    log is a record of what happened), an id that resolves to nothing
+    stays absent so the caller keeps showing the raw id, and a lookup
+    failure costs the names, never the page.
     """
     out: dict[str, str] = {}
     if not ids:
@@ -433,10 +441,6 @@ async def _resolve_reference_names(
         by_prefix.setdefault(i.split("_", 1)[0], []).append(i)
 
     try:
-        if by_prefix.get("ws"):
-            out.update(await user_repo.get_workspace_names_by_ids(
-                session, by_prefix["ws"],
-            ))
         if by_prefix.get("grp"):
             rows = await session.execute(
                 select(GroupORM.id, GroupORM.name)
@@ -706,46 +710,21 @@ async def list_audit_events(
             continue
         out.append(ev)
 
-    # ── Name the people in the page ───────────────────────────────
-    # ONE query for the whole page, after filtering, so the lookup only ever
-    # covers rows that are actually being returned. Every event carries at most
-    # two user ids and a page is capped at `_MAX_LIMIT`, so this is a single
-    # indexed `IN` over a few dozen keys at worst.
+    # ── Name every internal id the page mentions ──────────────────
+    # Collected lexically off each payload and summary rather than off a
+    # list of known keys, so a payload naming something in a field we have
+    # never heard of still gets it named, and an event shape added later
+    # needs no change here.
     #
-    # It runs against the page rather than per row for the obvious reason, but
-    # also because the same actor usually appears on many rows of an audit log —
-    # deduplicating first turns "one lookup per row" into "one lookup per
-    # distinct person".
+    # The lookups run once for the whole page, after filtering, and are
+    # deduplicated first: the same actor, workspace, or group recurs on
+    # many rows of an audit log, so this turns "one lookup per row" into
+    # "one lookup per distinct thing". Each is a single indexed `IN`.
     #
-    # A failure here must not take the audit lens down with it: the ids are the
-    # record, the names are an enrichment of it, and a log that renders with raw
-    # ids is enormously more useful than one that 500s.
-    try:
-        identities = await user_repo.get_identities_by_ids(
-            session,
-            [i for ev in out for i in (ev.actor_id, ev.target_user_id) if i],
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("audit: could not resolve user identities for this page", exc_info=True)
-        identities = {}
-
-    # Same treatment for the workspace an event happened in: "ws_4f21c8" tells
-    # a reader nothing they can act on. Deleted workspaces are included for the
-    # same reason deleted users are — an event in a workspace that has since
-    # been torn down is among the more interesting rows in the log.
-    try:
-        workspace_names = await user_repo.get_workspace_names_by_ids(
-            session, [ev.workspace_id for ev in out if ev.workspace_id],
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("audit: could not resolve workspace names for this page", exc_info=True)
-        workspace_names = {}
-
-    # Every OTHER internal id the page mentions — groups, IdP
-    # connections, views, workspaces buried in payloads — resolved the
-    # same way: once per page, deduplicated, best-effort. Collected
-    # lexically off the payload and the summary rather than off a list
-    # of known keys, so an event shape added later still gets named.
+    # A failure in any of them must not take the audit lens down with it:
+    # the ids are the record, the names are an enrichment of it, and a log
+    # that renders with raw ids is enormously more useful than one that
+    # 500s.
     referenced: set[str] = set()
     per_event_refs: list[set[str]] = []
     for ev in out:
@@ -756,7 +735,56 @@ async def list_audit_events(
         refs = set(_REF_ID.findall(blob)) | set(_REF_ID.findall(ev.summary))
         per_event_refs.append(refs)
         referenced |= refs
-    reference_names = await _resolve_reference_names(session, referenced)
+
+    # People — the actor and target slots PLUS anyone a payload names in
+    # another role (a granted_by, an inviter, a member) — in ONE query.
+    # The actor/target ids are folded into the same lexical set so a page
+    # never issues two identity lookups.
+    try:
+        person_ids = [
+            i for ev in out for i in (ev.actor_id, ev.target_user_id) if i
+        ]
+        person_ids += [r for r in referenced if r.startswith("usr_")]
+        identities = await user_repo.get_identities_by_ids(session, person_ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("audit: could not resolve user identities for this page", exc_info=True)
+        identities = {}
+
+    # Workspaces — the event's own workspace, plus any ``ws_`` buried in a
+    # payload — in ONE query. "ws_4f21c8" tells a reader nothing they can
+    # act on. Deleted workspaces are included for the same reason deleted
+    # users are: an event in a workspace since torn down is among the more
+    # interesting rows in the log.
+    try:
+        workspace_ids = [ev.workspace_id for ev in out if ev.workspace_id]
+        workspace_ids += [r for r in referenced if r.startswith("ws_")]
+        workspace_names = await user_repo.get_workspace_names_by_ids(
+            session, workspace_ids,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("audit: could not resolve workspace names for this page", exc_info=True)
+        workspace_names = {}
+
+    # Everything else — groups, IdP connections, views.
+    other_names = await _resolve_reference_names(
+        session,
+        {r for r in referenced if not r.startswith(("usr_", "ws_"))},
+    )
+
+    # One id -> name map for the payload drawer and the summary
+    # substitution, drawn from all three lookups. A person shows their
+    # name, or their email when they have no name; an id that resolved to
+    # nothing is simply absent, and the raw id stands.
+    reference_names: dict[str, str] = dict(other_names)
+    for i in referenced:
+        if i.startswith("usr_"):
+            person = identities.get(i)
+            if person and (person.get("name") or person.get("email")):
+                reference_names[i] = person["name"] or person["email"]
+        elif i.startswith("ws_"):
+            ws_name = workspace_names.get(i)
+            if ws_name:
+                reference_names[i] = ws_name
 
     for ev, refs in zip(out, per_event_refs):
         if ev.workspace_id:
