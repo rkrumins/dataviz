@@ -690,6 +690,31 @@ function AuditRow({ event }: { event: AuditEvent }) {
                             </div>
                         </dl>
 
+                        {/* Everything else the event references, named.
+                            The summary already speaks these names; this is
+                            the key for the raw payload below it, so an id
+                            met there can be read without leaving the row.
+                            Unresolved ids simply do not appear — the id in
+                            the payload stays the authoritative record. */}
+                        {Object.keys(event.resolvedNames ?? {}).length > 0 && (
+                            <div className="mt-4">
+                                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted">
+                                    Named in this event
+                                </p>
+                                <ul className="mt-1.5 flex flex-wrap gap-2">
+                                    {Object.entries(event.resolvedNames ?? {}).map(([id, name]) => (
+                                        <li
+                                            key={id}
+                                            className="inline-flex items-center gap-1.5 rounded-lg border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-2 py-1"
+                                        >
+                                            <span className="text-[11px] font-medium text-ink">{name}</span>
+                                            <span className="font-mono text-[10px] text-ink-muted">{id}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+
                         <details className="group/raw mt-4 rounded-xl border border-black/[0.07] bg-black/[0.02] dark:border-white/[0.08] dark:bg-white/[0.02]">
                             <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-xl px-3 py-2 text-[11px] font-semibold text-ink-secondary hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                                 <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform group-open/raw:rotate-90" />

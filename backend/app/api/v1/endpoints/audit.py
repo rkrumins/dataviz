@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,7 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import OutboxEventORM
+from backend.app.db.models import (
+    GroupORM,
+    IdpProviderORM,
+    OutboxEventORM,
+    ViewORM,
+)
 from backend.app.db.repositories import user_repo
 from backend.auth_service.interface import User
 from backend.common.models.audit import (
@@ -229,10 +235,34 @@ def _summary_idp_provider(verb: str):
     return _build
 
 
+def _mapping_target(t: dict) -> str:
+    """One clause naming what a mapping grants. Ids are fine here — the
+    reference-name pass below swaps every ``grp_``/``ws_`` token for the
+    thing's actual name before the summary leaves the server."""
+    if t.get("target_type") == "group_membership":
+        return f"joins {t.get('target_group_id') or '?'}"
+    role = t.get("role_name") or "?"
+    where = t.get("scope_id") or "the organization"
+    return f"gets {role} in {where}"
+
+
 def _summary_sso_mapping(verb: str):
     def _build(p: dict) -> str:
-        return f"IdP group mapping {verb} ({p.get('idp_group') or '?'})"
+        base = f"IdP group mapping {verb} ({p.get('idp_group') or '?'})"
+        if p.get("role_name") or p.get("target_group_id"):
+            return f"{base} → {_mapping_target(p)}"
+        return base
     return _build
+
+
+def _summary_sso_mapping_updated(p: dict) -> str:
+    before = p.get("before") if isinstance(p.get("before"), dict) else {}
+    after = p.get("after") if isinstance(p.get("after"), dict) else {}
+    group = after.get("idp_group") or before.get("idp_group") or "?"
+    line = f"IdP group mapping updated ({group}) → {_mapping_target(after)}"
+    if before and _mapping_target(before) != _mapping_target(after):
+        line += f" (was: {_mapping_target(before)})"
+    return line
 
 
 def _summary_login(p: dict) -> str:
@@ -323,6 +353,7 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "rbac.group.updated": ("info", _summary_group_lifecycle("updated")),
     "rbac.group.member_added": ("info", _summary_group_membership("added to")),
     "rbac.sso_mapping.created": ("info", _summary_sso_mapping("created")),
+    "rbac.sso_mapping.updated": ("info", _summary_sso_mapping_updated),
     "idp.provider.created": ("info", _summary_idp_provider("created")),
     "idp.provider.updated": ("info", _summary_idp_provider("updated")),
     "branding.updated": ("info", lambda p: "Branding settings updated"),
@@ -372,6 +403,67 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
 
 _MAX_LIMIT = 500
 _DEFAULT_LIMIT = 50
+
+
+#: Internal identifiers as they appear inside payloads and summaries.
+#: Every referenceable kind ships a distinct prefix, which is what makes
+#: naming them a lexical pass rather than a schema walk — a payload key
+#: we have never heard of still gets its group named.
+_REF_ID = re.compile(r"\b(?:grp|ws|idp|view)_[A-Za-z0-9]+\b")
+
+
+async def _resolve_reference_names(
+    session: AsyncSession, ids: set[str],
+) -> dict[str, str]:
+    """Display names for a page's worth of internal ids, keyed by id.
+
+    The sibling of ``get_identities_by_ids`` /
+    ``get_workspace_names_by_ids``, for everything else an event can
+    reference: internal groups, IdP connections, views. Same contract
+    throughout — deleted rows are still named (the log is a record of
+    what happened), an id that resolves to nothing stays absent so the
+    caller keeps showing the raw id, and a lookup failure costs the
+    names, never the page.
+    """
+    out: dict[str, str] = {}
+    if not ids:
+        return out
+    by_prefix: dict[str, list[str]] = {}
+    for i in ids:
+        by_prefix.setdefault(i.split("_", 1)[0], []).append(i)
+
+    try:
+        if by_prefix.get("ws"):
+            out.update(await user_repo.get_workspace_names_by_ids(
+                session, by_prefix["ws"],
+            ))
+        if by_prefix.get("grp"):
+            rows = await session.execute(
+                select(GroupORM.id, GroupORM.name)
+                .where(GroupORM.id.in_(by_prefix["grp"]))
+            )
+            out.update({i: n for i, n in rows.all() if n})
+        if by_prefix.get("idp"):
+            rows = await session.execute(
+                select(IdpProviderORM.id, IdpProviderORM.display_name,
+                       IdpProviderORM.slug)
+                .where(IdpProviderORM.id.in_(by_prefix["idp"]))
+            )
+            out.update({
+                i: (dn or slug) for i, dn, slug in rows.all() if dn or slug
+            })
+        if by_prefix.get("view"):
+            rows = await session.execute(
+                select(ViewORM.id, ViewORM.name)
+                .where(ViewORM.id.in_(by_prefix["view"]))
+            )
+            out.update({i: n for i, n in rows.all() if n})
+    except Exception:  # noqa: BLE001 — names are enrichment, ids are the record
+        logger.warning(
+            "audit: could not resolve reference names for this page",
+            exc_info=True,
+        )
+    return out
 
 
 def _row_to_response(row: OutboxEventORM) -> AuditEventResponse:
@@ -649,7 +741,24 @@ async def list_audit_events(
         logger.warning("audit: could not resolve workspace names for this page", exc_info=True)
         workspace_names = {}
 
+    # Every OTHER internal id the page mentions — groups, IdP
+    # connections, views, workspaces buried in payloads — resolved the
+    # same way: once per page, deduplicated, best-effort. Collected
+    # lexically off the payload and the summary rather than off a list
+    # of known keys, so an event shape added later still gets named.
+    referenced: set[str] = set()
+    per_event_refs: list[set[str]] = []
     for ev in out:
+        try:
+            blob = json.dumps(ev.payload)
+        except (TypeError, ValueError):
+            blob = ""
+        refs = set(_REF_ID.findall(blob)) | set(_REF_ID.findall(ev.summary))
+        per_event_refs.append(refs)
+        referenced |= refs
+    reference_names = await _resolve_reference_names(session, referenced)
+
+    for ev, refs in zip(out, per_event_refs):
         if ev.workspace_id:
             ev.workspace_name = workspace_names.get(ev.workspace_id)
         actor = identities.get(ev.actor_id) if ev.actor_id else None
@@ -662,6 +771,17 @@ async def list_audit_events(
             ev.target_user_name = target["name"] or None
             ev.target_user_email = target["email"]
             ev.target_user_deleted = target["deleted"]
+        # The summary speaks names; the map hands the FE the same
+        # answers for the payload drawer. Unresolved ids stay as they
+        # are — the id is the record, the name is an enrichment.
+        ev.resolved_names = {
+            i: reference_names[i] for i in refs if i in reference_names
+        }
+        if ev.resolved_names:
+            ev.summary = _REF_ID.sub(
+                lambda m: reference_names.get(m.group(0), m.group(0)),
+                ev.summary,
+            )
 
     next_cursor = None
     if has_more and rows:

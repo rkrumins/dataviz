@@ -44,6 +44,13 @@ class AuditEventResponse(BaseModel):
     # `*_deleted` marks an account that is soft-deleted but still named: the
     # log is a record of what happened, and "who was that account we removed"
     # is precisely the question it exists to answer.
+    # Every other internal id this event mentions — groups, IdP
+    # connections, views, workspaces inside the payload — resolved to
+    # its display name, keyed by the id. Same contract as the people
+    # above: absence means unresolved, and the id stays authoritative.
+    resolved_names: dict[str, str] = Field(
+        default_factory=dict, alias="resolvedNames",
+    )
     workspace_name: Optional[str] = Field(default=None, alias="workspaceName")
     actor_name: Optional[str] = Field(default=None, alias="actorName")
     actor_email: Optional[str] = Field(default=None, alias="actorEmail")

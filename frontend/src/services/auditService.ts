@@ -53,6 +53,11 @@ export interface AuditEvent {
     severity: AuditSeverity
     summary: string
 
+    /** Every other internal id this event mentions — groups, IdP
+     *  connections, views, workspaces inside the payload — resolved to
+     *  its display name, keyed by the id. Absence means unresolved and
+     *  the id stays authoritative. */
+    resolvedNames?: Record<string, string>
     payload: Record<string, unknown>
 }
 
