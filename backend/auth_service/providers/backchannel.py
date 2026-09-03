@@ -74,6 +74,7 @@ from .base import ProviderCredentials, ProviderIdentity
 from .claim_mapper import (
     apply_claim_mapping,
     ClaimMappingError,
+    hoist_nested,
     resolve_path,
     resolved_sources,
 )
@@ -131,43 +132,28 @@ _JWKS_TTL_SECONDS = 300.0
 _UNSIGNED_REPLAY_FLOOR_SECONDS = 900
 _UNSIGNED_REPLAY_CAP_SECONDS = 86_400
 
-#: One level of nesting hoisted so an operator maps ``firstName`` rather
-#: than ``user.firstName``. An API JSON body is exactly the shape that
-#: benefits. Mirrors ``custom_profile._NESTED_CONTAINERS``.
+#: Hoisted FIRST, in this order, so precedence between the well-known
+#: container names stays exactly what it always was. Every OTHER
+#: object-valued key hoists after these — the container can be called
+#: anything. Mirrors ``custom_profile._NESTED_CONTAINERS``.
 _NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile",
                       "data", "result", "attributes", "entitlements")
 
-#: Top-level values a populated nested one may overwrite during the
-#: hoist. Membership is by equality, so ``0`` and ``False`` — values a
-#: gateway can mean — are NOT emptyish.
-_EMPTYISH = (None, "", [], {})
-
-
 def hoist_nested_containers(claims: dict) -> dict:
-    """One level of container nesting flattened, so mappings can say
-    ``firstName`` instead of ``profile.firstName``.
+    """One level of container nesting flattened — whatever the
+    container is called — so mappings can say ``firstName`` instead of
+    ``profile.firstName``, and ``groups`` even when the gateway nests
+    membership under a name nobody predicted.
 
-    A top-level key wins over a hoisted one — except when its value is
-    emptyish (``None``, ``""``, ``[]``, ``{}``) and the nested one is
-    not. Real gateways emit exactly that shape: a vestigial top-level
-    ``groups: []`` beside ``profile.groups`` carrying the real list,
-    and "present but empty shadows populated" silently turned group
-    mapping off.
+    The merge rules (top-level wins unless emptyish; the well-known
+    names above hoist first, everything else in payload order) live in
+    :func:`claim_mapper.hoist_nested`, shared with the portal kind.
 
     Exported because the admin preview must run the very same hoist —
     a preview that skipped it disagreed with the sign-in it was
     supposed to predict.
     """
-    flat = {**claims}
-    for container in _NESTED_CONTAINERS:
-        nested = claims.get(container)
-        if isinstance(nested, dict):
-            for k, v in nested.items():
-                if k not in flat:
-                    flat[k] = v
-                elif flat[k] in _EMPTYISH and v not in _EMPTYISH:
-                    flat[k] = v
-    return flat
+    return hoist_nested(claims, priority=_NESTED_CONTAINERS)
 
 #: Async callable returning the ``host:port`` entries an operator has
 #: permitted. Injected rather than imported so ``auth_service`` keeps

@@ -197,6 +197,30 @@ async def test_one_level_of_nesting_is_hoisted_without_dotted_paths(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_any_container_name_is_hoisted(monkeypatch):
+    """``entitlements`` was an example, not an allowlist entry — a
+    gateway nesting its user object under any name maps with no
+    override."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            "sub": "emp-1",
+            "corpDirectoryRecord": {
+                "email": "alice@corp.example",
+                "firstName": "Alice", "lastName": "Anders",
+                "auth_time": 1_700_000_000,
+                "groups": ["my-super-cool-group"],
+            },
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.email == "alice@corp.example"
+    assert identity.groups == ("my-super-cool-group",)
+
+
+@pytest.mark.asyncio
 async def test_entitlements_membership_maps_with_no_configuration(monkeypatch):
     """The AD-federation shape: groups nested under ``entitlements``,
     beside a vestigial empty top-level ``groups``. Both the hoist and

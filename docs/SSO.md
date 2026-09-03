@@ -173,10 +173,14 @@ declares per-provider mappings as JSON:
   `address.country[0]`). No wildcards. Nested membership works the
   same way: `{"entitlements": {"groups": [...]}}` is reached by the
   candidate `entitlements.groups` — which every non-SAML kind now
-  carries **by default**, so the common AD-federation shape maps with
-  no override at all. Any other nesting is one dotted candidate in the
-  mapping studio. An empty top-level value never shadows a populated
-  nested one — the candidate walk skips empties.
+  carries **by default** — and on the gateway kinds (`backchannel`,
+  `custom_profile`) the container's *name* does not matter at all: one
+  level of every object-valued key is flattened before mapping
+  (`claim_mapper.hoist_nested`; the well-known names keep first pick
+  on a collision, then payload order). Deeper nesting is one dotted
+  candidate in the mapping studio. An empty top-level value never
+  shadows a populated nested one — neither in the hoist nor in the
+  candidate walk.
 * Each field's value is the first non-empty match from its candidate
   list. Empty list / unset key → falls back to the kind's defaults
   (`DEFAULT_OIDC`, `DEFAULT_SAML`, `DEFAULT_CUSTOM`).

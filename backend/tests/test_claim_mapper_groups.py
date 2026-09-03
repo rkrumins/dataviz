@@ -14,6 +14,7 @@ import pytest
 from backend.auth_service.providers.claim_mapper import (
     _to_groups,
     apply_claim_mapping,
+    hoist_nested,
     resolved_sources,
 )
 
@@ -146,6 +147,64 @@ def test_hundreds_of_ad_groups_arrive_intact_and_in_order():
     assert len(identity.groups) == 150
     assert identity.groups[0] == "CN=Team 0,OU=Groups,DC=corp"
     assert identity.groups[-1] == "CN=Team 149,OU=Groups,DC=corp"
+
+
+def test_the_hoist_is_generic_over_container_names():
+    """``entitlements`` was only ever an example — a gateway may nest
+    under any name it likes, and one level of every object-valued key
+    is flattened."""
+    flat = hoist_nested({
+        "sub": "emp-1",
+        "myCorpBlob": {"groups": ["group1"], "firstName": "Alice"},
+    })
+    assert flat["groups"] == ["group1"]
+    assert flat["firstName"] == "Alice"
+
+
+def test_the_hoist_keeps_top_level_wins_and_the_emptyish_rule():
+    flat = hoist_nested({
+        "email": "top@corp.example",
+        "groups": [],
+        "anything": {"email": "nested@corp.example", "groups": ["g1"]},
+    })
+    # Populated top-level beats hoisted; vestigial empty does not.
+    assert flat["email"] == "top@corp.example"
+    assert flat["groups"] == ["g1"]
+
+
+def test_priority_containers_beat_payload_order():
+    """The well-known names keep first pick when two containers carry
+    the same key, whatever order the payload lists them in."""
+    flat = hoist_nested(
+        {
+            "zzz": {"firstName": "FromZzz"},
+            "user": {"firstName": "FromUser"},
+        },
+        priority=("user",),
+    )
+    assert flat["firstName"] == "FromUser"
+
+
+def test_the_hoist_is_one_level_but_dots_reach_the_rest():
+    """A hoisted inner object is not flattened again — it becomes
+    reachable by its dotted path instead, which is how the
+    ``entitlements.groups`` default candidate finds
+    ``{"data": {"entitlements": {"groups": [...]}}}``."""
+    claims = {
+        "sub": "emp-1", "email": "a@corp.example",
+        "data": {"entitlements": {"groups": ["group1"]}},
+    }
+    flat = hoist_nested(claims)
+    assert flat["entitlements"] == {"groups": ["group1"]}
+    identity = apply_claim_mapping(
+        flat, kind="backchannel", provider_slug="corp",
+    )
+    assert identity.groups == ("group1",)
+
+
+def test_non_object_values_are_never_hoisted():
+    flat = hoist_nested({"groups": ["g1"], "note": "text", "n": 7})
+    assert flat == {"groups": ["g1"], "note": "text", "n": 7}
 
 
 def test_provenance_names_the_nested_winner():

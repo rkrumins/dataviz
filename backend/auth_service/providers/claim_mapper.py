@@ -238,6 +238,55 @@ def _resolve(claims: Any, path: str) -> Any:
 resolve_path = _resolve
 
 
+#: Top-level values a populated nested one may overwrite during a
+#: hoist. Membership is by equality on purpose: ``0`` and ``False`` are
+#: real answers a directory can give and must never read as absent.
+_EMPTYISH = (None, "", [], {})
+
+
+def hoist_nested(claims: dict, *, priority: tuple[str, ...] = ()) -> dict:
+    """One level of object nesting flattened — whatever the container
+    is called — so a mapping can say ``groups`` even when the payload
+    says ``{"entitlements": {"groups": [...]}}``, or nests under a name
+    nobody predicted.
+
+    Merge rules, in order:
+
+    * A top-level key wins over a hoisted one — except when its value
+      is emptyish (``None``, ``""``, ``[]``, ``{}``) and the nested one
+      is not. Real gateways emit exactly that shape: a vestigial
+      top-level ``groups: []`` beside the real list one level down, and
+      "present but empty shadows populated" silently turned group
+      mapping off.
+    * Containers named in *priority* hoist first, in that order, so
+      precedence between the well-known container names stays exactly
+      what it always was.
+    * Every other object-valued key follows, in payload order —
+      deterministic per payload, and when two containers disagree the
+      mapping studio's preview names which key actually supplied each
+      field.
+
+    One level only, by design: dotted candidate paths already reach any
+    depth, and a recursive flatten would make "which value won" an
+    accident — a hoisted inner object is itself reachable by its dotted
+    path afterwards. Pure, so the login and the admin preview run the
+    very same hoist.
+    """
+    flat = {**claims}
+    ordered = [c for c in priority if c in claims]
+    ordered += [k for k in claims if k not in priority]
+    for container in ordered:
+        nested = claims.get(container)
+        if not isinstance(nested, dict):
+            continue
+        for k, v in nested.items():
+            if k not in flat:
+                flat[k] = v
+            elif flat[k] in _EMPTYISH and v not in _EMPTYISH:
+                flat[k] = v
+    return flat
+
+
 def _first_non_empty(claims: dict, paths: Iterable[str]) -> Any:
     """Walk every path in order; return the first non-empty result."""
     for p in paths or ():
