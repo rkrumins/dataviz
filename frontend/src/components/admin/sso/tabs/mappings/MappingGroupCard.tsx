@@ -11,9 +11,9 @@
  * also makes the answer to "what happens if I remove someone from
  * engineering" a single card rather than a scan.
  */
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowRight, ShieldAlert, Trash2, Users } from 'lucide-react'
+import { ArrowRight, Pencil, ShieldAlert, Trash2, Users } from 'lucide-react'
 
 import type { IdpGroupMapping, IdpProvider } from '@/services/ssoAdminService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
@@ -42,6 +42,7 @@ export function groupMappings(rows: IdpGroupMapping[]): MappingGroup[] {
 
 export function MappingGroupCard({
     group, providers, workspaces, groups, busy, index, onDelete,
+    editingId = null, onEdit, editor,
 }: {
     group: MappingGroup
     providers: IdpProvider[]
@@ -50,6 +51,11 @@ export function MappingGroupCard({
     busy: boolean
     index: number
     onDelete: (id: string) => void
+    /** The rule currently open for editing, if any — its row morphs into
+     *  the editor the tab supplies, right where the rule lives. */
+    editingId?: string | null
+    onEdit?: (id: string) => void
+    editor?: (row: IdpGroupMapping) => ReactNode
 }) {
     return (
         <motion.div
@@ -70,28 +76,51 @@ export function MappingGroupCard({
 
             <ul className="divide-y divide-glass-border">
                 {group.rows.map(row => (
-                    <li
-                        key={row.id}
-                        className="flex items-center gap-3 px-4 py-3 group/row"
-                    >
-                        <span className="text-[11px] text-ink-muted shrink-0 w-28 truncate">
-                            {providerLabel(row, providers)}
-                        </span>
-                        <ArrowRight className="w-3.5 h-3.5 text-ink-muted shrink-0" />
-                        <span className="min-w-0 flex-1">
-                            <RuleTarget
-                                row={row}
-                                workspaces={workspaces}
-                                groups={groups}
-                                providers={providers}
+                    row.id === editingId && editor ? (
+                        <motion.li
+                            key={row.id}
+                            initial={{ opacity: 0, y: 4 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.14 }}
+                            className="px-4 py-4 bg-indigo-500/[0.04]"
+                        >
+                            {editor(row)}
+                        </motion.li>
+                    ) : (
+                        <li
+                            key={row.id}
+                            className="flex items-center gap-3 px-4 py-3 group/row"
+                        >
+                            <span className="text-[11px] text-ink-muted shrink-0 w-28 truncate">
+                                {providerLabel(row, providers)}
+                            </span>
+                            <ArrowRight className="w-3.5 h-3.5 text-ink-muted shrink-0" />
+                            <span className="min-w-0 flex-1">
+                                <RuleTarget
+                                    row={row}
+                                    workspaces={workspaces}
+                                    groups={groups}
+                                    providers={providers}
+                                />
+                            </span>
+                            {onEdit && (
+                                <button
+                                    type="button"
+                                    disabled={busy}
+                                    aria-label={`Edit this rule for ${group.idpGroup}`}
+                                    onClick={() => onEdit(row.id)}
+                                    className="shrink-0 p-1.5 rounded-lg text-ink-muted opacity-0 group-hover/row:opacity-100 focus:opacity-100 hover:bg-indigo-500/10 hover:text-indigo-500 transition-opacity"
+                                >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                            )}
+                            <DeleteRule
+                                busy={busy}
+                                label={group.idpGroup}
+                                onConfirm={() => onDelete(row.id)}
                             />
-                        </span>
-                        <DeleteRule
-                            busy={busy}
-                            label={group.idpGroup}
-                            onConfirm={() => onDelete(row.id)}
-                        />
-                    </li>
+                        </li>
+                    )
                 ))}
             </ul>
         </motion.div>

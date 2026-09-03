@@ -39,6 +39,9 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
     const [error, setError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
     const [loaded, setLoaded] = useState(false)
+    // One rule open for editing at a time: its row morphs into the same
+    // composer the New-rule card uses, pre-filled, in place.
+    const [editingId, setEditingId] = useState<string | null>(null)
     const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
@@ -145,6 +148,20 @@ export function MappingsTab({ onChanged }: { onChanged?: () => void }) {
                                     busy={busy}
                                     index={i}
                                     onDelete={id => { void remove(id) }}
+                                    editingId={editingId}
+                                    onEdit={id => setEditingId(id)}
+                                    editor={row => (
+                                        <MappingComposer
+                                            key={row.id}
+                                            providers={providers}
+                                            editing={row}
+                                            onCreated={async () => {
+                                                await refresh()
+                                                onChanged?.()
+                                            }}
+                                            onCancel={() => setEditingId(null)}
+                                        />
+                                    )}
                                 />
                             ))}
                         </div>
