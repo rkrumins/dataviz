@@ -43,9 +43,12 @@ Two discriminators, and the distinction matters:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 #: ``signal_source_changed`` origins that mean "automation asked", and are
 #: therefore subject to a hold. Everything else — ``script``, ``connector``,
@@ -190,3 +193,85 @@ def skip_for(hold: Hold) -> str:
     if hold.scope == "source":
         return "disabled" if hold.kind == "stopped" else "paused"
     return f"{hold.scope}_held"
+
+
+# ── Storage: the fleet/provider rows ─────────────────────────────────
+#
+# Read by PRIMARY KEY, never cached. The rows are read with ``session.get``
+# (one for the fleet, one per provider asked about — the identity map makes
+# repeats within a session free) rather than through a TTL cache like the
+# global cadence, because a hold is the one setting where a lag is a
+# correctness bug: "Pause provider" followed at once by "Refresh provider"
+# lands on two processes (the web tier writes, the Control Plane runs the
+# batch), and a 30s cache on the second would refresh every source the
+# operator had just paused. Two PK lookups per resolution is the whole cost.
+
+async def read_scope_holds(
+    session, provider_ids: Iterable[Optional[str]] = (),
+) -> Dict[Tuple[str, str], Any]:
+    """The fleet row and the rows for *provider_ids*, keyed ``(scope,
+    scope_id)`` — the mapping :func:`resolve_scope_hold` reads. Only rows
+    that exist are present. Never raises: a missing table (pre-migration) or
+    any read failure degrades to ``{}``, i.e. no scope-level hold, the same
+    fail-open direction as the rest of the freshness read path."""
+    from .models import AutomationHoldORM
+
+    out: Dict[Tuple[str, str], Any] = {}
+    try:
+        fleet = await session.get(AutomationHoldORM, FLEET_KEY)
+        if fleet is not None:
+            out[FLEET_KEY] = fleet
+        for pid in {p for p in provider_ids if p}:
+            row = await session.get(AutomationHoldORM, ("provider", pid))
+            if row is not None:
+                out[("provider", pid)] = row
+    except Exception as exc:  # pragma: no cover - defensive, never fail a read
+        logger.warning("Scope-hold read failed (treating as no hold): %s", exc)
+        return {}
+    return out
+
+
+_UNSET = object()
+
+
+async def set_scope_hold(
+    session, *, scope: str, scope_id: str = "",
+    paused_until: Any = _UNSET, stopped: Any = _UNSET,
+    actor: Optional[str] = None,
+):
+    """Set or clear a fleet/provider hold. Partial: only the arguments
+    passed are written. ``paused_until`` is the (already validated) ISO
+    instant, or ``None`` to lift the pause; ``stopped`` True stamps
+    ``stopped_at`` now (kept if already set — the original stop time is the
+    useful one), False lifts it. A row with nothing left in force is
+    deleted, so the table only ever holds what is held.
+
+    Does NOT commit: callers own the transaction (the fleet hold rides the
+    reconciliation-policy save and commits with it). Returns the row, or
+    ``None`` when nothing is held any more."""
+    from .models import AutomationHoldORM
+
+    if scope not in ("fleet", "provider"):
+        raise ValueError("scope must be 'fleet' or 'provider'")
+    key = (scope, scope_id or "")
+    row = await session.get(AutomationHoldORM, key)
+    fresh = row is None
+    if fresh:
+        row = AutomationHoldORM(scope=key[0], scope_id=key[1])
+    now = datetime.now(timezone.utc).isoformat()
+    if paused_until is not _UNSET:
+        row.paused_until = paused_until
+    if stopped is not _UNSET:
+        if stopped:
+            row.stopped_at = row.stopped_at or now
+        else:
+            row.stopped_at = None
+    row.updated_at = now
+    row.updated_by = actor
+    if not row.stopped_at and not row.paused_until:
+        if not fresh:
+            await session.delete(row)
+        return None
+    if fresh:
+        session.add(row)
+    return row

@@ -8,10 +8,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { OverlayIntegrity } from './OverlayIntegrity'
 
-const { getReconciliation, getReconciliationActivity, reconcileNow, permissionFn } = vi.hoisted(() => ({
+const { getReconciliation, getReconciliationActivity, reconcileNow, putReconciliation, permissionFn } = vi.hoisted(() => ({
     getReconciliation: vi.fn(),
     getReconciliationActivity: vi.fn(),
     reconcileNow: vi.fn(),
+    putReconciliation: vi.fn(),
     permissionFn: vi.fn(),
 }))
 
@@ -28,6 +29,7 @@ vi.mock('@/services/freshnessService', async () => {
             getReconciliation,
             getReconciliationActivity,
             reconcileNow,
+            putReconciliation,
         },
     }
 })
@@ -188,5 +190,52 @@ describe('OverlayIntegrity drift disclosure', () => {
             expect(screen.getByRole('button', { name: /Last drift/i })).toBeInTheDocument()
         })
         expect(screen.queryByText(/No drift in 7 days/i)).not.toBeInTheDocument()
+    })
+})
+
+
+describe('OverlayIntegrity fleet-wide hold banner', () => {
+    const POLICY = {
+        enabled: true, checkIntervalSecs: 3600,
+        envEnabled: true, envCheckIntervalSecs: 3600, envMaxActionsPerRun: 10,
+        envShrinkTolerancePct: 10, envStatsMaxAgeSecs: 2700, allDetectors: [],
+    }
+
+    beforeEach(() => {
+        vi.clearAllMocks()
+        getReconciliationActivity.mockResolvedValue({ since: '', items: [] })
+        reconcileNow.mockResolvedValue({ skipped: false, findings: [], run: null })
+        putReconciliation.mockResolvedValue(POLICY)
+    })
+
+    it('says nothing when the fleet is not held', async () => {
+        permissionFn.mockReturnValue(true)
+        getReconciliation.mockResolvedValue({ policy: POLICY, runs: [] })
+        renderCard()
+        await screen.findByRole('button', { name: /check now/i })
+        expect(screen.queryByText(/fleet-wide/)).not.toBeInTheDocument()
+    })
+
+    it('banners a stopped fleet above everything, and Resume lifts it', async () => {
+        permissionFn.mockReturnValue(true)
+        getReconciliation.mockResolvedValue({
+            policy: { ...POLICY, stoppedAt: '2026-09-01T00:00:00+00:00' }, runs: [],
+        })
+        renderCard()
+
+        expect(await screen.findByText(/Automatic rebuilds are stopped fleet-wide/)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /resume fleet-wide/i }))
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ pausedUntil: null, stopped: false }))
+    })
+
+    it('banners a paused fleet with the time left, read-only for a non-admin', async () => {
+        permissionFn.mockReturnValue(false)
+        getReconciliation.mockResolvedValue({
+            policy: { ...POLICY, pausedUntil: new Date(Date.now() + 3 * 3600_000).toISOString() }, runs: [],
+        })
+        renderCard()
+
+        expect(await screen.findByText(/paused for another 3h fleet-wide/)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /resume fleet-wide/i })).not.toBeInTheDocument()
     })
 })

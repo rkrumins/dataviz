@@ -26,9 +26,12 @@ import {
     type ReconcileActivity,
     type ReconcileOverview,
     type ReconcilePolicy,
+    type ReconcilePolicyPatch,
     type ReconcileRunResult,
     type RefreshResponse,
     type RefreshScope,
+    type ScopeHold,
+    type ScopeHoldPatch,
 } from '@/services/freshnessService'
 import { ACTIVE_JOBS_KEY } from './useActiveJobs'
 
@@ -165,14 +168,31 @@ export function useReconcileActivity(
     })
 }
 
-export function useSetReconciliationPolicy(): UseMutationResult<ReconcilePolicy, Error, Partial<ReconcilePolicy>> {
+export function useSetReconciliationPolicy(): UseMutationResult<ReconcilePolicy, Error, ReconcilePolicyPatch> {
     const qc = useQueryClient()
-    return useMutation<ReconcilePolicy, Error, Partial<ReconcilePolicy>>({
+    return useMutation<ReconcilePolicy, Error, ReconcilePolicyPatch>({
         mutationFn: (patch) => freshnessService.putReconciliation(patch),
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
             // The resolved per-source ``autoReconcile`` inherits the global,
-            // so every row's badge can change from one policy save.
+            // and a fleet hold changes every row's ``heldBy``, so every row's
+            // chip can change from one policy save.
+            void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
+        },
+    })
+}
+
+export interface SetProviderHoldVars extends ScopeHoldPatch {
+    providerId: string
+}
+
+/** Pause, stop or resume every source under a provider. Invalidates the
+ *  fleet: every row under the provider changes its ``heldBy``. */
+export function useSetProviderHold(): UseMutationResult<ScopeHold, Error, SetProviderHoldVars> {
+    const qc = useQueryClient()
+    return useMutation<ScopeHold, Error, SetProviderHoldVars>({
+        mutationFn: ({ providerId, ...patch }) => freshnessService.setProviderHold(providerId, patch),
+        onSuccess: () => {
             void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
         },
     })

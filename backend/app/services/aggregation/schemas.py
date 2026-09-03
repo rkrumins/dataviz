@@ -594,6 +594,13 @@ class RefreshResponse(BaseModel):
     job_id: Optional[str] = Field(None, alias="jobId")
     deferred: bool = False
     event_id: Optional[str] = Field(None, alias="eventId")
+    # The operator hold in force for this source when the verb ran, if any.
+    # A person is never refused by a hold — but a rebuild queued past one is
+    # reported with an ``override`` action, so the UI can say "this ran once;
+    # the pause stays" rather than implying the hold was lifted.
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     class Config:
         populate_by_name = True
@@ -669,6 +676,16 @@ class FreshnessRow(BaseModel):
     # action is suppressed. On FreshnessRow (not just FreshnessDoc) because
     # the fleet table renders a "Paused" chip straight off this field.
     paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    # The RESOLVED operator hold, most restrictive wins across fleet →
+    # provider → source (``holds.resolve_hold``). ``held_by`` names the scope
+    # that is holding this source — the control that will release it — so a
+    # row held by its provider is not sent to a source-level Resume that
+    # cannot release it. ``paused_until`` above stays the raw source value
+    # the drawer edits. ``held_kind`` is ``stopped`` (indefinite) or
+    # ``paused`` (timed; ``held_until`` is its expiry).
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
     last_checked_at: Optional[str] = Field(None, alias="lastCheckedAt")
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
@@ -827,6 +844,10 @@ class FreshnessSummary(BaseModel):
     # the data, rebuild it", and a rebuild is not the remedy here. Counted in
     # ``needsAttention``.
     projection_stalled: int = Field(0, alias="projectionStalled")
+    # Sources an operator hold (any scope) is keeping automation off. NOT in
+    # ``needsAttention``: a held source is one somebody deliberately silenced,
+    # and re-inflating the amber count is what the pause exists to avoid.
+    held: int = Field(0)
 
     class Config:
         populate_by_name = True
@@ -854,6 +875,14 @@ class ProviderFreshnessSummary(BaseModel):
     # the data, rebuild it", and a rebuild is not the remedy here. Counted in
     # ``needsAttention``.
     projection_stalled: int = Field(0, alias="projectionStalled")
+    # Same bucket as ``FreshnessSummary.held`` (any scope), per provider.
+    held: int = Field(0)
+    # The hold on the PROVIDER ITSELF (or the fleet's, which outranks it) —
+    # what the group header renders and what its Pause/Resume edits. Null
+    # when only individual sources inside the group are held.
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     class Config:
         populate_by_name = True
@@ -1043,6 +1072,14 @@ class FreshnessSettingsRequest(BaseModel):
         description="ISO-8601 instant until which automation is held for this "
                     "source. Null resumes immediately.",
     )
+    # An ACTION, not a setting: true resets the circuit breaker (zeroes the
+    # consecutive-action count and lifts the ``suspended`` verdict) so
+    # automation resumes on the next sweep. False/absent does nothing.
+    reset_breaker: Optional[bool] = Field(
+        None, alias="resetBreaker",
+        description="True resumes automation on a source the circuit breaker "
+                    "suspended. Not a stored setting.",
+    )
 
     @field_validator("paused_until")
     @classmethod
@@ -1069,6 +1106,8 @@ class FreshnessSettingsResponse(BaseModel):
     probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
     probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
     paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    # True when this PATCH reset the breaker (echo of the action, not state).
+    reset_breaker: Optional[bool] = Field(None, alias="resetBreaker")
 
     class Config:
         populate_by_name = True
@@ -1117,7 +1156,14 @@ class ReconcilePolicyResponse(BaseModel):
     """Resolved global policy plus the env defaults behind it, so the editor
     can seed from ``persisted ?? envDefault`` and a no-op save round-trips the
     real current default instead of pinning a wrong value — the same contract
-    ``AggregationSettingsResponse`` already honours for cadence."""
+    ``AggregationSettingsResponse`` already honours for cadence.
+
+    ``paused_until`` / ``stopped_at`` are the FLEET hold — the whole fleet's
+    automatic rebuilds held by an operator, timed or indefinitely. They ride
+    the policy so the Automation modal needs no second read; they are stored
+    in ``automation_holds``, not in the policy's ``cadence_json``."""
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    stopped_at: Optional[str] = Field(None, alias="stoppedAt")
     enabled: Optional[bool] = None
     check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
     max_actions_per_run: Optional[int] = Field(None, alias="maxActionsPerRun")
@@ -1194,6 +1240,17 @@ class ReconcilePolicyRequest(BaseModel):
         None, alias="shrinkTolerancePct", ge=0, le=100,
     )
     detectors: Optional[List[str]] = None
+    # The FLEET hold, partial like everything else here: ``pausedUntil`` sets
+    # (or, as null, lifts) the timed pause; ``stopped`` true stops every
+    # automatic rebuild until someone sends false. Same validator as the
+    # per-source snooze, so a "pause" cannot be a permanent hold in disguise.
+    paused_until: Optional[str] = Field(None, alias="pausedUntil", max_length=64)
+    stopped: Optional[bool] = None
+
+    @field_validator("paused_until")
+    @classmethod
+    def _check_paused_until(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_paused_until(v)
 
     @field_validator("detectors")
     @classmethod
@@ -1201,6 +1258,37 @@ class ReconcilePolicyRequest(BaseModel):
         if v is None:
             return v
         return _validate_detector_names(v)
+
+    class Config:
+        populate_by_name = True
+
+
+class ScopeHoldRequest(BaseModel):
+    """PUT /freshness/holds/provider/{provider_id}. Partial: ``pausedUntil``
+    sets (or, as null, lifts) the timed pause; ``stopped`` true/false sets or
+    lifts the indefinite stop. Sending both nulls/false resumes the provider.
+    The per-source snooze's validator applies, for the same reason."""
+    paused_until: Optional[str] = Field(None, alias="pausedUntil", max_length=64)
+    stopped: Optional[bool] = None
+
+    @field_validator("paused_until")
+    @classmethod
+    def _check_paused_until(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_paused_until(v)
+
+    class Config:
+        populate_by_name = True
+
+
+class ScopeHoldResponse(BaseModel):
+    """The stored hold for one scope after a PUT — both stamps null when the
+    scope is not held (the row is deleted rather than kept empty)."""
+    scope: str
+    scope_id: str = Field("", alias="scopeId")
+    paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    stopped_at: Optional[str] = Field(None, alias="stoppedAt")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
 
     class Config:
         populate_by_name = True

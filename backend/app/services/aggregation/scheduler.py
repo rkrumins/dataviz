@@ -311,7 +311,7 @@ class AggregationScheduler:
         the source still surfaces as needs-attention and is retried later).
         """
         from .models import AggregationDataSourceStateORM
-        from .service import hold_for_state, resolve_rebuild_interval
+        from .service import hold_for_source_row, resolve_rebuild_interval
         from backend.app.services.graph_cache import (
             clear_source_stale,
             list_stale_sources,
@@ -373,11 +373,11 @@ class AggregationScheduler:
                     # signal_source_changed refuse, is also what keeps a
                     # held-and-marked source from emitting an audit event
                     # every minute.
-                    # (No row is fine: hold_for_state reads through it, and
+                    # (No row is fine: the resolver reads through it, and
                     # the one thing an absent row inherits — the fleet's
                     # ② Check switch — must hold here too, or the signal
                     # below refuses it instead and audits every minute.)
-                    hold = hold_for_state(state, cadence)
+                    hold = await hold_for_source_row(s2, ds, state, cadence)
                     if hold is not None:
                         logger.debug(
                             "stale-marker reconcile: %s held (%s) — deferring",

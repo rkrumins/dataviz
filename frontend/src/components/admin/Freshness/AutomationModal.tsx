@@ -58,6 +58,7 @@ import {
     MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, automationWarnings, hintIdFor,
 } from './automationCopy'
 import { Advanced, PipelineRail, SettingRow, StageRow } from './StageRow'
+import { SnoozeRow } from './SnoozeRow'
 import { lastPassBrief, pickLastPassRun } from './reconcileHealth'
 import { useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
 
@@ -213,7 +214,7 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
     )
 }
 
-export function AutomationModal({ open, onClose, isAdmin, summary }: {
+export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspended }: {
     open: boolean
     /** Must be referentially stable: it feeds ``useModalA11y``'s focus effect,
      *  and a fresh identity on every parent render would pull focus back to
@@ -221,6 +222,10 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
     onClose: () => void
     isAdmin: boolean
     summary?: FreshnessSummary | null
+    /** Takes the reader to the sources the breaker stopped (closes the modal
+     *  and filters the table) — a count of sources waiting for a person is a
+     *  to-do list, not a statistic. */
+    onShowSuspended?: () => void
 }) {
     const qc = useQueryClient()
     const { notify } = useAppNotifications()
@@ -916,18 +921,52 @@ export function AutomationModal({ open, onClose, isAdmin, summary }: {
                                                 </span>
                                             </SettingRow>
 
+                                            {/* The fleet-wide hold: the drawer's snooze at fleet
+                                                scope. Immediate, never staged into Save — a pause
+                                                that waited for a Save button would be the one
+                                                control here that does not do what it says when
+                                                clicked. Most restrictive wins, so no source or
+                                                provider control can release it; it is also the
+                                                one thing the Overlay integrity header banners. */}
+                                            <SnoozeRow
+                                                scope="fleet"
+                                                idPrefix="automation-fleet-hold"
+                                                pausedUntil={policy?.pausedUntil}
+                                                stoppedAt={policy?.stoppedAt}
+                                                allowStop
+                                                disabled={!isAdmin}
+                                                pending={saveRecon.isPending}
+                                                onPatch={(patch, ok) => saveRecon.mutate(patch, {
+                                                    onSuccess: () => notify('success', `Fleet-wide: ${ok}`),
+                                                    onError: (e: Error) =>
+                                                        notify('error', e.message || 'Could not update the fleet-wide hold.'),
+                                                })}
+                                            />
+
                                             {/* The breaker's limit is deploy-owned and the API does
                                                 not report it, so this states the rule and the live
-                                                count rather than inventing a number. */}
+                                                count — as a way to those sources, because a count
+                                                of sources waiting for a person is a to-do list, not
+                                                a statistic. The resume is on each source's drawer. */}
                                             <SettingRow
-                                                label="Stop a source that keeps failing"
-                                                hint="A source that keeps needing the same rebuild waits for a person instead."
+                                                label="A source that keeps failing waits for a person"
+                                                hint="After repeated rebuilds that never clear the same problem, automation stops for that source until someone resumes it from its drawer."
                                             >
                                                 <span className="flex items-center gap-2">
                                                     {summary?.suspended != null && (
-                                                        <span className="text-[12px] text-ink-secondary tabular-nums">
-                                                            {summary.suspended.toLocaleString()} stopped now
-                                                        </span>
+                                                        onShowSuspended && summary.suspended > 0 ? (
+                                                            <button
+                                                                type="button"
+                                                                onClick={onShowSuspended}
+                                                                className="rounded text-[12px] font-semibold tabular-nums text-amber-700 dark:text-amber-300 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                                                            >
+                                                                {summary.suspended.toLocaleString()} need a person
+                                                            </button>
+                                                        ) : (
+                                                            <span className="text-[12px] text-ink-secondary tabular-nums">
+                                                                {summary.suspended.toLocaleString()} need a person
+                                                            </span>
+                                                        )
                                                     )}
                                                     <DeployTag />
                                                 </span>

@@ -36,6 +36,7 @@ import {
     DRIFT_SPEC, DriftStateBadge,
 } from './DriftStateBadge'
 import { failureBadgeLabel, failureBadgeWhy, relatedFailureCount } from './failureGuidance'
+import { holdLabel, holdTitle, rowHold, timeUntil } from './holds'
 import { SelectionCheckbox } from './SelectionCheckbox'
 import { resolveLastActivity, type LastActivityKind } from './lastActivity'
 
@@ -55,43 +56,30 @@ export function deriveStaleSince(row: FreshnessRowData): string | null {
     return null
 }
 
-/** Minutes/hours/days until a future instant, or null if it's already past. */
-export function timeUntil(iso?: string | null): string | null {
-    if (!iso) return null
-    const ms = new Date(iso).getTime() - Date.now()
-    if (Number.isNaN(ms) || ms <= 0) return null
-    const mins = Math.round(ms / 60000)
-    if (mins < 60) return `${mins}m`
-    const hours = Math.round(mins / 60)
-    if (hours < 24) return `${hours}h`
-    return `${Math.round(hours / 24)}d`
-}
-
 /** The reconciliation fields `automationChip` reads off a fleet row — a
  *  `Pick`, not the full row type, so the decision logic is testable with a
  *  bare literal (see FreshnessRow.test.tsx) rather than a fabricated row. */
 type AutomationRow = Pick<
     FreshnessRowData,
     'driftState' | 'autoReconcile' | 'pausedUntil' | 'projectorCurrent'
+    | 'heldBy' | 'heldKind' | 'heldUntil'
 >
 
 /**
  * The automation-state chip for a fleet row. Absence is the signal: a
- * healthy, automated source (in sync, not paused) returns null rather than
+ * healthy, automated source (in sync, not held) returns null rather than
  * repeating "everything is fine" on every row — a chip appears only for a
  * state worth interrupting the scan for.
  *
- * Precedence, most consequential first: the breaker (suspended) always
- * wins, even over an active snooze — a person is needed regardless of
- * whether the source is also paused. Next, a deliberate opt-out — it is
- * more permanent than a snooze (a snooze lapses on its own; automation
- * being off does not), so it wins over "Paused" too: a drifting, paused,
- * opted-out source resumes on nothing when the snooze lapses, and telling
- * the operator "Paused" there would imply otherwise. Only once neither of
- * those applies does a snooze get to surface, and only while it is
- * actually holding back a real drift verdict — pausing a source that never
- * drifts looks identical to automation working normally, so it stays as
- * quiet as any healthy row.
+ * Precedence, most consequential first: a stalled projection (automation
+ * is not merely stopped, the action it would take is the wrong one), then
+ * the breaker (suspended) — a person is needed regardless of whether the
+ * source is also held — then the hold. A hold shows whether or not the row
+ * is currently drifting: a paused source that happens to be fine right now
+ * is exactly the one an operator forgets, and it is the pause, not the
+ * drift, that they set and will need to release. The chip names the WIDEST
+ * scope holding the row (``rowHold``), so it points at the control that
+ * will actually release it.
  */
 export function automationChip(row: AutomationRow): {
     label: string
@@ -121,24 +109,12 @@ export function automationChip(row: AutomationRow): {
             title: DRIFT_SPEC.suspended.title,
         }
     }
-    if (row.autoReconcile === false) {
-        // No StatusFacet filters to "automation off" sources specifically,
-        // so this resolves to '' (the existing "all" facet) — the render
-        // site treats an empty facet as non-interactive rather than wiring
-        // up a click that would silently just clear the status filter.
+    const hold = rowHold(row)
+    if (hold) {
         return {
-            label: 'Automation off', tone: neutralTone, facet: '', Icon: Minus,
-            title: 'Automatic reconciliation is turned off for this source. '
-                + 'Drift is still detected and shown, but nothing is rebuilt '
-                + 'automatically.',
-        }
-    }
-    const drifting = row.driftState === 'drifting' || row.driftState === 'overlayMissing'
-    if (drifting && timeUntil(row.pausedUntil)) {
-        return {
-            label: 'Paused', tone: neutralTone, facet: 'drifting',
-            Icon: PauseCircle,
-            title: 'An operator paused automatic reconciliation for this source.',
+            label: holdLabel(hold), tone: neutralTone, facet: 'held',
+            Icon: hold.kind === 'paused' ? PauseCircle : StopCircle,
+            title: holdTitle(hold),
         }
     }
     // No cooldown chip here on purpose: FreshnessBadges already renders
@@ -647,10 +623,10 @@ export function FreshnessRow({
                             chip.tone,
                         )
                         const content = <><Icon className="w-3 h-3 shrink-0" />{chip.label}</>
-                        // Only 'suspended'/'drifting' have a real facet to filter
-                        // to — 'Automation off' resolves to '' (see automationChip)
-                        // and stays a plain label rather than a click that would
-                        // just clear the status filter.
+                        // Every chip carries a real facet today (suspended,
+                        // projectionStalled, held); the empty-facet guard stays
+                        // so a future chip without one renders as a plain label
+                        // rather than a click that would just clear the filter.
                         return chip.facet && onFilterStatus ? (
                             <button
                                 type="button"

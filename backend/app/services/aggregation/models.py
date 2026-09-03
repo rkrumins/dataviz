@@ -350,3 +350,36 @@ class AggregationSettingsORM(Base):
     cadence_json = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=True)
     updated_by = Column(Text, nullable=True)
+
+
+class AutomationHoldORM(Base):
+    """An operator hold on automatic rebuilds at PROVIDER or FLEET scope.
+
+    One row per held scope, keyed ``(scope, scope_id)`` — ``('fleet', '')``
+    for the whole fleet, ``('provider', <provider_id>)`` for one provider —
+    carrying the same two nullable columns the per-source hold has on
+    ``data_source_state`` (``paused_until`` = timed, lapses on its own;
+    ``stopped_at`` = indefinite, until someone resumes). ``holds.resolve_hold``
+    applies most-restrictive-wins across fleet → provider → source, so the
+    source's own controls cannot escape a wider hold.
+
+    Not a column on ``public.providers`` (viz-owned; every aggregation touch
+    of ``public`` is a read) and not a scope-keyed ``aggregation_settings``
+    row (its cadence chain is most-SPECIFIC-wins, the opposite rule). A row
+    is deleted when both columns are cleared, so the table only ever holds
+    what is actually held.
+    """
+    __tablename__ = "automation_holds"
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('fleet', 'provider')", name="ck_automation_holds_scope",
+        ),
+        {"schema": "aggregation"},
+    )
+
+    scope = Column(Text, primary_key=True)
+    scope_id = Column(Text, primary_key=True)   # '' for the fleet row
+    paused_until = Column(Text, nullable=True)  # ISO-8601; timed hold
+    stopped_at = Column(Text, nullable=True)    # ISO-8601; indefinite hold
+    updated_at = Column(Text, nullable=True)
+    updated_by = Column(Text, nullable=True)

@@ -653,3 +653,73 @@ describe('admin automation save', () => {
         expect(screen.getByText('starved')).toBeInTheDocument()
     })
 })
+
+describe('fleet-wide hold', () => {
+    /** Everything on, so the Act ledger renders live; the hold row sits
+     *  behind the Act disclosure with the other tuning knobs. */
+    const SUMMARY = {
+        total: 10, ready: 7, pending: 0, failed: 0, notBuilt: 0, recomputing: 0,
+        needsAttention: 3, cacheStamped: 8, drifting: 0, suspended: 3,
+    }
+
+    beforeEach(() => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+    })
+
+    it('a timed pause writes pausedUntil through the policy PUT, immediately', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        const select = await screen.findByLabelText('Pause every rebuild for')
+        await userEvent.selectOptions(select, '3600')
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledTimes(1))
+        const body = putReconciliation.mock.calls[0][0]
+        expect(body).toEqual({ pausedUntil: expect.any(String) })
+        // Roughly an hour out — the choice, not a hardcoded instant.
+        const until = Date.parse(body.pausedUntil)
+        expect(until - Date.now()).toBeGreaterThan(55 * 60_000)
+        expect(until - Date.now()).toBeLessThan(65 * 60_000)
+        // Not part of the staged form: Save was never needed.
+        expect(putAggregationCadence).not.toHaveBeenCalled()
+    })
+
+    it('"until resumed" is a stop, sent as such and never as a pause', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        await userEvent.selectOptions(await screen.findByLabelText('Pause every rebuild for'), 'stop')
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ pausedUntil: null, stopped: true }))
+    })
+
+    it('a stopped fleet shows the stop and its Resume lifts both stamps', async () => {
+        getReconciliation.mockResolvedValue({
+            policy: { ...RECON_POLICY, stoppedAt: '2026-09-01T00:00:00+00:00' }, runs: [],
+        })
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        expect(await screen.findByText('Every rebuild is stopped fleet-wide')).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /resume now/i }))
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ pausedUntil: null, stopped: false }))
+    })
+
+    it('a non-admin sees the hold but cannot set it', async () => {
+        permissionFn.mockReturnValue(false)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        expect(await screen.findByLabelText('Pause every rebuild for')).toBeDisabled()
+    })
+
+    it('the breaker count is a way to those sources, not a number', async () => {
+        const onShowSuspended = vi.fn()
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} onShowSuspended={onShowSuspended} />)
+        await openAdvanced('Act')
+
+        await userEvent.click(await screen.findByRole('button', { name: '3 need a person' }))
+        expect(onShowSuspended).toHaveBeenCalledTimes(1)
+    })
+})

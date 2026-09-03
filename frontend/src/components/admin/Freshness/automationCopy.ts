@@ -177,3 +177,15 @@ export function automationWarnings(
     }
     return out
 }
+
+/** How long an operator can hold rebuilds for — a source's, a provider's or
+ *  the fleet's. Hours and days, because a pause is measured in "until I have
+ *  looked at it", never in seconds — which is why this is a list of choices
+ *  and not a DurationField. Shared by every snooze control so the three
+ *  scopes cannot drift apart. */
+export const SNOOZE_CHOICES: { label: string; secs: number }[] = [
+    { label: '1 hour', secs: 3600 },
+    { label: '8 hours', secs: 8 * 3600 },
+    { label: '24 hours', secs: 24 * 3600 },
+    { label: '7 days', secs: 7 * 24 * 3600 },
+]

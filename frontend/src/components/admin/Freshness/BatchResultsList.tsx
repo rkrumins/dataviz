@@ -38,7 +38,7 @@ export function describeActions(actions: string[]): string {
 /** A held source was SKIPPED, not refreshed — say which control is holding
  *  it, because a source-level "Resume" does nothing against a provider or
  *  fleet hold. */
-export function describeHold(r: Pick<BatchItemResult, 'heldBy' | 'heldKind'>): string {
+function describeHold(r: Pick<BatchItemResult, 'heldBy' | 'heldKind'>): string {
     const kind = r.heldKind === 'stopped' ? 'stopped' : 'paused'
     const scope = r.heldBy === 'fleet' ? ' fleet-wide' : r.heldBy === 'provider' ? ' for the provider' : ''
     return `skipped — automation ${kind}${scope}`

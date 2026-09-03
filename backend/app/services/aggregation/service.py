@@ -42,7 +42,8 @@ from .schemas import (
 )
 from .fingerprint import compute_graph_fingerprint, fingerprints_match
 from .holds import (  # noqa: F401  (HeldError re-exported for callers)
-    AUTOMATION_ORIGINS, HELD_TRIGGER_SOURCES, HeldError, Hold, resolve_hold,
+    AUTOMATION_ORIGINS, FLEET_KEY, HELD_TRIGGER_SOURCES, HeldError, Hold,
+    read_scope_holds, resolve_hold, resolve_scope_hold, set_scope_hold,
 )
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
@@ -188,6 +189,36 @@ def hold_for_state(
         provider_id=provider_id,
         source_paused_until=getattr(state, "paused_until", None),
         source_reconcile_enabled=reconcile_enabled,
+    )
+
+
+async def _scope_context(session, ds_id: str):
+    """``(scope_holds, provider_id)`` for one source: the fleet row, the
+    source's provider, and that provider's row. Two or three primary-key
+    reads (see ``holds.read_scope_holds`` for why they are not cached).
+    Never raises — a failed provider lookup means "no provider hold", the
+    fail-open direction the rest of the freshness read path takes."""
+    provider_id = None
+    try:
+        from backend.app.db.models import WorkspaceDataSourceORM
+
+        ds = await session.get(WorkspaceDataSourceORM, ds_id)
+        provider_id = getattr(ds, "provider_id", None)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Provider lookup for hold on %s failed: %s", ds_id, exc)
+    scope_holds = await read_scope_holds(
+        session, [provider_id] if provider_id else [],
+    )
+    return scope_holds, provider_id
+
+
+async def hold_for_source_row(session, ds_id: str, state, cadence) -> Optional[Hold]:
+    """The hold in force for a source whose state row (or ``None``) and the
+    global cadence are already in hand — :func:`hold_for_state` plus the
+    fleet/provider rows. The one call every gate makes."""
+    scope_holds, provider_id = await _scope_context(session, ds_id)
+    return hold_for_state(
+        state, cadence, provider_id=provider_id, scope_holds=scope_holds,
     )
 
 
@@ -1693,7 +1724,7 @@ class AggregationService:
 
         state = await session.get(AggregationDataSourceStateORM, ds_id)
         cadence = await read_global_cadence(session)
-        return self.hold_for_state(state, cadence)
+        return await hold_for_source_row(session, ds_id, state, cadence)
 
     async def set_source_pause(
         self, ds_id: str, session: AsyncSession, *, paused_until: Optional[str],
@@ -1716,6 +1747,29 @@ class AggregationService:
             ds_id, state.paused_until,
         )
         return {"paused_until": state.paused_until}
+
+    async def reset_source_breaker(
+        self, ds_id: str, session: AsyncSession,
+    ) -> dict:
+        """Manual resume from the circuit breaker — the one thing that could
+        not be done before: ``reconcile_consecutive_actions`` only ever reset
+        on an ``in_sync`` verdict, so a source the breaker suspended stayed
+        suspended until the finding cleared by itself. Zeroes the count and
+        lifts the ``suspended`` stamp (the next sweep re-evaluates from
+        scratch); touches nothing else."""
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is None:
+            raise NotFoundError(
+                f"Data source {ds_id} not found in aggregation state"
+            )
+        state.reconcile_consecutive_actions = 0
+        if state.drift_state == "suspended":
+            state.drift_state = None
+        await session.commit()
+        logger.info("Reconcile breaker reset for data source %s", ds_id)
+        return {"reset_breaker": True}
 
     # ── Change Detection ──────────────────────────────────────────────
 
@@ -1954,7 +2008,7 @@ class AggregationService:
             # person or an external system (origin script/connector/api)
             # is never held here; they proceed, and the UI warns.
             if origin in AUTOMATION_ORIGINS:
-                held = self.hold_for_state(state, cadence)
+                held = await hold_for_source_row(session, ds_id, state, cadence)
             if held is not None:
                 trigger_outcome = "held"
                 trigger_detail = held.detail
@@ -2172,6 +2226,17 @@ class AggregationService:
         if state is None and ds_orm is None:
             raise NotFoundError(f"Data source {ds_id} not found")
 
+        # A hold stops automation, never this verb: a person (or an external
+        # system) proceeds. It is REPORTED, and a rebuild actually queued past
+        # it carries an ``override`` action, so the UI can say "ran once, the
+        # pause stays" instead of implying the hold was lifted.
+        hold = await self.hold_for_source(ds_id, session)
+        hold_fields = dict(
+            held_by=hold.scope if hold else None,
+            held_kind=hold.kind if hold else None,
+            held_until=hold.until if hold else None,
+        )
+
         # 1. auto — delegate to the signal, which owns the change gate and
         # emits its own event; reuse that event id, never emit a second.
         if scope == "auto":
@@ -2189,6 +2254,8 @@ class AggregationService:
                 actions.append("rebuild_deferred")
             elif signal.changed:
                 actions.append("invalidated")
+            if hold is not None and signal.job_id:
+                actions.append("override")
             if wait == "complete" and signal.job_id:
                 actions.append(
                     await self._wait_for_job(ds_id, signal.job_id, session)
@@ -2197,6 +2264,7 @@ class AggregationService:
                 scope="auto", gate=gate, changed=signal.changed,
                 actions=actions, job_id=signal.job_id,
                 deferred=signal.deferred, event_id=signal.event_id,
+                **hold_fields,
             )
 
         # Non-auto scopes own their single audit event. ``audit`` mirrors the
@@ -2331,6 +2399,9 @@ class AggregationService:
             detail=detail,
         )
 
+        if hold is not None and job_id:
+            actions.append("override")
+
         # 4. Optional synchronous wait for a queued rebuild.
         if wait == "complete" and job_id:
             actions.append(await self._wait_for_job(ds_id, job_id, session))
@@ -2338,6 +2409,7 @@ class AggregationService:
         return RefreshResponse(
             scope=scope, gate="n/a", changed=True, actions=actions,
             job_id=job_id, deferred=False, event_id=event_id,
+            **hold_fields,
         )
 
     async def _wait_for_job(
@@ -2430,6 +2502,7 @@ class AggregationService:
         # persisted global → env), so the badge matches the cooldown gate.
         cadence = await read_global_cadence(session)
         states = await _state_map(session, [ds.id])
+        scope_holds = await read_scope_holds(session, [ds.provider_id])
         state_row = states.get(ds.id, {})
         override_secs = state_row.get("rebuild_min_interval_secs")
         cooldown_interval_secs = resolve_rebuild_interval(
@@ -2538,6 +2611,7 @@ class AggregationService:
                 last_failure_category=last_failure_category,
                 platform_mastered=ds.id in versioned,
                 projector_health=health.get(ds.id),
+                scope_holds=scope_holds,
             ),
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
@@ -3163,6 +3237,7 @@ def _freshness_row_kwargs(
     last_failure_category: Optional[str] = None,
     platform_mastered: bool = False,
     projector_health=None,
+    scope_holds=None,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -3172,9 +3247,20 @@ def _freshness_row_kwargs(
     ``cooldownUntil`` the badge reads reflects any global/per-source override.
     ``state_row`` is this source's entry from :func:`_state_map` — the
     reconciliation verdict the SWEEP stamped, read straight off the row so
-    this path never recomputes detection."""
+    this path never recomputes detection. ``scope_holds`` is the fleet/provider
+    hold map (``holds.read_scope_holds``), read once per request by the
+    caller; the row reports the RESOLVED hold, widest scope first, so the
+    operator is pointed at the control that will actually release it."""
     generation, cache_as_of, stale_reason = signals
     st = state_row or {}
+    auto_reconcile = resolve_reconcile_enabled(
+        st.get("reconcile_enabled"), reconcile_enabled_global,
+    )
+    hold = resolve_hold(
+        scope_holds=scope_holds, provider_id=ds.provider_id,
+        source_paused_until=st.get("paused_until"),
+        source_reconcile_enabled=auto_reconcile,
+    )
     return dict(
         data_source_id=ds.id,
         workspace_id=ds.workspace_id,
@@ -3199,10 +3285,11 @@ def _freshness_row_kwargs(
         running_job_id=running_job_id,
         last_event=_event_summary(last_event),
         drift_state=st.get("drift_state"),
-        auto_reconcile=resolve_reconcile_enabled(
-            st.get("reconcile_enabled"), reconcile_enabled_global,
-        ),
+        auto_reconcile=auto_reconcile,
         paused_until=st.get("paused_until"),
+        held_by=hold.scope if hold else None,
+        held_kind=hold.kind if hold else None,
+        held_until=hold.until if hold else None,
         last_checked_at=st.get("last_reconcile_checked_at"),
         last_reconciled_at=st.get("last_reconciled_at"),
         last_reconcile_reason=st.get("last_reconcile_reason"),
@@ -3541,6 +3628,11 @@ async def assemble_fleet_freshness(
     # ``cooldownUntil`` badge honors both without any per-row reads.
     cadence = await read_global_cadence(session)
     states = await _state_map(session, ds_ids)
+    # Fleet/provider holds: one PK read for the fleet row plus one per
+    # distinct provider on the page (never per row).
+    scope_holds = await read_scope_holds(
+        session, {ds.provider_id for ds in ds_list},
+    )
     failed_ids = [
         ds.id for ds in ds_list if ds.aggregation_status == "failed"
     ]
@@ -3567,6 +3659,7 @@ async def assemble_fleet_freshness(
             last_failure_category=(failures.get(ds.id) or {}).get("category"),
             platform_mastered=ds.id in versioned,
             projector_health=health.get(ds.id),
+            scope_holds=scope_holds,
         ))
         for ds in ds_list
     ]
@@ -3582,6 +3675,8 @@ async def assemble_fleet_freshness(
         provider_names=provider_names,
         states=states,
         health=health,
+        cadence=cadence,
+        scope_holds=scope_holds,
     )
     return FreshnessFleetResponse(
         rows=rows, total=total, summary=summary,
@@ -3602,6 +3697,8 @@ async def _assemble_fleet_summary(
     provider_names: dict,
     states: Optional[dict] = None,
     health: Optional[dict] = None,
+    cadence=None,
+    scope_holds: Optional[dict] = None,
 ) -> tuple[Optional[FreshnessSummary], Optional[list[ProviderFreshnessSummary]]]:
     """Fleet stat-tile counts over the workspace/provider-filtered set,
     BEFORE the ``staleOnly`` facet and pagination — so the tiles describe
@@ -3708,13 +3805,37 @@ async def _assemble_fleet_summary(
     # out entirely would let a whole wedged fleet read as needing nothing.
     stalled_ids = _stalled_ids(full_ids, full_states, health)
 
+    # Operator holds, resolved per row from the same state map plus the
+    # fleet/provider rows — the page's read is reused when the page IS the
+    # full set, exactly as the maps above are. Its OWN bucket: a held source
+    # is one an operator deliberately silenced, so it is NOT folded into
+    # needs_attention, which would re-inflate the amber count the pause
+    # exists to quiet.
+    if cadence is None:
+        cadence = await read_global_cadence(session)
+    if scope_holds is None or not page_is_full_set:
+        scope_holds = await read_scope_holds(
+            session, {row[3] for row in full_rows},
+        )
+    held_ids = {
+        row[0] for row in full_rows
+        if resolve_hold(
+            scope_holds=scope_holds, provider_id=row[3],
+            source_paused_until=full_states.get(row[0], {}).get("paused_until"),
+            source_reconcile_enabled=resolve_reconcile_enabled(
+                full_states.get(row[0], {}).get("reconcile_enabled"),
+                cadence.reconcile_enabled,
+            ),
+        ) is not None
+    }
+
     summary = _summarize_freshness(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
-        stalled_ids,
+        stalled_ids, held_ids,
     )
     provider_summaries = _summarize_by_provider(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
-        stalled_ids,
+        stalled_ids, held_ids, scope_holds,
     )
     return summary, provider_summaries
 
@@ -3764,6 +3885,7 @@ def _summarize_freshness(
     drifting_ids: Optional[set] = None,
     suspended_ids: Optional[set] = None,
     stalled_ids: Optional[set] = None,
+    held_ids: Optional[set] = None,
 ) -> FreshnessSummary:
     """Reduce ``(ds_id, workspace_id, aggregation_status, ...)`` rows +
     their Redis signals + running-job map into the fleet summary counts
@@ -3778,9 +3900,10 @@ def _summarize_freshness(
     drifting_ids = drifting_ids or set()
     suspended_ids = suspended_ids or set()
     stalled_ids = stalled_ids or set()
+    held_ids = held_ids or set()
     ready = pending = failed = not_built = 0
     recomputing = needs_attention = cache_stamped = drifting = suspended = 0
-    projection_stalled = 0
+    projection_stalled = held = 0
     for row in full_rows:
         ds_id, ws_id, status = row[0], row[1], row[2]
         if status == "ready":
@@ -3806,6 +3929,9 @@ def _summarize_freshness(
         is_stalled = ds_id in stalled_ids
         if is_stalled:
             projection_stalled += 1
+        # Deliberately NOT part of the needs_attention OR below.
+        if ds_id in held_ids:
+            held += 1
         # A drifting or suspended source is serving data that no longer
         # matches its graph, so it belongs in the same triage bucket as a
         # failed or marked one. Suspended is the case that needs a person.
@@ -3830,6 +3956,7 @@ def _summarize_freshness(
         drifting=drifting,
         suspended=suspended,
         projection_stalled=projection_stalled,
+        held=held,
     )
 
 
@@ -3838,6 +3965,8 @@ def _summarize_by_provider(
     drifting_ids: Optional[set] = None,
     suspended_ids: Optional[set] = None,
     stalled_ids: Optional[set] = None,
+    held_ids: Optional[set] = None,
+    scope_holds: Optional[dict] = None,
 ) -> list[ProviderFreshnessSummary]:
     """Per-provider breakdown of the SAME rows ``_summarize_freshness``
     reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
@@ -3852,7 +3981,12 @@ def _summarize_by_provider(
     for (provider_id, provider_name), rows in groups.items():
         s = _summarize_freshness(
             rows, signals, running, drifting_ids, suspended_ids, stalled_ids,
+            held_ids,
         )
+        # The provider's OWN hold (or the fleet's, which outranks it) — what
+        # the group header renders and what its Pause/Resume control edits.
+        # Per-source holds inside the group are in ``held``, not here.
+        group_hold = resolve_scope_hold(scope_holds, provider_id)
         result.append(ProviderFreshnessSummary(
             provider_id=provider_id,
             provider_name=provider_name,
@@ -3860,6 +3994,10 @@ def _summarize_by_provider(
             not_built=s.not_built, needs_attention=s.needs_attention,
             cache_stamped=s.cache_stamped, drifting=s.drifting,
             suspended=s.suspended, projection_stalled=s.projection_stalled,
+            held=s.held,
+            held_by=group_hold.scope if group_hold else None,
+            held_kind=group_hold.kind if group_hold else None,
+            held_until=group_hold.until if group_hold else None,
         ))
     result.sort(key=lambda ps: (ps.provider_name is None, ps.provider_name or ""))
     return result
@@ -3868,14 +4006,18 @@ def _summarize_by_provider(
 # ── Reconciliation: policy read/write + run history ─────────────────
 
 
-def _policy_response(cadence) -> "ReconcilePolicyResponse":
+def _policy_response(cadence, fleet_hold=None) -> "ReconcilePolicyResponse":
     """Persisted policy plus the env defaults behind it, so the editor seeds
     from ``persisted ?? envDefault`` and a no-op save round-trips the real
-    current default instead of pinning a wrong value."""
+    current default instead of pinning a wrong value. ``fleet_hold`` is the
+    fleet's ``automation_holds`` row (or ``None``): its two stamps ride the
+    policy so the Automation modal needs no second read."""
     from .reconcile import REASONS
     from .schemas import ReconcilePolicyResponse
 
     return ReconcilePolicyResponse(
+        paused_until=getattr(fleet_hold, "paused_until", None),
+        stopped_at=getattr(fleet_hold, "stopped_at", None),
         enabled=cadence.reconcile_enabled,
         check_interval_secs=cadence.reconcile_check_interval_secs,
         max_actions_per_run=cadence.reconcile_max_actions_per_run,
@@ -3926,6 +4068,7 @@ async def assemble_reconcile_overview(
     from .schemas import ReconcileOverviewResponse
 
     cadence = await read_global_cadence(session)
+    fleet_hold = (await read_scope_holds(session)).get(FLEET_KEY)
     runs = []
     try:
         rows = (await session.execute(
@@ -3936,7 +4079,9 @@ async def assemble_reconcile_overview(
         runs = [_run_model(r) for r in rows]
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Reconcile run history read failed: %s", exc)
-    return ReconcileOverviewResponse(policy=_policy_response(cadence), runs=runs)
+    return ReconcileOverviewResponse(
+        policy=_policy_response(cadence, fleet_hold), runs=runs,
+    )
 
 
 def parse_activity_since(raw: Optional[str]) -> datetime:
@@ -4058,7 +4203,7 @@ async def assemble_reconcile_activity(
 
 
 async def save_reconcile_policy(
-    session: AsyncSession, body, *, sent: set,
+    session: AsyncSession, body, *, sent: set, actor: Optional[str] = None,
 ) -> "ReconcilePolicyResponse":
     """Merge the sent fields into ``aggregation_settings.cadence_json``.
 
@@ -4067,6 +4212,10 @@ async def save_reconcile_policy(
     ``driftAutoRebuild`` — hence the merge, and the row lock: two concurrent
     writers merging against the same snapshot would silently drop one
     another's fields (no-op on SQLite, ``FOR UPDATE`` on Postgres).
+
+    The FLEET HOLD (``pausedUntil`` / ``stopped``) rides the same PUT and the
+    same transaction but lives in its own ``automation_holds`` row, never in
+    ``cadence_json`` — see ``AutomationHoldORM`` for why.
     """
     from .models import AggregationSettingsORM
     from .schemas import AggregationCadence
@@ -4099,11 +4248,23 @@ async def save_reconcile_policy(
             else:
                 current[alias] = value
 
+    hold_kwargs = {}
+    if "paused_until" in sent:
+        hold_kwargs["paused_until"] = body.paused_until
+    if "stopped" in sent:
+        hold_kwargs["stopped"] = body.stopped
+    if hold_kwargs:
+        fleet_hold = await set_scope_hold(
+            session, scope="fleet", actor=actor, **hold_kwargs,
+        )
+    else:
+        fleet_hold = (await read_scope_holds(session)).get(FLEET_KEY)
+
     row.cadence_json = json.dumps(current)
     row.updated_at = _now()
     await session.commit()
     invalidate_global_cadence_cache()
-    return _policy_response(AggregationCadence(**current))
+    return _policy_response(AggregationCadence(**current), fleet_hold)
 
 
 # ── Custom Exception Classes ────────────────────────────────────────

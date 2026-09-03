@@ -42,7 +42,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import func, select, text
 
-from .holds import HeldError
+from .holds import HeldError, read_scope_holds, resolve_scope_hold, skip_for
 from .reconcile import Observation, Verdict, evaluate
 
 logger = logging.getLogger(__name__)
@@ -420,6 +420,11 @@ class ReconciliationSweeper:
 
             ds_ids = [s.data_source_id for s in states]
             ctx = await self._batch_context(session, ds_ids, versioned, health)
+            # Fleet/provider holds for this candidate set: one PK read for
+            # the fleet row plus one per distinct provider, once per pass.
+            scope_holds = await read_scope_holds(
+                session, {c.get("provider_id") for c in ctx.values()},
+            )
             # Drop the lock before any live graph call. Operator modes refresh
             # counts; auto ticks evaluate against the SQL snapshot alone.
             await session.commit()
@@ -460,6 +465,7 @@ class ReconciliationSweeper:
                         state.rebuild_min_interval_secs,
                         cadence.rebuild_min_interval_secs,
                     ),
+                    scope_holds=scope_holds,
                 )
                 # Per-source due-ness: the SQL cutoff is permissive because it
                 # cannot know each source's override, so the exact check is
@@ -1098,6 +1104,7 @@ class ReconciliationSweeper:
 
     def _observe(
         self, state, ctx, policy, *, reconcile_enabled, rebuild_interval,
+        scope_holds=None,
     ) -> Observation:
         c = ctx.get(state.data_source_id, {})
         stats_updated = c.get("stats_updated")
@@ -1163,6 +1170,7 @@ class ReconciliationSweeper:
             overlay_observable=c.get("overlay_observable", True),
             live_observed=bool(c.get("live_observed")),
             reconcile_enabled=reconcile_enabled,
+            scope_hold=resolve_scope_hold(scope_holds, c.get("provider_id")),
         )
 
     @staticmethod
@@ -1277,9 +1285,7 @@ class ReconciliationSweeper:
                 # is in force. That is a skip the operator asked for, not a
                 # dispatch failure — count it where the cockpit's "why did
                 # the fleet produce nothing" tally will show it.
-                skip = f"{exc.hold.scope}_held" if exc.hold.scope != "source" else (
-                    "disabled" if exc.hold.kind == "stopped" else "paused"
-                )
+                skip = skip_for(exc.hold)
                 result.skipped += 1
                 result.by_skip[skip] = result.by_skip.get(skip, 0) + 1
                 logger.info(

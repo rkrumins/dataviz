@@ -49,6 +49,15 @@ export type DriftStateValue =
 export type ReconcileReason =
     | 'overlay_missing' | 'overlay_shrunk' | 'never_aggregated' | 'raw_drift'
 
+/** Where an operator hold on automatic rebuilds is in force. On a row,
+ *  ``heldBy`` is the WIDEST scope holding it — most restrictive wins across
+ *  fleet → provider → source — so it names the control that will actually
+ *  release the source. */
+export type HoldScope = 'fleet' | 'provider' | 'source'
+/** ``paused`` lapses on its own (``heldUntil`` is when); ``stopped`` waits
+ *  for a person to resume it. */
+export type HoldKind = 'paused' | 'stopped'
+
 export interface RefreshEventSummary {
     origin: string
     outcome: string
@@ -96,6 +105,14 @@ export interface FreshnessRow {
      *  held. The row's driftState/finding still updates while this is in
      *  the future — only Act is suppressed, not Detect/Check. */
     pausedUntil?: string | null
+    /** The RESOLVED operator hold, widest scope first. Null when nothing is
+     *  holding this source. ``pausedUntil`` above stays the raw source value
+     *  the drawer edits; this is what the chip and the facet read. Absent on
+     *  a backend that predates it — ``rowHold`` in FreshnessRow falls back to
+     *  the source's own two switches then. */
+    heldBy?: HoldScope | null
+    heldKind?: HoldKind | null
+    heldUntil?: string | null
     lastCheckedAt?: string | null
     lastReconciledAt?: string | null
     lastReconcileReason?: ReconcileReason | string | null
@@ -192,6 +209,8 @@ export interface FreshnessSettings {
     probeEnabled?: boolean | null
     probeIntervalSecs?: number | null
     pausedUntil?: string | null
+    /** Echo of the action: true when this PATCH reset the breaker. */
+    resetBreaker?: boolean | null
 }
 
 /** PATCH body. Only the keys you send are written — every field treats an
@@ -205,6 +224,28 @@ export interface FreshnessSettingsPatch {
     /** Operator snooze: an ISO instant to hold automation until. Explicit
      *  null resumes immediately. */
     pausedUntil?: string | null
+    /** An ACTION, not a setting: true resumes automation on a source the
+     *  circuit breaker suspended (zeroes its count, lifts ``suspended``). */
+    resetBreaker?: boolean
+}
+
+/** PUT /freshness/holds/provider/{id} body. Partial: ``pausedUntil`` sets
+ *  (or, as null, lifts) the timed pause; ``stopped`` sets or lifts the
+ *  indefinite stop. Both cleared = the provider resumes. */
+export interface ScopeHoldPatch {
+    pausedUntil?: string | null
+    stopped?: boolean
+}
+
+/** The stored hold for one scope after a PUT — both stamps null when the
+ *  scope is not held. */
+export interface ScopeHold {
+    scope: HoldScope
+    scopeId: string
+    pausedUntil?: string | null
+    stoppedAt?: string | null
+    updatedAt?: string | null
+    updatedBy?: string | null
 }
 
 // ── Reconciliation ──────────────────────────────────────────────────
@@ -239,6 +280,11 @@ export interface ReconcileRun {
  *  from ``persisted ?? envDefault`` and a no-op save round-trips the real
  *  current default rather than pinning a wrong value. */
 export interface ReconcilePolicy {
+    /** The FLEET hold: every automatic rebuild paused until this instant… */
+    pausedUntil?: string | null
+    /** …or stopped since this instant, until someone resumes. Both ride the
+     *  policy read so the Automation modal needs no second request. */
+    stoppedAt?: string | null
     enabled?: boolean | null
     checkIntervalSecs?: number | null
     maxActionsPerRun?: number | null
@@ -251,6 +297,13 @@ export interface ReconcilePolicy {
     envShrinkTolerancePct: number
     envStatsMaxAgeSecs: number
     allDetectors: string[]
+}
+
+/** PUT body for the policy. Partial — only the keys sent are written. The
+ *  fleet hold rides the same PUT: ``pausedUntil`` sets/lifts the timed pause,
+ *  ``stopped`` sets/lifts the indefinite stop (it reads back as ``stoppedAt``). */
+export interface ReconcilePolicyPatch extends Partial<ReconcilePolicy> {
+    stopped?: boolean
 }
 
 export interface ReconcileOverview {
@@ -314,6 +367,9 @@ export interface FreshnessSummary {
      *  added to ``drifting``, which points at a rebuild that cannot help here.
      *  Already included in ``needsAttention``: do not add the two together. */
     projectionStalled?: number
+    /** Sources an operator hold (any scope) is keeping automation off. NOT
+     *  in ``needsAttention`` — a held source was deliberately silenced. */
+    held?: number
 }
 
 /** Per-provider breakdown of the fleet ``summary`` — identical bucket
@@ -336,6 +392,14 @@ export interface ProviderFreshnessSummary {
      *  grouped per provider — and likewise already inside this group's
      *  ``needsAttention``. */
     projectionStalled?: number
+    /** Same bucket as ``FreshnessSummary.held``, per provider. */
+    held?: number
+    /** The hold on the PROVIDER ITSELF (or the fleet's, which outranks it) —
+     *  what the group header shows and its Pause/Resume edits. Null when only
+     *  individual sources inside the group are held. */
+    heldBy?: HoldScope | null
+    heldKind?: HoldKind | null
+    heldUntil?: string | null
 }
 
 export interface FreshnessFleetResponse {
@@ -351,10 +415,16 @@ export interface RefreshResponse {
     scope: string
     gate: string
     changed: boolean
+    /** Includes ``override`` when a rebuild was queued past an operator hold
+     *  (a person is never refused; the hold stays). */
     actions: string[]
     jobId?: string | null
     deferred: boolean
     eventId?: string | null
+    /** The hold in force when the verb ran, if any. */
+    heldBy?: HoldScope | null
+    heldKind?: HoldKind | null
+    heldUntil?: string | null
 }
 
 export interface BatchItemResult {
@@ -372,8 +442,8 @@ export interface BatchItemResult {
     deferred?: boolean
     /** The hold that skipped this source; set only when ``outcome === 'held'``.
      *  ``heldBy`` is the widest scope in force — the control that releases it. */
-    heldBy?: 'fleet' | 'provider' | 'source' | null
-    heldKind?: 'paused' | 'stopped' | null
+    heldBy?: HoldScope | null
+    heldKind?: HoldKind | null
     heldUntil?: string | null
 }
 
@@ -486,9 +556,19 @@ export const freshnessService = {
     },
 
     /** Update the global policy. Partial: only the keys sent are written.
+     *  The fleet hold (``pausedUntil`` / ``stopped``) rides the same PUT.
      *  Platform-admin only. */
-    putReconciliation(body: Partial<ReconcilePolicy>): Promise<ReconcilePolicy> {
+    putReconciliation(body: ReconcilePolicyPatch): Promise<ReconcilePolicy> {
         return authFetch<ReconcilePolicy>(`${BASE}/freshness/reconciliation`, {
+            method: 'PUT',
+            body: JSON.stringify(body),
+        })
+    },
+
+    /** Pause, stop or resume automatic rebuilds for every source under a
+     *  provider. Partial, like the per-source PATCH. Platform-admin only. */
+    setProviderHold(providerId: string, body: ScopeHoldPatch): Promise<ScopeHold> {
+        return authFetch<ScopeHold>(`${BASE}/freshness/holds/provider/${providerId}`, {
             method: 'PUT',
             body: JSON.stringify(body),
         })
