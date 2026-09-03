@@ -56,11 +56,9 @@ from .models import (
 )
 
 # Derived in-graph bookkeeping, excluded from every cache-vs-committed-main
-# comparison. Built from the ONE definition in ``config`` — see the note there
-# on why a second copy of this list was a bug.
-_NOT_DERIVED = " AND ".join(
-    f"NOT '{label}' IN labels(n)" for label in config.DERIVED_LABELS
-)
+# comparison. Built from the ONE definition in ``common.derived_artifacts`` —
+# see the note there on the two separate ways a second copy of this list broke.
+_NOT_DERIVED = config.not_derived_clause("n")
 
 # Reuse the reader/projector's label sanitiser so the deep check compares against the SAME
 # label the projector wrote (``_sanitize_label(entityType)``), not the raw ontology type.
