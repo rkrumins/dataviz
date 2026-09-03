@@ -223,6 +223,73 @@ async def test_me_does_not_mint_for_anonymous(test_client: AsyncClient):
     assert _csrf_set_cookies(me) == []
 
 
+# ── GET /auth/csrf heals the cookie on demand, without rotating ──────
+#
+# The heal reachable on its own route, so a write that 403s ``csrf_failed``
+# can repair the cookie in place instead of rotating the whole session —
+# which is rate-limited, runs the session ceilings, and can sign the user
+# out. It re-mints only a missing or mis-bound cookie and leaves a valid
+# one alone (``_heal_csrf_cookie``), and 401s when there is no live session
+# to heal against so the client falls through to the refresh/login path.
+
+
+async def test_csrf_endpoint_mints_a_missing_cookie(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    from backend.auth_service.core.tokens import decode_token
+    from backend.auth_service.csrf import verify_csrf_token
+
+    await _login_cookie_user(test_client, db_session)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 200, resp.text
+    minted = _csrf_set_cookies(resp)
+    assert len(minted) == 1
+    # Bound to THIS session's sid, exactly as /me heals it — a cookie any
+    # sibling could satisfy would defeat the double-submit binding.
+    value = minted[0].split(";", 1)[0].split("=", 1)[1]
+    sid = decode_token(test_client.cookies.get(ACCESS_COOKIE_NAME)).get("sid")
+    assert verify_csrf_token(value, sid) is True
+
+
+async def test_csrf_endpoint_leaves_a_valid_cookie_alone(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    # No rotation, and no gratuitous re-mint: an already-valid cookie is
+    # returned untouched, so a concurrent write's in-flight header cannot
+    # be invalidated out from under it.
+    await _login_cookie_user(test_client, db_session)
+
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 200
+    assert _csrf_set_cookies(resp) == []
+
+
+async def test_csrf_endpoint_without_session_401s_and_mints_nothing(
+    test_client: AsyncClient
+):
+    # Nothing to heal against — the client must escalate to a rotation or
+    # a fresh login rather than loop here.
+    test_client.cookies.delete(ACCESS_COOKIE_NAME)
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+    resp = await test_client.get("/api/v1/auth/csrf")
+    assert resp.status_code == 401
+    assert _csrf_set_cookies(resp) == []
+
+
+async def test_csrf_endpoint_evicts_a_foreign_cookie(test_client: AsyncClient):
+    # A cookie from another deployment can never be healed here; it is
+    # classified and evicted, same as on /me, so the client stops retrying
+    # a repair that cannot succeed.
+    test_client.cookies.clear()
+    resp = await test_client.get(
+        "/api/v1/auth/csrf", cookies={ACCESS_COOKIE_NAME: _foreign_token()}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "session_foreign"
+
+
 # ── refresh rotation ─────────────────────────────────────────────────
 
 async def test_refresh_rotates_tokens(
