@@ -221,6 +221,34 @@ async def test_any_container_name_is_hoisted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_sample_payload_signs_in_when_auth_time_is_not_required(monkeypatch):
+    """The literal gateway answer this cycle was asked about: numeric
+    user_id, full_name, an entitlements object with empty groups and a
+    stray extra. It signs in whole once ``require_auth_time`` is
+    switched off — the payload carries no authentication-time claim,
+    and with the default posture that absence is refused, not the
+    shape."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            "user_id": 123,
+            "email": "jonh@gmail.com",
+            "entitlements": {"groups": [], "test": "test"},
+            "full_name": "John Doe",
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider(
+        require_auth_time=False,
+    ).fetch_identity("ambient-xyz")
+    assert identity.external_id == "123"
+    assert identity.email == "jonh@gmail.com"
+    assert identity.groups == ()
+    assert (identity.first_name, identity.last_name) == ("John", "Doe")
+
+
+@pytest.mark.asyncio
 async def test_entitlements_membership_maps_with_no_configuration(monkeypatch):
     """The AD-federation shape: groups nested under ``entitlements``,
     beside a vestigial empty top-level ``groups``. Both the hoist and

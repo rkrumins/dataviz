@@ -118,9 +118,10 @@ DEFAULT_CUSTOM: dict[str, Any] = {
     "first_name":     ["first_name"],
     "last_name":      ["last_name"],
     # The grab-bag the other custom-ish kinds carry: a custom IdP that
-    # releases only "name" or "fullName" deserves the split too.
+    # releases only "name" or "fullName" deserves the split too — in
+    # snake_case, camelCase, or kebab-case.
     "display_name":   ["display_name", "displayName", "fullName",
-                       "full_name", "name"],
+                       "full_name", "full-name", "name"],
     "groups":         ["groups", "entitlements.groups"],
     "auth_time":      ["auth_time"],
     "avatar_url":     [],
@@ -138,7 +139,8 @@ DEFAULT_CUSTOM_PROFILE: dict[str, Any] = {
     "email_verified": ["email_verified", "emailVerified"],
     "first_name":     ["firstName", "first_name", "givenName", "given_name"],
     "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
-    "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
+    "display_name":   ["fullName", "full_name", "full-name", "displayName",
+                       "display_name", "name"],
     "groups":         ["groups", "roles", "memberOf", "entitlements.groups"],
     "auth_time":      ["auth_time", "authTime", "iat"],
     "avatar_url":     [],
@@ -159,7 +161,8 @@ DEFAULT_BACKCHANNEL: dict[str, Any] = {
     "email_verified": ["email_verified", "emailVerified"],
     "first_name":     ["firstName", "first_name", "givenName", "given_name"],
     "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
-    "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
+    "display_name":   ["fullName", "full_name", "full-name", "displayName",
+                       "display_name", "name"],
     "groups":         ["groups", "roles", "memberOf", "groupMembership",
                        "entitlements.groups"],
     "auth_time":      ["auth_time", "authTime", "authenticationTime",

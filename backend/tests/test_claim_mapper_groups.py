@@ -149,6 +149,40 @@ def test_hundreds_of_ad_groups_arrive_intact_and_in_order():
     assert identity.groups[-1] == "CN=Team 149,OU=Groups,DC=corp"
 
 
+def test_the_sample_gateway_payload_maps_whole():
+    """The shape that motivated the nesting work, verbatim (keys use
+    underscores and hyphens, never spaces): a numeric id, a full_name
+    key, and an entitlements object whose groups are empty beside stray
+    extras. Everything lands — and empty membership is an answer, not
+    an error."""
+    payload = {
+        "user_id": 123,
+        "email": "jonh@gmail.com",
+        "entitlements": {"groups": [], "test": "test"},
+        "full_name": "John Doe",
+    }
+    for kind in ("backchannel", "custom_profile"):
+        identity = apply_claim_mapping(payload, kind=kind, provider_slug="corp")
+        assert identity.external_id == "123", kind
+        assert identity.email == "jonh@gmail.com", kind
+        assert identity.groups == (), kind
+        assert identity.display_name == "John Doe", kind
+        assert (identity.first_name, identity.last_name) == ("John", "Doe"), kind
+        assert identity.names_derived_from == "full_name", kind
+
+
+def test_a_kebab_case_full_name_key_resolves_too():
+    identity = apply_claim_mapping(
+        {
+            "user_id": 123, "email": "jonh@gmail.com",
+            "full-name": "John Doe",
+        },
+        kind="backchannel", provider_slug="corp",
+    )
+    assert identity.display_name == "John Doe"
+    assert identity.names_derived_from == "full-name"
+
+
 def test_the_hoist_is_generic_over_container_names():
     """``entitlements`` was only ever an example — a gateway may nest
     under any name it likes, and one level of every object-valued key
