@@ -29,6 +29,12 @@ from backend.auth_service.providers.claim_mapper import (
     # Single values.
     ("engineering", ("engineering",)),
     ("  padded  ", ("padded",)),
+    # Hyphens, underscores, dots and slashes are name characters, not
+    # delimiters — a kebab-case directory name is one group.
+    ("my-super-cool-group", ("my-super-cool-group",)),
+    ("team-a,team-b", ("team-a", "team-b")),
+    (["my-super-cool-group", "corp/eng_ops.eu"],
+     ("my-super-cool-group", "corp/eng_ops.eu")),
     # Numeric ids: directories that key groups by number.
     (42, ("42",)),
     ([101, "eng", 202], ("101", "eng", "202")),
