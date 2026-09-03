@@ -1265,6 +1265,50 @@ async def me(request: Request, response: Response):
     return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
 
 
+# ── GET /auth/csrf ────────────────────────────────────────────────────
+
+
+@router.get("/csrf", response_model=_Ack)
+async def csrf(request: Request, response: Response):
+    """Repair ``nx_csrf`` for the current session, in place — no rotation.
+
+    ``nx_csrf`` can go missing, or arrive as a sibling deployment's value,
+    while the session itself stays perfectly valid: a second instance's
+    sign-out sweeps the shared parent domain, or two deployments share one
+    cookie jar. The page cannot detect this — the token is bound to the
+    session's ``sid`` under a server secret, and the ``sid`` lives in the
+    HttpOnly access cookie the page cannot read — so a stale or absent
+    cookie 403s every write with nothing the page can do about it but a
+    full reload, which heals the cookie as a side effect of ``GET /me``.
+
+    This is that heal, made callable on its own. The client hits it the
+    moment a write fails ``csrf_failed`` (or pre-emptively when the cookie
+    is gone) and gets a correctly-bound cookie back without paying for a
+    token rotation — which is both wasteful and unsafe here, because a
+    rotation runs the session ceilings and can end the session outright,
+    turning "your CSRF cookie was evicted" into "you are signed out". It
+    reuses ``_heal_csrf_cookie``, so an already-valid cookie is left
+    untouched and only a missing or mis-bound one is re-minted.
+
+    401 when there is no live session to heal against, so the client falls
+    through to the refresh / login path rather than looping here. Being a
+    GET, it is a CSRF-safe method and needs no token of its own.
+    """
+    svc = _identity_service(request)
+    user = await svc.validate_session(read_access_cookie(request))
+    if user is None:
+        # Same classify-before-answering as ``/me``: a cookie from another
+        # environment can never be healed here, so evict it rather than
+        # letting the client retry a repair that cannot succeed.
+        raise_if_foreign_session(request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+    _heal_csrf_cookie(request, response)
+    return _Ack()
+
+
 # ── GET /auth/diagnostics ─────────────────────────────────────────────
 
 

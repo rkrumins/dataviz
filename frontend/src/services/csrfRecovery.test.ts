@@ -8,10 +8,13 @@
  * other's CSRF cookie. The access and refresh cookies are name-scoped and
  * survive; the tab stays authenticated and simply cannot write any more.
  *
- * Nothing used to re-mint it. A 403 does not trigger the refresh path the
- * way a 401 does, so every write failed indefinitely, reported through
- * the access-denied modal as a permission the user demonstrably held. The
- * repair is one rotation: `/auth/refresh` sets all four cookies.
+ * Nothing used to re-mint it without a full page reload, whose `/auth/me`
+ * heals the cookie as a side effect. The repair is now that same heal on
+ * its own route — `GET /auth/csrf` re-mints `nx_csrf` against the live
+ * session WITHOUT rotating it: no session ceilings, no per-session rate
+ * limit, no session-lost latch, none of the ways a rotation-based repair
+ * could fail and leave the 403 stranded until the user refreshed the page.
+ * A rotation is the fallback, only when there is no live session to heal.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -49,19 +52,20 @@ beforeEach(() => {
 })
 
 describe('CSRF failure recovery', () => {
-    it('refreshes once and retries the write', async () => {
+    it('heals once and retries the write', async () => {
         const calls: string[] = []
         vi.stubGlobal(
             'fetch',
             vi.fn(async (input: RequestInfo | URL) => {
                 const url = String(input)
                 calls.push(url)
-                if (url.includes('/auth/refresh')) {
-                    // The rotation is what re-mints the cookie.
+                if (url.includes('/auth/csrf')) {
+                    // The heal is what re-mints the cookie — in place, no
+                    // rotation.
                     setCookie('nx_csrf', 'fresh-token')
-                    return json({ user: {} }, 200)
+                    return json({ ok: true }, 200)
                 }
-                // First write fails CSRF; after the refresh it succeeds.
+                // First write fails CSRF; after the heal it succeeds.
                 return calls.filter((c) => c.includes('/views')).length === 1
                     ? json(CSRF_403, 403)
                     : json({ ok: true }, 200)
@@ -71,7 +75,39 @@ describe('CSRF failure recovery', () => {
         const res = await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
 
         expect(res.status).toBe(200)
-        expect(calls.some((c) => c.includes('/auth/refresh'))).toBe(true)
+        expect(calls.some((c) => c.includes('/auth/csrf'))).toBe(true)
+        // Repaired without rotating the session.
+        expect(calls.some((c) => c.includes('/auth/refresh'))).toBe(false)
+    })
+
+    it('rotates only when there is no live session to heal', async () => {
+        // The heal reports no session (the access token lapsed too), so the
+        // repair escalates to a rotation, which re-mints the cookie as a
+        // side effect and lets the write replay.
+        const calls: string[] = []
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input)
+                calls.push(url)
+                if (url.includes('/auth/csrf')) {
+                    return json({ detail: 'Not authenticated' }, 401)
+                }
+                if (url.includes('/auth/refresh')) {
+                    setCookie('nx_csrf', 'rotated-token')
+                    return json({ user: {} }, 200)
+                }
+                return calls.filter((c) => c.includes('/views')).length === 1
+                    ? json(CSRF_403, 403)
+                    : json({ ok: true }, 200)
+            }),
+        )
+
+        const res = await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
+
+        expect(res.status).toBe(200)
+        expect(calls.filter((c) => c.includes('/auth/csrf'))).toHaveLength(1)
+        expect(calls.filter((c) => c.includes('/auth/refresh'))).toHaveLength(1)
     })
 
     it('does not announce a permission failure for a CSRF failure', async () => {
@@ -83,11 +119,14 @@ describe('CSRF failure recovery', () => {
 
         vi.stubGlobal(
             'fetch',
-            vi.fn(async (input: RequestInfo | URL) =>
-                String(input).includes('/auth/refresh')
-                    ? json({ detail: 'no' }, 401)
-                    : json(CSRF_403, 403),
-            ),
+            vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input)
+                // Neither repair leg restores the cookie here, so the write
+                // stays 403 — and still must not reach the modal.
+                if (url.includes('/auth/csrf')) return json({ detail: 'no' }, 401)
+                if (url.includes('/auth/refresh')) return json({ detail: 'no' }, 401)
+                return json(CSRF_403, 403)
+            }),
         )
 
         await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
@@ -169,7 +208,7 @@ describe('CSRF failure recovery', () => {
 })
 
 describe('a session that has lost its CSRF cookie', () => {
-    it('re-mints it before a write instead of sending a doomed one', async () => {
+    it('heals it before a write instead of sending a doomed one', async () => {
         // The reactive repair spends a guaranteed-403 round trip to
         // learn something readable from document.cookie.
         document.cookie = `nx_access_exp=${Math.floor(Date.now() / 1000) + 900}`
@@ -178,9 +217,9 @@ describe('a session that has lost its CSRF cookie', () => {
             'fetch',
             vi.fn(async (input: RequestInfo | URL) => {
                 calls.push(String(input))
-                if (String(input).includes('/auth/refresh')) {
+                if (String(input).includes('/auth/csrf')) {
                     setCookie('nx_csrf', 'reminted')
-                    return json({ user: {} }, 200)
+                    return json({ ok: true }, 200)
                 }
                 return json({ ok: true }, 200)
             }),
@@ -188,15 +227,16 @@ describe('a session that has lost its CSRF cookie', () => {
 
         await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
 
-        expect(calls[0]).toContain('/auth/refresh')
+        expect(calls[0]).toContain('/auth/csrf')
         expect(calls[1]).toContain('/views/v1')
-        // One attempt at the write, not two.
+        // One attempt at the write, not two — and no rotation.
         expect(calls.filter((c) => c.includes('/views/v1'))).toHaveLength(1)
+        expect(calls.some((c) => c.includes('/auth/refresh'))).toBe(false)
     })
 
-    it('does not rotate for an anonymous write', async () => {
-        // No session to rotate: nx_access_exp absent. Firing a refresh
-        // before every /auth/login POST would be pure noise.
+    it('does not heal for an anonymous write', async () => {
+        // No session: nx_access_exp absent. Firing a heal before every
+        // /auth/login POST would be pure noise.
         const calls: string[] = []
         vi.stubGlobal(
             'fetch',
@@ -208,6 +248,7 @@ describe('a session that has lost its CSRF cookie', () => {
 
         await fetchWithTimeout('/api/v1/auth/signup', { method: 'POST' })
 
+        expect(calls.some((c) => c.includes('/auth/csrf'))).toBe(false)
         expect(calls.some((c) => c.includes('/auth/refresh'))).toBe(false)
     })
 
@@ -235,7 +276,7 @@ describe('concurrent writes during a repair', () => {
     // SKIPPED the wait, went out with no header at all, and had its 403
     // retry suppressed by the same flag. Joining is the contract now.
 
-    it('two concurrent writes share one repair and both carry the header', async () => {
+    it('two concurrent writes share one heal and both carry the header', async () => {
         document.cookie = `nx_access_exp=${Math.floor(Date.now() / 1000) + 900}`
         const calls: string[] = []
         const headers: Array<string | null> = []
@@ -244,9 +285,9 @@ describe('concurrent writes during a repair', () => {
             vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
                 const url = String(input)
                 calls.push(url)
-                if (url.includes('/auth/refresh')) {
+                if (url.includes('/auth/csrf')) {
                     setCookie('nx_csrf', 'reminted')
-                    return json({ user: {} }, 200)
+                    return json({ ok: true }, 200)
                 }
                 headers.push(new Headers(init?.headers).get('X-CSRF-Token'))
                 return json({ ok: true }, 200)
@@ -258,7 +299,7 @@ describe('concurrent writes during a repair', () => {
             fetchWithTimeout('/api/v1/views/v2', { method: 'DELETE' }),
         ])
 
-        expect(calls.filter((c) => c.includes('/auth/refresh'))).toHaveLength(1)
+        expect(calls.filter((c) => c.includes('/auth/csrf'))).toHaveLength(1)
         expect(calls.filter((c) => c.includes('/views/'))).toHaveLength(2)
         expect(headers).toEqual(['reminted', 'reminted'])
     })
@@ -272,9 +313,9 @@ describe('concurrent writes during a repair', () => {
             vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
                 const url = String(input)
                 calls.push(url)
-                if (url.includes('/auth/refresh')) {
+                if (url.includes('/auth/csrf')) {
                     setCookie('nx_csrf', 'reminted')
-                    return json({ user: {} }, 200)
+                    return json({ ok: true }, 200)
                 }
                 sent = new Headers(init?.headers).get('X-CSRF-Token')
                 return json({ ok: true }, 200)
@@ -286,8 +327,8 @@ describe('concurrent writes during a repair', () => {
         const write = fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
         await Promise.all([bootstrap, write])
 
-        expect(calls.filter((c) => c.includes('/auth/refresh'))).toHaveLength(1)
-        expect(calls[0]).toContain('/auth/refresh')
+        expect(calls.filter((c) => c.includes('/auth/csrf'))).toHaveLength(1)
+        expect(calls[0]).toContain('/auth/csrf')
         expect(calls[calls.length - 1]).toContain('/views/v1')
         expect(sent).toBe('reminted')
     })
@@ -295,22 +336,22 @@ describe('concurrent writes during a repair', () => {
     it('a csrf 403 mid-repair joins it and still replays once', async () => {
         // The stale-cookie shape: the pre-flight sees a cookie and sends,
         // both writes 403, and both must come back exactly once with the
-        // re-minted token — one shared refresh, no suppressed retries.
+        // re-minted token — one shared heal, no suppressed retries.
         document.cookie = `nx_access_exp=${Math.floor(Date.now() / 1000) + 900}`
         setCookie('nx_csrf', 'stale')
-        let releaseRefresh!: () => void
-        const refreshGate = new Promise<void>((r) => { releaseRefresh = r })
+        let releaseHeal!: () => void
+        const healGate = new Promise<void>((r) => { releaseHeal = r })
         const attempts: Record<string, Array<string | null>> = {}
-        let refreshCalls = 0
+        let healCalls = 0
         vi.stubGlobal(
             'fetch',
             vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
                 const url = String(input)
-                if (url.includes('/auth/refresh')) {
-                    refreshCalls += 1
-                    await refreshGate
+                if (url.includes('/auth/csrf')) {
+                    healCalls += 1
+                    await healGate
                     setCookie('nx_csrf', 'fresh')
-                    return json({ user: {} }, 200)
+                    return json({ ok: true }, 200)
                 }
                 const seen = (attempts[url] ??= [])
                 seen.push(new Headers(init?.headers).get('X-CSRF-Token'))
@@ -326,10 +367,10 @@ describe('concurrent writes during a repair', () => {
         ])
         // Let both first attempts 403 and both join the held repair.
         await new Promise((r) => setTimeout(r, 0))
-        releaseRefresh()
+        releaseHeal()
         const [r1, r2] = await writes
 
-        expect(refreshCalls).toBe(1)
+        expect(healCalls).toBe(1)
         expect(r1.status).toBe(200)
         expect(r2.status).toBe(200)
         for (const url of Object.keys(attempts)) {

@@ -9,6 +9,7 @@
 
 | Method | Path | Gate | CSRF |
 |---|---|---|---|
+| `GET` | `/api/v1/auth/csrf` | access cookie (validated in handler) | n/a — GET, safe method; re-mints `nx_csrf` bound to the session's sid, no rotation |
 | `GET` | `/api/v1/auth/diagnostics` | **NONE — unauthenticated** | n/a |
 | `POST` | `/api/v1/auth/forgot-password` | **NONE — unauthenticated** | double-submit exempt; Origin checked |
 | `POST` | `/api/v1/auth/login` | **NONE — unauthenticated** | double-submit exempt; Origin checked |
