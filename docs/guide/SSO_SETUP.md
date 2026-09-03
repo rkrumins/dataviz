@@ -183,6 +183,19 @@ here applies to active sessions within minutes. The group list itself is read
 from your directory at sign-in — a change made there lands at that person's
 next full sign-in, within 24 hours at the latest.
 
+Where the groups come *from* is the connection's claim mapping (the pencil on
+its card → mapping studio). A directory that nests membership — say
+`{"entitlements": {"groups": ["group1", …]}}` — works out of the box, and on
+gateway connections the container's name does not matter: whatever the
+payload nests its user object under, one level is flattened automatically.
+Deeper nesting is one dotted key away (`authz.ad.memberships` reaches
+`{"authz": {"ad": {"memberships": […]}}}`). Paste a sample payload into the
+studio and the Groups row names exactly which key supplied the list. Large
+directories are fine too: a person arriving with 100+ AD groups keeps every
+name intact (distinguished names are never split on their commas), and the
+rules are matched in one query — only the names you actually mapped do
+anything; the rest ride along unused.
+
 There is more to this than fits here: what a rule can grant, why removing
 somebody from a group does not always remove their access, and what platform-
 admin roles need. See [Running Single Sign-On](/guide/sso-operations).
