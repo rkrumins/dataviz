@@ -196,6 +196,26 @@ async def test_one_level_of_nesting_is_hoisted_without_dotted_paths(monkeypatch)
     assert identity.email == "alice@corp.example"
 
 
+@pytest.mark.asyncio
+async def test_entitlements_membership_maps_with_no_configuration(monkeypatch):
+    """The AD-federation shape: groups nested under ``entitlements``,
+    beside a vestigial empty top-level ``groups``. Both the hoist and
+    the dotted default candidate cover it, so the connection needs no
+    mapping override at all."""
+    def handler(request):
+        if request.url.path.endswith("/redeem"):
+            return httpx.Response(200, json={"access_token": "gw-token-abc"})
+        return httpx.Response(200, json={
+            **CLAIMS,
+            "groups": [],
+            "entitlements": {"groups": ["group1", "group2", "group3"]},
+        })
+
+    _routes(monkeypatch, handler)
+    identity = await _provider().fetch_identity("ambient-xyz")
+    assert identity.groups == ("group1", "group2", "group3")
+
+
 # ── fail closed ──────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

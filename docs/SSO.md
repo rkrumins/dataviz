@@ -170,10 +170,19 @@ declares per-provider mappings as JSON:
 ```
 
 * Path syntax: dotted JSONPath-lite (`profile.given_name`,
-  `address.country[0]`). No wildcards.
+  `address.country[0]`). No wildcards. Nested membership works the
+  same way: `{"entitlements": {"groups": [...]}}` is reached by the
+  candidate `entitlements.groups` — which every non-SAML kind now
+  carries **by default**, so the common AD-federation shape maps with
+  no override at all. Any other nesting is one dotted candidate in the
+  mapping studio. An empty top-level value never shadows a populated
+  nested one — the candidate walk skips empties.
 * Each field's value is the first non-empty match from its candidate
   list. Empty list / unset key → falls back to the kind's defaults
   (`DEFAULT_OIDC`, `DEFAULT_SAML`, `DEFAULT_CUSTOM`).
+* Group lists scale: 100+ groups per person arrive intact (order kept,
+  DN names never split), and the sign-in reconciler resolves mappings
+  with one `IN` query over the asserted names — never per-group work.
 * `extras` lands two places:
   * `users.metadata_.attributes` — JSON snapshot (canonical raw).
   * `user_external_attributes` rows — indexed projection used by the

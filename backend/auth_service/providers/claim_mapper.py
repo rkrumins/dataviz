@@ -59,7 +59,12 @@ DEFAULT_OIDC: dict[str, Any] = {
     "first_name":     ["given_name", "givenName"],
     "last_name":      ["family_name", "surname"],
     "display_name":   ["name", "displayName"],
-    "groups":         ["groups", "wids", "roles"],
+    # ``entitlements.groups`` is a dotted path, not a key: directories
+    # that nest their membership under an entitlements object (a common
+    # AD-federation shape) work without an override. Last, so a
+    # top-level claim always wins — and any other nesting is one dotted
+    # override away in the mapping studio.
+    "groups":         ["groups", "wids", "roles", "entitlements.groups"],
     "auth_time":      ["auth_time"],
     # Empty by default outside the backchannel kind: mapping a picture
     # makes the server fetch it at login, and that participation is a
@@ -116,7 +121,7 @@ DEFAULT_CUSTOM: dict[str, Any] = {
     # releases only "name" or "fullName" deserves the split too.
     "display_name":   ["display_name", "displayName", "fullName",
                        "full_name", "name"],
-    "groups":         ["groups"],
+    "groups":         ["groups", "entitlements.groups"],
     "auth_time":      ["auth_time"],
     "avatar_url":     [],
     "extras":         {},
@@ -134,7 +139,7 @@ DEFAULT_CUSTOM_PROFILE: dict[str, Any] = {
     "first_name":     ["firstName", "first_name", "givenName", "given_name"],
     "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
     "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
-    "groups":         ["groups", "roles", "memberOf"],
+    "groups":         ["groups", "roles", "memberOf", "entitlements.groups"],
     "auth_time":      ["auth_time", "authTime", "iat"],
     "avatar_url":     [],
     "extras":         {},
@@ -155,7 +160,8 @@ DEFAULT_BACKCHANNEL: dict[str, Any] = {
     "first_name":     ["firstName", "first_name", "givenName", "given_name"],
     "last_name":      ["lastName", "last_name", "surname", "family_name", "sn"],
     "display_name":   ["fullName", "full_name", "displayName", "display_name", "name"],
-    "groups":         ["groups", "roles", "memberOf", "groupMembership"],
+    "groups":         ["groups", "roles", "memberOf", "groupMembership",
+                       "entitlements.groups"],
     "auth_time":      ["auth_time", "authTime", "authenticationTime",
                        "lastLogin", "last_login"],
     #: Candidates only; nothing is fetched unless the connection's

@@ -14,6 +14,7 @@ import pytest
 from backend.auth_service.providers.claim_mapper import (
     _to_groups,
     apply_claim_mapping,
+    resolved_sources,
 )
 
 
@@ -60,3 +61,95 @@ def test_the_dn_payload_survives_end_to_end():
         kind="backchannel", provider_slug="corp",
     )
     assert identity.groups == ("CN=Data Analysts,OU=Groups,DC=corp",)
+
+
+# ── Nested membership (entitlements.groups and deeper) ───────────────
+
+
+def test_groups_nested_under_entitlements_resolve_by_default():
+    """The user object many AD federations hand over nests membership
+    under an ``entitlements`` key. The dotted default candidate reaches
+    it without any operator override — on the token kinds (no hoist)
+    and the gateway kinds alike."""
+    claims = {
+        # Both spellings of the subject, so one dict satisfies every
+        # kind's external_id default — the groups are what's under test.
+        "sub": "emp-1", "external_id": "emp-1",
+        "email": "a@corp.example",
+        "entitlements": {"groups": ["group1", "group2", "group3"]},
+    }
+    for kind in ("oidc", "custom", "custom_profile", "backchannel"):
+        identity = apply_claim_mapping(claims, kind=kind, provider_slug="corp")
+        assert identity.groups == ("group1", "group2", "group3"), kind
+
+
+def test_a_top_level_groups_claim_still_wins_over_the_nested_one():
+    identity = apply_claim_mapping(
+        {
+            "sub": "emp-1", "email": "a@corp.example",
+            "groups": ["direct"],
+            "entitlements": {"groups": ["nested"]},
+        },
+        kind="oidc", provider_slug="corp",
+    )
+    assert identity.groups == ("direct",)
+
+
+def test_an_empty_top_level_groups_does_not_shadow_the_nested_one():
+    """A vestigial ``groups: []`` beside the populated nested list must
+    not silently turn group mapping off — the candidate walk skips
+    empty values."""
+    identity = apply_claim_mapping(
+        {
+            "sub": "emp-1", "email": "a@corp.example",
+            "groups": [],
+            "entitlements": {"groups": ["group1"]},
+        },
+        kind="oidc", provider_slug="corp",
+    )
+    assert identity.groups == ("group1",)
+
+
+def test_an_operator_override_reaches_any_nesting():
+    """Depths the defaults do not cover are one dotted override away in
+    the mapping studio."""
+    identity = apply_claim_mapping(
+        {
+            "sub": "emp-1", "email": "a@corp.example",
+            "authz": {"ad": {"memberships": ["deep1", "deep2"]}},
+        },
+        kind="oidc", provider_slug="corp",
+        override={"groups": ["authz.ad.memberships"]},
+    )
+    assert identity.groups == ("deep1", "deep2")
+
+
+def test_hundreds_of_ad_groups_arrive_intact_and_in_order():
+    """Large organisations release 100+ groups per person. Every one
+    must survive normalisation — DNs included, order preserved, nothing
+    truncated — because the ones that matter to a mapping may be
+    anywhere in the list."""
+    many = [f"CN=Team {i},OU=Groups,DC=corp" for i in range(150)]
+    identity = apply_claim_mapping(
+        {
+            "sub": "emp-1", "email": "a@corp.example",
+            "entitlements": {"groups": many},
+        },
+        kind="backchannel", provider_slug="corp",
+    )
+    assert len(identity.groups) == 150
+    assert identity.groups[0] == "CN=Team 0,OU=Groups,DC=corp"
+    assert identity.groups[-1] == "CN=Team 149,OU=Groups,DC=corp"
+
+
+def test_provenance_names_the_nested_winner():
+    """The mapping studio's preview must say ``entitlements.groups``
+    supplied the groups, not report the field unresolved."""
+    sources = resolved_sources(
+        {
+            "sub": "emp-1", "email": "a@corp.example",
+            "entitlements": {"groups": ["group1"]},
+        },
+        kind="oidc",
+    )
+    assert sources["groups"] == "entitlements.groups"

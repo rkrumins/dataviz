@@ -135,7 +135,7 @@ _UNSIGNED_REPLAY_CAP_SECONDS = 86_400
 #: than ``user.firstName``. An API JSON body is exactly the shape that
 #: benefits. Mirrors ``custom_profile._NESTED_CONTAINERS``.
 _NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile",
-                      "data", "result", "attributes")
+                      "data", "result", "attributes", "entitlements")
 
 #: Top-level values a populated nested one may overwrite during the
 #: hoist. Membership is by equality, so ``0`` and ``False`` — values a

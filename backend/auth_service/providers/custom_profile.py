@@ -71,7 +71,8 @@ VALID_ALGS = frozenset({"HS256", "RS256"})
 
 # Nested containers hoisted to the top level so a payload shaped like
 # ``{"user": {...}}`` maps without the operator writing dotted paths.
-_NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile", "attributes")
+_NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile", "attributes",
+                      "entitlements")
 
 
 class CustomProfileError(Exception):
