@@ -65,6 +65,20 @@ class GroupUpdateRequest(BaseModel):
     description: Optional[str] = None
 
 
+class GroupMemberPreview(BaseModel):
+    """The first few faces in a group, for the admin table's avatar stack.
+
+    Same reasoning as ``WorkspaceMemberSubject`` below: inline expansion so
+    the groups table can show WHO is in a group without a round-trip per
+    row. Id and name only — the stack shows faces, the drawer shows emails.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    #: The picked illustration, so the stack can draw it instead of initials.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
+
+
 class GroupResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     id: str
@@ -75,6 +89,12 @@ class GroupResponse(BaseModel):
     created_at: str = Field(alias="createdAt")
     updated_at: str = Field(alias="updatedAt")
     member_count: int = Field(alias="memberCount")
+    #: First few members, so the admin table can draw an avatar stack
+    #: instead of a bare number. Empty on the single-group routes, which
+    #: no table renders.
+    member_preview: list[GroupMemberPreview] = Field(
+        default_factory=list, alias="memberPreview",
+    )
 
 
 class GroupMemberResponse(BaseModel):
@@ -87,6 +107,25 @@ class GroupMemberResponse(BaseModel):
     #: group mapping — the row is re-judged at every SSO login/refresh,
     #: so removing it by hand only lasts until the next one).
     source: str = "local"
+    #: Server-resolved identity, mirroring ``WorkspaceMemberSubject``. The
+    #: FE used to join these client-side against the admin-only user list,
+    #: which capped at 50 rows and 403'd outright for a delegated groups
+    #: admin (``org_admin`` holds ``system:groups:manage`` but not
+    #: ``system:admin``), leaving the member list stuck on its spinner.
+    #:
+    #: ``None`` when nothing resolves the id. The row still ships: an
+    #: orphaned membership is a real state and the admin needs to see it
+    #: to remove it. The caller must keep showing the raw id rather than
+    #: invent a name over it.
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
+    status: Optional[str] = None  # pending | active | suspended
+    #: Soft-deleted accounts stay in the group until somebody removes
+    #: them, so the list says so rather than showing them as current.
+    deleted: bool = False
+    #: The avatar illustration this person picked, when they picked one.
+    #: ``UserAvatar`` prefers the provider photo, then this, then initials.
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
 
 
 class GroupMemberAddRequest(BaseModel):

@@ -17,7 +17,7 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
-import { avatarPaletteFor, initialsOf } from '@/lib/avatar'
+import { UserAvatar } from '@/components/ui/UserAvatar'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 
@@ -461,7 +461,6 @@ function AuditPerson({ id, name, email, deleted, role }: {
         )
     }
 
-    const palette = avatarPaletteFor(id)
     const resolved = !!name || !!email
     const label = name || email || id
 
@@ -476,16 +475,32 @@ function AuditPerson({ id, name, email, deleted, role }: {
             }
         >
             <span className="flex items-center gap-2 min-w-0">
-                <span
-                    aria-hidden
-                    className={cn(
-                        'shrink-0 grid place-items-center rounded-full h-6 w-6 text-[10px] font-bold',
-                        resolved ? palette.bg : 'bg-black/[0.04] dark:bg-white/[0.06]',
-                        resolved ? palette.text : 'text-ink-muted',
-                    )}
-                >
-                    {resolved ? initialsOf(name || email) : '?'}
-                </span>
+                {/* The REAL person, when there is one: the same avatar the
+                    user list draws, photo and all. This was a hand-rolled
+                    initials circle in the tinted palette family, so somebody
+                    with an SSO photo looked like themselves on
+                    /admin/users and like a coloured monogram here.
+
+                    Only when the id RESOLVES. An unresolved id keeps its
+                    muted "?" — handing UserAvatar an id that matches no
+                    account just fires a 404 avatar fetch per unknown row,
+                    and this page's rule is that a system event or a
+                    hard-deleted account stays a bare id. */}
+                {resolved ? (
+                    <UserAvatar
+                        userId={id}
+                        name={name || email || id}
+                        shape="gradient"
+                        className="h-6 w-6 text-[10px] font-bold"
+                    />
+                ) : (
+                    <span
+                        aria-hidden
+                        className="shrink-0 grid place-items-center rounded-full h-6 w-6 text-[10px] font-bold bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted"
+                    >
+                        ?
+                    </span>
+                )}
                 <span className="min-w-0 leading-tight">
                     <a
                         href={`/admin/users?user=${encodeURIComponent(id)}`}
