@@ -1376,3 +1376,174 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ── Operator holds: the live hole, and the automation-only gate ──────────
+#
+# The stale-marker reconciler runs every tick regardless of every automation
+# switch, loads the state row (which carries paused_until / reconcile_enabled)
+# and, before this, consulted neither. A source paused while a marker was set
+# was rebuilt within a minute, every minute. It must DEFER — keeping the
+# marker, so the read path keeps serving the honest "may be out of date"
+# overlay — and emit nothing.
+
+
+class _HoldSchedSession(_SchedSession):
+    """A scheduler session whose state rows carry a hold for ``held_ds``."""
+
+    def __init__(self, held_ds, *, paused_until=None, reconcile_enabled=None, **kw):
+        super().__init__(**kw)
+        self._held_ds = set(held_ds)
+        self._paused_until = paused_until
+        self._reconcile_enabled = reconcile_enabled
+
+    async def get(self, orm, key):
+        row = await super().get(orm, key)
+        if key in self._held_ds:
+            row.paused_until = self._paused_until
+            row.reconcile_enabled = self._reconcile_enabled
+        return row
+
+
+def _hold_session_factory(held_ds, **hold):
+    created = []
+
+    def factory():
+        if not created:
+            s = _HoldSchedSession(held_ds, exec_results=[
+                _SchedExecResult([]), _SchedExecResult([]),
+            ], **hold)
+        else:
+            s = _HoldSchedSession(held_ds, **hold)
+        created.append(s)
+        return s
+
+    return factory
+
+
+def _future_iso(hours=3):
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+
+def test_scheduler_reconciler_defers_a_paused_marked_source(monkeypatch):
+    """THE success criterion: paused + marked survives a tick with no signal,
+    no job, and the marker intact."""
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2"), ("ws-3", "ds-3")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+    cleared = []
+
+    async def _clear(ws, ds):
+        cleared.append(ds)
+
+    monkeypatch.setattr(graph_cache_mod, "clear_source_stale", _clear)
+
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _hold_session_factory({"ds-2"}, paused_until=_future_iso())
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+    _run(sched._tick())
+
+    assert [c[0] for c in fake_svc.calls] == ["ds-3"]   # ds-2 deferred
+    assert "ds-2" not in cleared                         # marker kept
+
+
+def test_scheduler_reconciler_defers_a_source_with_automation_off(monkeypatch):
+    """``reconcile_enabled = False`` ("Automation off") IS the indefinite
+    stop, and had the identical hole."""
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _hold_session_factory({"ds-2"}, reconcile_enabled=False)
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+    _run(sched._tick())
+
+    assert fake_svc.calls == []
+
+
+def test_scheduler_reconciler_resumes_once_a_pause_lapses(monkeypatch):
+    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", "ds-2")]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+    fake_svc = _FakeSchedSvc()
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+
+    factory = _hold_session_factory({"ds-2"}, paused_until=_future_iso(-1))
+    sched = scheduler_mod.AggregationScheduler(factory, _SchedRegistry())
+    _run(sched._tick())
+
+    assert [c[0] for c in fake_svc.calls] == ["ds-2"]
+
+
+# signal_source_changed: keyed on ORIGIN, never on trigger_source.
+
+
+def test_signal_from_automation_is_held_but_still_invalidates(monkeypatch):
+    """Steps 4-7 (caches, marker) still run — only the rebuild is withheld,
+    and the marker is deliberately NOT cleared."""
+    state = _state(status="ready", fp="OLD")
+    state.paused_until = _future_iso()
+    state.reconcile_enabled = None
+    svc, session, order, captured = _build(monkeypatch, state=state, current_fp="NEW")
+
+    resp = _run(svc.signal_source_changed("ds-1", session, reason="drift", origin="reconcile"))
+
+    assert resp.changed is True
+    assert resp.held is True
+    assert resp.held_by == "source" and resp.held_kind == "paused"
+    assert resp.held_until == state.paused_until
+    assert resp.job_id is None and resp.deferred is False
+    assert "mark_source_stale" in order
+    assert "trigger" not in order
+    assert "clear_source_stale" not in order
+    # The audit row records the hold, and says which scope holds it.
+    assert svc._events[-1]["outcome"] == "held"
+    assert svc._events[-1]["actions"]["held"] == "source:paused"
+
+
+def test_signal_from_a_person_or_connector_proceeds_past_a_hold(monkeypatch):
+    """Decision 3: the same paused source, asked by a non-automation origin,
+    rebuilds — the UI warns, the work runs, the pause stays."""
+    for origin in ("api", "connector", "script"):
+        state = _state(status="ready", fp="OLD")
+        state.paused_until = _future_iso()
+        state.reconcile_enabled = None
+        svc, session, order, captured = _build(monkeypatch, state=state, current_fp="NEW")
+
+        resp = _run(svc.signal_source_changed("ds-1", session, reason="drift", origin=origin))
+
+        assert resp.held is False, origin
+        assert "trigger" in order, origin
+        assert resp.job_id == "agg_new", origin
+
+
+def test_signal_with_a_stopped_source_is_held_for_every_automation_origin(monkeypatch):
+    for origin in ("drift", "reconcile", "reconcile-sweep"):
+        state = _state(status="ready", fp="OLD")
+        state.paused_until = None
+        state.reconcile_enabled = False
+        svc, session, order, captured = _build(monkeypatch, state=state, current_fp="NEW")
+
+        resp = _run(svc.signal_source_changed("ds-1", session, reason="drift", origin=origin))
+
+        assert resp.held is True and resp.held_kind == "stopped", origin
+        assert "trigger" not in order, origin

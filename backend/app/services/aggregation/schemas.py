@@ -512,6 +512,16 @@ class SourceChangedResponse(BaseModel):
     # if the emit failed (audit writes are best-effort — see
     # emit_refresh_event). Reachable by F3/F4 to avoid a duplicate emit.
     event_id: Optional[str] = Field(None, alias="eventId")
+    # True when an AUTOMATION caller (origin drift/reconcile/reconcile-sweep)
+    # was refused a rebuild by an operator hold. Caches were still
+    # invalidated and the stale marker still set — the read path keeps
+    # serving the honest "may be out of date" overlay; only the rebuild is
+    # withheld. ``held_by`` names the scope holding it (fleet/provider/
+    # source) so the operator is sent to the control that will release it.
+    held: bool = False
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     class Config:
         populate_by_name = True
@@ -1305,7 +1315,14 @@ class BatchItemResult(BaseModel):
     All three default, because the error branch has no ``RefreshResponse``
     to read and an exception there would strand the batch at "running"."""
     data_source_id: str = Field(alias="dataSourceId")
-    outcome: Literal["done", "error"]
+    # ``held``: an operator hold is in force for this source, so the batch
+    # skipped it and reports it. A provider- or fleet-wide refresh is not a
+    # deliberate per-source override — a person overrides one source at a
+    # time, from that source's own Rebuild.
+    outcome: Literal["done", "error", "held"]
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
     job_id: Optional[str] = Field(None, alias="jobId")
     name: Optional[str] = None
     actions: List[str] = Field(default_factory=list)

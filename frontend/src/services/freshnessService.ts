@@ -359,7 +359,10 @@ export interface RefreshResponse {
 
 export interface BatchItemResult {
     dataSourceId: string
-    outcome: 'done' | 'error'
+    /** ``held``: automation is paused or stopped for this source (at source,
+     *  provider or fleet scope), so the batch skipped it — a fleet-wide
+     *  refresh is not a deliberate per-source override. Nothing ran. */
+    outcome: 'done' | 'error' | 'held'
     jobId?: string | null
     /** Data source label; absent on older batches still in Redis. */
     name?: string | null
@@ -367,6 +370,11 @@ export interface BatchItemResult {
     actions?: string[]
     /** Cooldown held the rebuild off — "done" but nothing was queued. */
     deferred?: boolean
+    /** The hold that skipped this source; set only when ``outcome === 'held'``.
+     *  ``heldBy`` is the widest scope in force — the control that releases it. */
+    heldBy?: 'fleet' | 'provider' | 'source' | null
+    heldKind?: 'paused' | 'stopped' | null
+    heldUntil?: string | null
 }
 
 export interface BatchStatus {

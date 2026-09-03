@@ -41,6 +41,9 @@ from .schemas import (
     SourceChangedResponse,
 )
 from .fingerprint import compute_graph_fingerprint, fingerprints_match
+from .holds import (  # noqa: F401  (HeldError re-exported for callers)
+    AUTOMATION_ORIGINS, HELD_TRIGGER_SOURCES, HeldError, Hold, resolve_hold,
+)
 from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
 
@@ -160,6 +163,32 @@ def resolve_reconcile_enabled(
     if global_value is not None:
         return global_value
     return AGGREGATION_RECONCILE_ENABLED
+
+
+def hold_for_state(
+    state, cadence, *, provider_id: Optional[str] = None, scope_holds=None,
+) -> Optional[Hold]:
+    """The operator hold in force for a source whose state row (or ``None``)
+    and the global cadence are already in hand.
+
+    Pure — no I/O — so the stale-marker reconciler and
+    ``signal_source_changed`` call it on rows they already loaded, and so it
+    does not depend on whichever service object a caller was handed. Most
+    restrictive wins across fleet → provider → source
+    (``holds.resolve_hold``); ``reconcile_enabled`` is resolved the same way
+    the sweeper resolves it (per-source override → global → env), so an
+    unset override inherits the fleet's ② Check switch.
+    """
+    reconcile_enabled = resolve_reconcile_enabled(
+        getattr(state, "reconcile_enabled", None),
+        getattr(cadence, "reconcile_enabled", None),
+    )
+    return resolve_hold(
+        scope_holds=scope_holds,
+        provider_id=provider_id,
+        source_paused_until=getattr(state, "paused_until", None),
+        source_reconcile_enabled=reconcile_enabled,
+    )
 
 
 def resolve_reconcile_interval(
@@ -380,6 +409,21 @@ class AggregationService:
                 f"invalid trigger_source {trigger_source!r}; expected one of "
                 f"{', '.join(API_TRIGGER_SOURCES)}"
             )
+
+        # ── Operator hold ──────────────────────────────────────────────
+        # Every path that can queue a job funnels through here, so this is
+        # the one place a hold cannot be bypassed — for AUTOMATION callers.
+        # A person (``manual``), provisioning (``onboarding``) and the
+        # purge's own re-aggregate (``post_purge``) proceed; ``api`` proceeds
+        # here because its automation subset is caught upstream by the
+        # origin check in signal_source_changed (``api`` is also what a
+        # person's Rebuild and the versioning projector send — holding it
+        # would abandon rollups the projector already skipped). Above the
+        # idempotency lookup so a refusal never leaves a half-open read.
+        if trigger_source in HELD_TRIGGER_SOURCES:
+            hold = await self.hold_for_source(ds_id, session)
+            if hold is not None:
+                raise HeldError(hold)
 
         # An EXPLICIT (non-auto) trigger clears the terminal-failure
         # backoff key: the user is deliberately retrying (typically after
@@ -1627,6 +1671,30 @@ class AggregationService:
             "probe_interval_secs": state.probe_interval_secs,
         }
 
+    def hold_for_state(
+        self, state, cadence, *, provider_id: Optional[str] = None,
+        scope_holds=None,
+    ) -> Optional[Hold]:
+        """See the module-level :func:`hold_for_state`; kept on the service
+        so callers holding a service can resolve without a second import."""
+        return hold_for_state(
+            state, cadence, provider_id=provider_id, scope_holds=scope_holds,
+        )
+
+    async def hold_for_source(
+        self, ds_id: str, session: AsyncSession,
+    ) -> Optional[Hold]:
+        """The hold in force for *ds_id*, loading what it needs. Used where
+        no state row is in hand yet: ``trigger()`` for automation sources,
+        and the provider/fleet refresh batches. A source with no state row
+        can still be held by the fleet's ② Check switch (resolved through
+        the cadence), which is the one thing an absent row inherits."""
+        from .models import AggregationDataSourceStateORM
+
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        cadence = await read_global_cadence(session)
+        return self.hold_for_state(state, cadence)
+
     async def set_source_pause(
         self, ds_id: str, session: AsyncSession, *, paused_until: Optional[str],
     ) -> dict:
@@ -1869,13 +1937,33 @@ class AggregationService:
         deferred = False
         trigger_outcome = None
         trigger_detail = None
+        held: Optional[Hold] = None
         if applicable:
             cadence = await read_global_cadence(session)
             interval_secs = resolve_rebuild_interval(
                 getattr(state, "rebuild_min_interval_secs", None),
                 cadence.rebuild_min_interval_secs,
             )
-            if not force and self._within_rebuild_cooldown(state, interval_secs):
+            # Operator hold, for AUTOMATION callers only — keyed on
+            # ``origin``, NOT ``trigger_source`` (which defaults to "api"
+            # for every scheduler caller and so cannot tell automation from
+            # a person). Steps 4-7 already ran: caches are invalidated and
+            # the stale marker is set, so the read path keeps serving the
+            # honest "may be out of date" overlay. Only the rebuild is
+            # withheld, and the marker is deliberately NOT cleared. A
+            # person or an external system (origin script/connector/api)
+            # is never held here; they proceed, and the UI warns.
+            if origin in AUTOMATION_ORIGINS:
+                held = self.hold_for_state(state, cadence)
+            if held is not None:
+                trigger_outcome = "held"
+                trigger_detail = held.detail
+                logger.info(
+                    "signal_source_changed: rebuild for %s held by operator "
+                    "(%s, origin=%s) — caches invalidated, marker kept, "
+                    "nothing queued", ds_id, held.detail, origin,
+                )
+            elif not force and self._within_rebuild_cooldown(state, interval_secs):
                 deferred = True
                 logger.info(
                     "signal_source_changed: rebuild deferred (cooldown) for "
@@ -1945,6 +2033,8 @@ class AggregationService:
         }
         if force:
             actions["force"] = True
+        if held is not None:
+            actions["held"] = held.detail
         event_id = await self._emit_signal_event(
             workspace_id=workspace_id, ds_id=ds_id, origin=origin,
             actor=actor, gate=("forced" if force else "changed"),
@@ -1961,6 +2051,10 @@ class AggregationService:
             stored_fingerprint=stored_fp,
             deferred=deferred,
             event_id=event_id,
+            held=held is not None,
+            held_by=held.scope if held else None,
+            held_kind=held.kind if held else None,
+            held_until=held.until if held else None,
         )
 
     async def _emit_signal_event(

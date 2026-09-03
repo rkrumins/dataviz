@@ -1871,3 +1871,36 @@ async def test_a_cold_projector_health_lookup_defers_the_whole_sweep(
     assert json.loads(run.detail)["bySkip"] == {
         "projector_health_unavailable": 1,
     }
+
+
+# ── a first build refused by trigger()'s hold gate is a skip, not an error ─
+
+
+@pytest.mark.asyncio
+async def test_a_first_build_held_by_trigger_is_counted_as_a_skip(session_factory):
+    """``trigger()`` refuses automation sources under a hold with
+    ``HeldError``. The sweeper is its only live caller for first builds and
+    must land that in the skip tally — an operator asked for it — never in
+    ``errors``, which reads as "dispatch is broken"."""
+    from backend.app.services.aggregation.holds import HeldError, Hold
+
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+
+    class _HeldSvc(_FakeService):
+        async def trigger(self, ds_id, request, trigger_source, session):
+            raise HeldError(Hold("provider", "stopped", scope_id="prov_1"))
+
+    svc = _HeldSvc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_reason == {"never_aggregated": 1}
+    assert result.errors == 0
+    assert result.actions == 0
+    assert result.skipped == 1
+    assert result.by_skip == {"provider_held": 1}
+    assert svc.signals == []

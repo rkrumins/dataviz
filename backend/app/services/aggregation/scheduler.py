@@ -311,7 +311,7 @@ class AggregationScheduler:
         the source still surfaces as needs-attention and is retried later).
         """
         from .models import AggregationDataSourceStateORM
-        from .service import resolve_rebuild_interval
+        from .service import hold_for_state, resolve_rebuild_interval
         from backend.app.services.graph_cache import (
             clear_source_stale,
             list_stale_sources,
@@ -359,6 +359,29 @@ class AggregationScheduler:
                         logger.debug(
                             "stale-marker reconcile: %s failed recently "
                             "(< %ds cadence) — backing off", ds, interval_secs,
+                        )
+                        continue
+                    # Operator hold (paused / stopped, at any scope): defer
+                    # and KEEP the marker. This loop runs every tick
+                    # regardless of every other automation switch, so it was
+                    # the one path a pause could never reach — a source
+                    # paused while a marker was set was rebuilt within a
+                    # minute, every minute. The marker stays because it is
+                    # what makes the read path serve the honest "may be out
+                    # of date" overlay; clearing it would make a paused
+                    # source look fresh. Deferring HERE, rather than letting
+                    # signal_source_changed refuse, is also what keeps a
+                    # held-and-marked source from emitting an audit event
+                    # every minute.
+                    # (No row is fine: hold_for_state reads through it, and
+                    # the one thing an absent row inherits — the fleet's
+                    # ② Check switch — must hold here too, or the signal
+                    # below refuses it instead and audits every minute.)
+                    hold = hold_for_state(state, cadence)
+                    if hold is not None:
+                        logger.debug(
+                            "stale-marker reconcile: %s held (%s) — deferring",
+                            ds, hold.detail,
                         )
                         continue
                     resp = await svc.signal_source_changed(

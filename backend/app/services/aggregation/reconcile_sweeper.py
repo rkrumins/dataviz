@@ -42,6 +42,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import func, select, text
 
+from .holds import HeldError
 from .reconcile import Observation, Verdict, evaluate
 
 logger = logging.getLogger(__name__)
@@ -1271,6 +1272,20 @@ class ReconciliationSweeper:
                 result.actions += 1
             except asyncio.CancelledError:
                 raise
+            except HeldError as exc:
+                # trigger() refused a first build because an operator hold
+                # is in force. That is a skip the operator asked for, not a
+                # dispatch failure — count it where the cockpit's "why did
+                # the fleet produce nothing" tally will show it.
+                skip = f"{exc.hold.scope}_held" if exc.hold.scope != "source" else (
+                    "disabled" if exc.hold.kind == "stopped" else "paused"
+                )
+                result.skipped += 1
+                result.by_skip[skip] = result.by_skip.get(skip, 0) + 1
+                logger.info(
+                    "reconcile sweep: first build for %s held (%s) — skipped",
+                    action.data_source_id, exc.hold.detail,
+                )
             except Exception as exc:
                 result.errors += 1
                 logger.warning(

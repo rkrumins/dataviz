@@ -955,17 +955,41 @@ async def _run_provider_batch(
                 # strands the batch at state "running" forever.
                 try:
                     async with session_factory() as session:
-                        resp = await svc.refresh_source(
-                            ds_id, session,
-                            scope=body.scope, force=body.force,
-                            actor=body.actor, origin=body.origin,
-                        )
-                    item = {
-                        "dataSourceId": ds_id, "name": ds_name, "outcome": "done",
-                        "jobId": resp.job_id,
-                        "actions": list(resp.actions or []),
-                        "deferred": bool(resp.deferred),
-                    }
+                        # An operator hold is honoured PER ITEM, not in the
+                        # enumerator: filtering _live_ds_rows would silently
+                        # shrink ``total`` and the dialog would report 200
+                        # sources as 197 with no explanation. A provider- or
+                        # fleet-wide refresh is not a deliberate per-source
+                        # override (that is the single-source Rebuild, which
+                        # warns and proceeds), so a held source is skipped
+                        # and REPORTED as such.
+                        # Capability-checked like the provider probes
+                        # (``getattr(provider, "get_counts_fast", None)``):
+                        # the real AggregationService always exposes it.
+                        resolve = getattr(svc, "hold_for_source", None)
+                        hold = await resolve(ds_id, session) if resolve else None
+                        if hold is not None:
+                            resp = None
+                        else:
+                            resp = await svc.refresh_source(
+                                ds_id, session,
+                                scope=body.scope, force=body.force,
+                                actor=body.actor, origin=body.origin,
+                            )
+                    if resp is None:
+                        item = {
+                            "dataSourceId": ds_id, "name": ds_name, "outcome": "held",
+                            "jobId": None, "actions": [], "deferred": False,
+                            "heldBy": hold.scope, "heldKind": hold.kind,
+                            "heldUntil": hold.until,
+                        }
+                    else:
+                        item = {
+                            "dataSourceId": ds_id, "name": ds_name, "outcome": "done",
+                            "jobId": resp.job_id,
+                            "actions": list(resp.actions or []),
+                            "deferred": bool(resp.deferred),
+                        }
                 except Exception as exc:
                     logger.warning(
                         "refresh batch %s: item %s failed: %s", batch_id, ds_id, exc,

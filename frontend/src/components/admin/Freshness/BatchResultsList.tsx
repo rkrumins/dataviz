@@ -8,7 +8,7 @@
  * component so the two dialogs cannot drift.
  */
 import { Link } from 'react-router-dom'
-import { ArrowUpRight, CheckCircle2, Clock, XCircle } from 'lucide-react'
+import { ArrowUpRight, CheckCircle2, Clock, PauseCircle, XCircle } from 'lucide-react'
 import type { BatchItemResult } from '@/services/freshnessService'
 import { jobHistoryPath } from '../job-history/shared'
 
@@ -35,12 +35,22 @@ export function describeActions(actions: string[]): string {
     return actions.map(a => ACTION_COPY[a] ?? a.replace(/_/g, ' ')).join(' · ')
 }
 
+/** A held source was SKIPPED, not refreshed — say which control is holding
+ *  it, because a source-level "Resume" does nothing against a provider or
+ *  fleet hold. */
+export function describeHold(r: Pick<BatchItemResult, 'heldBy' | 'heldKind'>): string {
+    const kind = r.heldKind === 'stopped' ? 'stopped' : 'paused'
+    const scope = r.heldBy === 'fleet' ? ' fleet-wide' : r.heldBy === 'provider' ? ' for the provider' : ''
+    return `skipped — automation ${kind}${scope}`
+}
+
 export function BatchResultsList({ results }: { results: BatchItemResult[] }) {
     if (results.length === 0) return null
 
     const queued = results.filter(r => r.outcome === 'done' && r.jobId).length
     const deferred = results.filter(r => r.outcome === 'done' && r.deferred).length
     const failed = results.filter(r => r.outcome === 'error').length
+    const held = results.filter(r => r.outcome === 'held').length
 
     return (
         <>
@@ -48,16 +58,20 @@ export function BatchResultsList({ results }: { results: BatchItemResult[] }) {
                 {results.map((r) => {
                     const detail = r.outcome === 'error'
                         ? 'failed to start'
-                        : r.deferred
+                        : r.outcome === 'held'
+                            ? describeHold(r)
+                            : r.deferred
                             ? 'deferred — in cooldown, no rebuild queued'
                             : r.actions?.length ? describeActions(r.actions) : r.jobId ? 'rebuild queued' : 'no changes needed'
                     return (
                         <li key={r.dataSourceId} className="flex items-center gap-2 text-xs text-ink-secondary">
                             {r.outcome === 'error'
                                 ? <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                                : r.deferred
-                                    ? <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                                    : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
+                                : r.outcome === 'held'
+                                    ? <PauseCircle className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                    : r.deferred
+                                        ? <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                                        : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />}
                             <span className="truncate font-medium text-ink">{r.name || r.dataSourceId}</span>
                             <span className="truncate text-ink-muted" title={detail}>{detail}</span>
                             {r.jobId && (
@@ -77,6 +91,7 @@ export function BatchResultsList({ results }: { results: BatchItemResult[] }) {
                     {results.length} source{results.length === 1 ? '' : 's'}
                     {queued > 0 && ` · ${queued} rebuild${queued === 1 ? '' : 's'} queued`}
                     {deferred > 0 && ` · ${deferred} deferred`}
+                    {held > 0 && ` · ${held} held`}
                     {failed > 0 && ` · ${failed} failed`}
                 </span>
                 {queued > 0 && (
