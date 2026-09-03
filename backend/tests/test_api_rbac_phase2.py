@@ -233,6 +233,103 @@ async def test_workspace_member_404_for_unknown_workspace(
     assert r.status_code == 404
 
 
+# ── /admin/workspaces/{ws}/members/effective ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_effective_access_flattens_groups_and_direct(
+    test_client: AsyncClient, db_session,
+):
+    """The flattened list resolves group bindings to their members, keeps
+    a user who inherits via several groups as ONE row with a grant per
+    route, and folds in direct bindings beside them."""
+    ws_id = await _seed_workspace(db_session)
+    u1 = await _seed_user(db_session, user_id="usr_one", email="one@example.com")
+    u2 = await _seed_user(db_session, user_id="usr_two", email="two@example.com")
+    u3 = await _seed_user(db_session, user_id="usr_three", email="three@example.com")
+
+    # Two groups: u1 is in BOTH; u2 only in the second.
+    ga = (await test_client.post("/api/v1/admin/groups", json={"name": "Alpha"})).json()["id"]
+    gb = (await test_client.post("/api/v1/admin/groups", json={"name": "Beta"})).json()["id"]
+    for uid in (u1,):
+        await test_client.post(f"/api/v1/admin/groups/{ga}/members", json={"userId": uid})
+    for uid in (u1, u2):
+        await test_client.post(f"/api/v1/admin/groups/{gb}/members", json={"userId": uid})
+
+    # Bind Alpha as viewer, Beta as member, and u3 directly as admin.
+    await test_client.post(
+        f"/api/v1/admin/workspaces/{ws_id}/members",
+        json={"subjectType": "group", "subjectId": ga, "role": "workspace_viewer"},
+    )
+    await test_client.post(
+        f"/api/v1/admin/workspaces/{ws_id}/members",
+        json={"subjectType": "group", "subjectId": gb, "role": "workspace_member"},
+    )
+    await test_client.post(
+        f"/api/v1/admin/workspaces/{ws_id}/members",
+        json={"subjectType": "user", "subjectId": u3, "role": "workspace_admin"},
+    )
+
+    r = await test_client.get(f"/api/v1/admin/workspaces/{ws_id}/members/effective")
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    assert body["totalUsers"] == 3
+    assert body["directUsers"] == 1       # only u3 is bound directly
+    assert body["viaGroupUsers"] == 2     # u1 and u2 inherit via a group
+
+    by_id = {u["userId"]: u for u in body["users"]}
+
+    # u1 inherits via BOTH groups — one row, two grants, two roles, and
+    # the higher-precedence role badges them.
+    one = by_id["usr_one"]
+    assert one["displayName"] == "Bob Bobson"  # _seed_user's name
+    assert set(one["roles"]) == {"workspace_viewer", "workspace_member"}
+    assert one["effectiveRole"] == "workspace_member"  # member outranks viewer
+    vias = {(g["via"], g.get("groupName")) for g in one["grants"]}
+    assert vias == {("group", "Alpha"), ("group", "Beta")}
+    assert all(g["via"] == "group" for g in one["grants"])
+
+    # u2 only via Beta.
+    two = by_id["usr_two"]
+    assert two["effectiveRole"] == "workspace_member"
+    assert [g["groupName"] for g in two["grants"]] == ["Beta"]
+
+    # u3 is direct, no group provenance.
+    three = by_id["usr_three"]
+    assert three["effectiveRole"] == "workspace_admin"
+    assert three["grants"][0]["via"] == "direct"
+    assert three["grants"][0]["groupId"] is None
+
+
+@pytest.mark.asyncio
+async def test_effective_access_names_a_deleted_member_and_404s_unknown_ws(
+    test_client: AsyncClient, db_session,
+):
+    # Unknown workspace → 404, same as the bindings list.
+    r = await test_client.get("/api/v1/admin/workspaces/ws_ghost/members/effective")
+    assert r.status_code == 404
+
+    # A soft-deleted user who still holds access is named, not dropped —
+    # that is exactly the row an admin needs to find and revoke.
+    from datetime import datetime, timezone
+    ws_id = await _seed_workspace(db_session, ws_id="ws_del", name="Del")
+    gone = await _seed_user(db_session, user_id="usr_gone", email="gone@example.com")
+    await test_client.post(
+        f"/api/v1/admin/workspaces/{ws_id}/members",
+        json={"subjectType": "user", "subjectId": gone, "role": "workspace_viewer"},
+    )
+    orm = await db_session.get(UserORM, gone)
+    orm.deleted_at = datetime.now(timezone.utc)
+    await db_session.commit()
+
+    r = await test_client.get(f"/api/v1/admin/workspaces/{ws_id}/members/effective")
+    assert r.status_code == 200
+    u = next(u for u in r.json()["users"] if u["userId"] == gone)
+    assert u["deleted"] is True
+    assert u["displayName"] == "Bob Bobson"
+
+
 # ── /views/{view}/grants ────────────────────────────────────────────
 
 @pytest.mark.asyncio

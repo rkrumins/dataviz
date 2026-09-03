@@ -163,6 +163,67 @@ class WorkspaceMemberResponse(BaseModel):
     subject: WorkspaceMemberSubject
 
 
+class WorkspaceAccessGrant(BaseModel):
+    """One route by which a user holds a role in the workspace.
+
+    A user can hold several: a direct binding and membership of two
+    groups that are each bound would be three grants. ``via`` is
+    ``"direct"`` for a user binding, ``"group"`` for one inherited
+    through a group; the group fields are set only in the latter case.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    role: str
+    via: str  # "direct" | "group"
+    binding_id: str = Field(alias="bindingId")
+    group_id: Optional[str] = Field(default=None, alias="groupId")
+    group_name: Optional[str] = Field(default=None, alias="groupName")
+    expires_at: Optional[str] = Field(default=None, alias="expiresAt")
+
+
+class WorkspaceAccessUser(BaseModel):
+    """A person with effective access to the workspace, flattened across
+    their direct binding(s) and every bound group they belong to.
+
+    ``roles`` is the distinct set they effectively hold here; the
+    permissions that actually apply are the UNION of those roles'
+    grants. ``effectiveRole`` is a single label for the badge — the
+    highest-precedence built-in workspace role they hold
+    (admin > member > viewer), or their first role when they hold only
+    custom ones. It is a convenience, never the whole story: ``roles``
+    and ``grants`` carry the full picture, and the FE shows them.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    user_id: str = Field(alias="userId")
+    # Best-effort identity, same contract as everywhere else: ``None``
+    # means the id resolved to nothing (a deleted account whose row is
+    # gone) — show the raw id, never invent a name.
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
+    avatar_id: Optional[str] = Field(default=None, alias="avatarId")
+    status: Optional[str] = None
+    deleted: bool = False
+    roles: list[str] = Field(default_factory=list)
+    effective_role: str = Field(alias="effectiveRole")
+    grants: list[WorkspaceAccessGrant] = Field(default_factory=list)
+
+
+class WorkspaceAccessResponse(BaseModel):
+    """The flattened, inheritance-aware access list for a workspace.
+
+    Every distinct person who can reach the workspace — directly bound
+    or through any bound group — with the route(s) by which they got
+    there. The counts drive the header strip without the FE re-counting.
+    """
+    model_config = ConfigDict(populate_by_name=True)
+    users: list[WorkspaceAccessUser] = Field(default_factory=list)
+    total_users: int = Field(alias="totalUsers")
+    # Users with at least one binding of each kind. A user can be in
+    # BOTH (bound directly and via a group), so these need not sum to
+    # ``totalUsers``.
+    direct_users: int = Field(default=0, alias="directUsers")
+    via_group_users: int = Field(default=0, alias="viaGroupUsers")
+
+
 class WorkspaceMemberCreateRequest(BaseModel):
     """Bind a user or group to a workspace at a specific role.
 
