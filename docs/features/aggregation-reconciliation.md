@@ -147,7 +147,7 @@ do not "align" them.
 | NULL baseline = seed | The first sweep over a fleet would classify every source as drifted and queue a fleet-wide rebuild. |
 | `expected > 0` on detector 1 | A containment-only graph legitimately materialises an empty cube and would rebuild forever. |
 | `already_marked` | The stale-marker reconciler in `scheduler.py` owns that source. Two mechanisms must never both retry one rebuild. |
-| Circuit breaker (3 consecutive actions) | A finding we can never clear would rebuild a huge graph every hour indefinitely. |
+| Circuit breaker (3 consecutive actions) | A finding we can never clear would rebuild a huge graph every hour indefinitely. The same counter bounds the stale-marker reconciler's retries after a failed or cancelled job. |
 | `no_ontology` | `trigger()` would raise `OntologyResolutionError` once an hour. Recorded as a finding instead — a useful signal on its own. |
 
 Several conditions produce a finding that is **recorded and surfaced but not
@@ -171,6 +171,7 @@ distinct in every surface — **Pause** is timed and lapses on its own,
 | source | `aggregation.data_source_state` | `paused_until` | `reconcile_enabled = false` (the "rebuild automatically" toggle *is* the stop) |
 | provider | `aggregation.automation_holds` `('provider', <id>)` | `paused_until` | `stopped_at` |
 | fleet | `aggregation.automation_holds` `('fleet', '')` | `paused_until` | `stopped_at` |
+| fleet, from the Automation modal's switches | `aggregation_settings.cadence_json` | — | ③ Act off (`driftAutoRebuild`) is a fleet-wide stop; ② Check off (`reconcileEnabled`) is a fleet-wide stop for every source that inherits it — an explicit per-source `true` escapes that one |
 
 **Most restrictive wins**, fleet → provider → source, and there is no
 per-source escape from a wider hold. Every gate resolves through one function
@@ -196,22 +197,30 @@ skip, never an error); `signal_source_changed` for automation origins (outcome
 `held` — caches are still invalidated and the stale marker still set, so the
 read path keeps serving the honest "may be out of date" overlay; only the
 rebuild is withheld); and the **stale-marker reconciler** in the scheduler,
-which retries every marked source every minute regardless of every other
-switch and was the path a pause could never reach. It now defers a held
-source and *keeps* the marker — clearing it would make a paused source look
-fresh. `manual`, `onboarding` and `post_purge` are exempt by construction (a
-purge that deleted the cells must be allowed its own re-aggregate).
+which used to retry every marked source every minute regardless of every
+other switch and was the path a pause could never reach. It now defers a
+held source and *keeps* the marker — clearing it would make a paused source
+look fresh — and its retries are **bounded**: after a failed *or cancelled*
+job it waits one rebuild window, retries up to the breaker cap (counting on
+the same `reconcile_consecutive_actions` the sweeper uses), then stamps the
+source `suspended`, rings the same notice, and waits for **Resume
+automation**. `manual`, `onboarding` and `post_purge` are exempt by
+construction (a purge that deleted the cells must be allowed its own
+re-aggregate).
 
 The wider-scope rows are read by primary key on every resolution, never
 cached: "Pause provider" on the web tier followed at once by "Refresh
 provider" on the Control Plane must skip what was just paused, and a 30s
 cache would not.
 
-A source the breaker suspended (`Needs a person`) has a manual way back:
-**Resume automation** in its drawer (`resetBreaker: true` on the settings
-PATCH) zeroes the consecutive-action count and lifts the `suspended` verdict;
+A source the breaker suspended (`Needs a person`) — by the sweeper or by the
+stale-marker reconciler's retries — has a manual way back: **Resume
+automation** in its drawer (`resetBreaker: true` on the settings PATCH)
+zeroes the consecutive-action count and lifts the `suspended` verdict;
 before that, the count only ever reset when a later check found the source in
-sync.
+sync. The count is shared, so a sweeper action followed by failed retries
+trips the breaker sooner than three retries; `resetBreaker` is the escape
+either way.
 
 ### Caps
 
@@ -523,6 +532,13 @@ Advanced there would be symmetry for its own sake). Env-only values
 (`statsMaxAgeSecs`, the breaker cap) render as read-only context clearly marked
 as deploy-set, never as disabled inputs pretending to be editable.
 
+③ Act's toggle ("Automatically rebuild a source when drift is detected") off
+is a **fleet-wide stop everywhere**: the sweeper's rebuilds and first builds,
+the stale-marker reconciler's retries of rebuilds already requested, and the
+provider/fleet batch refresh all hold, and every row reads "Stopped
+fleet-wide". A single-source Rebuild a person clicks still runs. It reaches
+the control plane within the 30s cadence cache.
+
 ③ Act's Advanced also carries the **fleet-wide hold** (the same snooze row as
 the drawer, plus "Until resumed (stop)"), which writes immediately rather than
 waiting for Save, and the breaker's live count as **"N need a person"** — a
@@ -595,11 +611,11 @@ seven states.
   and reports, and queues nothing.
 - **The first sweep seeds and acts on nothing** for drift; detectors 1 and 3 can
   fire on it, which is the point.
-- **A source stuck at "Reconcile suspended"** hit the breaker: it was rebuilt
-  repeatedly without the finding clearing. Fix why the rollups keep
-  disappearing first — the breaker resets only when a later evaluation finds
-  the source `in_sync` (a manual check *after* the underlying cause is fixed
-  does it; while the finding persists, checks re-confirm the suspension).
+- **A source stuck at "Reconcile suspended"** hit the breaker, for one of two
+  reasons: it was rebuilt repeatedly without the finding clearing, or its
+  rebuild failed (or was cancelled) and three automatic retries failed too.
+  Fix the cause first, then **Resume automation** in the drawer; the breaker
+  also resets when a later evaluation finds the source `in_sync`.
 - **Turning a detector off** stops rebuilds for it. The problem is still
   detected and still shown.
 - **A source that fails every rebuild on `MaterializationBudgetExceeded`** is

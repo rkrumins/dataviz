@@ -12,6 +12,10 @@ in two kinds and at three scopes:
   says so out loud).
 * **provider** / **fleet** — ``aggregation.automation_holds`` rows, keyed
   ``(scope, scope_id)``, each carrying the same two nullable columns.
+* **③ Act off** (the cadence's ``drift_auto_rebuild``) is a fleet-wide stop,
+  and **② Check off** (the cadence's ``reconcile_enabled``) is a fleet-wide
+  stop for every source that inherits it — an explicit per-source ``True``
+  escapes that one, because that chain is most-specific-wins.
 
 **Most restrictive wins.** Any hold anywhere in fleet → provider → source
 holds the source; there is no per-source escape from a wider hold. The
@@ -131,6 +135,8 @@ def _scope_row_hold(row: Any, scope: str, scope_id: str) -> Optional[Hold]:
 def resolve_scope_hold(
     scope_holds: Optional[Mapping[Tuple[str, str], Any]],
     provider_id: Optional[str],
+    *,
+    drift_auto_rebuild: Optional[bool] = None,
 ) -> Optional[Hold]:
     """The widest fleet/provider hold in force, or ``None``.
 
@@ -138,7 +144,11 @@ def resolve_scope_hold(
     ``paused_until`` / ``stopped_at`` (an ORM row, or any object with those
     attributes). An absent or empty mapping means no scope-level hold —
     the fail-open direction the freshness read path uses everywhere.
+    ``drift_auto_rebuild`` is ③ Act, RESOLVED (persisted global → env):
+    ``False`` is a fleet-wide stop that outranks every row.
     """
+    if drift_auto_rebuild is False:
+        return Hold(scope="fleet", kind="stopped")
     if not scope_holds:
         return None
     hold = _scope_row_hold(scope_holds.get(FLEET_KEY), "fleet", "")
@@ -156,9 +166,11 @@ def resolve_source_hold(
     reconcile_enabled: Optional[bool],
 ) -> Optional[Hold]:
     """The source's own hold, or ``None``. ``reconcile_enabled`` is the
-    RESOLVED value (per-source override → global → env), not the raw
-    override: an unset override inherits, and an inherited ``False`` is a
-    real stop."""
+    source's OWN ② Check override (``False`` = its own stop; ``None``
+    inherits — :func:`resolve_hold` decides what an inherited ``False``
+    means). Callers holding only the resolved value may still pass it: an
+    inherited stop then reads as the source's, which is how the sweep tally
+    keeps its historical ``disabled`` name."""
     if reconcile_enabled is False:
         return Hold(scope="source", kind="stopped")
     if pause_active(paused_until):
@@ -172,15 +184,26 @@ def resolve_hold(
     provider_id: Optional[str],
     source_paused_until: Optional[str] = None,
     source_reconcile_enabled: Optional[bool] = None,
+    fleet_reconcile_enabled: Optional[bool] = None,
+    drift_auto_rebuild: Optional[bool] = None,
 ) -> Optional[Hold]:
     """Most-restrictive-wins across fleet → provider → source.
 
-    Order: fleet stopped, fleet paused, provider stopped, provider paused,
-    source stopped, source paused, else ``None``. Every branch holds the
-    source equally — the order only decides which scope is reported.
+    Order: fleet stopped — ③ Act off (``drift_auto_rebuild``), ② Check off
+    where the source inherits it (``fleet_reconcile_enabled`` is ``False``
+    and ``source_reconcile_enabled`` is ``None``; an explicit per-source
+    ``True`` escapes, that chain being most-specific-wins), or the fleet row
+    — then fleet paused, provider stopped, provider paused, source stopped
+    (its own ② Check override), source paused, else ``None``. Every branch
+    holds the source equally — the order only decides which scope is
+    reported, so the operator is sent to the control that releases it.
     """
+    if source_reconcile_enabled is None and fleet_reconcile_enabled is False:
+        return Hold(scope="fleet", kind="stopped")
     return (
-        resolve_scope_hold(scope_holds, provider_id)
+        resolve_scope_hold(
+            scope_holds, provider_id, drift_auto_rebuild=drift_auto_rebuild,
+        )
         or resolve_source_hold(source_paused_until, source_reconcile_enabled)
     )
 

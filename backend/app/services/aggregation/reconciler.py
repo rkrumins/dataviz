@@ -49,6 +49,14 @@ _HEARTBEAT_THRESHOLD_SECS: float = float(
     os.getenv("STUCK_JOB_HEARTBEAT_THRESHOLD_SECS", "300")
 )
 _MAX_AUTO_RESUMES: int = int(os.getenv("STUCK_JOB_MAX_AUTO_RESUMES", "5"))
+# Lifetime of the per-job auto-resume counter. It exists only for a job whose
+# executor has died at least once, and it must outlive the whole job — up to
+# AGGREGATION_PENDING_TIMEOUT_SECS queued plus five long runs (a 1M-node
+# graph runs far longer than the old 1200s window in ONE attempt, which is
+# exactly how a sliding TTL let the cap reset between two executor deaths).
+# Nothing reads it once the job is terminal; a hand Resume deletes it. Seven
+# days is the repo's backstop convention for per-source Redis bookkeeping.
+_REDISPATCH_TTL_SECS: int = 7 * 86400
 # Stale-PENDING backstop: a row dispatched onto the job stream in a
 # deployment with no aggregation-worker consumer stays 'pending' forever
 # ("queued and will start shortly" in the UI) and 409-blocks every later
@@ -78,6 +86,39 @@ def _parse_iso(ts: str | None) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+async def count_auto_resume(redis_client: Any, job_id: str) -> int:
+    """One more automatic re-dispatch of *job_id*; returns the running total.
+
+    The TTL is set ONCE, when the counter is created, so it cannot slide:
+    refreshing it on every increment let a job that ran longer than the
+    window between two executor deaths be resumed forever.
+    """
+    from .redis_client import redispatch_key
+
+    key = redispatch_key(job_id)
+    attempts = int(await redis_client.incr(key))
+    if attempts == 1:
+        await redis_client.expire(key, _REDISPATCH_TTL_SECS)
+    return attempts
+
+
+def mark_auto_resume_exhausted(job: Any, now_iso: str) -> None:
+    """Terminal status for a job that died more times than automation may
+    resume it. A hand Resume from the cursor is still possible."""
+    job.status = "failed"
+    job.error_message = (
+        f"Auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
+        f"without completing; resume from cursor={job.last_cursor} "
+        f"is still possible."
+    )
+    job.completed_at = now_iso
+    job.updated_at = now_iso
+    metrics_increment(
+        "stuck_jobs_redispatched_total",
+        kind="aggregation", outcome="auto_resume_exhausted",
+    )
 
 
 async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int:
@@ -159,25 +200,12 @@ async def _reconcile_once(session_factory: Any, redis_client: Any = None) -> int
                         reconciled += 1
                         continue
 
-                    # Auto-resume, capped to avoid a poison job looping forever.
-                    cnt_key = f"agg:redispatch:{job.id}"
-                    attempts = int(await redis_client.incr(cnt_key))
-                    await redis_client.expire(
-                        cnt_key, int(_HEARTBEAT_THRESHOLD_SECS) * 4,
-                    )
+                    # Auto-resume, capped to avoid a poison job looping forever
+                    # (the counter is shared with crash recovery and never
+                    # slides — see count_auto_resume).
+                    attempts = await count_auto_resume(redis_client, job.id)
                     if attempts > _MAX_AUTO_RESUMES:
-                        job.status = "failed"
-                        job.error_message = (
-                            f"Auto-resume cap ({_MAX_AUTO_RESUMES}) reached "
-                            f"without completing; resume from cursor={job.last_cursor} "
-                            f"is still possible."
-                        )
-                        job.completed_at = now_iso
-                        job.updated_at = now_iso
-                        metrics_increment(
-                            "stuck_jobs_redispatched_total",
-                            kind="aggregation", outcome="auto_resume_exhausted",
-                        )
+                        mark_auto_resume_exhausted(job, now_iso)
                         reconciled += 1
                         continue
 

@@ -706,6 +706,11 @@ describe('fleet-wide hold', () => {
         await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ pausedUntil: null, stopped: false }))
     })
 
+    it('says out loud that ③ Act off is a fleet-wide stop', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        expect(await screen.findByText(/Off is a fleet-wide stop/)).toBeInTheDocument()
+    })
+
     it('a non-admin sees the hold but cannot set it', async () => {
         permissionFn.mockReturnValue(false)
         wrap(<AutomationModal open onClose={() => {}} isAdmin={false} summary={SUMMARY} />)

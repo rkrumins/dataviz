@@ -172,7 +172,7 @@ export function Freshness() {
     const onCancelJob = useCallback(async (dsId: string, jobId: string) => {
         try {
             await aggregationService.cancelJob(dsId, jobId)
-            notify('success', 'Rebuild cancelled.')
+            notify('success', 'Rebuild cancelled. If automation requested it, it may retry a few more times, then it waits for a person.')
         } catch (e) {
             notify('error', (e as Error).message || 'Could not cancel the rebuild.')
         }

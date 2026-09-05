@@ -913,7 +913,7 @@ def _no_marker(monkeypatch):
 
 
 def test_scheduler_drift_signals_with_default_env(monkeypatch):
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)
     _no_marker(monkeypatch)
     _empty_stale(monkeypatch)
@@ -935,14 +935,17 @@ def test_scheduler_drift_signals_with_default_env(monkeypatch):
     assert fake_svc.origins == ["drift"]
 
 
-# ── Scenario 2: flag off → DRIFT path is notify-only, but the marker ────
-# reconciler STILL runs. A marker exists only because an explicit signal
-# already requested a rebuild that a cooldown deferred or an attempt failed,
-# so completing it must not hinge on AGGREGATION_DRIFT_AUTO_REBUILD.
+# ── Scenario 2: ③ Act off is a FLEET-WIDE STOP. The drift path is notify-
+# only, and the marker reconciler still runs every tick — but it now defers
+# every marked source (the hold resolver reports ③ Act off as a fleet stop)
+# and keeps the marker, so the source stays honestly "out of date" and
+# nothing is rebuilt until ③ Act is back on. Before this, "Automatically
+# rebuild a source when drift is detected" gated one loop of three, which is
+# how an operator switched it off and still watched rebuilds appear.
 
 
-def test_scheduler_flag_off_still_reconciles_markers(monkeypatch):
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", False)
+def test_scheduler_act_off_holds_marked_sources_too(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
     _all_drift(monkeypatch)
     _no_marker(monkeypatch)  # the drifted source carries no marker
 
@@ -953,6 +956,12 @@ def test_scheduler_flag_off_still_reconciles_markers(monkeypatch):
         return [("ws-1", "ds-9")]
 
     monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+    cleared = []
+
+    async def _clear(ws, ds):
+        cleared.append(ds)
+
+    monkeypatch.setattr(graph_cache_mod, "clear_source_stale", _clear)
 
     fake_svc = _FakeSchedSvc()
     monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
@@ -963,20 +972,19 @@ def test_scheduler_flag_off_still_reconciles_markers(monkeypatch):
     _run(sched._tick())
 
     # DRIFT path is off: the drifted ds-1 is NOT signaled…
-    assert all(ds_id != "ds-1" for ds_id, _reason, _s in fake_svc.calls)
     assert "drift" not in fake_svc.origins
-    # …but the reconciler still runs and re-signals the marked ds-9.
-    assert list_calls  # list_stale_sources was consulted despite the flag
-    assert [c[0] for c in fake_svc.calls] == ["ds-9"]
-    assert fake_svc.calls[0][1] == "reconcile"
-    assert fake_svc.origins == ["reconcile"]
+    # …the reconciler still ran (it must keep deferring, not stop looking)…
+    assert list_calls
+    # …but it signaled nothing and kept the marker: a fleet-wide stop.
+    assert fake_svc.calls == []
+    assert "ds-9" not in cleared
 
 
 # ── Scenario 3: a signal failure must not abort the sweep ───────────────
 
 
 def test_scheduler_signal_failure_does_not_abort_sweep(monkeypatch):
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)
     _no_marker(monkeypatch)
     _empty_stale(monkeypatch)
@@ -1010,7 +1018,7 @@ def test_scheduler_signal_failure_does_not_abort_sweep(monkeypatch):
 
 
 def test_scheduler_no_active_service_is_noop(monkeypatch):
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1036,7 +1044,7 @@ def test_scheduler_no_active_service_is_noop(monkeypatch):
 
 
 def test_scheduler_reconciler_dedupes_against_drift_signaled(monkeypatch):
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)  # ds-1 (the only swept source) drifts
     _no_marker(monkeypatch)  # ds-1 has no marker → drift path signals it
 
@@ -1069,7 +1077,7 @@ def test_scheduler_reconciler_dedupes_against_drift_signaled(monkeypatch):
 
 
 def test_scheduler_reconciler_clears_marker_when_unchanged(monkeypatch):
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)  # nothing drifts in the sweep itself
 
     async def _list_stale():
@@ -1105,7 +1113,7 @@ def test_scheduler_drift_skips_already_marked_source(monkeypatch):
     # ds-1 drifts AND already carries a stale marker: the drift path must
     # NOT re-signal it (its invalidation happened at first signal); the
     # reconciler owns it from here and signals it with reason="reconcile".
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _all_drift(monkeypatch)
 
     async def _reason(ws, ds):
@@ -1139,7 +1147,7 @@ def test_scheduler_reconciler_skips_in_cooldown_marked_source(monkeypatch):
     # neither drifts this tick. The reconciler must skip ds-2 (its
     # invalidation already happened; re-signaling would churn every tick)
     # and signal only ds-3.
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)  # drift path unused (nothing drifts)
 
@@ -1253,7 +1261,7 @@ def test_recently_failed_lookup_error_fails_open():
 def test_scheduler_reconciler_backs_off_recently_failed_source(monkeypatch):
     # R2.1: marked source, status "failed", within its cadence window →
     # the reconciler must NOT signal it (marker is kept, not cleared).
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1283,7 +1291,7 @@ def test_scheduler_reconciler_backs_off_recently_failed_source(monkeypatch):
 def test_scheduler_reconciler_retries_failed_source_past_window(monkeypatch):
     # R2.2: marked source, status "failed", but past the cadence window →
     # signaled (retry allowed after the backoff window elapses).
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1313,7 +1321,7 @@ def test_scheduler_reconciler_retries_failed_source_past_window(monkeypatch):
 def test_scheduler_reconciler_ready_source_unaffected_by_failure_backoff(monkeypatch):
     # R2.3: a normal ("ready") stale source signals as before — the
     # failure-backoff check must not even run for a non-failed state.
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1348,7 +1356,7 @@ def test_scheduler_reconciler_skips_in_flight_rebuild(monkeypatch):
     # the cooldown has elapsed: the running job's job.completed clears the
     # marker and writes the fresh fingerprint. Only a marked source with no
     # in-flight rebuild ("ready") is reconciled.
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1428,7 +1436,7 @@ def _future_iso(hours=3):
 def test_scheduler_reconciler_defers_a_paused_marked_source(monkeypatch):
     """THE success criterion: paused + marked survives a tick with no signal,
     no job, and the marker intact."""
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1457,7 +1465,7 @@ def test_scheduler_reconciler_defers_a_paused_marked_source(monkeypatch):
 def test_scheduler_reconciler_defers_a_source_with_automation_off(monkeypatch):
     """``reconcile_enabled = False`` ("Automation off") IS the indefinite
     stop, and had the identical hole."""
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1476,7 +1484,7 @@ def test_scheduler_reconciler_defers_a_source_with_automation_off(monkeypatch):
 
 
 def test_scheduler_reconciler_resumes_once_a_pause_lapses(monkeypatch):
-    monkeypatch.setattr(scheduler_mod, "_DRIFT_AUTO_REBUILD", True)
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
     _no_drift(monkeypatch)
     _no_marker(monkeypatch)
 
@@ -1547,3 +1555,218 @@ def test_signal_with_a_stopped_source_is_held_for_every_automation_origin(monkey
 
         assert resp.held is True and resp.held_kind == "stopped", origin
         assert "trigger" not in order, origin
+
+
+# ── The stale-marker retry loop is bounded by the reconciliation breaker ──
+#
+# A failed (or cancelled) job keeps its marker, so the reconciler re-signals
+# the source once its backoff lapses — before this, every 15 minutes forever.
+# Now each retry that queues a job counts on the sweeper's own
+# ``reconcile_consecutive_actions``; at the cap the source is stamped
+# ``suspended`` ("Needs a person"), the same bell rings once, the marker is
+# kept, and nothing automatic runs until a person resumes it.
+
+
+class _BreakerSchedSession(_SchedSession):
+    """State rows memoised per key across every session a factory creates,
+    so a stamp made on one tick is what the next tick reads; ``commit`` is
+    counted. Other ORMs read as absent (no provider, no fleet row)."""
+
+    def __init__(self, rows, **kw):
+        super().__init__(**kw)
+        self.rows = rows
+        self.commits = 0
+
+    async def get(self, orm, key):
+        if orm.__name__ != "AggregationDataSourceStateORM":
+            return None
+        return self.rows.get(key)
+
+    async def commit(self):
+        self.commits += 1
+
+
+def _breaker_row(ds_id, *, status="failed", count=0, drift_state=None):
+    return types.SimpleNamespace(
+        data_source_id=ds_id, workspace_id="ws-2", last_aggregated_at=None,
+        aggregation_status=status, reconcile_consecutive_actions=count,
+        drift_state=drift_state, paused_until=None, reconcile_enabled=None,
+    )
+
+
+def _breaker_factory(rows):
+    created = []
+
+    def factory():
+        if not created:
+            s = _BreakerSchedSession(rows, exec_results=[
+                _SchedExecResult([]), _SchedExecResult([]),
+            ])
+        else:
+            s = _BreakerSchedSession(rows)
+        created.append(s)
+        return s
+
+    return factory
+
+
+def _breaker_tick(monkeypatch, rows, *, recently_failed=False, responses=None):
+    """One scheduler tick over the marked ``rows``. Returns the recorded
+    signals, the suspension notices and the markers cleared."""
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", True)
+    _no_drift(monkeypatch)
+    _no_marker(monkeypatch)
+
+    async def _list_stale():
+        return [("ws-2", ds) for ds in rows]
+
+    monkeypatch.setattr(graph_cache_mod, "list_stale_sources", _list_stale)
+    cleared = []
+
+    async def _clear(ws, ds):
+        cleared.append(ds)
+
+    monkeypatch.setattr(graph_cache_mod, "clear_source_stale", _clear)
+
+    async def _fake_recently_failed(session, state, interval_secs):
+        return recently_failed
+
+    monkeypatch.setattr(scheduler_mod, "_recently_failed", _fake_recently_failed)
+    notices = []
+
+    async def _notify(session, *, workspace_id, data_source_id, source_name):
+        notices.append((workspace_id, data_source_id, source_name))
+        return 1
+
+    monkeypatch.setattr(
+        "backend.app.db.repositories.notification_repo.notify_reconcile_suspended",
+        _notify,
+    )
+    fake_svc = _FakeSchedSvc(responses=responses)
+    monkeypatch.setattr(svc_mod, "get_active_service", lambda: fake_svc)
+    sched = scheduler_mod.AggregationScheduler(_breaker_factory(rows), _SchedRegistry())
+    _run(sched._tick())
+    return fake_svc, notices, cleared
+
+
+_QUEUED = types.SimpleNamespace(changed=True, job_id="agg_retry")
+
+
+def test_scheduler_reconciler_suspends_after_the_cap_and_keeps_the_marker(monkeypatch):
+    """THE success criterion: three failed automatic retries → no new job,
+    ``suspended`` stamped, one bell, marker intact — and the next tick is
+    just as quiet, with no second bell."""
+    rows = {"ds-2": _breaker_row("ds-2", status="failed", count=3)}
+
+    svc, notices, cleared = _breaker_tick(monkeypatch, rows)
+
+    assert svc.calls == []
+    assert rows["ds-2"].drift_state == "suspended"
+    assert notices == [("ws-2", "ds-2", "ds-2")]
+    assert "ds-2" not in cleared
+
+    svc, notices, cleared = _breaker_tick(monkeypatch, rows)
+    assert svc.calls == [] and notices == [] and "ds-2" not in cleared
+
+
+def test_scheduler_reconciler_counts_a_retry_only_when_a_job_was_queued(monkeypatch):
+    rows = {"ds-2": _breaker_row("ds-2", status="failed", count=1)}
+
+    svc, _n, _c = _breaker_tick(monkeypatch, rows, responses={"ds-2": _QUEUED})
+    assert [c[0] for c in svc.calls] == ["ds-2"]
+    assert rows["ds-2"].reconcile_consecutive_actions == 2
+
+    # A signal that queued nothing (conflict, unchanged, error) is not a retry.
+    svc, _n, _c = _breaker_tick(
+        monkeypatch, rows, responses={"ds-2": types.SimpleNamespace(changed=True)},
+    )
+    assert [c[0] for c in svc.calls] == ["ds-2"]
+    assert rows["ds-2"].reconcile_consecutive_actions == 2
+
+
+def test_scheduler_reconciler_cooldown_resignal_never_counts(monkeypatch):
+    """A marker left by a cooldown deferral is not a retry of a failure."""
+    rows = {"ds-2": _breaker_row("ds-2", status="ready", count=0)}
+    svc, notices, _c = _breaker_tick(monkeypatch, rows, responses={"ds-2": _QUEUED})
+    assert [c[0] for c in svc.calls] == ["ds-2"]
+    assert rows["ds-2"].reconcile_consecutive_actions == 0
+    assert notices == []
+
+
+def test_recently_failed_treats_a_cancelled_job_like_a_failed_one():
+    """A cancel is a person stopping THAT job; the next automatic retry
+    waits one rebuild window, exactly as after a failure — before this, a
+    cancelled job was re-queued on the very next tick."""
+    session = _JobRowSession(("cancelled", _secs_ago(30)))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(status="cancelled"), 900)
+    ) is True
+    session = _JobRowSession(("cancelled", _secs_ago(1000)))
+    assert _run(
+        scheduler_mod._recently_failed(session, _job_state(status="cancelled"), 900)
+    ) is False
+
+
+def test_scheduler_reconciler_bounds_retries_after_a_cancel(monkeypatch):
+    rows = {"ds-2": _breaker_row("ds-2", status="cancelled", count=0)}
+    svc, _n, _c = _breaker_tick(monkeypatch, rows, recently_failed=True)
+    assert svc.calls == []  # backed off like a failure
+
+    svc, _n, _c = _breaker_tick(monkeypatch, rows, responses={"ds-2": _QUEUED})
+    assert [c[0] for c in svc.calls] == ["ds-2"]
+    assert rows["ds-2"].reconcile_consecutive_actions == 1
+
+    rows["ds-2"].reconcile_consecutive_actions = 3
+    svc, notices, _c = _breaker_tick(monkeypatch, rows)
+    assert svc.calls == []
+    assert rows["ds-2"].drift_state == "suspended"
+    assert len(notices) == 1
+
+
+def test_scheduler_reconciler_defers_a_suspended_source_until_a_person_resumes_it(monkeypatch):
+    """Whichever loop suspended it. ``resetBreaker`` (the drawer's "Resume
+    automation") lifts the stamp and the count, and the next tick retries."""
+    rows = {"ds-2": _breaker_row("ds-2", status="failed", count=3, drift_state="suspended")}
+    svc, notices, _c = _breaker_tick(monkeypatch, rows, responses={"ds-2": _QUEUED})
+    assert svc.calls == [] and notices == []
+
+    class _Session:
+        async def get(self, orm, key):
+            return rows[key]
+
+        async def commit(self):
+            pass
+
+    real = AggregationService(dispatcher=None, registry=None, session_factory=None)
+    _run(real.reset_source_breaker("ds-2", _Session()))
+    assert rows["ds-2"].reconcile_consecutive_actions == 0
+    assert rows["ds-2"].drift_state is None
+
+    svc, notices, _c = _breaker_tick(monkeypatch, rows, responses={"ds-2": _QUEUED})
+    assert [c[0] for c in svc.calls] == ["ds-2"]
+    assert rows["ds-2"].reconcile_consecutive_actions == 1
+
+
+# ── ③ Act off reaches the signal gate as a fleet-wide stop ──────────────
+
+
+def test_signal_under_act_off_is_held_fleet_wide(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    state = _state(status="ready", fp="OLD")
+    state.paused_until = None
+    state.reconcile_enabled = None
+    svc, session, order, captured = _build(monkeypatch, state=state, current_fp="NEW")
+
+    resp = _run(svc.signal_source_changed("ds-1", session, reason="drift", origin="reconcile"))
+
+    assert resp.held is True
+    assert resp.held_by == "fleet" and resp.held_kind == "stopped"
+    assert "mark_source_stale" in order and "trigger" not in order
+
+    # A person's request is never held — it runs once, the switch stays off.
+    state = _state(status="ready", fp="OLD")
+    state.paused_until = None
+    state.reconcile_enabled = None
+    svc, session, order, captured = _build(monkeypatch, state=state, current_fp="NEW")
+    resp = _run(svc.signal_source_changed("ds-1", session, reason="drift", origin="api"))
+    assert resp.held is False and "trigger" in order

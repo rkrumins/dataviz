@@ -30,6 +30,8 @@ metadata:
 spec:
   # HA: 2 replicas removes the single-pod SPOF during GKE rebalancing. Safe
   # because every control-plane loop is HA-safe — state-sync (consumer group),
-  # reconciler (Postgres advisory xact lock), scheduler (detect-and-log only,
-  # idempotent), crash-recovery (per-job exec-lock dedup).
+  # reconciler (Postgres advisory xact lock), scheduler (idempotent signals;
+  # no lock, so its retry breaker may count a retry twice — it trips one
+  # retry early, never late), crash-recovery (per-job exec-lock dedup plus
+  # the shared auto-resume cap).
   replicas: 2

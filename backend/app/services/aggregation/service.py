@@ -166,6 +166,15 @@ def resolve_reconcile_enabled(
     return AGGREGATION_RECONCILE_ENABLED
 
 
+def resolve_drift_auto_rebuild(global_value: Optional[bool]) -> bool:
+    """③ Act: persisted global → env default. There is no per-source
+    override. ``False`` is a fleet-wide stop in the hold resolver, so the
+    scheduler's drift gate and every hold read the same answer."""
+    if global_value is not None:
+        return global_value
+    return AGGREGATION_DRIFT_AUTO_REBUILD
+
+
 def hold_for_state(
     state, cadence, *, provider_id: Optional[str] = None, scope_holds=None,
 ) -> Optional[Hold]:
@@ -176,19 +185,21 @@ def hold_for_state(
     ``signal_source_changed`` call it on rows they already loaded, and so it
     does not depend on whichever service object a caller was handed. Most
     restrictive wins across fleet → provider → source
-    (``holds.resolve_hold``); ``reconcile_enabled`` is resolved the same way
-    the sweeper resolves it (per-source override → global → env), so an
-    unset override inherits the fleet's ② Check switch.
+    (``holds.resolve_hold``). The source's own ② Check override and the
+    fleet's ② Check / ③ Act switches are passed separately, so an inherited
+    stop is reported at fleet scope — the control that releases it.
     """
-    reconcile_enabled = resolve_reconcile_enabled(
-        getattr(state, "reconcile_enabled", None),
-        getattr(cadence, "reconcile_enabled", None),
-    )
     return resolve_hold(
         scope_holds=scope_holds,
         provider_id=provider_id,
         source_paused_until=getattr(state, "paused_until", None),
-        source_reconcile_enabled=reconcile_enabled,
+        source_reconcile_enabled=getattr(state, "reconcile_enabled", None),
+        fleet_reconcile_enabled=resolve_reconcile_enabled(
+            None, getattr(cadence, "reconcile_enabled", None),
+        ),
+        drift_auto_rebuild=resolve_drift_auto_rebuild(
+            getattr(cadence, "drift_auto_rebuild", None),
+        ),
     )
 
 
@@ -1306,13 +1317,22 @@ class AggregationService:
         # delivery attempts), never the user. We RESET the automated retry
         # budget so the restarted run gets a fresh set of auto-retries for
         # transient provider blips (e.g. FalkorDB "BusyLoadingError: Redis is
-        # loading the dataset in memory"). The checkpoint (last_cursor) is
+        # loading the dataset in memory") — including the per-job auto-resume
+        # counter the stuck-job reconciler and crash recovery share, which
+        # no longer expires on its own. The checkpoint (last_cursor) is
         # preserved, so it resumes from where it stopped — not from zero.
         job.status = "pending"
         job.retry_count = 0
         job.error_message = None
         job.updated_at = _now()
         await session.commit()
+        try:
+            from .redis_client import get_redis, redispatch_key
+            await get_redis().delete(redispatch_key(job_id))
+        except Exception as exc:
+            logger.warning(
+                "Could not clear the auto-resume counter for %s: %s", job_id, exc,
+            )
 
         await self._dispatcher.dispatch(job.id)
 
@@ -2607,6 +2627,7 @@ class AggregationService:
                 cooldown_interval_secs=cooldown_interval_secs,
                 state_row=state_row,
                 reconcile_enabled_global=cadence.reconcile_enabled,
+                drift_auto_rebuild_global=cadence.drift_auto_rebuild,
                 last_failure_reason=last_failure_reason,
                 last_failure_category=last_failure_category,
                 platform_mastered=ds.id in versioned,
@@ -2745,7 +2766,11 @@ class AggregationService:
         Recovery distinguishes two cases:
         - A *running* job with a checkpoint (last_cursor) was actively making
           progress when the process died.  This is a clean crash recovery —
-          re-dispatch from the checkpoint **without** incrementing retry_count.
+          re-dispatch from the checkpoint **without** incrementing retry_count,
+          but counted against the same per-job auto-resume cap the stuck-job
+          reconciler uses (a process that crash-loops must not re-dispatch
+          the same job on every boot forever), and never for a job whose
+          durable cancel flag is set.
         - A job with no checkpoint (never ran, or stuck in pending) counts as
           a genuine retry and increments retry_count.
         """
@@ -2773,6 +2798,43 @@ class AggregationService:
                 )
 
                 if was_making_progress:
+                    # Bounded, and cancel-aware: the same counter and cap the
+                    # stuck-job reconciler applies, so a crash-looping process
+                    # cannot re-dispatch one job on every boot forever. Redis
+                    # unreachable → fall through to the legacy re-dispatch
+                    # (the dispatcher would fail anyway); never fail startup.
+                    try:
+                        from .redis_client import cancel_flag_key, get_redis
+                        from .reconciler import (
+                            _MAX_AUTO_RESUMES, count_auto_resume,
+                            mark_auto_resume_exhausted,
+                        )
+                        redis = get_redis()
+                        if await redis.get(cancel_flag_key(job.id)):
+                            job.status = "cancelled"
+                            job.error_message = "Cancelled; executor stopped."
+                            job.completed_at = _now()
+                            job.updated_at = _now()
+                            await session.commit()
+                            logger.info(
+                                "Crash recovery: job %s was cancelled — not "
+                                "re-dispatched", job.id,
+                            )
+                            continue
+                        if await count_auto_resume(redis, job.id) > _MAX_AUTO_RESUMES:
+                            mark_auto_resume_exhausted(job, _now())
+                            await session.commit()
+                            logger.warning(
+                                "Crash recovery: job %s exhausted its auto-resume "
+                                "cap — left failed for a hand resume", job.id,
+                            )
+                            continue
+                    except Exception as exc:
+                        logger.warning(
+                            "Crash recovery: auto-resume bookkeeping for %s "
+                            "unavailable (%s) — re-dispatching uncounted",
+                            job.id, exc,
+                        )
                     # Clean crash recovery — resume from checkpoint, no penalty
                     job.status = "pending"
                     job.error_message = None
@@ -3238,6 +3300,7 @@ def _freshness_row_kwargs(
     platform_mastered: bool = False,
     projector_health=None,
     scope_holds=None,
+    drift_auto_rebuild_global: Optional[bool] = None,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -3259,7 +3322,11 @@ def _freshness_row_kwargs(
     hold = resolve_hold(
         scope_holds=scope_holds, provider_id=ds.provider_id,
         source_paused_until=st.get("paused_until"),
-        source_reconcile_enabled=auto_reconcile,
+        source_reconcile_enabled=st.get("reconcile_enabled"),
+        fleet_reconcile_enabled=resolve_reconcile_enabled(
+            None, reconcile_enabled_global,
+        ),
+        drift_auto_rebuild=resolve_drift_auto_rebuild(drift_auto_rebuild_global),
     )
     return dict(
         data_source_id=ds.id,
@@ -3655,6 +3722,7 @@ async def assemble_fleet_freshness(
             ),
             state_row=states.get(ds.id),
             reconcile_enabled_global=cadence.reconcile_enabled,
+            drift_auto_rebuild_global=cadence.drift_auto_rebuild,
             last_failure_reason=(failures.get(ds.id) or {}).get("reason"),
             last_failure_category=(failures.get(ds.id) or {}).get("category"),
             platform_mastered=ds.id in versioned,
@@ -3817,15 +3885,16 @@ async def _assemble_fleet_summary(
         scope_holds = await read_scope_holds(
             session, {row[3] for row in full_rows},
         )
+    fleet_check = resolve_reconcile_enabled(None, cadence.reconcile_enabled)
+    drift_auto = resolve_drift_auto_rebuild(cadence.drift_auto_rebuild)
     held_ids = {
         row[0] for row in full_rows
         if resolve_hold(
             scope_holds=scope_holds, provider_id=row[3],
             source_paused_until=full_states.get(row[0], {}).get("paused_until"),
-            source_reconcile_enabled=resolve_reconcile_enabled(
-                full_states.get(row[0], {}).get("reconcile_enabled"),
-                cadence.reconcile_enabled,
-            ),
+            source_reconcile_enabled=full_states.get(row[0], {}).get("reconcile_enabled"),
+            fleet_reconcile_enabled=fleet_check,
+            drift_auto_rebuild=drift_auto,
         ) is not None
     }
 
@@ -3835,7 +3904,7 @@ async def _assemble_fleet_summary(
     )
     provider_summaries = _summarize_by_provider(
         full_rows, full_signals, full_running, drifting_ids, suspended_ids,
-        stalled_ids, held_ids, scope_holds,
+        stalled_ids, held_ids, scope_holds, drift_auto,
     )
     return summary, provider_summaries
 
@@ -3967,6 +4036,7 @@ def _summarize_by_provider(
     stalled_ids: Optional[set] = None,
     held_ids: Optional[set] = None,
     scope_holds: Optional[dict] = None,
+    drift_auto_rebuild: Optional[bool] = None,
 ) -> list[ProviderFreshnessSummary]:
     """Per-provider breakdown of the SAME rows ``_summarize_freshness``
     reduces, grouped by ``(provider_id, provider_name)`` (row columns 4
@@ -3986,7 +4056,9 @@ def _summarize_by_provider(
         # The provider's OWN hold (or the fleet's, which outranks it) — what
         # the group header renders and what its Pause/Resume control edits.
         # Per-source holds inside the group are in ``held``, not here.
-        group_hold = resolve_scope_hold(scope_holds, provider_id)
+        group_hold = resolve_scope_hold(
+            scope_holds, provider_id, drift_auto_rebuild=drift_auto_rebuild,
+        )
         result.append(ProviderFreshnessSummary(
             provider_id=provider_id,
             provider_name=provider_name,

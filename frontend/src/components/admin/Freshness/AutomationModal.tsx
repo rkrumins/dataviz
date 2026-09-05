@@ -813,6 +813,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                             <SettingRow
                                                 label="Automatically rebuild a source when drift is detected"
                                                 htmlFor="automation-drift-auto"
+                                                hint="Off is a fleet-wide stop: nothing is rebuilt automatically — including retries of rebuilds already requested — until this is back on."
                                             >
                                                 <ToggleSwitch
                                                     id="automation-drift-auto"

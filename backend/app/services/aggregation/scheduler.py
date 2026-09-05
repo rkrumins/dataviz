@@ -5,11 +5,14 @@ Runs periodic fingerprint checks for data sources with configured schedules.
 When drift is detected, it calls AggregationService.signal_source_changed
 (reason="drift") — the change-gated invalidate+rebuild entry point — as a
 backstop for external writers that bypass the app's own write paths, unless
-AGGREGATION_DRIFT_AUTO_REBUILD=false, in which case it only notifies (no
-auto-rebuild; the historic behavior). Regardless of that flag, the same pass
-reconciles sources left marked stale (aggstale:v1) by a rebuild the cooldown
-deferred or a prior attempt that failed, re-signaling each with
-reason="reconcile" (a marker means a rebuild was already requested). This is
+③ Act (the persisted cadence's driftAutoRebuild, env fallback
+AGGREGATION_DRIFT_AUTO_REBUILD) is off. The same pass reconciles sources
+left marked stale (aggstale:v1) by a rebuild the cooldown deferred or a prior
+attempt that failed, re-signaling each with reason="reconcile" (a marker
+means a rebuild was already requested) — held back by every operator hold
+(③ Act off is a fleet-wide stop, see holds.py) and BOUNDED: after a failed
+or cancelled job the retries stop at the reconciliation breaker cap and the
+source is stamped ``suspended`` until a person resumes it. This is
 schedule-tick-driven only, never read-path-driven — read-path auto-heal was
 removed after it caused backfill storms (commit 110cd431).
 
@@ -29,20 +32,17 @@ from sqlalchemy import and_, select
 
 logger = logging.getLogger(__name__)
 
-# Gates both the act-on-drift signal and the stale-marker reconciler
-# (Task 4). ``signal_source_changed`` is the single choke point for the
-# change gate and rebuild cooldown — this flag only controls whether the
-# scheduler CALLS it; off preserves the historic notify-only sweep exactly.
-# The ENV default is canonical in service.py (so ``get_settings`` reports the
-# same fallback the tick resolves against); a persisted global cadence
-# overrides it per tick. Kept as a module-level name here so tests can
-# monkeypatch ``scheduler._DRIFT_AUTO_REBUILD`` and the tick reads it live.
-from .service import AGGREGATION_DRIFT_AUTO_REBUILD as _DRIFT_AUTO_REBUILD
+# A job that ended in one of these leaves its stale marker in place, and the
+# reconciler retries the source — bounded by the reconciliation breaker (see
+# ``_reconcile_stale_markers``). A cancel is a person stopping THAT job, not
+# automation; it is retried like a failure, with the same backoff and cap.
+_RETRY_AFTER = ("failed", "cancelled")
 
 
 async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool:
-    """True when ``state``'s most recent aggregation job is 'failed' and
-    landed within ``interval_secs`` ago (H2 reconciler backoff, spec §9b).
+    """True when ``state``'s most recent aggregation job is 'failed' (or
+    'cancelled') and landed within ``interval_secs`` ago (H2 reconciler
+    backoff, spec §9b).
 
     The state row itself carries no failure timestamp — aggregation_status
     flips to "failed" with no companion write (worker._update_ds_state),
@@ -75,7 +75,7 @@ async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool
             "%s — not backing off", state.data_source_id, exc_info=True,
         )
         return False
-    if row is None or row[0] != "failed" or not row[1]:
+    if row is None or row[0] not in _RETRY_AFTER or not row[1]:
         return False
     try:
         failed_at = datetime.fromisoformat(row[1])
@@ -87,16 +87,46 @@ async def _recently_failed(session: Any, state: Any, interval_secs: int) -> bool
     return elapsed < interval_secs
 
 
+async def _suspend(session: Any, state: Any, ds: str) -> None:
+    """Trip the breaker for a marked source whose automatic retries are used
+    up: stamp the sweeper's own ``suspended`` verdict — so the "Needs a
+    person" chip, the suspended tile and ``resetBreaker`` all apply unchanged
+    — and ring the bell the sweeper rings. The stamp is committed first; the
+    notice is best-effort and never fails the tick."""
+    state.drift_state = "suspended"
+    await session.commit()
+    try:
+        from backend.app.db.models import WorkspaceDataSourceORM
+        from backend.app.db.repositories.notification_repo import (
+            notify_reconcile_suspended,
+        )
+
+        row = await session.get(WorkspaceDataSourceORM, ds)
+        await notify_reconcile_suspended(
+            session,
+            workspace_id=state.workspace_id,
+            data_source_id=ds,
+            source_name=getattr(row, "label", None) or ds,
+        )
+        await session.commit()
+    except Exception as exc:
+        logger.warning(
+            "stale-marker reconcile: suspension notice for %s failed (%s) — "
+            "the suspended state itself is committed", ds, exc,
+        )
+
+
 class AggregationScheduler:
     """Runs periodic change detection checks for data sources with configured schedules.
 
     Drift detection auto-queues a change-gated rebuild via
     ``AggregationService.signal_source_changed`` (reason="drift") unless
-    ``AGGREGATION_DRIFT_AUTO_REBUILD=false``, in which case checks stay
-    non-blocking and notify-only (the historic behavior). Independently of
-    that flag, the marker reconciler re-signals (reason="reconcile") sources
-    left marked stale by a deferred or failed rebuild — a marker means a
-    rebuild was already explicitly requested, so it is always retried.
+    ③ Act (``driftAutoRebuild``) is off, in which case checks stay
+    non-blocking and notify-only. The marker reconciler re-signals
+    (reason="reconcile") sources left marked stale by a deferred or failed
+    rebuild — a marker means a rebuild was already requested — but it
+    honours every operator hold (③ Act off is a fleet-wide stop) and stops
+    retrying after the breaker cap, stamping the source ``suspended``.
     Repeat-fire is bounded: a source's status flips out of 'ready' while a job runs
     (the sweep skips it), the fingerprint-embedded idempotency key
     collapses repeat triggers, and an active-job conflict is a no-op.
@@ -136,13 +166,15 @@ class AggregationScheduler:
         2. Compare against stored fingerprint
         3. If changed: log drift detection, collect the ds_id
         4. After the sweep: signal_source_changed(reason="drift") for each
-           collected id (gated by AGGREGATION_DRIFT_AUTO_REBUILD), then
-           reconcile any aggstale:v1-marked sources (reason="reconcile")
-           regardless of that flag (_reconcile_stale_markers)
+           collected id (gated by ③ Act), then reconcile any
+           aggstale:v1-marked sources (reason="reconcile"), subject to the
+           holds and the breaker (_reconcile_stale_markers)
         """
         from .models import AggregationDataSourceStateORM, AggregationJobORM
         from .fingerprint import compute_graph_fingerprint, fingerprints_match
-        from .service import get_active_service, read_global_cadence
+        from .service import (
+            get_active_service, read_global_cadence, resolve_drift_auto_rebuild,
+        )
         from backend.app.services.graph_cache import get_source_stale_reason
 
         async with self._session_factory() as session:
@@ -151,11 +183,9 @@ class AggregationScheduler:
             # drift-auto flag and every cooldown pre-check below resolve
             # through it — persisted value when set, env default otherwise.
             cadence = await read_global_cadence(session)
-            drift_auto = (
-                cadence.drift_auto_rebuild
-                if cadence.drift_auto_rebuild is not None
-                else _DRIFT_AUTO_REBUILD
-            )
+            # The same resolver the hold consults, so the drift gate here
+            # and the fleet-wide stop the holds report can never disagree.
+            drift_auto = resolve_drift_auto_rebuild(cadence.drift_auto_rebuild)
             # Find data sources with schedules configured AND status = 'ready'
             # Uses aggregation-owned state table (no public schema dependency)
             result = await session.execute(
@@ -222,14 +252,12 @@ class AggregationScheduler:
                         state.data_source_id, e,
                     )
 
-            # R1 — act on drift-detected changes, GATED by
-            # AGGREGATION_DRIFT_AUTO_REBUILD (off keeps the historic
-            # notify-only sweep). R1b — reconcile marked-stale sources runs
-            # UNCONDITIONALLY (see _reconcile_stale_markers): a marker exists
-            # only because an explicit signal already requested a rebuild that
-            # a cooldown deferred or a prior attempt failed, so completing it
-            # must not hinge on the drift-auto flag (which governs drift-
-            # detected changes, not already-requested rebuilds). The signal
+            # R1 — act on drift-detected changes, GATED by ③ Act (off keeps
+            # the historic notify-only sweep). R1b — the marked-stale
+            # reconciler runs every tick and decides per source (see
+            # _reconcile_stale_markers): it honours every operator hold —
+            # ③ Act off is a fleet-wide stop the resolver reports — and the
+            # breaker, and keeps the marker whenever it defers. The signal
             # itself re-runs the change gate + rebuild cooldown, so nothing
             # here duplicates that timing logic.
             svc = get_active_service()
@@ -297,27 +325,37 @@ class AggregationScheduler:
         self, svc: Any, cadence: Any, drifted_ids: list[str],
     ) -> None:
         """Re-signal sources left marked stale (``aggstale:v1``) by a rebuild a
-        cooldown deferred or a prior attempt failed.
+        cooldown deferred or a prior attempt failed or was cancelled.
 
-        Runs every tick REGARDLESS of ``AGGREGATION_DRIFT_AUTO_REBUILD`` — a
-        marker exists only because an explicit signal (script / connector /
-        operator refresh) already requested a rebuild, so completing it must
-        not depend on the drift-auto flag (which governs drift-DETECTED
-        changes, not already-requested rebuilds). ``signal_source_changed``
+        Runs every tick and decides per source. It defers — keeping the
+        marker, so the source still surfaces as out of date and is retried
+        later — when the rebuild is in flight or in cooldown, when the last
+        attempt failed or was cancelled within the cadence window, when an
+        operator hold is in force (③ Act off is a fleet-wide stop, reported
+        by the same resolver every other gate uses), and once the source is
+        ``suspended``. Retries are BOUNDED: each re-signal after a failed or
+        cancelled job counts against the reconciliation breaker
+        (``reconcile_consecutive_actions``, shared with the sweeper); at the
+        cap the source is stamped ``suspended`` and the sweeper's own notice
+        fires, and nothing automatic runs until a person resumes it
+        (``resetBreaker``) or rebuilds by hand. ``signal_source_changed``
         re-runs the change gate + rebuild cooldown, so nothing here duplicates
-        that timing logic. Bounded per tick; dedupes against this tick's drift
-        signals; skips sources whose rebuild is in flight, in cooldown, or
-        failed within the cadence window (the marker is kept in each case so
-        the source still surfaces as needs-attention and is retried later).
+        that timing logic. Bounded per tick; dedupes against this tick's
+        drift signals.
         """
         from .models import AggregationDataSourceStateORM
-        from .service import hold_for_source_row, resolve_rebuild_interval
+        from .service import (
+            hold_for_source_row,
+            reconcile_policy_from_cadence,
+            resolve_rebuild_interval,
+        )
         from backend.app.services.graph_cache import (
             clear_source_stale,
             list_stale_sources,
         )
 
         _MAX_STALE_RECONCILE_PER_TICK = 50
+        breaker_cap = reconcile_policy_from_cadence(cadence).breaker_cap
         stale_pairs = await list_stale_sources()
         to_reconcile = [
             (ws, ds) for ws, ds in stale_pairs if ds not in drifted_ids
@@ -351,11 +389,36 @@ class AggregationScheduler:
                             "— deferring", ds,
                         )
                         continue
+                    # A retry: the last job for this source failed or was
+                    # cancelled and the marker is still set. Bounded by the
+                    # reconciliation breaker — at the cap the source is
+                    # stamped ``suspended`` (once) and waits for a person.
+                    retrying = (
+                        state is not None
+                        and state.aggregation_status in _RETRY_AFTER
+                    )
+                    if (
+                        retrying
+                        and (getattr(state, "reconcile_consecutive_actions", 0) or 0)
+                        >= breaker_cap
+                        and getattr(state, "drift_state", None) != "suspended"
+                    ):
+                        logger.warning(
+                            "stale-marker reconcile: %s failed %d automatic "
+                            "retries — suspending until a person resumes it",
+                            ds, breaker_cap,
+                        )
+                        await _suspend(s2, state, ds)
                     if (
                         state is not None
-                        and state.aggregation_status == "failed"
-                        and await _recently_failed(s2, state, interval_secs)
+                        and getattr(state, "drift_state", None) == "suspended"
                     ):
+                        logger.debug(
+                            "stale-marker reconcile: %s suspended (needs a "
+                            "person) — deferring", ds,
+                        )
+                        continue
+                    if retrying and await _recently_failed(s2, state, interval_secs):
                         logger.debug(
                             "stale-marker reconcile: %s failed recently "
                             "(< %ds cadence) — backing off", ds, interval_secs,
@@ -387,6 +450,18 @@ class AggregationScheduler:
                     resp = await svc.signal_source_changed(
                         ds, s2, reason="reconcile", origin="reconcile",
                     )
+                    if retrying and getattr(resp, "job_id", None) is not None:
+                        # Count the retry the way the sweeper counts an
+                        # action: only once a job was actually queued. The
+                        # row is re-read because trigger() rolled this
+                        # session back and committed, which expired the
+                        # instance loaded above.
+                        state = await s2.get(AggregationDataSourceStateORM, ds)
+                        if state is not None:
+                            state.reconcile_consecutive_actions = (
+                                (state.reconcile_consecutive_actions or 0) + 1
+                            )
+                            await s2.commit()
                 if not resp.changed:
                     # No real change (marker left by a prior deferral that later
                     # reverted, or that never should have fired) — clear it so

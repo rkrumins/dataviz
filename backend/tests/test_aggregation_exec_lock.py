@@ -18,6 +18,7 @@ class FakeRedis:
     def __init__(self):
         self.store: dict = {}
         self.xadds: list = []
+        self.expires: list = []
 
     async def set(self, key, value, nx=False, px=None, ex=None):
         if nx and key in self.store:
@@ -37,7 +38,11 @@ class FakeRedis:
         return v
 
     async def expire(self, key, ttl):
+        self.expires.append((key, ttl))
         return True
+
+    async def delete(self, key):
+        return 1 if self.store.pop(key, None) is not None else 0
 
     async def xack(self, *a):
         return 1
@@ -170,6 +175,9 @@ class _ReconRes:
     def all(self):
         return self._items
 
+    def __iter__(self):
+        return iter(self._items)
+
 
 class _ReconSession:
     def __init__(self, jobs):
@@ -236,3 +244,140 @@ async def test_reconciler_marks_cancelled_when_flagged():
     assert n == 1
     assert job.status == "cancelled"
     assert redis.xadds == []
+
+
+# ── the auto-resume cap is real: the counter does not slide ─────────
+
+
+@pytest.mark.asyncio
+async def test_reconciler_counter_ttl_is_set_once():
+    """The old counter refreshed its TTL on every increment, so a job that
+    ran longer than the window between two executor deaths was resumed
+    forever. The TTL is now set on creation only."""
+    redis = FakeRedis()
+    job = _job()
+    await recon_mod._reconcile_once(_recon_factory([job]), redis)
+    await recon_mod._reconcile_once(_recon_factory([job]), redis)
+    assert redis.store["agg:redispatch:J"] == 2
+    assert redis.expires == [("agg:redispatch:J", recon_mod._REDISPATCH_TTL_SECS)]
+    assert len(redis.xadds) == 2
+
+
+@pytest.mark.asyncio
+async def test_reconciler_sixth_resume_fails_the_job_with_a_way_back():
+    redis = FakeRedis()
+    redis.store["agg:redispatch:J"] = 5  # the default cap, already spent
+    job = _job()
+    n = await recon_mod._reconcile_once(_recon_factory([job]), redis)
+    assert n == 1
+    assert job.status == "failed"
+    assert "resume from cursor=2:10 is still possible" in job.error_message
+    assert redis.xadds == []
+
+
+# ── crash recovery shares the counter, honours the cancel flag ──────
+
+
+class _Dispatcher:
+    def __init__(self):
+        self.dispatched: list = []
+
+    async def dispatch(self, job_id):
+        self.dispatched.append(job_id)
+
+
+def _service(jobs, dispatcher):
+    from backend.app.services.aggregation.service import AggregationService
+    return AggregationService(
+        dispatcher=dispatcher, registry=None, session_factory=_recon_factory(jobs),
+    )
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_counts_against_the_shared_cap(monkeypatch):
+    redis = FakeRedis()
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: redis,
+    )
+    d = _Dispatcher()
+    job = _job()  # running, checkpointed
+    n = await _service([job], d).recover_interrupted_jobs()
+    assert n == 1 and d.dispatched == ["J"] and job.status == "pending"
+    assert redis.store["agg:redispatch:J"] == 1
+    assert redis.expires == [("agg:redispatch:J", recon_mod._REDISPATCH_TTL_SECS)]
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_stops_at_the_cap(monkeypatch):
+    """A control plane that crash-loops must not re-dispatch the same job on
+    every boot forever — the checkpointed branch had no cap at all."""
+    redis = FakeRedis()
+    redis.store["agg:redispatch:J"] = 5
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: redis,
+    )
+    d = _Dispatcher()
+    job = _job()
+    await _service([job], d).recover_interrupted_jobs()
+    assert d.dispatched == []
+    assert job.status == "failed"
+    assert "resume from cursor=2:10 is still possible" in job.error_message
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_never_resumes_a_cancelled_job(monkeypatch):
+    redis = FakeRedis()
+    redis.store[cancel_flag_key("J")] = "1"
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: redis,
+    )
+    d = _Dispatcher()
+    job = _job()
+    await _service([job], d).recover_interrupted_jobs()
+    assert d.dispatched == []
+    assert job.status == "cancelled"
+    assert "agg:redispatch:J" not in redis.store
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_falls_open_when_redis_is_down(monkeypatch):
+    def _boom():
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", _boom,
+    )
+    d = _Dispatcher()
+    job = _job()
+    await _service([job], d).recover_interrupted_jobs()
+    assert d.dispatched == ["J"] and job.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_manual_resume_clears_the_auto_resume_counter(monkeypatch):
+    """The counter no longer expires on its own, so a hand Resume — which
+    promises a fresh automated budget — must clear it, or the resumed job
+    would fail at its first executor death."""
+    redis = FakeRedis()
+    redis.store["agg:redispatch:J"] = 5
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: redis,
+    )
+    d = _Dispatcher()
+    job = _job(status="failed")
+    # The resume response serialises the row; give it what a real row has.
+    job.trigger_source, job.created_at = "manual", "2026-09-05T00:00:00+00:00"
+    job.progress = job.total_edges = job.processed_edges = job.created_edges = 0
+    job.batch_size = 1000
+
+    class _Session:
+        async def get(self, orm, key):
+            return job if key == "J" else None
+
+        async def commit(self):
+            pass
+
+    svc = _service([job], d)
+    await svc.resume("ds", "J", _Session())
+    assert job.status == "pending" and d.dispatched == ["J"]
+    assert "agg:redispatch:J" not in redis.store

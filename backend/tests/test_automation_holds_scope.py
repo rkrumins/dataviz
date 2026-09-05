@@ -449,6 +449,40 @@ def test_provider_summary_reports_the_fleet_hold_on_every_provider():
     assert {p.held_kind for p in out} == {"stopped"}
 
 
+def test_row_kwargs_report_the_fleet_switches_at_fleet_scope():
+    """An inherited ② Check off and ③ Act off are fleet-wide stops, and the
+    row says so — a source's own False stays a source stop, and an explicit
+    per-source True escapes the inherited one."""
+    ds = types.SimpleNamespace(
+        id="ds-a", workspace_id="ws", provider_id="p1", label="A",
+        aggregation_status="ready", last_aggregated_at=None, graph_fingerprint=None,
+    )
+
+    def kw(state_row, **extra):
+        return svc_mod._freshness_row_kwargs(
+            ds, provider_name="Alpha", signals=(None, None, None),
+            running_job_id=None, last_event=None, state_row=state_row,
+            scope_holds={}, **extra,
+        )
+
+    k = kw({"reconcile_enabled": None}, reconcile_enabled_global=False)
+    assert (k["held_by"], k["held_kind"]) == ("fleet", "stopped")
+    k = kw({"reconcile_enabled": False}, reconcile_enabled_global=False)
+    assert (k["held_by"], k["held_kind"]) == ("source", "stopped")
+    k = kw({"reconcile_enabled": True}, reconcile_enabled_global=False)
+    assert k["held_by"] is None and k["auto_reconcile"] is True
+    k = kw({"reconcile_enabled": None}, drift_auto_rebuild_global=False)
+    assert (k["held_by"], k["held_kind"]) == ("fleet", "stopped")
+
+
+def test_provider_summary_reports_act_off_on_every_provider():
+    out = _summarize_by_provider(
+        _full_rows(), signals={}, running={}, scope_holds={}, drift_auto_rebuild=False,
+    )
+    assert {p.held_by for p in out} == {"fleet"}
+    assert {p.held_kind for p in out} == {"stopped"}
+
+
 def test_row_kwargs_report_the_resolved_hold_and_its_widest_scope():
     ds = types.SimpleNamespace(
         id="ds-a", workspace_id="ws", provider_id="p1", label="A",
@@ -498,6 +532,7 @@ def test_the_sweeper_and_the_scheduler_read_the_wider_scopes():
 
     sweeper_src = inspect.getsource(reconcile_sweeper.ReconciliationSweeper)
     assert "read_scope_holds(" in sweeper_src
-    assert "resolve_scope_hold(scope_holds" in sweeper_src
+    assert "resolve_scope_hold(" in sweeper_src
+    assert "drift_auto_rebuild=drift_auto_rebuild" in sweeper_src
     sched_src = inspect.getsource(scheduler.AggregationScheduler._reconcile_stale_markers)
     assert "hold_for_source_row(" in sched_src

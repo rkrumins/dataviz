@@ -24,10 +24,12 @@ from backend.app.services.aggregation.holds import (
     HeldError,
     Hold,
     resolve_hold,
+    resolve_scope_hold,
     skip_for,
 )
 from backend.app.services.aggregation.models import API_TRIGGER_SOURCES
 from backend.app.services.aggregation.schemas import AggregationTriggerRequest
+from backend.app.services.aggregation import service as svc_mod
 from backend.app.services.aggregation.service import (
     AggregationService,
     hold_for_state,
@@ -127,6 +129,49 @@ def test_hold_for_state_resolves_reconcile_enabled_the_way_the_sweeper_does():
     # pre-existing resolver contract, unchanged.
     on = types.SimpleNamespace(paused_until=None, reconcile_enabled=True)
     assert hold_for_state(on, types.SimpleNamespace(reconcile_enabled=False)) is None
+    # An INHERITED ② Check off is reported at fleet scope — the control that
+    # releases it — while a source's own False stays a source stop.
+    assert hold_for_state(st, types.SimpleNamespace(reconcile_enabled=False)).scope == "fleet"
+    assert hold_for_state(None, types.SimpleNamespace(reconcile_enabled=False)).scope == "fleet"
+    off = types.SimpleNamespace(paused_until=None, reconcile_enabled=False)
+    assert hold_for_state(off, types.SimpleNamespace(reconcile_enabled=True)).scope == "source"
+
+
+def test_act_off_is_a_fleet_stop_wherever_the_resolver_is_asked():
+    """③ Act ("Automatically rebuild a source when drift is detected") off
+    used to gate one loop of three. It is now a fleet-wide stop reported by
+    the one resolver, so every gate that consults a hold honours it."""
+    stop = Hold(scope="fleet", kind="stopped")
+    assert resolve_scope_hold({}, "p1", drift_auto_rebuild=False) == stop
+    assert resolve_scope_hold(None, None, drift_auto_rebuild=False) == stop
+    assert resolve_scope_hold({}, "p1", drift_auto_rebuild=True) is None
+    assert resolve_scope_hold({}, "p1") is None
+    # It outranks a provider pause row — the widest hold is what is reported.
+    rows = {("provider", "p1"): _row(paused_until=_iso(2))}
+    assert resolve_scope_hold(rows, "p1", drift_auto_rebuild=False) == stop
+    assert resolve_scope_hold(rows, "p1", drift_auto_rebuild=True).scope == "provider"
+    assert resolve_hold(scope_holds={}, provider_id="p1", drift_auto_rebuild=False) == stop
+
+
+def test_check_off_reports_the_scope_it_came_from():
+    fleet_off = dict(scope_holds={}, provider_id=None, fleet_reconcile_enabled=False)
+    assert resolve_hold(**fleet_off, source_reconcile_enabled=None) == Hold("fleet", "stopped")
+    assert resolve_hold(**fleet_off, source_reconcile_enabled=True) is None
+    assert resolve_hold(
+        scope_holds={}, provider_id=None,
+        source_reconcile_enabled=False, fleet_reconcile_enabled=True,
+    ) == Hold("source", "stopped")
+
+
+def test_hold_for_state_reads_act_from_the_cadence_then_the_env(monkeypatch):
+    st = types.SimpleNamespace(paused_until=None, reconcile_enabled=None)
+    assert hold_for_state(st, types.SimpleNamespace(drift_auto_rebuild=False)) == Hold("fleet", "stopped")
+    assert hold_for_state(st, types.SimpleNamespace(drift_auto_rebuild=True)) is None
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    assert hold_for_state(st, types.SimpleNamespace(drift_auto_rebuild=None)) == Hold("fleet", "stopped")
+    assert hold_for_state(None, types.SimpleNamespace()) == Hold("fleet", "stopped")
+    # The persisted cadence wins over the env fallback in both directions.
+    assert hold_for_state(st, types.SimpleNamespace(drift_auto_rebuild=True)) is None
 
 
 def test_the_discriminators_are_origin_and_trigger_source_and_api_is_in_neither():
@@ -209,6 +254,23 @@ def test_trigger_lets_a_person_and_the_lifecycle_paths_past_a_hold(source):
         _run(svc.trigger(
             "ds-1", AggregationTriggerRequest(), source,
             _HoldSession(reconcile_enabled=False),
+        ))
+
+
+def test_trigger_refuses_reconcile_when_act_is_off(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    svc = _make_service()
+    with pytest.raises(HeldError) as exc:
+        _run(svc.trigger(
+            "ds-1", AggregationTriggerRequest(), "reconcile",
+            _HoldSession(reconcile_enabled=None),
+        ))
+    assert exc.value.hold == Hold(scope="fleet", kind="stopped")
+    # A person still gets past the gate.
+    with pytest.raises(AssertionError, match=_PAST_THE_GATE):
+        _run(svc.trigger(
+            "ds-1", AggregationTriggerRequest(), "manual",
+            _HoldSession(reconcile_enabled=None),
         ))
 
 

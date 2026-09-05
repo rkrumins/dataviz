@@ -1976,3 +1976,45 @@ async def test_a_hold_on_another_provider_does_not_touch_this_source(
 
     assert "provider_held" not in result.by_skip
     assert len(svc.signals) == 1, "an unheld source is still dispatched"
+
+
+# ── ③ Act off is a fleet-wide stop for the sweep too ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_act_off_holds_the_sweep_fleet_wide(session_factory, monkeypatch):
+    """"Automatically rebuild a source when drift is detected" off used to
+    leave this loop — the main automatic rebuild engine — running. Now every
+    finding is still recorded, nothing is acted on, and the tally names the
+    fleet-wide stop."""
+    from backend.app.services.aggregation import service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.last_finding_reason == "overlay_missing"
+
+
+@pytest.mark.asyncio
+async def test_act_off_holds_first_builds_too(session_factory, monkeypatch):
+    from backend.app.services.aggregation import service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert svc.triggers == [] and svc.signals == []

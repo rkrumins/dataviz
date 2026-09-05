@@ -357,7 +357,7 @@ export function RegistryJobHistory() {
     }, [notify, fetchJobs])
 
     const handleCancel = useCallback((job: AggregationJobResponse) =>
-        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled', 'Could not cancel that job.'),
+        withAction(job.id, () => aggregationService.cancelJob(job.dataSourceId, job.id), 'Job cancelled. If automation requested this rebuild it may retry a few more times, then it waits for a person.', 'Could not cancel that job.'),
         [withAction],
     )
 

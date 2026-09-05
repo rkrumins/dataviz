@@ -342,6 +342,7 @@ class ReconciliationSweeper:
         from .service import (
             read_global_cadence,
             reconcile_policy_from_cadence,
+            resolve_drift_auto_rebuild,
             resolve_rebuild_interval,
             resolve_reconcile_enabled,
             resolve_reconcile_interval,
@@ -398,6 +399,11 @@ class ReconciliationSweeper:
 
             cadence = await read_global_cadence(session)
             policy = reconcile_policy_from_cadence(cadence)
+            # ③ Act off is a fleet-wide stop: every finding is still recorded,
+            # nothing is acted on (tallied ``fleet_held``, like the fleet row).
+            drift_auto = resolve_drift_auto_rebuild(
+                getattr(cadence, "drift_auto_rebuild", None),
+            )
             global_enabled = getattr(cadence, "reconcile_enabled", None)
             global_interval = getattr(
                 cadence, "reconcile_check_interval_secs", None,
@@ -466,6 +472,7 @@ class ReconciliationSweeper:
                         cadence.rebuild_min_interval_secs,
                     ),
                     scope_holds=scope_holds,
+                    drift_auto_rebuild=drift_auto,
                 )
                 # Per-source due-ness: the SQL cutoff is permissive because it
                 # cannot know each source's override, so the exact check is
@@ -1104,7 +1111,7 @@ class ReconciliationSweeper:
 
     def _observe(
         self, state, ctx, policy, *, reconcile_enabled, rebuild_interval,
-        scope_holds=None,
+        scope_holds=None, drift_auto_rebuild=None,
     ) -> Observation:
         c = ctx.get(state.data_source_id, {})
         stats_updated = c.get("stats_updated")
@@ -1170,7 +1177,10 @@ class ReconciliationSweeper:
             overlay_observable=c.get("overlay_observable", True),
             live_observed=bool(c.get("live_observed")),
             reconcile_enabled=reconcile_enabled,
-            scope_hold=resolve_scope_hold(scope_holds, c.get("provider_id")),
+            scope_hold=resolve_scope_hold(
+                scope_holds, c.get("provider_id"),
+                drift_auto_rebuild=drift_auto_rebuild,
+            ),
         )
 
     @staticmethod
