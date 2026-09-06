@@ -950,6 +950,7 @@ async def get_identities_by_ids(
             UserORM.email,
             UserORM.status,
             UserORM.deleted_at,
+            UserORM.avatar_id,
         ).where(UserORM.id.in_(ids))
     )).all()
     return {
@@ -962,6 +963,9 @@ async def get_identities_by_ids(
             "email": r[4],
             "status": r[5],
             "deleted": r[6] is not None,
+            # The picked illustration, for surfaces that draw an avatar.
+            # Additive: callers that only name people ignore it.
+            "avatar_id": r[7],
         }
         for r in rows
     }

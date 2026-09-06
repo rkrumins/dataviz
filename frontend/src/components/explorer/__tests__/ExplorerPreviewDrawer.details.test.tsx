@@ -70,6 +70,17 @@ describe('the preview panel’s Details block', () => {
         expect(screen.getByText('admin@nexuslineage.local')).toBeInTheDocument()
     })
 
+    it('shows the creator as a PERSON, not a generic glyph', async () => {
+        // This row printed the name under lucide's stock `User` icon, while
+        // the list row, the card footer and the creator filter beside it all
+        // drew the actual person. The fixture carries no user id, so the
+        // avatar falls back to initials — which is still a face, and still
+        // the thing that must not silently become plain text again.
+        renderDrawer()
+        await screen.findByText('System Admin')
+        expect(screen.getAllByText('SA').length).toBeGreaterThan(0)
+    })
+
     it('folds the timestamps away behind one disclosure', async () => {
         renderDrawer()
         await screen.findByText('System Admin')

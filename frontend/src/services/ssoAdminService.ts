@@ -739,6 +739,25 @@ export const ssoAdminService = {
         )
     },
 
+    /** Replace one live rule in place. The whole rule is sent — a rule
+     *  is one sentence — and the server validates it exactly as on
+     *  create. Grants under the old target adjust at each person's next
+     *  session refresh (or at once, when the edit orphaned the target). */
+    updateGroupMapping(id: string, body: {
+        providerId?: string | null
+        idpGroup: string
+        targetType: 'role_binding' | 'group_membership'
+        roleName?: string | null
+        scopeType?: 'global' | 'workspace' | null
+        scopeId?: string | null
+        targetGroupId?: string | null
+    }): Promise<IdpGroupMapping> {
+        return request<IdpGroupMapping>(
+            `${ADMIN}/idp-group-mappings/${encodeURIComponent(id)}`,
+            { method: 'PUT', body: JSON.stringify(body) },
+        )
+    },
+
     deleteMapping(id: string): Promise<void> {
         return request<void>(
             `${ADMIN}/idp-group-mappings/${encodeURIComponent(id)}`,

@@ -17,9 +17,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { IdpProvider } from '@/services/ssoAdminService'
 
 const { createRoleBindingMapping, createGroupMembershipMapping,
-        listRoles, listWorkspaces, listGroups } = vi.hoisted(() => ({
+        updateGroupMapping, listRoles, listWorkspaces, listGroups,
+} = vi.hoisted(() => ({
     createRoleBindingMapping: vi.fn(),
     createGroupMembershipMapping: vi.fn(),
+    updateGroupMapping: vi.fn(),
     listRoles: vi.fn(),
     listWorkspaces: vi.fn(),
     listGroups: vi.fn(),
@@ -31,7 +33,8 @@ vi.mock('@/services/ssoAdminService', async () => {
     return {
         ...a,
         ssoAdminService: {
-            ...a.ssoAdminService, createRoleBindingMapping, createGroupMembershipMapping,
+            ...a.ssoAdminService, createRoleBindingMapping,
+            createGroupMembershipMapping, updateGroupMapping,
         },
     }
 })
@@ -387,5 +390,101 @@ describe('the privileged-role floor', () => {
             expect(within(screen.getByLabelText('Role'))
                 .queryByText(/super.admin/i)).toBeNull()
         })
+    })
+})
+
+describe('editing a live rule', () => {
+    const RULE = {
+        id: 'map_1', providerId: 'idp_1', idpGroup: 'group1',
+        targetType: 'group_membership', roleName: null, scopeType: null,
+        scopeId: null, targetGroupId: 'grp_1',
+    } as import('@/services/ssoAdminService').IdpGroupMapping
+
+    function renderEditor() {
+        const onCreated = vi.fn()
+        const onCancel = vi.fn()
+        render(<>
+            <MappingComposer
+                providers={PROVIDERS}
+                onCreated={onCreated}
+                editing={RULE}
+                onCancel={onCancel}
+            />
+            <NotificationStack />
+        </>)
+        return { onCreated, onCancel }
+    }
+
+    it('opens pre-filled, previews the current rule, and has nothing to save', async () => {
+        renderEditor()
+        await waitFor(() => expect(listGroups).toHaveBeenCalled())
+
+        expect(screen.getByLabelText('IdP group name')).toHaveValue('group1')
+        // The preview works from the first paint: the stored rule renders
+        // through the same component the saved card uses.
+        expect(screen.getByText('Will be saved as')).toBeInTheDocument()
+        expect(screen.getByText('Unchanged')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /save changes/i }))
+            .toBeDisabled()
+        expect(screen.queryByText('Was:')).toBeNull()
+    })
+
+    it('a changed slot updates the preview, shows the was-line, and saves the whole rule', async () => {
+        updateGroupMapping.mockResolvedValue({})
+        const user = userEvent.setup()
+        const { onCreated, onCancel } = renderEditor()
+        await waitFor(() => expect(listGroups).toHaveBeenCalled())
+
+        const input = screen.getByLabelText('IdP group name')
+        await user.clear(input)
+        await user.type(input, 'group2')
+
+        expect(screen.getByText('Was:')).toBeInTheDocument()
+        expect(screen.getByText('Ready')).toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: /save changes/i }))
+
+        await waitFor(() => expect(updateGroupMapping).toHaveBeenCalledWith(
+            'map_1',
+            {
+                providerId: 'idp_1', idpGroup: 'group2',
+                targetType: 'group_membership', roleName: null,
+                scopeType: null, scopeId: null, targetGroupId: 'grp_1',
+            },
+        ))
+        expect(onCreated).toHaveBeenCalled()
+        expect(onCancel).toHaveBeenCalled()
+        expect(raised()[0].type).toBe('success')
+        expect(raised()[0].message).toMatch(/rule updated/i)
+    })
+
+    it('escape closes the editor without saving', async () => {
+        const user = userEvent.setup()
+        const { onCancel } = renderEditor()
+        await waitFor(() => expect(listGroups).toHaveBeenCalled())
+
+        await user.type(screen.getByLabelText('IdP group name'), '{Escape}')
+        expect(onCancel).toHaveBeenCalled()
+        expect(updateGroupMapping).not.toHaveBeenCalled()
+    })
+
+    it('can retarget across target types, scope implied as on create', async () => {
+        updateGroupMapping.mockResolvedValue({})
+        const user = userEvent.setup()
+        renderEditor()
+        await waitFor(() => expect(listRoles).toHaveBeenCalled())
+
+        await user.selectOptions(
+            screen.getByLabelText('What they get'), 'role_binding',
+        )
+        await user.selectOptions(screen.getByLabelText('Role'), 'org_member')
+        await user.click(screen.getByRole('button', { name: /save changes/i }))
+
+        await waitFor(() => expect(updateGroupMapping).toHaveBeenCalledWith(
+            'map_1',
+            expect.objectContaining({
+                targetType: 'role_binding', roleName: 'org_member',
+                scopeType: 'global', scopeId: null, targetGroupId: null,
+            }),
+        ))
     })
 })

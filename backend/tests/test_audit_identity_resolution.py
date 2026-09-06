@@ -315,3 +315,214 @@ async def test_an_id_that_names_nobody_still_filters_to_nothing(
     resp = await test_client.get(
         "/api/v1/admin/audit?category=all&targetUserId=nobody-by-that-name")
     assert resp.json()["events"] == []
+
+
+# ── Everything else gets named too ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_groups_providers_and_targets_are_named_in_summaries(
+    test_client: AsyncClient, db_session,
+):
+    """``rbac.group`` / ``sso_mapping`` events used to print ``grp_`` /
+    ``idp_`` ids in their one-line summaries. The reference pass swaps
+    every known id for the thing's name — in the summary, and in
+    ``resolvedNames`` for the payload drawer — while the raw payload
+    keeps the ids, because the ids are the record."""
+    from backend.app.db.repositories import group_repo, idp_provider_repo
+
+    group = await group_repo.create_group(
+        db_session, name="Use Case A", description="",
+    )
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="corp-ad", display_name="Corp AD",
+        kind="oidc", settings={},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.group.member_added",
+        payload={"actor_id": "usr_x", "user_id": "usr_y",
+                 "group_id": group.id},
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.sso_mapping.updated",
+        payload={
+            "mapping_id": "map_1", "actor_id": "usr_x",
+            "before": {
+                "idp_group": "group1", "target_type": "group_membership",
+                "target_group_id": group.id, "provider_id": provider.id,
+            },
+            "after": {
+                "idp_group": "group1", "target_type": "role_binding",
+                "role_name": "org_admin", "scope_type": "global",
+                "scope_id": None, "provider_id": provider.id,
+            },
+        },
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    assert resp.status_code == 200, resp.text
+    events = resp.json()["events"]
+
+    member = next(
+        e for e in events if e["eventType"] == "rbac.group.member_added"
+    )
+    assert "Use Case A" in member["summary"]
+    assert group.id not in member["summary"]
+    assert member["resolvedNames"][group.id] == "Use Case A"
+    assert member["payload"]["group_id"] == group.id
+
+    updated = next(
+        e for e in events if e["eventType"] == "rbac.sso_mapping.updated"
+    )
+    assert "org_admin" in updated["summary"]
+    # The was-clause names the old target rather than its id.
+    assert "Use Case A" in updated["summary"]
+    assert updated["resolvedNames"][group.id] == "Use Case A"
+    assert updated["resolvedNames"][provider.id] == "Corp AD"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_reference_keeps_its_id(
+    test_client: AsyncClient, db_session,
+):
+    """A hard-deleted group is a real state; the summary keeps the raw
+    id rather than inventing a name."""
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.group.member_added",
+        payload={"user_id": "usr_y", "group_id": "grp_gonehard"},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    ev = next(
+        e for e in resp.json()["events"]
+        if e["eventType"] == "rbac.group.member_added"
+        and e["payload"].get("group_id") == "grp_gonehard"
+    )
+    assert "grp_gonehard" in ev["summary"]
+    assert ev["resolvedNames"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_group_is_still_named(
+    test_client: AsyncClient, db_session,
+):
+    """Soft-deleted groups keep their name in the log — an event in a
+    group that has since been removed is among the rows the log exists
+    to explain."""
+    from sqlalchemy import update as sa_update
+
+    from backend.app.db.models import GroupORM
+    from backend.app.db.repositories import group_repo
+
+    group = await group_repo.create_group(
+        db_session, name="Retired Team", description="",
+    )
+    await db_session.execute(
+        sa_update(GroupORM).where(GroupORM.id == group.id)
+        .values(deleted_at="2026-01-01T00:00:00Z")
+    )
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.group.member_removed",
+        payload={"user_id": "usr_y", "group_id": group.id},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    ev = next(
+        e for e in resp.json()["events"]
+        if e["eventType"] == "rbac.group.member_removed"
+    )
+    assert "Retired Team" in ev["summary"]
+
+
+@pytest.mark.asyncio
+async def test_a_person_named_off_the_actor_target_slots_is_resolved(
+    test_client: AsyncClient, db_session,
+):
+    """A payload routinely names a THIRD person — a ``granted_by``, an
+    inviter, a member — beyond the row's actor and target. That id used to
+    render raw while every other kind beside it was named."""
+    await _seed(db_session, uid="usr_grantor", first="Grace", last="Grant",
+                email="grace@example.com")
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.group.member_added",
+        payload={"actor_id": "usr_sys", "user_id": "usr_member",
+                 "granted_by": "usr_grantor", "group_id": "grp_x"},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    ev = next(
+        e for e in resp.json()["events"]
+        if e["payload"].get("granted_by") == "usr_grantor"
+    )
+    # The third party is named in the drawer map…
+    assert ev["resolvedNames"]["usr_grantor"] == "Grace Grant"
+    # …while the raw id is untouched in the payload — the id is the record.
+    assert ev["payload"]["granted_by"] == "usr_grantor"
+    # A person the directory does not know stays a bare id.
+    assert "usr_member" not in ev["resolvedNames"]
+
+
+@pytest.mark.asyncio
+async def test_a_person_with_no_name_is_resolved_to_their_email(
+    test_client: AsyncClient, db_session,
+):
+    """Name-or-email: an account that never set a name is still better
+    named by its email than left as ``usr_…``."""
+    await _seed(db_session, uid="usr_noname", first="", last="",
+                email="only.email@example.com")
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.group.member_added",
+        payload={"user_id": "usr_target", "invited_by": "usr_noname",
+                 "group_id": "grp_x"},
+    )
+    await db_session.commit()
+
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    ev = next(
+        e for e in resp.json()["events"]
+        if e["payload"].get("invited_by") == "usr_noname"
+    )
+    assert ev["resolvedNames"]["usr_noname"] == "only.email@example.com"
+
+
+@pytest.mark.asyncio
+async def test_people_and_payload_refs_share_one_identity_query(
+    test_client: AsyncClient, db_session, monkeypatch,
+):
+    """The actor/target lookup and the payload-reference lookup are the
+    SAME query — naming a third person must not double the page's identity
+    round trips."""
+    await _seed(db_session, uid="usr_a", first="Ann", last="Actor",
+                email="ann@example.com")
+    await _seed(db_session, uid="usr_g", first="Gil", last="Grantor",
+                email="gil@example.com")
+    await user_repo.create_outbox_event(
+        db_session, event_type="rbac.group.member_added",
+        payload={"actor_id": "usr_a", "user_id": "usr_t",
+                 "granted_by": "usr_g", "group_id": "grp_x"},
+    )
+    await db_session.commit()
+
+    calls: list[list[str]] = []
+    real = user_repo.get_identities_by_ids
+
+    async def spy(session, ids):
+        calls.append(list(ids))
+        return await real(session, ids)
+
+    monkeypatch.setattr(user_repo, "get_identities_by_ids", spy)
+    resp = await test_client.get("/api/v1/admin/audit?category=all")
+    assert resp.status_code == 200, resp.text
+
+    assert len(calls) == 1, f"resolved identities {len(calls)} times for one page"
+    ev = next(
+        e for e in resp.json()["events"]
+        if e["payload"].get("granted_by") == "usr_g"
+    )
+    # Both the actor slot and the third-party ref came out of that one query.
+    assert ev["actorName"] == "Ann Actor"
+    assert ev["resolvedNames"]["usr_g"] == "Gil Grantor"

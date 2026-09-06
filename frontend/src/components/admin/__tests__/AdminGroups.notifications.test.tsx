@@ -26,14 +26,14 @@ vi.mock('@/services/groupsService', () => ({
         removeMember: vi.fn(),
     },
 }))
-vi.mock('@/services/adminUserService', () => ({
-    adminUserService: { listUsers: vi.fn() },
+vi.mock('@/services/userDirectoryService', () => ({
+    searchDirectory: vi.fn(),
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
 
 import { AdminGroups } from '../AdminGroups'
 import { groupsService, type GroupResponse } from '@/services/groupsService'
-import { adminUserService } from '@/services/adminUserService'
+import { searchDirectory } from '@/services/userDirectoryService'
 import { useNotificationStore } from '@/components/ui/notifications'
 
 function group(over: Partial<GroupResponse> = {}): GroupResponse {
@@ -57,7 +57,7 @@ beforeEach(() => {
     vi.clearAllMocks()
     useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     vi.mocked(groupsService.list).mockResolvedValue([group()])
-    vi.mocked(adminUserService.listUsers).mockResolvedValue([])
+    vi.mocked(searchDirectory).mockResolvedValue({ users: [], groups: [] })
 })
 
 describe('AdminGroups — once, not twice', () => {
@@ -90,15 +90,16 @@ describe('AdminGroups — once, not twice', () => {
     })
 })
 
-describe('AdminGroups — the membership modal speaks the same way', () => {
-    const MEMBER = { userId: 'usr_1', groupId: 'grp_1', addedAt: new Date().toISOString(), addedBy: null, source: 'local' }
-    const USER = {
-        id: 'usr_1', email: 'ada@example.com', firstName: 'Ada', lastName: 'Lovelace',
-        displayName: 'Ada Lovelace', status: 'active', role: 'member',
-        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-        resetRequested: false, mustChangePassword: false, hasPassword: true,
-        signupSource: 'admin_created', identities: [], isSystemAccount: false,
+describe('AdminGroups — the membership drawer speaks the same way', () => {
+    // The server names the member now; the FE no longer joins against the
+    // admin user list to find out who `usr_1` is.
+    const MEMBER = {
+        userId: 'usr_1', groupId: 'grp_1', addedAt: new Date().toISOString(),
+        addedBy: null, source: 'local',
+        displayName: 'Ada Lovelace', email: 'ada@example.com', status: 'active',
+        deleted: false,
     }
+    const DIR_USER = { id: 'usr_1', displayName: 'Ada Lovelace', email: 'ada@example.com' }
 
     async function openMembers() {
         const u = userEvent.setup()
@@ -112,7 +113,6 @@ describe('AdminGroups — the membership modal speaks the same way', () => {
         // and `new Error('')` is still an Error — an unguarded `err.message`
         // read renders an EMPTY red card for a failed membership change.
         vi.mocked(groupsService.listMembers).mockResolvedValue([MEMBER])
-        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
         vi.mocked(groupsService.removeMember).mockRejectedValue(new Error(''))
 
         const u = await openMembers()
@@ -125,10 +125,13 @@ describe('AdminGroups — the membership modal speaks the same way', () => {
 
     it('names the person and the group when a failed add carries no message', async () => {
         vi.mocked(groupsService.listMembers).mockResolvedValue([])
-        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
+        vi.mocked(searchDirectory).mockResolvedValue({ users: [DIR_USER], groups: [] })
         vi.mocked(groupsService.addMember).mockRejectedValue(new Error(''))
 
         const u = await openMembers()
+        // Adding is a panel that folds out of the drawer now — the member
+        // list is what the drawer opens on.
+        await u.click(await screen.findByTitle('Add members'))
         await u.click(await screen.findByText('Ada Lovelace'))
 
         await waitFor(() => expect(messages()).toEqual([
@@ -138,7 +141,6 @@ describe('AdminGroups — the membership modal speaks the same way', () => {
 
     it('names the group when the member list itself will not load', async () => {
         vi.mocked(groupsService.listMembers).mockRejectedValue(new Error(''))
-        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
 
         await openMembers()
 
@@ -149,7 +151,6 @@ describe('AdminGroups — the membership modal speaks the same way', () => {
 
     it('says where the person went, not just that something happened', async () => {
         vi.mocked(groupsService.listMembers).mockResolvedValue([MEMBER])
-        vi.mocked(adminUserService.listUsers).mockResolvedValue([USER])
         vi.mocked(groupsService.removeMember).mockResolvedValue(undefined)
 
         const u = await openMembers()

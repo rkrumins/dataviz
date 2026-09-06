@@ -204,3 +204,47 @@ describe('the audit log names people', () => {
         ))
     })
 })
+
+describe('everything else the event mentions gets named too', () => {
+    it('shows name-and-id chips for resolved references in further details', async () => {
+        const u = userEvent.setup()
+        list.mockResolvedValue({
+            events: [event({
+                summary: "User added to group 'Use Case A'",
+                payload: { group_id: 'grp_ab12', provider_id: 'idp_cd34' },
+                resolvedNames: {
+                    grp_ab12: 'Use Case A',
+                    idp_cd34: 'Corp AD',
+                },
+            })],
+            nextCursor: null,
+        })
+        render(<AdminAudit />)
+        await u.click(await screen.findByText(/added to group/))
+
+        await waitFor(() =>
+            expect(screen.getByText('Named in this event')).toBeInTheDocument())
+        // Name beside id — the id stays the record, the name reads.
+        expect(screen.getByText('Use Case A')).toBeInTheDocument()
+        expect(screen.getByText('grp_ab12')).toBeInTheDocument()
+        expect(screen.getByText('Corp AD')).toBeInTheDocument()
+        expect(screen.getByText('idp_cd34')).toBeInTheDocument()
+    })
+
+    it('shows no key at all when nothing resolved', async () => {
+        const u = userEvent.setup()
+        list.mockResolvedValue({
+            events: [event({
+                payload: { group_id: 'grp_gonehard' },
+                resolvedNames: {},
+            })],
+            nextCursor: null,
+        })
+        render(<AdminAudit />)
+        await u.click(await screen.findByText('Role changed'))
+
+        await waitFor(() =>
+            expect(screen.getByText('Raw event payload')).toBeInTheDocument())
+        expect(screen.queryByText('Named in this event')).not.toBeInTheDocument()
+    })
+})

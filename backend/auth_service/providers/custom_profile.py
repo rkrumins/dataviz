@@ -52,7 +52,11 @@ from typing import Any, Optional
 import jwt as pyjwt
 
 from .base import ProviderCredentials, ProviderIdentity
-from .claim_mapper import apply_claim_mapping, ClaimMappingError
+from .claim_mapper import (
+    apply_claim_mapping,
+    ClaimMappingError,
+    hoist_nested,
+)
 from ..core.config import CLOCK_SKEW_LEEWAY_SECONDS
 from .registry import ProviderConfigSnapshot
 
@@ -69,9 +73,12 @@ VALID_ENCODINGS = frozenset({"none", "base64url", "url"})
 VALID_FORMATS = frozenset({"jwt", "json"})
 VALID_ALGS = frozenset({"HS256", "RS256"})
 
-# Nested containers hoisted to the top level so a payload shaped like
-# ``{"user": {...}}`` maps without the operator writing dotted paths.
-_NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile", "attributes")
+# Hoisted FIRST, in this order, so precedence between the well-known
+# container names stays what it always was. Every other object-valued
+# key hoists after these — the container can be called anything.
+# Mirrors ``backchannel._NESTED_CONTAINERS``.
+_NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile", "attributes",
+                      "entitlements")
 
 
 class CustomProfileError(Exception):
@@ -433,15 +440,13 @@ class CustomProfileProvider:
         # unverified payload would let anyone invalidate a real one.
         await self._assert_not_replayed(payload)
 
-        # Hoist one level of nesting so the operator maps ``firstName``
-        # rather than ``user.firstName``. Dotted paths still work for
-        # anything deeper — setdefault never shadows a top-level key.
-        claims = {**payload}
-        for container in _NESTED_CONTAINERS:
-            nested = payload.get(container)
-            if isinstance(nested, dict):
-                for k, v in nested.items():
-                    claims.setdefault(k, v)
+        # Hoist one level of nesting — whatever the container is called
+        # — so the operator maps ``firstName`` rather than
+        # ``user.firstName``. Dotted paths still work for anything
+        # deeper. Shared with the backchannel kind, including its
+        # emptyish rule: a vestigial top-level ``groups: []`` no longer
+        # shadows the populated list one level down.
+        claims = hoist_nested(payload, priority=_NESTED_CONTAINERS)
 
         try:
             return apply_claim_mapping(

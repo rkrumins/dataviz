@@ -324,21 +324,20 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // only starts once status flips to 'authenticated', below.
             setAuthEnvironmentId(environment_id)
             // A session can be holding no CSRF cookie — evicted by a
-            // sibling deployment's sign-out, cleared by hand, expired —
-            // and only a rotation re-mints it. Bootstrap is the one place
+            // sibling deployment's sign-out, cleared by hand — and until
+            // it is restored every write 403s. Bootstrap is the one place
             // that knows a session exists before any write is attempted,
-            // so repairing here is what makes reloading the page fix it:
-            // a reload otherwise changes nothing, because it issues only
-            // GETs and no GET needs a CSRF token.
+            // so repairing here is belt-and-braces with the server's own
+            // heal on GET /auth/me above.
             //
             // AWAITED, deliberately: fire-and-forget left a window in
             // which the first admin write raced the repair and lost.
-            // Once the backend heals the cookie on GET /auth/me itself,
-            // this is usually a same-tick no-op (the cookie-present
-            // gate returns immediately); against an older backend it
-            // costs one refresh round trip before the authenticated
-            // flip — which is exactly the ordering that makes writes
-            // safe. Never rejects.
+            // Because GET /auth/me already healed the cookie a line
+            // earlier, this is normally a same-tick no-op (the
+            // cookie-present gate returns immediately); it only reaches
+            // the network on a backend too old to heal, where it costs
+            // one cheap /auth/csrf round trip before the authenticated
+            // flip — the ordering that makes writes safe. Never rejects.
             await ensureCsrfToken()
             // Re-apply with the server's freshly-returned DTO so
             // role/status updates from the backend overwrite the
