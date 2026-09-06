@@ -11,7 +11,7 @@
  * tile's number equals the rows it reveals. When ``summary`` is null (fleet too
  * large to summarise), the band renders nothing.
  */
-import { AlertTriangle, CheckCircle2, Database, Layers, Loader2, MinusCircle, Waves } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Database, Layers, Loader2, MinusCircle, PauseCircle, Waves } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessSummary } from '@/services/freshnessService'
 import { DRIFT_SPEC } from './DriftStateBadge'
@@ -109,15 +109,20 @@ export function FreshnessStatBand({ summary, activeFacet, onToggle }: {
     // that set it.
     const stalled = summary.projectionStalled ?? 0
     const showStalled = stalled > 0 || activeFacet === 'projectionStalled'
+    // Same rule for the second conditional tile: a permanent "0 held" would
+    // be noise, and a pause is something an operator chose — it earns its
+    // tile by existing, and stays while it is the active facet.
+    const held = summary.held ?? 0
+    const showHeld = held > 0 || activeFacet === 'held'
+    const wideCols = (['wide:grid-cols-7', 'wide:grid-cols-8', 'wide:grid-cols-9'] as const)[
+        (showStalled ? 1 : 0) + (showHeld ? 1 : 0)
+    ]
 
     return (
         <div
             role="group"
             aria-label="Fleet summary"
-            className={cn(
-                'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3',
-                showStalled ? 'wide:grid-cols-8' : 'wide:grid-cols-7',
-            )}
+            className={cn('grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3', wideCols)}
         >
             <Tile
                 icon={Layers} label="Total sources" value={summary.total.toLocaleString()}
@@ -179,6 +184,21 @@ export function FreshnessStatBand({ summary, activeFacet, onToggle }: {
                 accent={ACCENTS.slate} active={activeFacet === 'notBuilt'}
                 onToggle={() => toggle('notBuilt')}
             />
+            {/* Slate, like Not built: a hold is quiet by design. It is NOT
+                part of Needs attention — the operator paused these to get
+                them out of that count. */}
+            {showHeld && (
+                <Tile
+                    icon={PauseCircle} label="Automation held" value={held.toLocaleString()}
+                    accent={ACCENTS.slate} active={activeFacet === 'held'}
+                    onToggle={() => toggle('held')}
+                    secondary={
+                        <p className="mt-2 text-[10px] text-ink-muted leading-snug">
+                            Paused or stopped by an operator — still watched, not rebuilt
+                        </p>
+                    }
+                />
+            )}
             <Tile
                 icon={Database} label="Cache coverage" value={`${coverage}%`}
                 accent={ACCENTS.violet} active={activeFacet === 'cacheStamped'}

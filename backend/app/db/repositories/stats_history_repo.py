@@ -61,9 +61,9 @@ _MIN_RETENTION_DAYS = 1
 _MIN_MAX_ROWS = 1
 _MIN_HEARTBEAT_SECS = 60
 
-#: Same 30s in-process memo as ``aggregation.service.read_global_cadence``.
-#: Capture consults the policy on every counts write, and the settings row
-#: changes roughly never; cross-process staleness is bounded by this TTL.
+#: A 30s in-process memo: capture consults the policy on every counts write,
+#: and the settings row changes roughly never; cross-process staleness is
+#: bounded by this TTL.
 _POLICY_CACHE_TTL_S = 30.0
 _POLICY_CACHE: dict = {"policy": None, "at": 0.0}
 

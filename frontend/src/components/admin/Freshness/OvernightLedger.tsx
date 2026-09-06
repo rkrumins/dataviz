@@ -29,6 +29,8 @@ const SKIP_LABEL: Record<string, string> = {
     already_marked: 'Already queued for rebuild',
     cooldown: 'Within the minimum time between rebuilds',
     paused: 'Rebuilds paused by an operator',
+    provider_held: 'Rebuilds paused or stopped for the whole provider',
+    fleet_held: 'Rebuilds paused or stopped fleet-wide',
     failed_backoff: 'Backing off after a failed rebuild',
     opted_out: 'Automation off for this source',
     disabled: 'Automation off',

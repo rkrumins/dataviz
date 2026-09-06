@@ -54,6 +54,8 @@ from backend.app.services.aggregation.schemas import (
     ReconcileRunResponse,
     RefreshRequest,
     RefreshResponse,
+    ScopeHoldRequest,
+    ScopeHoldResponse,
 )
 from backend.auth_service.interface import User
 
@@ -253,6 +255,9 @@ async def patch_freshness_settings(
             pause = await svc.set_source_pause(
                 ds_id, session, paused_until=body.paused_until,
             )
+        breaker = {}
+        if body.reset_breaker:
+            breaker = await svc.reset_source_breaker(ds_id, session)
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     return FreshnessSettingsResponse(
@@ -263,6 +268,7 @@ async def patch_freshness_settings(
         probe_enabled=probe.get("probe_enabled"),
         probe_interval_secs=probe.get("probe_interval_secs"),
         paused_until=pause.get("paused_until"),
+        reset_breaker=breaker.get("reset_breaker"),
     )
 
 
@@ -327,18 +333,60 @@ async def get_reconciliation_activity(
     "/freshness/reconciliation",
     response_model=ReconcilePolicyResponse,
     summary="Update the global automatic-reconciliation policy",
-    dependencies=[Depends(_REQUIRE_PROVIDER_MANAGE)],
 )
 async def put_reconciliation(
     body: ReconcilePolicyRequest,
+    # Also the gate — the user is kept so the fleet hold can record who set it.
+    user: User = Depends(_REQUIRE_PROVIDER_MANAGE),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Platform-admin only: the policy governs every workspace's sources.
-    Partial-update semantics, same rule as the per-source PATCH above."""
+    Partial-update semantics, same rule as the per-source PATCH above. The
+    fleet-wide hold (``pausedUntil`` / ``stopped``) rides this same PUT."""
     from backend.app.services.aggregation.service import save_reconcile_policy
 
     return await save_reconcile_policy(
-        session, body, sent=body.model_fields_set,
+        session, body, sent=body.model_fields_set, actor=user.id,
+    )
+
+
+@router.put(
+    "/freshness/holds/provider/{provider_id}",
+    response_model=ScopeHoldResponse,
+    summary="Pause, stop or resume automatic rebuilds for every source under a provider",
+)
+async def put_provider_hold(
+    provider_id: str,
+    body: ScopeHoldRequest,
+    # A provider spans workspaces, so this is platform-admin only — the same
+    # argument ``refresh_provider_batch`` makes. The user is kept to record
+    # who set the hold.
+    user: User = Depends(_REQUIRE_PROVIDER_MANAGE),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Served in-process in both modes, like the fleet policy PUT above: it
+    is one primary-key upsert on an ``aggregation`` table the web tier
+    already reads, and the rows are read by key on every resolution (never
+    cached), so the Control Plane sees the hold on its very next decision.
+    Partial-update semantics, same rule as the per-source PATCH."""
+    from backend.app.services.aggregation.holds import set_scope_hold
+
+    sent = body.model_fields_set
+    kwargs = {}
+    if "paused_until" in sent:
+        kwargs["paused_until"] = body.paused_until
+    if "stopped" in sent:
+        kwargs["stopped"] = body.stopped
+    row = await set_scope_hold(
+        session, scope="provider", scope_id=provider_id, actor=user.id, **kwargs,
+    )
+    await session.commit()
+    return ScopeHoldResponse(
+        scope="provider", scope_id=provider_id,
+        paused_until=getattr(row, "paused_until", None),
+        stopped_at=getattr(row, "stopped_at", None),
+        updated_at=getattr(row, "updated_at", None),
+        updated_by=getattr(row, "updated_by", None),
     )
 
 

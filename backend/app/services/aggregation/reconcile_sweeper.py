@@ -42,6 +42,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import func, select, text
 
+from .holds import HeldError, read_scope_holds, resolve_scope_hold, skip_for
 from .reconcile import Observation, Verdict, evaluate
 
 logger = logging.getLogger(__name__)
@@ -341,6 +342,7 @@ class ReconciliationSweeper:
         from .service import (
             read_global_cadence,
             reconcile_policy_from_cadence,
+            resolve_drift_auto_rebuild,
             resolve_rebuild_interval,
             resolve_reconcile_enabled,
             resolve_reconcile_interval,
@@ -397,6 +399,11 @@ class ReconciliationSweeper:
 
             cadence = await read_global_cadence(session)
             policy = reconcile_policy_from_cadence(cadence)
+            # ③ Act off is a fleet-wide stop: every finding is still recorded,
+            # nothing is acted on (tallied ``fleet_held``, like the fleet row).
+            drift_auto = resolve_drift_auto_rebuild(
+                getattr(cadence, "drift_auto_rebuild", None),
+            )
             global_enabled = getattr(cadence, "reconcile_enabled", None)
             global_interval = getattr(
                 cadence, "reconcile_check_interval_secs", None,
@@ -419,6 +426,11 @@ class ReconciliationSweeper:
 
             ds_ids = [s.data_source_id for s in states]
             ctx = await self._batch_context(session, ds_ids, versioned, health)
+            # Fleet/provider holds for this candidate set: one PK read for
+            # the fleet row plus one per distinct provider, once per pass.
+            scope_holds = await read_scope_holds(
+                session, {c.get("provider_id") for c in ctx.values()},
+            )
             # Drop the lock before any live graph call. Operator modes refresh
             # counts; auto ticks evaluate against the SQL snapshot alone.
             await session.commit()
@@ -459,6 +471,8 @@ class ReconciliationSweeper:
                         state.rebuild_min_interval_secs,
                         cadence.rebuild_min_interval_secs,
                     ),
+                    scope_holds=scope_holds,
+                    drift_auto_rebuild=drift_auto,
                 )
                 # Per-source due-ness: the SQL cutoff is permissive because it
                 # cannot know each source's override, so the exact check is
@@ -1097,6 +1111,7 @@ class ReconciliationSweeper:
 
     def _observe(
         self, state, ctx, policy, *, reconcile_enabled, rebuild_interval,
+        scope_holds=None, drift_auto_rebuild=None,
     ) -> Observation:
         c = ctx.get(state.data_source_id, {})
         stats_updated = c.get("stats_updated")
@@ -1162,6 +1177,10 @@ class ReconciliationSweeper:
             overlay_observable=c.get("overlay_observable", True),
             live_observed=bool(c.get("live_observed")),
             reconcile_enabled=reconcile_enabled,
+            scope_hold=resolve_scope_hold(
+                scope_holds, c.get("provider_id"),
+                drift_auto_rebuild=drift_auto_rebuild,
+            ),
         )
 
     @staticmethod
@@ -1271,6 +1290,18 @@ class ReconciliationSweeper:
                 result.actions += 1
             except asyncio.CancelledError:
                 raise
+            except HeldError as exc:
+                # trigger() refused a first build because an operator hold
+                # is in force. That is a skip the operator asked for, not a
+                # dispatch failure — count it where the cockpit's "why did
+                # the fleet produce nothing" tally will show it.
+                skip = skip_for(exc.hold)
+                result.skipped += 1
+                result.by_skip[skip] = result.by_skip.get(skip, 0) + 1
+                logger.info(
+                    "reconcile sweep: first build for %s held (%s) — skipped",
+                    action.data_source_id, exc.hold.detail,
+                )
             except Exception as exc:
                 result.errors += 1
                 logger.warning(

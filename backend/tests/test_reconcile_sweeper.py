@@ -1871,3 +1871,150 @@ async def test_a_cold_projector_health_lookup_defers_the_whole_sweep(
     assert json.loads(run.detail)["bySkip"] == {
         "projector_health_unavailable": 1,
     }
+
+
+# ── a first build refused by trigger()'s hold gate is a skip, not an error ─
+
+
+@pytest.mark.asyncio
+async def test_a_first_build_held_by_trigger_is_counted_as_a_skip(session_factory):
+    """``trigger()`` refuses automation sources under a hold with
+    ``HeldError``. The sweeper is its only live caller for first builds and
+    must land that in the skip tally — an operator asked for it — never in
+    ``errors``, which reads as "dispatch is broken"."""
+    from backend.app.services.aggregation.holds import HeldError, Hold
+
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+
+    class _HeldSvc(_FakeService):
+        async def trigger(self, ds_id, request, trigger_source, session):
+            raise HeldError(Hold("provider", "stopped", scope_id="prov_1"))
+
+    svc = _HeldSvc()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_reason == {"never_aggregated": 1}
+    assert result.errors == 0
+    assert result.actions == 0
+    assert result.skipped == 1
+    assert result.by_skip == {"provider_held": 1}
+    assert svc.signals == []
+
+
+# ── Provider / fleet holds ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_provider_hold_is_honoured_by_the_sweep_and_named_in_the_tally(
+    session_factory,
+):
+    """One ``automation_holds`` row for the provider holds every source
+    under it — the sweep still evaluates and records the finding (a hold is
+    never a guard), dispatches nothing, and says WHICH control is holding
+    the source: ``provider_held``, not ``paused``, so an operator is not
+    sent to a source-level Resume that cannot release it."""
+    from backend.app.services.aggregation.models import AutomationHoldORM
+
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    async with session_factory() as s:
+        s.add(AutomationHoldORM(
+            scope="provider", scope_id="prov_1",
+            stopped_at="2026-09-01T00:00:00+00:00",
+        ))
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("provider_held") == 1
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.last_finding_reason == "overlay_missing"
+
+
+@pytest.mark.asyncio
+async def test_a_fleet_hold_outranks_a_source_pause_in_what_is_reported(
+    session_factory,
+):
+    from backend.app.services.aggregation.models import AutomationHoldORM
+
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    async with session_factory() as s:
+        state = await s.get(AggregationDataSourceStateORM, "ds_1")
+        state.paused_until = "2999-01-01T00:00:00+00:00"
+        s.add(AutomationHoldORM(
+            scope="fleet", scope_id="", paused_until="2999-01-01T00:00:00+00:00",
+        ))
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert "paused" not in result.by_skip
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
+async def test_a_hold_on_another_provider_does_not_touch_this_source(
+    session_factory,
+):
+    from backend.app.services.aggregation.models import AutomationHoldORM
+
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+    async with session_factory() as s:
+        s.add(AutomationHoldORM(scope="provider", scope_id="prov_other", stopped_at="x"))
+        await s.commit()
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert "provider_held" not in result.by_skip
+    assert len(svc.signals) == 1, "an unheld source is still dispatched"
+
+
+# ── ③ Act off is a fleet-wide stop for the sweep too ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_act_off_holds_the_sweep_fleet_wide(session_factory, monkeypatch):
+    """"Automatically rebuild a source when drift is detected" off used to
+    leave this loop — the main automatic rebuild engine — running. Now every
+    finding is still recorded, nothing is acted on, and the tally names the
+    fleet-wide stop."""
+    from backend.app.services.aggregation import service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert svc.signals == [] and svc.triggers == []
+    state = await _state(session_factory)
+    assert state.last_finding_reason == "overlay_missing"
+
+
+@pytest.mark.asyncio
+async def test_act_off_holds_first_builds_too(session_factory, monkeypatch):
+    from backend.app.services.aggregation import service as svc_mod
+
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    await _seed(
+        session_factory,
+        agg_status="none", expected_edges=0, raw_fingerprint=None,
+        edge_counts={"FLOWS_TO": 200}, job_rows=(),
+        last_aggregated_ago_secs=None,
+    )
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert result.by_skip.get("fleet_held") == 1
+    assert svc.triggers == [] and svc.signals == []

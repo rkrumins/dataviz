@@ -175,12 +175,18 @@ export function PipelineRail({ detect, check, act, starvedIntoCheck, starvedInto
  * so a reader could not line them up; here the only thing that changes between
  * ①, ② and ③ is the words and one accent.
  */
-export function StageRow({ stage, on, muted = false, stat, children }: {
+export function StageRow({ stage, on, muted = false, whenOff = false, stat, children }: {
     stage: Stage
     on: boolean | null
     /** Something upstream is off, so this stage's cadence buys less than it
      *  claims — worth showing on the stage itself, not only in a warning. */
     muted?: boolean
+    /** Say what this stage being OFF actually costs, in the shared words.
+     *  Opt-in per host rather than derived from ``on``, because a stage can
+     *  read "off" for a reason these words would misdescribe — a version-
+     *  controlled source's ③ Act is off because the projector owns its
+     *  rollups, and telling that reader to rebuild by hand is wrong. */
+    whenOff?: boolean
     /** What this stage has actually been doing: the live count. */
     stat?: ReactNode
     children?: ReactNode
@@ -236,6 +242,14 @@ export function StageRow({ stage, on, muted = false, stat, children }: {
             <div className={cn(CALM, muted && 'opacity-70')}>
                 <p className="mt-1.5 text-[13px] text-ink-secondary leading-snug">{s.means}</p>
                 <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">{s.costs}</p>
+                {/* The consequence, in the slate every held/off state on this
+                    page wears. Not amber: this is a state someone chose, not
+                    a problem to fix. */}
+                {whenOff && on === false && (
+                    <p className="mt-2 rounded-lg border border-slate-500/25 bg-slate-500/[0.06] px-2.5 py-1.5 text-[11px] text-ink-secondary leading-snug">
+                        {s.whenOff}
+                    </p>
+                )}
             </div>
 
             {children}

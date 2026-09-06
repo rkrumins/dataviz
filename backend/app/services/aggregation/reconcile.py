@@ -31,6 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Literal, Optional, Tuple
 
+from .holds import Hold, pause_active as _pause_active, resolve_source_hold, skip_for
+
 # ── Vocabulary ───────────────────────────────────────────────────────────
 # Both tuples are the single source of truth for their vocabulary: the API
 # schemas, the frontend labels and the tests all derive from them.
@@ -59,6 +61,8 @@ SKIP_REASONS: Tuple[str, ...] = (
     "already_marked",     # the stale-marker reconciler owns it
     "cooldown",           # inside the rebuild throttle window
     "paused",             # snoozed by an operator until a time
+    "provider_held",      # the whole provider is paused/stopped by an operator
+    "fleet_held",         # the whole fleet is paused/stopped by an operator
     "failed_backoff",     # last attempt failed inside the cadence window
     "opted_out",          # aggregation_status == 'skipped'
     "disabled",           # auto-reconcile turned off for this source
@@ -168,6 +172,12 @@ class Observation:
     # source is still evaluated and still reports its finding, so the cockpit
     # can show what is wrong with something it has been told to leave alone.
     paused_until: Optional[str] = None
+    # A FLEET- or PROVIDER-scoped hold in force for this source, resolved by
+    # the sweeper once per pass from ``automation_holds`` (most restrictive
+    # wins — see ``holds.resolve_scope_hold``). Source-scope holds are NOT
+    # carried here; ``_hold`` derives them from ``paused_until`` and
+    # ``reconcile_enabled`` so an Observation built by hand still behaves.
+    scope_hold: Optional[Hold] = None
     recently_failed: bool = False
     # projection_mode == 'dedicated' ⇒ the overlay lives in ANOTHER graph
     # that get_stats() never scans, so observed_aggregated is meaningless.
@@ -234,6 +244,7 @@ class Policy:
 # from absolute guards (deleted, no stats, …) which cannot evaluate at all.
 _HOLD_SKIPS: Tuple[str, ...] = (
     "cooldown", "failed_backoff", "disabled", "suspended", "paused",
+    "provider_held", "fleet_held",
 )
 
 
@@ -403,33 +414,32 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
 
 def _hold(obs: Observation, policy: Policy) -> Optional[str]:
     """Post-detector refusal to act. Unlike ``_guard``, these run AFTER the
-    detectors so a held source still carries a reason and evidence."""
-    if _pause_active(obs.paused_until):
-        return "paused"
+    detectors so a held source still carries a reason and evidence.
+
+    The breaker is checked FIRST. It used to come last, after the pause, so
+    a source that was both paused and at the cap reported ``paused``, never
+    stamped ``suspended``, and never fired the suspension notice — while the
+    UI chip precedence ("Needs a person" outranks "Paused") said the
+    opposite. Now the tally and the chip agree.
+
+    Then the operator holds, widest scope first (``holds.resolve_hold``):
+    a fleet or provider hold arrives pre-resolved on ``obs.scope_hold``; the
+    source's own comes from its two columns. A hold does not clear the
+    finding — the whole point is that the cockpit keeps showing what is
+    wrong with something it has been told to leave alone.
+    """
+    if obs.consecutive_actions >= policy.breaker_cap:
+        return "suspended"
+    held = obs.scope_hold or resolve_source_hold(
+        obs.paused_until, obs.reconcile_enabled,
+    )
+    if held is not None:
+        return skip_for(held)
     if obs.in_cooldown:
         return "cooldown"
     if obs.recently_failed:
         return "failed_backoff"
-    if not obs.reconcile_enabled:
-        return "disabled"
-    if obs.consecutive_actions >= policy.breaker_cap:
-        return "suspended"
     return None
-
-
-def _pause_active(paused_until: Optional[str]) -> bool:
-    """True while a snooze is still in force. An unparseable stamp is treated
-    as expired: a corrupt value must not pause a source forever."""
-    if not paused_until:
-        return False
-    from datetime import datetime, timezone
-    try:
-        until = datetime.fromisoformat(paused_until)
-    except (TypeError, ValueError):
-        return False
-    if until.tzinfo is None:
-        until = until.replace(tzinfo=timezone.utc)
-    return until > datetime.now(timezone.utc)
 
 
 def _idle_state(obs: Observation) -> str:

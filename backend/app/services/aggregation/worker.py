@@ -129,7 +129,11 @@ class AggregationWorker:
         7. On failure: update status='failed', preserve checkpoint for resume
         """
         async with self._session_factory() as session:
-            job = await session.get(AggregationJobORM, job_id)
+            # Row-locked (FOR UPDATE on Postgres, a no-op on SQLite) so the
+            # start below and ``service.cancel`` are mutually exclusive:
+            # whichever commits first, the other sees its status. The lock
+            # is held only until the running-transition commit below.
+            job = await session.get(AggregationJobORM, job_id, with_for_update=True)
             if not job:
                 logger.error("Aggregation job %s not found", job_id)
                 return
@@ -145,6 +149,19 @@ class AggregationWorker:
                     "the aggregation worker (trigger_source=purge) — "
                     "ignoring without touching the row. Find and fix the "
                     "dispatcher that sent it here.", job_id,
+                )
+                return
+
+            if job.status not in ("pending", "running"):
+                # A cancel (or another executor's completion) landed after
+                # this job was picked up. Never flip a terminal row back to
+                # running — the one guard the in-process dispatcher, which
+                # skips the consumer's status check, gets. ``running`` is
+                # accepted: the stuck-job reconciler re-dispatches a job
+                # whose executor died without resetting its row.
+                logger.info(
+                    "Aggregation job %s is %s — not starting it",
+                    job_id, job.status,
                 )
                 return
 
@@ -433,6 +450,30 @@ class AggregationWorker:
                         if done:
                             result = materialize_task.result()
                             break
+                        # Durable-cancel poll. The two cooperative checkpoints
+                        # inside the pipeline read only ``cancel_event``, which
+                        # is set by the Redis pub/sub CancelListener — and a
+                        # broadcast that arrives while that listener is backing
+                        # off through a Redis flap is simply lost, leaving this
+                        # job running to completion while the DB already says
+                        # ``cancelled``. The API also wrote a durable
+                        # ``agg:cancel:{job_id}`` flag (read today only at job
+                        # pickup); re-reading it on this existing 10s tick sets
+                        # the event within one tick of a lost delivery, and
+                        # both checkpoints then exit at the next boundary with
+                        # a resumable cursor. That cooperative exit is strictly
+                        # better than a hard task.cancel() mid-Cypher, which
+                        # is what leaves a partial cube — so no hard fallback
+                        # is added for the queue dispatchers. One GET per job
+                        # per 10s; a Redis error must never kill a healthy
+                        # job, so it is swallowed and retried next tick.
+                        if not cancel_event.is_set() and await self._durable_cancel_set(job.id):
+                            logger.info(
+                                "Aggregation job %s: durable cancel flag seen "
+                                "(pub/sub delivery missed) — stopping at the "
+                                "next checkpoint", job.id,
+                            )
+                            cancel_event.set()
                         now = time.monotonic()
                         stalled_for = now - progress_marker["at"]
                         if stalled_for > stall_timeout:
@@ -915,6 +956,19 @@ class AggregationWorker:
             list(flat.lineage_edge_types),
             levels,
         )
+
+    @staticmethod
+    async def _durable_cancel_set(job_id: str) -> bool:
+        """True when the API's durable cancel flag for *job_id* is set.
+
+        The same read ``__main__._is_cancelled`` does at job pickup; polled
+        here for the running case. Never raises — a failed read is "not
+        cancelled as far as we can tell", retried on the next tick."""
+        try:
+            from .redis_client import cancel_flag_key, get_redis
+            return bool(await get_redis().get(cancel_flag_key(job_id)))
+        except Exception:
+            return False
 
     async def _materialize_with_retries(
         self,

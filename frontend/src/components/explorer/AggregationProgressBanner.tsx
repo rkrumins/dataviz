@@ -66,6 +66,14 @@ export function AggregationProgressBanner({
 
   if (!readiness || readiness.isReady) {
     if (readiness?.driftDetected) {
+      // Why this banner is still here. Drift is terminal for the poll above —
+      // it clears when something rebuilds the source, and while a hold is in
+      // force nothing automatic will. Saying so turns "this warning never goes
+      // away" into two things the reader can act on: the button below still
+      // works, and someone can lift the hold.
+      const heldWhere = readiness.heldBy === 'fleet' ? 'for every source'
+        : readiness.heldBy === 'provider' ? 'for this provider'
+          : readiness.heldBy === 'source' ? 'for this source' : null
       return (
         <div className="mb-6 px-4 py-3 rounded-xl border border-amber-500/20 bg-amber-500/10 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -75,6 +83,13 @@ export function AggregationProgressBanner({
               <p className="text-xs text-amber-600/80 dark:text-amber-400/80">
                 The underlying graph structure has changed since the last aggregation. Some lineage relationships may be out of date.
               </p>
+              {heldWhere && (
+                <p className="mt-1 text-xs text-amber-600/80 dark:text-amber-400/80">
+                  Automatic rebuilds are {readiness.heldKind === 'paused' ? 'paused' : 'off'} {heldWhere},
+                  so this will not rebuild on its own. Re-aggregate still works, or an admin can
+                  resume automation under Ingestion → Automation.
+                </p>
+              )}
             </div>
           </div>
           <button 

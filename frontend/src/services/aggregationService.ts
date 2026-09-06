@@ -154,6 +154,11 @@ export interface DataSourceReadinessResponse {
   lastReconcileReason?: string | null;
   /** Resolved per-source → global → env. */
   autoReconcile?: boolean | null;
+  /** The operator hold in force, widest scope first — the control that would
+   *  release it. Null when nothing is holding this source. */
+  heldBy?: 'fleet' | 'provider' | 'source' | null;
+  heldKind?: 'paused' | 'stopped' | null;
+  heldUntil?: string | null;
   /** Is this source's read cache caught up with its published history?
    *  NULL MEANS UNKNOWN, NEVER HEALTHY — null for an unversioned source, for
    *  a versioned graph pinned to no graph target, and when the store could

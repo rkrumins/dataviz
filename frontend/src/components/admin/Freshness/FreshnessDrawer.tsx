@@ -35,11 +35,13 @@ import { OverlayIntegrityMeter } from './OverlayIntegrityMeter'
 import { EvidencePair, ReconcileWhy, reconcileEvidenceRows } from './reconcileEvidence'
 import {
     CADENCE_LABEL, CHECK_PRESETS, COOLDOWN_PRESETS, DETECT_PRESETS,
-    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, hintIdFor,
+    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS,
 } from './automationCopy'
 import { SettingRow, StageRow } from './StageRow'
+import { SnoozeRow } from './SnoozeRow'
 import { useActiveJobs } from './useActiveJobs'
-import { AggStatusPill, FreshnessBadges, MasteryTag, timeUntil } from './FreshnessRow'
+import { AggStatusPill, FreshnessBadges, MasteryTag } from './FreshnessRow'
+import { overrideWarning, rowHold, timeUntil, type RowHold } from './holds'
 import { isPlatformMastered, isProjectionStalled } from './freshnessTriage'
 import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
@@ -100,18 +102,6 @@ const QUIET_BTN = 'inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[
     + 'transition-colors motion-reduce:transition-none disabled:opacity-50 outline-none '
     + 'focus-visible:ring-2 focus-visible:ring-indigo-500/50'
 
-const SELECT_BOX = 'h-7 px-2 rounded-lg border border-glass-border bg-canvas text-[12px] text-ink '
-    + 'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-50'
-
-/** How long an operator can hold this source's rebuilds for. Hours and days,
- *  because a snooze is measured in "until I have looked at it", never in
- *  seconds — which is why this is a list of choices and not a DurationField. */
-const SNOOZE_CHOICES: { label: string; secs: number }[] = [
-    { label: '1 hour', secs: 3600 },
-    { label: '8 hours', secs: 8 * 3600 },
-    { label: '24 hours', secs: 24 * 3600 },
-    { label: '7 days', secs: 7 * 24 * 3600 },
-]
 
 /** The verdicts that mean the sweep found something. ``suspended`` is here
  *  too: the breaker stopped acting on the source, but the finding that got it
@@ -276,70 +266,20 @@ function DetectSection({ doc }: { doc: FreshnessDoc }) {
     )
 }
 
-/**
- * The operator snooze, in ③ Act because ③ Act is what it holds.
- *
- * ``paused_until`` is read by ``reconcile._hold``, which gates only the
- * dispatch: a paused source is still probed, still evaluated, and still
- * records its finding and its evidence — it is simply not rebuilt. So the
- * words are "pause rebuilds", never "pause automation", which would claim the
- * two stages above it stop as well.
- */
-function SnoozeRow({ doc, pausedFor, pending, onPatch }: {
-    doc: FreshnessDoc
-    /** How long is left, or null when no snooze is in force. */
-    pausedFor: string | null
-    pending: boolean
-    onPatch: (body: FreshnessSettingsPatch, ok: string) => void
-}) {
-    if (pausedFor) {
-        return (
-            <SettingRow
-                label="Rebuilds are paused"
-                hint={`Until ${new Date(doc.pausedUntil as string).toLocaleString()}`}
-            >
-                <button
-                    type="button"
-                    onClick={() => onPatch({ pausedUntil: null }, 'Rebuilds resumed.')}
-                    disabled={pending}
-                    className={QUIET_BTN}
-                >
-                    <RotateCcw className="w-3.5 h-3.5" /> Resume now
-                </button>
-            </SettingRow>
-        )
+/** What ③ Act says above its ledger while a hold is in force. A source's
+ *  own stop is its toggle, which explains itself on the row below, so it
+ *  gets no banner; every other hold names where it is released. */
+function holdBanner(hold: RowHold): string | null {
+    if (hold.scope === 'source') {
+        if (hold.kind === 'stopped') return null
+        const left = timeUntil(hold.until)
+        return left
+            ? `Paused for another ${left} — nothing will be rebuilt until then.`
+            : 'Paused — nothing will be rebuilt until it is resumed.'
     }
-
-    return (
-        <SettingRow
-            label="Pause rebuilds for"
-            htmlFor="freshness-snooze"
-            hint="Problems are still detected, checked and shown here — only the rebuild is held, so a source can be left alone without losing sight of it."
-        >
-            <select
-                id="freshness-snooze"
-                aria-describedby={hintIdFor('freshness-snooze')}
-                disabled={pending}
-                // Always empty: this picks an action, not a stored value. What
-                // was chosen reads back as the expiry, which replaces this row.
-                value=""
-                onChange={(e) => {
-                    const choice = SNOOZE_CHOICES.find(c => String(c.secs) === e.target.value)
-                    if (!choice) return
-                    onPatch(
-                        { pausedUntil: new Date(Date.now() + choice.secs * 1000).toISOString() },
-                        `Rebuilds paused for ${choice.label}.`,
-                    )
-                }}
-                className={SELECT_BOX}
-            >
-                <option value="">Choose…</option>
-                {SNOOZE_CHOICES.map(c => (
-                    <option key={c.secs} value={c.secs}>{c.label}</option>
-                ))}
-            </select>
-        </SettingRow>
-    )
+    const by = hold.scope === 'fleet' ? 'fleet-wide' : 'by the provider'
+    const where = hold.scope === 'fleet' ? 'Automation' : 'the provider row'
+    return `Held ${by} — nothing will be rebuilt until it is resumed from ${where}.`
 }
 
 /**
@@ -458,6 +398,29 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
                 <DriftStateBadge state={state} />
                 {spec && <p className="text-[11px] text-ink-muted leading-relaxed">{spec.title}</p>}
             </div>
+            {/* The manual way back from the breaker. Before this, the count
+                only reset when a later check found the source in sync — so
+                a suspended source stayed suspended until the problem cleared
+                by itself, which is the opposite of what "waits for a person"
+                promises. */}
+            {state === 'suspended' && canManage && (
+                <button
+                    type="button"
+                    onClick={() => setSettings.mutate(
+                        { dsId: doc.dataSourceId, resetBreaker: true },
+                        {
+                            onSuccess: () => notify('success',
+                                'Automation resumed for this source — the next check starts fresh.'),
+                            onError: (e) => notify('error',
+                                e.message || 'Could not resume automation.'),
+                        },
+                    )}
+                    disabled={setSettings.isPending}
+                    className={cn(QUIET_BTN, 'mt-2')}
+                >
+                    <RotateCcw className="w-3.5 h-3.5" /> Resume automation
+                </button>
+            )}
 
             {stalled ? <ProjectionWedge doc={doc} /> : isManaged ? (
                 <div className="mt-2 rounded-lg border border-sky-500/20 bg-sky-500/[0.05] p-2.5 space-y-1.5">
@@ -618,20 +581,28 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
     // control that cannot succeed.
     const neverBuilt = !doc.lastAggregatedAt
         && (doc.aggregationStatus == null || doc.aggregationStatus === 'none')
-    const pausedFor = timeUntil(doc.pausedUntil)
+    // The one hold in force, widest scope first (server-resolved). A hold
+    // at provider or fleet scope outranks anything set here.
+    const hold = rowHold(doc)
+    const inherited = hold && hold.scope !== 'source' ? hold : null
+    const banner = hold ? holdBanner(hold) : null
 
     return (
         <StageRow
             stage="act"
             on={!isManaged && auto}
+            // A managed source's ③ Act is off because version control owns its
+            // rollups, which the shared words would misdescribe; that case has
+            // its own block below.
+            whenOff={!isManaged}
             // Two ways this stage delivers less than its settings claim: the
             // stage before it is off, or a person is holding it. Both dim what
             // it delivers and neither touches its controls.
-            muted={doc.probeEnabled === false || pausedFor != null}
+            muted={doc.probeEnabled === false || hold != null}
         >
-            {pausedFor && (
+            {banner && (
                 <p className="mt-2 text-[11px] font-medium text-amber-600 dark:text-amber-400">
-                    Paused for another {pausedFor} — nothing will be rebuilt until then.
+                    {banner}
                 </p>
             )}
             {isManaged ? (
@@ -650,9 +621,6 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                         label="Rebuild this source automatically when a check finds drift"
                         htmlFor="freshness-auto-reconcile"
                         disabled={!canManage}
-                        hint={auto
-                            ? undefined
-                            : 'Off — drift is still detected and shown here, but nothing is rebuilt automatically.'}
                     >
                         <ToggleSwitch
                             id="freshness-auto-reconcile"
@@ -705,14 +673,20 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
 
                     {/* The snooze upserts its state row, so unlike the cadence
                         above it stays available on a never-built source — which
-                        is exactly the source someone may want to hold. */}
+                        is exactly the source someone may want to hold. Under a
+                        provider or fleet hold it becomes a read-out naming the
+                        control that will actually release the source. */}
                     {canManage && (
                         <SnoozeRow
-                            doc={doc}
-                            pausedFor={pausedFor}
+                            scope="source"
+                            idPrefix="freshness-snooze"
+                            pausedUntil={doc.pausedUntil}
+                            inherited={inherited}
                             pending={setSettings.isPending}
-                            onPatch={(body, ok) => setSettings.mutate(
-                                { dsId: doc.dataSourceId, ...body },
+                            onPatch={(patch, ok) => setSettings.mutate(
+                                // A source has no stop of its own to send —
+                                // its stop is the toggle above.
+                                { dsId: doc.dataSourceId, pausedUntil: patch.pausedUntil },
                                 {
                                     onSuccess: () => notify('success', ok),
                                     onError: (e) => notify('error',
@@ -1086,9 +1060,13 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
             },
         )
     }
-    const retryMessage = doc?.lastFailureCategory === 'out_of_memory'
+    const docHold = doc ? rowHold(doc) : null
+    const retryMessage = (doc?.lastFailureCategory === 'out_of_memory'
         ? 'Retries the aggregated-lineage rebuild for this source. It may fail again until memory is freed in the graph store.'
-        : 'Retries the aggregated-lineage rebuild for this source. This can take a while.'
+        : 'Retries the aggregated-lineage rebuild for this source. This can take a while.')
+        // A person may override a hold; the confirm says so, and that the
+        // hold stays — so "Retry" is never read as "and resume automation".
+        + (docHold ? ` ${overrideWarning(docHold)}` : '')
 
     const mastered = doc ? isPlatformMastered(doc) : false
 

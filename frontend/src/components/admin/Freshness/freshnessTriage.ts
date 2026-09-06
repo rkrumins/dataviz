@@ -16,7 +16,7 @@ import { asFailureCategory } from './failureGuidance'
 // ── Status facets (tile ⇄ filter) ────────────────────────────────────
 
 /** The status facet carried in the URL (``?fstatus=``). Empty string = all. */
-export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended' | 'projectionStalled'
+export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended' | 'projectionStalled' | 'held'
 
 /** Failure-cause facet (``?ffail=``). Empty = any cause. */
 export type FailureFacet = '' | FailureCategory
@@ -127,6 +127,21 @@ export function isCooldownActive(row: FreshnessRow): boolean {
     return !Number.isNaN(t) && t > Date.now()
 }
 
+/** An operator hold (any scope) is keeping automation off this source.
+ *  Mirrors the summary's ``held`` count: the server resolves ``heldBy`` with
+ *  the same rule it counts with (most restrictive wins across fleet →
+ *  provider → source). The fallback is for a backend that predates
+ *  ``heldBy`` — the source's own two switches are the only hold it could
+ *  have reported. NOT part of ``needsAttention``: a held source is one an
+ *  operator deliberately silenced. */
+export function isHeld(row: FreshnessRow): boolean {
+    if (row.heldBy != null) return true
+    if (row.autoReconcile === false) return true
+    if (!row.pausedUntil) return false
+    const t = Date.parse(row.pausedUntil)
+    return !Number.isNaN(t) && t > Date.now()
+}
+
 /**
  * Does ``row`` belong to ``facet``? The one place the tile→filter mapping
  * lives. Every branch matches the identically-named ``FreshnessSummary``
@@ -151,6 +166,8 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
             return isReconcileSuspended(row)
         case 'projectionStalled':
             return isProjectionStalled(row)
+        case 'held':
+            return isHeld(row)
         case '':
         default:
             return true
