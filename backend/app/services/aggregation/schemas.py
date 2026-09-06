@@ -1161,9 +1161,21 @@ class ReconcilePolicyResponse(BaseModel):
     ``paused_until`` / ``stopped_at`` are the FLEET hold — the whole fleet's
     automatic rebuilds held by an operator, timed or indefinitely. They ride
     the policy so the Automation modal needs no second read; they are stored
-    in ``automation_holds``, not in the policy's ``cadence_json``."""
+    in ``automation_holds``, not in the policy's ``cadence_json``.
+
+    ``held_by`` / ``held_kind`` / ``held_until`` are the fleet-level hold AS
+    THE RESOLVER REPORTS IT (``holds.resolve_hold`` with no provider and no
+    source override): that row, ③ Act off, or an inherited ② Check off — the
+    same trio every fleet row carries, so the page's banner and the modal
+    cannot disagree with the gates. ``held_reason`` names the control that
+    releases it: ``act`` / ``check`` (the Automation switches) or ``hold``
+    (the row; Resume)."""
     paused_until: Optional[str] = Field(None, alias="pausedUntil")
     stopped_at: Optional[str] = Field(None, alias="stoppedAt")
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
+    held_reason: Optional[str] = Field(None, alias="heldReason")
     enabled: Optional[bool] = None
     check_interval_secs: Optional[int] = Field(None, alias="checkIntervalSecs")
     max_actions_per_run: Optional[int] = Field(None, alias="maxActionsPerRun")
@@ -1246,6 +1258,10 @@ class ReconcilePolicyRequest(BaseModel):
     # per-source snooze, so a "pause" cannot be a permanent hold in disguise.
     paused_until: Optional[str] = Field(None, alias="pausedUntil", max_length=64)
     stopped: Optional[bool] = None
+    # An action, not a setting (same as the per-source PATCH): lifts every
+    # source the breaker suspended, fleet-wide, so re-enabling after an
+    # incident is not one drawer per source.
+    reset_breaker: Optional[bool] = Field(None, alias="resetBreaker")
 
     @field_validator("paused_until")
     @classmethod

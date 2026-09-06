@@ -57,6 +57,10 @@ export type HoldScope = 'fleet' | 'provider' | 'source'
 /** ``paused`` lapses on its own (``heldUntil`` is when); ``stopped`` waits
  *  for a person to resume it. */
 export type HoldKind = 'paused' | 'stopped'
+/** Which control releases the FLEET-level hold the policy reports: the two
+ *  Automation switches (``act`` = ③ Act off, ``check`` = ② Check off) or the
+ *  fleet row (``hold`` — Pause / Stop, released by Resume). */
+export type FleetHoldReason = 'act' | 'check' | 'hold'
 
 export interface RefreshEventSummary {
     origin: string
@@ -285,6 +289,14 @@ export interface ReconcilePolicy {
     /** …or stopped since this instant, until someone resumes. Both ride the
      *  policy read so the Automation modal needs no second request. */
     stoppedAt?: string | null
+    /** The fleet-level hold as the SERVER resolves it — the row above, ③ Act
+     *  off, or an inherited ② Check off — the same trio every row carries, so
+     *  the page's banner and the modal cannot disagree with the gates.
+     *  ``heldReason`` names the control that releases it. */
+    heldBy?: HoldScope | null
+    heldKind?: HoldKind | null
+    heldUntil?: string | null
+    heldReason?: FleetHoldReason | null
     enabled?: boolean | null
     checkIntervalSecs?: number | null
     maxActionsPerRun?: number | null
@@ -304,6 +316,9 @@ export interface ReconcilePolicy {
  *  ``stopped`` sets/lifts the indefinite stop (it reads back as ``stoppedAt``). */
 export interface ReconcilePolicyPatch extends Partial<ReconcilePolicy> {
     stopped?: boolean
+    /** An action, not a setting: lifts every source the breaker suspended,
+     *  fleet-wide — the drawer's "Resume automation" for all of them. */
+    resetBreaker?: boolean
 }
 
 export interface ReconcileOverview {

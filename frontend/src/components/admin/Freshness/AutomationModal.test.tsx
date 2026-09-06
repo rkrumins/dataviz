@@ -719,6 +719,41 @@ describe('fleet-wide hold', () => {
         expect(await screen.findByLabelText('Pause every rebuild for')).toBeDisabled()
     })
 
+    it('says what the server holds right now, naming the switch that releases it', async () => {
+        getReconciliation.mockResolvedValue({
+            policy: { ...RECON_POLICY, heldBy: 'fleet', heldKind: 'stopped', heldReason: 'act' }, runs: [],
+        })
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        expect(await screen.findByText(
+            'Right now: automatic rebuilds are stopped fleet-wide — ③ Act is off. 3 sources need a person.',
+        )).toBeInTheDocument()
+    })
+
+    it('reads "on" when nothing holds the fleet', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={{ ...SUMMARY, suspended: 0 }} />)
+        expect(await screen.findByText('Right now: automatic rebuilds are on.')).toBeInTheDocument()
+    })
+
+    it('Resume all lifts every suspended source through the policy PUT, immediately', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        await userEvent.click(await screen.findByRole('button', { name: 'Resume all 3' }))
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ resetBreaker: true }))
+        // An action, never staged into Save.
+        expect(putAggregationCadence).not.toHaveBeenCalled()
+    })
+
+    it('keeps the Detect and Act read as fresh as the policy', async () => {
+        const { qc } = wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await screen.findByText(/Right now/)
+        const query = qc.getQueryCache().find({ queryKey: ['aggregation', 'settings'] })
+        const options = query?.observers[0]?.options
+        expect(options?.staleTime).toBe(30_000)
+        expect(options?.refetchInterval).toBe(60_000)
+    })
+
     it('the breaker count is a way to those sources, not a number', async () => {
         const onShowSuspended = vi.fn()
         wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} onShowSuspended={onShowSuspended} />)

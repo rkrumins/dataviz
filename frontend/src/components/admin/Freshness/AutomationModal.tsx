@@ -60,9 +60,29 @@ import {
 import { Advanced, PipelineRail, SettingRow, StageRow } from './StageRow'
 import { SnoozeRow } from './SnoozeRow'
 import { lastPassBrief, pickLastPassRun } from './reconcileHealth'
-import { useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
+import { RECONCILE_POLL_MS, useReconcileNow, useReconciliation, useSetReconciliationPolicy } from './useFreshness'
+import { fleetHold, timeUntil, type FleetHold } from './holds'
 
 const SETTINGS_KEY = ['aggregation', 'settings'] as const
+
+/** The one line under the rail that says what the server holds RIGHT NOW —
+ *  the rail shows the form, which may be edited and unsaved. A hold names
+ *  the control that releases it. */
+function rightNowLine(hold: FleetHold | null, needPerson: number): string {
+    let line: string
+    if (!hold) line = 'Right now: automatic rebuilds are on.'
+    else if (hold.reason === 'act') line = 'Right now: automatic rebuilds are stopped fleet-wide — ③ Act is off.'
+    else if (hold.reason === 'check') line = 'Right now: automatic rebuilds are stopped fleet-wide — ② Check is off.'
+    else if (hold.kind === 'paused') {
+        line = `Right now: automatic rebuilds are paused fleet-wide for another ${timeUntil(hold.until) ?? '0m'}.`
+    } else line = 'Right now: automatic rebuilds are stopped fleet-wide until resumed.'
+    if (needPerson > 0) {
+        line += needPerson === 1
+            ? ' 1 source needs a person.'
+            : ` ${needPerson.toLocaleString()} sources need a person.`
+    }
+    return line
+}
 
 /** Bounds this modal owns alone; the shared ones live in ``automationCopy``
  *  because the per-source drawer edits the same three cadences. */
@@ -240,8 +260,18 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
         queryKey: SETTINGS_KEY,
         queryFn: () => aggregationService.getAggregationSettings(),
         enabled: open,
+        // As fresh as the policy half: the app default (five minutes) would
+        // show ③ Act flipped on another screen as still on, and the
+        // changed-elsewhere check below can only see what this refetches.
+        staleTime: 30_000,
+        refetchInterval: RECONCILE_POLL_MS,
     })
     const cadence = settingsQ.data?.cadence
+
+    // What the server holds RIGHT NOW, as the gates resolve it — the rail
+    // shows the form, which may be edited and unsaved. The policy read carries
+    // the resolver's own answer, so this line cannot disagree with the gates.
+    const rightNow = rightNowLine(fleetHold(policy), summary?.suspended ?? 0)
 
     const [probeEnabled, setProbeEnabled] = useState(true)
     const [probeSecs, setProbeSecs] = useState<number | null>(null)
@@ -433,6 +463,18 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
         ),
     })
     const saveRecon = useSetReconciliationPolicy()
+    // The drawer's "Resume automation", for every suspended source at once —
+    // an action riding the policy PUT, never staged into Save.
+    const resumeAll = () => {
+        const n = summary?.suspended ?? 0
+        saveRecon.mutate({ resetBreaker: true }, {
+            onSuccess: () => notify(
+                'success',
+                `Automation resumed for ${n.toLocaleString()} source${n === 1 ? '' : 's'} — their next check starts fresh.`,
+            ),
+            onError: (e: Error) => notify('error', e.message || 'Could not resume automation.'),
+        })
+    }
 
     // What the STORED policy would do to the fleet right now. Debounced so
     // opening and closing the modal does not set a fleet scan going, and
@@ -624,6 +666,9 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                             <p className="mt-2.5 text-[11px] text-ink-muted leading-snug">
                                 One pipeline, in the order it runs. Each stage feeds the next, so
                                 turning one off changes what the ones after it can see.
+                            </p>
+                            <p className="mt-1.5 text-[11px] font-medium text-ink-secondary leading-snug">
+                                {rightNow}
                             </p>
                         </div>
                         )}
@@ -948,10 +993,11 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                                 not report it, so this states the rule and the live
                                                 count — as a way to those sources, because a count
                                                 of sources waiting for a person is a to-do list, not
-                                                a statistic. The resume is on each source's drawer. */}
+                                                a statistic. The resume is on each source's drawer,
+                                                and here for all of them at once. */}
                                             <SettingRow
                                                 label="A source that keeps failing waits for a person"
-                                                hint="After repeated rebuilds that never clear the same problem, automation stops for that source until someone resumes it from its drawer."
+                                                hint="After repeated rebuilds that never clear the same problem, automation stops for that source until someone resumes it from its drawer — or all of them here."
                                             >
                                                 <span className="flex items-center gap-2">
                                                     {summary?.suspended != null && (
@@ -968,6 +1014,16 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                                                 {summary.suspended.toLocaleString()} need a person
                                                             </span>
                                                         )
+                                                    )}
+                                                    {isAdmin && summary?.suspended != null && summary.suspended > 0 && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={resumeAll}
+                                                            disabled={saveRecon.isPending}
+                                                            className="rounded text-[12px] font-semibold tabular-nums text-indigo-600 dark:text-indigo-400 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-50"
+                                                        >
+                                                            Resume all {summary.suspended.toLocaleString()}
+                                                        </button>
                                                     )}
                                                     <DeployTag />
                                                 </span>

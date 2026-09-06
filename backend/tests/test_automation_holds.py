@@ -290,8 +290,10 @@ def test_re_dispatch_of_existing_jobs_never_consults_the_hold():
     """Crash recovery and stuck-job re-dispatch resume EXISTING job rows
     straight onto the dispatcher, never through ``trigger()``. A job resuming
     from its cursor is an in-flight job, and a hold blocks the NEXT job
-    only. Pin that structurally: every method that re-dispatches by job id
-    neither triggers nor resolves a hold."""
+    only. (A job automation queued before the hold is, by decision, not
+    "the next one" either: it runs, and a person can cancel it from Job
+    History.) Pin that structurally: every method that re-dispatches by job
+    id neither triggers nor resolves a hold."""
     re_dispatchers = [
         name for name, fn in inspect.getmembers(AggregationService, inspect.isfunction)
         if "self._dispatcher.dispatch(job.id)" in inspect.getsource(fn)

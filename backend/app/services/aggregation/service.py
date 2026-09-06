@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,12 +128,11 @@ AGGREGATION_PROBE_BATCH_CAP = int(
 # ``resolve_rebuild_interval`` — is used by every consumer (the cooldown
 # gate, the scheduler reconciler pre-check, and the web-tier badge
 # derivation) so the "Next rebuild in Xm" badge never disagrees with the
-# behavior. The persisted global is read through a small in-process cache
-# (≤ _SETTINGS_CACHE_TTL_S) so the 60s scheduler tick and the fleet read
-# never hammer the settings row; put_settings busts it for same-process
-# immediacy, and the cache TTL bounds cross-process (web ⇄ CP) propagation.
-_SETTINGS_CACHE_TTL_S = 30.0
-_GLOBAL_CADENCE_CACHE: dict = {"cadence": None, "at": 0.0}
+# behavior. The persisted global is read by primary key on EVERY read, never
+# cached: ③ Act and ② Check are fleet-wide stops, and a per-process cache
+# left the other control-plane replica acting on the old value for its TTL
+# (and reading it back to the operator as still on) — the same reason the
+# wider-scope hold rows are uncached (see ``holds.read_scope_holds``).
 
 
 def resolve_rebuild_interval(
@@ -290,25 +289,14 @@ def reconcile_policy_from_cadence(cadence) -> "ReconcilePolicy":
     )
 
 
-def invalidate_global_cadence_cache() -> None:
-    """Drop the cached global cadence so the next read reflects a just-written
-    value in THIS process (put_settings calls this). Cross-process staleness
-    is bounded by the cache TTL, not this."""
-    _GLOBAL_CADENCE_CACHE["at"] = 0.0
-
-
 async def read_global_cadence(session: AsyncSession) -> AggregationCadence:
-    """Persisted global cadence (aggregation_settings.cadence_json), cached
-    in-process for ≤ _SETTINGS_CACHE_TTL_S. NEVER raises — any DB/parse
-    failure degrades to an empty cadence (⇒ callers fall through to env),
-    mirroring the never-raise convention of the freshness read path."""
-    import time as _time
+    """Persisted global cadence (aggregation_settings.cadence_json), read by
+    primary key on every call — never cached, so a switch flipped on any
+    replica is what every other replica's next tick and read see. NEVER
+    raises — any DB/parse failure degrades to an empty cadence (⇒ callers
+    fall through to env), mirroring the never-raise convention of the
+    freshness read path."""
     from .models import AggregationSettingsORM
-
-    now = _time.monotonic()
-    cached = _GLOBAL_CADENCE_CACHE
-    if cached["cadence"] is not None and (now - cached["at"]) < _SETTINGS_CACHE_TTL_S:
-        return cached["cadence"]
 
     cadence = AggregationCadence()
     try:
@@ -320,9 +308,6 @@ async def read_global_cadence(session: AsyncSession) -> AggregationCadence:
         logger.warning(
             "Global cadence read failed (using env defaults): %s", exc,
         )
-        return cadence
-    cached["cadence"] = cadence
-    cached["at"] = now
     return cadence
 
 # Bounds for ``refresh_source(wait="complete")`` — it polls a queued rebuild
@@ -1253,7 +1238,6 @@ class AggregationService:
         row.updated_at = _now()
         row.updated_by = updated_by
         await session.commit()
-        invalidate_global_cadence_cache()
         # Echo the stored state (re-parse the columns rather than only the
         # request, so a tuning-only PUT still returns the persisted cadence).
         return await self.get_settings(session)
@@ -1319,19 +1303,24 @@ class AggregationService:
         # transient provider blips (e.g. FalkorDB "BusyLoadingError: Redis is
         # loading the dataset in memory") — including the per-job auto-resume
         # counter the stuck-job reconciler and crash recovery share, which
-        # no longer expires on its own. The checkpoint (last_cursor) is
-        # preserved, so it resumes from where it stopped — not from zero.
+        # no longer expires on its own — and the durable cancel flag, or a
+        # Resume inside the flag's hour would be re-cancelled at pickup. The
+        # checkpoint (last_cursor) is preserved, so it resumes from where it
+        # stopped — not from zero.
         job.status = "pending"
         job.retry_count = 0
         job.error_message = None
         job.updated_at = _now()
         await session.commit()
         try:
-            from .redis_client import get_redis, redispatch_key
-            await get_redis().delete(redispatch_key(job_id))
+            from .redis_client import cancel_flag_key, get_redis, redispatch_key
+            redis = get_redis()
+            await redis.delete(redispatch_key(job_id))
+            await redis.delete(cancel_flag_key(job_id))
         except Exception as exc:
             logger.warning(
-                "Could not clear the auto-resume counter for %s: %s", job_id, exc,
+                "Could not clear the auto-resume counter / cancel flag for %s: %s",
+                job_id, exc,
             )
 
         await self._dispatcher.dispatch(job.id)
@@ -1358,14 +1347,19 @@ class AggregationService:
         emits the ``job_cancelled`` event, and unregisters.
 
         For pending jobs (no worker is running), we mark cancelled
-        directly and emit the event — there's nothing to coordinate
-        with. For running jobs we keep the dispatcher's
-        ``cancel_task`` as a hard fallback that fires after a grace
-        period, but the cooperative path should win in practice.
+        directly, release the source's state row and emit the event —
+        there's nothing to coordinate with. For running jobs we keep the
+        dispatcher's ``cancel_task`` as a hard fallback that fires after a
+        grace period, but the cooperative path should win in practice.
         """
         from .cancel import request_cancel as request_cooperative_cancel
+        from .models import AggregationDataSourceStateORM
 
-        job = await session.get(AggregationJobORM, job_id)
+        # Row-locked (FOR UPDATE on Postgres, a no-op on SQLite) so this and
+        # the worker's start are mutually exclusive: the precondition below
+        # runs on the CURRENT row, and a worker that loads the row after this
+        # commit sees ``cancelled`` and never flips it back to running.
+        job = await session.get(AggregationJobORM, job_id, with_for_update=True)
         if not job or job.data_source_id != ds_id:
             raise NotFoundError(f"Aggregation job {job_id} not found")
 
@@ -1434,10 +1428,21 @@ class AggregationService:
             )
 
         # Pending job, or no worker registered (e.g. the worker process
-        # crashed and the row is orphaned). Mark cancelled directly.
+        # crashed and the row is orphaned). Mark cancelled directly — the
+        # source's state row too, which ``trigger()`` set to ``pending`` and
+        # which only a worker would otherwise ever change: left as it was,
+        # the stale-marker reconciler defers the source as in-flight forever.
+        # A job that never started on a never-built source goes back to
+        # ``none`` so the sweeper's never-built detector can queue its first
+        # build again; anything else reads ``cancelled``, what the worker
+        # writes on a mid-run cancel, which automation retries with backoff.
         job.status = "cancelled"
         job.completed_at = _now()
         job.updated_at = _now()
+        state = await session.get(AggregationDataSourceStateORM, ds_id)
+        if state is not None:
+            never_ran = job.started_at is None and not state.last_aggregated_at
+            state.aggregation_status = "none" if never_ran else "cancelled"
         await session.commit()
 
         # Hard fallback for the orphaned-row case where there's no
@@ -4083,13 +4088,33 @@ def _policy_response(cadence, fleet_hold=None) -> "ReconcilePolicyResponse":
     from ``persisted ?? envDefault`` and a no-op save round-trips the real
     current default instead of pinning a wrong value. ``fleet_hold`` is the
     fleet's ``automation_holds`` row (or ``None``): its two stamps ride the
-    policy so the Automation modal needs no second read."""
+    policy so the Automation modal needs no second read — as does the
+    fleet-level hold exactly as the resolver reports it (``held_by`` …
+    ``held_reason``), so the page's banner and the modal's read-out are the
+    gates' own answer, never a second opinion."""
     from .reconcile import REASONS
     from .schemas import ReconcilePolicyResponse
+
+    fleet_check = resolve_reconcile_enabled(None, cadence.reconcile_enabled)
+    drift_auto = resolve_drift_auto_rebuild(cadence.drift_auto_rebuild)
+    hold = resolve_hold(
+        scope_holds={FLEET_KEY: fleet_hold} if fleet_hold is not None else {},
+        provider_id=None,
+        fleet_reconcile_enabled=fleet_check,
+        drift_auto_rebuild=drift_auto,
+    )
+    # Which control releases it: the two Automation switches outrank the row.
+    reason = None
+    if hold is not None:
+        reason = "act" if not drift_auto else "check" if not fleet_check else "hold"
 
     return ReconcilePolicyResponse(
         paused_until=getattr(fleet_hold, "paused_until", None),
         stopped_at=getattr(fleet_hold, "stopped_at", None),
+        held_by=hold.scope if hold is not None else None,
+        held_kind=hold.kind if hold is not None else None,
+        held_until=hold.until if hold is not None else None,
+        held_reason=reason,
         enabled=cadence.reconcile_enabled,
         check_interval_secs=cadence.reconcile_check_interval_secs,
         max_actions_per_run=cadence.reconcile_max_actions_per_run,
@@ -4288,8 +4313,11 @@ async def save_reconcile_policy(
     The FLEET HOLD (``pausedUntil`` / ``stopped``) rides the same PUT and the
     same transaction but lives in its own ``automation_holds`` row, never in
     ``cadence_json`` — see ``AutomationHoldORM`` for why.
+
+    ``resetBreaker`` is an action riding the same PUT, like the per-source
+    PATCH's: every source the breaker suspended starts fresh, fleet-wide.
     """
-    from .models import AggregationSettingsORM
+    from .models import AggregationDataSourceStateORM, AggregationSettingsORM
     from .schemas import AggregationCadence
 
     row = await session.get(
@@ -4332,10 +4360,24 @@ async def save_reconcile_policy(
     else:
         fleet_hold = (await read_scope_holds(session)).get(FLEET_KEY)
 
+    if "reset_breaker" in sent and body.reset_breaker:
+        # The two fields ``reset_source_breaker`` zeroes per source, for every
+        # suspended source at once — one statement, so re-enabling after an
+        # incident is not one drawer per source.
+        lifted = await session.execute(
+            update(AggregationDataSourceStateORM)
+            .where(AggregationDataSourceStateORM.drift_state == "suspended")
+            .values(reconcile_consecutive_actions=0, drift_state=None)
+            .execution_options(synchronize_session=False)
+        )
+        logger.info(
+            "Reconcile breaker reset fleet-wide by %s: %s source(s) resumed",
+            actor, getattr(lifted, "rowcount", "?"),
+        )
+
     row.cadence_json = json.dumps(current)
     row.updated_at = _now()
     await session.commit()
-    invalidate_global_cadence_cache()
     return _policy_response(AggregationCadence(**current), fleet_hold)
 
 

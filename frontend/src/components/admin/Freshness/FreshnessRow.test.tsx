@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { automationChip, FreshnessRow } from './FreshnessRow'
-import { holdLabel, overrideWarning, rowHold } from './holds'
+import { fleetHold, holdLabel, overrideWarning, rowHold } from './holds'
 import type { FreshnessRow as FreshnessRowData } from '@/services/freshnessService'
 
 describe('automationChip', () => {
@@ -87,6 +87,16 @@ describe('hold copy', () => {
     it('drops the scope suffix on the scope\'s own surface', () => {
         expect(holdLabel({ scope: 'provider', kind: 'stopped', until: null }, 'provider')).toBe('Stopped')
         expect(holdLabel({ scope: 'fleet', kind: 'stopped', until: null }, 'provider')).toBe('Stopped fleet-wide')
+    })
+
+    it('reads the fleet hold off the policy as the server resolved it, naming what releases it', () => {
+        expect(fleetHold({ heldBy: 'fleet', heldKind: 'stopped', heldReason: 'act' }))
+            .toEqual({ scope: 'fleet', kind: 'stopped', until: null, reason: 'act' })
+        // A backend that predates ``heldBy`` on the policy: the row's stamps.
+        expect(fleetHold({ stoppedAt: '2026-09-01T00:00:00+00:00' }))
+            .toEqual({ scope: 'fleet', kind: 'stopped', until: null, reason: 'hold' })
+        expect(fleetHold({ heldBy: null, stoppedAt: null, pausedUntil: null })).toBeNull()
+        expect(fleetHold(undefined)).toBeNull()
     })
 
     it('tells a person overriding a hold that the hold stays', () => {

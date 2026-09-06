@@ -188,7 +188,10 @@ stays") and the refresh event carries an `override` action. The one exception
 is the provider- and fleet-wide batch refresh, which *skips* held sources and
 reports them (`outcome: held`): two hundred sources is not a deliberate
 per-source override. A job already running is never interrupted; a hold blocks
-the next one.
+the next one — and a rebuild automation queued *before* the hold is not "the
+next one": it still runs when a worker gets to it (a person can cancel it from
+Job History, where the *Automatic reconciliation* chip says which jobs
+automation queued).
 
 The gates, every path that can queue a job: the reconcile sweeper's act
 decision; `trigger()` for the automation sources (`reconcile`, `drift`,
@@ -208,10 +211,13 @@ automation**. `manual`, `onboarding` and `post_purge` are exempt by
 construction (a purge that deleted the cells must be allowed its own
 re-aggregate).
 
-The wider-scope rows are read by primary key on every resolution, never
+The wider-scope rows — and, for the same reason, the cadence's ③ Act and
+② Check switches — are read by primary key on every resolution, never
 cached: "Pause provider" on the web tier followed at once by "Refresh
 provider" on the Control Plane must skip what was just paused, and a 30s
-cache would not.
+per-process cache would not (nor would it stop the *other* control-plane
+replica queueing rebuilds for its TTL after ③ Act was switched off, or stop
+it reading the switch back to the operator as still on).
 
 A source the breaker suspended (`Needs a person`) — by the sweeper or by the
 stale-marker reconciler's retries — has a manual way back: **Resume
@@ -407,7 +413,7 @@ source per hour — with tallies by reason and by skip code, trimmed to 30 days.
 |---|---|---|
 | `GET /api/v1/admin/freshness/reconciliation` | ingestion-read | in-process |
 | `GET /api/v1/admin/freshness/reconciliation/activity?since=` | ingestion-read | in-process |
-| `PUT /api/v1/admin/freshness/reconciliation` (also the fleet hold: `pausedUntil`, `stopped`) | `system:admin` | in-process |
+| `PUT /api/v1/admin/freshness/reconciliation` (also the fleet hold: `pausedUntil`, `stopped`; and `resetBreaker`, fleet-wide) | `system:admin` | in-process |
 | `PUT /api/v1/admin/freshness/holds/provider/{id}` `{pausedUntil?, stopped?}` | `system:admin` | in-process |
 | `POST /api/v1/admin/freshness/reconcile-now` `{dryRun, dataSourceIds?}` | `system:admin` | proxy |
 | `PATCH /api/v1/admin/data-sources/{id}/freshness-settings` (also `resetBreaker`) | `ds:manage` | existing |
@@ -431,6 +437,11 @@ control plane. `actor` is forced server-side.
 > sent are written. Every field treats an explicit `null` as "clear this
 > override", so applying absent fields too would make a partial update silently
 > destructive.
+
+The policy read (and the PUT's response) carries the fleet-level hold as the
+resolver reports it — `heldBy` / `heldKind` / `heldUntil`, plus `heldReason`
+(`act`, `check` or `hold`) — so no UI has to re-derive it from the two
+switches and the row.
 
 ## UI
 
@@ -536,15 +547,27 @@ as deploy-set, never as disabled inputs pretending to be editable.
 is a **fleet-wide stop everywhere**: the sweeper's rebuilds and first builds,
 the stale-marker reconciler's retries of rebuilds already requested, and the
 provider/fleet batch refresh all hold, and every row reads "Stopped
-fleet-wide". A single-source Rebuild a person clicks still runs. It reaches
-the control plane within the 30s cadence cache.
+fleet-wide". A single-source Rebuild a person clicks still runs. Every
+replica reads the switch fresh on its next tick; nothing caches it.
 
 ③ Act's Advanced also carries the **fleet-wide hold** (the same snooze row as
 the drawer, plus "Until resumed (stop)"), which writes immediately rather than
 waiting for Save, and the breaker's live count as **"N need a person"** — a
-button that filters the table to those sources. A fleet hold is also bannered
-at the top of Overlay integrity, with Resume, because it is the one setting
-that makes every row's chip and every provider's control read "held".
+button that filters the table to those sources — and **Resume all N**, the
+drawer's Resume automation for every suspended source at once
+(`resetBreaker: true` on the policy PUT — an action, never staged into Save).
+A fleet hold is also bannered at the top of Overlay integrity, with Resume,
+because it is the one setting that makes every row's chip and every
+provider's control read "held".
+
+Under the rail, one line says what the server holds **right now** ("Right
+now: automatic rebuilds are stopped fleet-wide — ③ Act is off." / "…are on.
+3 sources need a person."). It is read off the policy's `heldBy` /
+`heldReason`, which the hold resolver itself computes, so it cannot disagree
+with the gates while the rail shows an edited, unsaved form. The Overlay
+integrity banner reads the same fields: it names the switch that stopped the
+fleet and offers Resume only for the fleet row — the switches are released
+from the modal, so for those it offers *Open Automation* instead.
 
 Closing with unsaved edits — `Esc`, the close button, or the backdrop — raises a
 discard confirmation rather than silently dropping the work.
@@ -614,8 +637,15 @@ seven states.
 - **A source stuck at "Reconcile suspended"** hit the breaker, for one of two
   reasons: it was rebuilt repeatedly without the finding clearing, or its
   rebuild failed (or was cancelled) and three automatic retries failed too.
-  Fix the cause first, then **Resume automation** in the drawer; the breaker
-  also resets when a later evaluation finds the source `in_sync`.
+  Fix the cause first, then **Resume automation** in the drawer — or
+  **Resume all** in the Automation modal's ③ Act Advanced, for every suspended
+  source at once; the breaker also resets when a later evaluation finds the
+  source `in_sync`.
+- **Cancelling a queued rebuild** (one no worker has started) releases its
+  source: a built source is retried by automation after one rebuild window,
+  a never-built one is queued for its first build again. Cancel and a
+  worker's start exclude each other, so a cancelled job never runs; and
+  Resume clears the cancel flag, so a cancelled job can be resumed at once.
 - **Turning a detector off** stops rebuilds for it. The problem is still
   detected and still shown.
 - **A source that fails every rebuild on `MaterializationBudgetExceeded`** is

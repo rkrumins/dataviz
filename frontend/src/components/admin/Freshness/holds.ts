@@ -6,7 +6,9 @@
  * releases this source" is answered in one place. Most restrictive wins across
  * fleet → provider → source, and the WIDEST scope is what a row names.
  */
-import type { FreshnessRow as FreshnessRowData, HoldKind, HoldScope } from '@/services/freshnessService'
+import type {
+    FleetHoldReason, FreshnessRow as FreshnessRowData, HoldKind, HoldScope, ReconcilePolicy,
+} from '@/services/freshnessService'
 
 /** Minutes/hours/days until a future instant, or null if it's already past. */
 export function timeUntil(iso?: string | null): string | null {
@@ -45,6 +47,36 @@ export function rowHold(
     }
     if (row.autoReconcile === false) return { scope: 'source', kind: 'stopped', until: null }
     if (timeUntil(row.pausedUntil)) return { scope: 'source', kind: 'paused', until: row.pausedUntil ?? null }
+    return null
+}
+
+/** The fleet-level hold, with the control that releases it. */
+export interface FleetHold extends RowHold {
+    scope: 'fleet'
+    reason: FleetHoldReason
+}
+
+/**
+ * The hold on the whole fleet, as the SERVER resolved it on the policy read:
+ * the fleet row, ③ Act off, or an inherited ② Check off — the same answer
+ * every gate gives, so the banner and the modal never contradict them. The
+ * fallback is for a backend that predates ``heldBy`` on the policy: the
+ * row's two stamps were the only fleet hold it could have reported.
+ */
+export function fleetHold(
+    policy: Pick<ReconcilePolicy, 'heldBy' | 'heldKind' | 'heldUntil' | 'heldReason' | 'stoppedAt' | 'pausedUntil'> | null | undefined,
+): FleetHold | null {
+    if (!policy) return null
+    if (policy.heldBy === 'fleet') {
+        return {
+            scope: 'fleet', kind: policy.heldKind ?? 'stopped', until: policy.heldUntil ?? null,
+            reason: policy.heldReason ?? 'hold',
+        }
+    }
+    if (policy.stoppedAt) return { scope: 'fleet', kind: 'stopped', until: null, reason: 'hold' }
+    if (timeUntil(policy.pausedUntil)) {
+        return { scope: 'fleet', kind: 'paused', until: policy.pausedUntil ?? null, reason: 'hold' }
+    }
     return null
 }
 

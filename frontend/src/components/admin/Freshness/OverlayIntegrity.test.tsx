@@ -34,7 +34,7 @@ vi.mock('@/services/freshnessService', async () => {
     }
 })
 
-function renderCard(window: '1h' | '3h' | '12h' | '24h' | '7d' = '24h') {
+function renderCard(window: '1h' | '3h' | '12h' | '24h' | '7d' = '24h', onOpenAutomation?: () => void) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     return render(
         <QueryClientProvider client={qc}>
@@ -52,6 +52,7 @@ function renderCard(window: '1h' | '3h' | '12h' | '24h' | '7d' = '24h') {
                     onOpenSource={() => {}}
                     window={window}
                     onWindowChange={() => {}}
+                    onOpenAutomation={onOpenAutomation}
                 />
             </MemoryRouter>
         </QueryClientProvider>,
@@ -226,6 +227,35 @@ describe('OverlayIntegrity fleet-wide hold banner', () => {
         expect(await screen.findByText(/Automatic rebuilds are stopped fleet-wide/)).toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', { name: /resume fleet-wide/i }))
         await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ pausedUntil: null, stopped: false }))
+    })
+
+    it('banners ③ Act off as the reason and points at Automation, not at a Resume that could not release it', async () => {
+        permissionFn.mockReturnValue(true)
+        getReconciliation.mockResolvedValue({
+            policy: { ...POLICY, heldBy: 'fleet', heldKind: 'stopped', heldReason: 'act' }, runs: [],
+        })
+        const onOpenAutomation = vi.fn()
+        renderCard('24h', onOpenAutomation)
+
+        expect(await screen.findByText(/③ Act is off in Automation/)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /resume fleet-wide/i })).not.toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /open automation/i }))
+        expect(onOpenAutomation).toHaveBeenCalledTimes(1)
+    })
+
+    it('a stop the server resolved from the fleet row still gets Resume', async () => {
+        permissionFn.mockReturnValue(true)
+        getReconciliation.mockResolvedValue({
+            policy: {
+                ...POLICY, stoppedAt: '2026-09-01T00:00:00+00:00',
+                heldBy: 'fleet', heldKind: 'stopped', heldReason: 'hold',
+            },
+            runs: [],
+        })
+        renderCard()
+
+        expect(await screen.findByText(/Automatic rebuilds are stopped fleet-wide\./)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /resume fleet-wide/i })).toBeInTheDocument()
     })
 
     it('banners a paused fleet with the time left, read-only for a non-admin', async () => {

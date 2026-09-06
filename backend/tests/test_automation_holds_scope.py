@@ -33,6 +33,7 @@ from backend.app.services.aggregation.holds import (
 )
 from backend.app.services.aggregation.models import AutomationHoldORM
 from backend.app.services.aggregation.schemas import (
+    AggregationCadence,
     AggregationCadence, FreshnessSettingsRequest, ReconcilePolicyRequest,
     ScopeHoldRequest,
 )
@@ -342,6 +343,90 @@ def test_the_fleet_pause_gets_the_same_validation_as_the_source_snooze():
         ReconcilePolicyRequest.model_validate({"pausedUntil": "2001-01-01T00:00:00+00:00"})
     with pytest.raises(ValueError):
         ScopeHoldRequest.model_validate({"pausedUntil": "not a date"})
+
+
+# ── The switches are read fresh; the policy reports the fleet hold ───────
+
+
+def test_read_global_cadence_is_never_cached():
+    """③ Act and ② Check are fleet-wide stops. A switch flipped on any
+    replica must be what every other replica's next tick and read see — so
+    there is no in-process cache to go stale for its TTL."""
+    row = _SettingsRow(json.dumps({"driftAutoRebuild": True}))
+    session = _PolicySession(row)
+    assert _run(svc_mod.read_global_cadence(session)).drift_auto_rebuild is True
+    row.cadence_json = json.dumps({"driftAutoRebuild": False})
+    assert _run(svc_mod.read_global_cadence(session)).drift_auto_rebuild is False
+    assert not hasattr(svc_mod, "_GLOBAL_CADENCE_CACHE")
+    assert not hasattr(svc_mod, "invalidate_global_cadence_cache")
+
+
+def test_the_policy_reports_the_fleet_hold_as_the_resolver_sees_it():
+    """The banner and the modal read ``heldBy``/``heldReason`` off the policy,
+    so they say exactly what the gates would do — never a second opinion —
+    and ``heldReason`` names the control that releases it."""
+    def held(cadence, fleet_row=None):
+        resp = svc_mod._policy_response(AggregationCadence(**cadence), fleet_row)
+        return (resp.held_by, resp.held_kind, resp.held_until, resp.held_reason)
+
+    assert held({}) == (None, None, None, None)
+    assert held({"driftAutoRebuild": False}) == ("fleet", "stopped", None, "act")
+    assert held({"reconcileEnabled": False}) == ("fleet", "stopped", None, "check")
+    stopped = AutomationHoldORM(
+        scope="fleet", scope_id="", stopped_at="2026-09-01T00:00:00+00:00",
+    )
+    assert held({}, stopped) == ("fleet", "stopped", None, "hold")
+    until = _future()
+    paused = AutomationHoldORM(scope="fleet", scope_id="", paused_until=until)
+    assert held({}, paused) == ("fleet", "paused", until, "hold")
+    # The switches outrank the row: Resume on the row could not release this.
+    assert held({"driftAutoRebuild": False}, stopped)[3] == "act"
+
+
+def test_the_policy_reports_the_env_fallback_of_act_too(monkeypatch):
+    monkeypatch.setattr(svc_mod, "AGGREGATION_DRIFT_AUTO_REBUILD", False)
+    resp = svc_mod._policy_response(AggregationCadence())
+    assert (resp.held_by, resp.held_reason) == ("fleet", "act")
+
+
+class _ResetSession(_PolicySession):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.executed = []
+
+    async def execute(self, stmt):
+        self.executed.append(stmt)
+        return types.SimpleNamespace(rowcount=3)
+
+
+def test_reset_breaker_on_the_policy_put_lifts_every_suspended_source():
+    """One statement for the whole fleet — the two fields
+    ``reset_source_breaker`` zeroes per source — and the policy untouched."""
+    row = _SettingsRow(json.dumps({"reconcileEnabled": True}))
+    session = _ResetSession(row)
+    body = ReconcilePolicyRequest.model_validate({"resetBreaker": True})
+    _run(svc_mod.save_reconcile_policy(
+        session, body, sent=body.model_fields_set, actor="alice",
+    ))
+    (stmt,) = session.executed
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "data_source_state" in sql and "suspended" in sql
+    assert "reconcile_consecutive_actions" in sql and "drift_state" in sql
+    assert json.loads(row.cadence_json) == {"reconcileEnabled": True}
+    assert session.committed
+
+
+def test_a_plain_policy_save_resets_no_breaker():
+    session = _ResetSession(_SettingsRow())
+    body = ReconcilePolicyRequest.model_validate({"enabled": False})
+    _run(svc_mod.save_reconcile_policy(session, body, sent=body.model_fields_set))
+    assert session.executed == []
+
+
+def test_reset_breaker_is_an_action_on_the_policy_put_not_a_setting():
+    body = ReconcilePolicyRequest.model_validate({"resetBreaker": True})
+    assert body.reset_breaker is True
+    assert body.model_fields_set == {"reset_breaker"}
 
 
 # ── The provider hold route ──────────────────────────────────────────────

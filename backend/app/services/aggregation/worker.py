@@ -129,7 +129,11 @@ class AggregationWorker:
         7. On failure: update status='failed', preserve checkpoint for resume
         """
         async with self._session_factory() as session:
-            job = await session.get(AggregationJobORM, job_id)
+            # Row-locked (FOR UPDATE on Postgres, a no-op on SQLite) so the
+            # start below and ``service.cancel`` are mutually exclusive:
+            # whichever commits first, the other sees its status. The lock
+            # is held only until the running-transition commit below.
+            job = await session.get(AggregationJobORM, job_id, with_for_update=True)
             if not job:
                 logger.error("Aggregation job %s not found", job_id)
                 return
@@ -145,6 +149,19 @@ class AggregationWorker:
                     "the aggregation worker (trigger_source=purge) — "
                     "ignoring without touching the row. Find and fix the "
                     "dispatcher that sent it here.", job_id,
+                )
+                return
+
+            if job.status not in ("pending", "running"):
+                # A cancel (or another executor's completion) landed after
+                # this job was picked up. Never flip a terminal row back to
+                # running — the one guard the in-process dispatcher, which
+                # skips the consumer's status check, gets. ``running`` is
+                # accepted: the stuck-job reconciler re-dispatches a job
+                # whose executor died without resetting its row.
+                logger.info(
+                    "Aggregation job %s is %s — not starting it",
+                    job_id, job.status,
                 )
                 return
 

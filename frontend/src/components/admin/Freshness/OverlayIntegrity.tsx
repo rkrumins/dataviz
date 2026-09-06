@@ -19,7 +19,7 @@ import {
     useReconcileActivity, useReconcileNow, useReconciliation, useSetReconciliationPolicy,
     FRESHNESS_KEYS,
 } from './useFreshness'
-import { timeUntil } from './holds'
+import { fleetHold, timeUntil } from './holds'
 import { useQueryClient } from '@tanstack/react-query'
 import {
     ACTIVITY_HORIZON, DRIFT_WINDOWS, checkNowMessage, itemsInWindow, lastDriftAt,
@@ -62,15 +62,18 @@ export function OverlayIntegrity({
     const newestFinding = lastDriftAt(weekItems)
     const offenders = rankRepeatOffenders(weekItems)
 
-    // The fleet-wide hold, from the policy read this card already makes. It
-    // is bannered HERE, above everything, because it is the one setting that
-    // makes every row's chip and every provider's control say "held" — an
-    // operator who cannot find why nothing rebuilds must not have to open
-    // the Automation modal to learn the whole fleet is stopped.
+    // The fleet-wide hold, from the policy read this card already makes, AS
+    // THE SERVER RESOLVED IT: the fleet row, ③ Act off, or ② Check off — the
+    // gates' own answer, so this banner can never say "on" while every row's
+    // chip says "Stopped fleet-wide". It is bannered HERE, above everything,
+    // because it is the one setting that makes every row's chip and every
+    // provider's control say "held" — an operator who cannot find why
+    // nothing rebuilds must not have to open the Automation modal to learn
+    // the whole fleet is stopped. Only the row has a Resume here; the two
+    // switches are released from the modal, so that is where the button goes.
     const policy = recon.data?.policy
-    const fleetStopped = !!policy?.stoppedAt
-    const fleetPausedLeft = policy?.pausedUntil ? timeUntil(policy.pausedUntil) : null
-    const fleetHeld = fleetStopped || fleetPausedLeft != null
+    const hold = fleetHold(policy)
+    const fleetPausedLeft = hold?.kind === 'paused' ? timeUntil(hold.until) : null
     const resumeFleet = () => {
         setPolicy.mutate({ pausedUntil: null, stopped: false }, {
             onSuccess: () => notify('success', 'Fleet-wide rebuilds resumed.'),
@@ -187,19 +190,28 @@ export function OverlayIntegrity({
                 </div>
             </header>
 
-            {fleetHeld && (
+            {hold && (
                 <div
                     role="status"
                     className="mx-4 mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-500/25 bg-slate-500/[0.06] px-3 py-2 text-[12px] text-ink-secondary"
                 >
-                    {fleetStopped
+                    {hold.kind === 'stopped'
                         ? <StopCircle className="w-4 h-4 shrink-0 text-slate-500" aria-hidden />
                         : <PauseCircle className="w-4 h-4 shrink-0 text-slate-500" aria-hidden />}
                     <span className="min-w-0 flex-1 leading-snug">
-                        Automatic rebuilds are {fleetStopped ? 'stopped' : `paused for another ${fleetPausedLeft}`} fleet-wide.
-                        Drift is still detected and shown; nothing is rebuilt automatically until this is resumed.
+                        {hold.reason === 'hold' ? (
+                            <>
+                                Automatic rebuilds are {hold.kind === 'stopped' ? 'stopped' : `paused for another ${fleetPausedLeft}`} fleet-wide.
+                                Drift is still detected and shown; nothing is rebuilt automatically until this is resumed.
+                            </>
+                        ) : (
+                            <>
+                                Automatic rebuilds are stopped fleet-wide: {hold.reason === 'act' ? '③ Act' : '② Check'} is off in Automation.
+                                Drift is still detected and shown; nothing is rebuilt automatically until it is back on.
+                            </>
+                        )}
                     </span>
-                    {isAdmin && (
+                    {hold.reason === 'hold' && isAdmin && (
                         <button
                             type="button"
                             onClick={resumeFleet}
@@ -207,6 +219,15 @@ export function OverlayIntegrity({
                             className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors disabled:opacity-50 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
                         >
                             <RotateCcw className="w-3.5 h-3.5" /> Resume fleet-wide
+                        </button>
+                    )}
+                    {hold.reason !== 'hold' && onOpenAutomation && (
+                        <button
+                            type="button"
+                            onClick={onOpenAutomation}
+                            className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
+                        >
+                            <Clock className="w-3.5 h-3.5" /> Open Automation
                         </button>
                     )}
                 </div>

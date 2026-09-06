@@ -42,7 +42,7 @@ const FLEET_POLL_MS = 30_000
 const BATCH_POLL_MS = 2_000
 /** The sweep ticks on the order of an hour, so polling it faster than the
  *  fleet would only add noise. */
-const RECONCILE_POLL_MS = 60_000
+export const RECONCILE_POLL_MS = 60_000
 
 export const FRESHNESS_KEYS = {
     all: ['freshness'] as const,
