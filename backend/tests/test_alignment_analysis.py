@@ -73,8 +73,12 @@ async def test_alignment_analysis_drifted_raw_source(test_client: AsyncClient, d
 
     assert body["profiled"] is True
     assert body["ontology"]["id"] == ont_id
-    assert body["aggregation"] == {
-        "status": "none", "lastAggregatedAt": None, "canonicalized": False}
+    agg = body["aggregation"]
+    assert (agg["status"], agg["lastAggregatedAt"], agg["canonicalized"]) == (
+        "none", None, False)
+    # Not versioned ⇒ nothing is projected for this source, so the projection
+    # evidence is UNKNOWN rather than healthy.
+    assert agg["projectorCurrent"] is None
 
     # Index coverage: declared spellings (+ platform defaults) are indexed;
     # the drifted and unmapped physical labels are not.

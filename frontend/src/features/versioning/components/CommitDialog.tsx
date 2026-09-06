@@ -2,7 +2,7 @@
  * CommitDialog — take a draft to main. PR-by-default: the primary action opens a
  * merge request (review path); "Publish directly" is the `:manage`-gated shortcut.
  * Conflict-aware: a 409 (main moved) surfaces a summary + the escape hatch, rather
- * than a generic error toast.
+ * than a generic error notification.
  *
  * ALREADY-IN-REVIEW. A branch may have only one live review, because a PR's diff is computed live
  * from its source branch — so edits made after it was raised are ALREADY in it. Raising a second
@@ -14,7 +14,8 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { GitPullRequest, Rocket, X, Loader2, AlertTriangle, ArrowRight, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
@@ -41,7 +42,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
   const [raced, setRaced] = useState<{ prId: string; title?: string | null } | null>(null)
   /** "Publish now" while a review is open bypasses it — make that an explicit second step. */
   const [confirmBypass, setConfirmBypass] = useState(false)
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const navigate = useNavigate()
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   const switchToMain = useBranchStore((s) => s.switchToMain)
@@ -71,7 +72,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       // We lost a race (or the list was stale). Don't dead-end — show the review that won.
       setRaced({ prId: e.prId, title: e.prTitle })
     } else {
-      showToast('error', (e as Error).message)
+      notify('error', (e as Error).message)
     }
   }
 
@@ -82,7 +83,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       { branchId, title: message || undefined, description: description || undefined },
       {
         onSuccess: (res) => {
-          showToast('success', 'Sent for review.')
+          notify('success', 'Sent for review.')
           onClose()
           navigate(`/workspaces/${workspaceId}/reviews?pr=${res.prId}`)
         },
@@ -104,7 +105,7 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
       { branchId, message: message || 'Publish draft' },
       {
         onSuccess: (res) => {
-          // The receipt (not a toast) is the confirmation — the bar renders it until dismissed.
+          // The receipt (not a notification) is the confirmation — the bar renders it until dismissed.
           setReceipt({ commitId: res.commitId, graphId, counts: changeSet.counts, via: 'publish' })
           switchToMain()
           onClose()
@@ -240,6 +241,13 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
 
         <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-3 bg-canvas-overlay/40">
           {canManage && (
+            <HoverTip
+              className="inline-flex"
+              label={inReview
+                ? 'Publish straight to the live version, bypassing the open review'
+                : 'Publish straight to the live version, skipping review'}
+              detail="Everyone sees the result immediately"
+            >
             <button
               onClick={handlePublish}
               disabled={busy || !hasChanges}
@@ -249,13 +257,11 @@ export function CommitDialog({ workspaceId, graphId, branchId, changeSet, onClos
                   ? 'text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20'
                   : 'text-ink hover:bg-canvas-overlay',
               )}
-              title={inReview
-                ? 'Publish straight to the live version, bypassing the open review'
-                : 'Publish straight to the live version, skipping review'}
             >
               {publish.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}
               {confirmBypass ? 'Publish anyway' : 'Publish now'}
             </button>
+            </HoverTip>
           )}
           {inReview ? (
             <button

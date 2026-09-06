@@ -41,15 +41,25 @@ import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStaged
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useGraphProvider } from '@/providers'
 import type { TraceV2Result } from '@/providers/GraphDataProvider'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
+import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
+import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
+import {
+  childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
+  openedViewMessage, openingViewMessage,
+} from './loadMessages'
 import { useExternalDegrees } from '@/hooks/useExternalDegrees'
-import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
+import {
+  useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
+  type RevealSearchHit,
+} from '@/hooks/useRevealSearchHit'
 import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
@@ -58,11 +68,16 @@ import { HierarchyBuilderPanel } from '../create/HierarchyBuilderPanel'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 import { BuildPanel } from '../create/buildmode/BuildPanel'
 import { buildTypeLayerMap, resolveRowLayer } from '../create/buildmode/resolveRowLayer'
-import { EdgeLegend } from '../EdgeLegend'
+import { ConnectionsPanel } from './connections/ConnectionsPanel'
+import { DataLoadsPanel } from './DataLoadsPanel'
+import { buildConnectionModel } from './connections/connectionModel'
+import { useConnectionVisibility } from '@/store/connectionVisibility'
+import { useBandReservation, useViewportReservation } from './useBandReservation'
 
+import { buildTraceLaneIndex, isReverseTraceWire } from '@/hooks/lib/traceWireDirection'
 import { useUnifiedTrace, type UseUnifiedTraceResult, type TraceResult } from '@/hooks/useUnifiedTrace'
 import { useEdgeDetailPanel, useEdgeTypeFilters } from '@/hooks/useEdgeFilters'
-import { getEdgeTypeDefinition } from '@/utils/edgeTypeUtils'
+import { getEdgeTypeDefinition, getEdgeTypeFromSchema, type EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
@@ -137,6 +152,52 @@ const EMPTY_DRILLDOWNS: Map<string, TraceV2Result> = new Map()
 /** The native trace draws through the overlay, never through the browse
  *  hierarchy filter — so the filter is fed nothing and stays pass-through. */
 const EMPTY_TRACE_NODES: ReadonlySet<string> = new Set<string>()
+/** "Nothing hidden" for the edge projection while the OVERLAY draws: a
+ *  trace's hidden types are its own, ephemeral set — never browse's. */
+const EMPTY_TYPE_SET: ReadonlySet<string> = new Set<string>()
+
+/**
+ * ONE ontology lookup for the Flows panel's rows, the overlay's colour
+ * and the overlay's dash, CACHED PER TYPE. Each lookup builds a fresh
+ * definition and allocates an icon element, and the overlay asks for one PER
+ * EDGE on every compute pass — a pass that re-runs on hover. An estate has a
+ * handful of types, so one Map answers all of it. Built at module scope, so
+ * the cache is created with the resolver and dropped with it: the caller
+ * re-makes one exactly when the ontology it reads changes.
+ */
+function makeConnectionTypeResolver(
+  relationshipTypes: Parameters<typeof getEdgeTypeDefinition>[1],
+  containmentEdgeTypes: Parameters<typeof getEdgeTypeDefinition>[2],
+  ontologyMetadata: { edgeTypeMetadata: Record<string, unknown> },
+): (edgeType: string) => EdgeTypeDefinition {
+  const cache = new Map<string, EdgeTypeDefinition>()
+  return (edgeType: string): EdgeTypeDefinition => {
+    const cached = cache.get(edgeType)
+    if (cached) return cached
+    const def = getEdgeTypeDefinition(
+      edgeType,
+      relationshipTypes,
+      containmentEdgeTypes,
+      ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
+    )
+    // getEdgeTypeDefinition FABRICATES a description when the ontology has
+    // none — "Edge type: Flows To", "Data flow relationship: Flows To",
+    // "Parent-child containment relationship". The panel prints its
+    // description line only when it is non-empty, so hand it the schema's own
+    // words or nothing at all, never a sentence nobody wrote. (The view's
+    // edgeTypeMetadata carries no prose — only isContainment / isLineage /
+    // direction / category — so there is nothing else to fall back to.)
+    // A system type whose wording this app owns is the one exception: its
+    // copy is a deliberate replacement for the ontology's engineer-speak, so
+    // it outranks the schema rather than being overwritten by it.
+    const description = edgeTypeCopy(edgeType)?.description
+      ?? (getEdgeTypeFromSchema(edgeType, relationshipTypes)?.description || '')
+    const resolved = { ...def, description }
+    cache.set(edgeType, resolved)
+    return resolved
+  }
+}
+
 /** Fed to the edge projection while the OVERLAY is drawing: the trace's wires
  *  come from its own ledger, so the browse lineage has nothing to say and
  *  projecting it only produces noise (see the call site). */
@@ -164,15 +225,22 @@ import { normalizeReferenceLayout, deriveEntityScope, scopeForPersist, type Norm
 import { LineageFlowOverlay, EXTREMITY_EDGE_GUTTER_PX } from './LineageFlowOverlay'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
-import { EditViewDetailsDialog } from './EditViewDetailsDialog'
-import { ShareViewDialog } from '@/components/views/ShareViewDialog'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
-import { getView, updateView, updateViewLayout } from '@/services/viewApiService'
+import { getView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
+import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatchUp'
 import { SearchMapPanel } from '../search/SearchMapPanel'
+import {
+    ViewRowSearchContext,
+    ViewSearchSessionContext,
+} from '../search/session/ViewSearchSessionContext'
+import {
+  useViewSearchSessionController,
+  type ViewSearchSession,
+} from '../search/session/useViewSearchSessionController'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
-import { useLoadingToast, useToast, useToastStore } from '@/components/ui/toast'
+import { useLoadingNotification, useAppNotifications, useNotificationStore } from '@/components/ui/notifications'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
@@ -254,6 +322,21 @@ function siblingContext(
   }
 }
 
+/** `gap-1.5` on the dock column below — the space between two stacked headers. */
+const DOCK_GAP_PX = 6
+
+/**
+ * The dock's collapsed footprint: every panel's header row plus the gaps
+ * between them. An opened body is a transient overlay above that band, so it
+ * is not measured — but a SECOND collapsed panel is, or the stack's own header
+ * sits over the bottom row of every column.
+ */
+const measureLegendHeader = (el: HTMLElement): number => {
+  const headers = [...el.querySelectorAll<HTMLElement>('[data-dock-header]')]
+  if (headers.length === 0) return 0
+  return headers.reduce((sum, h) => sum + h.offsetHeight, 0) + (headers.length - 1) * DOCK_GAP_PX
+}
+
 export function ContextViewCanvas({
   className,
   layers = defaultReferenceModelLayers,
@@ -276,6 +359,10 @@ export function ContextViewCanvas({
   const edgesTruncated = useCanvasStore((s) => s.edgesTruncated)
   const schema = useSchemaStore((s) => s.schema)
   const activeView = useSchemaStore((s) => s.getActiveView())
+  // Flows panel: which flow types this user has hidden, per
+  // view. Kept in localStorage keyed by view id, never in the view itself.
+  const connectionsViewId = activeView?.id ?? ''
+  const connectionVisibility = useConnectionVisibility(connectionsViewId)
   const provider = useGraphProvider()
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
@@ -697,6 +784,7 @@ export function ContextViewCanvas({
   // (which never touch those routes) still only need isDraft.
   const editModeEnabled = useFeature('editModeEnabled')
   const canEditGraph = isDraft && editModeEnabled
+  const versioningEnabled = useFeature('versioningEnabled')
   // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
   // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
   useDeletionGhosts(isDraft)
@@ -707,6 +795,12 @@ export function ContextViewCanvas({
   const viewExecCtx = useViewExecutionContext()
   const readOnly = viewExecCtx?.readOnly ?? false
   const canEnterEdit = !!graphId && !readOnly
+  // The branch switcher moved down here out of CanvasVersioningBar, into the slot
+  // the duplicated title block used to occupy. It must appear on exactly the terms
+  // the bar did — CanvasRouter mounts that bar only when versioning is on, the view
+  // has a workspace, and the session can write — or the control would surface on a
+  // canvas that previously had no versioning chrome at all.
+  const branchWorkspaceId = versioningEnabled && !readOnly ? scopeWsId : null
   // Blank (hand-built) models drive the guided empty state + first-steps
   // companion; react-query dedupes this against CanvasVersioningBar's resolve.
   // Threading the view id keeps every resolve consumer on ONE cache entry per
@@ -731,9 +825,6 @@ export function ContextViewCanvas({
     canAdminPerm,
     canPublishPerm,
   })
-  const canEditView = viewCaps.canEdit
-  const canShareView = viewCaps.canManageGrants
-
   // Keyboard shortcuts. Published is read-only, so its mutating shortcuts — Delete, ⌘D (duplicate),
   // and N (create) — are neutralised there with no-ops. A bare `undefined` on onDelete would fall
   // through to useCanvasKeyboard's built-in node-removal, so it must be an explicit no-op.
@@ -742,10 +833,16 @@ export function ContextViewCanvas({
   // sortedLayers / lens state); ref indirection avoids the TDZ.
   const fitToWidthRef = useRef<(() => void) | null>(null)
   const focusLensRef = useRef<(() => void) | null>(null)
+  const searchRef = useRef<ViewSearchSession | null>(null)
   const zoomShortcutHandlers = useMemo(() => ({
     onFitView: () => fitToWidthRef.current?.(),
     onZoomPreset: (level: 1 | 2 | 3) => setCanvasZoom([0.5, 0.75, 1][level - 1]),
     onFocusLens: () => focusLensRef.current?.(),
+    // Both reach the session through a ref for the same reason the two
+    // above do: it is defined further down, and this object is built
+    // before it exists.
+    onFocusSearch: () => searchRef.current?.inputRef.current?.focus(),
+    onToggleSearchPanel: () => searchRef.current?.togglePanel(),
   }), [setCanvasZoom])
   useCanvasKeyboard({
     enabled: true,
@@ -776,15 +873,26 @@ export function ContextViewCanvas({
     } | null
   >(null)
   // Sync indicator DERIVED from the canvas debounce (replaces the deleted store syncStatus): 'saving'
-  // from the moment a save is armed until the durable PUT settles, else 'idle'. The header subline
-  // shows a small spinner while 'saving'.
-  const [layoutSyncStatus, setLayoutSyncStatus] = useState<'idle' | 'saving'>('idle')
+  // from the moment a save is armed until the durable PUT settles, 'error' when it did not land,
+  // else 'idle'. The header subline shows a small spinner while 'saving' and the "Sync issue —
+  // retry" control on 'error'.
+  const [layoutSyncStatus, setLayoutSyncStatus] = useState<'idle' | 'saving' | 'error'>('idle')
+  // Which attempt owns the slot. A PUT slower than the 1500ms debounce leaves two saves in flight,
+  // and the loser must not speak for the canvas: an older one that rejects AFTER a later one settled
+  // is stale — its work rides in that newer payload.
+  const layoutSaveSeq = useRef(0)
+  // The autosave's own notifier, declared beside the save it reports on (the canvas already takes
+  // this hook more than once; `notify` is stable, which the effects below depend on). The header's
+  // retry sits in a subline the user may never look at — a lost layout edit has to say so.
+  const { notify: notifyLayoutSave } = useAppNotifications()
 
   const doLayoutSave = useCallback(async () => {
     if (layoutSaveTimer.current) { clearTimeout(layoutSaveTimer.current); layoutSaveTimer.current = null }
     const pending = pendingLayoutSave.current
     if (!pending) { setLayoutSyncStatus('idle'); return }
     pendingLayoutSave.current = null
+    const seq = ++layoutSaveSeq.current
+    setLayoutSyncStatus('saving')   // also covers a retry, which starts from 'error'
     try {
       await updateViewLayout(pending.viewId, {
         referenceLayout: pending.referenceLayout,
@@ -793,13 +901,25 @@ export function ContextViewCanvas({
         // replaces referenceLayout wholesale, then re-nests displayRules only when supplied).
         displayRules: useReferenceModelStore.getState().displayRules,
       }, pending.branchId ?? undefined)
-    } catch (err) {
-      // Swallow to avoid unhandled-rejection noise; the next edit re-arms the save.
-      console.error('[ContextViewCanvas] layout save failed', err)
-    } finally {
       setLayoutSyncStatus('idle')
+    } catch (err) {
+      // NOT swallowed. Layer create/rename/reorder, entity placement and display rules are all
+      // durable work that only travels this path, and UnsavedWorkGuard cannot see any of it (it
+      // keys off staged changes; none of these are staged).
+      // The edit stays PENDING: the branch-switch effect guards its re-fetch with this exact ref,
+      // so clearing it let the server's stale layout overwrite the user's edits. Restored only if
+      // no newer edit claimed the single slot while this one was in flight.
+      console.error('[ContextViewCanvas] layout save failed', err)
+      // Only the NEWEST attempt owns the slot and the indicator. A save that started later has
+      // already carried this one's work (the payload is the whole layout); restoring the older one
+      // would report a failure over an edit that saved, and retrying it would revert the newer edit.
+      if (seq !== layoutSaveSeq.current) return
+      if (!pendingLayoutSave.current) pendingLayoutSave.current = pending
+      setLayoutSyncStatus('error')   // what the header's "Sync issue — retry" waits for
+      notifyLayoutSave('error', "Couldn't save the canvas layout — your edits are still here. "
+        + 'Retry from the sync note beside the view name.')
     }
-  }, [])
+  }, [notifyLayoutSave])
 
   /** Arm (or re-arm) the debounced durable save and show the 'saving' indicator.
    *  Gated on canEdit — the VIEW-config capability, not the graph-data one:
@@ -851,8 +971,12 @@ export function ContextViewCanvas({
         return
       }
       if (cancelled) return
-      // A local edit landed after we started (a new save is armed) → don't clobber the optimistic layout.
-      if (pendingLayoutSave.current) return
+      // A local edit for THIS branch landed after we started (a new save is armed) → don't clobber the
+      // optimistic layout. Branch-aware, not presence-based: a pending edit belonging to a DIFFERENT
+      // branch has no claim here (its payload carries the branch it must go back to), and blocking on
+      // it left the previous branch's columns on screen under this branch's name — then wrote them
+      // over this branch's overlay on the next gesture.
+      if (pendingLayoutSave.current?.branchId === effectiveBranchId) return
       const view = useSchemaStore.getState().getActiveView()
       if (!view || view.id !== viewId) return   // the active view switched under us
       const nextRef = full.config?.layout?.referenceLayout
@@ -1031,9 +1155,6 @@ export function ContextViewCanvas({
     return () => clearTimeout(t)
   }, [assignmentStatus, resetAssignmentStatus])
 
-  // Search state
-  const [searchQuery, setSearchQuery] = useState('')
-
   // Entity creation. Every entry point (layer "add" buttons, per-row
   // add-child, right-click create, palette, 'N' key) opens the shared
   // Hierarchy Builder; its store centralizes scope + the ensureDraftOpen
@@ -1142,26 +1263,11 @@ export function ContextViewCanvas({
 
   const relationshipTypes = useViewRelationshipTypes()
 
-  // Advanced Search — production panel for template-driven exploration,
-  // visual predicate builder, raw JSON (Power tools), and Ask (NL2Query).
-  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false)
-
   // Property Manager — right-side drawer to browse properties + author
   // display-rule tags. The engine recomputes which nodes each enabled
   // rule matches and publishes them so FlatTreeItem can render chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   useDisplayRuleEngine(activeView?.id ?? null)
-
-  // View-metadata dialogs (title menu). EditViewDetailsDialog is prop-driven
-  // (open flag); Share mirrors ExplorerPage — mounted while shareSeed is set,
-  // seeded from a fresh getView. viewVisibility feeds the menu's read-only
-  // row and is only ever populated from that fetch (undefined until first
-  // Share open — the menu hides the row while unknown).
-  const [viewDetailsOpen, setViewDetailsOpen] = useState(false)
-  const [shareSeed, setShareSeed] = useState<
-    { id: string; name: string; visibility: 'private' | 'workspace' | 'enterprise' } | null
-  >(null)
-  const [viewVisibility, setViewVisibility] = useState<'private' | 'workspace' | 'enterprise' | undefined>(undefined)
 
   // Granularity options for the lineage aggregation selector — driven by the
   // active ontology's entity types, sorted coarsest-first (lowest level first).
@@ -1169,12 +1275,35 @@ export function ContextViewCanvas({
   // — matches the trace v2 contract where only traceable entities can be the
   // level a trace runs at. Tags / glossary terms are excluded.
   const schemaEntityTypes = useViewEntityTypes()
+
+  // Entity types the ontology INTROSPECTED from the graph include labels that
+  // FalkorDB still lists after their last node is gone — `db.labels()` keeps a
+  // label in the schema forever. `SentinelMarker`, left behind by a test, is
+  // one: zero nodes, `hierarchy.level: 0`, `traceable: true`. The real level-0
+  // type here (`domain`) is `traceable: false`, so the zombie won the
+  // coarsest-first sort below and was sent as the granularity on EVERY
+  // aggregated-edge request, app-wide.
+  //
+  // A level nothing is filed under is not a granularity. Require the type to
+  // be present on the canvas: a type with no entities cannot be a meaningful
+  // aggregation level, and this holds for any future zombie without anyone
+  // having to notice it.
+  const presentEntityTypes = useMemo(() => {
+    const present = new Set<string>()
+    for (const n of nodes) {
+      const t = n.data?.type as string | undefined
+      if (t) present.add(t)
+    }
+    return present
+  }, [nodes])
+
   const granularityOptions = useMemo(
     () => schemaEntityTypes
       .filter(et => et.hierarchy?.level !== undefined)
       .filter(et => et.behavior?.traceable !== false)
+      .filter(et => presentEntityTypes.size === 0 || presentEntityTypes.has(et.id))
       .map(et => ({ id: et.id, name: et.name, level: et.hierarchy.level })),
-    [schemaEntityTypes]
+    [schemaEntityTypes, presentEntityTypes]
   )
 
   // Auto-select the coarsest (lowest-level) granularity once options are
@@ -1222,16 +1351,22 @@ export function ContextViewCanvas({
     )
   }, [edges, relationshipTypes, containmentEdgeTypes, ontologyMetadata, edgeFilters])
 
-  // Schema-driven edge color resolver — used by LineageFlowOverlay
-  // Resolves edge type → color from backend schema, falling back to defaults
+  // Schema-driven edge type resolver — one lookup, three readers: the
+  // Connections panel (label, description, colour, stroke style), the
+  // overlay's colour, and the overlay's dash.
+  // Resolves edge type → definition from backend schema, falling back to defaults
+  const resolveConnectionType = useMemo(
+    () => makeConnectionTypeResolver(relationshipTypes, containmentEdgeTypes, ontologyMetadata),
+    [relationshipTypes, containmentEdgeTypes, ontologyMetadata]
+  )
+
   const resolveEdgeColor = useCallback((edgeType: string) => {
-    return getEdgeTypeDefinition(
-      edgeType,
-      relationshipTypes,
-      containmentEdgeTypes,
-      ontologyMetadata ? { edgeTypeMetadata: ontologyMetadata.edgeTypeMetadata } : undefined
-    ).color
-  }, [relationshipTypes, containmentEdgeTypes, ontologyMetadata])
+    return resolveConnectionType(edgeType).color
+  }, [resolveConnectionType])
+
+  const resolveEdgeStrokeStyle = useCallback((edgeType: string) => {
+    return resolveConnectionType(edgeType).strokeStyle
+  }, [resolveConnectionType])
 
   // Double-click handler: inline edit (default) or trace (shift+double-click)
   const handleDoubleClick = useCallback(async (nodeId: string, event?: React.MouseEvent) => {
@@ -1370,6 +1505,17 @@ export function ContextViewCanvas({
   // below to keep the selected column in the un-occluded region whenever a
   // side panel (EntityDrawer / EdgeDetailPanel) is open.
   const horizontalScrollRef = useRef<HTMLDivElement | null>(null)
+  // The bottom-right dock reserves the band it floats in — the collapsed
+  // headers only, so opening a panel does not shove the columns up.
+  const edgeLegendRef = useRef<HTMLDivElement>(null)
+  // The variable keeps its name; what it measures is now the whole dock stack
+  // — Data loads' header plus Connections' (CanvasStatusChips and the columns
+  // read it by that name).
+  useBandReservation(edgeLegendRef, '--edge-legend-height', measureLegendHeader)
+  // ...and the dock's FULL height to the document, so the app's notification stack
+  // (bottom-right, z-80) starts above it instead of covering its headers and
+  // eating the clicks that collapse them.
+  useViewportReservation(edgeLegendRef, '--canvas-dock-height')
   const lastAutoScrolledForSelectionRef = useRef<string | null>(null)
 
   // Zoom changes move every node card, but nothing else forces the edge
@@ -1381,24 +1527,6 @@ export function ContextViewCanvas({
     })
     return () => cancelAnimationFrame(raf)
   }, [canvasZoom])
-
-  // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
-  // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
-  // via padding — a change that does NOT resize the observed node cards,
-  // so the overlay's ResizeObserver never fires. Without an explicit
-  // nudge the lineage marks stay anchored to their pre-panel positions,
-  // stranding ghost stubs/edges over empty canvas when a panel opens,
-  // closes, or the tree is expanded/collapsed while one is open. Force a
-  // redraw on every panel transition, with trailing settle passes so the
-  // marks land on the post-animation geometry (panels slide ~300–400ms).
-  useEffect(() => {
-    const raf = requestAnimationFrame(() =>
-      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.()),
-    )
-    const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
-    const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
-    return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, advancedSearchOpen, builderOpen, buildOpen])
 
   // Zoom-out mounts ~1/zoom more rows per column (the wrapper's layout
   // pre-compensation enlarges the scroll viewport in layout px), so the
@@ -1560,6 +1688,62 @@ export function ContextViewCanvas({
     [activeView?.content, activeReferenceLayout],
   )
 
+  // The reveal walk, handed to the search session below so the header's
+  // "Top matches" list can put a hit on the canvas without going through
+  // the results panel.
+  //
+  // A STABLE WRAPPER over a ref rather than the walk itself: the walk is
+  // built far below this line because it needs the hydration loader and
+  // the scroll helper, and neither exists yet here. Hoisting them would
+  // mean hoisting a third of this component above the session, and a
+  // session input that changed identity per render would churn every
+  // consumer of the search context. The warm-up has no such problem —
+  // the provider is resolved at the top of the file.
+  const revealSearchHitRef = useRef<RevealSearchHit | null>(null)
+  const revealHitForSearch = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
+    // No walk wired yet (first render) is a reveal that opened nothing,
+    // and the box says so rather than swallowing the click.
+    return (await revealSearchHitRef.current?.(urn, ancestorPath)) ?? LANDED_NOWHERE
+  }, [])
+  const prefetchSpine = usePrefetchSearchHitSpine(provider)
+  // A warm-up is still a write. While a trace owns the canvas the store is
+  // read-only (`traceWriteLocked`), and a spine primed behind the overlay
+  // would surface the moment the trace closed — nodes nobody expanded.
+  const prefetchSearchHitSpine = useCallback<typeof prefetchSpine>(async (urn, ancestorPath) => {
+    if (traceWriteLocked()) return
+    await prefetchSpine(urn, ancestorPath)
+  }, [prefetchSpine, traceWriteLocked])
+
+  // The canvas's ONE search session: the header box, the layer columns and
+  // the results panel all read it back off the context below, so they can
+  // no longer disagree about what was searched. Both inputs are memoised
+  // upstream — a per-render layout or layer array would churn the session
+  // and, through it, every consumer of that context.
+  const search = useViewSearchSessionController({
+    viewId: activeView?.id ?? '',
+    layers: sortedLayers,
+    assignments: activeReferenceLayout.assignments,
+    revealHit: revealHitForSearch,
+    prefetchHit: prefetchSearchHitSpine,
+  })
+  // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
+  // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
+  // via padding — a change that does NOT resize the observed node cards,
+  // so the overlay's ResizeObserver never fires. Without an explicit
+  // nudge the lineage marks stay anchored to their pre-panel positions,
+  // stranding ghost stubs/edges over empty canvas when a panel opens,
+  // closes, or the tree is expanded/collapsed while one is open. Force a
+  // redraw on every panel transition, with trailing settle passes so the
+  // marks land on the post-animation geometry (panels slide ~300–400ms).
+  useEffect(() => {
+    const raf = requestAnimationFrame(() =>
+      requestAnimationFrame(() => triggerEdgeRedrawRef.current?.()),
+    )
+    const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
+    const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
+    return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
+  }, [drawerNodeId, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+
   // ─── Node sort modes ────────────────────────────────────────────────────────
   // Persisted state: view-wide `defaultNodeSortMode` + per-layer `nodeSortMode`
   // overrides (both in referenceLayout). Viewer state: DEVICE-LOCAL per-view
@@ -1588,23 +1772,6 @@ export function ContextViewCanvas({
     horizontalScrollRef.current?.scrollTo({ left: 0, behavior: 'smooth' })
   }, [setCanvasZoom, sortedLayers.length])
 
-  // Measure the outer container's CLASSIC horizontal scrollbar into
-  // --canvas-hsb (0 for macOS overlay scrollbars). Percentage heights
-  // ignore scrollbar gutters, so without this the columns overflow the
-  // visible area by the scrollbar height and their bottom edge (and the
-  // bottom periphery scrims) clips below the fold.
-  useEffect(() => {
-    const el = horizontalScrollRef.current
-    if (!el) return
-    const update = () => {
-      el.style.setProperty('--canvas-hsb', `${Math.max(0, el.offsetHeight - el.clientHeight)}px`)
-    }
-    update()
-    if (typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(update)
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
@@ -1836,10 +2003,6 @@ export function ContextViewCanvas({
     if (hydration) {
       for (const id of hydration.loadingNodes) {
         hydration.cancel(id)
-        // `searchChildren` queues under its OWN keyspace while recording the
-        // BARE id in `loadingNodes`, so cancelling the id alone leaves an
-        // in-flight child search running straight into the trace.
-        hydration.cancel(`search:${id}`)
       }
     }
     canvasTrace.start(urn)
@@ -2342,38 +2505,12 @@ export function ContextViewCanvas({
   }, [trace.isTracing, trace.drilldowns, renderMap])
 
 
-  // Search results
-  const searchResults = useMemo(() => {
-    if (!searchQuery.trim()) return []
-    const query = searchQuery.toLowerCase()
-    return displayFlat.filter((node) =>
-      node.name.toLowerCase().includes(query) ||
-      node.typeId.toLowerCase().includes(query)
-    )
-  }, [searchQuery, displayFlat])
-
-  // Advanced-search match URN set (W1 substrate). Subscribed once so a
-  // re-render fires only when the set object identity changes. The
-  // canvas highlights these URNs via the existing `searchResults` prop
-  // on LayerColumn — same visual treatment as the legacy quick-search
-  // fallback, just sourced server-side. Union with the legacy quick-
-  // search hits so both lit at once (legacy is W9 cleanup target).
+  // What the session's last run matched, straight from the store.
+  // Subscribed once so a re-render fires only when the set's identity
+  // changes, and handed to LayerColumn as-is: a canvas node's id IS its
+  // URN (`lib/canvasNodeMapper`), and a Set keeps the per-row membership
+  // test O(1) for a search that matched thousands of nodes.
   const advancedMatchUrns = useMatchUrnSet()
-  const matchedNodeIds = useMemo(() => {
-    const out = new Set<string>(searchResults.map((n) => n.id))
-    if (advancedMatchUrns.size > 0) {
-      for (const node of displayFlat) {
-        const urn = (node as { urn?: string }).urn ?? node.id
-        if (advancedMatchUrns.has(urn) || advancedMatchUrns.has(node.id)) {
-          out.add(node.id)
-        }
-      }
-    }
-    // Kept as a Set: LayerColumn tests membership once per rendered row, and
-    // an advanced search can match thousands of nodes — an array turns that
-    // into an O(matches) scan per row on every render.
-    return out
-  }, [searchResults, advancedMatchUrns, displayFlat])
 
   // Action: Move entity to layer (updated for unified context menu)
   // Stages a `move_to_layer` change instead of immediately persisting via
@@ -2546,7 +2683,7 @@ export function ContextViewCanvas({
       const prefs = usePreferencesStore.getState()
       if (!prefs.onboardingCompletedSteps.includes('custom-order-toast')) {
         prefs.completeOnboardingStep('custom-order-toast')
-        useToastStore.getState().addToast({
+        useNotificationStore.getState().add({
           type: 'info',
           message: `Custom order — drag cards to arrange “${layer.name}”`,
         })
@@ -2740,7 +2877,7 @@ export function ContextViewCanvas({
   }, [interactions.openContextMenu])
 
   // Toggle node expansion with Lazy Loading
-  const { loadChildren, searchChildren, cancelChildLoad, isLoading: isLoadingChildren, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
+  const { loadChildren, cancelChildLoad, loadingNodes, failedNodes, retryHydration, loadMoreRoots, rootsLoaded, rootsHaveMore } = useGraphHydration()
 
   // Direction-aware child loading: a parent's children load server-sorted per
   // its layer's effective asc/desc (custom layers order ROOTS by orderKey;
@@ -2759,13 +2896,49 @@ export function ContextViewCanvas({
     [loadChildren, layerSortDirectionFor],
   )
 
+  /**
+   * The same load, but it says what it did — "Snowflake · 5 datasets", named
+   * from the summary `loadChildren` hands back.
+   *
+   * Only the two loads the USER asked for come through here: opening a
+   * container and "Load N more". Every other caller of `loadChildrenSorted`
+   * stays silent — the auto-first-page effect, a search reveal walking a hit's
+   * ancestors, the column's paging sentinel. None of those is something the
+   * user did, and announcing them is the noise this replaces.
+   *
+   * Keyed per container, so two containers opened at once are two named
+   * messages rather than one that outlives the other.
+   */
+  const { notify: notifyChildLoad, showLoading: showChildLoad, hideLoading: hideChildLoad } = useAppNotifications()
+  const announceChildLoad = useCallback(async (parentId: string) => {
+    const key = `ctx-children:${parentId}`
+    // Read at click time rather than through a dependency: `displayMap`
+    // changes with every graph write, and this callback is handed to
+    // LayerColumn's memo.
+    // `|| parentId`, not `?? ''`: a container whose backend displayName is ""
+    // would otherwise give "Loading …", a message with no subject at all.
+    const label = String(useCanvasStore.getState().nodes.find(n => n.id === parentId)?.data?.label || parentId)
+    showChildLoad(key, loadingChildrenMessage(label))
+    try {
+      const summary = await loadChildrenSorted(parentId)
+      // Undefined when nothing ran (already fully loaded, or collapsed onto an
+      // in-flight load) or when the load failed — nothing true to report.
+      if (summary) notifyChildLoad('success', childLoadMessage(summary, schema?.entityTypes))
+    } finally {
+      hideChildLoad(key)
+    }
+  }, [loadChildrenSorted, schema, showChildLoad, hideChildLoad, notifyChildLoad])
+
   // "Load N more" from a column. In trace mode the walk model IS the set of
   // children that carry lineage, so there is nothing more to fetch — and a
   // fetch would write the store the overlay deliberately leaves alone.
-  const loadMoreChildren = useCallback(async (parentId: string) => {
+  //
+  // `auto` = LoadMoreItem's one-page-ahead sentinel, which pages because the
+  // row drifted into view. Nobody asked for it, so it loads without a word.
+  const loadMoreChildren = useCallback(async (parentId: string, auto?: boolean) => {
     if (traceWriteLocked()) return
-    await loadChildrenSorted(parentId)
-  }, [loadChildrenSorted, traceWriteLocked])
+    await (auto ? loadChildrenSorted(parentId) : announceChildLoad(parentId))
+  }, [announceChildLoad, loadChildrenSorted, traceWriteLocked])
 
   // Same for another page of ROOTS — reachable from the status chip and from
   // scrolling a column to its end, neither of which means "grow the browse
@@ -2774,16 +2947,6 @@ export function ContextViewCanvas({
     if (traceWriteLocked()) return
     void loadMoreRoots()
   }, [loadMoreRoots, traceWriteLocked])
-
-  // Child search REPLACES a parent's loaded children in the store — it
-  // `removeNodes`/`removeEdges` them and `addGraph`s the hits — and records
-  // nothing about what it dropped. A trace that let it run could therefore
-  // never be exited back to the canvas the reader started from. The
-  // magnifier is hidden while tracing (FlatTreeItem); this is the backstop.
-  const searchChildrenGuarded = useCallback((parentId: string, query: string) => {
-    if (traceWriteLocked()) return
-    void searchChildren(parentId, query)
-  }, [searchChildren, traceWriteLocked])
 
   // Arming a connection is the first step of staging an edge: the next click
   // resolves a target, the picker opens, and confirming writes a create_edge
@@ -2800,6 +2963,9 @@ export function ContextViewCanvas({
   useEffect(() => {
     childLoadRef.current = { cancel: cancelChildLoad, loadingNodes }
     renderMapRef.current = renderMap
+    // The keyboard handlers are assembled before the session exists, so
+    // they reach it the same way they reach fit-to-width.
+    searchRef.current = search
   })
 
   // Fetch aggregated edges when the set of COLLAPSED visible containers changes.
@@ -2857,6 +3023,15 @@ export function ContextViewCanvas({
   // hooks/useSourceChangedRefresh.
   useSourceChangedRefresh(dataSourceId, aggregationStaleReason)
 
+  // Connections-still-catching-up: when the rollup layer answers SHORT, ask
+  // readiness whether this source is actually behind, and if it is, say so on
+  // the board. The silent version of this condition — cards drawn with the
+  // wires between them simply missing — is what cost a day of debugging.
+  // Rarely-changing by construction (it only moves when a source wedges or
+  // recovers), so it is safe at this component's top level; it is read by JSX
+  // only and is in no memo's dependency array.
+  const projectionCatchUp = useProjectionCatchUp(dataSourceId, aggregationStaleReason)
+
   // A node can become expanded WITHOUT going through the toggle handler that
   // loads its first page — the per-view expanded-state restore above replays a
   // saved expansion set onto a freshly-hydrated canvas that only has roots. Such
@@ -2878,17 +3053,16 @@ export function ContextViewCanvas({
     if (expandedNodes.size === 0) return
 
     for (const nodeId of expandedNodes) {
-      if (autoLoadedFirstPageRef.current.has(nodeId)) continue
+      // In-flight state stays here; the RULE lives in `shouldAutoLoadFirstPage`
+      // so it can be read and tested without mounting this component.
       if (loadingNodes.has(nodeId)) continue
       if (failedNodes.has(nodeId)) continue
-
-      const node = displayMap.get(nodeId)
-      if (!node) continue
-      const childCount = (node.data?.childCount as number) ?? 0
-      if (childCount === 0) continue
-      // Already has children on the canvas — this is a page-2+ situation, which
-      // is the Load-more row's job, not ours.
-      if ((childMap.get(nodeId)?.length ?? 0) > 0) continue
+      if (!shouldAutoLoadFirstPage({
+        nodeId,
+        displayMap,
+        childMap,
+        autoLoaded: autoLoadedFirstPageRef.current,
+      })) continue
 
       autoLoadedFirstPageRef.current.add(nodeId)
       void loadChildrenSorted(nodeId)
@@ -3058,7 +3232,7 @@ export function ContextViewCanvas({
     scrollHitIntoView,
     getElementById: (id) => document.getElementById(`layer-node-${id}`),
     getScrollContainer: () => horizontalScrollRef.current,
-    showToast: (type, message) => { useToastStore.getState().addToast({ type, message }) },
+    notify: (type, message) => { useNotificationStore.getState().add({ type, message }) },
   })
 
   // Reveal callback for advanced-search hits and pin clicks. Walks the
@@ -3068,19 +3242,35 @@ export function ContextViewCanvas({
   // (W3). Uses `useRevealSearchHit` (renamed from the original Advanced
   // Search `useRevealNode` during the resilience-hardening integration to
   // coexist with the entity-drawer reveal hook above).
+  // A level the walk opened AND furnished with its spine child is accounted
+  // for: nothing may page it afterwards. Stable identity — the ref is the
+  // state, so this callback never needs to change.
+  const markFirstPageHandled = useCallback((nodeId: string) => {
+    autoLoadedFirstPageRef.current.add(nodeId)
+  }, [])
   const revealSearchHitBrowse = useRevealSearchHit({
     setExpandedNodes,
-    loadChildren: loadChildrenSorted,
     provider,
     scrollIntoView: scrollHitIntoView,
+    markFirstPageHandled,
   })
-  const revealSearchHit = useCallback(async (urn: string, ancestorPath: Parameters<typeof revealSearchHitBrowse>[1]) => {
+  const revealSearchHit = useCallback<RevealSearchHit>(async (urn, ancestorPath) => {
     if (traceWriteLocked()) {
-      if (expandTraceChain(urn)) scrollHitIntoView(urn)
-      return
+      // Drawing: the overlay opens its own chain. Still walking: there is
+      // nothing on screen to land on yet, and saying so beats a click
+      // that looks like it did nothing.
+      if (!expandTraceChain(urn)) return LANDED_NOWHERE
+      scrollHitIntoView(urn)
+      return { landedOn: 'hit', urn, displayName: canvasDisplayName(urn) }
     }
-    await revealSearchHitBrowse(urn, ancestorPath)
+    return revealSearchHitBrowse(urn, ancestorPath)
   }, [expandTraceChain, scrollHitIntoView, revealSearchHitBrowse, traceWriteLocked])
+
+  // Close the loop on the wrapper the search session was handed above.
+  // The trace-aware `revealSearchHit`, not the bare browse walk: a reveal
+  // fired while a trace is on screen must go through the same write lock
+  // every other reveal does.
+  useEffect(() => { revealSearchHitRef.current = revealSearchHit })
 
   // "Frame matches" — scroll the horizontal canvas container so the first
   // match-bearing node is centered. This is a viewport-not-zoom action since
@@ -3132,38 +3322,83 @@ export function ContextViewCanvas({
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
   const hydrationStatus = useCanvasStore((s) => s.hydrationStatus)
   const hydrationFailed = hydrationStatus === 'warming' || hydrationStatus === 'unavailable'
-  const regionCount = useCanvasStore((s) => s.loadingRegions.size)
   const isHydratingInitial = hydrationPhase !== 'complete'
 
-  // Floating loading toasts — keep the full set so every long-running operation
+  // Floating loading notifications — keep the full set so every long-running operation
   // is explicitly announced. Wording is centralised here.
-  // Two phase-explicit toasts ('ctx-hydrating-entities' / 'ctx-hydrating-edges')
-  // duplicate the global 'hydration' toast from CanvasRouter intentionally: the
+  // Two phase-explicit notifications ('ctx-hydrating-entities' / 'ctx-hydrating-edges')
+  // duplicate the global 'hydration' notification from CanvasRouter intentionally: the
   // global one has a single key that recycles between phases, so users with the
   // canvas focused want a sticky in-context indicator that the entities AND
   // edges loads both happened — even if hydration is fast.
-  useLoadingToast('ctx-hydrating-entities', hydrationPhase === 'roots', 'Loading entities…', 'Entities loaded', hydrationFailed)
-  useLoadingToast('ctx-hydrating-edges', hydrationPhase === 'edges', 'Loading edges between entities…', 'Edges loaded', hydrationFailed)
-  useLoadingToast('ctx-assignments', assignmentStatus === 'loading', 'Computing layer assignments', 'Layer assignments ready')
-  useLoadingToast('ctx-agg-edges', isLoadingAggregatedEdges, 'Loading aggregated edges', 'Aggregated edges loaded')
-  useLoadingToast('ctx-children', isLoadingChildren, 'Loading child entities', 'Child entities loaded')
-  useLoadingToast('ctx-regions', regionCount > 0, 'Loading region data', 'Region data loaded')
+  //
+  // Every success message is a FUNCTION, evaluated at the loading→done
+  // transition: it reports what the load produced, and the counts only exist
+  // once it has. Read from the store rather than a render-scope value where
+  // the phase is what publishes the result — `nodes`/`edges` are authoritative
+  // the moment the phase leaves the roots/children pair / 'edges'.
+  //
+  // Expanding a container is NOT here: `isLoadingChildren` was
+  // `loadingNodes.size > 0`, a global "≥1 container busy" boolean that could
+  // never name which one. That message moved to `announceChildLoad`, at the
+  // two call sites where the container is known.
+  //
+  // 'roots' AND 'children' — the entities load spans BOTH phases, and only the
+  // transition out of the pair is behind `setGraph`. An open-scope view loads
+  // by type: roots first, then 'children' for the remaining visible types
+  // (useGraphHydration), and the nodes are committed after that second fetch.
+  // Gating on 'roots' alone put the falling edge at the roots→children hop —
+  // before the write, on a store that hydration had just emptied — so every
+  // such view was announced as "· 0 items".
+  useLoadingNotification(
+    'ctx-hydrating-entities',
+    hydrationPhase === 'roots' || hydrationPhase === 'children',
+    openingViewMessage(activeView?.name),
+    () => openedViewMessage(activeView?.name, useCanvasStore.getState().nodes.length),
+    hydrationFailed,
+  )
+  useLoadingNotification(
+    'ctx-hydrating-edges',
+    hydrationPhase === 'edges',
+    'Loading relationships…',
+    () => connectionsLoadedMessage(useCanvasStore.getState().edges.length),
+    hydrationFailed,
+  )
+  useLoadingNotification(
+    'ctx-assignments',
+    assignmentStatus === 'loading',
+    'Arranging layers…',
+    () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.length),
+    // An errored pass leaves `effectiveAssignments` at its previous value —
+    // an empty Map on a first load — so without this a provider blip reports
+    // the green "Placed 0 items across 6 layers", once per bounded retry.
+    assignmentStatus === 'error',
+  )
+  // A spinner while it works, and NOTHING in the record afterwards. Summarising
+  // is a consequence of expanding something, not a thing the user did: it
+  // re-runs on every expand and collapse, so announcing it put a system line
+  // between every two of the user's own — and interleaved like that the panel's
+  // fold could never collapse them. The count belongs to the Flows panel
+  // directly below, which is where a reader can act on it. Only non-loading
+  // notifications are recorded, so passing no success message keeps the log to
+  // what the user actually did.
+  useLoadingNotification('ctx-agg-edges', isLoadingAggregatedEdges, 'Summarising flows…')
 
   // Warn the user once when any child fetch fails — gives them an explicit
   // signal beyond the inline error rows inside the affected parent's subtree.
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const lastFailedCountRef = useRef(0)
   useEffect(() => {
     const count = failedNodes?.size ?? 0
     if (count > lastFailedCountRef.current) {
-      showToast('warning', count === 1 ? '1 entity failed to load' : `${count} entities failed to load`)
+      notify('warning', count === 1 ? '1 item failed to load' : `${count} items failed to load`)
     }
     lastFailedCountRef.current = count
-  }, [failedNodes, showToast])
+  }, [failedNodes, notify])
 
   // View/Edit mode transitions (header Edit / Done). Entering edit =
   // opening/resuming a draft; the versioning bar tints amber and the header
-  // morphs — that IS the success feedback, so no toast on the happy path.
+  // morphs — that IS the success feedback, so no notification on the happy path.
   // Entering Edit no longer silently resumes/creates a draft. The user explicitly continues an
   // existing draft OR names a new branch in StartEditingDialog (which then switchToDrafts). The
   // shared `ensureDraftOpen` stays the path for the OTHER authoring entry points (create-link,
@@ -3175,65 +3410,11 @@ export function ContextViewCanvas({
   const handleExitEdit = useCallback(() => {
     if (stagedChangeList.length > 0) {
       openStagedChangesPanel()
-      showToast('warning', 'Review your pending edits — save or discard them before leaving the draft.')
+      notify('warning', 'Review your pending edits — save or discard them before leaving the draft.')
       return
     }
     useBranchStore.getState().switchToMain()
-  }, [stagedChangeList.length, openStagedChangesPanel, showToast])
-
-  // ── View-metadata actions (title menu) ──────────────────────────────
-  // All read the live view from the store at call time so they carry no
-  // stale-closure risk and keep their dep lists minimal.
-
-  // Inline rename — optimistic: patch the store immediately (header updates
-  // instantly), persist, and on failure revert to the previous name + toast.
-  const handleRenameView = useCallback((name: string) => {
-    const view = useSchemaStore.getState().getActiveView()
-    if (!view?.id) return
-    const viewId = view.id
-    const previousName = view.name
-    useSchemaStore.getState().updateView(viewId, { name })
-    updateView(viewId, { name }).catch(err => {
-      useSchemaStore.getState().updateView(viewId, { name: previousName })
-      showToast('error', err instanceof Error ? err.message : 'Failed to rename view')
-    })
-  }, [showToast])
-
-  const handleEditViewDetails = useCallback(() => setViewDetailsOpen(true), [])
-
-  // The dialog persists to the backend itself; here we mirror the fields the
-  // store knows (name/description) so the header reflects the edit at once.
-  const handleViewDetailsSaved = useCallback(
-    (updated: { name: string; description?: string; tags?: string[] }) => {
-      const viewId = useSchemaStore.getState().getActiveView()?.id
-      if (!viewId) return
-      useSchemaStore.getState().updateView(viewId, {
-        name: updated.name,
-        description: updated.description,
-      })
-    },
-    [],
-  )
-
-  // Share — the store config carries the tier now (viewToViewConfig), so the
-  // dialog seeds synchronously; the fetch survives only as a fallback for
-  // store entries that predate the field.
-  const handleShareView = useCallback(async () => {
-    const view = useSchemaStore.getState().getActiveView()
-    if (!view?.id) return
-    if (view.visibility) {
-      setShareSeed({ id: view.id, name: view.name, visibility: view.visibility })
-      setViewVisibility(view.visibility)
-      return
-    }
-    try {
-      const full = await getView(view.id)
-      setShareSeed({ id: full.id, name: full.name, visibility: full.visibility })
-      setViewVisibility(full.visibility)
-    } catch (err) {
-      showToast('error', err instanceof Error ? err.message : 'Failed to open sharing')
-    }
-  }, [showToast])
+  }, [stagedChangeList.length, openStagedChangesPanel, notify])
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
@@ -3459,7 +3640,7 @@ export function ContextViewCanvas({
         // density-tier renderer + browse-mode bundling now absorb the
         // result; the historical reason this was disabled (canvas
         // overload) no longer applies.
-        await loadChildrenSorted(nodeId)
+        await announceChildLoad(nodeId)
         if (trace.isTracing) {
           // Fire-and-forget: drill runs in the background and merges into
           // the canvas as it returns. No await — the children are already
@@ -3624,7 +3805,7 @@ export function ContextViewCanvas({
       }
       if (subtreeUrns.size > 0) purgeAggregatedEdgesIncidentToUrns(subtreeUrns)
     }
-  }, [displayMap, loadChildrenSorted, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
+  }, [displayMap, announceChildLoad, cancelChildLoad, childMap, removeStoreNodes, purgeAggregatedEdgesIncidentToUrns, traceActive, trace.isTracing, autoDrillOnExpand, traceWriteLocked, recordTraceExpansionSoon])
 
 
 
@@ -3691,22 +3872,96 @@ export function ContextViewCanvas({
     browseBundleParentMap: parentMap,
     browseBundleFanInThreshold: lineageBundleFanIn,
     nodeLayerIndexMap,
+    // Hiding a type is real: the projection drops those relationships per
+    // group member. While the OVERLAY draws it is already fed EMPTY_EDGES,
+    // and the trace's own hidden set is ephemeral, so browse's persisted
+    // set has no say there.
+    hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
   })
+
+  // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
+  // and must not permanently reshape browse, so this set is ephemeral state
+  // here and the persisted browse set is neither read nor written while the
+  // overlay draws. Keyed on `overlay.active` (the same signal the projection
+  // uses): during the WALK the board is still browse, so browse's own set is
+  // still the one in force. Reset as the trace ends or the focus changes —
+  // React's "adjusting state when a prop changes", not an effect, which
+  // would draw one committed frame under the previous trace's set.
+  const [traceHiddenTypes, setTraceHiddenTypes] = useState<ReadonlySet<string>>(EMPTY_TYPE_SET)
+  const [traceHiddenScope, setTraceHiddenScope] = useState({ tracing: overlay.active, focus: canvasTrace.tracedUrn })
+  if (traceHiddenScope.tracing !== overlay.active || traceHiddenScope.focus !== canvasTrace.tracedUrn) {
+    setTraceHiddenScope({ tracing: overlay.active, focus: canvasTrace.tracedUrn })
+    setTraceHiddenTypes(EMPTY_TYPE_SET)
+  }
+
+  // ONE CONTROL FOR BROWSE AND TRACE, two places to put the answer. While
+  // the overlay draws, every toggle lands in the ephemeral set above and
+  // NEVER in the persisted store — the routing is what makes that
+  // impossible, not a guard inside the store.
+  const { toggle: toggleBrowseType, solo: soloBrowseType, showAll: showAllBrowseTypes } = connectionVisibility
+  const toggleConnectionType = useCallback((type: string) => {
+    if (!overlay.active) { toggleBrowseType(type); return }
+    const key = type.toUpperCase()
+    setTraceHiddenTypes(prev => {
+      const next = new Set(prev)
+      if (!next.delete(key)) next.add(key)
+      return next.size === 0 ? EMPTY_TYPE_SET : next
+    })
+  }, [overlay.active, toggleBrowseType])
+
+  const soloConnectionType = useCallback((type: string, allTypes: string[]) => {
+    if (!overlay.active) { soloBrowseType(type, allTypes); return }
+    // Same semantics as the store's: hide every type the panel knows about
+    // except this one, which over a single type hides nothing.
+    const key = type.toUpperCase()
+    const rest = [...new Set(allTypes.map(t => t.toUpperCase()))].filter(t => t !== key)
+    setTraceHiddenTypes(rest.length === 0 ? EMPTY_TYPE_SET : new Set(rest))
+  }, [overlay.active, soloBrowseType])
+
+  const showAllConnectionTypes = useCallback(() => {
+    if (!overlay.active) { showAllBrowseTypes(); return }
+    setTraceHiddenTypes(EMPTY_TYPE_SET)
+  }, [overlay.active, showAllBrowseTypes])
+
+  // WHICH WAY A TRACE WIRE RUNS is a question about the TRACE's board, and
+  // the trace's board is its lanes — a card the walk brought in is in none
+  // of the browse layers, so `nodeLayerIndexMap` answers "nothing" for it
+  // (see traceWireDirection for what that cost). Lanes arrive in the view's
+  // own layer order.
+  const traceLanes = overlay.view?.lanes
+  const traceLaneIndex = useMemo(() => buildTraceLaneIndex(traceLanes), [traceLanes])
 
   // THE TRACE'S OWN WIRES: one line per flow, at the one grain the reader's
   // expansion has earned. Endpoints are card ids (a Context View node id IS
   // its urn), which is what LineageFlowOverlay anchors on.
   const visibleLineageEdges = useMemo(() => {
     if (!overlay.active || !overlay.view) return browseVisibleLineageEdges
-    return overlay.view.wires.map(w => ({
-      id: w.id,
-      source: w.source,
-      target: w.target,
-      edgeCount: w.edgeCount,
-      isBundled: w.isBundled,
-      kind: w.kind,
-    }))
-  }, [overlay.active, overlay.view, browseVisibleLineageEdges])
+    // HIDING A TYPE MID-TRACE IS A WIRE FILTER, NOT A RE-TRACE: the native
+    // walk takes no edge-type argument, so re-running it would change
+    // nothing. A wire survives when it carries a type nobody hid — or no
+    // type at all, which is not something we can filter on. Its count is a
+    // WEIGHT, not a member list, so a mixed wire keeps its full count and
+    // only loses the hidden type from its row.
+    return overlay.view.wires
+      .filter(w => traceHiddenTypes.size === 0 || w.types.length === 0
+        || w.types.some(t => !traceHiddenTypes.has(t.toUpperCase())))
+      .map(w => ({
+        id: w.id,
+        source: w.source,
+        target: w.target,
+        edgeCount: w.edgeCount,
+        isBundled: w.isBundled,
+        kind: w.kind,
+        types: w.types.filter(t => !traceHiddenTypes.has(t.toUpperCase())),
+        // A rollup or residual wire IS a summary and must draw dashed.
+        isGhost: w.kind !== 'raw',
+        // Both ends must be placed before a wire is called reverse: the flag
+        // re-routes the line through the overlay's back-arc and lands in the
+        // panel's `←` column, so an unplaced endpoint must read as "unknown",
+        // never as Source.
+        isReverseFlow: isReverseTraceWire(w, traceLaneIndex),
+      }))
+  }, [overlay.active, overlay.view, browseVisibleLineageEdges, traceHiddenTypes, traceLaneIndex])
 
   // Publish the projected lineage edge set to the canvas store so panels
   // outside the canvas (EntityDrawer's Lineage section) can mirror exactly
@@ -3748,10 +4003,22 @@ export function ContextViewCanvas({
     return visibleLineageEdges.length > autoStubThreshold
   }, [overlay.active, lineageRenderMode, visibleLineageEdges.length, autoStubThreshold])
 
-  // Significance ranking: bundled edge count first (a 600-edge bundle IS
-  // the macro flow), confidence as the tie-break.
-  const bySignificance = (a: { edgeCount?: number; confidence?: number }, b: { edgeCount?: number; confidence?: number }) =>
-    ((b.edgeCount || 1) - (a.edgeCount || 1)) || ((b.confidence || 0) - (a.confidence || 0))
+  // Significance ranking for the AMBIENT BUDGET, which rations room on the
+  // board. It ranks on `bundleSize` — how many lines this one line replaces —
+  // NOT on `edgeCount`, which is the weight the bundle stands for.
+  //
+  // Those diverge on a roll-up: a "Combined flow" can speak for thousands of
+  // table-level flows while occupying exactly one line. Ranking on the weight
+  // let such a roll-up outrank, and therefore evict, the raw edges a user had
+  // just expanded a container to see — lineage vanishing at the moment they
+  // asked for more of it. `edgeCount` remains the weight everywhere it is
+  // read for display; only the budget's ordering changed.
+  const bySignificance = (
+    a: { bundleSize?: number; edgeCount?: number; confidence?: number },
+    b: { bundleSize?: number; edgeCount?: number; confidence?: number },
+  ) =>
+    ((b.bundleSize ?? b.edgeCount ?? 1) - (a.bundleSize ?? a.edgeCount ?? 1))
+    || ((b.confidence || 0) - (a.confidence || 0))
 
   // Adaptive ambient budget. Above the threshold, "Adaptive" adapts
   // instead of cliffing (old behavior: all ambient edges vanished at
@@ -3804,6 +4071,13 @@ export function ContextViewCanvas({
     }
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, autoStubThreshold, hoveredNodeId, selectedNodeId, overlay.active, canvasTrace.tracedUrn, urnToIdMap])
   const effectiveLineageEdges = edgePresentation.edges
+
+  // The panel reads the SAME array the overlay is handed, so "in view"
+  // means post-budget and the drawn set is a subset of the model.
+  const connectionModel = useMemo(
+    () => buildConnectionModel(effectiveLineageEdges),
+    [effectiveLineageEdges]
+  )
 
   // Flow ribbons — macro volume per (layer → layer) pair, aggregated over
   // EVERY projected edge (not just the budgeted subset) so the bands show
@@ -4226,6 +4500,32 @@ export function ContextViewCanvas({
   const mergedHighlightNodes = isClickHighlightActive ? highlightState.nodes : hoverHighlight.nodes
   const mergedHighlightEdges = isClickHighlightActive ? highlightState.edges : hoverHighlight.edges
 
+  // The Connections panel's highlight is a deliberate gesture on the panel,
+  // so while it is active it wins over hover/click — on the OVERLAY only.
+  // It carries edge ids and no nodes; routed to the columns as well, an
+  // active highlight with an empty node set would dim every card.
+  const [connectionHighlight, setConnectionHighlight] = useState<ReadonlySet<string> | null>(null)
+  // A highlight must not outlive the board it pointed at: switching view, and
+  // crossing into or out of a trace, replace every edge id under it.
+  // Reconciled as the change ARRIVES — React's "adjusting state when a prop
+  // changes", the same idiom the panel uses, not an effect, which would paint
+  // the stale highlight for one committed frame first.
+  // Keyed on `overlay.active`, the same signal the panel drops its own pin
+  // on: clearing on `traceActive` instead left the pinned ROW lit for the
+  // whole walk with nothing lit on the board to match it. NOT keyed on the
+  // traced urn: a re-focus inside a trace keeps the panel's pin, which
+  // re-emits against the new model, so clearing here would only blank the
+  // board for a frame.
+  const [highlightScope, setHighlightScope] = useState({ viewId: connectionsViewId, tracing: overlay.active })
+  if (highlightScope.viewId !== connectionsViewId || highlightScope.tracing !== overlay.active) {
+    setHighlightScope({ viewId: connectionsViewId, tracing: overlay.active })
+    setConnectionHighlight(null)
+  }
+  const overlayHighlightEdges = useMemo(
+    () => (connectionHighlight ? new Set(connectionHighlight) : mergedHighlightEdges),
+    [connectionHighlight, mergedHighlightEdges]
+  )
+
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
   // Drill-down: double-click an AGGREGATED edge to fetch finer-level lineage
@@ -4329,6 +4629,13 @@ export function ContextViewCanvas({
       data-trace-active={traceActive ? 'true' : 'false'}
       className={cn("h-full w-full flex flex-col overflow-hidden bg-gradient-to-br from-canvas via-canvas to-canvas-elevated/30", className)}
     >
+      {/* One session for the whole canvas — the header box and the results
+          panel read it from here. The columns read the narrow slice
+          nested inside it: the session changes identity on every
+          character typed in the header, and a column that re-rendered on
+          that rebuilt its whole flat tree per keystroke. */}
+      <ViewSearchSessionContext.Provider value={search}>
+      <ViewRowSearchContext.Provider value={search.rowSearch}>
       {/* Row layout: [left rail SearchMapPanel] + canvas column + [right-rail panels].
           When a panel opens it joins the row as a flex sibling so the entire
           canvas (header + body) shrinks horizontally rather than being
@@ -4344,32 +4651,16 @@ export function ContextViewCanvas({
           the exit (the unmount races the inner exit animation and can
           strand it). Render persistently; it owns its own presence. */}
       <SearchMapPanel
-        open={advancedSearchOpen}
-        onClose={() => setAdvancedSearchOpen(false)}
+        open={search.panelOpen}
+        onClose={search.closePanel}
         viewId={activeView?.id ?? ''}
+        session={search.advanced}
+        onClear={search.clearQuery}
         onRevealNode={revealSearchHit}
         onFrameMatches={handleFrameMatches}
       />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        searchResults={searchResults}
-        onSearchResultClick={(node) => {
-          selectNode(node.id)
-          // Tracing: the overlay owns expansion (and the hit may be nested
-          // inside a closed card, so open the way to it too). Mid-walk there
-          // is no overlay yet and browse expansion is not restored on exit,
-          // so leave it alone.
-          if (traceWriteLocked()) {
-            if (overlay.active) {
-              expandTraceChain(node.id)
-              overlay.expandPath([node.id])
-            }
-            return
-          }
-          setExpandedNodes((prev) => new Set([...prev, node.id]))
-        }}
         showLineageFlow={showLineageFlow}
         onToggleLineageFlow={() => setShowLineageFlow(!showLineageFlow)}
         showEdgeDirection={showEdgeDirection}
@@ -4395,38 +4686,10 @@ export function ContextViewCanvas({
           else setTraceDepthDown(value)
           recordTraceView(dir === 'upstream' ? { depthUp: value } : { depthDown: value })
         }}
-        onOpenAdvancedSearch={(seedQuery) => {
-          // Toggle the panel. When the user escalates from the
-          // quick search (passes a seed string), force-open the
-          // panel + clear the quick-search input (so the no-match
-          // escalation card disappears) + stash the typed query as
-          // a one-shot ``pendingSearchSeed`` (W2.7) so the empty
-          // hero's "Type to search by name across this view…"
-          // input opens pre-filled with the user's text. The hero
-          // consumes + clears the seed on mount.
-          if (seedQuery && seedQuery.trim()) {
-            const trimmed = seedQuery.trim()
-            setSearchQuery('')
-            useSearchStore.getState().setPendingSearchSeed(trimmed)
-            setAdvancedSearchOpen(true)
-            return
-          }
-          // Plain toggle — the search panel lives on the LEFT rail,
-          // so it coexists with selection / edge-panel / creation on
-          // the right.
-          setAdvancedSearchOpen((open) => !open)
-        }}
         onTogglePropertyManager={() => setPropertyManagerOpen((open) => !open)}
         propertyManagerOpen={propertyManagerOpen}
-        viewName={activeView?.name}
-        entityTypeCount={activeView?.content.visibleEntityTypes.length}
-        activeContextModelName={null}
-        canEditView={canEditView}
-        canShareView={canShareView}
-        viewVisibility={viewVisibility}
-        onRenameView={handleRenameView}
-        onEditViewDetails={handleEditViewDetails}
-        onShareView={() => void handleShareView()}
+        branchWorkspaceId={branchWorkspaceId}
+        branchDataSourceId={dataSourceId}
         syncStatus={layoutSyncStatus}
         onRetrySync={() => { void flushLayoutSave() }}
         isDraft={isDraft}
@@ -4511,17 +4774,41 @@ export function ContextViewCanvas({
         )}
 
 
+        {/* Connections-still-catching-up banner — THE EXPLANATION THAT WAS
+            MISSING. When a source's read cache trails its published history,
+            main reads fall back to the version log and the connections
+            between items largely stop being drawn. Before this, that looked
+            exactly like a correct, nearly-empty answer: cards on the board,
+            no wires, nothing said. It sits ABOVE the truncation banner and
+            suppresses that banner's "narrow the selection" advice, which is
+            wrong here — narrowing the selection cannot recover connections
+            the source is not serving yet. Plain language only: no
+            "projection", "watermark", "commit seq" or "rollup" on the board.
+            In normal flow inside [data-canvas-body], like every banner here,
+            so the columns are pushed down rather than covered — it reserves
+            no floating band and needs no --*-height. */}
+        {projectionCatchUp.catchingUp && (
+          <div
+            data-canvas-interactive
+            data-testid="lineage-catching-up"
+            role="status"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 dark:text-amber-400 text-xs flex items-start gap-2 z-20"
+          >
+            <span className="font-medium shrink-0">Connections are still catching up.</span>
+            <span>{catchUpMessage(projectionCatchUp.commitsBehind)}</span>
+          </div>
+        )}
         {/* Aggregation truncation banner — backend signal that the visible
             edge set was capped. The "computing" and "last computed Xh ago"
             banners were removed: the materialization-triggered flag was
             sticky after first paint and the staleness banner fired even
             for fresh aggregations. Trust the data already on canvas. */}
-        {(aggregationTruncated || edgesTruncated) && (
+        {((aggregationTruncated && !projectionCatchUp.catchingUp) || edgesTruncated) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
-            <span className="font-medium">Showing the largest connections — narrow the selection to see more.</span>
+            <span className="font-medium">Showing the largest relationships — narrow the selection to see more.</span>
           </div>
         )}
         {/* Stale-source banner — a source-data change queued/ran a rebuild; the
@@ -4537,13 +4824,15 @@ export function ContextViewCanvas({
         )}
         {/* Edge-fetch integrity banner — an edge query failed and was
             swallowed to keep nodes rendering; the canvas may be missing
-            connections. Retry re-hydrates and refetches aggregated edges. */}
+            relationships. That fetch is the RAW one, structural edges
+            included, so the banner uses the covering word rather than
+            "flows". Retry re-hydrates and refetches aggregated edges. */}
         {(edgeFetchFailures > 0 || aggregationError) && (
           <div
             data-canvas-interactive
             className="mx-4 mt-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/40 text-amber-700 text-xs flex items-center gap-2 z-20"
           >
-            <span className="font-medium">Some connections could not be loaded — the canvas may be incomplete.</span>
+            <span className="font-medium">Some relationships could not be loaded — the canvas may be incomplete.</span>
             <button
               className="ml-auto px-2 py-0.5 rounded-md border border-amber-500/40 font-semibold hover:bg-amber-500/10 transition-colors"
               onClick={() => {
@@ -4629,7 +4918,7 @@ export function ContextViewCanvas({
           const bs = useBranchStore.getState()
           if (bs.currentBranchId && bs.graphId && bs.dataSourceId) {
             try {
-              await saveStagedChangesToDraft(stagedChangeList, {
+              const { commitId, unsaved } = await saveStagedChangesToDraft(stagedChangeList, {
                 wsId: bs.workspaceId ?? scopeWsId,
                 dataSourceId: bs.dataSourceId,
                 branchId: bs.currentBranchId,
@@ -4659,9 +4948,24 @@ export function ContextViewCanvas({
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
               await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
               closeStagedChangesPanel()
-              showToast('success', 'Saved to draft.')
+              // Only claim what was written. `unsaved` names node fields the op mapper cannot carry
+              // (the entity drawer's schema-property inputs, a raw-JSON edit) — an edit made only of
+              // those sends no ops at all, and a zero-op save resolves exactly like a commit. A green
+              // "Saved to draft." over that is the lie this reports instead.
+              // A zero-OP batch is not a zero-WORK batch: layer moves produce no graph ops (so no
+              // commitId) and were just persisted durably by the flushLayoutSave above. Telling that
+              // user nothing was saved sends them to redo work that already landed.
+              const carriedSomething = !!commitId || stagedChangeList.some(
+                c => c.type !== 'update_entity' && c.type !== 'rename_entity')
+              if (unsaved.length > 0) {
+                notify('warning', carriedSomething
+                  ? `Saved, except ${unsaved.join(', ')} — the app can't store ${unsaved.length === 1 ? 'that field' : 'those fields'} on an entity yet.`
+                  : `Nothing was saved — the app can't store ${unsaved.join(', ')} on an entity yet.`)
+              } else {
+                notify('success', 'Saved to draft.')
+              }
             } catch (e) {
-              showToast('error', (e as Error).message)
+              notify('error', (e as Error).message)
             }
             return
           }
@@ -4675,18 +4979,49 @@ export function ContextViewCanvas({
           }
         }} />
 
-        {/* Edge Legend — sits at the bottom-right of the (possibly shrunken)
-            canvas. Right-rail panels are now flex siblings, so the canvas
-            itself shrinks when one opens — the legend doesn't need its own
-            offset logic. Lifts above TraceBottomDock via --trace-dock-height. */}
+        {/* The bottom-right dock — Data loads above Connections, one stack. Docked
+            in the reserved band, never over rows: it publishes its collapsed
+            (headers) height as --edge-legend-height and the columns area pads
+            for it; opening a panel grows upward as a transient overlay. The
+            column is bottom-anchored, so the two panels can never cover each
+            other however either one opens. Right-rail panels are flex
+            siblings, so the canvas itself shrinks when one opens.
+            Lifts above TraceBottomDock via --trace-dock-height.
+            Both bodies open (40vh + 45vh + ~244px of chrome) is TALLER than
+            the canvas body, which is `overflow-hidden` — so the column caps
+            itself and scrolls. Uncapped, the overflow is clipped off the top
+            and takes the Data loads header with it: the one control that closes
+            Data loads, unreachable. The cap excludes the bottom offset, or a
+            raised dock overflows the top by exactly the trace dock's height. */}
         <div
-          className="absolute z-30 w-64 pointer-events-auto transition-all duration-300 ease-out"
+          ref={edgeLegendRef}
+          // z-40, the floating-chrome tier (trace dock, lens pills): the
+          // columns area is `relative z-30` and later in the DOM, so at
+          // z-30 the opened panel body painted UNDER the rows it overlaps.
+          // w-80 = 320px, a NotificationCard's exact width. Data loads is the
+          // record of the very messages that just flew past in this corner, so
+          // the two surfaces line up as one column — and at 256px a message
+          // that fit on one line as a notification wrapped onto two here.
+          className="absolute z-40 w-80 pointer-events-auto flex flex-col gap-1.5 overflow-y-auto overscroll-contain transition-all duration-300 ease-out"
           style={{
-            bottom: 'calc(160px + var(--trace-dock-height, 0px))',
+            bottom: 'calc(0.5rem + var(--trace-dock-height, 0px))',
             right: '1rem',
+            maxHeight: 'calc(100% - 1rem - var(--trace-dock-height, 0px))',
           }}
         >
-          <EdgeLegend defaultExpanded={false} visibleEdges={effectiveLineageEdges} />
+          <DataLoadsPanel dataSourceId={dataSourceId} />
+          <ConnectionsPanel
+            key={connectionsViewId}
+            model={connectionModel}
+            hiddenTypes={overlay.active ? traceHiddenTypes : connectionVisibility.hiddenTypes}
+            resolveType={resolveConnectionType}
+            lineageOn={showLineageFlow}
+            traceMode={overlay.active}
+            onToggleType={toggleConnectionType}
+            onSoloType={soloConnectionType}
+            onShowAll={showAllConnectionTypes}
+            onHighlight={setConnectionHighlight}
+          />
         </div>
 
         {/* Status chips — loaded-but-hidden data (unresolved edges,
@@ -4737,7 +5072,9 @@ export function ContextViewCanvas({
               data-canvas-interactive
             >
               <span className="tabular-nums font-medium text-ink">{framePill.offCount}</span>
-              <span>connection{framePill.offCount === 1 ? '' : 's'} off-screen</span>
+              {/* neighborIds is a Set of NODE IDS: this counts entities,
+                  which is neither a flow nor a line. */}
+              <span>entit{framePill.offCount === 1 ? 'y' : 'ies'} off-screen</span>
               <button
                 type="button"
                 className="px-2 py-0.5 rounded-full font-semibold text-accent-lineage hover:bg-accent-lineage/10 transition-colors"
@@ -4783,7 +5120,7 @@ export function ContextViewCanvas({
                   {nodeMap.get(framedContext.nodeId)?.data.label ?? framedContext.nodeId}
                 </span>
                 {' '}· <span className="tabular-nums">{framedContext.count}</span>{' '}
-                connection{framedContext.count === 1 ? '' : 's'}
+                entit{framedContext.count === 1 ? 'y' : 'ies'}
               </span>
               <kbd className="flex-shrink-0 px-1.5 py-0.5 rounded-md border border-white/10 bg-white/[0.04] text-[9.5px] font-semibold uppercase tracking-wide text-ink-muted/70">
                 Esc
@@ -4894,12 +5231,28 @@ export function ContextViewCanvas({
         )}
 
 
-        {/* Layer Columns. */}
+        {/* Layer Columns. The wrapper exists so the edge fades can be
+            anchored to the SCROLLER's box rather than to canvas-body,
+            whose in-flow banners would otherwise offset them. */}
+        <div className="relative flex-1 min-h-0 flex flex-col">
         <div
           ref={horizontalScrollRef}
-          className="flex-1 overflow-auto relative scroll-smooth"
+          // `custom-scrollbar`: an author-styled scrollbar is a CLASSIC one
+          // in both Chromium and WebKit — always drawn, and claiming its own
+          // strip of layout rather than floating over the last row. The macOS
+          // overlay bar it replaces fades out entirely when idle, which left
+          // the sideways run of the canvas with no affordance at all. The
+          // strip it claims (11px in Chromium, which honours
+          // `scrollbar-width: thin` over the rule's 6px) comes out of
+          // clientHeight, so a percentage-height child inside already stops
+          // above it and the columns still end at the visible edge.
+          className="flex-1 min-h-0 overflow-auto relative scroll-smooth custom-scrollbar"
           onClick={handleBackgroundClick}
-          style={{ paddingBottom: 'var(--trace-dock-height, 0px)' }}
+          // Reserve the bottom band the floating chrome occupies (trace
+          // dock, layer strip, edge legend) so a column's last row can always scroll
+          // clear of it — and be clicked. Both variables are published by
+          // the chrome itself and are 0 when it is not rendered.
+          style={{ paddingBottom: 'calc(var(--trace-dock-height, 0px) + max(var(--layer-strip-height, 0px), var(--edge-legend-height, 0px)))' }}
         >
           {/* Lineage Flow Overlay - Render BEFORE columns to be behind them
               (z-index managed in component to 0, cols should be higher).
@@ -4917,9 +5270,10 @@ export function ContextViewCanvas({
               triggerRedrawRef={triggerEdgeRedrawRef}
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}
-              highlightedEdges={mergedHighlightEdges}
-              isHighlightActive={isHighlightActive}
+              highlightedEdges={overlayHighlightEdges}
+              isHighlightActive={connectionHighlight !== null || isHighlightActive}
               resolveEdgeColor={resolveEdgeColor}
+              resolveEdgeStrokeStyle={resolveEdgeStrokeStyle}
               onEdgeDoubleClick={handleEdgeDoubleClick}
               showDirection={showEdgeDirection}
               expandingEdgeIds={expandingEdgeIds}
@@ -4995,17 +5349,19 @@ export function ContextViewCanvas({
               // scrolls chained into that ghost area instead of the
               // columns' internal lists.
               //
-              // --canvas-hsb: measured height of the container's CLASSIC
-              // horizontal scrollbar (0 for macOS overlay scrollbars).
-              // Percentage heights resolve against a box that ignores
-              // the scrollbar, so a plain 100% overflows the visible
-              // area by the scrollbar height — clipping the columns'
-              // bottom edge (and the bottom periphery scrims) below the
-              // fold. Subtracting the measured gutter makes the column
-              // bottom land exactly at the visible edge at every zoom.
+              // The height is the container's CONTENT box, undone by the
+              // zoom the same way the width is. A percentage already
+              // resolves against that box, which excludes BOTH the
+              // reserved padding band below and the classic scrollbar's
+              // strip — measured in Chromium: scroller offsetHeight 583,
+              // clientHeight 572, padding-bottom 86, and a 100%-tall
+              // child paints 486 with its bottom exactly on the band.
+              // Subtracting the scrollbar as well (this once did) left
+              // every column, its bottom periphery scrim and its
+              // end-of-list sentinel 11px short of the visible edge.
               zoom: canvasZoom !== 1 ? canvasZoom : undefined,
               width: canvasZoom !== 1 ? `${100 / canvasZoom}%` : undefined,
-              height: `calc((100% - var(--canvas-hsb, 0px)) / ${canvasZoom})`,
+              height: `calc(100% / ${canvasZoom})`,
             }}
           >
             {sortedLayers.map((layer) => (
@@ -5020,7 +5376,7 @@ export function ContextViewCanvas({
                 isBlankModel={isBlankModel}
                 selectedNodeId={selectedNodeId}
                 expandedNodes={expandedForRender}
-                searchResults={matchedNodeIds}
+                searchResults={advancedMatchUrns}
                 onSelect={selectNode}
                 onToggle={toggleNode}
                 onContextMenu={handleContextMenu}
@@ -5043,8 +5399,10 @@ export function ContextViewCanvas({
                 isHoverHighlight={isHoverActive && !isClickHighlightActive}
                 onAnimationComplete={handleAnimationComplete}
                 onLoadMore={loadMoreChildren}
-                onSearchChildren={searchChildrenGuarded}
-                isLoadingChildren={isLoadingChildren}
+                // The row box's inline hit rows are pointers into the
+                // result set, so a click has to walk the ancestors open —
+                // the same reveal the results panel uses.
+                onRevealSearchHit={revealSearchHit}
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 onScroll={handleLayerScroll}
@@ -5091,6 +5449,12 @@ export function ContextViewCanvas({
           </div>
 
 
+        </div>
+        {/* "There is more this way" — a fade on whichever side still has
+            content. Pure decoration: pointer-events-none, and painted
+            under the layer strip and the bottom-right dock, which are
+            later siblings of this wrapper. */}
+        <CanvasEdgeFades scrollRef={horizontalScrollRef} />
         </div>
       </div>
       </div>{/* end canvas column */}
@@ -5187,7 +5551,7 @@ export function ContextViewCanvas({
         knownLayers={storeLayers.map((l) => l.name)}
         onSearchPredicate={(p) => {
           useSearchStore.getState().requestSearchRun(p)
-          setAdvancedSearchOpen(true)
+          search.openPanel()
         }}
       />
       </div>{/* end flex-row wrapper */}
@@ -5243,7 +5607,7 @@ export function ContextViewCanvas({
       {/* Quick create now lives in the Hierarchy Builder right rail
           (opened via useHierarchyBuilderStore). */}
 
-      {/* Command Palette - Press Cmd+K */}
+      {/* Command Palette - Press Cmd+Shift+P */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
@@ -5275,28 +5639,8 @@ export function ContextViewCanvas({
           block so it floats over whatever panel is open. */}
       <CreateLinkPopover onCreateLink={(s, t, e) => interactions.stageEdgeCreate(s, t, e)} />
 
-      {/* View-metadata dialogs (title menu). EditViewDetailsDialog is
-          prop-driven; Share is reused unchanged from the Explorer, mounted
-          while shareSeed holds its fetched identity + visibility. */}
-      {activeView?.id && (
-        <EditViewDetailsDialog
-          open={viewDetailsOpen}
-          viewId={activeView.id}
-          onClose={() => setViewDetailsOpen(false)}
-          onSaved={handleViewDetailsSaved}
-        />
-      )}
-      {shareSeed && (
-        <ShareViewDialog
-          viewId={shareSeed.id}
-          viewName={shareSeed.name}
-          currentVisibility={shareSeed.visibility}
-          workspaceId={scopeWsId ?? undefined}
-          access={viewExecCtx?.access ?? null}
-          isOpen={true}
-          onClose={() => setShareSeed(null)}
-        />
-      )}
+      </ViewRowSearchContext.Provider>
+      </ViewSearchSessionContext.Provider>
     </div>
   )
 }

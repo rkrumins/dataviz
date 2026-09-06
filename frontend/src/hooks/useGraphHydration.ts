@@ -60,11 +60,33 @@ interface LoadChildrenOptions {
     sortDirection?: 'asc' | 'desc'
 }
 
+/**
+ * What one child page actually delivered. Returned by `loadChildren` so the
+ * CALLER can decide whether to say something about it and in what words — the
+ * hook itself stays silent, because GraphCanvas and HierarchyCanvas share it
+ * and neither announces a load. Only ContextViewCanvas's two user-initiated
+ * call sites (expand, "Load N more") speak.
+ */
+export interface ChildLoadSummary {
+    /** The container's display name — the subject of the message. */
+    parentLabel: string
+    /** The container's entity type id. */
+    parentType?: string
+    /** Children this page returned. Zero = nothing more to load. */
+    arrived: number
+    /** Children already loaded before this page — 0 means this was page 1. */
+    offset: number
+    /** The container's declared total, when it has one. */
+    total?: number
+    /** Distinct entity types among this page's children — one means the message can use its schema noun. */
+    childTypes: string[]
+}
+
 export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete'
 
 /**
  * Authoritative hydration state machine. ALL terminal canvas UI (empty state,
- * provider overlay, success toasts) derives from this single value so the
+ * provider overlay, success notifications) derives from this single value so the
  * "genuinely empty" and "failed/loading" cases can never be confused — not
  * even transiently during an auto-retry. Transitions:
  *   loading → ready        (a fetch SUCCEEDED — canvas renders; empty-state
@@ -90,9 +112,7 @@ class HydrationLoadError extends Error {
 
 export interface UseGraphHydrationResult {
     /** Load children for a node (empty string = load roots). */
-    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<void>
-    /** Search children under a parent node. */
-    searchChildren: (parentId: string, query: string) => Promise<void>
+    loadChildren: (parentId: string, options?: LoadChildrenOptions) => Promise<ChildLoadSummary | undefined>
     /**
      * Cancel a pending or in-flight `loadChildren` for the given parent.
      * Queued tasks are dropped silently; in-flight network requests
@@ -129,7 +149,7 @@ interface UseGraphHydrationOptions {
      * When true, runs the initial hydration effect that loads root nodes + edges
      * on mount / view change. Only ONE component should set this to true
      * (CanvasRouter). All other consumers should leave it false (default) and
-     * only use loadChildren / searchChildren.
+     * only use loadChildren.
      */
     hydrate?: boolean
 }
@@ -319,7 +339,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // This effect ONLY fires in CanvasRouter. Individual canvas components
     // (HierarchyCanvas, ContextViewCanvas, etc.) call useGraphHydration()
     // without { hydrate: true }, so they skip this entirely and only use
-    // loadChildren / searchChildren.
+    // loadChildren.
 
     useEffect(() => {
         if (!enableHydration) return
@@ -874,7 +894,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setRootsLoaded(0)
             setRootsHaveMore(false)
 
-            return submitRootPage(0)
+            await submitRootPage(0)
+            return
         }
 
         // ── Handle child loading (specific parentId) ────────────────
@@ -896,19 +917,27 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         const pendingNodeIds = new Set(
             nodes.filter(n => (n.data as any)?.isPending === 'create').map(n => n.id),
         )
+        // A child primed out of band by a search reveal (`useRevealSearchHit`)
+        // belongs to some later page — counting it would skew the offset the
+        // same way, skipping a real sibling. Same rule as optimistic children.
+        const revealedNodeIds = new Set(
+            nodes.filter(n => n.data?.viaReveal).map(n => n.id),
+        )
 
         // Count loaded SAVED children via containment edges (ontology-driven)
         const currentChildrenCount = edges.filter(e => {
             if (e.source !== parentId) return false
             if (!existingNodeIds.has(e.target)) return false
             if (e.data?.isPending === 'create' || pendingNodeIds.has(e.target)) return false
+            if (revealedNodeIds.has(e.target)) return false
             return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
         }).length
 
         // If we have all children, don't refetch
         if (currentChildrenCount >= childCount && childCount > 0) return
 
-        return queueRef.current.submit(parentId, async (signal) => {
+        let summary: ChildLoadSummary | undefined
+        await queueRef.current.submit(parentId, async (signal) => {
             setFailedNodes(prev => { const next = new Set(prev); next.delete(parentId); return next })
             setLoadingNodes(prev => new Set(prev).add(parentId))
             try {
@@ -949,8 +978,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     ].map(e => toCanvasEdge(e))
 
                     // Single atomic commit — nodes and edges arrive together
-                    const { addGraph: addGraphFresh } = useCanvasStore.getState()
+                    const { addGraph: addGraphFresh, updateNode } = useCanvasStore.getState()
                     addGraphFresh(nodesToAdd, edgesToAdd)
+
+                    // A revealed child this page actually delivered is now a
+                    // normal loaded child — clear the flag so it counts
+                    // toward the next page's offset.
+                    result.children.forEach(child => {
+                        if (revealedNodeIds.has(child.urn)) updateNode(child.urn, { viaReveal: false })
+                    })
 
                     // Cross-page sibling lineage: getChildrenWithEdges only
                     // returns lineage among [parent + this page's children],
@@ -982,6 +1018,21 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
                     console.log(`[useGraphHydration] Loaded ${nodesToAdd.length} children for ${parentId}`)
                 }
+
+                // The facts about this page, for whoever asked for it. Set
+                // only on a page that actually completed — an aborted or
+                // failed load has nothing true to say.
+                summary = {
+                    // `|| urn`, not `?? ''`: a container whose backend
+                    // displayName is "" would otherwise be announced as
+                    // " · 5 datasets" — a message with no subject.
+                    parentLabel: String(parentNode.data.label || urn),
+                    parentType: parentNode.data.type as string | undefined,
+                    arrived: result.children.length,
+                    offset: currentChildrenCount,
+                    total: childCount,
+                    childTypes: [...new Set(result.children.map(c => c.entityType).filter(Boolean))],
+                }
             } catch (err) {
                 console.error(`[useGraphHydration] Failed to load children for ${parentId}`, err)
                 setFailedNodes(prev => new Set(prev).add(parentId))
@@ -993,6 +1044,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 })
             }
         })
+        // Undefined when the queue collapsed this call onto an in-flight one
+        // with the same key (the task never ran), and when the load aborted
+        // or failed — in every one of those cases there is nothing to report.
+        return summary
     }, [provider, containmentEdgeTypes, lineageEdgeTypes, rootEntityTypes, schemaEntityTypes, isSchemaReady, loadingNodes, submitRootPage])
 
     /**
@@ -1006,90 +1061,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         queueRef.current.cancel(parentId)
     }, [])
 
-    // ─── searchChildren ─────────────────────────────────────────────────
-
-    const searchChildren = useCallback(async (parentId: string, query: string) => {
-        if (!query.trim()) return
-
-        // Submit under a distinct keyspace so a concurrent loadChildren
-        // for the same parent doesn't collapse into the search task.
-        return queueRef.current.submit(`search:${parentId}`, async (signal) => {
-            setLoadingNodes(prev => new Set(prev).add(parentId))
-            try {
-                const { nodes, removeNodes, removeEdges, addGraph } = useCanvasStore.getState()
-
-                const parentNode = nodes.find(n => n.id === parentId)
-                const urn = parentNode ? (parentNode.data.urn as string || parentId) : parentId
-                const fetchTypes = containmentEdgeTypes.length > 0 ? containmentEdgeTypes : undefined
-
-                // Single round-trip: children + edges for search results.
-                // The backend filters the parent's FULL child set by searchQuery
-                // (not the loaded subset), so this is global within the subtree.
-                // limit=200 is the match-count cap: ensures wide queries against
-                // 1000+ children still surface a useful spread of results.
-                const result = await provider.getChildrenWithEdges(urn, {
-                    edgeTypes: fetchTypes,
-                    lineageEdgeTypes: lineageEdgeTypes.length > 0 ? lineageEdgeTypes : undefined,
-                    searchQuery: query,
-                    limit: 200,
-                    includeLineageEdges: true,
-                })
-
-                if (signal.aborted) return
-
-                // Get freshest state right before mutating
-                const freshNodes = useCanvasStore.getState().nodes
-                const freshEdges = useCanvasStore.getState().edges
-
-                // Clean up existing children of this node to replace with search results
-                const existingEdgesToRemove = freshEdges.filter(e => e.source === parentId)
-                const targetNodeIdsToRemove = new Set(existingEdgesToRemove.map(e => e.target))
-
-                // Keep nodes connected to other parents
-                const otherEdges = freshEdges.filter(e => e.source !== parentId)
-                const safeNodesToKeep = new Set(otherEdges.map(e => e.target))
-                const nodeIdsToRemove = Array.from(targetNodeIdsToRemove).filter(id => !safeNodesToKeep.has(id))
-                const edgeIdsToRemove = existingEdgesToRemove.map(e => e.id)
-
-                if (nodeIdsToRemove.length > 0) removeNodes(nodeIdsToRemove)
-                if (edgeIdsToRemove.length > 0) removeEdges(edgeIdsToRemove)
-
-                if (result.children.length > 0) {
-                    const nodesToAdd: LineageNode[] = []
-
-                    const remainingNodeIds = new Set(freshNodes.map(n => n.id))
-                    nodeIdsToRemove.forEach(id => remainingNodeIds.delete(id))
-                    const newIds = new Set<string>()
-
-                    result.children.forEach(child => {
-                        if (!remainingNodeIds.has(child.urn) && !newIds.has(child.urn)) {
-                            nodesToAdd.push(toCanvasNode(child))
-                            newIds.add(child.urn)
-                        }
-                    })
-
-                    const edgesToAdd = [
-                        ...result.containmentEdges,
-                        ...result.lineageEdges,
-                    ].map(e => toCanvasEdge(e))
-
-                    addGraph(nodesToAdd, edgesToAdd)
-                }
-            } catch (err) {
-                console.error(`[useGraphHydration] Failed to search children for ${parentId}`, err)
-            } finally {
-                setLoadingNodes(prev => {
-                    const next = new Set(prev)
-                    next.delete(parentId)
-                    return next
-                })
-            }
-        })
-    }, [provider, containmentEdgeTypes, lineageEdgeTypes])
-
     return {
         loadChildren,
-        searchChildren,
         cancelChildLoad,
         isLoading: loadingNodes.size > 0,
         loadingNodes,

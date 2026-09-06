@@ -189,6 +189,33 @@ async def test_property_predicate_eq(stub):
 
 
 @pytest.mark.asyncio
+async def test_property_predicate_eq_case_folds_strings_and_coerces_stored_type():
+    """Mirrors the compiler's ``_visit_property`` case-fold rule: once
+    the fold triggers (predicate value is a string, not case_sensitive),
+    the compiler wraps the STORED column unconditionally in
+    toLower(toString(col)) — so a stored int 100 DOES match predicate
+    value '100' (toString(100) == '100'), same as 'STRING' eq matching
+    'string'."""
+    nodes = [{
+        "urn": "urn:dataset:x",
+        "entityType": "dataset",
+        "logicalType": "STRING",
+        "rowCount": 100,
+    }]
+    stub = StubDeepSearchProvider(nodes=nodes)
+
+    string_match = await stub.deep_search(
+        _query(PropertyPredicate(key="logicalType", op="eq", value="string"))
+    )
+    assert string_match.candidate_count == 1
+
+    int_coerced_to_string_match = await stub.deep_search(
+        _query(PropertyPredicate(key="rowCount", op="eq", value="100"))
+    )
+    assert int_coerced_to_string_match.candidate_count == 1
+
+
+@pytest.mark.asyncio
 async def test_property_predicate_gt(stub):
     query = _query(PropertyPredicate(key="rowCount", op="gt", value=1_000_000))
     page = await stub.deep_search(query)
@@ -259,6 +286,35 @@ async def test_text_predicate_substring_matches_property_value(stub):
 
 
 @pytest.mark.asyncio
+async def test_text_target_any_matches_property_but_name_does_not():
+    """``target='any'`` scans n.searchableText (which in production has
+    property values folded in); ``target='name'`` only scans
+    displayName + qualifiedName and must NOT fall back to
+    searchableText, so a value that lives only in a folded property
+    matches 'any' but not 'name'."""
+    nodes = [{
+        "urn": "urn:dataset:metrics",
+        "entityType": "dataset",
+        "displayName": "Metrics Table",
+        "qualifiedName": "warehouse.public.metrics",
+        "searchableText": (
+            "metrics table warehouse.public.metrics zephyrus-cluster"
+        ),
+    }]
+    stub = StubDeepSearchProvider(nodes=nodes)
+
+    any_page = await stub.deep_search(
+        _query(TextPredicate(value="zephyrus", target="any"))
+    )
+    assert any_page.candidate_count == 1
+
+    name_page = await stub.deep_search(
+        _query(TextPredicate(value="zephyrus", target="name"))
+    )
+    assert name_page.candidate_count == 0
+
+
+@pytest.mark.asyncio
 async def test_group_predicate_and(stub):
     query = _query(GroupPredicate(op="and", children=[
         EntityTypePredicate(op="in", values=["dataset"]),
@@ -289,6 +345,67 @@ async def test_group_predicate_not(stub):
     page = await stub.deep_search(query)
     # Three datasets, no domain.
     assert page.candidate_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Scope clamps — the stub mirrors the FalkorDB provider's rule that a
+# containment boundary, where one exists, is the only boundary.
+# ---------------------------------------------------------------------------
+
+
+def _nested_provider() -> StubDeepSearchProvider:
+    """A ``dataset`` nested inside a ``domain`` — the shape a curated
+    view has when its layers declare only the container type."""
+    return StubDeepSearchProvider(
+        nodes=[
+            {
+                "urn": "urn:domain:customers",
+                "entityType": "domain",
+                "displayName": "Customers Domain",
+                "tags": ["PII"],
+            },
+            {
+                "urn": "urn:dataset:customers",
+                "entityType": "dataset",
+                "displayName": "Customers",
+                "tags": ["PII"],
+                "ancestorUrns": ["urn:domain:customers"],
+            },
+        ],
+        edges=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_root_scope_does_not_clamp_descendant_types():
+    """``root_urns`` bounds the search, so the stamped entity types must
+    not gate it too — otherwise the nested ``dataset`` is unfindable."""
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(
+            view_id="test-view",
+            root_urns=["urn:domain:customers"],
+            entity_types=["domain"],
+        ),
+        options=SearchOptions(results="hits", page_size=50),
+    )
+    page = await _nested_provider().deep_search(query)
+    assert {h.node.urn for h in page.hits} == {
+        "urn:domain:customers",
+        "urn:dataset:customers",
+    }
+
+
+@pytest.mark.asyncio
+async def test_entity_types_still_clamp_without_roots():
+    """No containment boundary → the type clamp is all there is."""
+    query = SearchQuery(
+        predicate=TagPredicate(values=["PII"]),
+        scope=SearchScope(view_id="test-view", entity_types=["domain"]),
+        options=SearchOptions(results="hits", page_size=50),
+    )
+    page = await _nested_provider().deep_search(query)
+    assert {h.node.urn for h in page.hits} == {"urn:domain:customers"}
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +477,40 @@ async def test_discovery_truncated_false_when_below_cap(monkeypatch):
     stub = StubDeepSearchProvider(nodes=nodes)
     result = await stub.deep_search_discover(sample_per_label=200)
     assert result["labels"]["dataset"]["truncatedProperties"] is False
+
+
+@pytest.mark.asyncio
+async def test_stub_reports_the_exact_total(stub):
+    """The stub evaluates in memory, so every match is already counted —
+    ``totalCount`` is the pre-cap match count, matching the FalkorDB
+    provider's contract."""
+    page = await stub.deep_search(
+        _query(EntityTypePredicate(op="in", values=["dataset"]))
+    )
+    assert page.total_count == page.candidate_count
+    assert page.total_count == 3
+
+
+# ---------------------------------------------------------------------------
+# missingSearchableText — the stub mirrors the FalkorDB diagnostic.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discover_counts_fixture_nodes_missing_searchable_text(stub):
+    """The fixture predates the searchableText backfill, so every one of
+    its four nodes is missing the blob ``text(target='any')`` reads."""
+    result = await stub.deep_search_discover(sample_per_label=200)
+    assert result["missingSearchableText"] == 4
+
+
+@pytest.mark.asyncio
+async def test_discover_counts_only_the_nodes_without_a_blob():
+    nodes = [
+        {"urn": "urn:a", "entityType": "dataset", "searchableText": "a"},
+        {"urn": "urn:b", "entityType": "dataset"},
+        {"urn": "urn:c", "entityType": "domain", "searchableText": ""},
+    ]
+    stub = StubDeepSearchProvider(nodes=nodes, edges=[])
+    result = await stub.deep_search_discover(sample_per_label=200)
+    assert result["missingSearchableText"] == 2

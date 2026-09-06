@@ -23,7 +23,7 @@ import {
 import { motion } from 'framer-motion'
 import {
     AlertTriangle, Check, ChevronDown, DoorOpen, Loader2, LogOut, Mail,
-    ShieldCheck, UserPlus, X,
+    ShieldCheck, UserPlus,
 } from 'lucide-react'
 
 import {
@@ -32,8 +32,10 @@ import {
     type IdpProvider,
 } from '@/services/ssoAdminService'
 import { cn } from '@/lib/utils'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ErrorBanner } from './ErrorBanner'
 import { BackchannelHostsPanel } from './settings/BackchannelHostsPanel'
+import { AvatarHostsPanel } from './settings/AvatarHostsPanel'
 import { describePosture, riskChecks, type PostureTone } from './settings/posture'
 import { SsoCard, SsoSectionLabel, type CardTone } from '../ui/SsoCard'
 import { SsoSettingsSkeleton, SsoLoading } from '../ui/SsoSkeleton'
@@ -47,6 +49,11 @@ interface SwitchDef {
     technical: string
     /** Turning it OFF is the restrictive direction and wants a confirm. */
     confirmOff?: boolean
+    /** What just happened, in the operator's terms. A switch that moves
+     *  says what the sign-in page now does; the switch position alone is
+     *  the state, not the answer. */
+    resultOn: string
+    resultOff: string
 }
 
 const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: SwitchDef[] }[] = [
@@ -68,6 +75,12 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     '/auth/providers returns [] and every /auth/{slug}/* route ' +
                     'returns 404. Provider rows keep their settings.',
                 confirmOff: true,
+                resultOn:
+                    'Single sign-on is on — your published connections are ' +
+                    'back on the sign-in page.',
+                resultOff:
+                    'Single sign-on is off — no connection signs anyone in ' +
+                    'now, and nothing was deleted.',
             },
             {
                 field: 'allowLocalLogin',
@@ -77,8 +90,15 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'Off means single sign-on is the only way in.',
                 technical:
                     'POST /auth/login returns 403. Refused with 409 if it would ' +
-                    'lock out an active admin who has no SSO identity.',
+                    'lock out an active admin who has no SSO identity and is not ' +
+                    'a system account. System accounts keep password sign-in, at ' +
+                    '/login?password=1.',
                 confirmOff: true,
+                resultOn:
+                    'Passwords are on — people can sign in with an email and ' +
+                    'password again.',
+                resultOff:
+                    'Passwords are off — single sign-on is the only way in.',
             },
         ],
     },
@@ -98,6 +118,12 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'An unknown subject raises jit_disabled instead of creating a ' +
                     'user. Existing users are unaffected.',
                 confirmOff: true,
+                resultOn:
+                    'Accounts are created automatically — someone your ' +
+                    'directory knows can sign in without an invite.',
+                resultOff:
+                    'Accounts are no longer created automatically — anyone ' +
+                    'not already here is turned away.',
             },
         ],
     },
@@ -118,10 +144,26 @@ const GROUPS: { title: string; blurb: string; icon: typeof DoorOpen; switches: S
                     'The login page calls /auth/resolve with the address and ' +
                     'redirects to the matching provider. An address matching nothing ' +
                     'falls back to the password form.',
+                resultOn:
+                    'The sign-in page asks for an email address first.',
+                resultOff:
+                    'The sign-in page shows the connection buttons again.',
             },
         ],
     },
 ]
+
+/** Every switch by the field it writes — ``apply`` is handed a field, not
+ *  the group the switch happens to sit in. */
+const SWITCH: Record<string, SwitchDef> = Object.fromEntries(
+    GROUPS.flatMap(g => g.switches).map(s => [s.field, s]),
+)
+
+/** The server's own words when it gave any, and a sentence naming the
+ *  action when it did not — a failure must never read as an empty box. */
+function errText(err: unknown, fallback: string): string {
+    return err instanceof Error && err.message ? err.message : fallback
+}
 
 /** The healthy posture is the common one, so it gets the neutral card and
  *  only a warn/danger state spends colour. As a full-width amber slab this
@@ -133,8 +175,11 @@ const POSTURE_TONE: Record<PostureTone, CardTone> = {
 export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }) {
     const [cfg, setCfg] = useState<AuthConfig | null>(null)
     const [providers, setProviders] = useState<IdpProvider[]>(seeded ?? [])
+    // Only the posture read writes this. What an operator DOES here — a
+    // switch flipped, sessions ended, and every way those fail — just
+    // happened, and goes to the app's one notification stack; the banner
+    // is for what is still true while it is being read.
     const [error, setError] = useState<string | null>(null)
-    const [notice, setNotice] = useState<string | null>(null)
     const [pending, setPending] = useState<keyof AuthConfig | null>(null)
     const [confirming, setConfirming] = useState<keyof AuthConfig | null>(null)
     // The ssoEnabled confirm carries a number: how many people are signed
@@ -142,13 +187,24 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
     // too. ``null`` = count unavailable (the confirm happens anyway).
     const [ssoOffCount, setSsoOffCount] = useState<number | null>(null)
     const [ssoOffSignOut, setSsoOffSignOut] = useState(false)
+    // The allowLocalLogin confirm asks the same question about EVERY
+    // session: enforcement changes what the next sign-in must be, and
+    // the sessions already out there stay valid under the old policy
+    // until they expire. ``null`` = counts unavailable.
+    const [localOffDry, setLocalOffDry] = useState<
+        { affected: number; skipped: number } | null
+    >(null)
+    const [localOffSignOut, setLocalOffSignOut] = useState(false)
+    const { notify } = useAppNotifications()
 
     const refresh = useCallback(async () => {
         try {
             setCfg(await ssoAdminService.getAuthConfig())
             setError(null)
         } catch (err) {
-            setError((err as Error).message)
+            setError(errText(
+                err, 'The current sign-in posture could not be read.',
+            ))
         }
         // The posture sentence needs to know what is actually live. A
         // failure here costs the sentence its detail, not the page.
@@ -170,15 +226,19 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
 
     async function apply(field: keyof AuthConfig, value: boolean): Promise<boolean> {
         if (!cfg) return false
+        const def = SWITCH[field]
         setPending(field)
         try {
             setCfg(await ssoAdminService.updateAuthConfig({
                 [field]: value, expectedVersion: cfg.version,
             } as never))
             setError(null)
+            notify('success', value ? def.resultOn : def.resultOff)
             return true
         } catch (err) {
-            setError((err as Error).message)
+            notify('error', errText(
+                err, `Could not turn ${def.label} ${value ? 'on' : 'off'}.`,
+            ))
             return false
         } finally {
             setPending(null)
@@ -205,16 +265,53 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         if (!ok || !signOut) return
         try {
             const ended = await ssoAdminService.endSsoSessions()
-            setNotice(
+            notify('success',
                 `Signed out ${ended.usersAffected} ${
                     ended.usersAffected === 1 ? 'person' : 'people'
                 } who had signed in through a connection.`,
             )
         } catch (err) {
             // The switch DID flip — say so, and say what didn't happen.
-            setError(
+            notify('error',
                 'Single sign-on is off, but signing its users out failed: '
-                + (err as Error).message,
+                + errText(err, 'the request did not complete'),
+            )
+        }
+    }
+
+    /** Best-effort counts for the allowLocalLogin confirm — same rule as
+     *  ``loadSsoOffCount``: losing the numbers must not lose the confirm. */
+    async function loadLocalOffCounts() {
+        setLocalOffDry(null)
+        setLocalOffSignOut(false)
+        try {
+            const dry = await ssoAdminService.endAllSessions({ dryRun: true })
+            setLocalOffDry({
+                affected: dry.usersAffected,
+                skipped: dry.systemAccountsSkipped,
+            })
+        } catch {
+            setLocalOffDry(null)
+        }
+    }
+
+    async function confirmLocalOff() {
+        const signOut = localOffSignOut
+        const ok = await apply('allowLocalLogin', false)
+        if (!ok || !signOut) return
+        try {
+            const ended = await ssoAdminService.endAllSessions()
+            notify('success',
+                `Signed out ${ended.usersAffected} ${
+                    ended.usersAffected === 1 ? 'person' : 'people'
+                } — everyone signs back in under single sign-on. If your own `
+                + 'session was among them, you will be taken to the sign-in '
+                + 'page in a moment.',
+            )
+        } catch (err) {
+            notify('error',
+                'Passwords are off, but the sign-everyone-out failed: '
+                + errText(err, 'the request did not complete'),
             )
         }
     }
@@ -234,23 +331,6 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
         <div className="grid xl:grid-cols-[minmax(0,1fr)_340px] gap-6 items-start">
             <div className="min-w-0 space-y-6">
             {error && <ErrorBanner message={error} />}
-            {notice && (
-                <div
-                    role="status"
-                    className="flex items-start gap-2 px-3 py-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06]"
-                >
-                    <Check className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
-                    <p className="text-xs text-ink flex-1 min-w-0">{notice}</p>
-                    <button
-                        type="button"
-                        aria-label="Dismiss notice"
-                        onClick={() => setNotice(null)}
-                        className="shrink-0 text-ink-muted hover:text-ink"
-                    >
-                        <X className="w-3.5 h-3.5" />
-                    </button>
-                </div>
-            )}
 
             {GROUPS.map((group, gi) => (
                 <motion.section
@@ -280,6 +360,12 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                             checked={ssoOffSignOut}
                                             onChange={setSsoOffSignOut}
                                         />
+                                    ) : s.field === 'allowLocalLogin' ? (
+                                        <RequireReloginChoice
+                                            dry={localOffDry}
+                                            checked={localOffSignOut}
+                                            onChange={setLocalOffSignOut}
+                                        />
                                     ) : undefined
                                 }
                                 onRequest={next => {
@@ -288,10 +374,16 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                                         if (s.field === 'ssoEnabled') {
                                             void loadSsoOffCount()
                                         }
+                                        if (s.field === 'allowLocalLogin') {
+                                            void loadLocalOffCounts()
+                                        }
                                     } else void apply(s.field, next)
                                 }}
                                 onConfirm={() => {
                                     if (s.field === 'ssoEnabled') void confirmSsoOff()
+                                    else if (s.field === 'allowLocalLogin') {
+                                        void confirmLocalOff()
+                                    }
                                     else void apply(s.field, false)
                                 }}
                                 onCancel={() => setConfirming(null)}
@@ -307,8 +399,20 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                 time (or turned SSO off before the offer existed). */}
             {cfg !== null && !cfg.ssoEnabled && (
                 <EndSsoSessionsCard
-                    onDone={line => { setNotice(line); setError(null) }}
-                    onError={msg => setError(msg)}
+                    onDone={line => notify('success', line)}
+                    onError={msg => notify('error', msg)}
+                />
+            )}
+
+            {/* The admin-level "everyone signs in again" — for a posture
+                change already made (enforcement flipped earlier, a
+                suspected leak, an IdP migration). Always present: the
+                moment it is needed is rarely the moment a switch is
+                being flipped. */}
+            {cfg !== null && (
+                <EndAllSessionsCard
+                    onDone={line => notify('success', line)}
+                    onError={msg => notify('error', msg)}
                 />
             )}
 
@@ -317,6 +421,8 @@ export function SettingsTab({ providers: seeded }: { providers?: IdpProvider[] }
                 reach. It belongs beside them rather than inside one
                 provider's settings, where it would be circular. */}
             <BackchannelHostsPanel />
+
+            <AvatarHostsPanel />
 
             <p className="text-[11px] text-ink-muted">
                 Version {cfg?.version ?? '—'} · last changed {relative(cfg?.updatedAt)}
@@ -519,6 +625,49 @@ function SignOutSsoUsersChoice({
     )
 }
 
+/** The require-everyone-to-sign-in-again choice inside the passwords-off
+ *  confirm. Counts of 0 render as statements, and the "including you"
+ *  warning is the one line that must never be lost to a failed count. */
+function RequireReloginChoice({
+    dry, checked, onChange,
+}: {
+    dry: { affected: number; skipped: number } | null
+    checked: boolean
+    onChange: (next: boolean) => void
+}) {
+    if (dry !== null && dry.affected === 0) {
+        return (
+            <p className="mt-2 text-xs text-ink-secondary">
+                Nobody is signed in right now, so there is nothing to end.
+            </p>
+        )
+    }
+    return (
+        <div className="mt-2">
+            <label className="flex items-center gap-2 text-xs text-ink">
+                <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={e => onChange(e.target.checked)}
+                />
+                {dry === null
+                    ? 'Also require everyone to sign in again now'
+                    : `Also require the ${dry.affected} ${
+                        dry.affected === 1 ? 'person' : 'people'
+                    } signed in right now to sign in again`}
+            </label>
+            <p className="mt-1 text-[11px] text-ink-muted leading-relaxed">
+                That includes you, unless your account is a system account
+                {dry !== null && dry.skipped > 0
+                    ? ` — ${dry.skipped} system ${
+                        dry.skipped === 1 ? 'account stays' : 'accounts stay'
+                    } signed in.`
+                    : '.'}
+            </p>
+        </div>
+    )
+}
+
 /** Standalone sign-out for sessions that outlived the master switch.
  *  Two steps on purpose: the first click only fetches the count, and the
  *  irreversible act is behind a second click that carries the number. */
@@ -539,7 +688,9 @@ function EndSsoSessionsCard({
             setCount(dry.usersAffected)
             setAsked(true)
         } catch (err) {
-            onError((err as Error).message)
+            onError(errText(
+                err, 'Could not count the sessions still open through a connection.',
+            ))
         } finally {
             setBusy(false)
         }
@@ -556,7 +707,9 @@ function EndSsoSessionsCard({
             )
             setAsked(false)
         } catch (err) {
-            onError((err as Error).message)
+            onError(errText(
+                err, 'Could not sign out the people signed in through a connection.',
+            ))
         } finally {
             setBusy(false)
         }
@@ -602,6 +755,126 @@ function EndSsoSessionsCard({
                                     className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
                                 >
                                     Sign out {count} {count === 1 ? 'person' : 'people'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setAsked(false)}
+                                    disabled={busy}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-ink-secondary hover:bg-black/5 dark:hover:bg-white/5"
+                                >
+                                    Never mind
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    )
+}
+
+/** "Require everyone to sign in again" — the platform-wide sweep.
+ *  Same two-step shape as ``EndSsoSessionsCard``: the first click only
+ *  fetches the counts, the act is behind a second click carrying them.
+ *  Ends password AND SSO sessions; system accounts are skipped, and the
+ *  caller's own session is included unless it is one — after which the
+ *  app's session-loss recovery walks them to the sign-in page. */
+function EndAllSessionsCard({
+    onDone, onError,
+}: {
+    onDone: (line: string) => void
+    onError: (msg: string) => void
+}) {
+    const [dry, setDry] = useState<
+        { affected: number; skipped: number } | null
+    >(null)
+    const [asked, setAsked] = useState(false)
+    const [busy, setBusy] = useState(false)
+
+    async function askCounts() {
+        setBusy(true)
+        try {
+            const d = await ssoAdminService.endAllSessions({ dryRun: true })
+            setDry({
+                affected: d.usersAffected,
+                skipped: d.systemAccountsSkipped,
+            })
+            setAsked(true)
+        } catch (err) {
+            onError(errText(err, 'Could not count the open sessions.'))
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    async function end() {
+        setBusy(true)
+        try {
+            const ended = await ssoAdminService.endAllSessions()
+            onDone(
+                `Signed out ${ended.usersAffected} ${
+                    ended.usersAffected === 1 ? 'person' : 'people'
+                } — everyone signs back in under the current policy. If your `
+                + 'own session was among them, you will be taken to the '
+                + 'sign-in page in a moment.',
+            )
+            setAsked(false)
+        } catch (err) {
+            onError(errText(err, 'Could not sign everyone out.'))
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    return (
+        <div className="rounded-xl border border-glass-border bg-canvas-elevated p-4">
+            <div className="flex items-start gap-3.5">
+                <LogOut className="w-4 h-4 mt-0.5 shrink-0 text-ink-muted" />
+                <div className="min-w-0 flex-1">
+                    <span className="text-sm font-semibold text-ink">
+                        Require everyone to sign in again
+                    </span>
+                    <p className="mt-1 text-xs text-ink-secondary leading-relaxed">
+                        Ends every session — password and single sign-on alike —
+                        so everyone comes back in under whatever the switches
+                        above now allow. System accounts are skipped. Your own
+                        session is included unless your account is one.
+                    </p>
+                    {!asked ? (
+                        <button
+                            type="button"
+                            onClick={() => void askCounts()}
+                            disabled={busy}
+                            className="mt-2 px-3 py-1.5 rounded-lg border border-glass-border text-xs font-medium text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50"
+                        >
+                            Sign everyone out now…
+                        </button>
+                    ) : dry !== null && dry.affected === 0 ? (
+                        <p className="mt-2 text-xs text-ink-secondary">
+                            Nobody is signed in right now.
+                        </p>
+                    ) : (
+                        <div className="mt-2">
+                            <p className="text-xs text-ink">
+                                This signs out {dry?.affected}{' '}
+                                {dry?.affected === 1 ? 'person' : 'people'} now
+                                {dry !== null && dry.skipped > 0
+                                    ? `; ${dry.skipped} system ${
+                                        dry.skipped === 1
+                                            ? 'account stays'
+                                            : 'accounts stay'
+                                    } signed in`
+                                    : ''}.
+                            </p>
+                            <div className="mt-2 flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => void end()}
+                                    disabled={busy}
+                                    className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50"
+                                >
+                                    Sign out {dry?.affected}{' '}
+                                    {dry?.affected === 1 ? 'person' : 'people'}
                                 </button>
                                 <button
                                     type="button"

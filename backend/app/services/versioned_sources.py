@@ -28,13 +28,20 @@ partitioned) with a unique index on ``data_source_id``, so fetching the whole
 set costs one indexed scan and removes any dependence on the caller's candidate
 list. A source becomes versioned once and stays versioned, so the result is
 cached generously.
+
+:func:`projector_health` is the sibling that answers the *other* half of
+the question — not "who masters this source" but "and is that mastering
+currently working". It reads the same control plane and is cached for
+seconds, not minutes; see the note above it for why the two TTLs must
+differ.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from typing import FrozenSet, Optional
+from dataclasses import dataclass
+from typing import Dict, FrozenSet, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -109,3 +116,223 @@ def reset_cache() -> None:
     bootstrap/unversion when the TTL is too long to wait out."""
     global _cache, _cache_at
     _cache, _cache_at = None, 0.0
+
+
+# ── Projector health ─────────────────────────────────────────────────────
+# The set above answers "who masters this source". It does NOT answer "and is
+# that mastering currently working", and for fourteen hours on 2026-08-30 that
+# gap WAS the outage: one graph's projection wedged, ``projected_commit_seq``
+# sat below ``main_head_commit_seq``, ContextEngine routed every main read
+# through VersionedBranchProvider — which holds no ``:AGGREGATED`` rows —
+# and aggregated lineage silently vanished from the canvas while every
+# surface reported ``ready`` / ``managed``.
+#
+# TTL. ``versioned_data_source_ids`` caches for ten minutes because a source
+# becomes versioned once and stays versioned. Health is the exact opposite: it
+# changes minute to minute, and a stale HEALTHY answer is the same silence we
+# are removing here. Five seconds is deliberately just long enough to collapse
+# the fan-out of one fleet page render (or one sweep pass) into a single read
+# and no longer.
+HEALTH_CACHE_TTL_SECS = 5
+
+# Projection statuses that mean "a pass is running", per the CHECK constraint
+# on ``graphver.projection_state`` (``idle``/``projecting``/``rebuilding``/
+# ``evicted``).
+_IN_PROGRESS_STATUSES = frozenset({"projecting", "rebuilding"})
+
+_health_cache: Optional["Dict[str, ProjectorHealth]"] = None
+_health_cache_at: float = 0.0
+
+
+class ProjectorHealthUnavailable(RuntimeError):
+    """Projector health could not be read.
+
+    Deliberately has no fallback answer. Unlike the versioned SET — where a
+    ten-minute-old value is very nearly always still correct — the only value
+    we could invent here is "everything is fine", which is precisely the claim
+    that hid a wedged projection for fourteen hours. Callers either defer (the
+    sweep) or present the health fields as unknown (the read paths); nobody
+    gets to assume healthy.
+    """
+
+
+@dataclass(frozen=True)
+class ProjectorHealth:
+    """One versioned graph's projection watermark, as of ``checked_at``.
+
+    ``main_head_commit_seq`` is what has been published; ``projected_commit_seq``
+    is what the FalkorDB read cache has actually caught up to. While the second
+    trails the first, reads fall back to the version log and rolled-up
+    connections are missing from the product.
+    """
+    data_source_id: str
+    graph_id: str
+    # NULL when the graph has no ``projection_state`` row at all.
+    projected_commit_seq: Optional[int]
+    main_head_commit_seq: Optional[int]
+    last_error: Optional[str]
+    # A pinned graph is one this platform actually projects into. Without a
+    # pin nothing is projected BY DESIGN — reads come from Postgres because
+    # that is the whole plan, not because anything is wedged. Mirrors the
+    # PROJECTION_STALE finding in the alignment-analysis endpoint, which must
+    # not disagree with this module about the same graph.
+    falkor_graph_pinned: bool
+    status: Optional[str]
+    checked_at: str
+
+    @property
+    def commits_behind(self) -> int:
+        """How many published commits the read cache has not caught up to.
+        Zero when either number is unknown — "behind" is a claim, and an
+        unknown watermark does not support it."""
+        if self.projected_commit_seq is None or self.main_head_commit_seq is None:
+            return 0
+        return max(0, self.main_head_commit_seq - self.projected_commit_seq)
+
+    @property
+    def in_progress(self) -> bool:
+        """A projection pass is running for this graph right now.
+
+        ``FalkorProjector`` stamps ``projecting`` for an incremental window and
+        ``rebuilding`` for a full seed, and resets both to ``idle`` when the
+        pass ends — so this is the NORMAL state for the seconds after every
+        publish, exactly when the watermark legitimately trails the head.
+        ``versioning/reconcile.py`` already skips its scan for the same reason
+        ("a projection/rebuild is actively catching the cache up"), and the
+        infrastructure panel already excludes these graphs from its
+        not-publishing list. This is the third reader of that one rule.
+        """
+        return (self.status or "idle") in _IN_PROGRESS_STATUSES
+
+    @property
+    def behind(self) -> bool:
+        """The read cache trails the published head and nothing is closing the
+        gap. Working is not wedged: without the second clause every ordinary
+        publish reported itself as an outage for the length of its own pass."""
+        return (
+            self.falkor_graph_pinned
+            and self.commits_behind > 0
+            and not self.in_progress
+        )
+
+    @property
+    def erroring(self) -> bool:
+        """The projector's last completed pass recorded a failure.
+
+        EVIDENCE, never a verdict on its own. A failed verify deliberately does
+        NOT advance the watermark — ``projection.py`` holds ``projected`` below
+        ``committed`` so reads stay on Postgres — so a projector that is really
+        failing to publish is ALREADY ``behind``. The one shape this catches
+        that ``behind`` does not is a graph that is fully caught up carrying an
+        error from a pass that ran weeks ago: ``last_error`` is only ever
+        rewritten by the next pass, so on a graph nothing publishes to any more
+        it never clears. Ten live graphs sat in exactly that shape while every
+        string this drove asserted the ``behind`` consequence — "reads fall
+        back to the change history", "aggregated lineage is missing right now",
+        "this clears on its own within a minute" — all of them false. So it is
+        surfaced (as ``projectionLastError``, and in the infrastructure panel's
+        not-publishing list) and never counted as stalled.
+        """
+        return self.falkor_graph_pinned and bool(self.last_error)
+
+    @property
+    def stalled(self) -> bool:
+        """Rolled-up connections are missing from the product RIGHT NOW.
+
+        Exactly ``behind``, because that is exactly what read routing consults:
+        ``fresh = projected >= committed`` (``versioning/service.py``,
+        ``projection_watermark``) looks at neither ``last_error`` nor
+        ``status``. Every consumer's copy asserts this consequence, so the
+        predicate has to be the consequence and nothing wider.
+        """
+        return self.behind
+
+    @property
+    def current(self) -> bool:
+        return not self.stalled
+
+
+async def projector_health(
+    *, ttl_secs: int = HEALTH_CACHE_TTL_SECS,
+) -> "Dict[str, ProjectorHealth]":
+    """Projection health for every live versioned graph, keyed by data source.
+
+    One indexed scan over ``graphver.graphs`` LEFT JOINed to
+    ``graphver.projection_state`` — both low-cardinality control-plane tables,
+    the same shape and cost as :func:`versioned_data_source_ids`.
+
+    The join is OUTER on purpose: a versioned graph with no projection row has
+    never been projected at all, which is a different fact from "behind", and
+    collapsing the two would report a brand-new graph as wedged.
+
+    Raises :class:`ProjectorHealthUnavailable` on any failure. There is no
+    stale-serving and no fail-open dict — see the exception's docstring.
+    """
+    global _health_cache, _health_cache_at
+
+    now = time.monotonic()
+    if _health_cache is not None and (now - _health_cache_at) < ttl_secs:
+        return _health_cache
+
+    try:
+        from datetime import datetime, timezone
+
+        from sqlalchemy import select
+
+        from backend.app.services.versioning.db import get_session_factory
+        from backend.app.services.versioning.models import (
+            GraphORM, ProjectionStateORM,
+        )
+
+        async with get_session_factory()() as session:
+            rows = (await session.execute(
+                select(
+                    GraphORM.data_source_id,
+                    GraphORM.id,
+                    GraphORM.main_head_commit_seq,
+                    ProjectionStateORM.projected_commit_seq,
+                    ProjectionStateORM.last_error,
+                    ProjectionStateORM.falkor_graph_name,
+                    ProjectionStateORM.status,
+                )
+                .outerjoin(
+                    ProjectionStateORM,
+                    ProjectionStateORM.graph_id == GraphORM.id,
+                )
+                .where(GraphORM.deleted_at.is_(None))
+            )).all()
+        checked_at = datetime.now(timezone.utc).isoformat()
+        found = {
+            ds_id: ProjectorHealth(
+                data_source_id=ds_id,
+                graph_id=graph_id,
+                projected_commit_seq=(
+                    None if projected is None else int(projected)
+                ),
+                main_head_commit_seq=None if head is None else int(head),
+                last_error=last_error or None,
+                falkor_graph_pinned=bool(falkor_name),
+                status=status,
+                checked_at=checked_at,
+            )
+            for (
+                ds_id, graph_id, head, projected, last_error, falkor_name,
+                status,
+            ) in rows
+            if ds_id
+        }
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("projector health lookup failed: %s", exc)
+        raise ProjectorHealthUnavailable(str(exc)) from exc
+
+    _health_cache, _health_cache_at = found, now
+    return found
+
+
+def reset_health_cache() -> None:
+    """Drop the cached health snapshot — used by tests, and wherever a caller
+    needs to observe a projection change it has just caused."""
+    global _health_cache, _health_cache_at
+    _health_cache, _health_cache_at = None, 0.0

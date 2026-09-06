@@ -50,14 +50,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "frame-ancestors 'none'"
             )
         else:
-            response.headers["Content-Security-Policy"] = (
+            # A default, not an override: an endpoint serving third-party
+            # bytes (the avatar image route) sets a STRICTER policy of its
+            # own ("sandbox"), and stamping the site-wide one over it
+            # would silently weaken exactly the response that needs it.
+            response.headers.setdefault(
+                "Content-Security-Policy",
                 "default-src 'self'; "
                 "script-src 'self'; "
                 "style-src 'self' 'unsafe-inline'; "
                 "img-src 'self' data: blob:; "
                 "font-src 'self'; "
                 "connect-src 'self'; "
-                "frame-ancestors 'none'"
+                "frame-ancestors 'none'",
             )
 
         # Cross-origin isolation for the API surface. Cheap, and it stops

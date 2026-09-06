@@ -1,6 +1,6 @@
 /**
  * useCanvasKeyboard - Keyboard shortcuts for canvas operations
- * 
+ *
  * Provides a consistent keyboard experience across all canvas views:
  * - Delete/Backspace: Delete selected nodes/edges
  * - Cmd/Ctrl+D: Duplicate selected nodes
@@ -12,6 +12,10 @@
  * - Escape: Clear selection / Cancel operation
  * - T: Trace lineage from selected node
  * - N: Create new node
+ * - /: Focus the view search box
+ * - Cmd/Ctrl+Shift+F: Toggle the search results panel
+ * - Cmd/Ctrl+Shift+P: Open the canvas action palette (Cmd/Ctrl+K is the
+ *   app-wide palette only — see layout/CommandPalette.tsx)
  */
 
 import { useEffect, useCallback, useRef } from 'react'
@@ -52,6 +56,10 @@ export interface CanvasKeyboardHandlers {
     onZoomPreset?: (level: 1 | 2 | 3) => void
     /** Open the Lineage Lens on the selected node (F) */
     onFocusLens?: () => void
+    /** Focus the view search box (/). */
+    onFocusSearch?: () => void
+    /** Toggle the search results panel (Cmd/Ctrl+Shift+F). */
+    onToggleSearchPanel?: () => void
 }
 
 export interface UseCanvasKeyboardOptions {
@@ -61,6 +69,27 @@ export interface UseCanvasKeyboardOptions {
     handlers: CanvasKeyboardHandlers
     /** Container element (for scoping, defaults to document) */
     containerRef?: React.RefObject<HTMLElement>
+}
+
+// ============================================
+// Interactive-target guard
+// ============================================
+
+/**
+ * Roles whose focused element is activated by Enter. Cancelling Enter on one
+ * of these breaks the control — the canvas has no claim on the key there.
+ */
+const ACTIVATION_ROLES = new Set([
+    'button', 'link', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+    'option', 'tab', 'checkbox', 'radio', 'switch',
+])
+
+/** Does Enter already do something on this element without our help? */
+function activatesOnEnter(el: HTMLElement): boolean {
+    if (el.tagName === 'BUTTON') return true
+    if (el.tagName === 'A' && el.hasAttribute('href')) return true
+    const role = el.getAttribute('role')
+    return role !== null && ACTIVATION_ROLES.has(role)
 }
 
 // ============================================
@@ -114,14 +143,29 @@ export function useCanvasKeyboard({
         
         const isMod = e.metaKey || e.ctrlKey
         const isShift = e.shiftKey
-        
-        // Command Palette: Cmd/Ctrl + K
-        if (isMod && e.key === 'k') {
+
+        // Focus search: / (no modifier)
+        if (e.key === '/' && !isMod) {
+            e.preventDefault()
+            handlersRef.current.onFocusSearch?.()
+            return
+        }
+
+        // Toggle search results panel: Cmd/Ctrl + Shift + F
+        if (isMod && isShift && e.key.toLowerCase() === 'f') {
+            e.preventDefault()
+            handlersRef.current.onToggleSearchPanel?.()
+            return
+        }
+
+        // Canvas action palette: Cmd/Ctrl + Shift + P (Cmd/Ctrl+K is the
+        // app-wide palette only — see layout/CommandPalette.tsx)
+        if (isMod && isShift && e.key.toLowerCase() === 'p') {
             e.preventDefault()
             handlersRef.current.onCommandPalette?.()
             return
         }
-        
+
         // Fit to width: Cmd/Ctrl + 0
         if (isMod && e.key === '0') {
             e.preventDefault()
@@ -183,9 +227,18 @@ export function useCanvasKeyboard({
         }
         
         // Edit: Enter (when node selected)
+        //
+        // Enter is also how the browser activates a focused button or link, and
+        // this listener sits on `document` — so cancelling it unconditionally
+        // (which the old code did, BEFORE the optional-chained call, so it fired
+        // with no handler wired too) killed every button and link in the app for
+        // as long as any canvas was mounted. Act only when there is something to
+        // do, and never when the key already belongs to the focused control.
         if (e.key === 'Enter' && !isMod) {
-            e.preventDefault()
-            handlersRef.current.onEdit?.()
+            if (handlersRef.current.onEdit && !activatesOnEnter(target)) {
+                e.preventDefault()
+                handlersRef.current.onEdit()
+            }
             return
         }
         
@@ -251,7 +304,9 @@ export function useCanvasKeyboard({
 // ============================================
 
 export const KEYBOARD_SHORTCUTS = [
-    { key: '⌘/Ctrl + K', action: 'Command Palette' },
+    { key: '⌘/Ctrl + ⇧ + P', action: 'Command Palette' },
+    { key: '/', action: 'Search this view' },
+    { key: '⌘/Ctrl + ⇧ + F', action: 'Search results panel' },
     { key: '⌘/Ctrl + A', action: 'Select All' },
     { key: '⌘/Ctrl + C', action: 'Copy URN' },
     { key: '⌘/Ctrl + D', action: 'Duplicate' },

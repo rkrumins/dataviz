@@ -1,5 +1,5 @@
 pytest>=9.1.1
 pytest-asyncio>=1.4.0
 pytest-cov>=7.1.0
-fakeredis>=2.37.0         # in-memory Redis double used across the unit suite
+fakeredis>=2.37.1         # in-memory Redis double used across the unit suite
 aiosqlite>=0.22.1         # async sqlite driver for the test DB fixtures

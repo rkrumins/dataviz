@@ -19,6 +19,7 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { ChevronDown, RotateCcw, Settings2, Sliders, SlidersHorizontal } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { DisplaySettingsSections, isDefaultState } from '../DisplaySettingsPopover'
 import { LineageDisplaySections } from '../LineageDisplayPopover'
@@ -120,6 +121,11 @@ export function DisplayMenu({
 
   return (
     <>
+      <HoverTip
+        className="inline-flex"
+        label="Change how the canvas is drawn — zoom, density, badges and lineage"
+        detail="Affects what you see, never the view itself"
+      >
       <button
         ref={triggerRef}
         data-tour="canvas-display"
@@ -127,7 +133,6 @@ export function DisplayMenu({
         onClick={() => setOpen(o => !o)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title="Display settings — canvas zoom, density, and lineage appearance"
         className={cn(
           'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300',
           open
@@ -139,6 +144,7 @@ export function DisplayMenu({
         <span>Display</span>
         <ChevronDown className={cn('w-3.5 h-3.5 transition-transform duration-200', open && 'rotate-180')} />
       </button>
+      </HoverTip>
 
       {/* Portal escapes the header's stacking context (it has backdrop-filter,
           which creates one) so the popover is layered above the canvas body
@@ -153,7 +159,7 @@ export function DisplayMenu({
               ref={popoverRef}
               initial={{ opacity: 0, y: -6, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ duration: 0.15, ease: 'easeOut' }}
+              transition={{ duration: 0.1, ease: 'easeOut' }}
               role="dialog"
               aria-label="Display"
               style={{
@@ -178,15 +184,19 @@ export function DisplayMenu({
                 </div>
                 <div className="text-[12px] font-semibold text-ink tracking-tight">Canvas</div>
                 {isCustom && (
-                  <button
-                    type="button"
-                    onClick={onReset}
-                    className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
-                    title="Reset all display settings"
+                  <HoverTip
+                    className="ml-auto inline-flex"
+                    label="Put zoom, density, badges and lineage appearance back to their defaults"
                   >
-                    <RotateCcw className="w-3 h-3" />
-                    Reset
-                  </button>
+                    <button
+                      type="button"
+                      onClick={onReset}
+                      className="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Reset
+                    </button>
+                  </HoverTip>
                 )}
               </div>
 

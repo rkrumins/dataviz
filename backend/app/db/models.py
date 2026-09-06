@@ -1628,6 +1628,14 @@ class UserORM(Base):
     must_change_password = Column(
         Boolean, nullable=False, default=False, server_default="false",
     )
+    # Break-glass. A system account is out of scope for the SSO
+    # enforcement machinery: it keeps password sign-in while
+    # ``allow_local_login`` is off, forced sign-out sweeps skip it, and
+    # the admin-lockout guard does not count it. Set on the seeded
+    # bootstrap admin; toggled per user in Admin → Users.
+    is_system_account = Column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
     # Chosen avatar illustration. Was a browser-local preference, so it
     # reset on a new machine and nobody else ever saw it.
     avatar_id = Column(Text, nullable=True)
@@ -1799,6 +1807,13 @@ class SsoBackchannelHostORM(Base):
         Text, primary_key=True,
         default=lambda: f"bch_{uuid.uuid4().hex[:12]}",
     )
+    #: Which outbound flow the entry serves. ``gateway`` rows relax the
+    #: private-address refusal for the back-channel legs; ``avatar`` rows
+    #: name the external image hosts in-app avatars may be fetched from
+    #: (with the avatar list empty, external avatar hosts are refused —
+    #: the list is the on-switch, not a narrowing).
+    purpose = Column(Text, nullable=False, default="gateway",
+                     server_default="gateway")
     #: Lowercased, trailing root dot stripped — normalised by the repo so
     #: one destination is one row rather than three spellings.
     host = Column(Text, nullable=False)
@@ -1810,14 +1825,15 @@ class SsoBackchannelHostORM(Base):
     created_by = Column(Text, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("host", "port", name="uq_sso_backchannel_host_port"),
+        UniqueConstraint("purpose", "host", "port",
+                         name="uq_sso_backchannel_purpose_host_port"),
         CheckConstraint(
             "port > 0 AND port <= 65535", name="ck_sso_backchannel_port",
         ),
     )
 
     def __repr__(self) -> str:
-        return f"<SsoBackchannelHost {self.host}:{self.port}>"
+        return f"<SsoBackchannelHost {self.purpose}:{self.host}:{self.port}>"
 
 
 # ------------------------------------------------------------------ #

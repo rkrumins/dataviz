@@ -810,8 +810,9 @@ export interface GraphDataProvider {
     getDescendants(urn: URN, depth?: number): Promise<GraphNode[]>
 
     /**
-     * Get containment context: parent + children matching optional search
-     * Used for SearchChildrenPanel and similar UIs
+     * Get containment context: parent + children matching optional search.
+     * No caller today — the canvas's row-level search is a scoped instance
+     * of the view search session, which goes through `searchAdvanced`.
      */
     getContainment?(params: { parentUrn: URN; searchQuery?: string; limit?: number }): Promise<ContainmentResult>
 

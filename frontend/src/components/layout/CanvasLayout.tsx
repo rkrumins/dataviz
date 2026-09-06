@@ -19,6 +19,7 @@ import { Outlet } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2, RefreshCw, CloudOff } from 'lucide-react'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
+import { MOTION } from '@/lib/motion'
 
 export function CanvasLayout() {
   const { isLoading, isFetching, isError, error, refetch } = useGraphSchema()
@@ -38,7 +39,7 @@ export function CanvasLayout() {
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
-            transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+            transition={MOTION.drawerSlide}
             className="absolute top-4 left-1/2 -translate-x-1/2 z-40"
           >
             <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-amber-50 dark:bg-amber-950/60 border border-amber-300/60 dark:border-amber-500/30 shadow-lg shadow-amber-500/10 backdrop-blur-sm">

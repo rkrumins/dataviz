@@ -11,18 +11,24 @@
  * ``workspace:admin`` on the workspace. The component still calls the
  * backend on every action — backend remains source of truth.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     Users, Shield, UserCog, Eye, UserPlus, Trash2, RefreshCw,
     Search, Loader2, X, AlertCircle, AlertTriangle, Mail, Users2,
-    ChevronDown, ChevronUp, Inbox, Check, XCircle, Clock,
+    ChevronDown, ChevronUp, ChevronRight, Inbox, Check, XCircle, Clock,
+    UserCheck,
 } from 'lucide-react'
 import {
     workspaceMembersService,
     type WorkspaceMemberResponse,
 } from '@/services/workspaceMembersService'
-import { groupsService, type GroupResponse } from '@/services/groupsService'
+import { WorkspaceAccessList } from './WorkspaceAccessList'
+import {
+    groupsService,
+    type GroupResponse,
+    type GroupMemberResponse,
+} from '@/services/groupsService'
 import { adminUserService, type AdminUserResponse } from '@/services/adminUserService'
 import {
     permissionsService,
@@ -34,7 +40,7 @@ import {
 } from '@/services/accessRequestsService'
 import type { ImpactPreviewResponse } from '@/services/permissionsService'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -209,6 +215,57 @@ function SubjectAvatar({ type, displayName, userId, size = 'md' }: {
 }
 
 
+// ── Group member line (inline group expansion) ───────────────────────
+
+/** A compact, read-only member row for a group revealed inside the
+ *  bindings table. Mirrors the /admin/groups drawer's member row: the id
+ *  stays visible when it resolves to nobody, deleted/SSO are flagged. */
+function GroupMemberLine({ member: m }: { member: GroupMemberResponse }) {
+    const resolved = !!m.displayName
+    const name = m.displayName ?? m.userId
+    return (
+        <div className="flex items-center gap-2.5 px-4 py-2 border-b last:border-b-0 border-glass-border">
+            {resolved ? (
+                <UserAvatar
+                    userId={m.userId}
+                    avatarId={m.avatarId ?? undefined}
+                    name={name}
+                    shape="gradient"
+                    className="w-7 h-7 text-[10px] font-bold shrink-0"
+                />
+            ) : (
+                <span aria-hidden className="w-7 h-7 rounded-full shrink-0 grid place-items-center text-[10px] font-bold bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted">
+                    ?
+                </span>
+            )}
+            <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 min-w-0">
+                    <p className={cn(
+                        'truncate',
+                        resolved ? 'text-[13px] font-medium text-ink' : 'font-mono text-[11px] text-ink-secondary',
+                    )}>
+                        {name}
+                    </p>
+                    {m.source === 'sso' && (
+                        <span className="shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide bg-violet-500/15 text-violet-600 dark:text-violet-400">
+                            SSO
+                        </span>
+                    )}
+                    {m.deleted && (
+                        <span className="shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase tracking-wide bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20">
+                            Deleted
+                        </span>
+                    )}
+                </div>
+                {m.email && (
+                    <p className="text-[11px] text-ink-muted truncate">{m.email}</p>
+                )}
+            </div>
+        </div>
+    )
+}
+
+
 // ── Main component ───────────────────────────────────────────────────
 
 export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
@@ -229,7 +286,39 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
-    const { showToast } = useToast()
+    // Bindings (the raw grants) vs People (the flattened, inheritance-
+    // aware list of everyone who can actually get in).
+    const [viewMode, setViewMode] = useState<'bindings' | 'people'>('bindings')
+    // Group binding rows expand in place to reveal their members — the
+    // same list the /admin/groups drawer shows, fetched lazily and cached
+    // by group id so re-expanding is instant.
+    const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+    const [groupMembers, setGroupMembers] = useState<
+        Record<string, GroupMemberResponse[] | 'loading' | 'error'>
+    >({})
+    const { notify } = useAppNotifications()
+
+    const ensureGroupMembers = useCallback((groupId: string) => {
+        setGroupMembers(prev =>
+            prev[groupId] && prev[groupId] !== 'error'
+                ? prev
+                : { ...prev, [groupId]: 'loading' },
+        )
+        groupsService.listMembers(groupId)
+            .then(ms => setGroupMembers(prev => ({ ...prev, [groupId]: ms })))
+            .catch(() => setGroupMembers(prev => ({ ...prev, [groupId]: 'error' })))
+    }, [])
+
+    const toggleGroupRow = (bindingId: string, groupId: string) => {
+        const willOpen = !expandedGroups.has(bindingId)
+        setExpandedGroups(prev => {
+            const next = new Set(prev)
+            if (willOpen) next.add(bindingId)
+            else next.delete(bindingId)
+            return next
+        })
+        if (willOpen) ensureGroupMembers(groupId)
+    }
 
 
     // ── Data fetching ────────────────────────────────────────────────
@@ -324,11 +413,11 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
             })
             await fetchMembers()
             const suffix = expiresIn ? ` (expires in ${expiresIn})` : ''
-            showToast('success', `Granted ${roleVisualFor(role).label} to ${label}${suffix}`)
+            notify('success', `Granted ${roleVisualFor(role).label} to ${label}${suffix}`)
             setModal(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to add member'
-            showToast('error', msg)
+            notify('error', msg)
             setError(msg)
         } finally {
             setActionLoading(null)
@@ -341,12 +430,12 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
         try {
             await workspaceMembersService.revoke(workspaceId, member.bindingId)
             await fetchMembers()
-            showToast('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
+            notify('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
             setModal(null)
             setRevokePreview(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to revoke binding'
-            showToast('error', msg)
+            notify('error', msg)
             setError(msg)
         } finally {
             setActionLoading(null)
@@ -416,7 +505,31 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                 </div>
             </div>
 
+            {/* View toggle: the raw bindings, or the flattened list of
+                everyone who can actually get in. */}
+            <div className="flex gap-1 bg-black/5 dark:bg-white/5 rounded-xl p-1 w-fit">
+                {([
+                    ['bindings', 'Bindings', Shield],
+                    ['people', 'People with access', UserCheck],
+                ] as const).map(([mode, label, Icon]) => (
+                    <button
+                        key={mode}
+                        onClick={() => setViewMode(mode)}
+                        className={cn(
+                            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150',
+                            viewMode === mode
+                                ? 'bg-white dark:bg-white/10 text-ink shadow-sm'
+                                : 'text-ink-muted hover:text-ink',
+                        )}
+                    >
+                        <Icon className="w-3.5 h-3.5" />
+                        {label}
+                    </button>
+                ))}
+            </div>
+
             {/* KPI strip */}
+            {viewMode === 'bindings' && (
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 {KPI_CARDS.map(kpi => {
                     const Icon = kpi.icon
@@ -438,6 +551,7 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                     )
                 })}
             </div>
+            )}
 
             {/* Error banner */}
             <AnimatePresence>
@@ -458,6 +572,10 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                 )}
             </AnimatePresence>
 
+            {viewMode === 'people' ? (
+                <WorkspaceAccessList workspaceId={workspaceId} />
+            ) : (
+            <>
             {/* Toolbar */}
             <div className="flex items-center gap-3">
                 <div className="relative flex-1 max-w-xs">
@@ -529,22 +647,43 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                 const RoleIcon = role.icon
                                 const isActing = actionLoading === `revoke-${m.bindingId}`
                                 const name = m.subject.displayName ?? m.subject.id
+                                const isGroup = m.subject.type === 'group'
+                                const isExpanded = isGroup && expandedGroups.has(m.bindingId)
+                                const membersState = isGroup ? groupMembers[m.subject.id] : undefined
                                 return (
+                                    <Fragment key={m.bindingId}>
                                     <motion.tr
-                                        key={m.bindingId}
                                         initial={{ opacity: 0 }}
                                         animate={{ opacity: 1 }}
                                         transition={{ duration: 0.15, delay: i * 0.02 }}
-                                        className="border-b last:border-b-0 border-glass-border transition-colors group hover:bg-black/[0.02] dark:hover:bg-white/[0.02]"
+                                        className={cn(
+                                            'border-b border-glass-border transition-colors group hover:bg-black/[0.02] dark:hover:bg-white/[0.02]',
+                                            !isExpanded && 'last:border-b-0',
+                                        )}
                                     >
                                         {/* Subject */}
                                         <td className="px-5 py-4">
                                             <div className="flex items-center gap-3">
+                                                {/* Groups expand in place; users get a spacer so
+                                                    the avatars stay in one column. */}
+                                                {isGroup ? (
+                                                    <button
+                                                        onClick={() => toggleGroupRow(m.bindingId, m.subject.id)}
+                                                        title={isExpanded ? 'Hide members' : 'Show members'}
+                                                        aria-label={isExpanded ? `Hide members of ${name}` : `Show members of ${name}`}
+                                                        aria-expanded={isExpanded}
+                                                        className="p-0.5 -ml-1 rounded text-ink-muted hover:text-ink transition-colors shrink-0"
+                                                    >
+                                                        <ChevronRight className={cn('w-4 h-4 transition-transform', isExpanded && 'rotate-90')} />
+                                                    </button>
+                                                ) : (
+                                                    <span className="w-3.5 shrink-0" aria-hidden />
+                                                )}
                                                 <SubjectAvatar type={m.subject.type as SubjectType} displayName={name} userId={m.subject.id} />
                                                 <div className="min-w-0">
                                                     <div className="flex items-center gap-2">
                                                         <p className="text-sm font-semibold text-ink truncate">{name}</p>
-                                                        {m.subject.type === 'group' && (
+                                                        {isGroup && (
                                                             <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20 shrink-0">
                                                                 GROUP
                                                             </span>
@@ -592,6 +731,49 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                                             </button>
                                         </td>
                                     </motion.tr>
+
+                                    {/* Group members, revealed in place — the same list the
+                                        /admin/groups drawer shows, and who this binding lets in. */}
+                                    {isExpanded && (
+                                        <tr className="border-b last:border-b-0 border-glass-border bg-black/[0.015] dark:bg-white/[0.015]">
+                                            <td colSpan={4} className="px-5 pb-4 pt-0">
+                                                <div className="ml-8 rounded-xl border border-glass-border bg-canvas-elevated overflow-hidden">
+                                                    <div className="px-4 py-2 border-b border-glass-border bg-black/[0.02] dark:bg-white/[0.03] flex items-center gap-2">
+                                                        <Users2 className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+                                                        <p className="text-[11px] font-semibold text-ink-secondary">
+                                                            {Array.isArray(membersState)
+                                                                ? `${membersState.length} member${membersState.length !== 1 ? 's' : ''} inherit the ${role.label} role here`
+                                                                : `Members of ${name}`}
+                                                        </p>
+                                                    </div>
+                                                    {membersState === undefined || membersState === 'loading' ? (
+                                                        <div className="py-6 flex items-center justify-center text-ink-muted text-xs">
+                                                            <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                                                            Loading members…
+                                                        </div>
+                                                    ) : membersState === 'error' ? (
+                                                        <div className="py-6 text-center text-xs text-ink-muted">
+                                                            Couldn't load this group's members.{' '}
+                                                            <button onClick={() => ensureGroupMembers(m.subject.id)} className="font-semibold text-accent-lineage hover:underline">
+                                                                Retry
+                                                            </button>
+                                                        </div>
+                                                    ) : membersState.length === 0 ? (
+                                                        <div className="py-6 text-center text-xs text-ink-muted">
+                                                            This group has no members yet — the binding grants nobody access.
+                                                        </div>
+                                                    ) : (
+                                                        <div className="max-h-72 overflow-y-auto custom-scrollbar">
+                                                            {membersState.map(gm => (
+                                                                <GroupMemberLine key={gm.userId} member={gm} />
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    )}
+                                    </Fragment>
                                 )
                             })}
                         </tbody>
@@ -607,6 +789,8 @@ export function WorkspaceMembers({ workspaceId }: { workspaceId: string }) {
                         <TablePagination page={clampedPage} pageSize={PAGE_SIZE} total={processedMembers.length} onPageChange={setPage} />
                     </div>
                 </div>
+            )}
+            </>
             )}
 
             {/* Pending access requests inbox (Phase 4.3) */}
@@ -705,7 +889,7 @@ function AddMemberModal({
     // we send the duration shortcut to the backend which normalises
     // it to an ISO ``expires_at`` on the server side.
     const [expiresIn, setExpiresIn] = useState<string>('')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // Phase 3: pull the bindable roles for *this* workspace — global
     // roles plus any role scoped to this workspace. The picker only
@@ -735,10 +919,10 @@ function AddMemberModal({
                 })
                 setAvailableRoles(bindable)
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load roles')
+                notify('error', err instanceof Error ? err.message : 'Failed to load roles')
             }
         })()
-    }, [workspaceId, showToast])
+    }, [workspaceId, notify])
 
     // Subject id → role pairs already bound, so we can disable them in
     // the picker (the API would 409 anyway).
@@ -764,10 +948,10 @@ function AddMemberModal({
                     setGroups(data)
                 }
             } catch (err) {
-                showToast('error', err instanceof Error ? err.message : 'Failed to load')
+                notify('error', err instanceof Error ? err.message : 'Failed to load')
             }
         })()
-    }, [subjectType, users, groups, showToast])
+    }, [subjectType, users, groups, notify])
 
     // Reset selection when toggling subject type
     useEffect(() => { setSelected(null) }, [subjectType])
@@ -1057,7 +1241,7 @@ function PendingRequestsPanel({
     const [acting, setActing] = useState<string | null>(null)
     const [denyingId, setDenyingId] = useState<string | null>(null)
     const [denyNote, setDenyNote] = useState('')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const fetchPending = useCallback(async () => {
         setError(null)
@@ -1077,11 +1261,11 @@ function PendingRequestsPanel({
         setActing(req.id)
         try {
             await accessRequestsService.approve(req.id)
-            showToast('success', `Approved access for ${req.requester.displayName ?? req.requester.id}`)
+            notify('success', `Approved access for ${req.requester.displayName ?? req.requester.id}`)
             await fetchPending()
             await onResolved()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Approve failed')
+            notify('error', err instanceof Error ? err.message : 'Approve failed')
         } finally {
             setActing(null)
         }
@@ -1091,12 +1275,12 @@ function PendingRequestsPanel({
         setActing(req.id)
         try {
             await accessRequestsService.deny(req.id, { note: denyNote.trim() || null })
-            showToast('success', `Denied request from ${req.requester.displayName ?? req.requester.id}`)
+            notify('success', `Denied request from ${req.requester.displayName ?? req.requester.id}`)
             setDenyingId(null)
             setDenyNote('')
             await fetchPending()
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Deny failed')
+            notify('error', err instanceof Error ? err.message : 'Deny failed')
         } finally {
             setActing(null)
         }

@@ -244,7 +244,9 @@ the **first checkpoint**, before any graph work. Resume rules:
 * **Server-side query kill**: every deploy manifest now sets
   `TIMEOUT_MAX` (FalkorDB ignores per-query timeouts on *write* queries
   without it), `TIMEOUT_DEFAULT`, `MAX_QUEUED_QUERIES`,
-  `QUERY_MEM_CAPACITY`, and — critically — `OMP_THREAD_COUNT 1`
+  `QUERY_MEM_CAPACITY` (overridable as `FALKORDB_QUERY_MEM_CAPACITY`; size
+  it WITH the container limit, never alone), and — critically —
+  `OMP_THREAD_COUNT 1`
   (unbounded per-query OpenMP threads on a big node under a small cgroup
   quota were the main cause of the 150% CPU spikes). See
   `docs/FALKORDB_DEPLOYMENT.md` for sizing rules.
@@ -292,7 +294,7 @@ pipeline).
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
-| `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink-on-timeout ladder descends to (a floor-width timeout is an outage and fails the run) |
+| `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink ladder descends to. A floor-width TIMEOUT is an outage and fails the run; a floor-width per-query MEMORY refusal is a payload-size fact and fails the job terminally, no retries |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
 | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | true | Rollup storage. `true` (shipped default) always stores the full cube — leaf-involving and mixed-level pairs included — and FAILS above the write budget; `auto` picks cube-vs-boundary by estimate and degrades instead; `false` forces the boundary. Per-job as `materializeFinePairs`, fleet-wide from Ingestion → Freshness → Automation (③ Act → Advanced) |
 | `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Hard write budget (fail loud, never OOM). ~12.5GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
@@ -417,16 +419,37 @@ next reconcile. *Impact: a raw-edge deletion can never collapse or
 delete a rollup it didn't contribute to; worst case is a briefly
 stale-high weight that the next run reconciles.*
 
-**5. One slow range scan failed the whole run.** Scan timeouts are
-deliberately never retried at the connection layer (a slow query must
-not be multiplied), so a briefly-busy server or one dense ID range sent
-a multi-hour job back through worker retry into a full EXTRACT re-run.
-`_fetch_range` now halves the failing range down to
+**5. One slow — or one oversized — range scan failed the whole run.**
+Scan timeouts are deliberately never retried at the connection layer (a
+slow query must not be multiplied), so a briefly-busy server or one dense
+ID range sent a multi-hour job back through worker retry into a full
+EXTRACT re-run. `_fetch_range` now halves the failing range down to
 `AGGREGATION_SCAN_SHRINK_FLOOR` (sticky for the rest of the run,
 re-growing after sustained health); only a floor-width timeout — an
 outage, not payload size — still fails the run. *Impact: multi-hour
 jobs absorb transient provider slowness instead of restarting; a
 partial scan is never silently treated as complete.*
+
+The same ladder now also catches the server's PER-QUERY memory refusal
+(`QUERY_MEM_CAPACITY`: *"Query's mem consumption exceeded capacity"*).
+That signal used to escape it entirely — the `except` was
+`asyncio.TimeoutError` only — so the job failed, the circuit breaker
+relabelled it `ProviderUnavailable`, and the worker retried the IDENTICAL
+query three times: exactly enough failures to open the breaker for every
+reader of that provider, while the UI told the operator the graph store
+was offline. It is shrinkable because FalkorDB buffers a query's whole
+result set inside the tracked budget (it does not stream), so the bytes
+scale linearly with rows returned; at floor width it raises
+`MaterializationQueryMemoryExceeded` — a `ValueError`, hence
+breaker-ignored and terminal — carrying the scan label, the range, the
+width and the ordered fixes. Exposure is very uneven across the four
+scan shapes: RECONCILE projects 11 columns including `aggKey` (two
+concatenated URNs) and the `sourceEdgeTypes` array, while EXTRACT returns
+two integers at the same range width — so the full-cube regime, which
+multiplies RECONCILE's row count, is what brings a graph within reach of
+the ceiling. A run that survived by degrading reports `scan_width_min`
+and `scan_shrinks` in `run_stats`. *Impact: growing past the per-query
+ceiling costs a slower run, not a failed job — and never a breaker trip.*
 
 **6. Apply-resume could skip pairs (completeness).** The apply-phase
 cursor fast-forward bisected past every key ≤ the recorded position —

@@ -148,7 +148,7 @@ export interface FetchEnvelopedOptions {
      * Suppress the global access-denied modal on 403. Forwarded to
      * ``fetchWithTimeout``. Use when the envelope endpoint is admin-only
      * and the caller is a background probe — non-admins will 403 by
-     * design, and the toast confuses them.
+     * design, and the notification confuses them.
      */
     silent403?: boolean
 }

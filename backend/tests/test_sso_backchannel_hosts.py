@@ -110,6 +110,43 @@ async def test_removal_is_immediate(db_session):
     assert await repo.delete_host(db_session, row.id) is False
 
 
+# ── two lists, one table ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_two_lists_do_not_bleed_into_each_other(db_session):
+    """A gateway entry must not quietly admit an avatar host, nor the
+    other way round — the reads are purpose-filtered."""
+    await repo.add_host(db_session, host="gw.corp.internal", port=443)
+    await repo.add_host(
+        db_session, host="avatars.example.com", port=443, purpose="avatar",
+    )
+    assert await repo.allowed_host_keys(db_session) == {
+        "gw.corp.internal:443",
+    }
+    assert await repo.allowed_host_keys(db_session, purpose="avatar") == {
+        "avatars.example.com:443",
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_same_host_may_sit_on_both_lists(db_session):
+    gw = await repo.add_host(db_session, host="pics.corp.internal")
+    av = await repo.add_host(
+        db_session, host="pics.corp.internal", purpose="avatar",
+    )
+    assert gw.id != av.id
+    assert len(await repo.list_hosts(db_session)) == 1
+    assert len(await repo.list_hosts(db_session, purpose="avatar")) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_purpose_is_refused(db_session):
+    with pytest.raises(BackchannelHostError):
+        await repo.add_host(db_session, host="x.example", purpose="both")
+    with pytest.raises(BackchannelHostError):
+        await repo.list_hosts(db_session, purpose="")
+
+
 # ── the floor no entry can lower ─────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -169,6 +206,34 @@ async def test_the_full_round_trip_through_the_api(test_client):
     removed = await test_client.delete(f"{_BASE}/{body['id']}")
     assert removed.status_code == 204
     assert (await test_client.get(_BASE)).json() == []
+
+
+@pytest.mark.asyncio
+async def test_the_avatar_list_round_trips_through_the_api(test_client):
+    created = await test_client.post(
+        f"{_BASE}?purpose=avatar",
+        json={"host": "Avatars.Example.Com", "note": "public CDN"},
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["purpose"] == "avatar"
+    assert body["host"] == "avatars.example.com"
+
+    listed = await test_client.get(f"{_BASE}?purpose=avatar")
+    assert [e["host"] for e in listed.json()] == ["avatars.example.com"]
+    # The default read is the gateway list; the avatar entry stays off it.
+    assert (await test_client.get(_BASE)).json() == []
+
+    assert (
+        await test_client.delete(f"{_BASE}/{body['id']}")
+    ).status_code == 204
+    assert (await test_client.get(f"{_BASE}?purpose=avatar")).json() == []
+
+
+@pytest.mark.asyncio
+async def test_a_made_up_purpose_is_a_validation_error(test_client):
+    resp = await test_client.get(f"{_BASE}?purpose=everything")
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

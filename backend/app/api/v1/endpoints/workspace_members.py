@@ -28,11 +28,32 @@ from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     ImpactPreviewResponse,
     ImpactPreviewUser,
+    WorkspaceAccessGrant,
+    WorkspaceAccessResponse,
+    WorkspaceAccessUser,
     WorkspaceMemberCreateRequest,
     WorkspaceMemberExpiryUpdateRequest,
     WorkspaceMemberResponse,
     WorkspaceMemberSubject,
 )
+
+
+# Precedence for the single "effective role" badge. Higher wins; a role
+# not listed (a custom workspace role) ranks below the built-ins but is
+# still carried in ``roles`` and every ``grant`` — the badge is a
+# convenience, never the whole picture.
+_WS_ROLE_RANK = {
+    "workspace_admin": 3,
+    "workspace_member": 2,
+    "workspace_viewer": 1,
+}
+
+
+def _effective_role(roles: list[str]) -> str:
+    """The one role to badge a user with: the highest-precedence built-in
+    they hold, else their first role by name. ``roles`` is never empty —
+    a user only appears here because at least one route grants them one."""
+    return min(roles, key=lambda r: (-_WS_ROLE_RANK.get(r, 0), r))
 
 
 logger = logging.getLogger(__name__)
@@ -123,6 +144,109 @@ async def list_members(
             )
         )
     return out
+
+
+@router.get(
+    "/effective",
+    response_model=WorkspaceAccessResponse,
+    response_model_by_alias=True,
+)
+async def list_effective_access(
+    ws_id: str,
+    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceAccessResponse:
+    """The flattened, inheritance-aware access list for the workspace.
+
+    ``GET /members`` lists the BINDINGS — a group bound here is one row,
+    and to learn who that actually lets in you had to open the group
+    elsewhere. This resolves them: every distinct person who can reach
+    the workspace, bound directly or a member of any bound group, with a
+    grant per route that got them there. A user in three bound groups
+    (and perhaps bound directly too) appears ONCE, with a grant per
+    route, so "who can actually get in, and how" reads off one list.
+    """
+    await _ensure_workspace_exists(session, ws_id)
+    bindings = await binding_repo.list_for_scope(
+        session, scope_type="workspace", scope_id=ws_id,
+    )
+
+    # Names for every bound group, in one query, so a grant can say which
+    # group it came through.
+    group_ids = [b.subject_id for b in bindings if b.subject_type == "group"]
+    group_names: dict[str, str] = {}
+    if group_ids:
+        rows = await session.execute(
+            select(GroupORM.id, GroupORM.name).where(GroupORM.id.in_(group_ids))
+        )
+        group_names = {gid: name for gid, name in rows.all()}
+
+    grants_by_user: dict[str, list[WorkspaceAccessGrant]] = {}
+    direct_ids: set[str] = set()
+    via_group_ids: set[str] = set()
+
+    for b in bindings:
+        if b.subject_type == "user":
+            grants_by_user.setdefault(b.subject_id, []).append(
+                WorkspaceAccessGrant(
+                    role=b.role_name, via="direct", binding_id=b.id,
+                    expires_at=b.expires_at,
+                )
+            )
+            direct_ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            gname = group_names.get(b.subject_id)
+            members = await group_repo.list_group_members(session, b.subject_id)
+            for m in members:
+                grants_by_user.setdefault(m.user_id, []).append(
+                    WorkspaceAccessGrant(
+                        role=b.role_name, via="group", binding_id=b.id,
+                        group_id=b.subject_id, group_name=gname,
+                        expires_at=b.expires_at,
+                    )
+                )
+                via_group_ids.add(m.user_id)
+
+    # One batched identity lookup for the whole page — names, emails,
+    # avatars, and the deleted flag (a deleted account that still holds
+    # access is exactly what an admin needs to see and remove).
+    identities = await user_repo.get_identities_by_ids(
+        session, list(grants_by_user.keys()),
+    )
+
+    users: list[WorkspaceAccessUser] = []
+    for uid, grants in grants_by_user.items():
+        ident = identities.get(uid)
+        roles = sorted({g.role for g in grants})
+        users.append(
+            WorkspaceAccessUser(
+                user_id=uid,
+                display_name=(ident["name"] or None) if ident else None,
+                email=ident["email"] if ident else None,
+                avatar_id=ident["avatar_id"] if ident else None,
+                status=ident["status"] if ident else None,
+                deleted=ident["deleted"] if ident else False,
+                roles=roles,
+                effective_role=_effective_role(roles),
+                # Direct routes first, then by group name, then role —
+                # stable and readable in the drawer.
+                grants=sorted(
+                    grants,
+                    key=lambda g: (
+                        g.via != "direct", (g.group_name or "").lower(), g.role,
+                    ),
+                ),
+            )
+        )
+
+    users.sort(key=lambda u: (u.display_name or u.user_id).lower())
+
+    return WorkspaceAccessResponse(
+        users=users,
+        total_users=len(users),
+        direct_users=len(direct_ids),
+        via_group_users=len(via_group_ids),
+    )
 
 
 @router.post(
@@ -409,7 +533,10 @@ async def preview_revoke_binding(
         display_name = None
         email = None
         if user_orm is not None:
-            full = f"{user_orm.first_name} {user_orm.last_name}".strip()
+            full = resolve_display_name(
+                getattr(user_orm, "display_name", None),
+                user_orm.first_name, user_orm.last_name,
+            )
             display_name = full or user_orm.email
             email = user_orm.email
         user_impact.append(

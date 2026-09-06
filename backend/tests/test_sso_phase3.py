@@ -224,6 +224,63 @@ async def test_reconcile_creates_group_membership(db_session):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_scales_to_an_ad_sized_group_list(db_session):
+    """The large-organisation case: one person arrives with 150 AD
+    groups, two of which are mapped — ``group1`` to the internal group
+    "Use Case A" and ``group3`` to an org role. Both land, the 148
+    unmapped names grant nothing (one IN query, set bucketing — never
+    per-group work), a replay is idempotent, and dropping one group on
+    a later login removes exactly its grant."""
+    provider = await idp_provider_repo.create_provider(
+        db_session, slug="corp-ad", display_name="Corp AD",
+        kind="oidc", settings={},
+    )
+    use_case_a = await group_repo.create_group(
+        db_session, name="Use Case A", description="",
+    )
+    await idp_group_mapping_repo.create_group_membership_mapping(
+        db_session, idp_group="group1",
+        target_group_id=use_case_a.id, provider_id=provider.id,
+    )
+    await idp_group_mapping_repo.create_role_binding_mapping(
+        db_session, idp_group="group3", role_name="org_admin",
+        scope_type="global", scope_id=None, provider_id=provider.id,
+    )
+    user = await user_repo.create_sso_user(
+        db_session, email="big@corp.example", first_name="B",
+        last_name="Org", password_hash=disabled_password_hash(),
+    )
+
+    filler = [f"CN=Team {i},OU=Groups,DC=corp" for i in range(148)]
+    asserted = ["group1", *filler, "group3"]
+
+    out = await reconcile_sso_targets(
+        db_session, user_id=user.id, idp_groups=asserted,
+        provider_id=provider.id,
+    )
+    assert out["mappings_matched"] == 2
+    assert out["memberships_added"] == 1
+    assert out["created"] == 1
+
+    # The same 150 again: idempotent, nothing granted twice.
+    out2 = await reconcile_sso_targets(
+        db_session, user_id=user.id, idp_groups=asserted,
+        provider_id=provider.id,
+    )
+    assert out2["memberships_added"] == 0
+    assert out2["created"] == 0
+
+    # The directory drops group1: its membership goes, the role stays.
+    out3 = await reconcile_sso_targets(
+        db_session, user_id=user.id,
+        idp_groups=[g for g in asserted if g != "group1"],
+        provider_id=provider.id,
+    )
+    assert out3["memberships_removed"] == 1
+    assert out3["revoked"] == 0
+
+
+@pytest.mark.asyncio
 async def test_reconcile_preserves_manual_group_memberships(db_session):
     """Memberships added manually (source='local') must NOT be revoked
     even when the SSO assertion stops including the group."""
@@ -327,3 +384,49 @@ async def test_list_providers_ordered_by_priority(db_session):
     listing = await idp_provider_repo.list_providers(db_session)
     slugs = [r.slug for r in listing]
     assert slugs.index("prio-hi") < slugs.index("prio-lo")
+
+
+@pytest.mark.asyncio
+async def test_list_for_users_batches_a_page(db_session):
+    """The admin user list resolves a whole page's identities in ONE
+    query — per-row lookups would be fifty queries per page."""
+    p1 = await idp_provider_repo.create_provider(
+        db_session, slug="batch-a", display_name="A", kind="oidc",
+        settings={},
+    )
+    p2 = await idp_provider_repo.create_provider(
+        db_session, slug="batch-b", display_name="B", kind="saml2",
+        settings={},
+    )
+    both = await user_repo.create_sso_user(
+        db_session, email="both@batch.example", first_name="B",
+        last_name="L", password_hash=disabled_password_hash(),
+    )
+    one = await user_repo.create_sso_user(
+        db_session, email="one@batch.example", first_name="O",
+        last_name="L", password_hash=disabled_password_hash(),
+    )
+    none = await user_repo.create_sso_user(
+        db_session, email="none@batch.example", first_name="N",
+        last_name="L", password_hash=disabled_password_hash(),
+    )
+    for uid, pid, ext in [
+        (both.id, p1.id, "e1"), (both.id, p2.id, "e2"), (one.id, p1.id, "e3"),
+    ]:
+        await user_identity_repo.create_identity(
+            db_session, user_id=uid, provider_id=pid, external_id=ext,
+            email_at_link=None,
+        )
+    await db_session.commit()
+
+    grouped = await user_identity_repo.list_for_users(
+        db_session, [both.id, one.id, none.id],
+    )
+    assert sorted(i.provider.slug for i in grouped[both.id]) == [
+        "batch-a", "batch-b",
+    ]
+    assert [i.provider.slug for i in grouped[one.id]] == ["batch-a"]
+    # No identities = no key; and ``.provider`` was eager-loaded (no
+    # MissingGreenlet on access above).
+    assert none.id not in grouped
+    assert await user_identity_repo.list_for_users(db_session, []) == {}

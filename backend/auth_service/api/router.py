@@ -68,11 +68,13 @@ from ..cookies import (
     read_oidc_cookie,
     read_refresh_cookie,
     read_saml_cookie,
+    set_csrf_cookie,
     set_mock_identity_cookie,
     set_oidc_cookie,
     set_saml_cookie,
     set_session_cookies,
 )
+from ..csrf import mint_csrf_token, verify_csrf_token
 # Module, not names: the key ring resolves on first access so this
 # module stays importable without a signing secret.
 from ..core import config as jwt_config
@@ -84,6 +86,7 @@ from ..core.config import (
     COOKIE_SAMESITE,
     COOKIE_SECURE,
     JWT_ISSUER,
+    JWT_REFRESH_EXPIRY_DAYS,
     RATELIMIT_LOGIN_PER_ACCOUNT,
     RATELIMIT_LOGIN_PER_IP,
     RATELIMIT_REFRESH_PER_SESSION,
@@ -692,6 +695,50 @@ def _dryrun_response(slug: str, outcome: dict) -> Response:
             "re-certification will measure from each sign-in",
         )
 
+    # The avatar leg gets a verdict line in every state — silence is how
+    # this feature failed before: a refused fetch was one server log
+    # line, and the operator's only symptom was a 404 on the image.
+    avatar_fact = outcome.get("avatar") or {}
+    if avatar_fact:
+        if avatar_fact.get("url") is None:
+            row(
+                "Profile picture",
+                "no avatar URL resolved from the claims — either none "
+                "was sent, or avatar mapping is off for this connection",
+            )
+        elif avatar_fact.get("fetched"):
+            size_kib = max(1, round((avatar_fact.get("size") or 0) / 1024))
+            row(
+                "Profile picture",
+                f"would arrive — {avatar_fact.get('content_type', 'image')}, "
+                f"{size_kib} KiB from {avatar_fact['url']}. A real sign-in "
+                "would store it",
+            )
+        else:
+            reason = str(avatar_fact.get("reason") or "fetch_failed")
+            hint = {
+                "host_not_allowlisted":
+                    "add the host under Settings → Avatar image hosts",
+                "not_an_image":
+                    "supply a raster image URL (PNG, JPEG, GIF, WebP or "
+                    "AVIF)",
+                "too_many_redirects":
+                    "the URL redirects more than three times",
+                "tls_verify_failed":
+                    "the host's TLS answer does not validate against "
+                    "this deployment's trust — mount your corporate CA "
+                    "bundle and point SSO_OUTBOUND_TLS_CA_CERTS at it "
+                    "(see the deployment guide)",
+                "fetch_unavailable":
+                    "this deployment has no avatar fetcher wired",
+            }.get(reason)
+            text = f"would NOT arrive ({reason})"
+            if hint:
+                text += f" — {hint}"
+            if avatar_fact.get("detail"):
+                text += f". {avatar_fact['detail']}"
+            row("Profile picture", text)
+
     if outcome.get("reason"):
         row("Refused because", outcome["reason"])
     for reason in outcome.get("deny_reasons") or []:
@@ -1047,10 +1094,17 @@ async def login(
     except LocalLoginDisabled:
         # Phase 4: SSO-only mode. Don't leak the existence of any
         # account; respond with a structured 403 so the FE can
-        # redirect to the providers picker.
+        # redirect to the providers picker. (System accounts are the
+        # one carve-out, resolved inside ``svc.login`` — reaching this
+        # branch means the account is not one, or does not exist, and
+        # the two are deliberately indistinguishable.)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "local_login_disabled"},
+            detail={
+                "error": "local_login_disabled",
+                "message": "Password sign-in is switched off for this "
+                           "deployment — use single sign-on.",
+            },
         )
     except InvalidCredentials:
         # Only failures accumulate, so someone who signs in correctly
@@ -1161,12 +1215,38 @@ async def refresh(request: Request, response: Response):
 # ── GET /auth/me ──────────────────────────────────────────────────────
 
 
+def _heal_csrf_cookie(request: Request, response: Response) -> None:
+    """Re-mint ``nx_csrf`` when a valid session presents none, or one
+    that does not verify for this session's ``sid``.
+
+    Nothing else mints this cookie outside a rotation, so a reload —
+    all GETs — used to change nothing and every write kept failing
+    "CSRF token missing or invalid" until something POST-shaped
+    happened to run. A VALID cookie is left strictly alone: rotation
+    stays the refresh path's job, and gratuitously re-minting here
+    would widen the header/cookie skew window the client already
+    races.
+    """
+    presented = request.cookies.get(CSRF_COOKIE_NAME)
+    try:
+        sid = decode_token(read_access_cookie(request) or "").get("sid")
+    except Exception:  # noqa: BLE001 — unreadable token; same fallback as the middleware
+        sid = None
+    if presented and verify_csrf_token(presented, sid):
+        return
+    set_csrf_cookie(
+        response,
+        mint_csrf_token(sid),
+        max_age_seconds=JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60,
+    )
+
+
 @router.get(
     "/me",
     response_model=SessionResponse,
     response_model_by_alias=True,
 )
-async def me(request: Request):
+async def me(request: Request, response: Response):
     svc = _identity_service(request)
     user = await svc.validate_session(read_access_cookie(request))
     if user is None:
@@ -1179,7 +1259,54 @@ async def me(request: Request):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
+    # The bootstrap GET is where a lost CSRF cookie gets healed — the
+    # one moment we know the session is valid before any write happens.
+    _heal_csrf_cookie(request, response)
     return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+
+
+# ── GET /auth/csrf ────────────────────────────────────────────────────
+
+
+@router.get("/csrf", response_model=_Ack)
+async def csrf(request: Request, response: Response):
+    """Repair ``nx_csrf`` for the current session, in place — no rotation.
+
+    ``nx_csrf`` can go missing, or arrive as a sibling deployment's value,
+    while the session itself stays perfectly valid: a second instance's
+    sign-out sweeps the shared parent domain, or two deployments share one
+    cookie jar. The page cannot detect this — the token is bound to the
+    session's ``sid`` under a server secret, and the ``sid`` lives in the
+    HttpOnly access cookie the page cannot read — so a stale or absent
+    cookie 403s every write with nothing the page can do about it but a
+    full reload, which heals the cookie as a side effect of ``GET /me``.
+
+    This is that heal, made callable on its own. The client hits it the
+    moment a write fails ``csrf_failed`` (or pre-emptively when the cookie
+    is gone) and gets a correctly-bound cookie back without paying for a
+    token rotation — which is both wasteful and unsafe here, because a
+    rotation runs the session ceilings and can end the session outright,
+    turning "your CSRF cookie was evicted" into "you are signed out". It
+    reuses ``_heal_csrf_cookie``, so an already-valid cookie is left
+    untouched and only a missing or mis-bound one is re-minted.
+
+    401 when there is no live session to heal against, so the client falls
+    through to the refresh / login path rather than looping here. Being a
+    GET, it is a CSRF-safe method and needs no token of its own.
+    """
+    svc = _identity_service(request)
+    user = await svc.validate_session(read_access_cookie(request))
+    if user is None:
+        # Same classify-before-answering as ``/me``: a cookie from another
+        # environment can never be healed here, so evict it rather than
+        # letting the client retry a repair that cannot succeed.
+        raise_if_foreign_session(request)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+    _heal_csrf_cookie(request, response)
+    return _Ack()
 
 
 # ── GET /auth/diagnostics ─────────────────────────────────────────────

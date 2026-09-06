@@ -180,6 +180,7 @@ const FRIENDLY_BY_CODE: Record<string, string> = {
     db_unavailable: "The database is busy right now — too many open connections. Please try again in a moment.",
     provider_unavailable: "This provider is temporarily unavailable — it may be restarting or under load. Try again shortly.",
     out_of_memory: "The provider ran low on memory and is recovering. Give it a moment, then try again.",
+    query_memory: "A single query asked for more data than this provider allows one query to hold. The provider itself is healthy — the query needs to read less.",
     provider_loading: "This provider is still warming up — its data is loading and will appear shortly.",
     cluster_mode_mismatch: "This server is a Redis Cluster node, but the provider is configured for standalone mode — a standalone connection sees only a fraction of the graphs. Edit the connection and set Mode to Cluster (with the cluster's startup nodes).",
 }
@@ -206,7 +207,7 @@ export function friendlyError(raw: string): string {
         if (typeof parsed.error === 'string' && !code) code = parsed.error
         // Top-level structured errors, e.g. the async-refresh enqueue
         // failure {"code":"DB_UNAVAILABLE","reason":"Too many connections"}.
-        // Without this, the raw JSON leaked into toasts and banners.
+        // Without this, the raw JSON leaked into notifications and banners.
         if (!code && typeof parsed.code === 'string') code = parsed.code
         if (!code && typeof parsed.reason === 'string') code = parsed.reason
         // If there's a human 'reason' but no mapped code, prefer it over
@@ -254,6 +255,10 @@ export function friendlyError(raw: string): string {
         return FRIENDLY_BY_CODE.db_unavailable
     if (lower.includes('out of memory') || lower.includes('oom command') || lower.includes("'maxmemory'"))
         return FRIENDLY_BY_CODE.out_of_memory
+    // Per-query ceiling (QUERY_MEM_CAPACITY), not the instance's maxmemory —
+    // checked after the OOM arm because only this phrasing is specific to it.
+    if (lower.includes('mem consumption exceeded'))
+        return FRIENDLY_BY_CODE.query_memory
     if (lower.includes('loading the dataset') || lower.includes('-loading') || lower.includes('is loading'))
         return FRIENDLY_BY_CODE.provider_loading
 

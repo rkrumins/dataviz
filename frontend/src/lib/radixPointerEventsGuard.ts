@@ -78,5 +78,10 @@ export function installRadixPointerEventsGuard(): void {
   // can't notice the freeze. Keydown (users mash Escape when stuck) and tab
   // re-focus are reliable moments to re-check.
   window.addEventListener('keydown', schedule, true)
+  // The moment a lock actually hurts is the moment someone clicks. A capture
+  // listener here heals before the click is lost, which no other wake source
+  // could promise: the observer only fires on a body mutation, and focus and
+  // keydown may never come on a mouse-driven page.
+  window.addEventListener('pointerdown', schedule, true)
   window.addEventListener('focus', schedule, true)
 }

@@ -26,7 +26,7 @@ import os
 import time
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, literal, select
+from sqlalchemy import func, literal, or_, select
 
 from . import config, db
 from .reconcile import falkor_counts, pg_live_counts_projectable
@@ -181,7 +181,9 @@ def _node_item(entity_id: str, urn: str, payload: dict,
         "sourceSystem": payload.get("sourceSystem") or "",
         "lastSyncedAt": payload.get("lastSyncedAt") or "",
         "level": lvl,
-        "searchableText": _compute_searchable_text(dn, qn, desc, native),
+        "searchableText": _compute_searchable_text(
+            dn, qn, desc, native, tags=payload.get("tags"),
+        ),
     }
 
 
@@ -424,10 +426,13 @@ class FalkorProjector:
                     # field — the content-drift class the old count-only verify published blind).
                     # DO NOT advance: hold projected < committed so `fresh` stays false and reads
                     # keep falling back to Postgres (the SoR) instead of flipping onto a corrupt
-                    # cache. Pin target down to the un-advanced seq so the poll loop
-                    # (project_pending: projected < target) stops re-running a deterministic-fail
-                    # seed; a manual rebuild (request_projection_rebuild re-arms target=head) or a
-                    # new commit retries it.
+                    # cache. Pin target down to the un-advanced seq so the RETRY is bounded and
+                    # idempotent — each pass re-attempts this one seq rather than climbing.
+                    # It does NOT stop the poll: `project_pending` re-selects on
+                    # `projected < main_head_commit_seq` too, precisely because selecting on
+                    # target alone left a held-back graph unreachable forever once BOTH sat at
+                    # the un-advanced seq — that is the shape that wedged a projection for 14h
+                    # and silently routed every main read back to Postgres.
                     ps.target_commit_seq = ps.projected_commit_seq
                     logger.error("projection for %s verified UNFAITHFUL at seq %d; holding watermark "
                                  "at %d so reads stay on Postgres — %s", graph_id, to_seq,
@@ -539,8 +544,28 @@ class FalkorProjector:
         per-graph failure is logged and does not abort the batch."""
         async with self._session() as s:
             ids = (await s.execute(
-                select(ProjectionStateORM.graph_id).where(
-                    ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq,
+                select(ProjectionStateORM.graph_id).join(
+                    GraphORM, GraphORM.id == ProjectionStateORM.graph_id,
+                ).where(
+                    # LAG IS MEASURED AGAINST THE COMMITTED HEAD, not against `target`.
+                    #
+                    # `target_commit_seq` is what a projection ATTEMPT aimed at, and the
+                    # failure path holds BOTH counters at the last good seq. So a graph that
+                    # fails to verify ends up `projected == target` below `main_head`: this
+                    # retry can never select it again, while the read path's freshness check
+                    # (`projected >= main_head`, service.py:2126) stays false forever and
+                    # routes every main read to Postgres. That is a permanent wedge with no
+                    # self-healing path — one cost a data source its entire aggregated
+                    # lineage layer for 14 hours and needed a hand-written UPDATE to escape.
+                    #
+                    # Selecting on the head means a held-back graph is retried on the next
+                    # poll. A genuinely unfixable graph therefore retries on a loop, which is
+                    # the correct trade: it is visible and bounded by the poll interval,
+                    # where silence was neither.
+                    or_(
+                        ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq,
+                        ProjectionStateORM.projected_commit_seq < GraphORM.main_head_commit_seq,
+                    ),
                     # Unpinned graphs (no real FalkorDB target — falkor_graph_name NULL or the
                     # synthetic gv_<id> fallback) are never projected: nothing reads those keys.
                     # Filtered here in SQL so hundreds of test-created graphs can't crowd out
@@ -549,7 +574,8 @@ class FalkorProjector:
                     ProjectionStateORM.falkor_graph_name
                     != literal("gv_").concat(ProjectionStateORM.graph_id),
                 ).order_by(
-                    (ProjectionStateORM.target_commit_seq
+                    (func.greatest(ProjectionStateORM.target_commit_seq,
+                                   GraphORM.main_head_commit_seq)
                      - ProjectionStateORM.projected_commit_seq).desc()
                 ).limit(limit)
             )).scalars().all()

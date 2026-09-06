@@ -140,6 +140,30 @@ async def test_logical_errors_do_not_affect_breaker() -> None:
     assert proxy.breaker_state == "closed"
 
 
+async def test_query_memory_exceeded_does_not_affect_breaker() -> None:
+    """A query too large for QUERY_MEM_CAPACITY is not a sick provider.
+
+    It used to land in the catch-all: relabelled ProviderUnavailable AND
+    counted, so an aggregation job's three retries were exactly enough to
+    open the breaker for every reader of that provider — the canvas
+    included. It is now a ValueError subclass, which the ignored set covers,
+    so it reaches the worker's terminal branch unwrapped and the breaker
+    never sees it."""
+    from backend.app.providers.falkordb_materialize import (
+        MaterializationQueryMemoryExceeded,
+    )
+
+    target = FlakyProvider()
+    target.raise_exc = MaterializationQueryMemoryExceeded("scan too wide")
+    proxy = CircuitBreakerProxy(target, name="test", fail_max=3)
+
+    for _ in range(10):
+        with pytest.raises(MaterializationQueryMemoryExceeded):
+            await proxy.get_stats()
+
+    assert proxy.breaker_state == "closed"
+
+
 async def test_provider_unavailable_itself_does_not_recursively_trip() -> None:
     """ProviderUnavailable raised by the proxy should not re-feed the
     breaker's failure counter if the target ever re-raises it."""

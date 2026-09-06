@@ -1,8 +1,11 @@
 /**
  * ContextViewHeader - Layout shell for the Context View's toolbar.
  *
- * Receives all state as props from ContextViewCanvas — no store access here.
- * Keeps the orchestrator lean and makes the header independently testable.
+ * Receives its state as props from ContextViewCanvas, which keeps the
+ * orchestrator lean and the header independently testable. The one
+ * exception is the search box, which reads the canvas's search session off
+ * a context — a query, its results and its highlights are one thing shared
+ * by three surfaces, and drilling it through here would only pass it on.
  *
  * The header is partitioned by mode. Published is strictly read-only for
  * everybody; "edit mode" IS being on a draft (no separate flag):
@@ -11,8 +14,13 @@
  *   - Edit mode (on a draft): the same comprehension tools + the authoring
  *     cluster — Undo/Redo, Review & Save, Done (see header/EditorActions.tsx)
  *     — plus a thin amber strip along the top edge matching the
- *     CanvasVersioningBar's draft tint. Branch lifecycle (switcher /
- *     Publish / Discard) lives in that bar, never here.
+ *     CanvasVersioningBar's draft tint. Publish / Discard stay in that bar.
+ *
+ * The left slot holds the BRANCH SWITCHER, not a title. It used to repeat the
+ * view's name and type count, both of which the page header already prints
+ * larger — one view, two names, three stacked bands. The name stayed upstairs
+ * and the switcher came down into the slot it freed (see CanvasVersioningBar,
+ * which now renders nothing at all in its idle Published state).
  *
  * The header is INTENTIONALLY trace-agnostic. Trace UI lives in the
  * `TraceBottomDock` mounted inside ContextViewCanvas's canvas-body, in a
@@ -20,21 +28,16 @@
  */
 
 import { motion, AnimatePresence } from 'framer-motion'
-import type { HierarchyNode } from './types'
+import { Loader2 } from 'lucide-react'
+import { HoverTip } from '@/components/ui/HoverTip'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
-import { HeaderSearch, HeaderSearchResults } from './header/HeaderSearch'
+import { BranchSwitcher } from '@/features/versioning/components/BranchSwitcher'
+import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
-import { ViewTitleMenu } from './header/ViewTitleMenu'
 
 export interface ContextViewHeaderProps {
-  // Search
-  searchQuery: string
-  onSearchChange: (q: string) => void
-  searchResults: HierarchyNode[]
-  onSearchResultClick: (node: HierarchyNode) => void
-
   // Lineage flow
   showLineageFlow: boolean
   onToggleLineageFlow: () => void
@@ -59,7 +62,7 @@ export interface ContextViewHeaderProps {
   /** True once the canvas finishes hydrating (entities + edges). When
    *  false, Trace is unsafe to fire — the backend hasn't fully loaded the
    *  lineage graph yet and the trace would return nothing. The header
-   *  surfaces this as a distinct "loading" button state with a toast on
+   *  surfaces this as a distinct "loading" button state with a notification on
    *  attempted click. */
   lineageReady: boolean
 
@@ -87,40 +90,22 @@ export interface ContextViewHeaderProps {
   onEnterEdit: () => void
   onExitEdit: () => void
 
-  // Advanced search panel (G2 production UX surface).
-  //
-  // When invoked WITH a ``seedQuery`` (the current quick-search
-  // value), the parent should:
-  //   * clear the quick-search input so the no-match escalation
-  //     card vanishes,
-  //   * seed the Advanced Search panel's draft predicate with a
-  //     ``TextPredicate{target:'name', value: seedQuery}`` so the
-  //     user picks up where they left off without retyping.
-  // When invoked WITHOUT a seedQuery, just toggle the panel.
-  onOpenAdvancedSearch?: (seedQuery?: string) => void
-
   // Property Manager — opens the reusable right-side drawer for browsing
   // properties and authoring display-rule tags. Optional so canvases that
   // don't wire it simply omit the button.
   onTogglePropertyManager?: () => void
   propertyManagerOpen?: boolean
 
-  // Title — actual view name + entity-type count, shown in the header.
-  viewName?: string
-  entityTypeCount?: number
-  /** Folded into the title subline ({N} types · {model name}). */
-  activeContextModelName: string | null
-
-  // View-level capabilities + metadata actions. Independent of
-  // isDraft/canManage — view metadata is not graph data, so the title menu
-  // behaves identically on Published and drafts (see the header design spec).
-  // With neither capability, the title stays a plain label (calm-view rule).
-  canEditView?: boolean
-  canShareView?: boolean
-  viewVisibility?: 'private' | 'workspace' | 'enterprise'
-  onRenameView?: (name: string) => void
-  onEditViewDetails?: () => void
-  onShareView?: () => void
+  /** Branch switcher slot. The view's workspace when versioning chrome is
+   *  available to this caller, `null` when it is not (flag off, read-only
+   *  session, no workspace) — the switcher is then absent, exactly as the
+   *  versioning bar was. The switcher hides itself when the data source has
+   *  no versioned graph.
+   *
+   *  Only THIS canvas hosts it; the others keep it in CanvasVersioningBar,
+   *  which is why that bar takes `showBranchSwitcher`. */
+  branchWorkspaceId?: string | null
+  branchDataSourceId?: string | null
 
   // Blueprint sync — surfaces only as a tiny subline spinner ('saving')
   // or a "Sync issue — retry" text button ('error' → onRetrySync).
@@ -157,10 +142,6 @@ export interface ContextViewHeaderProps {
 }
 
 export function ContextViewHeader({
-  searchQuery,
-  onSearchChange,
-  searchResults,
-  onSearchResultClick,
   showLineageFlow,
   onToggleLineageFlow,
   showEdgeDirection,
@@ -185,18 +166,10 @@ export function ContextViewHeader({
   canEnterEdit,
   onEnterEdit,
   onExitEdit,
-  onOpenAdvancedSearch,
   onTogglePropertyManager,
   propertyManagerOpen = false,
-  viewName,
-  entityTypeCount,
-  activeContextModelName,
-  canEditView = false,
-  canShareView = false,
-  viewVisibility,
-  onRenameView,
-  onEditViewDetails,
-  onShareView,
+  branchWorkspaceId,
+  branchDataSourceId,
   syncStatus,
   onRetrySync,
   pendingChangeCount = 0,
@@ -259,14 +232,15 @@ export function ContextViewHeader({
     isDraft,
   }
 
-  const subline = [
-    typeof entityTypeCount === 'number'
-      ? `${entityTypeCount} type${entityTypeCount === 1 ? '' : 's'}`
-      : null,
-    activeContextModelName ?? 'Context View',
-  ].filter(Boolean).join(' · ')
-
   return (
+    /* These three gradient stops paint NOTHING, and that is deliberate. The canvas
+       colours are complete CSS variables, so `from-canvas-elevated/90` emits no
+       rule, `--tw-gradient-stops` is never set, and the `background-image` is
+       invalid — the frosted fill you see is the `backdrop-blur-xl` sibling on this
+       same element. Do NOT "fix" them to plain tokens: 75208053 reverted exactly
+       that change across nine surfaces, because an opaque toolbar floating over the
+       canvas reads as a pasted-on bar rather than glass. All three classes are
+       recorded in the baseline of `__tests__/noDeadAlphaOnCssVarTokens.test.ts`. */
     <div className="flex-shrink-0 bg-gradient-to-r from-canvas-elevated/90 via-canvas-elevated/95 to-canvas-elevated/90 backdrop-blur-xl border-b border-black/[0.08] dark:border-white/[0.06] px-6 py-3 relative">
       {/* Subtle gradient overlay — dark-mode decoration */}
       <div className="absolute inset-0 hidden dark:block bg-gradient-to-r from-accent-lineage/[0.02] via-transparent to-purple-500/[0.02] pointer-events-none" />
@@ -289,30 +263,53 @@ export function ContextViewHeader({
       </AnimatePresence>
 
       <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 relative">
-        {/* Zone 1 — Title. The whole title block (icon, name, subline with
-            its sync spinner/retry) plus the view-metadata affordances (rename,
-            Edit details, Share) live in ViewTitleMenu. The chevron/menu appear
-            only when the user holds a view-level capability. */}
-        <ViewTitleMenu
-          viewName={viewName ?? 'Context View'}
-          subline={subline}
-          canEditView={canEditView}
-          canShareView={canShareView}
-          viewVisibility={viewVisibility}
-          onRenameView={onRenameView}
-          onEditViewDetails={onEditViewDetails}
-          onShareView={onShareView}
-          syncStatus={syncStatus}
-          onRetrySync={onRetrySync}
-        />
+        {/* Zone 1 — which version am I on, and did my layout save. The view's
+            name, type count and metadata actions all live in the page header
+            now; what is left here is the branch switcher (moved down out of
+            CanvasVersioningBar) and the blueprint-sync signal that used to
+            ride the title's subline. */}
+        <div className="flex items-center gap-2 min-w-0">
+          {branchWorkspaceId && (
+            <BranchSwitcher
+              workspaceId={branchWorkspaceId}
+              dataSourceId={branchDataSourceId ?? null}
+            />
+          )}
 
-        {/* Zone 2 — Search. See header/HeaderSearch.tsx for the field +
-            helper-row implementation. */}
-        <HeaderSearch
-          searchQuery={searchQuery}
-          onSearchChange={onSearchChange}
-          onOpenAdvancedSearch={onOpenAdvancedSearch}
-        />
+          {/* A spinner and an error link, both unexplained: `aria-label` told a
+              screen reader what was happening and a sighted user got an
+              unlabelled glyph in the toolbar. */}
+          {syncStatus === 'saving' && (
+            <HoverTip
+              className="inline-flex flex-shrink-0"
+              label="Saving where things sit on the canvas"
+              detail="Layout only — your entities and lineage are untouched"
+            >
+              <Loader2
+                className="w-3.5 h-3.5 animate-spin text-ink-muted flex-shrink-0"
+                aria-label="Saving changes"
+              />
+            </HoverTip>
+          )}
+          {syncStatus === 'error' && onRetrySync && (
+            <HoverTip
+              className="inline-flex flex-shrink-0"
+              label="Try saving the canvas layout again"
+              detail="The last save did not reach the server — nothing you did was lost"
+            >
+              <button
+                onClick={onRetrySync}
+                className="flex-shrink-0 text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline underline-offset-2 transition-colors"
+              >
+                Sync issue — retry
+              </button>
+            </HoverTip>
+          )}
+        </div>
+
+        {/* Zone 2 — Search. Reads the canvas's search session off a
+            context; see header/HeaderSearch.tsx. */}
+        <HeaderSearch />
 
         {/* Zone 3 — Actions. Comprehension tools render identically in
             both modes; only the tail changes (Edit ↔ authoring cluster).
@@ -357,23 +354,6 @@ export function ContextViewHeader({
           )}
         </AnimatePresence>
       </div>
-
-      {/* Search Results — three states drive the row:
-            1. query empty       → nothing rendered
-            2. query + matches   → chip list + a tail "Search entire
-                                   graph" escalation link
-            3. query + no match  → prominent escalation card pointing
-                                   the user at Advanced Search
-          The escalation card makes the empty case the BEST moment to
-          discover Advanced Search — exactly when the user has typed
-          something and the visible canvas couldn't find it.
-          See header/HeaderSearch.tsx for the implementation. */}
-      <HeaderSearchResults
-        searchQuery={searchQuery}
-        searchResults={searchResults}
-        onSearchResultClick={onSearchResultClick}
-        onOpenAdvancedSearch={onOpenAdvancedSearch}
-      />
     </div>
   )
 }

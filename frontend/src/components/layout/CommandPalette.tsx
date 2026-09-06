@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState, useCallback } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Command } from 'cmdk'
 import {
   Search,
@@ -14,6 +14,7 @@ import {
   Clock,
   Globe,
   Database,
+  FileText,
   LayoutTemplate,
   BookOpen,
   Loader2,
@@ -32,8 +33,6 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { wsGradient } from '@/lib/viewUtils'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
-import { guideEntries } from '@/components/guide/guideConfig'
-import { interpolateBrand } from '@/lib/brandText'
 
 interface CommandPaletteProps {
   open: boolean
@@ -41,25 +40,72 @@ interface CommandPaletteProps {
 }
 
 const CATEGORY_ICONS: Record<SearchCategory, React.ComponentType<{ className?: string }>> = {
+  Page: FileText,
   Workspace: Globe,
   'Data Source': Database,
   View: Eye,
   Template: LayoutTemplate,
   'Semantic Layer': BookOpen,
+  Setting: Settings,
+  Doc: BookOpen,
 }
 
 const CATEGORY_HEADINGS: Record<SearchCategory, string> = {
+  Page: 'Pages',
   Workspace: 'Workspaces',
   'Data Source': 'Data Sources',
   View: 'Views',
   Template: 'Templates',
   'Semantic Layer': 'Semantic Layers',
+  Setting: 'Settings & Admin',
+  Doc: 'Docs & Guides',
 }
 
+/** The palette's own query history — the Explorer box keeps its own list. */
+const PALETTE_RECENTS_KEY = 'nexus.palette.recentSearches'
+
+/**
+ * The ⌘K shell. It is mounted for the whole session, so it holds nothing
+ * but the shortcut: every hook the palette needs lives in the dialog
+ * below and starts only when the dialog does.
+ */
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+  // Keyboard shortcut to open / close
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        // A closed palette must not take the chord out of a field
+        // somebody is typing in. Once open, focus is the palette's own
+        // input, so the same chord still closes it.
+        if (!open && isTypingTarget(e.target)) return
+        e.preventDefault()
+        onOpenChange(!open)
+      }
+      if (e.key === 'Escape' && open) {
+        onOpenChange(false)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [open, onOpenChange])
+
+  const close = useCallback(() => onOpenChange(false), [onOpenChange])
+
+  return open ? <CommandPaletteDialog onClose={close} /> : null
+}
+
+/** Same guard as AppLayout's "?" shortcut: never steal a keystroke. */
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  const tag = el?.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!el?.isContentEditable
+}
+
+function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
   const brand = useBrand()
   const [search, setSearch] = useState('')
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const { toggleMode, mode } = usePersonaStore()
   const { setTheme, theme, toggleSidebar } = usePreferencesStore()
 
@@ -72,43 +118,38 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
 
   // Recent views (zero-search state)
   const { recent } = useRecentViews()
-  const { recents: recentSearches, record: recordRecentSearch, clear: clearRecentSearches } = useRecentSearches()
+  const { recents: recentSearches, record: recordRecentSearch, clear: clearRecentSearches } =
+    useRecentSearches(PALETTE_RECENTS_KEY)
 
   // Unified ranked search across all top-level entities, including views
   // from the API — fixes the bug where the palette only saw views loaded
-  // into `schemaStore.schema?.views` for the active scope.
-  const searchResult = useGlobalSearch(search)
+  // into `schemaStore.schema?.views` for the active scope. `appWide` adds
+  // the product itself: its pages, its settings, its documentation.
+  const searchResult = useGlobalSearch(search, { appWide: true })
   const isZeroSearch = search.trim() === ''
   const hasEntityHits = !isZeroSearch && CATEGORY_ORDER.some(c => searchResult.byCategory[c].length > 0)
-
-  // Keyboard shortcut to open / close
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault()
-        onOpenChange(!open)
-      }
-      if (e.key === 'Escape' && open) {
-        onOpenChange(false)
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [open, onOpenChange])
-
-  const close = useCallback(() => {
-    onOpenChange(false)
-    setSearch('')
-  }, [onOpenChange])
 
   const handleSelectHit = useCallback((hit: SearchHit) => {
     if (search.trim()) recordRecentSearch(search)
     switch (hit.category) {
+      case 'Page':
+      case 'Setting':
+        navigate(hit.path)
+        break
+      case 'Doc':
+        navigate(`/${hit.area}/${hit.slug}`)
+        break
       case 'Workspace':
         wsSetActive(hit.workspace.id)
         navigate(`/workspaces/${hit.workspace.id}`)
         break
       case 'Data Source':
+        // A catalogued source has a page of its own; anything else is
+        // only reachable through the workspace that holds it.
+        if (hit.dataSource.catalogItemId) {
+          navigate(`/datasources/${hit.dataSource.catalogItemId}`)
+          break
+        }
         wsSetActive(hit.workspace.id)
         setActiveDataSource(hit.dataSource.id)
         navigate(`/workspaces/${hit.workspace.id}`)
@@ -130,26 +171,26 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         })
         break
     }
-    close()
-  }, [search, recordRecentSearch, navigate, wsSetActive, setActiveDataSource, setActiveView, close])
+    onClose()
+  }, [search, recordRecentSearch, navigate, wsSetActive, setActiveDataSource, setActiveView, onClose])
 
   const handleAction = useCallback((action: string) => {
     if (action.startsWith('navigate:')) {
       navigate(action.replace('navigate:', ''))
-      close()
+      onClose()
       return
     }
     if (action.startsWith('go-to-view:')) {
       const viewId = action.replace('go-to-view:', '').split('|')[0]
       navigate(`/views/${viewId}`)
-      close()
+      onClose()
       return
     }
     if (action.startsWith('switch-workspace:')) {
       const wsId = action.replace('switch-workspace:', '')
       wsSetActive(wsId)
       navigate(`/explorer?workspace=${encodeURIComponent(wsId)}`)
-      close()
+      onClose()
       return
     }
     switch (action) {
@@ -159,34 +200,12 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       case 'theme-system': setTheme('system'); break
       case 'toggle-sidebar': toggleSidebar(); break
     }
-    close()
-  }, [toggleMode, setTheme, toggleSidebar, navigate, wsSetActive, close])
-
-  // Guide articles matching the current search — the palette runs its own
-  // filtering (shouldFilter={false}), so we filter here. Empty search shows
-  // none (the "Open the User Guide" entry always stands in for browse).
-  const guideDocResults = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return []
-    return guideEntries
-      .filter((e) => {
-        const title = interpolateBrand(e.title, brand).toLowerCase()
-        const desc = interpolateBrand(e.description, brand).toLowerCase()
-        return title.includes(q) || desc.includes(q)
-      })
-      .slice(0, 6)
-  }, [search, brand])
-
-  // Reset search when closing
-  useEffect(() => {
-    if (!open) setSearch('')
-  }, [open])
-
-  if (!open) return null
+    onClose()
+  }, [toggleMode, setTheme, toggleSidebar, navigate, wsSetActive, onClose])
 
   return (
     <>
-    <Backdrop open={true} onClick={close} zClassName="z-[100]" className="bg-black/50" />
+    <Backdrop open={true} onClick={onClose} zClassName="z-[100]" className="bg-black/50" />
     <div className="fixed inset-0 z-[100] pointer-events-none">
       {/* Command Dialog */}
       <div className="absolute inset-x-0 top-[15%] flex justify-center px-4">
@@ -208,7 +227,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               <Command.Input
                 value={search}
                 onValueChange={setSearch}
-                placeholder="Search workspaces, views, data sources, templates…"
+                placeholder="Search pages, views, workspaces, docs…"
                 className={cn(
                   "flex-1 bg-transparent text-base",
                   "placeholder:text-ink-muted",
@@ -231,7 +250,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               {/* Inline hint when query yields no entities but commands remain available */}
               {!isZeroSearch && !hasEntityHits && !searchResult.isLoading && (
                 <div className="px-3 py-3 mb-1 text-xs text-ink-muted border border-glass-border rounded-lg bg-black/[0.02] dark:bg-white/[0.02]">
-                  No matching workspaces, views, data sources, templates, or semantic layers. Try a different keyword, or use a command below.
+                  No matching pages, views, workspaces, data sources, or docs. Try a different keyword, or use a command below.
                 </div>
               )}
 
@@ -253,6 +272,15 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                         onSelect={() => handleSelectHit(hit)}
                       />
                     ))}
+                    {category === 'View' && (searchResult.viewsHasMore || total > hits.length) && (
+                      <CommandItem
+                        icon={Eye}
+                        label={`Show all ${total} in Explorer →`}
+                        onSelect={() => handleAction(
+                          `navigate:/explorer?q=${encodeURIComponent(searchResult.query)}`
+                        )}
+                      />
+                    )}
                   </Command.Group>
                 )
               })}
@@ -369,7 +397,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 <CommandItem
                   icon={mode === 'business' ? Zap : Layers}
                   label={`Switch to ${mode === 'business' ? 'Technical' : 'Business'} View`}
-                  description="Toggle persona mode"
+                  description={mode === 'business'
+                    ? 'Show each entity’s qualified name (or URN) under its name'
+                    : 'Show names only, without technical identifiers'}
                   shortcut="⌘/"
                   onSelect={() => handleAction('toggle-persona')}
                 />
@@ -399,15 +429,6 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   description="Browse every guide article"
                   onSelect={() => handleAction('navigate:/guide')}
                 />
-                {guideDocResults.map((e) => (
-                  <CommandItem
-                    key={e.slug}
-                    icon={BookOpen}
-                    label={interpolateBrand(e.title, brand)}
-                    description={`${interpolateBrand(e.description, brand)} · ${e.readingTime}`}
-                    onSelect={() => handleAction(`navigate:/guide/${e.slug}`)}
-                  />
-                ))}
               </Command.Group>
 
               {/* Settings — always shown */}
@@ -422,14 +443,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   icon={Settings}
                   label="Open Settings"
                   description="Customize your experience"
-                  shortcut="⌘,"
-                  onSelect={() => handleAction('open-settings')}
+                  onSelect={() => handleAction('navigate:/me/account')}
                 />
               </Command.Group>
             </Command.List>
 
             {/* Footer */}
-            <div className="px-4 py-2 border-t border-glass-border flex items-center justify-between text-2xs text-ink-muted">
+            <div className="px-4 py-2 border-t border-glass-border flex items-center justify-between gap-4 text-2xs text-ink-muted">
               <div className="flex items-center gap-4">
                 <span className="flex items-center gap-1">
                   <kbd className="kbd">↑↓</kbd> Navigate
@@ -441,7 +461,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                   <kbd className="kbd">ESC</kbd> Close
                 </span>
               </div>
-              <span>Powered by {brand.shortName}</span>
+              {pathname.startsWith('/views/') && (
+                <span className="min-w-0 truncate">Looking for data in this view? Press / on the canvas.</span>
+              )}
+              <span className="shrink-0">Powered by {brand.shortName}</span>
             </div>
           </Command>
         </div>

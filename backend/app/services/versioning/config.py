@@ -20,6 +20,18 @@ import hashlib
 import json
 import os
 
+# In-graph bookkeeping nodes that live in a FalkorDB cache graph but are NOT
+# committed-main entities: the projector's rollup watermark, the aggregation
+# pipeline's run stamp, and the dedicated-projection scaffolding. They are the
+# projector's and the aggregation worker's own output, so every comparison of a
+# cache graph against committed main must exclude them. ONE definition, shared
+# — see the module docstring there for the two separate outages a second copy
+# of this list caused.
+from backend.common.derived_artifacts import (  # noqa: F401  (re-export)
+    DERIVED_LABELS,
+    not_derived_clause,
+)
+
 # --------------------------------------------------------------------------- #
 # Store / decoupling (RUNTIME-TUNABLE)                                         #
 # --------------------------------------------------------------------------- #
@@ -167,19 +179,12 @@ FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{
 DEFAULT_FALKOR_PROVIDER: str = "default"
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
-# In-graph bookkeeping nodes that live in a FalkorDB cache graph but are NOT
-# committed-main entities: the projector's rollup watermark, the aggregation
-# pipeline's run stamp, and the dedicated-projection scaffolding. They are the
-# projector's and the aggregation worker's own output, so every comparison of a
-# cache graph against committed main must exclude them.
-#
-# ONE definition on purpose. Two copies of this list is exactly how
-# ``reconcile.falkor_counts`` came to omit ``_AggMeta``: in ``in_source`` mode —
-# which is the versioned mode — the aggregation pipeline stamps ``_AggMeta``
-# into the same graph the projector verifies, so any aggregation job left the
-# node count one high, the verify reported "extra entities vs committed main",
-# and the watermark was pinned until a human rebuilt.
-DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection")
+# DERIVED_LABELS / not_derived_clause are imported at the top of this module and
+# re-exported here for this package's callers. The definition moved OUT to
+# ``backend/common/derived_artifacts`` because the provider and profiling read
+# paths need the same list and cannot import from the versioning package
+# (deliberately decoupled) — so they went without one and re-broke this a second
+# way. That module's docstring records both incidents.
 
 
 def falkor_eviction_configured() -> bool:

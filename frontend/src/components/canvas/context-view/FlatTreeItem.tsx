@@ -11,7 +11,10 @@ import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { densityRowTokens } from './density'
+import { unitMeaning, unitNoun } from './connections/connectionUnits'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
@@ -230,6 +233,17 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const density = usePreferencesStore(s => s.canvasDensity) ?? 'spacious'
   const showTypeBadge = usePreferencesStore(s => s.showCanvasTypeBadge) ?? true
   const subtleTreeLines = usePreferencesStore(s => s.subtleCanvasTreeLines) ?? false
+
+  // Business/Technical. `node.name` is the business-facing name the hierarchy
+  // was built with; the persona mode is applied here, at render, so switching
+  // it never rebuilds the tree. Technical mode reveals the qualified name (or
+  // the URN) on a second line — and only when it says something the name on the
+  // row does not, so no row ever prints the same string twice. The row grows by
+  // one line when it does; LayerColumn measures every row via
+  // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
+  const personaMode = usePersonaMode()
+  const displayName = resolveEntityName(node.data, personaMode, node.name)
+  const technicalLine = technicalSubtitle(node.data, personaMode)
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
   const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
@@ -367,7 +381,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         if (draggedId !== node.id) reparent(draggedId, node.id)
       }}
       className={cn(
-        "flex items-center gap-2 mx-1 rounded-xl transition-all duration-200 group/item relative z-[2]",
+        "flex items-center gap-2 mx-1 rounded-xl transition-[background-color,background-image,box-shadow] duration-150 group/item relative z-[2]",
         // Reorderable rows advertise the drag with a grab cursor (+ the
         // hover-revealed grip below); everything else keeps the pointer.
         reorderBandsActive ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
@@ -380,8 +394,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // near-zero so the airy feel of the original cards is preserved;
         // hover / selected gradients below paint over this without conflict.
         "bg-canvas-elevated/10 backdrop-blur-sm",
-        // Base hover state with gradient
-        "hover:bg-gradient-to-r hover:from-white/[0.06] hover:to-transparent",
+        // Base hover state with gradient.
+        //
+        // This was `from-white/[0.06]` alone — 6% white, which over a near-white
+        // row in LIGHT mode is invisible. Hover only ever worked in dark mode.
+        // Every other state on this row is either theme-aware or uses a hue that
+        // reads on both grounds; this one was not. A dark tint in light mode and
+        // a slightly stronger light tint in dark gives the same weight on both.
+        "hover:bg-gradient-to-r hover:to-transparent",
+        "hover:from-accent-lineage/[0.07] dark:hover:from-accent-lineage/[0.13]",
         // Selected state with accent glow
         isSelected && "bg-gradient-to-r from-accent-lineage/15 via-accent-lineage/10 to-transparent shadow-[inset_0_0_0_1px_rgba(var(--accent-lineage-rgb),0.3)]",
         // Search result highlight — direct match (advanced search or quick search)
@@ -619,7 +640,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           unreadable widths). */}
       <div
         className="flex-1 min-w-0 flex flex-col justify-center"
-        title={stagedSummary ?? node.name}
+        title={stagedSummary ?? displayName}
       >
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
@@ -638,8 +659,28 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // their successors without scroll-jump.
           "line-clamp-3 break-words"
         )}>
-          {node.name}
+          {displayName}
         </span>
+        {/* Technical identity (Business/Technical toggle) — one truncated line,
+            full value on hover.
+
+            TRUNCATED FROM THE HEAD, not the tail. Every URN from one source
+            shares a long prefix (`urn:synodic:solidatus:node:OBJ-…`) and the
+            column gives this line ~143px against a ~234px string, so an end
+            ellipsis cuts off precisely the part that tells two rows apart —
+            a screenful of siblings then reads the identical
+            `urn:synodic:solidatus:n…`. An RTL inline direction puts the
+            ellipsis at the start and keeps the discriminating tail; the runs
+            inside are still read left-to-right. */}
+        {technicalLine && (
+          <span
+            className="text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
+            style={{ direction: 'rtl', textAlign: 'left' }}
+            title={technicalLine}
+          >
+            {technicalLine}
+          </span>
+        )}
         {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
             users can reclaim vertical space in dense canvases. */}
         {showTypeBadge && (
@@ -728,21 +769,25 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             2. Bump blur from ``backdrop-blur-md`` to
                ``backdrop-blur-xl`` so even the fade zone obscures
                any text it overlaps. */}
-      <motion.div
-        initial={false}
-        animate={{ opacity: isHovered ? 1 : 0, x: isHovered ? 0 : 8 }}
-        transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+      {/* Visibility is owned by CSS (`group-hover/item`), not by React
+          state: a state-driven overlay stays painted on a row the pointer
+          left without a mouseleave (a row covered by a drawer, scrolled
+          away, or recycled), which read as a "white strip" on the node.
+          The browser never leaves :hover stuck. No blurred backdrop: the
+          gradient is already opaque under the buttons, and a blur surface
+          toggling inside a scroller is the shape that ghosts. */}
+      <div
+        data-row-actions
         className={cn(
           "absolute inset-y-0 flex items-center gap-1 pl-8 pr-1 rounded-l-xl z-[4]",
+          "opacity-0 translate-x-2 pointer-events-none",
+          "transition-[opacity,transform] duration-[180ms] ease-out",
+          "group-hover/item:opacity-100 group-hover/item:translate-x-0 group-hover/item:pointer-events-auto",
+          "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
+          "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
           (ancestorMatchCount > 0 && !isExpanded && hasChildren)
             ? "right-[3.125rem]"
             : "right-2",
-          isHovered && cn(
-            "backdrop-blur-xl",
-            "bg-gradient-to-l from-canvas-elevated via-canvas-elevated via-75% to-transparent",
-            "dark:from-canvas-elevated dark:via-canvas-elevated dark:to-transparent",
-          ),
-          !isHovered && "pointer-events-none"
         )}
       >
         {/* Focus/Drill button */}
@@ -759,10 +804,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
-        {/* Search children button. Hidden while tracing: child search
-            REPLACES a parent's loaded children in the canvas store, which a
-            trace can never undo on exit, so the handler refuses it — and an
-            affordance that does nothing is worse than no affordance. */}
+        {/* Search children button. Hidden while tracing: the box scopes the
+            VIEW's search to this container, and a trace's tree is a filtered
+            overlay the store never sees — so its hits would be rows the trace
+            had deliberately left out, arriving from underneath it. An
+            affordance that answers the wrong question is worse than none.
+            A harness test pins the withdrawal. */}
         {hasChildren && onToggleSearch && !isTracing && (
           <button
             onClick={(e) => {
@@ -794,7 +841,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             <LucideIcons.Plus className="w-3 h-3 block" />
           </button>
         )}
-      </motion.div>
+      </div>
 
       {/* Hover indicator line */}
       <motion.div
@@ -824,7 +871,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
             opacity: 0.6 + lineageIntensityIn * 0.4,
           }}
-          title={`${lineageIn.toLocaleString()} incoming connection${lineageIn === 1 ? '' : 's'}`}
+          title={`${lineageIn.toLocaleString()} incoming ${unitNoun(lineageIn, 'lines')} on this canvas — ${unitMeaning('lines')}`}
         />
       )}
       {lineageOut > 0 && (
@@ -834,21 +881,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             background: 'linear-gradient(to bottom, transparent, rgb(79,70,229) 16%, rgb(79,70,229) 84%, transparent)',
             opacity: 0.6 + lineageIntensityOut * 0.4,
           }}
-          title={`${lineageOut.toLocaleString()} outgoing connection${lineageOut === 1 ? '' : 's'}`}
+          title={`${lineageOut.toLocaleString()} outgoing ${unitNoun(lineageOut, 'lines')} on this canvas — ${unitMeaning('lines')}`}
         />
       )}
       {externalIn > 0 && (
         <div
           className="pointer-events-none absolute left-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalIn.toLocaleString()} incoming connection${externalIn === 1 ? '' : 's'} outside this view`}
+          title={`${externalIn.toLocaleString()} incoming ${unitNoun(externalIn, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
       {externalOut > 0 && (
         <div
           className="pointer-events-none absolute right-[4px] top-1/2 -translate-y-1/2 w-0 h-[34%] border-l-[1.5px] border-dashed"
           style={{ borderColor: 'rgb(56,189,248)', opacity: 0.55 }}
-          title={`${externalOut.toLocaleString()} outgoing connection${externalOut === 1 ? '' : 's'} outside this view`}
+          title={`${externalOut.toLocaleString()} outgoing ${unitNoun(externalOut, 'flows')} lead outside this view — ${unitMeaning('flows')}`}
         />
       )}
     </div>

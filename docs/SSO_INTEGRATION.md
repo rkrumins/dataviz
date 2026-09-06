@@ -1590,6 +1590,7 @@ the whole ring so a key rotation does not 403 every write in flight.
 | POST | `/api/v1/auth/logout` | — | cookie | `{ok: true}` + clear cookies |
 | POST | `/api/v1/auth/refresh` | — | cookie | `SessionResponse` or 401 `sso_reauth_required` |
 | GET | `/api/v1/auth/me` | — | cookie | `SessionResponse` |
+| GET | `/api/v1/auth/csrf` | — | cookie | `{ok: true}` + re-mints `nx_csrf` in place (no rotation); 401 when no live session |
 | GET | `/api/v1/auth/{slug}/login` | next, force | none | 302 to IdP |
 | GET | `/api/v1/auth/{slug}/callback` | code, state | nx_oidc | 302 |
 | POST | `/api/v1/auth/{slug}/acs` | SAMLResponse, RelayState (form) | nx_saml | 302 |
@@ -1668,6 +1669,7 @@ by `source_event_id` UNIQUE.
 | `AUTH_COOKIE_DOMAIN` | (none) | cookie `Domain` |
 | `AUTH_COOKIE_SAMESITE` | `lax` | cookie `SameSite` |
 | `SSO_SESSION_MAX_AGE_HOURS` | `24` | 24h re-auth |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | (none — system trust store) | Trust anchor for every outbound SSO call: OIDC discovery/token/JWKS, SAML metadata, gateway redeem/exchange/liveness, avatar fetches. PEM bundle path; `file:` URIs tolerated. An unloadable path logs ERROR and falls back to the system store — corporate-CA hosts keep failing until fixed |
 | `ENV` | `dev` | prod-guard on custom IdP + .env auto-load |
 | `AUTH_CUSTOM_PROVIDER_ENABLED` | `false` | dev IdP gate |
 | `CREDENTIAL_ENCRYPTION_KEY` | (none) | Fernet for provider settings + connection creds |

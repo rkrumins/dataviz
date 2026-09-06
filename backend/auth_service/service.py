@@ -208,7 +208,7 @@ class LocalIdentityService:
         session_revoker: Optional[Callable[..., Awaitable[None]]] = None,
         auth_config_provider: Optional[AuthConfigProvider] = None,
         avatar_fetcher: Optional[
-            Callable[[str], Awaitable[tuple[bytes, str]]]
+            Callable[..., Awaitable[tuple[bytes, str]]]
         ] = None,
     ):
         self._session_factory = session_factory
@@ -230,9 +230,12 @@ class LocalIdentityService:
         self._sso_role_previewer = sso_role_preview
         self._session_killer = session_killer
         self._session_revoker = session_revoker
-        # (url) -> (bytes, content_type). Injected by app startup, which
-        # binds the outbound guard and the operator's host allowlist —
-        # auth_service may not import backend.app.* itself.
+        # (url, *, provider_id=None) -> (bytes, content_type). Injected
+        # by app startup, which binds the outbound guard and the
+        # operator's host allowlist — auth_service may not import
+        # backend.app.* itself. ``provider_id`` lets the wiring honour
+        # the connection's own TLS posture (its ``tls_verify`` opt-out)
+        # for the image fetch made during that connection's sign-in.
         self._avatar_fetcher = avatar_fetcher
         # ``auth_config_provider`` (Phase 4) gates login + JIT + SSO
         # discovery on the platform posture stored in
@@ -285,8 +288,6 @@ class LocalIdentityService:
         # FE can redirect to the dynamic providers list instead of
         # showing a generic "wrong password".
         cfg = await self._auth_config_provider.get()
-        if not cfg.allow_local_login:
-            raise LocalLoginDisabled()
 
         provider = get_provider("local")
 
@@ -294,6 +295,19 @@ class LocalIdentityService:
         async with self._session_factory() as session:
             async def _get_user_by_email(em: str):
                 return await self._user_repo.get_user_by_email(session, em)
+
+            if not cfg.allow_local_login:
+                # One carve-out from the kill-switch: a system account
+                # (break-glass) keeps the password door while the
+                # platform enforces SSO — otherwise an IdP outage has
+                # no way back in. Unknown emails and every ordinary
+                # account get the identical refusal, before any
+                # password check, so this is not an account oracle.
+                candidate = await _get_user_by_email(email)
+                if candidate is None or not bool(
+                    getattr(candidate, "is_system_account", False)
+                ):
+                    raise LocalLoginDisabled()
 
             identity = await provider.authenticate(
                 ProviderCredentials(email=email, password=password),
@@ -1061,7 +1075,9 @@ class LocalIdentityService:
                     avatar_asserted = True
                 else:
                     try:
-                        img, ctype = await self._avatar_fetcher(avatar_url)
+                        img, ctype = await self._avatar_fetcher(
+                            avatar_url, provider_id=provider_id,
+                        )
                         await self._user_repo.set_user_avatar_image(
                             session, orm.id,
                             image_b64=base64.b64encode(img).decode("ascii"),
@@ -1395,6 +1411,14 @@ class LocalIdentityService:
         transaction — would exercise the writers, and the audit helper
         there commits a session of its own, which would make "writes
         nothing" untrue in exactly the case an operator is trusting it.
+
+        One read-only side effect is deliberate: when the claims carry
+        an avatar URL, the rehearsal performs the same guarded GET a
+        real sign-in would (storing nothing), so the verdict can say
+        whether the picture would arrive — and name the rule that
+        refused it when it would not. That is the only surface an
+        operator has for a fetch that otherwise fails as one server log
+        line.
         """
         auth_time = getattr(identity, "auth_time", None)
         outcome: dict = {
@@ -1451,7 +1475,56 @@ class LocalIdentityService:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Dry-run role preview failed: %s", exc)
 
+        # After the session block on purpose: the avatar leg can wait on
+        # a slow host, and a rehearsal must not hold a DB connection
+        # while it does.
+        outcome["avatar"] = await self._preview_avatar(
+            getattr(identity, "avatar_url", None),
+            provider_id=provider_id,
+        )
+
         return outcome
+
+    async def _preview_avatar(
+        self, avatar_url, *, provider_id: Optional[str] = None,
+    ) -> dict:
+        """The avatar leg of a rehearsal: the fetch, storing nothing.
+
+        Returns a dict the verdict renderer pattern-matches: no URL
+        resolved (``{"url": None}``), fetched (content type and size),
+        or refused — with the fetch guard's machine-readable ``reason``
+        so the operator is told which rule fired (host not on the
+        avatar list, not a raster image, too many redirects, …).
+        """
+        url = avatar_url.strip() if isinstance(avatar_url, str) else None
+        if not url:
+            return {"url": None}
+        if self._avatar_fetcher is None:
+            return {"url": url, "fetched": False,
+                    "reason": "fetch_unavailable"}
+        try:
+            body, content_type = await self._avatar_fetcher(
+                url, provider_id=provider_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from .providers.outbound import is_tls_verification_failure
+
+            reason = getattr(exc, "reason", None)
+            if reason is None and is_tls_verification_failure(exc):
+                # httpx wraps the ssl failure in a ConnectError with no
+                # ``.reason``; without this the operator reads a generic
+                # fetch_failed and learns nothing about trust.
+                reason = "tls_verify_failed"
+            return {
+                "url": url,
+                "fetched": False,
+                "reason": reason or "fetch_failed",
+                "detail": str(exc),
+            }
+        return {
+            "url": url, "fetched": True,
+            "content_type": content_type, "size": len(body),
+        }
 
     @staticmethod
     def _link_deny_reasons(

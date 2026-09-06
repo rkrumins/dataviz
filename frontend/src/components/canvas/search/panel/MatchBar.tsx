@@ -50,6 +50,9 @@ export interface MatchBarProps {
     isRunning: boolean
     errorMessage?: string | null
     truncated?: boolean
+    /** Whether `count` is the server's exact total. A truncated run it
+     *  could still count has no "more than" to advertise. */
+    countIsExact?: boolean
     deadlineExceeded?: boolean
     candidateCount?: number | null
     /** Frame all matches on the canvas. Hidden when no matches or
@@ -70,7 +73,7 @@ export interface MatchBarProps {
 
 
 export const MatchBar: FC<MatchBarProps> = ({
-    count, elapsedMs, isRunning, errorMessage, truncated,
+    count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
     deadlineExceeded, candidateCount, onFrame, onShowFocusedOnCanvas,
     onClear, viewId,
 }) => {
@@ -82,6 +85,10 @@ export const MatchBar: FC<MatchBarProps> = ({
 
     const isError = Boolean(errorMessage)
     const showTruncation = Boolean(truncated && !isRunning && !isError)
+    // Two different facts. The banner reports that the RUN stopped at the
+    // cap; the plus claims the NUMBER is a floor, which it is not once
+    // the server has sent an exact total.
+    const showPlus = showTruncation && !countIsExact
     const showDeadlineExceeded = Boolean(
         deadlineExceeded && !isRunning && !isError,
     )
@@ -106,7 +113,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                 errorMessage={errorMessage ?? null}
                 count={count}
                 elapsedMs={elapsedMs}
-                showTruncation={showTruncation}
+                showPlus={showPlus}
                 onClear={onClear}
             />
             {hasMatches && !isRunning && !isError && (
@@ -143,14 +150,14 @@ export const MatchBar: FC<MatchBarProps> = ({
 // ---------------------------------------------------------------------------
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showTruncation, onClear,
+    showPlus, onClear,
 }: {
     isRunning: boolean
     isError: boolean
     errorMessage: string | null
     count: number | null
     elapsedMs: number | null
-    showTruncation: boolean
+    showPlus: boolean
     onClear?: () => void
 }) {
     return (
@@ -164,7 +171,7 @@ function SummaryStrip({
                 errorMessage={errorMessage}
                 count={count}
                 elapsedMs={elapsedMs}
-                showTruncation={showTruncation}
+                showPlus={showPlus}
             />
             {onClear && (
                 <button
@@ -285,14 +292,14 @@ function ToolbarStrip({
 
 
 function CountReadout({
-    isRunning, isError, errorMessage, count, elapsedMs, showTruncation,
+    isRunning, isError, errorMessage, count, elapsedMs, showPlus,
 }: {
     isRunning: boolean
     isError: boolean
     errorMessage: string | null
     count: number | null
     elapsedMs: number | null
-    showTruncation: boolean
+    showPlus: boolean
 }) {
     return (
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
@@ -311,7 +318,7 @@ function CountReadout({
                         Tabular numerals keep the digits aligned when the
                         count updates between runs. */}
                     <span className="text-[20px] font-display font-bold text-ink tabular-nums leading-none">
-                        {count.toLocaleString()}{showTruncation && '+'}
+                        {count.toLocaleString()}{showPlus && '+'}
                     </span>
                     <span className="text-[12px] text-ink-secondary leading-none">
                         {count === 1 ? 'match' : 'matches'}

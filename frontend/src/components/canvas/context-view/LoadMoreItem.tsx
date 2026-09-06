@@ -39,7 +39,9 @@ export function LoadMoreItem({
   /** Children not yet loaded for this parent. */
   count: number
   isLoading?: boolean
-  onLoadMore: () => void
+  /** `auto` is true only for the sentinel's one-page-ahead fetch — the caller
+   *  announces the CLICK and stays quiet about the prefetch. */
+  onLoadMore: (auto?: boolean) => void
   /** One-page-ahead auto-load when the row scrolls into view. */
   autoLoad?: boolean
 }) {
@@ -65,7 +67,7 @@ export function LoadMoreItem({
       dwell = setTimeout(() => {
         dwell = null
         lastFiredCountRef.current = count
-        onLoadMoreRef.current()
+        onLoadMoreRef.current(true)
       }, 300)
     }, { root: el.closest('.overflow-y-auto'), rootMargin: '120px' })
     io.observe(el)

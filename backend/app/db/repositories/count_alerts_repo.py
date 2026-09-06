@@ -35,6 +35,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import resilience
+from backend.common.derived_artifacts import strip_derived_counts
 from ..models import (
     DataSourceCountAlertORM,
     DataSourceCountSnapshotORM,
@@ -368,7 +369,17 @@ def _types_that_vanished(rows: list) -> Dict[str, tuple]:
     ):
         previous: Dict[str, int] = {}
         for row in rows:
-            current = stats_history_repo.loads_counts(getattr(row, field, None))
+            # Launder platform-written bookkeeping out of already-stored
+            # snapshots. The providers no longer record it, but rows captured
+            # before that fix stay readable for the whole retention window —
+            # and `_AggMeta` toggles 1 -> 0 -> 1 (MERGEd per aggregation run,
+            # wiped by projection seeds and purges), so every dip in that
+            # history would raise a SEVERE "type is gone" finding plus a
+            # notification about the platform's own node.
+            current = strip_derived_counts(
+                stats_history_repo.loads_counts(getattr(row, field, None)),
+                edges=(field == "edge_type_counts"),
+            )
             for name, before in previous.items():
                 if before and not current.get(name):
                     # Last writer wins: if a type vanished twice in the window

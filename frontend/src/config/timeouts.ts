@@ -19,6 +19,7 @@
  *   VITE_TIMEOUT_TOP_LEVEL_MS
  *   VITE_TIMEOUT_AGGREGATED_EDGES_MS
  *   VITE_TIMEOUT_EDGES_BETWEEN_MS
+ *   VITE_TIMEOUT_SEARCH_ADVANCED_MS
  *   VITE_TIMEOUT_PROVIDER_HEALTH_MS
  *   VITE_TIMEOUT_ADMIN_LIST_MS
  *   VITE_TIMEOUT_LINEAGE_FOCUS_MS
@@ -100,6 +101,11 @@ export const TIMEOUTS = {
   TOP_LEVEL_MS:         readMs('VITE_TIMEOUT_TOP_LEVEL_MS',         45_000, _LONG),
   AGGREGATED_EDGES_MS:  readMs('VITE_TIMEOUT_AGGREGATED_EDGES_MS',  45_000, _LONG),
   EDGES_BETWEEN_MS:     readMs('VITE_TIMEOUT_EDGES_BETWEEN_MS',     45_000, _LONG),
+  // /search/advanced. The server's soft deadline is 30s but still
+  // returns partial results after it — give the client headroom over
+  // that so a search-as-you-type request isn't aborted before the
+  // backend's own partial response can arrive.
+  SEARCH_ADVANCED_MS:   readMs('VITE_TIMEOUT_SEARCH_ADVANCED_MS',   45_000, _LONG),
   PROVIDER_HEALTH_MS:   readMs('VITE_TIMEOUT_PROVIDER_HEALTH_MS',   30_000, _MEDIUM),
   // Per-call deadline for admin/dashboard list fan-outs wrapped in
   // Promise.allSettled. Generous enough for a healthy backend, tight

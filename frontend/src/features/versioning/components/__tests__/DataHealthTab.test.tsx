@@ -9,14 +9,14 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { DriftReport, Watermark } from '@/services/versioningApiService'
 
-const showToast = vi.fn()
+const notify = vi.fn()
 const reconcileMutate = vi.fn()
 const rebuildMutate = vi.fn()
 
 let watermark: Watermark | undefined
 let reconcileResolve: { ok: true; report: DriftReport } | { ok: false; error: Error }
 
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('../../hooks/useVersioning', () => ({
   useProjectionWatermark: () => ({ data: watermark ? { ...watermark } : undefined, dataUpdatedAt: Date.now() }),
   useReconcileProjection: () => ({ mutate: reconcileMutate, isPending: false }),
@@ -36,7 +36,7 @@ const baseReport = (over: Partial<DriftReport> = {}): DriftReport => ({
 const renderTab = () => render(<DataHealthTab wsId="ws1" graphId="g1" />)
 
 beforeEach(() => {
-  showToast.mockReset()
+  notify.mockReset()
   reconcileMutate.mockReset()
   rebuildMutate.mockReset()
   watermark = { committed: 12, projected: 12, fresh: true, status: 'idle' }

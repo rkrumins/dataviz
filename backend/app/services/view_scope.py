@@ -118,6 +118,14 @@ class EffectiveViewScope:
     """URNs the client sent that were filtered out (out-of-view). The
     service surfaces these via the ``X-Search-Dropped-URNs`` header and
     the audit log."""
+    view_data_source_id: Optional[str] = None
+    """The data source the VIEW belongs to, verbatim from the view row.
+
+    Distinct from ``data_source_id`` above, which the caller's own
+    ``?dataSourceId=`` overrides — so that field can never answer "which
+    source does this view live in?". The search's roots come from the
+    view while the engine's provider comes from the request, and only
+    this field lets the service check that the two agree."""
 
 
 # --------------------------------------------------------------------------- #
@@ -386,6 +394,7 @@ class ViewScopeResolver:
             view_id=view.id,
             workspace_id=view.workspace_id,
             data_source_id=data_source_id or view.data_source_id,
+            view_data_source_id=view.data_source_id,
             canvas_kind=canvas_kind,
             root_urns=tuple(effective_root_urns),
             entity_type_allow_list=effective_entity_types,

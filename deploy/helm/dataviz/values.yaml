@@ -145,14 +145,24 @@ stores:
   falkordb:
     enabled: false
     image: falkordb/falkordb:v4.18.11
+    # QUERY_MEM_CAPACITY is charged PER CONCURRENT QUERY, on top of
+    # maxmemory, inside limits.memory — the three share one budget:
+    #   limits.memory >= 1.25*maxmemory + concurrent*1.3*QUERY_MEM_CAPACITY + 256Mi
+    # (the 1.3 is the untracked client reply buffer; FalkorDB materializes a
+    # query's whole result set before sending it). Raising QUERY_MEM_CAPACITY
+    # without raising limits.memory trades a caught query error for an
+    # OOM-killed pod. See docs/FALKORDB_DEPLOYMENT.md.
     args: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
-    # Instance ceiling at 75% of the memory limit; noeviction = writes
-    # fail loudly instead of the pod being OOM-killed by data growth.
+    # noeviction = writes fail loudly instead of the pod being OOM-killed
+    # by data growth.
     redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction"
     storage: 10Gi
     resources:
       requests: { cpu: "1", memory: 2Gi }
-      limits: { cpu: "4", memory: 8Gi }
+      # 10Gi: 6gb*1.25 + 2 concurrent queries at 512Mi*1.3 + 256Mi ~= 9.1Gi.
+      # The previous 8Gi booked the whole non-maxmemory remainder for
+      # fragmentation/COW and left nothing for query memory.
+      limits: { cpu: "4", memory: 10Gi }
   redis:
     enabled: false
     image: redis:7-alpine

@@ -8,6 +8,17 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
     css: false,
+    // Vitest's 5s default is sized for unit tests; a good part of this suite is
+    // jsdom integration work — virtualized canvas columns, trace walks, 1,200-row
+    // scale scenarios — that legitimately costs 3-4s of CPU on its own. Measured:
+    // the slowest test needs 3.4s in isolation but was observed at 10.5s in the
+    // full run, because 16 parallel workers contend for cores and a per-test
+    // timeout measures wall clock, including time the worker spent descheduled.
+    // At 5s those tests failed intermittently, and on a DIFFERENT set each run —
+    // which is why this is global rather than a few per-file overrides. CI is more
+    // exposed than a dev machine (slower cores), and the job's own 20-minute budget
+    // against a ~3-minute suite leaves plenty of room.
+    testTimeout: 20000,
   },
   resolve: {
     alias: {

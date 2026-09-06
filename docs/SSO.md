@@ -170,10 +170,23 @@ declares per-provider mappings as JSON:
 ```
 
 * Path syntax: dotted JSONPath-lite (`profile.given_name`,
-  `address.country[0]`). No wildcards.
+  `address.country[0]`). No wildcards. Nested membership works the
+  same way: `{"entitlements": {"groups": [...]}}` is reached by the
+  candidate `entitlements.groups` — which every non-SAML kind now
+  carries **by default** — and on the gateway kinds (`backchannel`,
+  `custom_profile`) the container's *name* does not matter at all: one
+  level of every object-valued key is flattened before mapping
+  (`claim_mapper.hoist_nested`; the well-known names keep first pick
+  on a collision, then payload order). Deeper nesting is one dotted
+  candidate in the mapping studio. An empty top-level value never
+  shadows a populated nested one — neither in the hoist nor in the
+  candidate walk.
 * Each field's value is the first non-empty match from its candidate
   list. Empty list / unset key → falls back to the kind's defaults
   (`DEFAULT_OIDC`, `DEFAULT_SAML`, `DEFAULT_CUSTOM`).
+* Group lists scale: 100+ groups per person arrive intact (order kept,
+  DN names never split), and the sign-in reconciler resolves mappings
+  with one `IN` query over the asserted names — never per-group work.
 * `extras` lands two places:
   * `users.metadata_.attributes` — JSON snapshot (canonical raw).
   * `user_external_attributes` rows — indexed projection used by the
@@ -280,17 +293,25 @@ Singleton row in `app_auth_config`:
 | Toggle | Default | When OFF |
 |---|---|---|
 | `sso_enabled` | true | `/auth/providers` returns `[]`; `/auth/{slug}/*` 404s |
-| `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` |
+| `allow_local_login` | true | `POST /auth/login` returns 403 `{"error":"local_login_disabled"}` (and `POST /auth/signup` the same — a password account minted under enforcement would be a dead end). One carve-out: an account marked `is_system_account` (break-glass) still signs in with its password, and unknown emails get the identical 403 so the carve-out is not an account oracle |
 | `allow_jit_provisioning` | true | New IdP subjects with no email match raise `jit_disabled` |
 | `email_first_login` | **false** | `POST /auth/resolve` always answers `{"provider": null}`; the login page is byte-for-byte what it was |
 
 The PATCH endpoint refuses lockout scenarios:
 
 * `allow_local_login=false` is rejected (HTTP 409) when any active
-  admin lacks an SSO identity. Response carries the offending admin
-  list so the operator can fix it.
+  admin lacks an SSO identity **and is not a system account** — a
+  system account keeps password sign-in under enforcement, so it
+  cannot be locked out by the switch and does not block it. Response
+  carries the offending admin list so the operator can fix it.
 * `sso_enabled=false` AND `allow_local_login=false` together is
   rejected — there'd be no way to log in.
+* The companion sweep `POST /admin/sso/config/end-all-sessions`
+  (`dryRun` supported) ends every session — password and SSO — except
+  system accounts', so enforcement can take effect now instead of when
+  the old sessions expire. Unmarking a system account is refused with
+  the same 409 when passwords are off and that admin has no SSO
+  identity: the flag was the last door in.
 
 ### 1.10 Admin lookup + search
 
@@ -401,8 +422,11 @@ from.
   miss from the feature being off, an unknown domain, a disabled provider,
   or malformed input all return the same empty body. Rate limited like
   `/login`, and CSRF-exempt because it is called before any session exists.
-* Additive: an address that matches nothing falls through to the password
-  form and the button row, so a wrong domain mapping cannot strand anyone.
+* Additive: submitting an address that matches nothing says so on the
+  page ("We don't recognise that email's domain") and reveals the
+  password form and the full button row, so a wrong or missing domain
+  mapping cannot strand anyone. While typing, a miss stays silent — only
+  the submit speaks.
 
 ### 1.15 IdP health
 

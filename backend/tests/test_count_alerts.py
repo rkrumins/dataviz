@@ -1106,3 +1106,98 @@ async def test_silence_does_not_re_alert_inside_the_cooldown(
     assert await count_alerts_repo.evaluate_silent_sources(
         db_session, _policy(),
     ) == [], "an outage must ring once, not once per tick"
+
+
+# ── derived bookkeeping never raises a finding ───────────────────────
+#
+# `_AggMeta` is MERGEd into the graph by the aggregation pipeline itself, and
+# wiped by projection seeds, rebuilds and purges — so it toggles 1 -> 0 -> 1
+# forever. Every dip used to raise a SEVERE `type_gone` finding, plus a bell
+# notification reading "<source>: _AggMeta is gone", about the platform's own
+# node. Snapshots captured before the providers stopped recording it stay
+# readable for the whole retention window, so the exclusion has to hold on the
+# READ side too — which is what these fixtures exercise.
+
+
+async def test_a_vanished_derived_label_raises_nothing(db_session: AsyncSession):
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_001, delta=0,
+            entity_types={"Table": 10_000, "_AggMeta": 1},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=-1,
+        entity_types={"Table": 10_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    assert not [n for n in notices if n.finding == "type_gone"]
+
+
+async def test_a_real_type_still_reports_when_a_derived_one_also_vanishes(
+    db_session: AsyncSession,
+):
+    """The exclusion must be surgical: a genuine disappearance in the same
+    observation is exactly the signal this alerter exists for."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_201, delta=0,
+            entity_types={"Table": 10_000, "Column": 200, "_AggMeta": 1},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=-201,
+        entity_types={"Table": 10_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    gone = [n for n in notices if n.finding == "type_gone"]
+    assert [n.subject_type for n in gone] == ["Column"]
+
+
+async def test_a_customer_label_starting_with_underscore_still_reports(
+    db_session: AsyncSession,
+):
+    """Membership is the explicit list, never a "_" prefix rule — a customer's
+    own `_internal` type disappearing is their data going missing."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=10_200, delta=0,
+            entity_types={"Table": 10_000, "_internal": 200},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=10_000, delta=-200,
+        entity_types={"Table": 10_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    gone = [n for n in notices if n.finding == "type_gone"]
+    assert [n.subject_type for n in gone] == ["_internal"]
+
+
+async def test_a_vanished_aggregated_edge_type_raises_nothing(
+    db_session: AsyncSession,
+):
+    """A purge drops every AGGREGATED edge by design. That is the platform
+    rebuilding its own overlay, not a source losing relationships."""
+    for hours in range(20, 10, -1):
+        await _snap(
+            db_session, at=_iso(hours), nodes=100, delta=0,
+            edges=9_000, edge_delta=0,
+            edge_types={"LINKS": 4_000, "AGGREGATED": 5_000},
+        )
+    await _snap(
+        db_session, at=_iso(2), nodes=100, delta=0,
+        edges=4_000, edge_delta=-5_000,
+        edge_types={"LINKS": 4_000},
+    )
+
+    notices = await count_alerts_repo.evaluate_source(
+        db_session, DS_ID, _policy(),
+    )
+    assert not [n for n in notices if n.finding == "type_gone"]

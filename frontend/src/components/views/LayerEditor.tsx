@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { generateId } from '@/lib/utils'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { useSchemaStore } from '@/store/schema'
 import { useInstanceAssignments } from '@/store/referenceModelStore'
 import type {
@@ -280,7 +281,7 @@ export function LayerEditor({
                                 )}
                             >
                                 {isIncluded && <Check className="w-3 h-3" />}
-                                {edgeType}
+                                {edgeTypeCopy(edgeType)?.label ?? edgeType}
                             </button>
                         )
                     })}
