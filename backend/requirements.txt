@@ -49,7 +49,7 @@ xmlsec>=1.3.17
 python-dotenv>=1.2.3     # >=1.2.2: GHSA-mf9w-mj56-hr94 (set_key follows symlinks)
 
 # Graph adapter dependencies
-neo4j>=5.14.0            # Neo4j async driver (Phase 4)
+neo4j>=6.3.0            # Neo4j async driver (Phase 4)
 httpx>=0.28.1            # DataHub GraphQL HTTP client + async test client
 google-cloud-spanner>=3.69.1                 # Spanner Graph adapter (bundles spanner_admin_database_v1 for CREATE TABLE / CREATE PROPERTY GRAPH bootstrap)
 anyio>=4.14.2                                 # Threadpool used by Spanner async/sync seam
