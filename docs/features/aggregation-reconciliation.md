@@ -228,6 +228,58 @@ sync. The count is shared, so a sweeper action followed by failed retries
 trips the breaker sooner than three retries; `resetBreaker` is the escape
 either way.
 
+### Turning automation off and on
+
+Everything below withholds **rebuilds**, and only rebuilds. Nothing here
+deletes anything, and nothing here stops a person.
+
+| I want to… | Control | Where | Releases with |
+|---|---|---|---|
+| Quiet the whole fleet for a few hours | **Pause** (timed) | Automation → ③ Act → Advanced | Lapses on its own, or Resume |
+| Stop the whole fleet until I say otherwise | **Until resumed (stop)** | Automation → ③ Act → Advanced | Resume fleet-wide |
+| Stop rebuilding but keep watching | **③ Act** off | Automation → ③ Act | Switch it back on |
+| Stop checking as well as rebuilding | **② Check** off | Automation → ② Check | Switch it back on |
+| Hold one provider | **Pause provider…** | The provider's group header | Resume provider |
+| Hold one source for a while | The snooze | Source drawer → ③ Act | Lapses, or Resume |
+| Stop one source indefinitely | **Rebuild this source automatically** off | Source drawer → ③ Act | Switch it back on |
+| Stop the rebuild running right now | **Cancel** | Job History | Automation retries it, bounded by the breaker |
+| Bring back sources that gave up | **Resume automation** / **Resume all N** | Source drawer → ② Check / Automation → ③ Act | — |
+
+Two fleet-wide stops — switching ③ Act off, and choosing "Until resumed" —
+ask for confirmation first, naming the count and the three facts below. A
+timed pause, a provider hold and a per-source control do not: they say when
+they end, or they are one reversible row.
+
+**What stops.** No source is rebuilt automatically: the sweeper's rebuilds and
+first builds, the stale-marker retries, the drift signal, and the
+provider/fleet batch refresh, which skips held sources and reports them
+(`outcome: held`). Rolled-up lineage stays as it is and drifts further from
+the data as that data changes.
+
+**What carries on.** Sources are still watched (① Detect) and still judged
+(② Check); findings, evidence and `drift_state` are still recorded; every row
+still shows what is drifting, plus a hold chip; the read path still serves the
+"may be out of date" overlay, because a hold keeps the stale marker rather
+than clearing it. A person's Rebuild still runs — with a warning that the hold
+stays — and so does a job that was already running or already queued.
+
+**What is never touched.** Nothing is deleted. Turning automation back on
+starts from a fresh check; no backlog of held rebuilds is replayed.
+
+**What it looks like downstream.** A drifting source that nothing is allowed
+to rebuild keeps its amber *Graph Drift Detected* banner on the canvas — that
+banner is terminal by design, since only a rebuild clears it. It names the
+hold and points at both ways out: its own **Re-aggregate** button, which is a
+person and so is never held, and Ingestion → Automation for an admin. The
+compensation is the reason to reach for a hold during an incident: while it
+stands, no rebuild load reaches FalkorDB at all.
+
+**Confirming it took effect.** The Automation modal's "Right now" line, the
+banner at the top of Overlay integrity, every row's chip reading "Stopped
+fleet-wide", and the next sweep's `bySkip` tallying `fleet_held`. All four are
+computed by the same resolver as the gates, so agreement is structural rather
+than hopeful.
+
 ### Caps
 
 `_SCAN_CAP = 200` per pass · `reconcileMaxActionsPerRun = 10` ·
@@ -325,11 +377,15 @@ versioning does not read as drifted on its first sweep afterwards.
 ## Configuration
 
 Global policy lives in `aggregation_settings.cadence_json` beside the rebuild
-cadence — the same store, the same 30-second cache, the same dialog.
+cadence — the same store, the same dialog. It is read by primary key on every
+read and never cached, so a switch flipped on one replica is what every other
+replica's next tick sees.
 
 | Field | Env fallback | Default |
 |---|---|---|
-| `reconcileEnabled` | `AGGREGATION_RECONCILE_ENABLED` | `true` |
+| `driftAutoRebuild` (③ Act) | `AGGREGATION_DRIFT_AUTO_REBUILD` | `true` — `false` is a fleet-wide stop |
+| `reconcileEnabled` (② Check) | `AGGREGATION_RECONCILE_ENABLED` | `true` |
+| `rebuildMinIntervalSecs` | `AGGREGATION_REBUILD_MIN_INTERVAL_SECS` | `900` (`0` disables the throttle) |
 | `reconcileCheckIntervalSecs` | `AGGREGATION_RECONCILE_INTERVAL_SECS` | `3600` (floor 30) |
 | `reconcileMaxActionsPerRun` | `AGGREGATION_RECONCILE_MAX_ACTIONS` | `10` |
 | `reconcileShrinkTolerancePct` | `AGGREGATION_RECONCILE_SHRINK_TOLERANCE_PCT` | `10` |

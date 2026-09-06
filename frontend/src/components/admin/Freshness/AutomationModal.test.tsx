@@ -689,8 +689,34 @@ describe('fleet-wide hold', () => {
         await openAdvanced('Act')
 
         await userEvent.selectOptions(await screen.findByLabelText('Pause every rebuild for'), 'stop')
+        await userEvent.click(await screen.findByRole('button', { name: 'Stop rebuilds' }))
 
         await waitFor(() => expect(putReconciliation).toHaveBeenCalledWith({ pausedUntil: null, stopped: true }))
+    })
+
+    it('an estate-wide stop states its effect and writes nothing until it is confirmed', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        await userEvent.selectOptions(await screen.findByLabelText('Pause every rebuild for'), 'stop')
+
+        // The count, and the fact that makes the stop safe to reach for.
+        expect(await screen.findByText(/This holds all 10 sources/)).toBeInTheDocument()
+        expect(screen.getByText(/still watched and still checked/)).toBeInTheDocument()
+        expect(putReconciliation).not.toHaveBeenCalled()
+
+        await userEvent.click(screen.getByRole('button', { name: 'Keep automation on' }))
+        expect(putReconciliation).not.toHaveBeenCalled()
+    })
+
+    it('a timed pause is never confirmed — it says when it ends', async () => {
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+        await openAdvanced('Act')
+
+        await userEvent.selectOptions(await screen.findByLabelText('Pause every rebuild for'), '3600')
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledTimes(1))
+        expect(screen.queryByRole('button', { name: 'Stop rebuilds' })).not.toBeInTheDocument()
     })
 
     it('a stopped fleet shows the stop and its Resume lifts both stamps', async () => {
@@ -717,6 +743,49 @@ describe('fleet-wide hold', () => {
         await openAdvanced('Act')
 
         expect(await screen.findByLabelText('Pause every rebuild for')).toBeDisabled()
+    })
+
+    it('a stage that is off says what that costs, and only when it is off', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+
+        const act = await screen.findByLabelText('Automatically rebuild a source when drift is detected')
+        // The control's hint always warns what OFF costs; the consequence
+        // line — what carries on regardless — appears only once it is off.
+        expect(screen.queryByText(/anyone can still rebuild a source by hand/)).not.toBeInTheDocument()
+
+        await userEvent.click(act)
+
+        expect(await screen.findByText(/anyone can still rebuild a source by hand/)).toBeInTheDocument()
+    })
+
+    it('turning ③ Act off asks first, and saves nothing until it is confirmed', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+
+        await userEvent.click(await screen.findByLabelText('Automatically rebuild a source when drift is detected'))
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        expect(await screen.findByText('Stop automatic rebuilds for every source?')).toBeInTheDocument()
+        expect(putReconciliation).not.toHaveBeenCalled()
+
+        await userEvent.click(screen.getByRole('button', { name: 'Stop rebuilds' }))
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledTimes(1))
+        await waitFor(() => expect(putAggregationCadence).toHaveBeenCalledWith(
+            expect.objectContaining({ driftAutoRebuild: false }),
+        ))
+    })
+
+    it('a save that leaves ③ Act on asks nothing', async () => {
+        getAggregationSettings.mockResolvedValue(SETTINGS)
+        wrap(<AutomationModal open onClose={() => {}} isAdmin summary={SUMMARY} />)
+
+        // Edit something else entirely, so Save has work to do.
+        await userEvent.click(await screen.findByLabelText('Watch for changes made outside this app'))
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+        await waitFor(() => expect(putReconciliation).toHaveBeenCalledTimes(1))
+        expect(screen.queryByText('Stop automatic rebuilds for every source?')).not.toBeInTheDocument()
     })
 
     it('says what the server holds right now, naming the switch that releases it', async () => {

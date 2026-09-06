@@ -18,19 +18,41 @@ export const STAGES = {
         name: 'Detect',
         means: 'Watches each source for data changed by systems outside this app.',
         costs: 'Reads stored counts, not the data itself — cheap enough to run every minute.',
+        whenOff: 'Nothing notices when another system changes a source, so Check has nothing new to judge and drift is found late or not at all.',
     },
     check: {
         n: '2',
         name: 'Check',
         means: 'Decides whether the rolled-up lineage still matches the data.',
         costs: 'Pure database work; never touches the graph.',
+        whenOff: 'No source is judged, so drift is neither found nor shown — and nothing is rebuilt, because nothing is ever reported to rebuild.',
     },
     act: {
         n: '3',
         name: 'Act',
         means: 'Rebuilds the rolled-up lineage when it no longer matches.',
         costs: 'Minutes of work on the graph — throttled and capped on purpose.',
+        // The control's own hint states what stops; this states what does
+        // NOT, which is the half that makes the switch safe to reach for.
+        whenOff: 'Drift is still found and still shown on every row, and anyone can still rebuild a source by hand.',
     },
+} as const
+
+/**
+ * What a hold — any hold, at any scope — actually does. Three facts, in the
+ * order a person needs them: what stops, what carries on regardless, and what
+ * is never touched.
+ *
+ * One copy, because the confirmation, the modal's live read-out and the
+ * runbook must not describe the same act differently. The middle line is the
+ * one that makes a stop safe to reach for: a hold withholds REBUILDS and
+ * nothing else — the watching, the judging and the reporting all continue,
+ * which is why a paused fleet still shows you everything that is drifting.
+ */
+export const HOLD_EFFECT = {
+    stops: 'No source is rebuilt automatically. Rolled-up lineage stays as it is and drifts further from the data as that data changes.',
+    continues: 'Sources are still watched and still checked, drift is still shown on every row, and anyone can still rebuild a source by hand.',
+    keeps: 'Nothing is deleted. Turning automation back on starts from a fresh check — no backlog of rebuilds is replayed.',
 } as const
 
 /** Backend bounds, in the one unit both surfaces speak. The server's floor for

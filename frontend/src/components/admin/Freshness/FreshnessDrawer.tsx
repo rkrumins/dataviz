@@ -591,6 +591,10 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
         <StageRow
             stage="act"
             on={!isManaged && auto}
+            // A managed source's ③ Act is off because version control owns its
+            // rollups, which the shared words would misdescribe; that case has
+            // its own block below.
+            whenOff={!isManaged}
             // Two ways this stage delivers less than its settings claim: the
             // stage before it is off, or a person is holding it. Both dim what
             // it delivers and neither touches its controls.
@@ -617,9 +621,6 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                         label="Rebuild this source automatically when a check finds drift"
                         htmlFor="freshness-auto-reconcile"
                         disabled={!canManage}
-                        hint={auto
-                            ? undefined
-                            : 'Off — drift is still detected and shown here, but nothing is rebuilt automatically.'}
                     >
                         <ToggleSwitch
                             id="freshness-auto-reconcile"

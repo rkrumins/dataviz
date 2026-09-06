@@ -39,7 +39,7 @@
  * the StrictMode click-shield; the panel itself is inside <AnimatePresence> so
  * it leaves rather than vanishing.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -55,7 +55,7 @@ import { aggregationService, type AggregationCadence, type AggregationTuning } f
 import type { FreshnessSummary } from '@/services/freshnessService'
 import {
     CADENCE_LABEL, CHECK_PRESETS, COOLDOWN_PRESETS, DETECTORS, DETECT_PRESETS,
-    MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, automationWarnings, hintIdFor,
+    HOLD_EFFECT, MAX_SECS, MIN_CHECK_SECS, MIN_PROBE_SECS, automationWarnings, hintIdFor,
 } from './automationCopy'
 import { Advanced, PipelineRail, SettingRow, StageRow } from './StageRow'
 import { SnoozeRow } from './SnoozeRow'
@@ -125,8 +125,14 @@ function Ledger({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * The unsaved-changes guard, mirroring ``ProviderOnboardingWizard``'s
+ * The modal's one confirmation, mirroring ``ProviderOnboardingWizard``'s
  * ``ConfirmCloseDialog``.
+ *
+ * Two questions share it, because both are "this is about to lose something
+ * you cannot see from here": discarding unsaved edits, and stopping automatic
+ * rebuilds for every source in the estate. The focus trap below is the reason
+ * it is shared rather than copied — a second hand-rolled dialog would be a
+ * second chance to get that wrong.
  *
  * Putting these settings in a modal handed them two brand-new ways to throw
  * work away that the inline panel they replaced did not have — Escape and the
@@ -145,8 +151,12 @@ function Ledger({ children }: { children: React.ReactNode }) {
  * them. The listener is registered in CAPTURE so it runs before the parent's,
  * and it pulls focus back in if it ever lands outside.
  */
-function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
+function ConfirmDialog({ open, title, body, cancelLabel, confirmLabel, onCancel, onConfirm }: {
     open: boolean
+    title: string
+    body: ReactNode
+    cancelLabel: string
+    confirmLabel: string
     onCancel: () => void
     onConfirm: () => void
 }) {
@@ -191,8 +201,8 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
                     ref={panelRef}
                     role="alertdialog"
                     aria-modal="true"
-                    aria-labelledby="automation-discard-title"
-                    aria-describedby="automation-discard-body"
+                    aria-labelledby="automation-confirm-title"
+                    aria-describedby="automation-confirm-body"
                     initial={{ opacity: 0, y: 12, scale: 0.96 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     className="pointer-events-auto w-full max-w-md rounded-2xl border border-glass-border bg-canvas-elevated p-6 shadow-lg"
@@ -202,13 +212,12 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
                             <AlertTriangle className="h-5 w-5" />
                         </div>
                         <div className="flex-1 min-w-0">
-                            <h3 id="automation-discard-title" className="text-lg font-semibold text-ink">
-                                Discard these automation changes?
+                            <h3 id="automation-confirm-title" className="text-lg font-semibold text-ink">
+                                {title}
                             </h3>
-                            <p id="automation-discard-body" className="mt-1 text-sm text-ink-muted">
-                                Your unsaved changes will be lost if you close now. The schedule
-                                keeps running on whatever it was last saved with.
-                            </p>
+                            <div id="automation-confirm-body" className="mt-1 text-sm text-ink-muted">
+                                {body}
+                            </div>
                         </div>
                     </div>
                     <div className="mt-6 flex items-center justify-end gap-3">
@@ -218,14 +227,14 @@ function ConfirmCloseDialog({ open, onCancel, onConfirm }: {
                             onClick={onCancel}
                             className="rounded-xl border border-glass-border px-4 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-black/5 dark:hover:bg-white/5 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
                         >
-                            Keep editing
+                            {cancelLabel}
                         </button>
                         <button
                             type="button"
                             onClick={onConfirm}
                             className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-600 outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
                         >
-                            Discard
+                            {confirmLabel}
                         </button>
                     </div>
                 </motion.div>
@@ -309,6 +318,13 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
     const [seededSig, setSeededSig] = useState('')
     /** Armed by a dismissal gesture while there are unsaved edits. */
     const [showCloseConfirm, setShowCloseConfirm] = useState(false)
+    /** A fleet-wide stop waiting to be confirmed. Held as the action itself,
+     *  so the confirmation cannot drift from what it is confirming: nothing
+     *  is written until ``run`` is called. Only the two fleet-wide stops arm
+     *  it — a timed pause lapses on its own, and a provider or source hold is
+     *  a local, reversible act that would not survive being asked about
+     *  twice. */
+    const [pendingStop, setPendingStop] = useState<{ run: () => void } | null>(null)
 
     const remoteSig = JSON.stringify([
         policy?.enabled, policy?.checkIntervalSecs, policy?.maxActionsPerRun,
@@ -518,7 +534,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
         // Both writes land in the same stored record, so they are sequenced
         // rather than raced: the policy first, then the cadence, each merging
         // into what the other left.
-        saveRecon.mutate(
+        const commitSave = () => saveRecon.mutate(
             {
                 enabled: checkEnabled,
                 checkIntervalSecs: checkSecs,
@@ -542,6 +558,17 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                     notify('error', e.message || 'Could not save the reconciliation policy.'),
             },
         )
+
+        // ③ Act going off is a fleet-wide stop, and the only one that arrives
+        // by way of Save — so it is asked about here rather than at the
+        // toggle, where it would interrupt someone still deciding. Turning it
+        // back on, or saving with it already off, asks nothing.
+        const actWasOn = (cadence?.driftAutoRebuild ?? settingsQ.data?.envDriftAutoRebuild ?? true) !== false
+        if (actWasOn && driftAuto === false) {
+            setPendingStop({ run: commitSave })
+            return
+        }
+        commitSave()
     }
 
     // On a FIRST read failure both queries stop loading with no data, so "not
@@ -670,6 +697,14 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                             <p className="mt-1.5 text-[11px] font-medium text-ink-secondary leading-snug">
                                 {rightNow}
                             </p>
+                            {/* What that state does NOT stop. The line above
+                                names the control; this one is why reaching for
+                                it is safe. */}
+                            {fleetHold(policy) != null && (
+                                <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">
+                                    {HOLD_EFFECT.continues}
+                                </p>
+                            )}
                         </div>
                         )}
 
@@ -697,6 +732,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                     <StageRow
                                         stage="detect"
                                         on={probeEnabled}
+                                        whenOff
                                         stat={detectStat}
                                     >
                                         <Ledger>
@@ -731,6 +767,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                     <StageRow
                                         stage="check"
                                         on={checkEnabled}
+                                        whenOff
                                         muted={starvedIntoCheck}
                                         stat={checkStat}
                                     >
@@ -851,6 +888,7 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                     <StageRow
                                         stage="act"
                                         on={driftAuto}
+                                        whenOff
                                         muted={starvedIntoCheck || starvedIntoAct}
                                         stat={actStat}
                                     >
@@ -982,11 +1020,17 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                                                 allowStop
                                                 disabled={!isAdmin}
                                                 pending={saveRecon.isPending}
-                                                onPatch={(patch, ok) => saveRecon.mutate(patch, {
-                                                    onSuccess: () => notify('success', `Fleet-wide: ${ok}`),
-                                                    onError: (e: Error) =>
-                                                        notify('error', e.message || 'Could not update the fleet-wide hold.'),
-                                                })}
+                                                onPatch={(patch, ok) => {
+                                                    const write = () => saveRecon.mutate(patch, {
+                                                        onSuccess: () => notify('success', `Fleet-wide: ${ok}`),
+                                                        onError: (e: Error) =>
+                                                            notify('error', e.message || 'Could not update the fleet-wide hold.'),
+                                                    })
+                                                    // The indefinite stop, and only it: a timed pause
+                                                    // says when it ends, and resuming asks nothing.
+                                                    if (patch.stopped === true) setPendingStop({ run: write })
+                                                    else write()
+                                                }}
                                             />
 
                                             {/* The breaker's limit is deploy-owned and the API does
@@ -1144,12 +1188,48 @@ export function AutomationModal({ open, onClose, isAdmin, summary, onShowSuspend
                 </AnimatePresence>
             </div>
 
-            <ConfirmCloseDialog
+            <ConfirmDialog
                 open={showCloseConfirm}
+                title="Discard these automation changes?"
+                body={
+                    <p>
+                        Your unsaved changes will be lost if you close now. The schedule
+                        keeps running on whatever it was last saved with.
+                    </p>
+                }
+                cancelLabel="Keep editing"
+                confirmLabel="Discard"
                 onCancel={() => setShowCloseConfirm(false)}
                 onConfirm={() => {
                     setShowCloseConfirm(false)
                     onClose()
+                }}
+            />
+
+            {/* The estate-wide consequence, stated before it happens rather
+                than discovered afterwards from rows that stopped rebuilding. */}
+            <ConfirmDialog
+                open={pendingStop != null}
+                title="Stop automatic rebuilds for every source?"
+                body={
+                    <div className="space-y-2">
+                        <p>
+                            {summary?.total != null
+                                ? `This holds all ${summary.total.toLocaleString()} sources.`
+                                : 'This holds every source.'}{' '}
+                            {HOLD_EFFECT.stops}
+                        </p>
+                        <p><span className="font-medium text-ink-secondary">Still happens:</span> {HOLD_EFFECT.continues}</p>
+                        <p>{HOLD_EFFECT.keeps}</p>
+                    </div>
+                }
+                cancelLabel="Keep automation on"
+                confirmLabel="Stop rebuilds"
+                onCancel={() => setPendingStop(null)}
+                onConfirm={() => {
+                    const pending = pendingStop
+                    setPendingStop(null)
+                    pending?.run()
                 }}
             />
         </>,

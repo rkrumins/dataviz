@@ -836,6 +836,9 @@ class AggregationService:
         # exact combination that read "ready" for fourteen hours with no
         # lineage on the canvas. The stored column keeps its meaning; this read
         # path stops presenting it as the whole truth.
+        cadence = await read_global_cadence(session)
+        hold = await hold_for_source_row(session, ds_id, state, cadence)
+
         health = (await _projector_health_map()).get(ds_id)
         projection = _projection_wire_fields(health)
         if status == "ready" and projection["projector_current"] is False:
@@ -866,8 +869,14 @@ class AggregationService:
             last_reconcile_reason=getattr(state, "last_reconcile_reason", None),
             auto_reconcile=resolve_reconcile_enabled(
                 getattr(state, "reconcile_enabled", None),
-                (await read_global_cadence(session)).reconcile_enabled,
+                cadence.reconcile_enabled,
             ),
+            # The same call every gate makes, so the banner explains the hold
+            # that would actually withhold the rebuild — not a second opinion
+            # assembled from the switches.
+            held_by=hold.scope if hold is not None else None,
+            held_kind=hold.kind if hold is not None else None,
+            held_until=hold.until if hold is not None else None,
             **projection,
             message=message,
         )

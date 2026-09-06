@@ -441,6 +441,16 @@ class DataSourceReadinessResponse(BaseModel):
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
     auto_reconcile: Optional[bool] = Field(None, alias="autoReconcile")
+    # The operator hold in force for this source, as ``holds.resolve_hold``
+    # reports it (widest scope first). The canvas's drift banner reads it to
+    # explain why a drifting source is not rebuilding itself — that banner is
+    # the only place most people ever see the consequence of a hold, and
+    # without this it can only show the drift and say nothing about why it
+    # persists. ``auto_reconcile`` above is the source's own ② Check chain and
+    # cannot see a provider or fleet hold.
+    held_by: Optional[str] = Field(None, alias="heldBy")
+    held_kind: Optional[str] = Field(None, alias="heldKind")
+    held_until: Optional[str] = Field(None, alias="heldUntil")
 
     # ── Projection health (versioned sources only) ────────────────────
     # THE EVIDENCE BEHIND ``driftState == "projectionStalled"``. A versioned
