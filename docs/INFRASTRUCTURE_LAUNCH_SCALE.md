@@ -341,11 +341,12 @@ FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUER
 | `REDIS_CACHE_*` (legacy `CACHE_REDIS_URL`) | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020/ADR-022) refuses to co-locate on FalkorDB |
 | `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | ≈ shard `maxmemory` × 0.8 per provider | Turns on cold-graph eviction so residency tracks the ~40M working set, not the full 45M+growth corpus |
 | `AGGREGATION_STREAMING_REBUILD_ENABLED` | `true` (default) | Constant-memory, crash-resumable aggregation instead of full-graph in-memory accumulation |
+| `AGGREGATION_SHARD_RESERVE_PCT` | `20` (default) | Share of a shard's `maxmemory` a rebuild must leave free: the write budget reads the owning shard's `used_memory` before storing rollups and refuses, naming the shortfall, rather than filling it |
 | `GRAPHVER_READ_MAX_LAG` | `0` (strict) — small `>0` acceptable during bulk imports | Governs FalkorDB-vs-Cloud-SQL read-freshness fallback |
 
 ### 7.4 Placement & rebuild
 
-Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monitor per-shard `used_memory`; on skew, **move graphs** (drop + rebuild-from-Cloud-SQL onto the target shard), never live-reshard hot slots. The registry + rebuild-from-Postgres makes moves cheap. Full-cluster data loss is **acceptable by design** — every graph reseeds from Cloud SQL; RDB snapshots only shorten the rebuild.
+Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monitor per-shard `used_memory`; on skew, **move graphs** (drop + rebuild-from-Cloud-SQL onto the target shard), never live-reshard hot slots. The aggregation rebuild reads that same `used_memory` against `maxmemory` on the owning shard before it writes rollups (`docs/AGGREGATION_PIPELINE.md`), so a shard nearing its reserve shows up first as a refused rebuild that names the shard — the cue to move a graph. The registry + rebuild-from-Postgres makes moves cheap. Full-cluster data loss is **acceptable by design** — every graph reseeds from Cloud SQL; RDB snapshots only shorten the rebuild.
 
 ---
 

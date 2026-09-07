@@ -85,6 +85,10 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from backend.app.providers.shard_capacity import (
+    ShardMemory, WriteBudget, calibrate_bytes_per_edge, compute_write_budget,
+    estimate_margin_pct_default, format_refusal, read_shard_memory,
+)
 from backend.common.providers.identity import (
     node_identity_expr as _shared_identity_expr,
 )
@@ -236,6 +240,12 @@ def _materialize_fine_pairs_mode() -> str:
     return "auto"
 
 
+#: Upper bound on the explicit edge ceiling. A 256GB shard holds ~400M edges
+#: at 512 B each; the old 50M bound was a wall an operator with the memory
+#: could not get past.
+_MAX_EDGES_BOUND = 500_000_000
+
+
 def _max_materialized_edges() -> int:
     """Hard write budget: the pipeline refuses (fails the job loudly with
     guidance) rather than writing more :AGGREGATED edges than this into
@@ -266,9 +276,11 @@ def _max_materialized_edges() -> int:
     more on a cluster than standalone — ``noeviction`` at the shard cap
     fails writes for every graph on that shard, and with
     ``cluster-require-full-coverage no`` the rest of the cluster keeps
-    serving, so it degrades partially instead of obviously. Raise it per
-    job (ceiling 50M) only on an instance with the headroom to match."""
-    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 25_000_000, 10_000, 50_000_000)
+    serving, so it degrades partially instead of obviously. It is now the
+    FALLBACK rule: when the owning shard can be measured, the shard's real
+    headroom governs (see ``shard_capacity``) and this count applies only
+    as an explicit ceiling set in tuning."""
+    return _env_int("AGGREGATION_MAX_MATERIALIZED_EDGES", 25_000_000, 10_000, _MAX_EDGES_BOUND)
 
 
 def _max_cube_edges() -> int:
@@ -288,7 +300,8 @@ def _max_cube_edges() -> int:
 
 
 class MaterializationBudgetExceeded(ValueError):
-    """The computed result is larger than ``max_materialized_edges``.
+    """The result would not fit the owning shard's headroom — or, when the
+    shard cannot be measured, exceeds ``max_materialized_edges``.
 
     Deterministic: recomputing yields the same count, so the worker must
     fail the job terminally instead of consuming its retry budget."""
@@ -423,9 +436,19 @@ class AggregationPipeline:
         should_cancel: Optional[Callable[[], bool]],
         tuning: Optional[Dict[str, Any]] = None,
         job_id: Optional[str] = None,
+        capacity_hints: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.p = provider
         self._job_id = job_id or ""
+        # What the worker knows that the shard does not: the bytes-per-edge
+        # a previous run of THIS graph measured. Never tuning — an operator
+        # override of the same figure comes through ``tuning`` instead.
+        self._capacity_hints: Dict[str, Any] = dict(capacity_hints or {})
+        self._last_budget: Optional[WriteBudget] = None
+        self._used_before: Optional[int] = None
+        self._edges_before: int = 0
+        self._calibration: Optional[Dict[str, Any]] = None
+        self._fresh_run: bool = True
         # Per-job tuning overrides (frozen on the job row at trigger time)
         # layered over env defaults — see _knob_int/_knob_float/_knob_bool.
         self._tuning: Dict[str, Any] = dict(tuning or {})
@@ -573,6 +596,7 @@ class AggregationPipeline:
 
     async def run(self) -> Dict[str, Any]:
         resume = parse_cursor(self._last_cursor)
+        self._fresh_run = resume is None
         if resume is not None:
             self._run_start_ms, phase, pos = resume
             logger.info(
@@ -613,11 +637,15 @@ class AggregationPipeline:
             self._phase_started = time.monotonic()
             await self._checkpoint(PHASE_AGGREGATE, 0, phase_label="extracting")
 
+            # What the graph already stores and what the shard holds now:
+            # the growth budget and the calibration both start from here.
+            await self._capacity_baseline()
+
             # EXTRACT + COMPUTE always re-run (deterministic, minutes).
             await self._extract_and_compute()
-            # Hard write budget: refuse a result that cannot fit in the
-            # FalkorDB instance BEFORE the first write reaches it.
-            self._check_write_budget()
+            # Hard write budget: refuse a result the owning shard cannot
+            # take BEFORE the first apply write reaches it.
+            await self._check_write_budget()
             self._snapshot_pairs_by_level()
             self._mark_phase("reconcile_s")
 
@@ -641,6 +669,7 @@ class AggregationPipeline:
 
             final_total = len(self._flushed | set(self._acc.keys()))
             await self._stamp_run_meta(final_total)
+            await self._calibrate()
             self._progress_pct = 100
             await self._checkpoint(
                 PHASE_APPLY, self._max_applied_key, phase_label="applying",
@@ -831,13 +860,18 @@ class AggregationPipeline:
                         "regime": (
                             "boundary" if self._fine_filter_active() else "cube"
                         ),
-                        "materialize_budget": self._knob_int(
-                            "max_materialized_edges",
-                            _max_materialized_edges, 10_000, 50_000_000,
-                        ),
+                        "materialize_budget": self._governing_allowance(),
                     }
                     if self._cube_mode is not None else {}
                 ),
+                # The capacity decision, durable on the job: what the owning
+                # shard allowed, which rule governed, and what this run
+                # taught us about bytes per edge (or why it could not).
+                **(
+                    {"write_budget": self._last_budget.as_stats()}
+                    if self._last_budget is not None else {}
+                ),
+                **(self._calibration or {}),
                 **(
                     {"cube_estimate": self._cube_estimate}
                     if getattr(self, "_cube_estimate", None) is not None
@@ -1595,6 +1629,118 @@ class AggregationPipeline:
     def _pair_cap(self) -> int:
         return self._knob_int("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000)
 
+    # -- capacity: the owning shard decides, the operator overrides ----------
+
+    def _explicit_ceiling(self) -> Optional[int]:
+        """``maxMaterializedEdges`` only when tuning set it — an operator's
+        ceiling on the TOTAL, layered over whichever rule governs."""
+        raw = self._tuning.get("max_materialized_edges")
+        if raw is None:
+            return None
+        try:
+            return max(10_000, min(_MAX_EDGES_BOUND, int(raw)))
+        except (TypeError, ValueError):
+            return None
+
+    def _static_cap(self) -> int:
+        """The count rule that governs when the shard cannot be measured:
+        the explicit ceiling if set, else the env default."""
+        return self._explicit_ceiling() or _max_materialized_edges()
+
+    def _governing_allowance(self) -> int:
+        """For ``run_stats``: how many edges the rule in force allowed."""
+        b = self._last_budget
+        if b is not None and b.governed_by == "shard":
+            return int(b.allowed_growth_edges or 0)
+        return self._static_cap()
+
+    async def _read_shard(self) -> ShardMemory:
+        """The shard that owns the graph the rollups land on — the
+        projection graph in dedicated mode, which may live on a different
+        shard from the source graph. Read through the client the provider
+        holds NOW and never cached: a failover rebuilds that client, and
+        re-reading is what follows it."""
+        p = self.p
+        dedicated = getattr(p, "_projection_mode", None) == "dedicated"
+        db = (getattr(p, "_proj_db", None) if dedicated else None) or getattr(p, "_db", None)
+        key = f"{p._graph_name}_proj" if dedicated else p._graph_name
+        cfg = getattr(p, "_conn_cfg", None)
+        return await read_shard_memory(
+            db, mode=getattr(cfg, "mode", None), graph_key=key,
+            timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+        )
+
+    async def _budget(self) -> WriteBudget:
+        """A fresh reading plus the operator's limits. Bytes per edge:
+        tuning → what a previous run of this graph measured → env."""
+        shard = await self._read_shard()
+        raw_bpe = self._tuning.get("bytes_per_edge")
+        hint = self._capacity_hints.get("bytes_per_edge_observed")
+        if raw_bpe is not None:
+            bpe, source = raw_bpe, "tuning"
+        elif hint:
+            bpe, source = hint, "calibrated"
+        else:
+            bpe, source = None, "default"
+        budget = compute_write_budget(
+            shard,
+            reserve_pct=self._tuning.get("shard_reserve_pct"),
+            bytes_per_edge=bpe, bpe_source=source,
+            explicit_ceiling=self._explicit_ceiling(),
+            static_cap=self._static_cap(),
+        )
+        self._last_budget = budget
+        return budget
+
+    async def _count_aggregated(self) -> int:
+        """How many :AGGREGATED edges the graph holds — what a rebuild
+        re-materialises rather than grows. Best-effort: unknown reads as 0,
+        which budgets every cell as growth (the conservative direction)."""
+        try:
+            res = await self.p._proj_ro_query(
+                "MATCH ()-[r:AGGREGATED]->() RETURN count(r)",
+                timeout=_scan_timeout_s(),
+            )
+            rows = res.result_set or []
+            return int(rows[0][0] or 0) if rows and rows[0] else 0
+        except Exception as exc:
+            logger.info(
+                "aggregation pipeline on %s: existing rollup count unavailable "
+                "(%s) — budgeting every cell as growth.", self.p._graph_name, exc,
+            )
+            return 0
+
+    async def _capacity_baseline(self) -> None:
+        """E0 for the growth budget on every run; the shard's ``used`` for
+        the calibration on a FRESH run only (a resumed run's start is gone)."""
+        self._edges_before = await self._count_aggregated()
+        if self._fresh_run:
+            shard = await self._read_shard()
+            self._used_before = shard.used if shard.measurable else None
+
+    async def _calibrate(self) -> None:
+        """What this run actually cost the shard per NEW edge, for the next
+        run's budget. The gates (fresh run, material growth, positive delta,
+        clamp) live in ``shard_capacity``; the outcome lands in run_stats
+        either way, so a run that could not calibrate says why."""
+        if not self._fresh_run:
+            self._calibration = {"calibration": "skipped_resume"}
+            return
+        if self._used_before is None:
+            self._calibration = {"calibration": "skipped_unmeasured"}
+            return
+        shard = await self._read_shard()
+        edges_after = await self._count_aggregated()
+        observed = calibrate_bytes_per_edge(
+            used_before=self._used_before,
+            used_after=shard.used if shard.measurable else None,
+            edges_before=self._edges_before, edges_after=edges_after,
+        )
+        self._calibration = (
+            {"bytes_per_edge_observed": observed, "calibration": "measured"}
+            if observed is not None else {"calibration": "skipped_small_growth"}
+        )
+
     async def _maybe_overflow_flush(self) -> None:
         """Early-apply the accumulator when it exceeds the memory cap.
 
@@ -1606,10 +1752,12 @@ class AggregationPipeline:
         cap = self._pair_cap()
         if len(self._acc) < cap:
             return
-        self._check_write_budget()
         flushed = self._flushed
         overwrite = [k for k in self._acc if k not in flushed]
         add = [k for k in self._acc if k in flushed]
+        # This wave's growth is exactly its first-touch keys; the shard is
+        # re-read, so the waves before it are already inside ``used``.
+        await self._check_write_budget(wave=overwrite)
         logger.info(
             "aggregation pipeline on %s: accumulator hit cap %d — early "
             "flush (%d first-touch overwrite, %d add).",
@@ -1675,12 +1823,14 @@ class AggregationPipeline:
             # mirror; the boundary has nothing to rank. Legacy path.
             self._cube_mode = True
             return
-        if mode == "true":
-            self._cube_mode = True
-            return
         if mode == "false":
             self._cube_mode = False
             return
+        # Forced full detail used to skip the estimate and fail mid-apply,
+        # leaving a partial cube over the previous generation's cells. It
+        # now pays the same counting scan Auto does, so a cube the owning
+        # shard cannot take is refused BEFORE compute and before any write.
+        forced = mode == "true"
         parents = self._parents
         cnt_memo: Dict[int, int] = {}
 
@@ -1721,24 +1871,43 @@ class AggregationPipeline:
                     if sid is None or tid is None:
                         continue
                     estimate += (anc_count(int(sid))) * (anc_count(int(tid)))
-        # The cube ceiling is deliberately NOT the write budget: the budget
-        # is a runaway backstop sized well above any real result, while the
-        # cube decision must stay pinned to what the instance can hold.
-        # Sharing them would make raising the backstop silently turn "Auto"
-        # into "Always full detail". See _max_cube_edges.
-        cap = _max_cube_edges()
-        write_budget = self._knob_int(
-            "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
-        )
         self._cube_estimate = estimate
-        self._cube_mode = estimate <= cap
+        # The estimate is an UPPER bound on cells, so it is checked with a
+        # margin; the exact post-compute check stands behind it.
+        budget = await self._budget()
+        margin = estimate_margin_pct_default()
+        verdict = budget.verdict(
+            projected=estimate, growth_edges=max(0, estimate - self._edges_before),
+            margin_pct=margin,
+        )
+        if forced:
+            self._cube_mode = True
+            if not verdict.ok:
+                raise MaterializationBudgetExceeded(format_refusal(
+                    budget, verdict, graph=self.p._graph_name,
+                    composition="full cube, estimated before compute",
+                    from_estimate=True, margin_pct=margin,
+                ))
+            logger.info(
+                "aggregation pipeline on %s: forced full cube — estimate ~%d "
+                "cells; the %s rule allows it.",
+                self.p._graph_name, estimate, budget.governed_by,
+            )
+            return
+        # The cube ceiling is deliberately NOT the write budget: it is Auto's
+        # appetite, a product choice, while the budget is what the shard can
+        # take. Auto keeps its ceiling AND never picks a cube the shard would
+        # refuse. See _max_cube_edges.
+        cap = _max_cube_edges()
+        self._cube_mode = estimate <= cap and verdict.ok
         logger.info(
             "aggregation pipeline on %s: auto mode — full-cube estimate "
-            "~%d cells vs cube ceiling %d (write budget %d) → %s.",
-            self.p._graph_name, estimate, cap, write_budget,
+            "~%d cells vs cube ceiling %d (%s rule: %s) → %s.",
+            self.p._graph_name, estimate, cap, budget.governed_by,
+            "fits" if verdict.ok else "does not fit",
             "FULL CUBE (every ancestor combination stored)"
             if self._cube_mode else
-            "structural depth-diagonal (cube exceeds ceiling; mixed "
+            "structural depth-diagonal (cube exceeds ceiling or budget; mixed "
             "granularities served on demand)",
         )
 
@@ -1831,29 +2000,27 @@ class AggregationPipeline:
             ", ".join(f"d{rk}={n}" for rk, n in sorted(by_rank.items())),
         )
 
-    def _check_write_budget(self) -> None:
-        """Refuse to exceed the FalkorDB write budget — failing the job with
-        guidance beats OOM-killing the shared instance."""
-        cap = self._knob_int(
-            "max_materialized_edges", _max_materialized_edges, 10_000, 50_000_000,
-        )
+    async def _check_write_budget(self, *, wave: Optional[List[int]] = None) -> None:
+        """Refuse a write the owning shard cannot take — failing the job
+        with the numbers beats OOM-killing a shared instance.
+
+        Growth, not size, is what the shard pays for. Before the apply it is
+        every cell the graph does not already hold; for an overflow ``wave``
+        it is that wave's first-touch keys, the shard having been re-read so
+        the waves before it are already inside ``used``."""
         # Union, not sum: a key flushed earlier AND re-touched since sits
         # in both sets — summing double-counts it and terminally fails a
         # legitimately under-budget job.
         flushed = self._flushed
         projected = len(flushed) + sum(1 for k in self._acc if k not in flushed)
-        if projected > cap:
-            raise MaterializationBudgetExceeded(
-                f"aggregation would materialize ~{projected} :AGGREGATED edges "
-                f"({self._budget_composition()}), exceeding "
-                f"max_materialized_edges={cap} for graph "
-                f"'{self.p._graph_name}'. Writing this would risk exhausting the "
-                f"FalkorDB instance's memory. This count is deterministic — the "
-                f"job is not retried. Fixes: keep the default level-based "
-                f"materialization (materialize_fine_pairs=false) so only "
-                f"same-level container pairs are stored; raise the cap via "
-                f"tuning only if the instance has headroom (~0.5KB per edge)."
-            )
+        growth = len(wave) if wave is not None else max(0, projected - self._edges_before)
+        budget = await self._budget()
+        verdict = budget.verdict(projected=projected, growth_edges=growth)
+        if not verdict.ok:
+            raise MaterializationBudgetExceeded(format_refusal(
+                budget, verdict, graph=self.p._graph_name,
+                composition=self._budget_composition(),
+            ))
 
     def _budget_composition(self) -> str:
         """Per-rank-pair histogram of the would-be result, so operators
@@ -2667,6 +2834,7 @@ async def materialize_aggregated_edges(
     resume_created: int = 0,
     tuning: Optional[Dict[str, Any]] = None,
     job_id: Optional[str] = None,
+    capacity_hints: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Entry point used by ``FalkorDBProvider.materialize_aggregated_edges_batch``."""
     pipeline = AggregationPipeline(
@@ -2679,5 +2847,6 @@ async def materialize_aggregated_edges(
         should_cancel=should_cancel,
         tuning=tuning,
         job_id=job_id,
+        capacity_hints=capacity_hints,
     )
     return await pipeline.run()

@@ -58,19 +58,23 @@ caveat on SELF-NESTING types, where the on-demand reader still reasons in
 ontology type levels and mixed-granularity drill answers can come back
 incomplete (depth-aware on-demand reads are the tracked follow-up).
 
-The cost is stated plainly because it is real: a FORCED cube **skips the
-up-front estimate**, so a graph whose result exceeds the WRITE BUDGET is
-not refused before it starts — it fails terminally mid-apply, leaving a
-partial cube over the previous generation's cells, because the reconcile
-delete pass never runs. On a fleet with multi-million-edge graphs, size
-`AGGREGATION_MAX_MATERIALIZED_EDGES` against the largest of them first.
+The cost is stated plainly because it is real: a FORCED cube is checked
+against the WRITE BUDGET **before it starts** — the same up-front estimate
+Auto runs, an upper bound with `AGGREGATION_ESTIMATE_MARGIN_PCT` of slack,
+against the free memory of the shard that owns the graph — and a graph
+that cannot fit is refused with nothing computed and nothing written. The
+exact count is checked again after COMPUTE and before every overflow wave,
+so a shard that fills up mid-run (another graph landing on it) still fails
+the job loudly rather than filling the shard; that late refusal is the one
+case that leaves a partial cube over the previous generation's cells,
+which the next successful rebuild reconciles.
 
 `auto` is the mode that degrades instead of failing: it ESTIMATES the full
 ancestor cross-product volume up front (one counting scan: Σ ancestors(src)+1
 × ancestors(tgt)+1 — a conservative upper bound), stores the cube when it fits
-`AGGREGATION_MAX_CUBE_EDGES`, and falls back to the structural boundary below
-otherwise, so it can never pick a cube that exceeds the budget. `false` forces
-the boundary. Operators move a whole fleet between these from Ingestion →
+`AGGREGATION_MAX_CUBE_EDGES` **and** the owning shard has room for it, and
+falls back to the structural boundary below otherwise, so it can never pick a
+cube that exceeds the budget. `false` forces the boundary. Operators move a whole fleet between these from Ingestion →
 Freshness → Automation (③ Act → Advanced) without a redeploy; a single run is
 set in the trigger dialog's Rollup storage control.
 
@@ -116,37 +120,65 @@ All reads are index-driven and bounded by the visible set —
 milliseconds even 8 levels deep on multi-million-edge graphs. Same
 answers, same response shape. Trace is unaffected: trace-at-level reads
 same-level cells (still materialized) and already uses raw edges at the
-finest level. A hard write budget (`AGGREGATION_MAX_MATERIALIZED_EDGES`,
-default 25M) fails a job loudly — terminally, no retries, with a
-per-level composition breakdown in the error — rather than ever letting
-a result OOM the shared instance.
+finest level. The write budget fails a job loudly — terminally, no
+retries, with every number a person needs in the error — rather than ever
+letting a result OOM the shared instance.
 
-**Size it against ONE SHARD.** A FalkorDB graph key lives entirely on one
-node — Redis Cluster does NOT split a graph, so sharding scales the
-*number* of graphs you can host, not the size of any one, and running on
-a cluster gives a single large graph zero extra headroom
-(`backend/app/providers/falkordb_connection.py` module docstring). The
-reference cluster (`deploy/k8s/overlays/production-cluster/`) runs
-`maxmemory 40gb` per shard against ~22GB planned usage — about 18GB of
-headroom. The 25M default is ~12.5GB at ~0.5KB/edge, roughly 70% of that.
-Boundary pairs run ~1.5-2x raw edge count, so it covers a graph of about
-12-16M edges — several times the 1M-node / 2M-edge floor the defaults
-target, which is the point: that floor is a MINIMUM, not a ceiling.
+**The budget is MEASURED from the shard that owns the graph.** A FalkorDB
+graph key lives entirely on one node — Redis Cluster does NOT split a
+graph, so sharding scales the *number* of graphs you can host, not the
+size of any one, and running on a cluster gives a single large graph zero
+extra headroom (`backend/app/providers/falkordb_connection.py` module
+docstring). So before it writes, the pipeline reads `INFO memory` on that
+one shard — the projection graph's shard in dedicated mode — through the
+client it already holds, and allows the write when the NEW edges fit
+under a reserve:
 
-Note this sits **above** the ~8GB "largest single graph" figure in
-[Infrastructure: Launch Scale](/docs/infra-launch-scale) §2.2, whose 18GB of
-headroom covers skew *and* the largest graph *and* growth together.
+```
+allowed_growth = (maxmemory - reserve_pct% x maxmemory - used_memory) / bytes_per_edge
+```
+
+Only growth is charged (edges the graph already holds are re-written in
+place), and the reading is fresh at every check: the up-front estimate,
+the exact count after COMPUTE, and each overflow wave. Adding memory to a
+shard is therefore visible to the very next rebuild. The refusal names the
+shard, the edges and bytes needed, what was free of what `maxmemory`, the
+shortfall and the ways out, and `run_stats.write_budget` records the same
+decision on success (`governed_by: shard`). Read the shard yourself with
+`redis-cli -h <shard> INFO memory` — the same two numbers.
+
+Three operator limits sit on top, resolved per-job tuning → Ingestion →
+Freshness → Defaults → env, like every other knob: **`shardReservePct`**
+(`AGGREGATION_SHARD_RESERVE_PCT`, 20) is how much of the shard must stay
+free for live queries and every other graph on it; **`bytesPerEdge`**
+(`AGGREGATION_BYTES_PER_EDGE`, 512) overrides what one edge is assumed to
+cost — a planning figure until a fresh rebuild with material growth has
+CALIBRATED it from the shard's own before/after usage, per graph, which
+the next rebuild of that graph then uses; and **`maxMaterializedEdges`**
+is an OPTIONAL explicit ceiling on the total, layered over the measured
+budget for a graph you want held BELOW what its shard could take. No
+preset sets it — a ceiling on the job wins over the measurement, which is
+exactly how a pinned 25M made adding shard memory change nothing.
+
+When the shard cannot be measured — no `maxmemory` configured (the five
+`deploy/topologies/docker-compose.falkordb-*.yml` files), or the read
+timed out — the budget degrades to the static count rule: the explicit
+ceiling if set, else `AGGREGATION_MAX_MATERIALIZED_EDGES` (25M, ~12.5GB
+at the default bytes/edge), and the message says that the static cap
+governed and why.
+
 Because keyslot placement is deterministic rather than load-aware, the
-case to watch is two graphs near this budget landing on the same shard —
-monitor per-shard `used_memory` and rebalance by moving a graph, per that
-document.
+case to watch is two graphs landing on the same shard: the reserve, the
+fresh per-wave reading and the measured growth bound it, but two rebuilds
+racing onto one shard can still both pass their estimate (no per-shard
+reservation is held between them) — monitor per-shard `used_memory` and
+rebalance by moving a graph, per
+[Infrastructure: Launch Scale](/docs/infra-launch-scale) §7.4.
 
-The budget is a backstop, not a sizing guard — it exists so a pathological
-result fails loudly instead of filling the shard. That matters *more* on a
-cluster: `noeviction` at the shard cap fails writes for every graph on
-that shard, and with `cluster-require-full-coverage no` the rest of the
-cluster keeps serving, so the failure is partial and confusing rather
-than obvious. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
+Under `noeviction` a full shard fails writes for every graph on it, and
+with `cluster-require-full-coverage no` the rest of the cluster keeps
+serving, so that failure is partial and confusing rather than obvious —
+which is why the budget refuses BEFORE the shard fills, not at the cap. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
 ontology level map — or with a SINGLE-LEVEL map (no container types) —
 fall back to it automatically. An empty graph completes as a clean
@@ -297,7 +329,10 @@ pipeline).
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink ladder descends to. A floor-width TIMEOUT is an outage and fails the run; a floor-width per-query MEMORY refusal is a payload-size fact and fails the job terminally, no retries |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
 | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | true | Rollup storage. `true` (shipped default) always stores the full cube — leaf-involving and mixed-level pairs included — and FAILS above the write budget; `auto` picks cube-vs-boundary by estimate and degrades instead; `false` forces the boundary. Per-job as `materializeFinePairs`, fleet-wide from Ingestion → Freshness → Automation (③ Act → Advanced) |
-| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Hard write budget (fail loud, never OOM). ~12.5GB at 0.5KB/edge — sized against ONE SHARD, since a graph never spans shards. Ceiling 50M |
+| `AGGREGATION_SHARD_RESERVE_PCT` | 20 | Write budget: share of the owning shard's `maxmemory` a rebuild must leave free. New rollup edges are allowed while they fit under it (0-90). Per-job / Defaults as `shardReservePct` |
+| `AGGREGATION_BYTES_PER_EDGE` | 512 | Write budget: bytes one stored `:AGGREGATED` edge is assumed to cost until a fresh rebuild has calibrated the figure for that graph (64-16384). Per-job / Defaults as `bytesPerEdge`, which also overrides the calibrated value |
+| `AGGREGATION_ESTIMATE_MARGIN_PCT` | 25 | Write budget: slack applied to the pre-write UPPER-BOUND estimate (and to the static cap) so a loose estimate does not refuse a cube the exact post-compute check would pass (0-100) |
+| `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Static edge cap, in force ONLY when the owning shard cannot be measured (no `maxmemory`, or the `INFO` read failed). Per-job / Defaults as `maxMaterializedEdges` it is instead an optional explicit ceiling layered over the measured budget; no preset sets it. Bound 500M |
 | `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate. Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Not per-job tunable |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
@@ -535,8 +570,9 @@ this pipeline silently drops aggregations: EXTRACT tiles the full ID
 space (a floor-width timeout fails the run rather than passing a
 partial scan off as complete); the pending-pairs cap is a flush
 trigger with exact weight semantics; the write budget fails terminally
-and loudly with a per-level composition breakdown (raise it via tuning
-when the instance has headroom); endpoints deleted mid-run are dropped
+and loudly with a per-level composition breakdown and the shard's own
+numbers (it reads the instance's headroom itself; the reserve and
+bytes-per-edge are the tunable parts); endpoints deleted mid-run are dropped
 WITH a warning and recomputed next run; read-path caps are response
 top-N contracts over complete stored data. The live suite pins the
 observable contract: exact cells/weights/level stamps under mixed

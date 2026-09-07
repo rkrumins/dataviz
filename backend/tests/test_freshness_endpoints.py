@@ -919,6 +919,15 @@ def test_source_probe_failure_does_not_write_counts(monkeypatch):
          "consumption exceeded capacity", "query_memory"),
         ("Retry 3/3: Provider 'falkordb:g' unavailable: ResponseError: "
          "Query's mem consumption exceeded capacity", "query_memory"),
+        # The write budget's refusal starts with its marker and carries the
+        # shard's numbers; whatever words follow, it is its own bucket.
+        ("write budget: aggregation would materialize ~30,000,000 :AGGREGATED edges "
+         "(d1→d1: 9) for graph 'g': ~30,000,000 of them new, needing 14.3 GB at "
+         "~512 B/edge (default), but shard 10.0.0.1:6379 has 2.0 GB free of 40.0 GB "
+         "after the 20% reserve — short by 12.3 GB.", "write_budget"),
+        ("write budget: aggregation would materialize ~30,000,000 :AGGREGATED edges, "
+         "exceeding max_materialized_edges=25,000,000. The shard's memory could not be "
+         "measured, so the static cap governed.", "write_budget"),
         ("asyncio.TimeoutError: query timed out after 30s", "timeout"),
         ("OntologyResolutionError: no ontology assigned to this source", "ontology"),
         ("ConflictError: job already active for this source", "conflict"),

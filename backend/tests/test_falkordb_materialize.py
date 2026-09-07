@@ -134,6 +134,9 @@ class _FakeFalkor:
         raise AssertionError(f"unhandled ro_query: {cypher}")
 
     async def _agg_read(self, cypher, params):
+        if "count(r)" in cypher:
+            # The capacity baseline: how many rollups the graph holds now.
+            return _Result([[len(self.agg)]])
         if "RETURN 1 LIMIT 1" in cypher and "aggKey IS NULL" not in cypher:
             return _Result([[1]] if self.agg else [])
         if "max(ID(r))" in cypher:
@@ -1904,3 +1907,165 @@ def test_clean_run_reports_no_scan_pressure():
     stats = pipe._result(10)["run_stats"]
     assert "scan_width_min" not in stats
     assert "scan_shrinks" not in stats
+
+
+# ── the write budget reads the shard ─────────────────────────────────
+#
+# Everything above ran on the STATIC rule: ``_make_provider`` never connects,
+# so the shard reading is "unavailable" and the count cap governs exactly as
+# it did before the pipeline could measure. These pin the measured path.
+
+from backend.app.providers.shard_capacity import ShardMemory as _ShardMemory
+
+
+class _ShardFake:
+    """A shard whose ``used`` follows what the fake graph stores — the way a
+    real one does — so a re-read after a write sees that write."""
+
+    def __init__(self, fake, *, base_used, maxmemory, bpe=512):
+        self.fake, self.base, self.maxmemory, self.bpe = fake, base_used, maxmemory, bpe
+        self.reads = 0
+
+    async def __call__(self, db, *, mode, graph_key, timeout):
+        self.reads += 1
+        used = self.base + len(self.fake.agg) * self.bpe
+        return _ShardMemory("10.0.0.1:6379", used, self.maxmemory, "noeviction", 0.0, "measured")
+
+
+def test_a_measured_shard_with_room_passes_a_result_the_static_cap_refused(monkeypatch):
+    """The operator's case: more memory on the shard must change the answer.
+    The static cap says 4 edges; the shard says 40GB; the cube is 8+ cells."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    monkeypatch.setattr(mat, "_max_materialized_edges", lambda: 4)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    shard = _ShardFake(fake, base_used=10 * 2 ** 30, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
+
+    assert result["errors"] == 0 and fake.agg
+    wb = result["run_stats"]["write_budget"]
+    assert wb["governed_by"] == "shard" and wb["shard"]["endpoint"] == "10.0.0.1:6379"
+    assert wb["bytes_per_edge_source"] == "default" and wb["reserve_pct"] == 20
+    assert result["run_stats"]["materialize_budget"] == wb["allowed_growth_edges"]
+    # Baseline, the estimate, the pre-apply check, the calibration: read
+    # fresh every time, never cached.
+    assert shard.reads >= 4
+
+
+def test_a_forced_cube_the_shard_cannot_take_is_refused_before_any_write(monkeypatch):
+    """Forced Full detail used to compute, write waves, and fail mid-apply.
+    Now the estimate runs first, and a cube that cannot land is refused with
+    the shard's numbers — and nothing reaches the graph."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    # Room for two edges at 512 B; the cube estimate is 8+.
+    shard = _ShardFake(fake, base_used=40 * 2 ** 30 - 2 * 512, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(p, tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}))
+
+    msg = str(exc.value)
+    assert msg.startswith("write budget:")
+    assert "upper-bound estimate" in msg and "short by" in msg and "10.0.0.1:6379" in msg
+    assert fake.agg == {}
+
+
+def test_auto_never_picks_a_cube_the_shard_would_refuse(monkeypatch):
+    """Auto's own ceiling is generous here; the SHARD is what says no. The
+    depth-diagonal still fits, so the run degrades instead of failing."""
+    fake0 = _FakeFalkor()
+    levels0 = _seed_self_nesting_graph(fake0, depth=3)
+    _run(_materialize(_make_provider(fake0, levels0), tuning={"materialize_fine_pairs": False}))
+    boundary_cells = len(fake0.agg)
+    assert 0 < boundary_cells < 18            # the cube estimate is 18 cells
+
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    shard = _ShardFake(fake, base_used=40 * 2 ** 30 - boundary_cells * 512, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, tuning={
+        "materialize_fine_pairs": "auto", "shard_reserve_pct": 0,
+        "max_materialized_edges": 50_000_000,
+    }))
+    assert result["errors"] == 0
+    assert result["run_stats"]["regime"] == "boundary"
+    assert result["run_stats"]["cube_estimate"] == 18
+
+
+def test_an_explicit_ceiling_still_caps_a_shard_with_room(monkeypatch):
+    """The operator's ceiling is an OPTIONAL cap on the total, layered over
+    the shard's answer — and the refusal points at the ceiling, not the shard."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    with pytest.raises(mat.MaterializationBudgetExceeded, match="maxMaterializedEdges=10,000") as exc:
+        # 10,000 is the schema floor; the cube is 8+ cells but a ceiling of
+        # 10,000 still passes it — so pin the ceiling below by monkeypatching
+        # the clamp floor is not the point. Use the pipeline's own resolver.
+        pipe = mat.AggregationPipeline(
+            p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+            last_cursor=None, progress_callback=None, intra_batch_callback=None,
+            should_cancel=None, tuning={"materialize_fine_pairs": True, "max_materialized_edges": 10_000},
+        )
+        pipe._edges_before = 0
+        pipe._flushed = set()
+        pipe._acc = {k: None for k in range(10_001)}
+        _run(pipe._check_write_budget())
+    assert "clear the ceiling" in str(exc.value)
+
+
+def test_a_fresh_run_records_what_it_measured_and_a_resumed_run_says_why_not(monkeypatch):
+    monkeypatch.setattr(mat, "calibrate_bytes_per_edge", lambda **kw: 777)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    result = _run(_materialize(_make_provider(fake, levels)))
+    assert result["run_stats"]["bytes_per_edge_observed"] == 777
+    assert result["run_stats"]["calibration"] == "measured"
+
+    # A resumed run's starting point is gone — no calibration, and it says so.
+    fake2 = _FakeFalkor()
+    levels2 = _seed_two_chain_graph(fake2)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake2, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    monkeypatch.setattr(mat, "parse_cursor", lambda cursor: (1, mat.PHASE_AGGREGATE, 0))
+    result2 = _run(_materialize(_make_provider(fake2, levels2), last_cursor="v3:resume"))
+    assert result2["run_stats"]["calibration"] == "skipped_resume"
+    assert "bytes_per_edge_observed" not in result2["run_stats"]
+
+
+def test_an_unmeasurable_shard_cannot_calibrate_and_says_so():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    result = _run(_materialize(_make_provider(fake, levels)))     # no client → unavailable
+    assert result["run_stats"]["calibration"] == "skipped_unmeasured"
+    assert result["run_stats"]["write_budget"]["governed_by"] == "static"
+
+
+def test_the_workers_calibrated_figure_beats_the_default_and_tuning_beats_both(monkeypatch):
+    def run_with(hints, tuning):
+        fake = _FakeFalkor()
+        levels = _seed_two_chain_graph(fake)
+        monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+        r = _run(mat.materialize_aggregated_edges(
+            _make_provider(fake, levels),
+            containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+            last_cursor=None, progress_callback=None, intra_batch_callback=None,
+            should_cancel=None, tuning={"materialize_fine_pairs": False, **tuning},
+            capacity_hints=hints,
+        ))
+        wb = r["run_stats"]["write_budget"]
+        return wb["bytes_per_edge"], wb["bytes_per_edge_source"]
+
+    assert run_with({}, {}) == (512, "default")
+    assert run_with({"bytes_per_edge_observed": 900}, {}) == (900, "calibrated")
+    assert run_with({"bytes_per_edge_observed": 900}, {"bytes_per_edge": 1024}) == (1024, "tuning")

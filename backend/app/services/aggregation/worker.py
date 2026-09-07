@@ -537,6 +537,13 @@ class AggregationWorker:
                     last_aggregated_at=job.completed_at,
                     aggregation_edge_count=job.created_edges,
                     graph_fingerprint=job.graph_fingerprint_after,
+                    # What this run measured per new edge on its shard — the
+                    # next run's budget starts from it. None (no calibration
+                    # this run) leaves the previous figure standing.
+                    observed_bytes_per_edge=(
+                        (result.get("run_stats") or {}).get("bytes_per_edge_observed")
+                        if isinstance(result.get("run_stats"), dict) else None
+                    ),
                 )
                 await self._sync_workspace_ds_row(
                     session, job,
@@ -764,6 +771,21 @@ class AggregationWorker:
                         provider.set_admission_controller(None)
                     except Exception:
                         pass
+
+    async def _capacity_hints(self, session: AsyncSession, data_source_id: str) -> dict:
+        """What the worker knows about this graph's cost on its shard that
+        the pipeline cannot measure before it runs: the bytes per new edge a
+        previous successful rebuild observed. Best-effort — no row, no
+        column, no hint."""
+        from .models import AggregationDataSourceStateORM
+
+        try:
+            state = await session.get(AggregationDataSourceStateORM, data_source_id)
+        except Exception as exc:
+            logger.debug("capacity hints unavailable for %s: %s", data_source_id, exc)
+            return {}
+        observed = getattr(state, "observed_bytes_per_edge", None)
+        return {"bytes_per_edge_observed": observed} if observed else {}
 
     async def _update_ds_state(
         self,
@@ -1434,11 +1456,16 @@ class AggregationWorker:
             job_tuning = json.loads(getattr(job, "tuning_json", None) or "{}") or {}
         except (TypeError, ValueError):
             job_tuning = {}
+        # What a previous run of this graph measured on its shard — a hint,
+        # never tuning: an operator's override of the same figure arrives in
+        # ``job_tuning`` and wins over it.
+        capacity_hints = await self._capacity_hints(session, job.data_source_id)
         result = await provider.materialize_aggregated_edges_batch(
             containment_edge_types=containment_types,
             lineage_edge_types=lineage_types,
             batch_size=job.batch_size,
             tuning=job_tuning,
+            capacity_hints=capacity_hints,
             job_id=job.id,
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,

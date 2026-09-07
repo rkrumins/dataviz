@@ -26,8 +26,16 @@ export interface AggregationTuning {
    * key: omission cannot override a stored `true`.
    */
   materializeFinePairs?: boolean | 'auto';
-  /** Hard write budget: fail the job instead of writing more :AGGREGATED edges than this. */
-  maxMaterializedEdges?: number | null; // 10,000 .. 50,000,000
+  /**
+   * Optional explicit ceiling on stored :AGGREGATED edges, layered over the
+   * measured shard budget. Absent (the norm) means the budget is what the
+   * graph's own shard has free; set it only to hold a graph BELOW that.
+   */
+  maxMaterializedEdges?: number | null; // 10,000 .. 500,000,000
+  /** Share of the owning shard's maxmemory the rebuild must leave free. */
+  shardReservePct?: number | null;      // 0 .. 90
+  /** Bytes one rolled-up edge costs on the shard; overrides the calibrated figure. */
+  bytesPerEdge?: number | null;         // 64 .. 16384
 }
 
 export interface AggregationTriggerRequest {

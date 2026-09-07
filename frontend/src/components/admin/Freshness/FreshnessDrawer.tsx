@@ -855,6 +855,18 @@ interface CategoryGuidance {
 }
 
 const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
+    write_budget: {
+        // Nothing broke and nothing was written: before storing rollups the
+        // rebuild measured the shard that owns this graph and found the new
+        // edges would not fit under the reserve. The error text carries the
+        // whole record — edges, bytes, the shard, what was free, the
+        // shortfall — so the technical details are the primary evidence
+        // here, and a retry is deterministic until something changes.
+        why: 'The rebuild measured the graph-store shard that owns this graph and refused before writing: the rollups would not fit in its free memory.',
+        how: "The technical details below name the shard, the memory the rollups need and the shortfall. Set this source's Rollup storage to Auto so it stores far fewer summary edges, or free or add memory on that shard; an administrator can also lower the shard memory reserve or correct bytes per edge in Defaults if the headroom is real, or clear an explicit edge ceiling set in tuning.",
+        showClear: true, showRetry: true, primary: 'clear',
+        retryWarning: 'will refuse the same way until the rollup setting, the shard\u2019s memory or the limits change.',
+    },
     out_of_memory: {
         why: 'The graph store ran out of memory while building aggregated lineage for this large source.',
         how: 'Free up memory in the graph store (remove unused graphs) or raise its memory limit, then retry the rebuild.',
@@ -1063,7 +1075,9 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
     const docHold = doc ? rowHold(doc) : null
     const retryMessage = (doc?.lastFailureCategory === 'out_of_memory'
         ? 'Retries the aggregated-lineage rebuild for this source. It may fail again until memory is freed in the graph store.'
-        : 'Retries the aggregated-lineage rebuild for this source. This can take a while.')
+        : doc?.lastFailureCategory === 'write_budget'
+            ? 'Retries the aggregated-lineage rebuild for this source. It will refuse the same way until the rollup setting, the shard\u2019s memory or the limits change.'
+            : 'Retries the aggregated-lineage rebuild for this source. This can take a while.')
         // A person may override a hold; the confirm says so, and that the
         // hold stays — so "Retry" is never read as "and resume automation".
         + (docHold ? ` ${overrideWarning(docHold)}` : '')

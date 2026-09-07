@@ -18,6 +18,7 @@ export type RefreshScope = 'auto' | 'read-caches' | 'rollups' | 'full' | 'clear'
 /** Coarse, UI-facing classification of a failed rebuild — drives the drawer's
  *  resolution guidance. Mirrors the backend ``classify_failure`` categories. */
 export type FailureCategory =
+    | 'write_budget'
     | 'out_of_memory'
     | 'query_memory'
     | 'provider_unavailable'

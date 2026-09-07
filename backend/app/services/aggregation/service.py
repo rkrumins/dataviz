@@ -3203,9 +3203,17 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     ``QUERY_MEM_CAPACITY``, a per-query budget — the store is healthy and
     one query asked for too many rows at once, so the fix is to make that
     query read less (or, together with the container limit, to raise the
-    per-query ceiling)."""
+    per-query ceiling).
+
+    ``write_budget`` is checked FIRST: the pipeline refused to write because
+    the owning shard has no room (or the static cap governed), with the
+    numbers in the message. It is a decision, not an error, and the message
+    deliberately avoids every substring below — but a stable marker beats
+    hoping."""
     if not error_message:
         return None
+    if error_message.lstrip().startswith("write budget:"):
+        return "write_budget"
     if (
         "OutOfMemoryError" in error_message
         or "used memory > 'maxmemory'" in error_message

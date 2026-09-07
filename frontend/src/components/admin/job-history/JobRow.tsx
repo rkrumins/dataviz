@@ -671,7 +671,7 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         <Tip label={
                                                             statRegime === 'cube'
                                                                 ? 'Every ancestor combination is materialized — all canvas granularities answer from storage.'
-                                                                : `Full detail would be ~${(statCubeEstimate ?? 0).toLocaleString()} edges — over the ${(statBudget ?? 0).toLocaleString()} budget, so only the canonical depth-diagonal is stored and finer granularities are derived on demand. Raise the budget or force full detail in Advanced tuning to pre-create everything.`
+                                                                : `Full detail would be ~${(statCubeEstimate ?? 0).toLocaleString()} edges — over the cube ceiling, or more than the ${(statBudget ?? 0).toLocaleString()} new edges the graph-store shard had room for, so only the canonical depth-diagonal is stored and finer granularities are derived on demand. Force full detail in Advanced tuning to pre-create everything; it fails loudly if the shard cannot hold it.`
                                                         }>
                                                             {statRegime === 'cube'
                                                                 ? <span className="text-emerald-400">Full detail</span>
@@ -785,10 +785,10 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         Likely caused by server restarts during processing, not a job logic failure.
                                                     </p>
                                                 )}
-                                                {job.errorMessage.includes('max_materialized_edges') && (
+                                                {job.errorMessage.includes('write budget:') && (
                                                     <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
                                                         <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                                        The computed result exceeds the write budget — deterministic, so the job was not retried. Raise Max Materialized Edges in tuning only if the FalkorDB instance has memory headroom.
+                                                        The rebuild measured the graph-store shard that owns this graph and refused before writing: the rollups would not fit. The message above names the shard, what they need, what was free and the shortfall — deterministic, so the job was not retried. Set Rollup storage to Auto, free or add memory on that shard, or adjust Shard memory reserve, Bytes per rollup edge or the Edge ceiling in tuning if the headroom is real.
                                                     </p>
                                                 )}
                                                 {job.errorMessage.includes('write lease held') && (

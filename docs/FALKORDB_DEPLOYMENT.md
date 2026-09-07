@@ -443,3 +443,29 @@ usage denies every write under `noeviction`.
 > the read size first — set the source's Rollup storage to Auto, which is what
 > makes the RECONCILE scan (the pipeline's widest projection: 11 columns
 > including `aggKey` and the `sourceEdgeTypes` array) read far fewer rows.
+
+### The rebuild reads `maxmemory` before it writes
+
+`maxmemory` is not only the ceiling writes fail at — it is what the
+aggregation write budget plans against. Before storing rollups, a rebuild
+reads `INFO memory` on the one shard that owns the graph (a graph key never
+spans shards) and proceeds only while the NEW `:AGGREGATED` edges fit under
+`AGGREGATION_SHARD_RESERVE_PCT` (20%) of `maxmemory`, at a bytes-per-edge
+figure it calibrates from its own runs; otherwise it refuses before writing,
+naming the shard, the bytes needed, what was free and the shortfall. So:
+
+- **Set `maxmemory` on every instance you want measured.** Without it (the
+  `deploy/topologies/docker-compose.falkordb-*.yml` files do not pass it) the
+  budget cannot read headroom and falls back to the static edge cap
+  `AGGREGATION_MAX_MATERIALIZED_EDGES`, and the refusal says so.
+- **Adding memory to a shard is enough.** Raise `maxmemory` (live, via
+  `CONFIG SET`, sized per the formula above) and the next rebuild sees it —
+  no application setting has to move. Lower the reserve, or clear an explicit
+  `maxMaterializedEdges` ceiling in Defaults, only if a refusal says one of
+  them governed.
+- **The reserve is the headroom that stays yours.** It is what keeps a large
+  rebuild from taking the room live queries and the other graphs on that
+  shard need — under `noeviction` a full shard fails every graph's writes.
+
+Sizing, the tuning knobs and the exact rule live in
+`docs/AGGREGATION_PIPELINE.md` (§ Semantics, "The budget is MEASURED from the shard that owns the graph", and § Tuning).

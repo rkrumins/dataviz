@@ -704,14 +704,22 @@ seven states.
   Resume clears the cancel flag, so a cancelled job can be resumed at once.
 - **Turning a detector off** stops rebuilds for it. The problem is still
   detected and still shown.
-- **A source that fails every rebuild on `MaterializationBudgetExceeded`** is
-  the forced-cube default meeting a graph too big for the write budget. It is
-  deterministic, so the job is not retried and the breaker suspends the source
-  after three passes. Either raise `maxMaterializedEdges` (~0.5KB of FalkorDB
-  RAM per edge, sized against ONE shard) or move the fleet's Rollup storage to
-  Auto in the Automation modal, which degrades to the depth-diagonal instead of
-  failing. Note the failed job leaves a partial cube behind — the next
-  successful rebuild reconciles it.
+- **A source that fails every rebuild on `MaterializationBudgetExceeded`**
+  ("write budget: …", shown as *Would not fit* in Freshness) is the forced-cube
+  default meeting a graph the shard that owns it cannot hold: the rebuild
+  measured that shard before writing and refused, and the message names the
+  shard, the edges and bytes needed, what was free after the reserve and the
+  shortfall. It is deterministic, so the job is not retried and the breaker
+  suspends the source after three passes. Ways out, in order: move the
+  fleet's Rollup storage to Auto in the Automation modal (degrades to the
+  depth-diagonal instead of failing); free or add memory on that shard — the
+  next rebuild reads it, nothing else has to change — or move the graph (a
+  dedicated projection lands on its own shard); or, if the headroom is real,
+  lower *Shard memory reserve* / correct *Bytes per rollup edge* in Defaults,
+  or clear an explicit *Edge ceiling* if the message says one governed.
+  Refused on the up-front estimate, the job wrote nothing; only the rarer
+  mid-run refusal (the shard filled while it ran) leaves a partial cube
+  behind, which the next successful rebuild reconciles.
 
 ## Verifying it end to end
 

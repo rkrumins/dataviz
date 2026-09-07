@@ -110,13 +110,15 @@ function ImpactMeter({ label, level, max = 5 }: { label: string; level: number; 
 // ============================================
 
 interface TuningFieldSpec {
-    key: 'scanRangeWidth' | 'writePacingRatio' | 'maxPendingPairs' | 'extractConcurrency' | 'maxMaterializedEdges'
+    key: 'scanRangeWidth' | 'writePacingRatio' | 'maxPendingPairs' | 'extractConcurrency'
+        | 'shardReservePct' | 'bytesPerEdge' | 'maxMaterializedEdges'
     label: string
     tip: string
     help: string
     min: number
     max: number
-    placeholder: number
+    /** Shown in the empty input: the effective default, or what "empty" means. */
+    placeholder: number | string
     step?: number
     float?: boolean
 }
@@ -151,11 +153,25 @@ const TUNING_FIELDS: TuningFieldSpec[] = [
         min: 1, max: 4, placeholder: 1,
     },
     {
+        key: 'shardReservePct',
+        label: 'Shard memory reserve',
+        tip: 'Before writing rollups the rebuild measures the graph-store shard that owns this graph and only proceeds when the new edges fit under this reserve — the share of the shard\u2019s maxmemory that must stay free for live queries and every other graph on it. Lower it only when you know that headroom is real.',
+        help: 'Percent of the shard\u2019s maxmemory kept free (0-90)',
+        min: 0, max: 90, placeholder: 20,
+    },
+    {
+        key: 'bytesPerEdge',
+        label: 'Bytes per rollup edge',
+        tip: 'How much shard memory one stored AGGREGATED edge costs. Each successful rebuild measures this for its graph and the next rebuild uses that figure; set it here to override the measurement (or the ~512-byte default before any run has measured).',
+        help: 'Graph-store bytes per stored edge (64-16,384)',
+        min: 64, max: 16_384, placeholder: 512,
+    },
+    {
         key: 'maxMaterializedEdges',
-        label: 'Materialization budget',
-        tip: 'Hard ceiling on stored AGGREGATED edges (~0.5KB of graph memory each). A backstop, not a sizing guard — forced full detail fails loudly instead of exceeding it. Size it against a SINGLE graph store node: a graph never spans cluster shards, so sharding adds no headroom for one large graph. Auto storage decides cube-vs-diagonal against its own ceiling, so raising this does not change that choice.',
-        help: 'Max stored rollup edges (10,000-50,000,000)',
-        min: 10_000, max: 50_000_000, placeholder: 25_000_000,
+        label: 'Edge ceiling (optional)',
+        tip: 'An explicit cap on stored AGGREGATED edges, layered over the measured shard budget. Leave it empty so the budget is whatever the graph\u2019s own shard has free; set it only to hold a graph BELOW that. When the shard cannot be measured (no maxmemory set) this — or the server default when empty — is the whole budget. Forced full detail fails loudly instead of exceeding either. Auto storage decides cube-vs-diagonal against its own ceiling, so this does not change that choice.',
+        help: 'Max stored rollup edges (10,000-500,000,000); empty = shard budget',
+        min: 10_000, max: 500_000_000, placeholder: 'shard budget',
     },
 ]
 
@@ -347,15 +363,18 @@ interface ConfigPreset {
  * `PRESET_MATCH_KEYS` — otherwise a form carrying an explicit `'auto'` could
  * never match a preset that carries nothing, and no profile would ever
  * highlight as active.
+ *
+ * `maxMaterializedEdges` is absent for the same reason, and its absence is
+ * load-bearing: the write budget is MEASURED from the shard that owns the
+ * graph, and an explicit ceiling on the job wins over that measurement. A
+ * preset that pinned 25M here made every UI-triggered rebuild stop at 25M
+ * no matter how much memory the operator added to the shard. So are the
+ * shard reserve and bytes-per-edge: capacity is the shard's, a preset's is
+ * only how hard to lean on it.
  */
 const CAPACITY_FLOOR = {
     // Worker RSS bound — unaffected by the graph store's topology.
     maxPendingPairs: 50_000_000,
-    // Graph-store bound, so sized against ONE SHARD: a graph key never
-    // spans shards, and the reference cluster runs maxmemory 40gb per
-    // shard with ~18GB free. 25M x ~0.5KB ~= 12.5GB, covering a graph
-    // several times the 1M-node / 2M-edge floor.
-    maxMaterializedEdges: 25_000_000,
 } as const
 
 /**
@@ -398,12 +417,12 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
 ]
 
 /** The knobs a preset actually sets, and therefore the only ones that can
- *  decide whether the current form IS that preset. `materializeFinePairs` is
- *  excluded on purpose — see CAPACITY_FLOOR above. */
+ *  decide whether the current form IS that preset. `materializeFinePairs`,
+ *  `maxMaterializedEdges`, `shardReservePct` and `bytesPerEdge` are excluded
+ *  on purpose — see CAPACITY_FLOOR above. */
 const PRESET_MATCH_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk',
     'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
-    'maxMaterializedEdges',
 ]
 
 // ============================================

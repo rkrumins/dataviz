@@ -66,6 +66,24 @@ per view open, lineage trace and graph search.
 
 ### Changed
 
+**The aggregation write budget measures the graph store instead of counting to a
+number.** "Writing this would risk exhausting the FalkorDB instance's memory" was a static
+edge cap (25M, hard-bounded at 50M) that never read the instance, so adding memory to every
+shard changed nothing — and every UI preset pinned that cap onto the job. A rebuild now reads
+`INFO memory` on the one shard that owns the graph before it writes, allows the write while
+the *new* edges fit under a reserve (`AGGREGATION_SHARD_RESERVE_PCT`, 20%), and refuses with
+the whole record — the shard, the edges and bytes needed, what was free of what `maxmemory`,
+the shortfall, what governed, and the ways out — as a new *Would not fit* failure category
+with its own guidance. Forced Full detail is checked on the up-front estimate, so a cube that
+cannot fit is refused with nothing computed and nothing written; the exact count is re-checked
+after compute and before every overflow wave. Bytes-per-edge is calibrated per graph from each
+fresh rebuild's own before/after usage (recorded on the source's state row) and a planning
+figure (512 B) until then. Operators set the limits in Defaults or per job: *Shard memory
+reserve*, *Bytes per rollup edge*, and an optional *Edge ceiling* (`maxMaterializedEdges`, bound
+lifted to 500M) layered over the measurement. Where the shard cannot be measured — no
+`maxmemory`, or the read failed — the static cap governs as before, and the message says so.
+`run_stats.write_budget` records the decision on every successful run.
+
 **Analytics now follows the app's permission model instead of re-deciding it.** It was
 *stricter* than the product it reports on in four places — ignoring `system:org-viewer`,
 hiding `enterprise`-visibility view names, denying a creator reach to their own work, and
@@ -173,6 +191,22 @@ and a fourth that requires the identifiers to be *present* in a privileged docum
 that cannot fail proves nothing.
 
 ### Upgrading
+
+**Presets no longer pin `maxMaterializedEdges`, and a stored one now overrides the shard.**
+An explicit ceiling on a job wins over the measured budget — that is what it is for — so a
+25M value left in Ingestion → Freshness → Defaults from an earlier preset will keep every
+rebuild at 25M however much memory the shards have. Clear that field (empty = the shard
+governs) unless you mean it; the refusal names the ceiling when one governed. Jobs re-triggered
+from Job History seed from Defaults, so they pick the change up at once.
+
+**Set `maxmemory` where you want the budget measured.** Every top-level deployment already
+passes it; the `deploy/topologies/docker-compose.falkordb-*.yml` files do not, and run on the
+static edge cap until they do.
+
+**Run the migration.** `20260907_1000_bytes_per_edge` adds the nullable
+`aggregation.data_source_state.observed_bytes_per_edge` column (inspector-guarded; the
+Control Plane's start-up init adds it too, so a Control Plane that boots before the migration
+is fine).
 
 **Run the migration.** `20260821_1200_event_subject` adds `product_events.subject_id` and its
 index, then backfills in Python — SQLite and Postgres spell JSON extraction differently. It is

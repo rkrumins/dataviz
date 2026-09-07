@@ -7,6 +7,7 @@
 import type { FailureCategory, FreshnessRow } from '@/services/freshnessService'
 
 export const FAILURE_CATEGORY_LABEL: Record<FailureCategory, string> = {
+    write_budget: 'Would not fit',
     out_of_memory: 'Out of memory',
     query_memory: 'Query too large',
     provider_unavailable: 'Graph store offline',
@@ -17,6 +18,8 @@ export const FAILURE_CATEGORY_LABEL: Record<FailureCategory, string> = {
 }
 
 export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
+    write_budget:
+        'The rebuild measured the graph-store shard that owns this graph and refused before writing: the rollups would not fit in its free memory.',
     out_of_memory:
         'The graph store ran out of memory while building aggregated lineage for this large source.',
     query_memory:

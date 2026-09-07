@@ -148,9 +148,26 @@ class AggregationTuning(BaseModel):
                     "global default, then the env default.",
     )
     max_materialized_edges: Optional[int] = Field(
-        None, alias="maxMaterializedEdges", ge=10_000, le=50_000_000,
-        description="Hard write budget: fail the job instead of writing more "
-                    ":AGGREGATED edges than this (~0.5KB RAM each).",
+        None, alias="maxMaterializedEdges", ge=10_000, le=500_000_000,
+        description="Optional explicit ceiling on stored :AGGREGATED edges. "
+                    "The rebuild measures the shard that owns the graph and "
+                    "budgets by its real headroom; set this only to cap the "
+                    "total below what the shard would allow. When the shard "
+                    "cannot be measured (no maxmemory), this — or the env "
+                    "default — is the rule that governs.",
+    )
+    shard_reserve_pct: Optional[int] = Field(
+        None, alias="shardReservePct", ge=0, le=90,
+        description="Share of the owning shard's maxmemory a rebuild must "
+                    "leave free (default 20). A shard is shared: under "
+                    "noeviction, the write that fills it fails every graph's "
+                    "writes on it.",
+    )
+    bytes_per_edge: Optional[int] = Field(
+        None, alias="bytesPerEdge", ge=64, le=16_384,
+        description="Pin the per-edge memory estimate by hand. Overrides the "
+                    "figure the last successful rebuild measured on the shard "
+                    "(and the 512 B default before any run has).",
     )
 
     class Config:

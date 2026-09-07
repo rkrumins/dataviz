@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { FreshnessRow } from '@/services/freshnessService'
 import {
     FAILURE_CATEGORY_LABEL,
+    asFailureCategory,
     countFailuresByCategory,
     failureBadgeLabel,
+    failureBadgeWhy,
     relatedFailureCount,
 } from './failureGuidance'
 import { matchesFailureFacet } from './freshnessTriage'
@@ -57,6 +59,27 @@ describe('failureGuidance', () => {
             { category: 'query_memory', count: 1 },
         ])
         expect(matchesFailureFacet(rows[0], 'query_memory')).toBe(true)
+        expect(matchesFailureFacet(rows[0], 'out_of_memory')).toBe(false)
+    })
+
+    it('keeps a write-budget refusal distinct from running out of memory', () => {
+        // Nothing broke: the rebuild measured the shard before writing and
+        // refused because the rollups would not fit. Filing it under
+        // out_of_memory would tell the operator the store failed, when the
+        // message already says exactly how short the shard was.
+        expect(asFailureCategory('write_budget')).toBe('write_budget')
+        expect(failureBadgeLabel(row({ lastFailureCategory: 'write_budget' })))
+            .toBe(FAILURE_CATEGORY_LABEL.write_budget)
+        expect(FAILURE_CATEGORY_LABEL.write_budget)
+            .not.toBe(FAILURE_CATEGORY_LABEL.out_of_memory)
+        expect(failureBadgeWhy(row({ lastFailureCategory: 'write_budget' })))
+            .toMatch(/refused before writing/)
+
+        const rows = [
+            row({ dataSourceId: 'a', lastFailureCategory: 'write_budget' }),
+            row({ dataSourceId: 'b', lastFailureCategory: 'out_of_memory' }),
+        ]
+        expect(matchesFailureFacet(rows[0], 'write_budget')).toBe(true)
         expect(matchesFailureFacet(rows[0], 'out_of_memory')).toBe(false)
     })
 })

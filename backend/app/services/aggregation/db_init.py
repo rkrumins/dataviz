@@ -223,6 +223,11 @@ async def init_aggregation_db() -> None:
                 # turning it off forever.
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS paused_until TEXT NULL",
+                # Measured bytes per rolled-up edge (2026-09-07), mirrored in
+                # alembic 20260907_1000_bytes_per_edge: the write
+                # budget's calibration point for the next rebuild.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS observed_bytes_per_edge INTEGER NULL",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

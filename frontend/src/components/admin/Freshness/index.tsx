@@ -57,7 +57,7 @@ const COLS = 7
 
 const STATUS_FACETS: readonly StatusFacet[] = ['ready', 'pending', 'needsAttention', 'notBuilt', 'cacheStamped', 'drifting', 'suspended', 'projectionStalled', 'held']
 const FAILURE_FACETS: readonly FailureFacet[] = [
-    'out_of_memory', 'query_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
+    'write_budget', 'out_of_memory', 'query_memory', 'provider_unavailable', 'ontology', 'timeout', 'conflict', 'unknown',
 ]
 
 function parseStatus(raw: string | null): StatusFacet {

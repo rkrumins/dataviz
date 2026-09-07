@@ -228,6 +228,11 @@ class AggregationDataSourceStateORM(Base):
     aggregation_status = Column(Text, nullable=False, default="none")
     last_aggregated_at = Column(Text, nullable=True)
     aggregation_edge_count = Column(Integer, nullable=False, default=0)
+    # What the last successful rebuild measured on the owning shard, per NEW
+    # rolled-up edge. The next rebuild's write budget uses it in place of the
+    # planning default (512 B). NULL until a fresh run with material growth
+    # has calibrated it — see ``providers.shard_capacity``.
+    observed_bytes_per_edge = Column(Integer, nullable=True)
     graph_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
     # Per-source rebuild-cooldown override (seconds). NULL = fall through to
