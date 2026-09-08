@@ -16,6 +16,7 @@ import { ServiceTile } from './ServiceTile'
 import { ProjectionPanel } from './ProjectionPanel'
 import { StreamsPanel } from './StreamsPanel'
 import { GraphProvidersPanel } from './GraphProvidersPanel'
+import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
 import { compactNum, formatAgeMs } from './meta'
@@ -122,6 +123,9 @@ function Skeleton() {
 
 export function AdminInfrastructure() {
     const { data, error, isLoading, isFetching, dataUpdatedAt, refetch, history } = useSystemStatus()
+    // The rollup write budget's own reading of the graph tier, so the memory
+    // headroom block can mark the reserve and say what still fits.
+    const capacity = useFleetCapacity(!!data)
 
     const hero = data ? HERO[data.status] : null
     const HeroIcon = hero?.icon ?? Loader2
@@ -198,7 +202,7 @@ export function AdminInfrastructure() {
                     </div>
 
                     {/* Graph data providers (any type — FalkorDB, Neo4j, …) */}
-                    <GraphProvidersPanel providers={data.graphProviders} services={data.services} projection={data.projection} />
+                    <GraphProvidersPanel providers={data.graphProviders} services={data.services} projection={data.projection} capacity={capacity.data ?? null} />
 
                     {/* Workload KPIs — is the work getting done, and how fast */}
                     <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">

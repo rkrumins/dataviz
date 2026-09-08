@@ -26,6 +26,8 @@ import {
     AggregationOverridesForm,
     type AggregationOverridesValue,
 } from '../shared/AggregationOverridesForm'
+import { RetriggerFitCheck } from './RetriggerFitCheck'
+import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 
 export interface RetriggerDialogProps {
     isOpen: boolean
@@ -43,6 +45,13 @@ export interface RetriggerDialogProps {
     /** What the server resolves for Rollup storage when the request omits it,
      *  so the form can show the mode the job would really run in. */
     defaultFinePairs?: 'auto' | 'true' | 'false'
+    /** When known, the dialog shows whether THIS run would fit the source's
+     *  shard before it is queued — re-decided as the form changes. */
+    dataSourceId?: string
+    /** The server's live env defaults and the stored fleet Defaults, so the
+     *  form's placeholders tell the truth. */
+    envDefaults?: EnvTuningDefaults | null
+    storedGlobal?: AggregationTuning | null
     /** Always shown. */
     onConfirmRetrigger: (overrides: AggregationOverridesValue) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
@@ -56,6 +65,9 @@ export function RetriggerDialog({
     title,
     originatingJob,
     defaultFinePairs,
+    dataSourceId,
+    envDefaults,
+    storedGlobal,
     onConfirmRetrigger,
     onConfirmResume,
 }: RetriggerDialogProps) {
@@ -150,12 +162,21 @@ export function RetriggerDialog({
                     </div>
 
                     {/* Body — scrollable form */}
-                    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+                    <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
+                        {dataSourceId && (
+                            <RetriggerFitCheck
+                                dataSourceId={dataSourceId}
+                                draftTuning={value.tuning}
+                                defaultFinePairs={defaultFinePairs}
+                            />
+                        )}
                         <AggregationOverridesForm
                             value={value}
                             onChange={setValue}
                             disabled={isLoading}
                             defaultFinePairs={defaultFinePairs}
+                            envDefaults={envDefaults}
+                            storedGlobal={storedGlobal}
                         />
                     </div>
 

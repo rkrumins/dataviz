@@ -208,9 +208,33 @@ export interface AggregationCadence {
   probeIntervalSecs?: number | null;
 }
 
+/**
+ * Every tuning knob's ENV-resolved default, read live by the server — what
+ * "empty" really means in the editors, and where an "Environment default"
+ * chip gets its number. The last three are information only (env-only).
+ */
+export interface EnvTuningDefaults {
+  scanRangeWidth?: number | null;
+  maxPendingPairs?: number | null;
+  applyChunk?: number | null;
+  deleteChunk?: number | null;
+  writePacingRatio?: number | null;
+  extractConcurrency?: number | null;
+  materializeLeafPairs?: boolean | null;
+  materializeFinePairs?: 'auto' | 'true' | 'false' | null;
+  maxMaterializedEdges?: number | null;
+  shardReservePct?: number | null;
+  bytesPerEdge?: number | null;
+  estimateMarginPct?: number | null;
+  maxCubeEdges?: number | null;
+  budgetRecheckEdges?: number | null;
+}
+
 export interface AggregationSettingsResponse {
   tuning: AggregationTuning | null;
   cadence?: AggregationCadence | null;
+  /** Live env default of every knob (present whether or not a row exists). */
+  envTuningDefaults?: EnvTuningDefaults | null;
   /** Effective ENV defaults (server-read) — the cadence editor seeds from
    *  `persisted ?? envDefault` so a no-op save round-trips the real default. */
   envRebuildMinIntervalSecs?: number | null;
@@ -221,6 +245,112 @@ export interface AggregationSettingsResponse {
   envMaterializeFinePairs?: 'auto' | 'true' | 'false' | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
+}
+
+// ── Capacity: what the write budget measures, for people ───────────────
+//
+// The same reading and arithmetic the rebuild uses before it writes rollups,
+// assembled per shard and per source. Mirrors the backend capacity schemas.
+
+export interface CapacityLimitValue {
+  value: number | string | boolean | null;
+  /** 'global' = the stored Defaults row; 'default' = the environment. */
+  source: 'global' | 'default';
+}
+
+export interface CapacityLimits {
+  shardReservePct: CapacityLimitValue;
+  bytesPerEdge: CapacityLimitValue;
+  /** value null = no explicit ceiling: the shard governs. */
+  maxMaterializedEdges: CapacityLimitValue;
+  /** 'auto' | 'true' | 'false' — the fleet-wide Rollup storage. */
+  rollupStorage: CapacityLimitValue;
+  estimateMarginPct: number;
+  maxCubeEdges: number;
+  staticCap: number;
+  budgetRecheckEdges: number;
+}
+
+export interface CapacitySource {
+  dataSourceId: string;
+  label?: string | null;
+  workspaceId?: string | null;
+  providerId?: string | null;
+  providerName?: string | null;
+  graphKey?: string | null;
+  projectionMode?: string | null;
+  aggregationStatus?: string | null;
+  edgeCount: number;
+  bytesPerEdge: number;
+  bytesPerEdgeSource: 'calibrated' | 'default';
+  footprintBytes: number;
+  lastCubeEstimate?: number | null;
+  lastRegime?: string | null;
+  lastFailureCategory?: string | null;
+}
+
+export interface ShardCapacity {
+  endpoint: string;
+  used?: number | null;
+  maxmemory?: number | null;
+  policy?: string | null;
+  measurable: boolean;
+  whyNot?: string | null;
+  usedPct?: number | null;
+  reservePct: number;
+  reserveBytes?: number | null;
+  availableBytes?: number | null;
+  /** How many more rollup edges fit at the fleet bytes-per-edge; null when unmeasurable. */
+  allowedGrowthEdges?: number | null;
+  governedBy: string;
+  staticCap: number;
+  sources: CapacitySource[];
+}
+
+export interface UnresolvedSource {
+  dataSourceId: string;
+  label?: string | null;
+  workspaceId?: string | null;
+  providerId?: string | null;
+  whyNot: string;
+}
+
+export interface AggregationCapacityResponse {
+  limits: CapacityLimits;
+  shards: ShardCapacity[];
+  unresolved: UnresolvedSource[];
+  sourcesTotal: number;
+  truncated: boolean;
+  measuredAt: string;
+  cacheAgeMs: number;
+}
+
+export interface FullDetailPreflight {
+  estimateEdges?: number | null;
+  estimateSource?: 'lastRun' | null;
+  growthEdges?: number | null;
+  neededBytes?: number | null;
+  verdict: 'fits' | 'short' | 'unknown';
+  blockedBy?: string | null;
+  shortfallBytes?: number | null;
+  shortfallEdges?: number | null;
+  marginPct: number;
+}
+
+export interface AutoPreflight {
+  neverRefused: boolean;
+  cubeCeiling: number;
+  wouldStoreCube?: boolean | null;
+  fallback: string;
+}
+
+export interface SourceCapacityResponse {
+  source: CapacitySource;
+  shard: ShardCapacity;
+  limits: CapacityLimits;
+  fullDetail: FullDetailPreflight;
+  auto: AutoPreflight;
+  measuredAt: string;
 }
 
 export interface AggregationWorkerJob {
@@ -414,6 +544,21 @@ class AggregationService {
         method: 'PUT',
         body: JSON.stringify({ cadence }),
       }
+    );
+  }
+
+  /** Every shard with rollups on it, what fits, and the sources on each —
+   *  cached briefly server-side; `fresh` forces a new sweep. */
+  async getFleetCapacity(fresh = false): Promise<AggregationCapacityResponse> {
+    return authFetch<AggregationCapacityResponse>(
+      `/api/v1/admin/aggregation/capacity${fresh ? '?fresh=true' : ''}`
+    );
+  }
+
+  /** One source's footprint, its shard's headroom and the pre-flight fit. */
+  async getSourceCapacity(dsId: string): Promise<SourceCapacityResponse> {
+    return authFetch<SourceCapacityResponse>(
+      `/api/v1/admin/data-sources/${encodeURIComponent(dsId)}/capacity`
     );
   }
 

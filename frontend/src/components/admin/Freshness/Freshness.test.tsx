@@ -52,7 +52,23 @@ vi.mock('@/services/freshnessService', async () => {
 })
 vi.mock('@/services/providerService', () => ({ providerService: { list: listProviders } }))
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { list: listWorkspaces } }))
-vi.mock('@/services/aggregationService', () => ({ aggregationService: { listJobsGlobal } }))
+vi.mock('@/services/aggregationService', () => ({
+    aggregationService: {
+        listJobsGlobal,
+        // The capacity card reads the fleet sweep; an empty snapshot keeps the
+        // page quiet in these tests.
+        getFleetCapacity: vi.fn().mockResolvedValue({
+            limits: {
+                shardReservePct: { value: 20, source: 'default' }, bytesPerEdge: { value: 512, source: 'default' },
+                maxMaterializedEdges: { value: null, source: 'default' }, rollupStorage: { value: 'true', source: 'default' },
+                estimateMarginPct: 25, maxCubeEdges: 8_000_000, staticCap: 25_000_000, budgetRecheckEdges: 1_000_000,
+            },
+            shards: [], unresolved: [], sourcesTotal: 0, truncated: false, measuredAt: '2026-09-08T00:00:00Z', cacheAgeMs: 0,
+        }),
+        getSourceCapacity: vi.fn().mockRejectedValue(new Error('not in this test')),
+        getAggregationSettings: vi.fn().mockRejectedValue(new Error('not in this test')),
+    },
+}))
 
 // jsdom lacks the pointer-capture + scroll APIs Radix calls when a menu opens.
 beforeAll(() => {

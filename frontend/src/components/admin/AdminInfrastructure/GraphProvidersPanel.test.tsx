@@ -1,7 +1,9 @@
 /**
- * Memory headroom on the graph tier. The page is read at a glance, so the
- * contract is as much about SILENCE as about the warning: nothing renders
- * while every shard has headroom, while a filling shard must name itself.
+ * Memory headroom on the graph tier. Every MEASURABLE node is shown — the
+ * rollup write budget reads this same used/maxmemory pair before every
+ * rebuild — but the WORDS are reserved: a node with headroom carries no
+ * level chip, a filling one must name itself, and a node that cannot be
+ * measured (no cap, no memory section) stays silent.
  *
  * The same contract governs the fleet publish signal beside it, plus one
  * more: the causal claim tying a full node to a stalled publish may only be
@@ -29,13 +31,36 @@ function standalone(overrides: Record<string, unknown>): Record<string, unknown>
 }
 
 describe('GraphProvidersPanel — memory headroom', () => {
-  it('says nothing while the shard has headroom', () => {
+  it('shows a shard with headroom, without a level word', () => {
     render(<GraphProvidersPanel providers={PROVIDERS} services={falkor(standalone({
       usedMemory: 5_368_709_120, maxmemory: 12_884_901_888, memoryUsedPct: 41.7,
     }))} />)
     expect(screen.getByText('Primary graph')).toBeInTheDocument()
-    expect(screen.queryByText(/Memory headroom/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/41/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Memory headroom/i)).toBeInTheDocument()
+    expect(screen.getByText(/5\.0 GB of 12\.0 GB \(42%\)/)).toBeInTheDocument()
+    expect(screen.getByText(/1 shard with headroom/)).toBeInTheDocument()
+    expect(screen.queryByText('Warning')).not.toBeInTheDocument()
+    expect(screen.queryByText('Critical')).not.toBeInTheDocument()
+  })
+
+  it('marks the rollup reserve and says what still fits when the capacity sweep knows the node', () => {
+    render(<GraphProvidersPanel providers={PROVIDERS} services={falkor(standalone({
+      usedMemory: 5_368_709_120, maxmemory: 12_884_901_888, memoryUsedPct: 41.7,
+    }))} capacity={{
+      limits: {
+        shardReservePct: { value: 20, source: 'default' }, bytesPerEdge: { value: 512, source: 'default' },
+        maxMaterializedEdges: { value: null, source: 'default' }, rollupStorage: { value: 'true', source: 'default' },
+        estimateMarginPct: 25, maxCubeEdges: 8_000_000, staticCap: 25_000_000, budgetRecheckEdges: 1_000_000,
+      },
+      shards: [{
+        endpoint: 'falkordb:6379', used: 5_368_709_120, maxmemory: 12_884_901_888, policy: 'noeviction', measurable: true,
+        usedPct: 41.7, reservePct: 20, reserveBytes: 2_576_980_377, availableBytes: 4_939_212_391,
+        allowedGrowthEdges: 9_646_899, governedBy: 'shard', staticCap: 25_000_000, sources: [],
+      }],
+      unresolved: [], sourcesTotal: 1, truncated: false, measuredAt: '2026-09-08T10:00:00Z', cacheAgeMs: 0,
+    }} />)
+    expect(screen.getByText(/Rollups keep 20% in reserve/)).toBeInTheDocument()
+    expect(screen.getByText(/fits ~9\.6M more rollup edges at 512 B each/)).toBeInTheDocument()
   })
 
   it('warns with the node, the bytes against the cap, and the percentage', () => {

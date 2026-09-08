@@ -21,7 +21,8 @@ import {
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
-import type { AggregationTuning } from '@/services/aggregationService'
+import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
+import { TUNING_KNOBS, clampKnob, knobPlaceholder, resolveKnob, type TuningKnob } from './aggregationKnobs'
 
 // ============================================
 // Public Contract
@@ -49,6 +50,10 @@ export interface AggregationOverridesFormProps {
      * know; `'true'` is then assumed, matching the backend.
      */
     defaultFinePairs?: 'auto' | 'true' | 'false'
+    /** The server's live env defaults — placeholders that tell the truth. */
+    envDefaults?: EnvTuningDefaults | null
+    /** The stored fleet Defaults, so an empty field can say what it inherits. */
+    storedGlobal?: AggregationTuning | null
 }
 
 // ============================================
@@ -109,71 +114,9 @@ function ImpactMeter({ label, level, max = 5 }: { label: string; level: number; 
 // Advanced Tuning (shared with the admin "Defaults" dialog)
 // ============================================
 
-interface TuningFieldSpec {
-    key: 'scanRangeWidth' | 'writePacingRatio' | 'maxPendingPairs' | 'extractConcurrency'
-        | 'shardReservePct' | 'bytesPerEdge' | 'maxMaterializedEdges'
-    label: string
-    tip: string
-    help: string
-    min: number
-    max: number
-    /** Shown in the empty input: the effective default, or what "empty" means. */
-    placeholder: number | string
-    step?: number
-    float?: boolean
-}
-
-const TUNING_FIELDS: TuningFieldSpec[] = [
-    {
-        key: 'scanRangeWidth',
-        label: 'Scan range width',
-        tip: 'Width of each edge-ID range the extract phase scans per query. The pipeline shrinks this automatically under pressure — this value is the ceiling.',
-        help: 'Edges per scan range (10,000-5,000,000)',
-        min: 10_000, max: 5_000_000, placeholder: 200_000,
-    },
-    {
-        key: 'writePacingRatio',
-        label: 'Write pacing ratio',
-        tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
-        help: 'Pause between writes (0-10)',
-        min: 0, max: 10, placeholder: 1.0, step: 0.1, float: true,
-    },
-    {
-        key: 'maxPendingPairs',
-        label: 'Memory cap — max pending pairs',
-        tip: 'Maximum aggregated pairs held in memory before the pipeline flushes early. Lower values reduce worker RSS at the cost of more flush cycles.',
-        help: 'Pairs held in memory (50,000-50,000,000)',
-        min: 50_000, max: 50_000_000, placeholder: 50_000_000,
-    },
-    {
-        key: 'extractConcurrency',
-        label: 'Extract concurrency',
-        tip: 'Number of parallel extract scans. Higher values speed up the extract phase but put more read load on the provider.',
-        help: 'Parallel scans (1-4)',
-        min: 1, max: 4, placeholder: 1,
-    },
-    {
-        key: 'shardReservePct',
-        label: 'Shard memory reserve',
-        tip: 'Before writing rollups the rebuild measures the graph-store shard that owns this graph and only proceeds when the new edges fit under this reserve — the share of the shard\u2019s maxmemory that must stay free for live queries and every other graph on it. Lower it only when you know that headroom is real.',
-        help: 'Percent of the shard\u2019s maxmemory kept free (0-90)',
-        min: 0, max: 90, placeholder: 20,
-    },
-    {
-        key: 'bytesPerEdge',
-        label: 'Bytes per rollup edge',
-        tip: 'How much shard memory one stored AGGREGATED edge costs. Each successful rebuild measures this for its graph and the next rebuild uses that figure; set it here to override the measurement (or the ~512-byte default before any run has measured).',
-        help: 'Graph-store bytes per stored edge (64-16,384)',
-        min: 64, max: 16_384, placeholder: 512,
-    },
-    {
-        key: 'maxMaterializedEdges',
-        label: 'Edge ceiling (optional)',
-        tip: 'An explicit cap on stored AGGREGATED edges, layered over the measured shard budget. Leave it empty so the budget is whatever the graph\u2019s own shard has free; set it only to hold a graph BELOW that. When the shard cannot be measured (no maxmemory set) this — or the server default when empty — is the whole budget. Forced full detail fails loudly instead of exceeding either. Auto storage decides cube-vs-diagonal against its own ceiling, so this does not change that choice.',
-        help: 'Max stored rollup edges (10,000-500,000,000); empty = shard budget',
-        min: 10_000, max: 500_000_000, placeholder: 'shard budget',
-    },
-]
+// The knob catalogue itself lives in ``aggregationKnobs.ts`` — one
+// description per knob, shared with the fleet-wide Defaults dialog.
+const PER_JOB_KNOBS = TUNING_KNOBS.filter(k => !k.fleetOnly)
 
 export interface TuningFieldsProps {
     value: AggregationTuning
@@ -181,31 +124,45 @@ export interface TuningFieldsProps {
     disabled?: boolean
     /** See `AggregationOverridesFormProps.defaultFinePairs`. */
     defaultFinePairs?: 'auto' | 'true' | 'false'
+    /** The server's live env defaults — what an empty field really means. */
+    envDefaults?: EnvTuningDefaults | null
+    /** The stored fleet Defaults, so an empty per-job field can say which
+     *  value it inherits and from where. */
+    storedGlobal?: AggregationTuning | null
+    /** What clearing a field writes: ``delete`` omits the key (per-job:
+     *  inherit), ``null`` sends an explicit null (the Defaults dialog: the
+     *  server MERGES tuning and only an explicit null clears a stored key). */
+    clearMode?: 'delete' | 'null'
 }
 
 /**
  * TuningFields — the raw Advanced-tuning inputs, without the collapsible
- * shell, so the workspace dashboard's "Defaults" dialog can reuse them.
- * Empty inputs mean "no override" (the key is omitted from `tuning`).
+ * shell, so the fleet-wide Defaults dialog can reuse them. What an empty
+ * input means depends on ``clearMode``; either way the placeholder shows the
+ * value the empty field resolves to, from the server's own defaults.
  */
 export function TuningFields({
     value,
     onChange,
     disabled = false,
     defaultFinePairs = 'true',
+    envDefaults,
+    storedGlobal,
+    clearMode = 'delete',
 }: TuningFieldsProps): JSX.Element {
-    const setField = (spec: TuningFieldSpec, raw: string, clamp: boolean) => {
+    const setField = (spec: TuningKnob, raw: string, clamp: boolean) => {
         const next: AggregationTuning = { ...value }
         const parsed = spec.float ? parseFloat(raw) : parseInt(raw)
         if (raw === '' || !Number.isFinite(parsed)) {
             // Cleared (or garbage on blur) → drop the override, fall back to default.
             if (raw === '' || clamp) {
-                delete next[spec.key]
+                if (clearMode === 'null') next[spec.key] = null
+                else delete next[spec.key]
                 onChange(next)
             }
             return
         }
-        next[spec.key] = clamp ? Math.max(spec.min, Math.min(spec.max, parsed)) : parsed
+        next[spec.key] = clamp ? clampKnob(spec, parsed) : parsed
         onChange(next)
     }
 
@@ -268,29 +225,38 @@ export function TuningFields({
                 </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
-                {TUNING_FIELDS.map(spec => (
-                    <div key={spec.key}>
-                        <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
-                            {spec.label}
-                            <Tip label={spec.tip}>
-                                <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
-                            </Tip>
-                        </label>
-                        <input
-                            type="number"
-                            min={spec.min}
-                            max={spec.max}
-                            step={spec.step}
-                            disabled={disabled}
-                            placeholder={String(spec.placeholder)}
-                            value={value[spec.key] ?? ''}
-                            onChange={e => setField(spec, e.target.value, false)}
-                            onBlur={e => setField(spec, e.target.value, true)}
-                            className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
-                        />
-                        <p className="text-[10px] text-ink-muted mt-1">{spec.help}</p>
-                    </div>
-                ))}
+                {PER_JOB_KNOBS.map(spec => {
+                    const resolved = resolveKnob(spec, value[spec.key] ?? null, storedGlobal, envDefaults)
+                    return (
+                        <div key={spec.key}>
+                            <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
+                                {spec.label}
+                                <Tip label={spec.tip}>
+                                    <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
+                                </Tip>
+                            </label>
+                            <input
+                                type="number"
+                                min={spec.min}
+                                max={spec.max}
+                                step={spec.step}
+                                disabled={disabled}
+                                placeholder={knobPlaceholder(spec, envDefaults)}
+                                aria-label={spec.label}
+                                value={value[spec.key] ?? ''}
+                                onChange={e => setField(spec, e.target.value, false)}
+                                onBlur={e => setField(spec, e.target.value, true)}
+                                className="w-full px-3 py-2 text-sm rounded-lg border bg-transparent text-ink placeholder:text-ink-muted/50 outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 border-glass-border disabled:opacity-60 disabled:cursor-not-allowed"
+                            />
+                            <p className="text-[10px] text-ink-muted mt-1">
+                                {spec.help}
+                                {resolved.source === 'global' && resolved.value != null && (
+                                    <span className="text-indigo-500"> {'\u00b7'} inherits {resolved.value.toLocaleString()} from Defaults</span>
+                                )}
+                            </p>
+                        </div>
+                    )
+                })}
             </div>
 
             {/* Materialize leaf-to-leaf pairs toggle */}
@@ -435,6 +401,8 @@ export function AggregationOverridesForm({
     disabled = false,
     hideProjectionMode = false,
     defaultFinePairs,
+    envDefaults,
+    storedGlobal,
 }: AggregationOverridesFormProps): JSX.Element {
     const [showAdvanced, setShowAdvanced] = useState(false)
 
@@ -707,6 +675,8 @@ export function AggregationOverridesForm({
                                     </div>
                                     <TuningFields
                                         value={value.tuning ?? {}}
+                                        envDefaults={envDefaults}
+                                        storedGlobal={storedGlobal}
                                         onChange={tuning => update({ tuning })}
                                         disabled={disabled}
                                         defaultFinePairs={defaultFinePairs}

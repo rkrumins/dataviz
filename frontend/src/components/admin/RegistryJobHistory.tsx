@@ -21,8 +21,7 @@ import {
     type AggregationTuning,
     type JobHistoryFilters,
     type JobsSummary,
-    type PaginatedJobsResponse,
-} from '@/services/aggregationService'
+    type PaginatedJobsResponse, type EnvTuningDefaults } from '@/services/aggregationService'
 import { workspaceService, type WorkspaceResponse } from '@/services/workspaceService'
 import { providerService, type ProviderResponse } from '@/services/providerService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
@@ -168,6 +167,9 @@ export function RegistryJobHistory() {
     // nothing, so the dialog's radio can show the mode the job would actually
     // run in rather than assuming Auto for an absent key.
     const [envFinePairs, setEnvFinePairs] = useState<'auto' | 'true' | 'false' | undefined>(undefined)
+    // Every knob's live env default, so the dialog's placeholders are the
+    // deployment's numbers rather than a guess baked into the bundle.
+    const [envDefaults, setEnvDefaults] = useState<EnvTuningDefaults | null>(null)
 
     // Load reference data + summary
     useEffect(() => {
@@ -179,6 +181,7 @@ export function RegistryJobHistory() {
             .then(s => {
                 setDefaultTuning(s.tuning ?? undefined)
                 setEnvFinePairs(s.envMaterializeFinePairs ?? undefined)
+                setEnvDefaults(s.envTuningDefaults ?? null)
             })
             .catch(() => {})
     }, [])
@@ -785,6 +788,13 @@ export function RegistryJobHistory() {
                     status: retriggerCtx.job.status,
                 } : undefined}
                 defaultFinePairs={envFinePairs}
+                dataSourceId={
+                    retriggerCtx?.kind === 'job'
+                        ? retriggerCtx.job.dataSourceId
+                        : retriggerCtx?.kind === 'dataSource' ? retriggerCtx.dataSourceId : undefined
+                }
+                envDefaults={envDefaults}
+                storedGlobal={defaultTuning ?? null}
                 onConfirmRetrigger={handleConfirmRetrigger}
                 onConfirmResume={retriggerCtx?.kind === 'job' ? handleConfirmResume : undefined}
             />

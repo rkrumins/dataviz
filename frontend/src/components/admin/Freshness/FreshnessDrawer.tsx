@@ -39,6 +39,7 @@ import {
 } from './automationCopy'
 import { SettingRow, StageRow } from './StageRow'
 import { SnoozeRow } from './SnoozeRow'
+import { SourceCapacityBlock } from './SourceCapacityBlock'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, MasteryTag } from './FreshnessRow'
 import { overrideWarning, rowHold, timeUntil, type RowHold } from './holds'
@@ -1407,6 +1408,11 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
                                             </div>
                                         )}
                                     </div>
+
+                                    {/* This source on its shard: what its rollups cost, what is
+                                        left under the reserve, and whether the next rebuild fits —
+                                        the reading the guidance above sends people to. */}
+                                    <SourceCapacityBlock dsId={doc.dataSourceId} />
 
                                     {/* Recent activity */}
                                     <div>

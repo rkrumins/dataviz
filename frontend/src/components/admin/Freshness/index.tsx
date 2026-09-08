@@ -33,6 +33,8 @@ import { FreshnessFilterBar } from './FreshnessFilterBar'
 import { FreshnessGroupHeader } from './FreshnessGroupHeader'
 import { AutomationModal } from './AutomationModal'
 import { OverlayIntegrity } from './OverlayIntegrity'
+import { GraphStoreCapacity } from './GraphStoreCapacity'
+import { DefaultsDialog } from '../shared/DefaultsDialog'
 import { useFleetFreshness, useRefreshSource, FRESHNESS_KEYS } from './useFreshness'
 import { useActiveJobs, ACTIVE_JOBS_KEY } from './useActiveJobs'
 import {
@@ -75,6 +77,9 @@ function parseList(raw: string | null): string[] {
 export function Freshness() {
     useDocumentTitle('Freshness')
     const isSystemAdmin = usePermission('system:admin')
+    // The fleet Defaults, reachable from the capacity card: the limits the
+    // card measures against live one dialog away, not on another page.
+    const [defaultsOpen, setDefaultsOpen] = useState(false)
     const { notify } = useAppNotifications()
 
     const [searchParams, setSearchParams] = useSearchParams()
@@ -372,6 +377,12 @@ export function Freshness() {
                 onWindowChange={(w) => patchParams({ fwin: w === '24h' ? null : w })}
             />
 
+            <GraphStoreCapacity
+                onOpenSource={setDrawerDsId}
+                onFacetWouldNotFit={() => patchParams({ fstatus: 'needsAttention', ffail: 'write_budget' })}
+                onAdjustLimits={isSystemAdmin ? () => setDefaultsOpen(true) : undefined}
+            />
+
             <StartHereStrip
                 summary={summary}
                 rows={scopeRows}
@@ -578,6 +589,8 @@ export function Freshness() {
                 isOpen={fleetDialogOpen}
                 onClose={() => setFleetDialogOpen(false)}
             />
+
+            <DefaultsDialog open={defaultsOpen} onClose={() => setDefaultsOpen(false)} />
 
             <AutomationModal
                 open={automationOpen}

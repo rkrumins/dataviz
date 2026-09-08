@@ -14,10 +14,12 @@
  * purpose: a full node and a stalled publish are the same incident seen from
  * two ends, and an operator has to read that pair in one glance.
  */
-import { Boxes, GitBranch } from 'lucide-react'
+import { Boxes, GitBranch, MemoryStick } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { GraphProvider, ProjectionSection, ServiceEntry } from '@/services/systemStatusService'
 import { STATUS_META, formatBytes, num, obj, str } from './meta'
+import type { AggregationCapacityResponse } from '@/services/aggregationService'
+import { compactEdges } from '../shared/aggregationKnobs'
 
 /** Neutral type badge — no privileged provider. */
 const TYPE_LABEL: Record<string, string> = {
@@ -56,13 +58,19 @@ function ProviderCard({ p }: { p: GraphProvider }) {
     )
 }
 
-/** One graph node's used-memory headroom. */
+/** One graph node's used-memory headroom. The capacity fields ride along
+ *  when the aggregation capacity sweep has measured the same node. */
 interface ShardMemory {
     endpoint: string
     usedMemory: number | null
     maxmemory: number | null
     usedPct: number | null
     level: 'warn' | 'critical' | null
+    /** Share of maxmemory the rollup write budget keeps free. */
+    reservePct?: number | null
+    /** How many more rollup edges fit under that reserve, at bytesPerEdge. */
+    fitsEdges?: number | null
+    bytesPerEdge?: number | null
 }
 
 /** Memory pressure is its own signal, not a fifth status word — warn and
@@ -86,27 +94,58 @@ function shardLevel(row: Record<string, unknown>): 'warn' | 'critical' | null {
 }
 
 /**
- * Per-node memory for the graph tier — EMPTY unless at least one node is
- * genuinely under pressure, so a page read at a glance stays quiet while
- * every shard has headroom. A node with no cap (``maxmemory: 0`` is
- * unlimited, not full) or no memory section reports no percentage and is
- * never rendered. One node is one row, not a manufactured list.
+ * Per-node memory for the graph tier: every MEASURABLE node, always — the
+ * rollup write budget reads this same used/maxmemory pair before every
+ * rebuild, so a page that hid it until a node was 85% full left the operator
+ * without the one number that decides whether a rebuild fits. A node with no
+ * cap (``maxmemory: 0`` is unlimited, not full) or no memory section reports
+ * no percentage and is never rendered. One node is one row.
+ *
+ * The status probe and the capacity sweep can name the same node differently
+ * (the probe reads the env topology, the sweep the provider's own client,
+ * after any address remap), so the two are UNIONED by endpoint, never joined:
+ * a node either source knows is shown, and the capacity figures ride along
+ * where the names agree.
  */
-function graphShardMemory(services: ServiceEntry[] | null | undefined): ShardMemory[] {
+export function graphShardMemory(
+    services: ServiceEntry[] | null | undefined,
+    capacity?: AggregationCapacityResponse | null,
+): ShardMemory[] {
     const svc = services?.find(s => s.key === 'falkordb')
-    if (!svc) return []
-    const raw = Array.isArray(svc.detail.shards)
+    const raw = !svc ? [] : Array.isArray(svc.detail.shards)
         ? (svc.detail.shards as unknown[]).filter(
             (s): s is Record<string, unknown> => !!s && typeof s === 'object' && !Array.isArray(s))
         : [svc.detail]
-    const rows = raw.map(r => ({
-        endpoint: str(r, 'endpoint') ?? svc.label,
+    const rows: ShardMemory[] = raw.map(r => ({
+        endpoint: str(r, 'endpoint') ?? svc?.label ?? 'graph store',
         usedMemory: num(r, 'usedMemory'),
         maxmemory: num(r, 'maxmemory'),
         usedPct: num(r, 'memoryUsedPct'),
         level: shardLevel(r),
     })).filter(r => r.usedPct != null)
-    return rows.some(r => r.level) ? rows : []
+    const bytesPerEdge = typeof capacity?.limits.bytesPerEdge.value === 'number'
+        ? capacity.limits.bytesPerEdge.value : null
+    for (const shard of capacity?.shards ?? []) {
+        if (!shard.measurable) continue
+        const row = rows.find(r => r.endpoint === shard.endpoint)
+        if (row) {
+            row.reservePct = shard.reservePct
+            row.fitsEdges = shard.allowedGrowthEdges ?? null
+            row.bytesPerEdge = bytesPerEdge
+        } else {
+            rows.push({
+                endpoint: shard.endpoint,
+                usedMemory: shard.used ?? null,
+                maxmemory: shard.maxmemory ?? null,
+                usedPct: shard.usedPct ?? null,
+                level: null,
+                reservePct: shard.reservePct,
+                fitsEdges: shard.allowedGrowthEdges ?? null,
+                bytesPerEdge,
+            })
+        }
+    }
+    return rows
 }
 
 function ShardMemoryRow({ shard }: { shard: ShardMemory }) {
@@ -129,41 +168,52 @@ function ShardMemoryRow({ shard }: { shard: ShardMemory }) {
                     </span>
                 )}
             </div>
-            <div aria-hidden="true" className="mt-1 h-1 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
+            <div aria-hidden="true" className="relative mt-1 h-1.5 rounded-full bg-black/5 dark:bg-white/10 overflow-hidden">
                 <div
                     className={cn('h-full rounded-full', level ? level.meta.dot : 'bg-emerald-500')}
                     style={{ width: `${Math.min(100, Math.max(0, shard.usedPct ?? 0))}%` }}
                 />
+                {shard.reservePct != null && (
+                    <div className="absolute inset-y-0 w-0.5 bg-ink" style={{ left: `${100 - shard.reservePct}%` }} />
+                )}
             </div>
+            {shard.reservePct != null && (
+                <p className="mt-1 text-[11px] text-ink-muted tabular-nums">
+                    Rollups keep {shard.reservePct}% in reserve
+                    {shard.fitsEdges != null && ` \u00b7 fits ~${compactEdges(shard.fitsEdges)} more rollup edges`}
+                    {shard.bytesPerEdge != null && ` at ${shard.bytesPerEdge} B each`}
+                </p>
+            )}
         </div>
     )
 }
 
-/** Rendered only when a node is filling — see ``graphShardMemory``. The
- *  nodes that still have room are listed alongside it, because "move a
- *  graph to another shard" is unanswerable without them. */
+/** Every measurable node — see ``graphShardMemory``. A filling node names
+ *  itself with a level word; the nodes that still have room are listed
+ *  alongside it, because "move a graph to another shard" is unanswerable
+ *  without them, and the rollup reserve is marked on each. */
 function MemoryHeadroom({ shards }: { shards: ShardMemory[] }) {
     if (shards.length === 0) return null
     const filling = shards.filter(s => s.level)
-    const worst = filling.some(s => s.level === 'critical') ? 'critical' : 'warn'
-    const { meta } = LEVEL_META[worst]
-    const HeadIcon = meta.icon
+    const worst = filling.some(s => s.level === 'critical') ? 'critical' : filling.length > 0 ? 'warn' : null
+    const meta = worst ? LEVEL_META[worst].meta : null
+    const HeadIcon = meta?.icon ?? MemoryStick
     return (
         <div className="px-4 pb-4">
             <div className="border border-glass-border rounded-xl p-3 bg-black/[0.02] dark:bg-white/[0.03]">
                 <div className="flex items-center gap-2">
-                    <HeadIcon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
+                    <HeadIcon className={cn('w-3.5 h-3.5 shrink-0', meta ? meta.text : 'text-ink-muted')} />
                     <h3 className="text-xs font-semibold text-ink">Memory headroom</h3>
-                    {shards.length > 1 && (
-                        <span className="ml-auto text-[11px] text-ink-muted">
-                            {filling.length} of {shards.length} shards filling
-                        </span>
-                    )}
+                    <span className="ml-auto text-[11px] text-ink-muted">
+                        {filling.length > 0
+                            ? `${filling.length} of ${shards.length} shard${shards.length === 1 ? '' : 's'} filling`
+                            : `${shards.length} shard${shards.length === 1 ? '' : 's'} with headroom`}
+                    </span>
                 </div>
                 <div className="mt-2 space-y-2">
                     {shards.map(s => <ShardMemoryRow key={s.endpoint} shard={s} />)}
                 </div>
-                {worst === 'critical' && (
+                {worst === 'critical' && meta && (
                     <p className={cn('mt-2 text-[11px] leading-snug', meta.text)}>{CRITICAL_CONSEQUENCE}</p>
                 )}
             </div>
@@ -287,12 +337,15 @@ function PublishingStalled({ projection, providers, nodeFilling }: {
     )
 }
 
-export function GraphProvidersPanel({ providers, services, projection }: {
+export function GraphProvidersPanel({ providers, services, projection, capacity }: {
     providers: GraphProvider[] | null
     services?: ServiceEntry[] | null
     projection?: ProjectionSection | null
+    /** The aggregation capacity sweep, when the page has it: the rollup
+     *  reserve and what fits ride onto the matching shard rows. */
+    capacity?: AggregationCapacityResponse | null
 }) {
-    const shards = graphShardMemory(services)
+    const shards = graphShardMemory(services, capacity)
     const list = providers ?? []
     const stalledCount = projection ? projection.lagging + projection.failed : 0
     // Neither a filling shard nor a stalled publish is hidden because no
