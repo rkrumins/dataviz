@@ -23,12 +23,12 @@ export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
     out_of_memory:
         'The graph store ran out of memory while building aggregated lineage for this large source.',
     query_memory:
-        'One rebuild query asked the graph store for more rows than a single query is allowed to hold.',
+        'A single row of one rebuild scan is larger than the graph store’s per-query limit, even after the rebuild narrowed its scans as far as they go.',
     provider_unavailable:
         'The graph store was unreachable during the rebuild.',
     ontology:
         "This data source has no ontology assigned, so its lineage can't be aggregated.",
-    timeout: 'The rebuild took longer than the allowed time.',
+    timeout: 'The graph store stopped answering, or the rebuild made no progress for longer than its stall window.',
     conflict: 'Another rebuild for this source was already running.',
     unknown: "The rebuild didn't complete. Open this source for details.",
 }

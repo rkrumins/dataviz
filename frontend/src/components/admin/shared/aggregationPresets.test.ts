@@ -66,7 +66,20 @@ describe('aggregation config presets', () => {
             .toBeGreaterThan(byId.conservative.tuning.scanRangeWidth!)
     })
 
-    it('keeps the three profiles distinguishable, so the selector still means something', () => {
+    it('offers a Gentle profile for graphs the store keeps refusing, gentler than Conservative', () => {
+        const byId = Object.fromEntries(CONFIG_PRESETS.map(p => [p.id, p]))
+        expect(CONFIG_PRESETS[0].id).toBe('gentle')                       // first: the safe choice leads
+        expect(byId.gentle.tuning.writePacingRatio!).toBeGreaterThan(byId.conservative.tuning.writePacingRatio!)
+        expect(byId.gentle.tuning.scanRangeWidth!).toBeLessThan(byId.conservative.tuning.scanRangeWidth!)
+        expect(byId.gentle.tuning.extractConcurrency).toBe(1)
+        expect(byId.gentle.tuning.scanShrinkFloor).toBe(1)               // narrows all the way to one row
+        expect(byId.gentle.tuning.scanTimeoutS!).toBeGreaterThan(30)      // more patience per query
+        expect(byId.gentle.maxRetries).toBe(5)
+        // It says nothing about what the last run learned — the hints apply.
+        expect(Object.hasOwn(byId.gentle.tuning, 'ignoreObserved')).toBe(false)
+    })
+
+    it('keeps the profiles distinguishable, so the selector still means something', () => {
         const fingerprints = CONFIG_PRESETS.map(p => JSON.stringify([p.maxRetries, p.tuning]))
         expect(new Set(fingerprints).size).toBe(CONFIG_PRESETS.length)
     })

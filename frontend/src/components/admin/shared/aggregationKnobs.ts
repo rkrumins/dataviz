@@ -19,10 +19,11 @@ import type {
 
 export type TuningKnobKey =
     | 'scanRangeWidth' | 'maxPendingPairs' | 'applyChunk' | 'deleteChunk'
-    | 'writePacingRatio' | 'extractConcurrency'
+    | 'writePacingRatio' | 'extractConcurrency' | 'scanShrinkFloor'
     | 'shardReservePct' | 'bytesPerEdge' | 'maxMaterializedEdges'
+    | 'scanTimeoutS' | 'writeTimeoutS' | 'stallTimeoutSecs' | 'maxWallSecs'
 
-export type KnobGroup = 'capacity' | 'reading' | 'writing'
+export type KnobGroup = 'capacity' | 'reading' | 'writing' | 'timeouts'
 
 export interface TuningKnob {
     key: TuningKnobKey
@@ -57,6 +58,10 @@ export const KNOB_GROUPS: Record<KnobGroup, { title: string; blurb: string }> = 
     writing: {
         title: 'Writing rollups',
         blurb: 'How the apply and delete passes pace themselves against live traffic.',
+    },
+    timeouts: {
+        title: 'Time limits',
+        blurb: 'How long one query may take, and how long a job may go without progress or run in total. A slow store is retried and narrowed, never abandoned, within these.',
     },
 }
 
@@ -98,6 +103,13 @@ export const TUNING_KNOBS: TuningKnob[] = [
         min: 1, max: 4, group: 'reading', fallback: 1,
     },
     {
+        key: 'scanShrinkFloor',
+        label: 'Scan floor',
+        tip: 'The narrowest scan slice the pressure ladder descends to when the graph store refuses a query for size or time. At 1 the rebuild reads one row at a time before it concludes that a single row is larger than the store’s per-query ceiling — the only failure it cannot narrow its way out of. A higher floor fails sooner with less certainty.',
+        help: 'Narrowest scan slice before a single row is declared too large (1-5,000,000 rows)',
+        min: 1, max: 5_000_000, group: 'reading', fallback: 1,
+    },
+    {
         key: 'maxPendingPairs',
         label: 'Memory cap — max pending pairs',
         tip: 'Maximum aggregated pairs held in worker memory before the pipeline flushes early. Lower values reduce worker RSS at the cost of more flush cycles. This bounds the WORKER, not the graph store.',
@@ -125,7 +137,50 @@ export const TUNING_KNOBS: TuningKnob[] = [
         help: 'Stale edges deleted per query (100-50,000)',
         min: 100, max: 50_000, group: 'writing', fallback: 10_000, fleetOnly: true,
     },
+    {
+        key: 'scanTimeoutS',
+        label: 'Scan timeout',
+        tip: 'How long one read scan may run before the store aborts it. A scan that times out is re-read in narrower slices, and at the narrowest slice retried with backoff before the run declares the store unreachable and resumes later from its checkpoint. Values above the store’s own TIMEOUT_MAX are capped by the store.',
+        help: 'Seconds per read scan (5-600)',
+        min: 5, max: 600, step: 1, float: true, group: 'timeouts', fallback: 30,
+    },
+    {
+        key: 'writeTimeoutS',
+        label: 'Write timeout',
+        tip: 'How long one write or delete batch may run before the store aborts it. A batch that times out is re-issued as two halves, down to a single row. Values above the store’s TIMEOUT_MAX are capped by the store.',
+        help: 'Seconds per write or delete batch (5-600)',
+        min: 5, max: 600, step: 1, float: true, group: 'timeouts', fallback: 60,
+    },
+    {
+        key: 'stallTimeoutSecs',
+        label: 'Stall window',
+        tip: 'How long a job may make NO forward progress before the watchdog kills it, for jobs that do not set their own (automatic rebuilds). The per-job Stall timeout in the re-trigger dialog wins over this. Narrowed scans and backoff retries heartbeat, so a slow rebuild is progress, not a stall.',
+        help: 'Seconds without progress before a job is killed (60-604,800)',
+        min: 60, max: 604_800, group: 'timeouts', fallback: 10_800, fleetOnly: true,
+    },
+    {
+        key: 'maxWallSecs',
+        label: 'Wall clock',
+        tip: 'The longest a job may run in total, however much progress it makes — the safety net for a rebuild that never ends. Never lower than the job’s stall window. Can be raised on a running job from Job History.',
+        help: 'Total run time allowed (3,600-604,800 s)',
+        min: 3_600, max: 604_800, group: 'timeouts', fallback: 86_400,
+    },
 ]
+
+/**
+ * The graph store's own per-query cap (TIMEOUT_MAX, reported by the server
+ * as ``serverTimeoutMaxMs``) bounds the two per-query timeouts above it: a
+ * value past the cap is silently capped by the store. Returns the sentence
+ * to show under the input when a value is past it, else null.
+ */
+export function serverCapNote(knob: TuningKnob, value: number | null | undefined, env?: EnvTuningDefaults | null): string | null {
+    if (knob.key !== 'scanTimeoutS' && knob.key !== 'writeTimeoutS') return null
+    const capMs = env?.serverTimeoutMaxMs
+    if (typeof capMs !== 'number' || capMs <= 0 || typeof value !== 'number') return null
+    const capS = capMs / 1000
+    if (value <= capS) return null
+    return `Capped by the graph store at ${capS % 1 === 0 ? capS : capS.toFixed(1)} s (TIMEOUT_MAX) — raise TIMEOUT_MAX in FALKORDB_ARGS and FALKORDB_SERVER_TIMEOUT_MAX_MS together to go higher.`
+}
 
 export const KNOB_BY_KEY: Record<TuningKnobKey, TuningKnob> = Object.fromEntries(
     TUNING_KNOBS.map(k => [k.key, k]),

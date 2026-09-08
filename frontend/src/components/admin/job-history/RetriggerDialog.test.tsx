@@ -85,4 +85,18 @@ describe('RetriggerDialog', () => {
     expect(screen.queryByRole('button', { name: /resume from cursor/i }))
       .not.toBeInTheDocument()
   })
+
+  it('says why the form opened on a profile the operator did not pick', () => {
+    render(
+      <RetriggerDialog
+        isOpen
+        onClose={() => {}}
+        initialValue={baseValue}
+        title="Re-trigger aggregation"
+        onConfirmRetrigger={noop}
+        presetReason="Pre-selected the Gentle profile: the last run hit the graph store’s per-query memory limit."
+      />,
+    )
+    expect(screen.getByTestId('retrigger-preset-reason')).toHaveTextContent(/Gentle profile/)
+  })
 })

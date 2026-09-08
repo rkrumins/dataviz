@@ -13,6 +13,34 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Rebuilds that always complete under the graph store's per-query limits.** A rebuild that
+meets the store's per-query memory ceiling (`QUERY_MEM_CAPACITY`) or a per-query timeout no
+longer fails — it goes slower until every query fits: the first refusal of a run drops read
+concurrency to 1; the reconcile scan (the pipeline's widest projection) switches to a keys-only
+two-pass strategy; scans halve down to a scan floor that now defaults to **one row**, re-growing
+after sustained successes and never straight back into a width that failed; write and delete
+batches halve the same way; a narrowest scan that keeps timing out is retried with backoff and
+heartbeats before the run reports the store as unreachable and keeps its checkpoint. The only
+terminal outcome is a single row larger than the ceiling, and its message names the scan, the
+row and the ceiling. What a rebuild learned is remembered per source and seeds the next rebuild
+of that source (never wider than its settings; *Ignore last run* opts out).
+
+**Every run shows what it ran with, and what it adapted to.** Job History's stat grid gains a
+*Settings* cell — the profile the run matches, or *Custom* — with a *Run settings* disclosure:
+every knob with where its value came from (*Job override*, *Fleet default*, *Learned from last
+run*, *Environment*), including the stall window and wall clock, and plain sentences for what
+the pressure ladder changed; written at the first checkpoint, so a failed or cancelled run has
+it too, and read from the live stream while a job runs. A running row shows an amber *Going
+slower to fit the graph store* state; the Freshness badge reads *narrowing*.
+
+**Every time limit is a knob.** *Time limits* in the Defaults dialog and Advanced tuning: scan
+timeout and write timeout per query (the graph store's own `TIMEOUT_MAX` caps them, and the
+editors say so), the stall window as a fleet default that machine-queued rebuilds now honour,
+and the wall clock (never below the stall window). Bounds lifted to seven days. Plus a **Gentle**
+profile in the re-trigger dialog — narrow scans, serial reads, generous pacing, a longer scan
+timeout — pre-selected, with the reason, after a per-query memory or timeout failure; the canvas
+banner offers the same retry. The capacity card shows each node's per-query limit.
+
 **Rollup capacity you can see, and every limit you can set.** Ingestion → Freshness gains a
 *Graph store capacity* card: one row per shard with a meter of memory in use, the fleet reserve
 marked on it, what is free after that reserve, how many more rollup edges that is, and the
@@ -183,6 +211,16 @@ does not swing the trend, short enough that "what changed" is still about now.
 
 ### Fixed
 
+- **A slow scan escaped the pressure ladder and restarted the run.** Every query goes out with
+  a server `TIMEOUT` 500 ms under the client budget, so a slow scan is aborted by the store and
+  arrives as its own *Query timed out* error — which the ladder, listening for the client
+  deadline only, never saw. Both signals now enter the ladder.
+- A rebuild that gave up after its own timeout retries was reported as *Job killed by
+  watchdog*; it now says which scan timed out, at what width and budget, and that the job
+  resumes from its checkpoint.
+- Job History's error hint for a per-query memory failure told operators to lower the scan
+  range width, which the rebuild already does by itself.
+
 **The Growth tab crashed against any server that had not deployed yet** —
 `series.previous.buckets is not iterable`, an unguarded spread of a field the running backend
 did not send. Analytics documents are precomputed into Redis and outlive the code that wrote
@@ -235,6 +273,14 @@ that cannot fail proves nothing.
 
 ### Upgrading
 
+- Migration `20260909_1000_observed_tuning` adds `data_source_state.observed_tuning` (what the
+  last rebuild of a source learned under pressure); mirrored in `init_aggregation_db`, so a
+  control plane that boots first is fine.
+- `AGGREGATION_SCAN_SHRINK_FLOOR` now defaults to 1 (was 10,000): a rebuild narrows all the way
+  to one row before it concludes. Set the *Scan floor* knob to restore an early stop.
+- The stall window and wall clock accept up to seven days; `timeoutSecs` above 86,400 is no
+  longer rejected.
+
 **Run the migration.** `20260908_1000_rollup_storage` adds the nullable
 `aggregation.data_source_state.rollup_storage` column (inspector-guarded; the Control Plane's
 start-up init adds it too, so a Control Plane that boots before the migration is fine).
@@ -283,6 +329,14 @@ is required for correctness, but without it readers pay the aggregation on the r
 
 ### Known limitations
 
+- A single row larger than the graph store's per-query memory ceiling is still terminal — the
+  message now names which — and the per-query timeouts cannot exceed the store's `TIMEOUT_MAX`
+  (180 s as shipped) without `FALKORDB_ARGS` and `FALKORDB_SERVER_TIMEOUT_MAX_MS` changing
+  together.
+- Scan shape (width, floor, concurrency, pacing, chunks, rollup storage) changes on the next
+  Resume or Re-trigger, not on a running job; only the time limits are live.
+- The canvas's own reads have no pressure ladder: a per-query refusal on a drill is a read
+  error, not a narrower read.
 - **The rebuild worker's own memory is bounded by a pair count, not by measurement.**
   `AGGREGATION_MAX_PENDING_PAIRS` (50,000,000, and its upper bound) is the only thing that
   bounds worker RSS, and at 50M pairs it sits above the reference 4Gi pod limit — a graph

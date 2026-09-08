@@ -9,7 +9,7 @@
  * projection lives rather than how fast it is built.
  */
 import { describe, expect, it } from 'vitest'
-import { buildInitialOverridesFromJob } from './RegistryJobHistory'
+import { buildInitialOverridesFromJob, gentleRetryReason } from './RegistryJobHistory'
 import type { AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
 
 const CONFIGURED_DEFAULTS: AggregationTuning = {
@@ -72,5 +72,30 @@ describe('buildInitialOverridesFromJob', () => {
         const legacy = { ...jobWithStaleTuning, batchSize: 0 } as AggregationJobResponse
 
         expect(buildInitialOverridesFromJob(legacy, CONFIGURED_DEFAULTS).batchSize).toBe(5000)
+    })
+})
+
+describe('a retry after the graph store kept refusing starts from the Gentle profile', () => {
+    const refused = { ...jobWithStaleTuning, status: 'failed', failureCategory: 'query_memory' } as AggregationJobResponse
+
+    it('pre-selects Gentle for a per-query memory or timeout failure, keeping the storage choice', () => {
+        const value = buildInitialOverridesFromJob(refused, { ...CONFIGURED_DEFAULTS, materializeFinePairs: 'auto' })
+        expect(value.tuning?.scanRangeWidth).toBe(25_000)
+        expect(value.tuning?.extractConcurrency).toBe(1)
+        expect(value.tuning?.scanShrinkFloor).toBe(1)
+        expect(value.tuning?.materializeFinePairs).toBe('auto')     // the fleet's storage choice survives
+        expect(value.maxRetries).toBe(5)
+        expect(gentleRetryReason(refused)).toMatch(/per-query memory limit/)
+        expect(gentleRetryReason({ status: 'failed', failureCategory: 'timeout' })).toMatch(/timed out/)
+    })
+
+    it('leaves every other failure — and a completed run — on the configured defaults', () => {
+        for (const job of [
+            { ...jobWithStaleTuning, status: 'failed', failureCategory: 'write_budget' },
+            { ...jobWithStaleTuning, status: 'completed', failureCategory: null },
+        ] as AggregationJobResponse[]) {
+            expect(buildInitialOverridesFromJob(job, CONFIGURED_DEFAULTS).tuning).toEqual(CONFIGURED_DEFAULTS)
+            expect(gentleRetryReason(job)).toBeNull()
+        }
     })
 })

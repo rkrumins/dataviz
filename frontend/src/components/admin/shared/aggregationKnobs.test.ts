@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 import {
     KNOB_BY_KEY, TUNING_KNOBS, compactBytes, compactEdges, fitsEdges, freeAfterReserve,
-    fullDetailVerdict, knobPlaceholder, resolveKnob,
+    fullDetailVerdict, knobPlaceholder, resolveKnob, serverCapNote,
 } from './aggregationKnobs'
 
 const GB = 2 ** 30
@@ -16,6 +16,7 @@ const GB = 2 ** 30
 const NUMERIC_TUNING_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk', 'writePacingRatio',
     'extractConcurrency', 'maxMaterializedEdges', 'shardReservePct', 'bytesPerEdge',
+    'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS', 'stallTimeoutSecs', 'maxWallSecs',
 ]
 
 describe('the knob catalogue', () => {
@@ -28,6 +29,23 @@ describe('the knob catalogue', () => {
         expect([KNOB_BY_KEY.bytesPerEdge.min, KNOB_BY_KEY.bytesPerEdge.max]).toEqual([64, 16_384])
         expect([KNOB_BY_KEY.maxMaterializedEdges.min, KNOB_BY_KEY.maxMaterializedEdges.max]).toEqual([10_000, 500_000_000])
         expect([KNOB_BY_KEY.maxPendingPairs.min, KNOB_BY_KEY.maxPendingPairs.max]).toEqual([50_000, 50_000_000])
+        expect([KNOB_BY_KEY.scanShrinkFloor.min, KNOB_BY_KEY.scanShrinkFloor.max]).toEqual([1, 5_000_000])
+        expect([KNOB_BY_KEY.scanTimeoutS.min, KNOB_BY_KEY.scanTimeoutS.max]).toEqual([5, 600])
+        expect([KNOB_BY_KEY.stallTimeoutSecs.min, KNOB_BY_KEY.stallTimeoutSecs.max]).toEqual([60, 604_800])
+        expect([KNOB_BY_KEY.maxWallSecs.min, KNOB_BY_KEY.maxWallSecs.max]).toEqual([3_600, 604_800])
+        // The stall window is a fleet default only: the per-job form already has it as the Stall timeout.
+        expect(KNOB_BY_KEY.stallTimeoutSecs.fleetOnly).toBe(true)
+    })
+
+    it('says when a per-query timeout is past the graph store’s own cap', () => {
+        const env: EnvTuningDefaults = { serverTimeoutMaxMs: 180_000 }
+        expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 120, env)).toBeNull()
+        expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, env)).toMatch(/Capped by the graph store at 180 s/)
+        expect(serverCapNote(KNOB_BY_KEY.writeTimeoutS, 300, env)).toMatch(/TIMEOUT_MAX/)
+        // Not a per-query knob, no cap reported, or no value → nothing to say.
+        expect(serverCapNote(KNOB_BY_KEY.maxWallSecs, 300, env)).toBeNull()
+        expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, {})).toBeNull()
+        expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, null, env)).toBeNull()
     })
 
     it('shows the server’s live env default as the placeholder, and what empty means for the ceiling', () => {

@@ -340,7 +340,25 @@ the **first checkpoint**, before any graph work. Resume rules:
   that column NULL — reconciliation drift and first builds, the cron drift
   sweep, the stale-marker reconciler, Refresh rollups, the projector heal
   hook — so at 900 they were the only rebuilds being killed for going
-  quiet, on exactly the graphs large enough to do it.
+  quiet, on exactly the graphs large enough to do it. Both windows are
+  re-read from the job row while it runs (`PATCH …/jobs/{id}/limits`), so
+  an operator can give a running job more time without cancelling it.
+* **The pressure ladder**: every per-query refusal the graph store can
+  make — the memory ceiling (`QUERY_MEM_CAPACITY`) and the per-query
+  timeout, whether the client deadline or the server's own *Query timed
+  out* — is absorbed by reading less per query: the first event of a run
+  pins wave concurrency to 1; a RECONCILE scan switches to the keys-only
+  two-pass strategy under `AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH`; the
+  sticky scan width halves down to `AGGREGATION_SCAN_SHRINK_FLOOR` (default
+  one row) and re-grows after sustained successes, never straight back into
+  a width that failed; write and delete batches halve the same way. At the
+  narrowest width a timeout is retried with backoff and heartbeats
+  (`AGGREGATION_SCAN_TIMEOUT_RETRIES`) and only then raised as
+  `MaterializationScanTimedOut` — a `TimeoutError` the worker treats as an
+  outage (resumable from the checkpoint); a memory refusal on a single row
+  is the one terminal outcome. What a run learned is persisted per source
+  (`data_source_state.observed_tuning`) and seeds the next run's ladder
+  where it is stricter than the knobs (`ignoreObserved` opts out).
 
 ## Tuning
 
@@ -363,8 +381,11 @@ pipeline).
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing |
-| `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
-| `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink ladder descends to. A floor-width TIMEOUT is an outage and fails the run; a floor-width per-query MEMORY refusal is a payload-size fact and fails the job terminally, no retries |
+| `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query budget (s). Per-job / Defaults as `scanTimeoutS` (5-600); the server caps any query at its `TIMEOUT_MAX` (`FALKORDB_SERVER_TIMEOUT_MAX_MS`). Raisable on a running job |
+| `FALKORDB_BULK_CREATE_TIMEOUT_S` | 60 | Per-query budget for the pipeline's write and delete batches (s). Per-job / Defaults as `writeTimeoutS` (5-600), capped by the server like the scan budget. Raisable on a running job |
+| `AGGREGATION_SCAN_SHRINK_FLOOR` | 1 | Narrowest range width the pressure ladder descends to. Per-job / Defaults as `scanShrinkFloor`. At 1 the only terminal outcome is a single row larger than `QUERY_MEM_CAPACITY`; a floor-width timeout is retried with backoff and then reported as an outage (resumable) |
+| `AGGREGATION_SCAN_TIMEOUT_RETRIES` | 6 | Backoff retries (2s, 4s … 60s + jitter, heartbeating between) a floor-width scan gets before the run raises `MaterializationScanTimedOut` (0-20) |
+| `AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH` | 5000 | Width at or below which a RECONCILE scan under pressure switches to the keys-only two-pass strategy instead of halving (1-5M) |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |
 | `AGGREGATION_MATERIALIZE_FINE_PAIRS` | true | Rollup storage. `true` (shipped default) always stores the full cube — leaf-involving and mixed-level pairs included — and FAILS above the write budget; `auto` picks cube-vs-boundary by estimate and degrades instead; `false` forces the boundary. Per-job as `materializeFinePairs`, fleet-wide from Ingestion → Freshness → Automation (③ Act → Advanced) |
 | `AGGREGATION_SHARD_RESERVE_PCT` | 20 | Write budget: share of the owning shard's `maxmemory` a rebuild must leave free. New rollup edges are allowed while they fit under it (0-90). Per-job / Defaults as `shardReservePct` |
@@ -378,8 +399,8 @@ pipeline).
 | `AGGREGATION_CAPACITY_MAX_SOURCES` | 500 | Capacity API: sources per sweep, largest first; the response says when it was truncated |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
-| `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. Matches what every UI trigger path sends as `timeoutSecs`; the machine paths (reconciliation, Refresh rollups, the projector heal hook) send nothing and land here. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS` |
-| `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net |
+| `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. The job's `timeoutSecs` wins; a job that sends none (the machine paths: reconciliation, Refresh rollups, the projector heal hook) takes the fleet Defaults' `stallTimeoutSecs`, then this. Bound 7 days. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS`. Raisable on a running job |
+| `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net; per-job / Defaults as `maxWallSecs` (1h-7d), never lower than the job's stall window. Raisable on a running job |
 | `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |
 | `AGGREGATION_LARGE_JOB_EDGE_THRESHOLD` | 500000 | Edge count classifying a job as "large" |
 | `AGGREGATION_MAX_LARGE_JOBS_PER_WORKER` | 1 | Large jobs one worker may hold concurrently |
@@ -399,8 +420,16 @@ claim policy** — draining, RSS above the high-water mark, or a second
 re-enqueueing the job for an idle sibling, so one pod's big jobs can
 never OOM-stack while another idles. SIGTERM flips drain (no new
 claims; running jobs checkpoint and hand over via exec-lock expiry).
-Every job records `worker_id`, and completed jobs persist `run_stats`
-(per-phase durations + writes/deletes) shown in the job detail panel.
+Every job records `worker_id` and a `run_stats` document: at the first
+checkpoint, `effective_tuning` (every knob's value and its source — `job`,
+`hint`, `env` — plus the stall window, wall clock and retries) and, as the
+ladder engages, `adapted` (current and narrowest scan width, shrinks, the
+concurrency and reconcile strategy in force, write batch / delete chunk,
+timeout retries, the last pressure events, `from_last_run`); on success the
+per-phase durations, writes/deletes, the write budget, `query_mem_capacity`
+and the final `adapted` are merged over it. Job History's *Run settings*
+disclosure renders it for every status; the `adapted` scalars also ride the
+live progress events (`adapted_*`).
 
 Memory budget per large job at 2M nodes / 5M edges: child→parent map
 ~200MB + accumulator ~250MB + ID cache ~125MB ≈ under 1GB; worker pods
@@ -502,10 +531,26 @@ slow query must not be multiplied), so a briefly-busy server or one dense
 ID range sent a multi-hour job back through worker retry into a full
 EXTRACT re-run. `_fetch_range` now halves the failing range down to
 `AGGREGATION_SCAN_SHRINK_FLOOR` (sticky for the rest of the run,
-re-growing after sustained health); only a floor-width timeout — an
-outage, not payload size — still fails the run. *Impact: multi-hour
-jobs absorb transient provider slowness instead of restarting; a
-partial scan is never silently treated as complete.*
+re-growing after sustained health). *Impact: multi-hour jobs absorb
+transient provider slowness instead of restarting; a partial scan is
+never silently treated as complete.*
+
+Two later findings changed the ladder's shape. First, the timeout arm was
+effectively dead in production: every query goes out with a server
+`TIMEOUT` 500 ms under the client budget, so a slow scan is aborted by the
+SERVER and arrives as a `ResponseError("Query timed out")`, which the
+ladder — listening for `asyncio.TimeoutError` only — re-raised; the real
+signal escaped to the worker's generic retry and restarted the run from
+its cursor. `_is_query_timeout_error` now matches it beside the memory
+matcher. Second, halving alone was the wrong lever for RECONCILE: its
+11-column projection is ~10× heavier per row than EXTRACT's two integers,
+so under pressure it now switches to a keys-only two-pass strategy (pass 1
+reads `ID(a), ID(b), ID(r), aggKey, latestUpdate`; pass 2 seeks the
+comparison columns by `aggKey` for exactly the desired, not-yet-flushed
+keys), the first event of a run pins wave concurrency to 1, the floor
+defaults to one row, and a floor-width timeout is retried with backoff
+before it is declared an outage. Writes and deletes halve their batches
+under the same signals. Only a single row over the ceiling is terminal.
 
 The same ladder now also catches the server's PER-QUERY memory refusal
 (`QUERY_MEM_CAPACITY`: *"Query's mem consumption exceeded capacity"*).
@@ -525,8 +570,9 @@ concatenated URNs) and the `sourceEdgeTypes` array, while EXTRACT returns
 two integers at the same range width — so the full-cube regime, which
 multiplies RECONCILE's row count, is what brings a graph within reach of
 the ceiling. A run that survived by degrading reports `scan_width_min`
-and `scan_shrinks` in `run_stats`. *Impact: growing past the per-query
-ceiling costs a slower run, not a failed job — and never a breaker trip.*
+and `scan_shrinks` in `run_stats` (and, since the ladder's rework, the
+full `adapted` record). *Impact: growing past the per-query ceiling costs
+a slower run, not a failed job — and never a breaker trip.*
 
 **6. Apply-resume could skip pairs (completeness).** The apply-phase
 cursor fast-forward bisected past every key ≤ the recorded position —

@@ -52,6 +52,9 @@ export interface RetriggerDialogProps {
      *  form's placeholders tell the truth. */
     envDefaults?: EnvTuningDefaults | null
     storedGlobal?: AggregationTuning | null
+    /** Why the form opened on a profile the operator did not pick (a Gentle
+     *  retry after a per-query memory or timeout failure). */
+    presetReason?: string | null
     /** Always shown. */
     onConfirmRetrigger: (overrides: AggregationOverridesValue) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
@@ -68,6 +71,7 @@ export function RetriggerDialog({
     dataSourceId,
     envDefaults,
     storedGlobal,
+    presetReason,
     onConfirmRetrigger,
     onConfirmResume,
 }: RetriggerDialogProps) {
@@ -163,6 +167,14 @@ export function RetriggerDialog({
 
                     {/* Body — scrollable form */}
                     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
+                        {presetReason && (
+                            <p
+                                data-testid="retrigger-preset-reason"
+                                className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300"
+                            >
+                                {presetReason}
+                            </p>
+                        )}
                         {dataSourceId && (
                             <RetriggerFitCheck
                                 dataSourceId={dataSourceId}

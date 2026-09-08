@@ -986,10 +986,10 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         // narrows its scans automatically, so reaching this means it hit the
         // narrowest slice it will go to, and the fix is to make the rebuild
         // read less rather than to free memory.
-        why: 'One rebuild query asked the graph store for more rows than a single query is allowed to hold.',
-        how: "Set this source's Rollup storage to Auto so the rebuild stores fewer summary edges, then rebuild. If it recurs, an administrator can raise the graph store's per-query limit alongside its memory limit.",
+        why: 'One rebuild query asked the graph store for more than a single query is allowed to hold — after the rebuild had already narrowed its scans to a single row.',
+        how: "A single row of that scan is larger than the store's per-query limit (QUERY_MEM_CAPACITY): an administrator raises it together with the container memory limit. The Gentle profile and Auto rollup storage lighten every query before this point, but cannot shrink one row.",
         showClear: true, showRetry: true, primary: 'clear',
-        retryWarning: 'will fail the same way until the rollup setting or the store limit changes.',
+        retryWarning: 'will fail the same way until the store limit changes.',
     },
     provider_unavailable: {
         why: 'The graph store was unreachable during the rebuild.',
@@ -1003,9 +1003,10 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         showClear: true, showRetry: false, primary: 'clear',
     },
     timeout: {
-        why: 'The rebuild took longer than the allowed time.',
-        how: 'Retry the rebuild. If it keeps timing out, the source may be too large for the current limit.',
+        why: 'The graph store stopped answering, or the rebuild made no progress for longer than its stall window.',
+        how: 'Check the graph store, then resume the rebuild from its checkpoint. If the store is merely slow, raise the scan timeout or the stall window in tuning, or re-trigger with the Gentle profile — it narrows the scans and allows each query longer.',
         showClear: true, showRetry: true, primary: 'retry',
+        retryWarning: 'resumes from its checkpoint; if the store is still unreachable it will time out again.',
     },
     conflict: {
         why: 'Another rebuild for this source was already running.',

@@ -38,7 +38,7 @@ import {
 } from '@/services/aggregationService'
 import {
     KNOB_BY_KEY, KNOB_GROUPS, TUNING_KNOBS, clampKnob, compactBytes, compactEdges,
-    envDefaultFor, fitsEdges, freeAfterReserve, knobPlaceholder,
+    envDefaultFor, fitsEdges, freeAfterReserve, knobPlaceholder, serverCapNote,
     type KnobGroup, type TuningKnob,
 } from './aggregationKnobs'
 import { CAPACITY_KEYS, useFleetCapacity } from './useAggregationCapacity'
@@ -46,7 +46,7 @@ import { CAPACITY_KEYS, useFleetCapacity } from './useAggregationCapacity'
 /** The same key the Automation modal reads, so a save here is visible there. */
 export const SETTINGS_KEY = ['aggregation', 'settings'] as const
 
-const GROUP_ORDER: KnobGroup[] = ['capacity', 'reading', 'writing']
+const GROUP_ORDER: KnobGroup[] = ['capacity', 'reading', 'writing', 'timeouts']
 
 const INPUT = 'w-32 px-2.5 py-1.5 text-[13px] text-right tabular-nums rounded-lg border border-glass-border bg-transparent text-ink placeholder:text-ink-muted outline-none transition-colors duration-150 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500/40 disabled:opacity-60 disabled:cursor-not-allowed'
 
@@ -86,6 +86,7 @@ function KnobRow({ knob, value, env, disabled, onChange, onReset }: {
     const set = isSet(value)
     const id = `defaults-${knob.key}`
     const envValue = envDefaultFor(knob, env)
+    const capNote = serverCapNote(knob, set ? value : null, env)
     const resolvedLine = set
         ? `Set here: ${value.toLocaleString()}${knob.emptyMeans ? '' : ` (environment default ${envValue.toLocaleString()})`}`
         : knob.emptyMeans
@@ -104,6 +105,7 @@ function KnobRow({ knob, value, env, disabled, onChange, onReset }: {
                 </label>
                 <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">{knob.help}</p>
                 <p className="mt-0.5 text-[11px] text-ink-muted tabular-nums">{resolvedLine}</p>
+                {capNote && <p className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">{capNote}</p>}
             </div>
             <div className="flex items-center gap-2 shrink-0 ml-auto">
                 <input
@@ -306,6 +308,13 @@ export function DefaultsDialog({ open, onClose }: { open: boolean; onClose: () =
                                                     ))}
                                                 </div>
 
+                                                {group === 'timeouts' && env && (
+                                                    <p className="mt-3 text-[11px] text-ink-muted">
+                                                        Set by the deployment: the graph store caps any query at {typeof env.serverTimeoutMaxMs === 'number' && env.serverTimeoutMaxMs > 0 ? `${env.serverTimeoutMaxMs / 1000} s` : 'no limit'} (TIMEOUT_MAX);
+                                                        a narrowest scan that keeps timing out is retried {env.scanTimeoutRetries ?? 6} times with backoff before the run resumes from its checkpoint;
+                                                        the reconcile switches to keys-only at {compactEdges(env.reconcileKeysOnlyWidth ?? 5_000)} rows.
+                                                    </p>
+                                                )}
                                                 {group === 'capacity' && (
                                                     <div className="mt-3 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] p-3 space-y-2">
                                                         <p className="text-[11px] font-semibold text-ink-secondary">What these limits mean on your shards right now</p>

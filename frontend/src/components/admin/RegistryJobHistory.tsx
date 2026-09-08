@@ -38,7 +38,7 @@ import { RetriggerDialog } from './job-history/RetriggerDialog'
 import { JobHistoryFilterBar } from './job-history/JobHistoryFilterBar'
 import { JobHistoryKPIs } from './job-history/JobHistoryKPIs'
 import { JobHistoryGroupedView } from './job-history/JobHistoryGroupedView'
-import type { AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import { gentlePreset, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 // ── Defaults ─────────────────────────────────────────────────────────
@@ -72,13 +72,41 @@ export function buildInitialOverridesFromJob(
     // the default any time the stored value is below the validator's floor.
     const storedBatchSize = job.batchSize ?? DEFAULT_BATCH_SIZE
     const safeBatchSize = storedBatchSize < 100 ? DEFAULT_BATCH_SIZE : storedBatchSize
-    return {
+    const base = {
         batchSize: safeBatchSize,
-        projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source'),
+        projectionMode: (job.projectionMode === 'dedicated' ? 'dedicated' : 'in_source') as 'dedicated' | 'in_source',
+    }
+    // A run the graph store kept refusing for size or time starts its retry
+    // from the Gentle profile — narrow scans, serial reads, generous pacing,
+    // a long scan timeout — keeping only the source's rollup-storage choice.
+    if (gentleRetryReason(job)) {
+        const gentle = gentlePreset()
+        const finePairs = defaultTuning?.materializeFinePairs
+        return {
+            ...base,
+            maxRetries: gentle.maxRetries,
+            timeoutMinutes: gentle.timeoutMinutes,
+            tuning: finePairs === undefined ? { ...gentle.tuning } : { ...gentle.tuning, materializeFinePairs: finePairs },
+        }
+    }
+    return {
+        ...base,
         maxRetries: DEFAULT_MAX_RETRIES,
         timeoutMinutes: Math.round(DEFAULT_TIMEOUT_SECS / 60),
         tuning: defaultTuning,
     }
+}
+
+/** Why a retry of this job is pre-set to the Gentle profile, or null. */
+export function gentleRetryReason(job: Pick<AggregationJobResponse, 'failureCategory' | 'status'>): string | null {
+    if (job.status !== 'failed') return null
+    if (job.failureCategory === 'query_memory') {
+        return 'Pre-selected the Gentle profile: the last run hit the graph store’s per-query memory limit. Gentle reads less per query from the start.'
+    }
+    if (job.failureCategory === 'timeout') {
+        return 'Pre-selected the Gentle profile: the last run timed out against the graph store. Gentle scans narrower with a longer per-query timeout.'
+    }
+    return null
 }
 
 function buildInitialOverridesForDataSource(
@@ -133,7 +161,7 @@ export function RegistryJobHistory() {
     const [confirmDelete, setConfirmDelete] = useState<AggregationJobResponse | null>(null)
     // Retrigger dialog: either job-derived (from a JobRow) or data-source-derived (from grouped card).
     const [retriggerCtx, setRetriggerCtx] = useState<
-        | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue }
+        | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue; presetReason?: string | null }
         | { kind: 'dataSource'; dataSourceId: string; dataSourceLabel: string; initialValue: AggregationOverridesValue }
         | null
     >(null)
@@ -376,13 +404,13 @@ export function RegistryJobHistory() {
     // appears one frame later, which still reads as instant.
     const handleResume = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job) })
         })
     }, [defaultTuning])
 
     const handleRetrigger = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job) })
         })
     }, [defaultTuning])
 
@@ -796,6 +824,7 @@ export function RegistryJobHistory() {
                 }
                 envDefaults={envDefaults}
                 storedGlobal={defaultTuning ?? null}
+                presetReason={retriggerCtx?.kind === 'job' ? retriggerCtx.presetReason ?? null : null}
                 onConfirmRetrigger={handleConfirmRetrigger}
                 onConfirmResume={retriggerCtx?.kind === 'job' ? handleConfirmResume : undefined}
             />

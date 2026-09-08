@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService';
-import { DEFAULT_TIMEOUT_SECS } from '@/components/admin/shared/AggregationOverridesForm';
+import { DEFAULT_TIMEOUT_SECS, gentlePreset } from '@/components/admin/shared/AggregationOverridesForm';
+import { friendlyError } from '@/services/providerService';
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage';
 import { SkipAggregationDialog } from './SkipAggregationDialog';
 
@@ -139,7 +140,7 @@ export function AggregationProgressBanner({
             </h3>
             <p className="text-xs text-ink-muted mt-0.5 max-w-xl">
               {readiness.aggregationStatus === 'failed' ? (
-                activeJob?.errorMessage || 'An unknown error occurred during aggregation.'
+                activeJob?.errorMessage ? friendlyError(activeJob.errorMessage) : 'An unknown error occurred during aggregation.'
               ) : (
                 'We are pre-computing structural hierarchies to optimize deep graph queries. View creation is paused until this completes.'
               )}
@@ -160,6 +161,25 @@ export function AggregationProgressBanner({
             </div>
           )}
           
+          {readiness.aggregationStatus === 'failed' && dataSourceId
+            && (activeJob?.failureCategory === 'query_memory' || activeJob?.failureCategory === 'timeout') && (
+            <button
+              type="button"
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors"
+              title="Narrow scans, serial reads, generous pacing and a longer per-query timeout — the profile for a graph the store keeps refusing"
+              onClick={() => {
+                const gentle = gentlePreset();
+                aggregationService.triggerAggregation(dataSourceId, {
+                  projectionMode: 'in_source', batchSize: 500,
+                  maxRetries: gentle.maxRetries, timeoutSecs: gentle.timeoutMinutes * 60, tuning: gentle.tuning,
+                }, 'manual');
+                setReadiness(prev => prev ? { ...prev, aggregationStatus: 'pending' } : null);
+                setPollEpoch(e => e + 1);
+              }}
+            >
+              Retry with the Gentle profile
+            </button>
+          )}
           <button
             onClick={() => setShowSkipDialog(true)}
             className="text-xs text-ink-muted hover:text-ink underline underline-offset-2 transition-colors ml-2"

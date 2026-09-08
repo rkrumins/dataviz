@@ -876,7 +876,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 {job.errorMessage.includes('mem consumption exceeded') && (
                                                     <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
                                                         <AlertTriangle className="w-3 h-3 flex-shrink-0" />
-                                                        One scan asked the graph store for more rows than a single query may hold. The store is healthy — this is not an outage. The rebuild narrows its scans automatically, so reaching this means it hit its narrowest slice: set Rollup storage to Auto so it reads fewer summary edges, or lower Scan Range Width in tuning.
+                                                        One query asked the graph store for more than a single query may hold{typeof job.runStats?.query_mem_capacity === 'number' ? ` (${(job.runStats.query_mem_capacity / 2 ** 20).toFixed(0)} MB)` : ''}. The store is healthy — this is not an outage. The rebuild had already dropped to serial reads, switched strategy and narrowed to a single row, so that one row is larger than the per-query ceiling. Raise QUERY_MEM_CAPACITY together with the container memory limit; the Gentle profile and Auto rollup storage lighten every query before this point but cannot shrink one row.
+                                                    </p>
+                                                )}
+                                                {job.errorMessage.includes('treating as a graph-store outage') && (
+                                                    <p className="mt-2 text-[10px] text-amber-400/80 flex items-center gap-1.5">
+                                                        <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+                                                        The graph store stopped answering: the narrowest scan kept timing out through every backoff retry. Check the store, then Resume from the checkpoint. If it is merely slow, raise the scan timeout in Advanced tuning (the store caps it at its TIMEOUT_MAX), or re-trigger with the Gentle profile.
                                                     </p>
                                                 )}
                                             </div>

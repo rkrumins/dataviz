@@ -17,12 +17,12 @@
 import { useMemo, useState, type JSX } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-    ChevronDown, Info, Activity, Shield, Zap, Copy, GitBranch,
+    ChevronDown, Info, Activity, Shield, Snail, Zap, Copy, GitBranch,
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
 import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
-import { TUNING_KNOBS, clampKnob, knobPlaceholder, resolveKnob, type TuningKnob } from './aggregationKnobs'
+import { TUNING_KNOBS, clampKnob, knobPlaceholder, resolveKnob, serverCapNote, type TuningKnob } from './aggregationKnobs'
 
 // ============================================
 // Public Contract
@@ -63,7 +63,7 @@ export interface AggregationOverridesFormProps {
 const RETRIES_MIN = 0
 const RETRIES_MAX = 10
 const TIMEOUT_MIN = 1
-const TIMEOUT_MAX = 1440
+const TIMEOUT_MAX = 10_080   // minutes: 7 days, the server's bound
 
 const clampRetries = (n: number) => Math.max(RETRIES_MIN, Math.min(RETRIES_MAX, n))
 const clampTimeout = (n: number) => Math.max(TIMEOUT_MIN, Math.min(TIMEOUT_MAX, n))
@@ -254,6 +254,10 @@ export function TuningFields({
                                     <span className="text-indigo-500"> {'\u00b7'} inherits {resolved.value.toLocaleString()} from Defaults</span>
                                 )}
                             </p>
+                            {(() => {
+                                const note = serverCapNote(spec, resolved.value, envDefaults)
+                                return note ? <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">{note}</p> : null
+                            })()}
                         </div>
                     )
                 })}
@@ -304,7 +308,7 @@ export function TuningFields({
 // ============================================
 
 interface ConfigPreset {
-    id: 'conservative' | 'balanced' | 'performance'
+    id: 'gentle' | 'conservative' | 'balanced' | 'performance'
     label: string
     description: string
     icon: typeof Shield
@@ -354,6 +358,18 @@ export const DEFAULT_TIMEOUT_SECS = PRESET_TIMEOUT_MINUTES * 60
 
 export const CONFIG_PRESETS: ConfigPreset[] = [
     {
+        id: 'gentle',
+        label: 'Gentle',
+        description: 'Large graph — go slow. Narrow scans, serial reads, generous pacing, a long scan timeout; keeps whatever the last run learned',
+        icon: Snail,
+        maxRetries: 5,
+        timeoutMinutes: PRESET_TIMEOUT_MINUTES,
+        tuning: {
+            ...CAPACITY_FLOOR, scanRangeWidth: 25_000, writePacingRatio: 4.0, extractConcurrency: 1,
+            scanShrinkFloor: 1, scanTimeoutS: 120,
+        },
+    },
+    {
         id: 'conservative',
         label: 'Conservative',
         description: 'Safest option — lowest provider load, gentlest write pacing',
@@ -389,7 +405,14 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
 const PRESET_MATCH_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk',
     'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
+    'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS',
 ]
+
+/** The profile for a graph the store keeps refusing: what a retry after a
+ *  per-query memory or timeout failure starts from. */
+export function gentlePreset(): ConfigPreset {
+    return CONFIG_PRESETS.find(p => p.id === 'gentle')!
+}
 
 /**
  * Which profile a set of overrides IS, or null for a custom mix. Strict on
@@ -645,7 +668,7 @@ export function AggregationOverridesForm({
                                     <div>
                                         <label className="flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary mb-1.5">
                                             Stall timeout (minutes)
-                                            <Tip label="How long the job may make NO forward progress before the watchdog kills it. This is not a cap on total runtime — a job that keeps progressing runs until it finishes (up to a 24h safety net), so a long value here only decides how long a genuinely wedged job holds the graph's write lease.">
+                                            <Tip label="How long the job may make NO forward progress before the watchdog kills it. This is not a cap on total runtime — a job that keeps progressing runs until it finishes (up to the wall-clock safety net in Advanced tuning), so a long value here only decides how long a genuinely wedged job holds the graph's write lease. Narrowed scans and backoff retries count as progress. Can be raised on a running job from Job History.">
                                                 <span><Info className="w-3 h-3 text-ink-muted/60 cursor-help" /></span>
                                             </Tip>
                                         </label>

@@ -436,13 +436,16 @@ usage denies every write under `noeviction`.
 
 > **It is rarely the right first lever.** A "Query's mem consumption exceeded
 > capacity" failure means one query asked for too many rows, not that the
-> instance is short of memory. The aggregation pipeline reacts by halving its
-> scan range and re-reading (`AGGREGATION_SCAN_RANGE_WIDTH`, floored at
-> `AGGREGATION_SCAN_SHRINK_FLOOR`), so a job normally absorbs this on its own
-> and reports `scan_width_min` in `run_stats`. When it fails terminally, fix
-> the read size first — set the source's Rollup storage to Auto, which is what
-> makes the RECONCILE scan (the pipeline's widest projection: 11 columns
-> including `aggKey` and the `sourceEdgeTypes` array) read far fewer rows.
+> instance is short of memory. The aggregation pipeline reacts by reading
+> serially, switching the RECONCILE scan (its widest projection: 11 columns
+> including `aggKey` and the `sourceEdgeTypes` array) to a keys-only two-pass
+> strategy, and halving its scan range down to one row
+> (`AGGREGATION_SCAN_SHRINK_FLOOR`, default 1), so a job absorbs this on its
+> own and reports what it adapted to in `run_stats.adapted`. When it fails
+> terminally, a SINGLE ROW of one projection is larger than the ceiling — the
+> message names it — and raising the ceiling, with the container limit, is
+> then the only lever. The ceiling is read into `run_stats.query_mem_capacity`
+> and shown on the capacity card as *per-query limit*.
 
 ### The rebuild reads `maxmemory` before it writes
 

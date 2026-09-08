@@ -14,13 +14,13 @@ const EFFECTIVE = {
     scan_range_width: 200_000, max_pending_pairs: 50_000_000, apply_chunk: 20_000, delete_chunk: 10_000,
     write_pacing_ratio: 1.0, extract_concurrency: 1, materialize_leaf_pairs: false, materialize_fine_pairs: 'true',
     max_materialized_edges: null, shard_reserve_pct: 20, bytes_per_edge: 640, scan_shrink_floor: 1,
-    scan_timeout_s: 120, write_timeout_s: 60, ignore_observed: false,
+    scan_timeout_s: 30, write_timeout_s: 60, ignore_observed: false,
     stall_timeout_secs: 10_800, max_wall_secs: 86_400, max_retries: 3,
     sources: {
         scan_range_width: 'job', max_pending_pairs: 'job', apply_chunk: 'env', delete_chunk: 'env',
         write_pacing_ratio: 'job', extract_concurrency: 'job', materialize_leaf_pairs: 'env',
         materialize_fine_pairs: 'env', max_materialized_edges: 'env', shard_reserve_pct: 'job',
-        bytes_per_edge: 'hint', scan_shrink_floor: 'env', scan_timeout_s: 'job', write_timeout_s: 'env',
+        bytes_per_edge: 'hint', scan_shrink_floor: 'env', scan_timeout_s: 'env', write_timeout_s: 'env',
         ignore_observed: 'env', stall_timeout_secs: 'job', max_wall_secs: 'env', max_retries: 'job',
     },
 }
@@ -44,7 +44,7 @@ describe('runSettingsRows', () => {
         expect(byKey.max_materialized_edges.value).toBe('Shard governs')
         expect(byKey.materialize_fine_pairs.value).toBe('Full detail')
         expect(byKey.stall_timeout_secs).toMatchObject({ value: '3h', source: 'job' })
-        expect(byKey.scan_timeout_s.value).toBe('120 s')
+        expect(byKey.scan_timeout_s.value).toBe('30 s')
         expect(byKey.ignore_observed).toBeUndefined()          // only shown when set
         expect(rows.map(r => r.key)[0]).toBe('scan_range_width')
     })

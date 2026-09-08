@@ -85,6 +85,22 @@ unhealthy provider** — start there.
 - Review their **role bindings** and **scope** (global vs workspace), and any
   **group** memberships. Prefer adjusting the **group** over the individual.
 
+### A rebuild is slow, or says a query was too large or timed out
+
+A rebuild that meets the graph store's **per-query** limits — the memory
+ceiling or the time limit on one query — does not fail; it goes slower until
+every query fits: serial reads, a lighter reconcile strategy, narrower scans
+down to a single row, smaller write batches, backoff retries. Job History
+shows *Going slower to fit the graph store* while it happens, and every
+run's **Run settings** disclosure lists what it ran with and what it adapted
+to. It remembers per source, so the next rebuild starts there. If a run does
+fail: a *single row* larger than the per-query memory ceiling means the
+ceiling (`QUERY_MEM_CAPACITY`) must be raised together with the container
+memory limit; a narrowest scan that kept timing out means the store stopped
+answering — check it, then **Resume from cursor**. Retry with the **Gentle**
+profile (pre-selected after either failure), or give a running job more time
+with **Extend time limit**. See [Rollup capacity](/guide/rollup-capacity).
+
 ### I changed an ontology and many Views shifted
 - That's expected if a new version was assigned — check the **audit trail** to see
   what changed and when. Re-assign the previous published version if needed.
