@@ -40,10 +40,16 @@ def _bounded_query(client, cypher: str, params=None):
     ``await client.query(...)``, bounded only by the pool's 75s socket hang-net — and
     ResilientGraph retries once, so a black-holed socket could stall a single
     reconcile query for ~150s. Imported lazily: projection imports this module during
-    its own init, so a module-level import is circular."""
-    from .projection import _READ_TIMEOUT_MS, _q
+    its own init, so a module-level import is circular.
 
-    return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS)
+    READ-ONLY (``GRAPH.RO_QUERY``). Every query in this module is a drift
+    OBSERVATION — counts and ordered scans — and drift checking runs on a
+    schedule. As ``GRAPH.QUERY`` these reads created the graph key whenever it
+    was absent, so a cache graph an operator deleted was silently re-created as
+    an empty 0/0 graph by the very check that exists to notice it is gone."""
+    from .projection import _READ_TIMEOUT_MS, _q_ro
+
+    return _q_ro(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS)
 
 from . import config
 from .models import (
@@ -158,13 +164,28 @@ async def falkor_counts(client) -> Tuple[int, int]:
     graph, so omitting it left the count one high after ANY aggregation job (including one the
     projector queued itself via ``on_rollups_stale``). ``_sweep_tombstoned`` cannot clear it — it
     carries no tombstone — so the verify reported extra entities, ``published`` went False, and
-    ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand."""
-    fn = await _bounded_query(
-        client,
-        f"MATCH (n) WHERE {_NOT_DERIVED} RETURN count(n) AS c")
-    fe = await _bounded_query(
-        client,
-        "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
+    ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand.
+
+    An ABSENT graph key counts as ``(0, 0)``. FalkorDB answers a read-only query
+    on a missing graph with ``Invalid graph operation on empty key``; that is the
+    honest reading of "the cache holds nothing", and it is the same number the
+    old ``GRAPH.QUERY`` form reported — the difference being that the old form
+    first CREATED the graph in order to find it empty. Drift is then reported
+    against committed main exactly as before, the watermark holds, and reads
+    fall back to Postgres."""
+    from .projection import _is_missing_graph_error
+
+    try:
+        fn = await _bounded_query(
+            client,
+            f"MATCH (n) WHERE {_NOT_DERIVED} RETURN count(n) AS c")
+        fe = await _bounded_query(
+            client,
+            "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
+    except Exception as exc:
+        if _is_missing_graph_error(exc):
+            return 0, 0
+        raise
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
 
 
@@ -454,10 +475,23 @@ class ProjectionReconciler:
             cursor = rows[-1][0]
 
     async def _scan_falkor(self, client, cypher: str):
-        """Ascending stream of a FalkorDB scan's rows via SKIP/LIMIT paging (O(batch) memory)."""
+        """Ascending stream of a FalkorDB scan's rows via SKIP/LIMIT paging (O(batch) memory).
+
+        An absent graph key yields nothing — same reading as
+        :func:`falkor_counts`, and the deep diff then reports every committed
+        entity as missing from the cache, which is exactly what has happened."""
+        from .projection import _is_missing_graph_error
+
         skip = 0
         while True:
-            res = await _bounded_query(client, cypher, params={"s": skip, "l": _PG_BATCH})
+            try:
+                res = await _bounded_query(
+                    client, cypher, params={"s": skip, "l": _PG_BATCH},
+                )
+            except Exception as exc:
+                if _is_missing_graph_error(exc):
+                    return
+                raise
             rows = getattr(res, "result_set", None) or []
             for row in rows:
                 yield row

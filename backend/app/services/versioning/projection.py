@@ -44,6 +44,7 @@ from .service import GraphVersioningService, _is_edge_payload
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
     _compute_searchable_text,
+    _is_missing_graph_error,
     _sanitize_label,
     _split_user_properties,
 )
@@ -76,6 +77,32 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
         coro = client.query(cypher, params=params, timeout=timeout_ms)
     except TypeError:
         coro = client.query(cypher, params=params)
+    return await asyncio.wait_for(coro, timeout=timeout_ms / 1000 + 10)
+
+
+async def _q_ro(client, cypher: str, params: Optional[dict] = None,
+                *, timeout_ms: int = _READ_TIMEOUT_MS):
+    """:func:`_q` for a query that must NOT be able to create the graph.
+
+    ``GRAPH.QUERY`` creates a missing graph key; ``GRAPH.RO_QUERY`` does not
+    (FalkorDB's ``should_command_create_graph``: true for QUERY/PROFILE, false
+    for RO_QUERY/EXPLAIN). Every read the projector issues purely to OBSERVE —
+    the reachability probe, the reconcile drift counts and scans — went through
+    ``_q``, so a graph an operator had deleted came back as an empty 0/0 graph
+    the next time drift was checked. Raises the usual
+    ``Invalid graph operation on empty key`` when the graph is absent; callers
+    that treat absence as "empty" use :func:`_is_missing_graph_error`.
+
+    Falls back to ``query`` for client fakes without ``ro_query`` (tests), which
+    keeps their behaviour unchanged.
+    """
+    ro = getattr(client, "ro_query", None)
+    if ro is None:
+        return await _q(client, cypher, params, timeout_ms=timeout_ms)
+    try:
+        coro = ro(cypher, params=params, timeout=timeout_ms)
+    except TypeError:
+        coro = ro(cypher, params=params)
     return await asyncio.wait_for(coro, timeout=timeout_ms / 1000 + 10)
 
 
@@ -362,11 +389,21 @@ class FalkorProjector:
                 # NON-DESTRUCTIVE REBUILD — probe connectivity BEFORE the drop. A full seed DROPs the
                 # graph key and can only re-seed it by MERGEing from Postgres, so dropping against an
                 # unreachable/misrouted instance would WIPE the read cache with no way to repair it
-                # ("rebuild wiped all data"). A trivial read (never touches the graph) proves the
-                # resolved client is reachable; if it is not, the error propagates to the outer handler
-                # (records last_error, resets status, re-raises) with NOTHING dropped — reads keep
+                # ("rebuild wiped all data"). A trivial read proves the resolved client is
+                # reachable; if it is not, the error propagates to the outer handler (records
+                # last_error, resets status, re-raises) with NOTHING dropped — reads keep
                 # falling back to Postgres and the existing cache is left intact.
-                await _q(client, "RETURN 1", timeout_ms=_READ_TIMEOUT_MS)
+                #
+                # Read-ONLY: as a ``GRAPH.QUERY`` this probe CREATED the graph key it claimed
+                # never to touch, which is why "graph deleted in the UI" reappeared as an empty
+                # graph. As a ``GRAPH.RO_QUERY`` a missing graph answers "empty key" instead —
+                # and that error is itself proof the instance is reachable, which is all the
+                # probe is for, so it is accepted rather than raised.
+                try:
+                    await _q_ro(client, "RETURN 1", timeout_ms=_READ_TIMEOUT_MS)
+                except Exception as probe_exc:
+                    if not _is_missing_graph_error(probe_exc):
+                        raise
                 # A full seed is a CLEAN REBUILD: drop any prior contents so the projected graph equals
                 # committed main exactly. The seed only MERGEs the live state, so without this an entity
                 # a merged draft DELETED (or stale rows on a just-re-pointed graph) would survive — the

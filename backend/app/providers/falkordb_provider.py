@@ -1904,6 +1904,46 @@ class FalkorDBProvider(GraphDataProvider):
 
         return await self._guarded_timed(_call, kind="ro", cypher=cypher, op=op, budget=t)
 
+    async def graph_key_exists(self, name: Optional[str] = None) -> Optional[bool]:
+        """Does the FalkorDB graph KEY exist right now?
+
+        ``True`` / ``False`` when the answer is known, ``None`` when the probe
+        itself could not answer (unreachable instance, EXISTS unsupported).
+
+        This is the gate that keeps observability from CREATING data. FalkorDB
+        decides per-command whether a missing key is created — see
+        ``should_command_create_graph`` in its ``cmd_dispatcher.c``::
+
+            CMD_QUERY / CMD_PROFILE   -> shouldCreate = true
+            CMD_RO_QUERY / CMD_EXPLAIN -> shouldCreate = false
+
+        so ANY ``GRAPH.QUERY`` against a graph an operator deleted silently
+        re-materialises it as a 0-node / 0-edge graph. ``CREATE INDEX`` is a
+        ``GRAPH.QUERY``, which is how a purely periodic reconcile (index DDL on
+        connect) resurrected every deleted graph within one poll interval.
+
+        Callers that must not create: probe first, skip on ``False``/``None``.
+        Callers that legitimately create (the write paths) skip the probe.
+
+        NEVER raises — an unreachable instance is ``None`` ("unknown"), which
+        every gate treats as "do not create". That keeps the never-raises
+        contract of :meth:`ensure_indices` intact.
+        """
+        key = name or getattr(self, "_graph_name", None)
+        try:
+            await self._ensure_connected()
+            exists = await asyncio.wait_for(
+                self._db.execute_command("EXISTS", key),
+                timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            )
+        except Exception as exc:
+            logger.debug(
+                "graph_key_exists: EXISTS probe for %r failed (%s) — unknown",
+                key, exc,
+            )
+            return None
+        return int(exists or 0) > 0
+
     async def _empty_key_is_genuine(self) -> bool:
         """Whether an "Invalid graph operation on empty key" really means the
         graph is empty.
@@ -2246,7 +2286,12 @@ class FalkorDBProvider(GraphDataProvider):
             )
         return stamped
 
-    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
+    async def ensure_indices(
+        self,
+        entity_type_ids: Optional[List[str]] = None,
+        *,
+        allow_graph_create: bool = False,
+    ):
         """Create indices for node labels and properties.
 
         When *entity_type_ids* is provided (e.g. from the resolved ontology),
@@ -2255,8 +2300,34 @@ class FalkorDBProvider(GraphDataProvider):
         The label/property policy lives in ``index_policy`` — shared with the
         alignment-analysis endpoint so its performance predictions can never
         drift from what is actually indexed here.
+
+        ``allow_graph_create`` is the resurrection guard. ``CREATE INDEX`` is a
+        ``GRAPH.QUERY``, and FalkorDB CREATES a missing graph key for that
+        command (see :meth:`graph_key_exists`). This method runs from the
+        connect-time reconcile and from ontology resolution — both pure
+        observability paths that fire on a schedule — so by default it PROBES
+        first and does nothing when the graph does not exist. Otherwise an
+        operator who deletes a graph in the FalkorDB UI gets it back as an
+        empty 0/0 graph on the next discovery sweep, forever.
+
+        Write paths that are about to create the graph anyway (currently
+        :meth:`save_custom_graph`, which indexes BEFORE its MERGEs so the
+        merges are index-driven) pass ``allow_graph_create=True`` and skip the
+        probe.
         """
         from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
+
+        if not allow_graph_create:
+            # Unknown (probe failed) is treated as absent: indices are
+            # best-effort and re-attempted on the next connect, whereas
+            # creating a graph an operator deleted is not undoable by us.
+            if await self.graph_key_exists() is not True:
+                logger.debug(
+                    "ensure_indices: graph %r does not exist — skipping index "
+                    "DDL so a read/observability path cannot create it.",
+                    self._graph_name,
+                )
+                return
 
         labels = indexed_labels(entity_type_ids)
         # Remember the ontology vocabulary the indices were built for, so
@@ -4191,7 +4262,7 @@ class FalkorDBProvider(GraphDataProvider):
     # Projection / Materialization Lifecycle Hooks                         #
     # ------------------------------------------------------------------ #
 
-    async def ensure_projections(self) -> None:
+    async def ensure_projections(self, *, allow_graph_create: bool = False) -> None:
         """Create indices on the projection target for fast AGGREGATED reads
         and (critically) for the unlabeled MERGE that runs on the write path.
 
@@ -4209,6 +4280,24 @@ class FalkorDBProvider(GraphDataProvider):
         and fall through silently on older releases (the existing per-label
         URN indexes remain in place for labeled queries).
         """
+
+        if not allow_graph_create:
+            # Same resurrection guard as ``ensure_indices`` — and it matters
+            # doubly here: in "dedicated" mode the target is the SEPARATE
+            # ``<graph>_proj`` key, so an ungated reconcile recreated BOTH the
+            # source graph and its projection companion as empty graphs.
+            proj_name = (
+                f"{self._graph_name}_proj"
+                if self._projection_mode == "dedicated"
+                else self._graph_name
+            )
+            if await self.graph_key_exists(proj_name) is not True:
+                logger.debug(
+                    "ensure_projections: graph %r does not exist — skipping "
+                    "projection index DDL so it cannot be created by a read path.",
+                    proj_name,
+                )
+                return
 
         try:
             await self._proj_query("CREATE INDEX FOR (n:_Projection) ON (n.urn)")
@@ -11026,7 +11115,12 @@ class FalkorDBProvider(GraphDataProvider):
         # idempotent but there's no point re-issuing DDL per chunk.
         if nodes_by_label and not getattr(self, "_save_indices_ensured", False):
             try:
-                await self.ensure_indices(list(nodes_by_label.keys()))
+                # allow_graph_create: this is the write path — the MERGEs
+                # below create the graph, and indexing FIRST is what makes
+                # them index-driven rather than label scans.
+                await self.ensure_indices(
+                    list(nodes_by_label.keys()), allow_graph_create=True,
+                )
                 self._save_indices_ensured = True
             except Exception as exc:
                 logger.warning(

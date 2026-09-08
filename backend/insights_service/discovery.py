@@ -131,6 +131,41 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
                 )
                 payload = {"assets": list(graphs)}
             else:
+                # Does the graph still exist? ``get_stats`` tolerates a missing
+                # graph and reports 0/0 — indistinguishable from a real but
+                # empty graph — so an asset whose graph an operator deleted
+                # silently kept a green "0 nodes" row. Ask explicitly first.
+                #
+                # This is also the sweep that used to RESURRECT those graphs:
+                # ``get_stats`` connects, and connecting scheduled the index
+                # reconcile, whose ``CREATE INDEX`` is a ``GRAPH.QUERY`` —
+                # which creates a missing graph key. That DDL is now gated on
+                # the same answer (``ensure_indices(allow_graph_create=False)``),
+                # so this branch reports absence instead of manufacturing it.
+                exists = None
+                probe = getattr(instance, "graph_key_exists", None)
+                if probe is not None:
+                    try:
+                        exists = await asyncio.wait_for(probe(), timeout=5.0)
+                    except Exception as probe_exc:      # unknown, not absent
+                        logger.debug(
+                            "discovery.exists_probe_failed provider=%s asset=%s err=%s",
+                            provider_id, asset_name, probe_exc,
+                        )
+                if exists is False:
+                    logger.warning(
+                        "discovery.graph_missing provider=%s asset=%s — the "
+                        "graph key does not exist on the instance; keeping the "
+                        "last known counts and flagging the row.",
+                        provider_id, asset_name,
+                    )
+                    await record_failure(
+                        provider_id, asset_name,
+                        f"graph_missing: {asset_name!r} no longer exists on this "
+                        "FalkorDB instance — showing last known counts. Restore "
+                        "it, re-run ingestion, or unregister the data source.",
+                    )
+                    return
                 try:
                     raw = await asyncio.wait_for(
                         instance.get_stats(), timeout=_DISCOVERY_LIVE_TIMEOUT_SECS

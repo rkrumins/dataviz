@@ -116,7 +116,11 @@ def test_ensure_indices_reports_real_failures_once(caplog):
     graph = _FailingGraph("connection reset")
     provider = _bare_provider(graph)
     with caplog.at_level(logging.WARNING, logger="backend.app.providers.falkordb_provider"):
-        _run(provider.ensure_indices(["table"]))
+        # allow_graph_create: this case exercises the DDL accounting itself, so
+        # it takes the write-path entry point rather than the (probe-gated)
+        # observability one. The gate is covered in
+        # ``test_falkordb_no_graph_resurrection``.
+        _run(provider.ensure_indices(["table"], allow_graph_create=True))
     warnings = [r for r in caplog.records if "ensure_indices" in r.getMessage()]
     assert len(warnings) == 1
     assert "failed" in warnings[0].getMessage()
@@ -127,6 +131,6 @@ def test_ensure_indices_treats_already_indexed_as_success(caplog):
     graph = _FailingGraph("Attribute 'urn' is already indexed")
     provider = _bare_provider(graph)
     with caplog.at_level(logging.WARNING, logger="backend.app.providers.falkordb_provider"):
-        _run(provider.ensure_indices([]))
+        _run(provider.ensure_indices([], allow_graph_create=True))
     warnings = [r for r in caplog.records if "ensure_indices" in r.getMessage()]
     assert warnings == []
