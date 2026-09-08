@@ -35,14 +35,17 @@ export function StatusChip({ meta, compact, className }: Props) {
     // "the cache is stale" in that situation.
     const showProviderDown = provider_health === 'down'
 
-    // The backend's ``stale`` classification triggers read-path
-    // enqueues (see _classify_freshness in insights.py); it fires as
-    // early as STATS_CACHE_FRESH_SECS (5 min default). With a 30-min
-    // discovery scheduler, that's a constant amber alarm on data the
-    // user perceives as current. Suppress the warning visual until
-    // ``staleness_secs`` exceeds the env-driven UI threshold (default
-    // 24h). The data and refresh path are unchanged — only the chip
-    // colour + label differ.
+    // The backend classifies a row ``stale`` the moment it passes
+    // DISCOVERY_CACHE_FRESH_SECS — i.e. as soon as the next sweep is
+    // due — so painting that amber would be a constant alarm on data
+    // the user rightly perceives as current. The warning visual is
+    // suppressed until ``staleness_secs`` passes the env-driven UI
+    // threshold, which now DEFAULTS to the backend's own self-heal
+    // floor (DISCOVERY_CACHE_SELF_HEAL_SECS, three missed sweeps)
+    // rather than a flat 24h. That flat default is what let a row
+    // which had missed dozens of 30-minute sweeps still render a calm
+    // green "Refreshed 20h ago". The age shown is always the real one
+    // — only the colour and the wording change here.
     const isStaleButRecent =
         status === 'stale'
         && staleness_secs != null
@@ -93,7 +96,10 @@ export function StatusChip({ meta, compact, className }: Props) {
         // Honest copy: a stale row has NO refresh job pending — reads never
         // enqueue provider work (see insights.py _build_response). It updates
         // on the next scheduled scan, or immediately via a manual refresh.
-        title = `These figures haven't refreshed in ${ago ?? 'a while'}. They update on the next scheduled scan — or refresh them now to update immediately.`
+        // Past the self-heal floor the read path enqueues one refresh itself
+        // (insights.py _build_response), so a row this old is being worked on,
+        // not merely waiting for a sweep that has evidently not been landing.
+        title = `These figures haven't refreshed in ${ago ?? 'a while'}. Opening this page has queued a refresh; it will also update on the next scheduled scan, or refresh it now to update immediately.`
         tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
     } else if (effectiveStatus === 'partial') {
         Icon = AlertTriangle
@@ -106,7 +112,7 @@ export function StatusChip({ meta, compact, className }: Props) {
         const ago = formatStaleness(staleness_secs)
         label = ago ? `Refreshed ${ago}` : 'Fresh'
         if (isStaleButRecent) {
-            title = 'Cached data; a background refresh is in flight but the row is still recent'
+            title = `Last refreshed ${ago ?? 'recently'} — past the refresh cadence but well inside the window where that is normal. The next scheduled scan will update it.`
         }
         if (provider_health === 'degraded') {
             // Cache is fresh but the provider is showing intermittent failures —

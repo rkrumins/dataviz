@@ -42,6 +42,13 @@ export interface DiscoverySchedulerStatus {
     list_jobs: number | null
     asset_jobs: number | null
     dedup_skipped: number | null
+    /** Rows past their freshness window on the last tick, and how many of them
+     *  the per-tick cap left for the next one. A `asset_deferred` that stays
+     *  high tick after tick is "the sweep cannot keep up with this fleet" —
+     *  which is what days-old figures on the Data Sources page look like from
+     *  the scheduler's side. */
+    asset_due: number | null
+    asset_deferred: number | null
 }
 
 export interface DiscoveryTickTriggerResult {

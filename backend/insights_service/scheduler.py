@@ -637,6 +637,12 @@ class DiscoveryTickSummary:
     list_jobs: int        # successful list-all enqueues
     asset_jobs: int       # successful per-asset enqueues
     dedup_skipped: int    # enqueues blocked by an in-flight claim
+    # Rows past DISCOVERY_CACHE_FRESH_SECS this tick, and how many of them the
+    # per-tick cap left for the next one. ``asset_due`` far above ``asset_jobs``
+    # tick after tick is the signal for "the sweep cannot keep up" — the exact
+    # condition behind rows that look days old, and one nothing surfaced before.
+    asset_due: int = 0
+    asset_deferred: int = 0
 
 
 # Module-level status. The /health snapshot and the discovery-status
@@ -664,6 +670,8 @@ def get_discovery_scheduler_status() -> dict:
             "list_jobs": None,
             "asset_jobs": None,
             "dedup_skipped": None,
+            "asset_due": None,
+            "asset_deferred": None,
         }
     age_secs = max(
         0,
@@ -677,6 +685,8 @@ def get_discovery_scheduler_status() -> dict:
         "list_jobs": _last_discovery_summary.list_jobs,
         "asset_jobs": _last_discovery_summary.asset_jobs,
         "dedup_skipped": _last_discovery_summary.dedup_skipped,
+        "asset_due": _last_discovery_summary.asset_due,
+        "asset_deferred": _last_discovery_summary.asset_deferred,
     }
 
 
@@ -689,17 +699,40 @@ _DISCOVERY_BOOTSTRAP_DELAY_SECS = float(
 )
 
 
-# When true (default), the background sweep's per-asset stats refresh
-# is limited to REGISTERED assets (those with a catalog entry) — the
-# ones users actually monitor. Unregistered assets refresh on demand
-# only: their rows serve from cache while stale and self-heal (hot
-# lane) when someone views them past the 7-day absolute expiry. Cuts
-# the sweep's standing provider load from every-cached-asset to
-# what's-actually-in-use.
+# When true, the background sweep's per-asset stats refresh is limited to
+# REGISTERED assets (those with a catalog entry). Defaults OFF now: the limit
+# was the reason an unregistered asset's row could sit untouched for days — the
+# sweep skipped it and the read path deliberately does not enqueue for a merely
+# stale row, so nothing refreshed it until someone crossed the 7-day absolute
+# expiry.
+#
+# Covering everything is affordable because the sweep is no longer
+# refresh-everything-every-tick: ``_due_assets`` only enqueues rows actually
+# past ``DISCOVERY_CACHE_FRESH_SECS``, oldest-first, capped per tick. So the
+# standing load is proportional to what has genuinely aged out, not to the size
+# of the cache — which makes full coverage CHEAPER than the old registered-only
+# sweep was, not more expensive.
 _SWEEP_REGISTERED_ONLY = (
-    os.getenv("DISCOVERY_SWEEP_REGISTERED_ONLY", "true").lower()
+    os.getenv("DISCOVERY_SWEEP_REGISTERED_ONLY", "false").lower()
     in ("1", "true", "yes", "on")
 )
+
+
+def _is_due_for_sweep(computed_at: Optional[str], now: datetime) -> bool:
+    """Has this cache row aged past the freshness window?
+
+    An unparseable or missing stamp is due — a row we cannot date is exactly
+    the row worth re-reading.
+    """
+    if not computed_at:
+        return True
+    try:
+        ts = datetime.fromisoformat(computed_at)
+    except (TypeError, ValueError):
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (now - ts).total_seconds() >= resilience.DISCOVERY_CACHE_FRESH_SECS
 
 
 async def _discovery_tick() -> DiscoveryTickSummary:
@@ -717,20 +750,27 @@ async def _discovery_tick() -> DiscoveryTickSummary:
 
     from backend.app.db.models import CatalogItemORM
 
+    now = datetime.now(timezone.utc)
+
     async with get_readonly_session() as session:
         provider_rows = await session.execute(
             select(ProviderORM.id).where(ProviderORM.is_active.is_(True))
         )
         provider_ids = [row[0] for row in provider_rows.all()]
 
+        # Oldest-first so the most overdue rows go first and the per-tick cap
+        # below can never starve anything: what does not fit this tick is at
+        # the front of the next one.
         cached_rows = await session.execute(
             select(
                 AssetDiscoveryCacheORM.provider_id,
                 AssetDiscoveryCacheORM.asset_name,
-            )
+                AssetDiscoveryCacheORM.computed_at,
+            ).order_by(AssetDiscoveryCacheORM.computed_at.asc())
         )
         cached_pairs: list[tuple[str, str]] = [
             (row[0], row[1]) for row in cached_rows.all()
+            if _is_due_for_sweep(row[2], now)
         ]
 
         registered: set[tuple[str, str]] | None = None
@@ -743,6 +783,7 @@ async def _discovery_tick() -> DiscoveryTickSummary:
             }
 
     list_jobs = asset_jobs = dedup_skipped = 0
+    asset_due = 0
 
     # 1. List-all sentinel for every active provider — refreshes the
     #    "what assets exist on this provider" payload.
@@ -753,13 +794,17 @@ async def _discovery_tick() -> DiscoveryTickSummary:
         else:
             dedup_skipped += 1
 
-    # 2. Per-asset stats refresh. Skip the empty-string sentinel
-    #    (already enqueued above) and, by default, unregistered assets.
+    # 2. Per-asset stats refresh, for rows that have actually aged out. Skips
+    #    the empty-string sentinel (already enqueued above) and, when
+    #    DISCOVERY_SWEEP_REGISTERED_ONLY is on, unregistered assets.
     for provider_id, asset_name in cached_pairs:
         if not asset_name:
             continue
         if registered is not None and (provider_id, asset_name) not in registered:
             continue
+        asset_due += 1
+        if asset_jobs >= resilience.DISCOVERY_SWEEP_MAX_PER_TICK:
+            continue          # counted as deferred, picked up oldest-first next tick
         msg_id = await enqueue_discovery_job_safe(provider_id, asset_name)
         if msg_id is not None:
             asset_jobs += 1
@@ -771,6 +816,8 @@ async def _discovery_tick() -> DiscoveryTickSummary:
         list_jobs=list_jobs,
         asset_jobs=asset_jobs,
         dedup_skipped=dedup_skipped,
+        asset_due=asset_due,
+        asset_deferred=max(0, asset_due - asset_jobs - dedup_skipped),
     )
 
 
@@ -786,10 +833,10 @@ async def trigger_discovery_tick_now() -> DiscoveryTickSummary:
     _last_discovery_summary = summary
     _last_discovery_tick_at = datetime.now(timezone.utc)
     logger.info(
-        "discovery_tick.complete providers=%d list_jobs=%d "
-        "asset_jobs=%d dedup_skipped=%d (manual_trigger=true)",
-        summary.providers, summary.list_jobs,
-        summary.asset_jobs, summary.dedup_skipped,
+        "discovery_tick.complete providers=%d list_jobs=%d asset_due=%d "
+        "asset_jobs=%d asset_deferred=%d dedup_skipped=%d (manual_trigger=true)",
+        summary.providers, summary.list_jobs, summary.asset_due,
+        summary.asset_jobs, summary.asset_deferred, summary.dedup_skipped,
     )
     return summary
 
@@ -830,9 +877,9 @@ async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
             _last_discovery_tick_at = datetime.now(timezone.utc)
             logger.info(
                 "discovery_tick.complete providers=%d list_jobs=%d "
-                "asset_jobs=%d dedup_skipped=%d",
-                summary.providers, summary.list_jobs,
-                summary.asset_jobs, summary.dedup_skipped,
+                "asset_due=%d asset_jobs=%d asset_deferred=%d dedup_skipped=%d",
+                summary.providers, summary.list_jobs, summary.asset_due,
+                summary.asset_jobs, summary.asset_deferred, summary.dedup_skipped,
             )
         except asyncio.CancelledError:
             raise

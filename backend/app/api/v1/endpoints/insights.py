@@ -243,12 +243,29 @@ async def _build_response(
         )
 
     if cache_row is not None and tier == "stale":
-        # Serve the cache verbatim — NO enqueue side effect. Reads must
-        # never generate provider work: refresh ownership belongs to the
-        # background sweep and the explicit /refresh endpoints. (The old
-        # enqueue-on-read here meant merely RENDERING an asset list
-        # manufactured one discovery job per visible row, on every
-        # provider flick and every 5s poll.)
+        # Serve the cache verbatim. Refresh ownership belongs to the background
+        # sweep and the explicit /refresh endpoints: enqueueing for every stale
+        # row meant merely RENDERING an asset list manufactured one discovery
+        # job per visible row, on every provider flick and every 5s poll.
+        #
+        # But "not the reader's job" needs a floor. Past
+        # DISCOVERY_CACHE_SELF_HEAL_SECS (default three missed sweeps) the row
+        # is not merely stale, it is STUCK — the sweep is evidently not landing
+        # on it — and a reader looking straight at days-old figures is the best
+        # evidence anyone will get. One enqueue, non-priority (the sweep's own
+        # lane), and the SET NX claim caps it at one job per
+        # DISCOVERY_DEDUP_TTL_SECS however many rows or viewers ask.
+        self_heal_after = resilience.DISCOVERY_CACHE_SELF_HEAL_SECS
+        stuck = (
+            self_heal_after > 0 and age is not None and age >= self_heal_after
+        )
+        job_id = None
+        if stuck:
+            job_id = await enqueue_discovery_job_safe(provider_id, asset_name)
+            logger.info(
+                "insights.self_heal provider=%s asset=%s age_secs=%s job=%s",
+                provider_id, asset_name or "<list-all>", age, job_id,
+            )
         try:
             payload = json.loads(cache_row.payload)
         except (TypeError, ValueError):
@@ -261,8 +278,11 @@ async def _build_response(
             asset_name=asset_name,
             updated_at=updated_at,
             age_secs=age,
-            refreshing=await _refresh_in_flight(provider_id, asset_name),
-            job_id=None,
+            refreshing=(
+                job_id is not None
+                or await _refresh_in_flight(provider_id, asset_name)
+            ),
+            job_id=job_id,
             provider_health=health,
             last_error=cache_row.last_error,
         )
@@ -730,6 +750,11 @@ class DiscoverySchedulerStatusResponse(BaseModel):
     list_jobs: Optional[int] = None
     asset_jobs: Optional[int] = None
     dedup_skipped: Optional[int] = None
+    # Backlog gauges: rows past their freshness window this tick, and how many
+    # the per-tick cap deferred. ``asset_deferred`` staying high tick after tick
+    # is what "the sweep cannot keep up with this fleet" looks like.
+    asset_due: Optional[int] = None
+    asset_deferred: Optional[int] = None
 
 
 @router.get(

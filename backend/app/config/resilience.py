@@ -432,6 +432,28 @@ DISCOVERY_CACHE_FRESH_SECS: int = int(
     os.getenv("DISCOVERY_CACHE_FRESH_SECS", str(DISCOVERY_REFRESH_INTERVAL_SECS))
 )
 
+# Age at which a READ stops trusting the background sweep and kicks ONE refresh
+# itself. The read path deliberately does not enqueue for merely-stale rows —
+# rendering an asset list would otherwise manufacture a discovery job per
+# visible row on every poll — but "deliberately does not enqueue" has no floor,
+# and a row whose sweep never lands (worker wedged, provider that was
+# unreachable for a while, an asset the sweep was configured to skip) then sat
+# untouched until someone noticed. Three consecutive missed sweeps is not a
+# cadence question any more, it is a stuck row, and one enqueue per read is
+# already rate-limited to one job per DISCOVERY_DEDUP_TTL_SECS by the SET NX
+# claim. Set to 0 to disable read-side self-heal entirely.
+DISCOVERY_CACHE_SELF_HEAL_SECS: int = int(
+    os.getenv("DISCOVERY_CACHE_SELF_HEAL_SECS", str(3 * DISCOVERY_REFRESH_INTERVAL_SECS))
+)
+
+# Per-tick ceiling on the background sweep's per-asset refreshes. The sweep is
+# due-ness filtered (only rows past DISCOVERY_CACHE_FRESH_SECS) and ordered
+# oldest-first, so this bounds standing provider load without starving anything:
+# whatever does not fit is the oldest thing next tick.
+DISCOVERY_SWEEP_MAX_PER_TICK: int = int(
+    os.getenv("DISCOVERY_SWEEP_MAX_PER_TICK", "200")
+)
+
 # ── Insights frontend / job-poll knobs (surfaced via /admin/insights/config) ─
 # Frontend reads these once at app mount via ``useInsightsConfig``;
 # all values are env-driven on the backend. Changing requires a
@@ -447,7 +469,14 @@ INSIGHTS_JOB_MAX_RETRIES: int = int(os.getenv("INSIGHTS_JOB_MAX_RETRIES", "4"))
 # threshold. Default 24h avoids the "Stale 4m ago" false-alarm UX;
 # ops can lower it for environments that need tighter freshness
 # signalling.
-INSIGHTS_UI_STALE_THRESHOLD_SECS: int = int(os.getenv("INSIGHTS_UI_STALE_THRESHOLD_SECS", "86400"))
+# Defaults to the read-side self-heal floor: the point at which the platform
+# itself stops calling the row acceptable is the honest point to stop showing it
+# as green. The old flat 24h default was chosen against a read path that could
+# not self-heal, and it is what let a row that had missed dozens of 30-minute
+# sweeps still render "Refreshed 20h ago" in calm green.
+INSIGHTS_UI_STALE_THRESHOLD_SECS: int = int(
+    os.getenv("INSIGHTS_UI_STALE_THRESHOLD_SECS", str(DISCOVERY_CACHE_SELF_HEAL_SECS))
+)
 
 # ── Insights worker / DLQ knobs ─────────────────────────────────────
 # Cap on the per-provider Refresh button's fan-out — protects against
