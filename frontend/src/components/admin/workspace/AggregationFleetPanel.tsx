@@ -137,7 +137,10 @@ export function AggregationFleetPanel() {
                 </div>
             )}
 
-            <DefaultsDialog open={showDefaults} onClose={() => setShowDefaults(false)} />
+            {/* Mounted only while open: the dialog reads react-query and the
+                panel must not require that context for a dialog nobody has
+                opened (the dashboard renders this panel without one). */}
+            {showDefaults && <DefaultsDialog open onClose={() => setShowDefaults(false)} />}
         </div>
     )
 }
