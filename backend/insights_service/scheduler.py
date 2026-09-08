@@ -637,6 +637,8 @@ class DiscoveryTickSummary:
     list_jobs: int        # successful list-all enqueues
     asset_jobs: int       # successful per-asset enqueues
     dedup_skipped: int    # enqueues blocked by an in-flight claim
+    due: int = 0          # rows past their own deadline this tick
+    seen: int = 0         # cached rows considered
 
 
 # Module-level status. The /health snapshot and the discovery-status
@@ -654,16 +656,28 @@ def get_discovery_scheduler_status() -> dict:
     when the scheduler hasn't completed its first tick yet (during
     bootstrap delay or right after process start).
     """
-    interval = resilience.DISCOVERY_REFRESH_INTERVAL_SECS
+    # ``interval_secs`` is the loop's TICK — how often due-ness is evaluated.
+    # ``default_interval_secs`` is the deadline a row inherits when its data
+    # source has no configured interval (or has none at all). They were the
+    # same number before per-source cadences existed, and the UI's "every 30m"
+    # pill was reading the tick as if it described every source.
+    tick = min(
+        resilience.DISCOVERY_TICK_INTERVAL_SECS,
+        resilience.DISCOVERY_REFRESH_INTERVAL_SECS,
+    )
+    default_interval = resilience.DISCOVERY_REFRESH_INTERVAL_SECS
     if _last_discovery_summary is None or _last_discovery_tick_at is None:
         return {
             "last_tick_at": None,
-            "interval_secs": interval,
+            "interval_secs": tick,
+            "default_interval_secs": default_interval,
             "next_tick_eta_secs": None,
             "providers": None,
             "list_jobs": None,
             "asset_jobs": None,
             "dedup_skipped": None,
+            "seen": None,
+            "due": None,
         }
     age_secs = max(
         0,
@@ -671,12 +685,15 @@ def get_discovery_scheduler_status() -> dict:
     )
     return {
         "last_tick_at": _last_discovery_tick_at.isoformat(),
-        "interval_secs": interval,
-        "next_tick_eta_secs": max(0, interval - age_secs),
+        "interval_secs": tick,
+        "default_interval_secs": default_interval,
+        "next_tick_eta_secs": max(0, tick - age_secs),
         "providers": _last_discovery_summary.providers,
         "list_jobs": _last_discovery_summary.list_jobs,
         "asset_jobs": _last_discovery_summary.asset_jobs,
         "dedup_skipped": _last_discovery_summary.dedup_skipped,
+        "seen": _last_discovery_summary.seen,
+        "due": _last_discovery_summary.due,
     }
 
 
@@ -702,20 +719,73 @@ _SWEEP_REGISTERED_ONLY = (
 )
 
 
+def _discovery_deadline(
+    interval_seconds: Optional[int], is_enabled: Optional[bool],
+) -> int:
+    """How stale a cache row may get before the sweep refreshes it.
+
+    The data source's OWN configured interval when it has one and polling is
+    enabled, else the global sweep cadence. Floored at the tick so a
+    misconfigured 1-second interval cannot ask for work the loop can't do.
+
+    A pre-registration cache row has no data source, so it keeps the global
+    cadence — there is no per-source setting to honour.
+    """
+    if is_enabled and interval_seconds:
+        return max(int(interval_seconds), resilience.DISCOVERY_TICK_INTERVAL_SECS)
+    return resilience.DISCOVERY_REFRESH_INTERVAL_SECS
+
+
+def _discovery_due(
+    last_attempt_at: Optional[str],
+    computed_at: Optional[str],
+    deadline: int,
+    now: datetime,
+) -> bool:
+    """Whether a cache row is past its deadline.
+
+    Measured from the last ATTEMPT, not the last successful payload: a
+    provider that keeps failing leaves ``computed_at`` frozen, and measuring
+    from that would re-enqueue it on every single tick forever. Falls back to
+    ``computed_at`` for rows written before ``last_attempt_at`` existed.
+    Missing or unparseable → due, matching ``_is_due``.
+    """
+    marker = last_attempt_at or computed_at
+    if not marker:
+        return True
+    try:
+        last = datetime.fromisoformat(marker)
+    except (TypeError, ValueError):
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (now - last).total_seconds() >= deadline
+
+
 async def _discovery_tick() -> DiscoveryTickSummary:
     """Single discovery scheduler pass.
 
-    Enqueues a list-all refresh per active provider, plus per-asset
-    stats refreshes for registered assets (all cached assets when
-    ``DISCOVERY_SWEEP_REGISTERED_ONLY=false``). Dedup is naturally
-    handled by the SET NX claim inside ``enqueue_discovery_job_safe``;
-    if a worker is already mid-job for ``(provider_id, asset_name)``
-    the call returns ``None`` and we count it as ``dedup_skipped``.
+    Enqueues a list-all refresh per active provider, plus per-asset stats
+    refreshes for registered assets (all cached assets when
+    ``DISCOVERY_SWEEP_REGISTERED_ONLY=false``) — but only for rows that are
+    past THEIR OWN deadline. The loop now ticks every
+    ``DISCOVERY_TICK_INTERVAL_SECS`` and each row carries its data source's
+    configured ``interval_seconds``, so a source set to poll every 5 minutes
+    is honoured instead of silently inheriting the 30-minute sweep cadence.
+    Rows with no data source (pre-registration cache entries) keep the global
+    cadence — there is no per-source setting for them to honour.
+
+    Dedup is still handled by the SET NX claim inside
+    ``enqueue_discovery_job_safe``; if a worker is already mid-job for
+    ``(provider_id, asset_name)`` the call returns ``None`` and we count it as
+    ``dedup_skipped``.
     """
     # Lazy import: avoid circular module-graph at process start.
     from .enqueue import enqueue_discovery_job_safe
 
     from backend.app.db.models import CatalogItemORM
+
+    now = datetime.now(timezone.utc)
 
     async with get_readonly_session() as session:
         provider_rows = await session.execute(
@@ -723,15 +793,35 @@ async def _discovery_tick() -> DiscoveryTickSummary:
         )
         provider_ids = [row[0] for row in provider_rows.all()]
 
+        # Each cached row, joined out to the data source that owns it (matched
+        # on the graph name the cache is keyed by) and that source's polling
+        # config. Both joins are outer: a pre-registration row has neither.
         cached_rows = await session.execute(
             select(
                 AssetDiscoveryCacheORM.provider_id,
                 AssetDiscoveryCacheORM.asset_name,
+                AssetDiscoveryCacheORM.computed_at,
+                AssetDiscoveryCacheORM.last_attempt_at,
+                DataSourcePollingConfigORM.interval_seconds,
+                DataSourcePollingConfigORM.is_enabled,
+            )
+            .join(
+                WorkspaceDataSourceORM,
+                (WorkspaceDataSourceORM.provider_id
+                 == AssetDiscoveryCacheORM.provider_id)
+                & (WorkspaceDataSourceORM.graph_name
+                   == AssetDiscoveryCacheORM.asset_name)
+                & WorkspaceDataSourceORM.deleted_at.is_(None),
+                isouter=True,
+            )
+            .join(
+                DataSourcePollingConfigORM,
+                DataSourcePollingConfigORM.data_source_id
+                == WorkspaceDataSourceORM.id,
+                isouter=True,
             )
         )
-        cached_pairs: list[tuple[str, str]] = [
-            (row[0], row[1]) for row in cached_rows.all()
-        ]
+        cached = list(cached_rows.all())
 
         registered: set[tuple[str, str]] | None = None
         if _SWEEP_REGISTERED_ONLY:
@@ -742,11 +832,24 @@ async def _discovery_tick() -> DiscoveryTickSummary:
                 (row[0], row[1]) for row in reg_rows.all() if row[1]
             }
 
-    list_jobs = asset_jobs = dedup_skipped = 0
+    list_jobs = asset_jobs = dedup_skipped = seen = due = 0
+
+    # The list-all sentinel's own cache row carries its deadline; it has no
+    # data source, so it always runs on the global cadence.
+    sentinel_marker = {
+        (r[0], r[1]): (r[2], r[3]) for r in cached if not r[1]
+    }
 
     # 1. List-all sentinel for every active provider — refreshes the
     #    "what assets exist on this provider" payload.
     for provider_id in provider_ids:
+        computed_at, last_attempt_at = sentinel_marker.get((provider_id, ""), (None, None))
+        if not _discovery_due(
+            last_attempt_at, computed_at,
+            resilience.DISCOVERY_REFRESH_INTERVAL_SECS, now,
+        ):
+            continue
+        due += 1
         msg_id = await enqueue_discovery_job_safe(provider_id, "")
         if msg_id is not None:
             list_jobs += 1
@@ -755,11 +858,19 @@ async def _discovery_tick() -> DiscoveryTickSummary:
 
     # 2. Per-asset stats refresh. Skip the empty-string sentinel
     #    (already enqueued above) and, by default, unregistered assets.
-    for provider_id, asset_name in cached_pairs:
+    for (provider_id, asset_name, computed_at, last_attempt_at,
+         interval_seconds, is_enabled) in cached:
         if not asset_name:
             continue
         if registered is not None and (provider_id, asset_name) not in registered:
             continue
+        seen += 1
+        if not _discovery_due(
+            last_attempt_at, computed_at,
+            _discovery_deadline(interval_seconds, is_enabled), now,
+        ):
+            continue
+        due += 1
         msg_id = await enqueue_discovery_job_safe(provider_id, asset_name)
         if msg_id is not None:
             asset_jobs += 1
@@ -771,6 +882,8 @@ async def _discovery_tick() -> DiscoveryTickSummary:
         list_jobs=list_jobs,
         asset_jobs=asset_jobs,
         dedup_skipped=dedup_skipped,
+        due=due,
+        seen=seen,
     )
 
 
@@ -786,9 +899,9 @@ async def trigger_discovery_tick_now() -> DiscoveryTickSummary:
     _last_discovery_summary = summary
     _last_discovery_tick_at = datetime.now(timezone.utc)
     logger.info(
-        "discovery_tick.complete providers=%d list_jobs=%d "
+        "discovery_tick.complete providers=%d seen=%d due=%d list_jobs=%d "
         "asset_jobs=%d dedup_skipped=%d (manual_trigger=true)",
-        summary.providers, summary.list_jobs,
+        summary.providers, summary.seen, summary.due, summary.list_jobs,
         summary.asset_jobs, summary.dedup_skipped,
     )
     return summary
@@ -806,10 +919,18 @@ async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
     """
     global _last_discovery_summary, _last_discovery_tick_at
 
-    interval = resilience.DISCOVERY_REFRESH_INTERVAL_SECS
+    # The loop WAKES on the tick; each row is enqueued when it is past its own
+    # deadline (see ``_discovery_deadline``). Sleeping the refresh interval, as
+    # this used to, made any configured cadence shorter than it unreachable.
+    tick = min(
+        resilience.DISCOVERY_TICK_INTERVAL_SECS,
+        resilience.DISCOVERY_REFRESH_INTERVAL_SECS,
+    )
     logger.info(
-        "Discovery scheduler started (interval=%ds, bootstrap_delay=%.0fs)",
-        interval, _DISCOVERY_BOOTSTRAP_DELAY_SECS,
+        "Discovery scheduler started (tick=%ds, default_deadline=%ds, "
+        "bootstrap_delay=%.0fs)",
+        tick, resilience.DISCOVERY_REFRESH_INTERVAL_SECS,
+        _DISCOVERY_BOOTSTRAP_DELAY_SECS,
     )
 
     # Bootstrap delay before the first tick.
@@ -829,9 +950,9 @@ async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
             _last_discovery_summary = summary
             _last_discovery_tick_at = datetime.now(timezone.utc)
             logger.info(
-                "discovery_tick.complete providers=%d list_jobs=%d "
+                "discovery_tick.complete providers=%d seen=%d due=%d list_jobs=%d "
                 "asset_jobs=%d dedup_skipped=%d",
-                summary.providers, summary.list_jobs,
+                summary.providers, summary.seen, summary.due, summary.list_jobs,
                 summary.asset_jobs, summary.dedup_skipped,
             )
         except asyncio.CancelledError:
@@ -843,7 +964,7 @@ async def run_discovery_scheduler(shutdown: asyncio.Event) -> None:
             # a transient blip.
 
         try:
-            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            await asyncio.wait_for(shutdown.wait(), timeout=tick)
             return  # shutdown triggered during wait
         except asyncio.TimeoutError:
             continue

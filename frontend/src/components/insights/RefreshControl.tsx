@@ -2,7 +2,9 @@
  * RefreshControl — Provider-level refresh affordance for RegistryAssets.
  *
  * Visual stack (left → right):
- *   1. Cadence pill: "Auto · every 30m"          (configured interval)
+ *   1. Cadence pill: "Auto · up to every 30m"     (default deadline; a source
+ *                                                  with its own configured
+ *                                                  interval refreshes sooner)
  *   2. Last-refresh-ago: "· last refresh 4m ago" (from /discovery/status)
  *   3. Refresh button:  "Refresh"                (force-refreshes this provider)
  *   4. Overflow caret:  ⋯                        (advanced ops actions)
@@ -138,7 +140,13 @@ export function RefreshControl({
             <div
                 className="flex items-center gap-1.5 text-[11px] text-ink-muted pr-1"
                 title={
-                    `Background scheduler runs every ${cadenceLabel}.`
+                    // The scheduler ticks far more often than any one source is
+                    // due; each source is refreshed on its own configured
+                    // interval, and this is the deadline a source inherits when
+                    // it has none. One number cannot describe the fleet, so say
+                    // which number this is.
+                    `Sources without their own configured interval refresh every `
+                    + `${cadenceLabel}; a source with one refreshes on that instead.`
                     + (status.data?.last_tick_at
                         ? ` Last completed tick at ${new Date(status.data.last_tick_at).toLocaleString()}.`
                         : ' No tick has completed yet — the scheduler may still be in its bootstrap delay.')
@@ -148,7 +156,7 @@ export function RefreshControl({
                 }
             >
                 <Clock className="w-3 h-3 shrink-0" />
-                <span className="font-medium">Auto · every {cadenceLabel}</span>
+                <span className="font-medium">Auto · up to every {cadenceLabel}</span>
                 {lastRefreshAgo && (
                     <span className="text-ink-muted/70">· last {lastRefreshAgo}</span>
                 )}
@@ -202,7 +210,8 @@ export function RefreshControl({
                                 Scheduler
                             </div>
                             <div className="text-[11px] text-ink-muted mt-0.5">
-                                Refreshes every {cadenceLabel}.
+                                Refreshes every {cadenceLabel} unless a source
+                                sets its own interval.
                                 {lastRefreshAgo
                                     ? ` Last tick ${lastRefreshAgo}.`
                                     : ' First tick pending.'}

@@ -19,17 +19,27 @@ from backend.app.db.models import ProviderHealthWindowORM
 from backend.insights_service import enqueue as enqueue_mod
 
 
-def _row(age_secs: int) -> SimpleNamespace:
-    computed = datetime.now(timezone.utc) - timedelta(seconds=age_secs)
+def _row(age_secs: int, attempt_age_secs: int | None = None) -> SimpleNamespace:
+    now = datetime.now(timezone.utc)
+    computed = now - timedelta(seconds=age_secs)
+    attempted = (
+        now - timedelta(seconds=attempt_age_secs)
+        if attempt_age_secs is not None else computed
+    )
     return SimpleNamespace(
         payload=json.dumps({"assets": ["a"]}),
         computed_at=computed.isoformat(),
         last_error=None,
+        last_attempt_at=attempted.isoformat(),
     )
 
 
 class _Session:
-    """session.get fake: health window → None, cache row → self._row."""
+    """session.get fake: health window → None, cache row → self._row.
+
+    ``execute`` answers the stale path's polling-config lookup with "no
+    configured interval", so the row falls back to the global sweep deadline.
+    """
 
     def __init__(self, row):
         self._row = row
@@ -38,6 +48,9 @@ class _Session:
         if orm is ProviderHealthWindowORM:
             return None
         return self._row
+
+    async def execute(self, _stmt):
+        return SimpleNamespace(first=lambda: None)
 
 
 def _wire_safe_enqueue(monkeypatch, *, claim_held: bool = False) -> list[tuple[str, str]]:
@@ -282,3 +295,154 @@ async def test_refresh_survives_redis_down_without_503(monkeypatch) -> None:
     assert isinstance(res, dict)
     assert res["jobs_queued"] == 0     # degraded: nothing queued, but no 503
     assert res["list_job_id"] is None
+
+
+# ── read-path repair for a row the sweep has stopped reaching ────────────
+#
+# Reads must not generate unbounded provider work (the removed enqueue-on-read
+# made one job per visible row on every 5s poll). These pin the three things
+# that keep the one exception bounded: it needs several MISSED ATTEMPTS, not
+# mere staleness; it is capped by a per-scope cooldown; and it never rides the
+# hot lane.
+
+
+class _CooldownRedis:
+    """SET NX + EX, in memory. Records what was asked for."""
+
+    def __init__(self):
+        self.keys: dict = {}
+        self.ttls: list[int] = []
+
+    async def set(self, key, _value, nx=False, ex=None):
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = "1"
+        self.ttls.append(ex)
+        return True
+
+
+def _wire_cooldown(monkeypatch) -> _CooldownRedis:
+    redis = _CooldownRedis()
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: redis,
+    )
+    return redis
+
+
+@pytest.mark.asyncio
+async def test_a_merely_stale_row_is_not_repaired_on_read(monkeypatch) -> None:
+    """Stale is normal between sweeps. Only a row nothing has ATTEMPTED for
+    several of its own deadlines says the sweep is not reaching it."""
+    calls = _wire_safe_enqueue(monkeypatch)
+    _wire_cooldown(monkeypatch)
+
+    barely_overdue = resilience.DISCOVERY_REFRESH_INTERVAL_SECS * 2
+    env = await insights._build_response(
+        session=_Session(_row(barely_overdue)), provider_id="p1", asset_name="g1",
+    )
+    assert env["meta"]["status"] == "stale"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_row_the_sweep_stopped_reaching_is_repaired_once(monkeypatch) -> None:
+    calls = _wire_safe_enqueue(monkeypatch)
+    redis = _wire_cooldown(monkeypatch)
+
+    abandoned = resilience.DISCOVERY_REFRESH_INTERVAL_SECS * 4
+    session = _Session(_row(abandoned))
+
+    env = await insights._build_response(
+        session=session, provider_id="p1", asset_name="g1",
+    )
+    assert calls == [("p1", "g1")]
+    assert env["meta"]["refreshing"] is True
+    # Background repair, not work the reader asked for: no job to poll.
+    assert env["meta"]["job_id"] is None
+    assert env["meta"]["status"] == "stale"
+
+    # Every subsequent read inside the cooldown is free.
+    for _ in range(5):
+        await insights._build_response(
+            session=session, provider_id="p1", asset_name="g1",
+        )
+    assert calls == [("p1", "g1")]
+    assert list(redis.keys) == ["insights:discovery:readheal:p1:g1"]
+
+
+@pytest.mark.asyncio
+async def test_repair_rides_the_sweep_lane_not_the_hot_lane(monkeypatch) -> None:
+    """The hot lane belongs to people clicking Refresh; a wall of abandoned
+    rows must never queue ahead of them."""
+    seen: list[dict] = []
+
+    async def fake_safe(provider_id, asset_name, **kw):
+        seen.append(kw)
+        return "1-1"
+
+    async def fake_claim_exists(_scope_key, **_kw):
+        return False
+
+    monkeypatch.setattr(insights, "enqueue_discovery_job_safe", fake_safe)
+    monkeypatch.setattr(insights, "claim_exists", fake_claim_exists)
+    _wire_cooldown(monkeypatch)
+
+    abandoned = resilience.DISCOVERY_REFRESH_INTERVAL_SECS * 4
+    await insights._build_response(
+        session=_Session(_row(abandoned)), provider_id="p1", asset_name="g1",
+    )
+    assert seen == [{}], "no priority=True — that is the user-action lane"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_being_retried_and_failing_is_not_piled_on(
+    monkeypatch,
+) -> None:
+    """``computed_at`` is ancient because the provider keeps refusing, but the
+    sweep IS reaching it — another job would just fail too."""
+    calls = _wire_safe_enqueue(monkeypatch)
+    _wire_cooldown(monkeypatch)
+
+    row = _row(
+        resilience.DISCOVERY_REFRESH_INTERVAL_SECS * 10,   # payload is days old
+        attempt_age_secs=60,                              # but we tried a minute ago
+    )
+    await insights._build_response(
+        session=_Session(row), provider_id="p1", asset_name="g1",
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_repair_can_be_switched_off(monkeypatch) -> None:
+    calls = _wire_safe_enqueue(monkeypatch)
+    _wire_cooldown(monkeypatch)
+    monkeypatch.setattr(resilience, "DISCOVERY_READ_HEAL_FACTOR", 0)
+
+    abandoned = resilience.DISCOVERY_REFRESH_INTERVAL_SECS * 4
+    await insights._build_response(
+        session=_Session(_row(abandoned)), provider_id="p1", asset_name="g1",
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_redis_outage_degrades_to_no_repair(monkeypatch) -> None:
+    """A cooldown we cannot take is a repair we do not attempt — never a
+    failed read."""
+    calls = _wire_safe_enqueue(monkeypatch)
+
+    class _DeadRedis:
+        async def set(self, *_a, **_kw):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(
+        "backend.app.services.aggregation.redis_client.get_redis", lambda: _DeadRedis(),
+    )
+
+    abandoned = resilience.DISCOVERY_REFRESH_INTERVAL_SECS * 4
+    env = await insights._build_response(
+        session=_Session(_row(abandoned)), provider_id="p1", asset_name="g1",
+    )
+    assert calls == []
+    assert env["meta"]["status"] == "stale"

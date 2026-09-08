@@ -386,6 +386,35 @@ async def collect_deep(envelope: StatsJobEnvelope) -> None:
                     "schema scans", envelope.data_source_id,
                 )
                 async with get_jobs_session() as session:
+                    # Write the probe's counts even though they match what is
+                    # stored. Two reasons, both about honesty:
+                    #
+                    # * ``_stamp_poll_success`` below resets the COUNTS lane's
+                    #   clock (``last_polled_at``, which ``_is_due`` reads), so a
+                    #   deep run that wrote nothing pushed the next counts poll
+                    #   out by up to a full interval. Writing here makes the
+                    #   stamp truthful — this poll did refresh the counts.
+                    # * The write is what reaches ``maybe_capture_snapshot``, so
+                    #   the profiling series records that the source WAS checked
+                    #   at this instant. Without it a deep-heavy cadence leaves
+                    #   holes that read as a dead pipeline.
+                    #
+                    # The digest is unchanged by construction, so this is
+                    # classified ``heartbeat`` and the existing 900s gate decides
+                    # whether a row is written at all.
+                    await upsert_data_source_stats_counts(
+                        session=session,
+                        ds_id=envelope.data_source_id,
+                        node_count=int(probe.get("nodeCount", 0) or 0),
+                        edge_count=int(probe.get("edgeCount", 0) or 0),
+                        entity_type_counts=json.dumps(
+                            probe.get("entityTypeCounts", {}) or {}
+                        ),
+                        edge_type_counts=json.dumps(
+                            probe.get("edgeTypeCounts", {}) or {}
+                        ),
+                        lane="deep",
+                    )
                     await touch_schema_freshness(session, envelope.data_source_id)
                     await _stamp_poll_success(session, envelope.data_source_id)
                 return

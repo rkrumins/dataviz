@@ -348,6 +348,15 @@ function AssetRow({
                                             envelope?.meta.updated_at
                                                 ? `\nLast refreshed: ${new Date(envelope.meta.updated_at).toLocaleString()}`
                                                 : ''
+                                        }${
+                                            // Only when it says something "last refreshed" does not:
+                                            // a provider that keeps refusing leaves the counts old
+                                            // while the sweep goes on checking. Without this the two
+                                            // states are indistinguishable from the row.
+                                            envelope?.meta.last_attempt_at
+                                            && envelope.meta.last_attempt_at !== envelope.meta.updated_at
+                                                ? `\nLast checked: ${new Date(envelope.meta.last_attempt_at).toLocaleString()}`
+                                                : ''
                                         }`
                             }
                             aria-label={`Refresh stats for ${assetName}`}

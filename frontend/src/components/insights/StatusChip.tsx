@@ -27,7 +27,7 @@ function formatStaleness(secs: number | null): string | null {
 }
 
 export function StatusChip({ meta, compact, className }: Props) {
-    const { status, staleness_secs, provider_health, last_error } = meta
+    const { status, staleness_secs, provider_health, last_error, attempt_age_secs } = meta
     const { ui_stale_threshold_secs } = useInsightsConfig()
 
     // Provider health overrides envelope status when the upstream is
@@ -49,6 +49,17 @@ export function StatusChip({ meta, compact, className }: Props) {
         && staleness_secs < ui_stale_threshold_secs
     const effectiveStatus = isStaleButRecent ? 'fresh' : status
 
+    // "Updated" and "checked" are different facts, and the gap between them is
+    // the whole diagnosis: a provider that keeps refusing leaves the counts
+    // honestly old while the sweep retries on cadence. Only shown when the two
+    // actually diverge — otherwise it is noise on every healthy row.
+    const checkedAgo =
+        attempt_age_secs != null
+        && staleness_secs != null
+        && staleness_secs - attempt_age_secs >= 60
+            ? formatStaleness(attempt_age_secs)
+            : null
+
     let Icon: typeof CheckCircle2 = CheckCircle2
     let label = 'Fresh'
     let title: string | undefined = undefined
@@ -68,7 +79,7 @@ export function StatusChip({ meta, compact, className }: Props) {
         Icon = Database
         const ago = formatStaleness(staleness_secs)
         label = compact ? 'Cached' : `Cached${ago ? ` · updated ${ago}` : ''}`
-        title = `The provider is offline right now — these figures are served from the last cached copy${ago ? ` (updated ${ago})` : ''}. They refresh automatically once the provider is reachable again.`
+        title = `The provider is offline right now — these figures are served from the last cached copy${ago ? ` (updated ${ago})` : ''}.${checkedAgo ? ` Last checked ${checkedAgo}.` : ''} They refresh automatically once the provider is reachable again.`
         tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
     } else if (showProviderDown) {
         // Provider offline AND no cached data to fall back on — genuinely nothing to show.
@@ -93,7 +104,10 @@ export function StatusChip({ meta, compact, className }: Props) {
         // Honest copy: a stale row has NO refresh job pending — reads never
         // enqueue provider work (see insights.py _build_response). It updates
         // on the next scheduled scan, or immediately via a manual refresh.
-        title = `These figures haven't refreshed in ${ago ?? 'a while'}. They update on the next scheduled scan — or refresh them now to update immediately.`
+        title = checkedAgo
+            ? `These figures haven't refreshed in ${ago ?? 'a while'}, but the source was last checked ${checkedAgo} — the refresh is running and failing.${last_error ? ` Last error: ${last_error}` : ''} Refresh now to retry immediately.`
+            : `These figures haven't refreshed in ${ago ?? 'a while'}. They update on the next scheduled scan — or refresh them now to update immediately.`
+        if (!compact && checkedAgo) label = `Stale${ago ? ` (${ago})` : ''} · checked ${checkedAgo}`
         tone = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
     } else if (effectiveStatus === 'partial') {
         Icon = AlertTriangle

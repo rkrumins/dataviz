@@ -15,6 +15,8 @@ const base: InsightsMeta = {
     poll_url: null,
     provider_health: 'ok',
     last_error: null,
+    last_attempt_at: null,
+    attempt_age_secs: null,
 }
 
 describe('assetStatsRefetchInterval', () => {

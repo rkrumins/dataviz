@@ -1471,6 +1471,14 @@ class AssetDiscoveryCacheORM(Base):
     computed_at = Column(Text, nullable=False, default=_now)
     expires_at = Column(Text, nullable=False)  # ISO; absolute, cleaned by scheduler
     last_error = Column(Text, nullable=True)
+    # When the last refresh ATTEMPT finished, success or failure — as opposed to
+    # ``computed_at``, which only moves when a scan actually produced a payload.
+    # A provider that has been failing for days keeps honestly-old counts, and
+    # without this column there is nothing to distinguish "the sweep is retrying
+    # this every 30 minutes and the provider keeps refusing" from "nothing has
+    # looked at this since Tuesday". NULL until the first attempt after this
+    # column shipped, which reads correctly as "due".
+    last_attempt_at = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_adc_expires", "expires_at"),

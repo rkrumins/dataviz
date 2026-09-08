@@ -405,6 +405,31 @@ PROFILING_SILENT_AFTER_SECS: int = int(
 # whose UI users rarely need second-by-second accuracy.
 DISCOVERY_REFRESH_INTERVAL_SECS: int = int(os.getenv("DISCOVERY_REFRESH_INTERVAL_SECS", "1800"))
 
+# How often the discovery loop WAKES — not how often any given row is
+# refreshed. The two used to be the same value, which meant a data source
+# configured to poll every 5 minutes could not be honoured: the loop simply
+# was not awake to notice. Now the loop ticks here and each row is enqueued
+# when it is past ITS OWN deadline (the source's configured
+# ``data_source_polling_configs.interval_seconds``, or
+# DISCOVERY_REFRESH_INTERVAL_SECS for a pre-registration cache row with no
+# data source). Same shape as the stats scheduler's tick + ``_is_due`` pair.
+# A tick is one grouped read plus a SET NX per due row, so 60s is cheap;
+# setting this to DISCOVERY_REFRESH_INTERVAL_SECS restores the old behaviour.
+DISCOVERY_TICK_INTERVAL_SECS: int = max(
+    5, int(os.getenv("DISCOVERY_TICK_INTERVAL_SECS", "60")),
+)
+
+# How many missed refresh cycles before a READ may enqueue a repair for the row
+# it is serving. Reads do not normally generate provider work — the old
+# enqueue-on-read manufactured one discovery job per visible row on every 5s
+# poll, and removing it is a standing constraint. This is a deliberately narrow
+# exception: it fires only when nothing has ATTEMPTED the row in this many of
+# its own deadlines (so a provider that is being retried and failing is never
+# piled on — the sweep is clearly not reaching this row at all), and it is
+# additionally bounded by a per-scope SET NX cooldown, so the ceiling is one job
+# per scope per cycle no matter how many people have the page open. 0 disables.
+DISCOVERY_READ_HEAL_FACTOR: int = int(os.getenv("DISCOVERY_READ_HEAL_FACTOR", "3"))
+
 # Dedup-claim TTL for discovery jobs. Discovery handlers complete in
 # seconds (list_graphs / get_stats); the stats-poll TTL of 1200s is
 # wildly oversized here and was the root cause of the "Stale for X

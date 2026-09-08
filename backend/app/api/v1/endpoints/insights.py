@@ -58,6 +58,7 @@ from backend.app.config import resilience
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import (
     AssetDiscoveryCacheORM,
+    DataSourcePollingConfigORM,
     ProviderAdmissionConfigORM,
     ProviderHealthWindowORM,
     ProviderORM,
@@ -150,6 +151,7 @@ def _build_envelope(
     job_id: Optional[str],
     provider_health: str,
     last_error: Optional[str],
+    last_attempt_at: Optional[str] = None,
 ) -> dict:
     return {
         "data": payload,
@@ -161,6 +163,13 @@ def _build_envelope(
             "updated_at": updated_at.isoformat() if updated_at else None,
             "staleness_secs": age_secs,
             "ttl_seconds": _ttl_seconds(age_secs),
+            # When a refresh was last ATTEMPTED, and how long ago. Distinct from
+            # ``updated_at``, which only moves when an attempt produced a payload:
+            # a provider that has been failing for days keeps honestly-old counts,
+            # and these two fields together are what let the UI say so instead of
+            # leaving the reader to guess whether anything is still running.
+            "last_attempt_at": last_attempt_at,
+            "attempt_age_secs": _age_seconds(_parse_iso(last_attempt_at)),
             "refreshing": refreshing,
             "job_id": job_id,
             "poll_url": (
@@ -190,6 +199,105 @@ async def _refresh_in_flight(provider_id: str, asset_name: str) -> bool:
         )
     except Exception:
         return False
+
+
+async def _effective_deadline(
+    session: AsyncSession, provider_id: str, asset_name: str
+) -> int:
+    """How stale this row may get before the sweep should have refreshed it.
+
+    The owning data source's configured ``interval_seconds`` when it has one,
+    else the global sweep cadence — the same resolution
+    ``scheduler._discovery_deadline`` makes, kept here rather than imported so
+    the web tier does not pull the worker module into a request path.
+
+    Only called for a row already classified stale, so the fresh path pays
+    nothing for it.
+    """
+    row = (await session.execute(
+        select(DataSourcePollingConfigORM.interval_seconds,
+               DataSourcePollingConfigORM.is_enabled)
+        .join(
+            WorkspaceDataSourceORM,
+            WorkspaceDataSourceORM.id
+            == DataSourcePollingConfigORM.data_source_id,
+        )
+        .where(
+            WorkspaceDataSourceORM.provider_id == provider_id,
+            WorkspaceDataSourceORM.graph_name == asset_name,
+            WorkspaceDataSourceORM.deleted_at.is_(None),
+        )
+        .limit(1)
+    )).first()
+    if row is not None and row[1] and row[0]:
+        return max(int(row[0]), resilience.DISCOVERY_TICK_INTERVAL_SECS)
+    return resilience.DISCOVERY_REFRESH_INTERVAL_SECS
+
+
+async def _maybe_heal_overdue(
+    session: AsyncSession,
+    provider_id: str,
+    asset_name: str,
+    cache_row: AssetDiscoveryCacheORM,
+) -> bool:
+    """Enqueue ONE background refresh for a row the sweep has stopped reaching.
+
+    Reads must not generate unbounded provider work — the removed
+    enqueue-on-read produced a discovery job per visible row on every 5s poll,
+    and that constraint stands. Three things keep this bounded:
+
+    * It measures the last ATTEMPT, not the last successful payload. A provider
+      that is being retried and refusing is never piled on; this fires only when
+      nothing has even tried in ``DISCOVERY_READ_HEAL_FACTOR`` of the row's own
+      deadlines, which means the sweep is not reaching it at all.
+    * A per-scope ``SET NX`` cooldown caps it at one job per scope per cycle,
+      however many viewers or polls there are.
+    * It rides the background sweep lane, not the hot lane, so it can never
+      queue ahead of someone actually clicking Refresh.
+
+    Never raises: a Redis blip degrades to "no repair", not a failed read.
+    """
+    factor = resilience.DISCOVERY_READ_HEAL_FACTOR
+    if factor <= 0:
+        return False
+    # Fall back to computed_at for rows written before last_attempt_at existed.
+    attempted = _parse_iso(cache_row.last_attempt_at) or _parse_iso(
+        cache_row.computed_at
+    )
+    age = _age_seconds(attempted)
+    if age is None:
+        return False
+    deadline = await _effective_deadline(session, provider_id, asset_name)
+    if age < deadline * factor:
+        return False
+
+    from backend.app.services.aggregation.redis_client import get_redis
+
+    key = f"insights:discovery:readheal:{provider_id}:{asset_name}"
+    try:
+        won = await get_redis().set(
+            key, "1", nx=True, ex=max(300, min(3600, deadline)),
+        )
+    except Exception as exc:
+        logger.debug(
+            "discovery read-heal: cooldown check failed for %s:%s (%s) — skipping",
+            provider_id, asset_name, exc,
+        )
+        return False
+    if not won:
+        return False
+    # Deliberately NOT the hot lane, and deliberately no compensating release
+    # if the enqueue is dedup-skipped: a job genuinely being in flight is the
+    # outcome we wanted, and losing one cycle to a race is correct.
+    job_id = await enqueue_discovery_job_safe(provider_id, asset_name)
+    if job_id is not None:
+        logger.info(
+            "discovery.read_heal provider=%s asset=%s attempt_age_secs=%d "
+            "deadline_secs=%d — sweep has not reached this row; enqueued one "
+            "background refresh",
+            provider_id, asset_name, age, deadline,
+        )
+    return job_id is not None
 
 
 async def _ensure_provider_exists(
@@ -240,19 +348,26 @@ async def _build_response(
             job_id=None,
             provider_health=health,
             last_error=cache_row.last_error,
+            last_attempt_at=cache_row.last_attempt_at,
         )
 
     if cache_row is not None and tier == "stale":
-        # Serve the cache verbatim — NO enqueue side effect. Reads must
-        # never generate provider work: refresh ownership belongs to the
-        # background sweep and the explicit /refresh endpoints. (The old
-        # enqueue-on-read here meant merely RENDERING an asset list
-        # manufactured one discovery job per visible row, on every
-        # provider flick and every 5s poll.)
+        # Serve the cache verbatim. Refresh ownership belongs to the background
+        # sweep and the explicit /refresh endpoints — the old enqueue-on-read
+        # here meant merely RENDERING an asset list manufactured one discovery
+        # job per visible row, on every provider flick and every 5s poll, and
+        # that must not come back. ``_maybe_heal_overdue`` is the one bounded
+        # exception: it fires only when nothing has ATTEMPTED this row in
+        # several of its own deadlines (i.e. the sweep is not reaching it), and
+        # a per-scope cooldown caps it at one job per cycle regardless of how
+        # many readers there are. See its docstring.
         try:
             payload = json.loads(cache_row.payload)
         except (TypeError, ValueError):
             payload = None
+        healed = await _maybe_heal_overdue(
+            session, provider_id, asset_name, cache_row,
+        )
         return _build_envelope(
             payload=payload,
             status="stale",
@@ -261,10 +376,13 @@ async def _build_response(
             asset_name=asset_name,
             updated_at=updated_at,
             age_secs=age,
-            refreshing=await _refresh_in_flight(provider_id, asset_name),
+            refreshing=healed or await _refresh_in_flight(provider_id, asset_name),
+            # No job_id/poll_url: this is background repair, not work the reader
+            # asked for, and the UI must not start a job-polling loop over it.
             job_id=None,
             provider_health=health,
             last_error=cache_row.last_error,
+            last_attempt_at=cache_row.last_attempt_at,
         )
 
     # No usable cache (true miss or past absolute expiry) — kick ONE
@@ -286,6 +404,7 @@ async def _build_response(
         job_id=job_id,
         provider_health=health,
         last_error=cache_row.last_error if cache_row else None,
+        last_attempt_at=cache_row.last_attempt_at if cache_row else None,
     )
 
 
@@ -730,6 +849,13 @@ class DiscoverySchedulerStatusResponse(BaseModel):
     list_jobs: Optional[int] = None
     asset_jobs: Optional[int] = None
     dedup_skipped: Optional[int] = None
+    # ``interval_secs`` above is the loop's TICK. This is the deadline a cached
+    # row inherits when it has no data source, or none with a configured
+    # interval; a registered source uses its own ``interval_seconds`` instead,
+    # so no single number describes the whole fleet any more.
+    default_interval_secs: Optional[int] = None
+    seen: Optional[int] = None
+    due: Optional[int] = None
 
 
 @router.get(

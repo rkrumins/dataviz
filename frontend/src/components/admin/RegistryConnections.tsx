@@ -77,6 +77,10 @@ function syntheticMetaFromSweep(
         updated_at: null,
         staleness_secs: null,
         ttl_seconds: null,
+        // Synthesised from the provider warmup sweep, not from a discovery
+        // cache row — there is no refresh attempt to report a time for.
+        last_attempt_at: null,
+        attempt_age_secs: null,
         refreshing: health.status === 'checking' || health.status === 'unknown',
         job_id: null,
         poll_url: null,

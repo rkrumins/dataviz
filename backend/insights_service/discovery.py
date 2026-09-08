@@ -377,10 +377,16 @@ async def record_failure(
                     computed_at=now.isoformat(),
                     expires_at=_absolute_expiry().isoformat(),
                     last_error=error[:2000],
+                    last_attempt_at=now.isoformat(),
                 )
             )
             return
         existing.last_error = error[:2000]
+        # ``computed_at`` deliberately does NOT move — the counts we are still
+        # serving really are that old. But the ATTEMPT did happen, and recording
+        # it is what lets the UI say "updated 3d ago, checked 4m ago" instead of
+        # leaving the reader unable to tell a failing provider from a dead sweep.
+        existing.last_attempt_at = datetime.now(timezone.utc).isoformat()
 
 
 # ── Internal: cache upsert helpers ───────────────────────────────────
@@ -407,6 +413,7 @@ async def _upsert_cache(
         "computed_at": now.isoformat(),
         "expires_at": _absolute_expiry().isoformat(),
         "last_error": last_error,
+        "last_attempt_at": now.isoformat(),
     }
     dialect = session.bind.dialect.name if session.bind is not None else "sqlite"
     if dialect == "postgresql":
@@ -419,6 +426,7 @@ async def _upsert_cache(
                 "computed_at": stmt.excluded.computed_at,
                 "expires_at": stmt.excluded.expires_at,
                 "last_error": stmt.excluded.last_error,
+                "last_attempt_at": stmt.excluded.last_attempt_at,
             },
         )
         await session.execute(stmt)
@@ -433,6 +441,7 @@ async def _upsert_cache(
                 "computed_at": stmt.excluded.computed_at,
                 "expires_at": stmt.excluded.expires_at,
                 "last_error": stmt.excluded.last_error,
+                "last_attempt_at": stmt.excluded.last_attempt_at,
             },
         )
         await session.execute(stmt)

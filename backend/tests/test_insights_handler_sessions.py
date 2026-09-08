@@ -221,7 +221,15 @@ async def test_deep_facet_one_fetch_and_session_discipline(monkeypatch) -> None:
 async def test_deep_facet_skips_scans_when_counts_unchanged(monkeypatch) -> None:
     """The 'never re-profile an unchanged graph' invariant: when the
     cheap counts probe matches the stored row, the deep facet must skip
-    the samples/tags scans + schema rebuild and only advance freshness."""
+    the samples/tags scans + schema rebuild.
+
+    It does still write the probe's counts. Skipping that write made
+    ``_stamp_poll_success`` below untruthful (it resets the COUNTS lane's
+    clock, deferring the next counts poll for a refresh that never happened)
+    and left no observation in the profiling series, so a deep-heavy cadence
+    produced holes that read as a dead pipeline. The write is counts-only —
+    the expensive full-row upsert stays skipped, which is what this invariant
+    is actually about."""
     events: list[str] = []
     stored = SimpleNamespace(
         node_count=5, edge_count=3,
@@ -247,8 +255,17 @@ async def test_deep_facet_skips_scans_when_counts_unchanged(monkeypatch) -> None
     assert events.count("io:get_stats(bypass=True)") == 1  # the probe
     assert "io:get_schema_stats" not in events  # heavy scans skipped
     assert "io:get_graph_schema" not in events
-    assert upserts_full == [] and upserts_counts == [] and primes == []
-    assert touched == ["ds1"]  # freshness advanced without a rewrite
+    assert upserts_full == [] and primes == []
+    assert touched == ["ds1"]  # freshness advanced without a schema rewrite
+    # The probe's counts are recorded, attributed to the lane that observed
+    # them. Identical to what is stored, so the history layer classifies it a
+    # heartbeat and its own interval decides whether a row is written.
+    assert len(upserts_counts) == 1
+    assert upserts_counts[0]["lane"] == "deep"
+    assert upserts_counts[0]["node_count"] == 5
+    assert upserts_counts[0]["edge_count"] == 3
+    assert json.loads(upserts_counts[0]["entity_type_counts"]) == {"dataset": 5}
+    assert json.loads(upserts_counts[0]["edge_type_counts"]) == {"CONTAINS": 3}
 
 
 @pytest.mark.asyncio

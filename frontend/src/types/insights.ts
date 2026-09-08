@@ -34,6 +34,16 @@ export interface InsightsMeta {
     poll_url: string | null
     provider_health: ProviderHealth
     last_error: string | null
+    /**
+     * ISO 8601 timestamp of the last refresh ATTEMPT — success or failure.
+     * Distinct from `updated_at`, which only moves when an attempt produced a
+     * payload. A provider that has been refusing for days keeps honestly-old
+     * counts; these two together are what distinguish "the provider is broken"
+     * from "nothing has looked at this since Tuesday".
+     */
+    last_attempt_at: string | null
+    /** Seconds since `last_attempt_at`. Null when nothing has attempted yet. */
+    attempt_age_secs: number | null
     /** Discovery scope identifiers — present on discovery envelopes. */
     provider_id?: string
     asset_name?: string
