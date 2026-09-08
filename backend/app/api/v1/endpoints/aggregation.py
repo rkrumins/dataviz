@@ -312,6 +312,60 @@ async def put_aggregation_settings(
     )
 
 
+# ── GET /aggregation/capacity, /data-sources/{ds_id}/capacity ───────
+#
+# What the write budget measures, for people: every aggregated source mapped
+# to the shard its rollups land on, that shard's used/maxmemory under the
+# fleet reserve, and how many more rollup edges would fit — the same reading
+# a rebuild takes before it writes. Ingestion-read like the settings GET:
+# the Freshness page shows this to the audience that already reads the
+# refusal text (which carries the same endpoints and byte figures) on a
+# failed source; system:admin is one of the ingestion-read permissions, so
+# the Infrastructure page reaches it too.
+
+@router.get(
+    "/aggregation/capacity",
+    summary="Graph-store capacity for rollups: every shard, what fits, the sources on it",
+    dependencies=[Depends(_require_ingestion_read)],
+)
+async def get_aggregation_capacity(
+    request: Request,
+    svc=Depends(_get_svc),
+    # Bulkhead pool: the sweep holds this across outbound INFO reads.
+    session: AsyncSession = Depends(get_graph_read_db_session),
+    fresh: bool = Query(False),
+):
+    if _PROXY_ENABLED:
+        return await _proxy("GET", "/aggregation/capacity", request)
+    from backend.app.services.aggregation.capacity import assemble_fleet_capacity
+    return await assemble_fleet_capacity(session, svc._registry, fresh=fresh)
+
+
+@router.get(
+    "/data-sources/{ds_id}/capacity",
+    summary="One source's footprint, its shard's headroom, and whether a rebuild would fit",
+    dependencies=[Depends(_require_ingestion_read)],
+)
+async def get_data_source_capacity(
+    ds_id: str,
+    request: Request,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_graph_read_db_session),
+):
+    if _PROXY_ENABLED:
+        return await _proxy(
+            "GET", f"/aggregation/data-sources/{ds_id}/capacity", request,
+        )
+    from backend.app.services.aggregation.capacity import assemble_source_capacity
+    doc = await assemble_source_capacity(session, svc._registry, ds_id)
+    if doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Data source {ds_id} not found",
+        )
+    return doc
+
+
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────
 
 @router.get(

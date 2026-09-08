@@ -1143,8 +1143,9 @@ class AggregationService:
         # Local import — the providers package pulls in the graph client and
         # this module is imported long before it.
         from backend.app.providers.falkordb_materialize import (
-            _materialize_fine_pairs_mode,
+            _materialize_fine_pairs_mode, env_tuning_defaults,
         )
+        from .schemas import EnvTuningDefaults
 
         env_kwargs = dict(
             env_rebuild_min_interval_secs=AGGREGATION_REBUILD_MIN_INTERVAL_SECS,
@@ -1152,6 +1153,9 @@ class AggregationService:
             env_probe_enabled=AGGREGATION_PROBE_ENABLED,
             env_probe_interval_secs=AGGREGATION_PROBE_INTERVAL_SECS,
             env_materialize_fine_pairs=_materialize_fine_pairs_mode(),
+            # Every knob's env default, live — the same readers the pipeline
+            # resolves with, so the editors' placeholders cannot drift.
+            env_tuning_defaults=EnvTuningDefaults(**env_tuning_defaults()),
         )
         row = await session.get(AggregationSettingsORM, "global")
         if row is None:
@@ -3593,6 +3597,8 @@ async def _state_map(
                 S.probe_enabled,
                 S.probe_interval_secs,
                 S.paused_until,
+                S.aggregation_edge_count,
+                S.observed_bytes_per_edge,
             ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
@@ -3616,6 +3622,10 @@ async def _state_map(
             "probe_enabled": r[12],
             "probe_interval_secs": r[13],
             "paused_until": r[14],
+            # Capacity: what the graph holds and what the last fresh rebuild
+            # measured per new edge on its shard (None until calibrated).
+            "aggregation_edge_count": r[15],
+            "observed_bytes_per_edge": r[16],
         }
         for r in rows
     }

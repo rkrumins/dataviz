@@ -86,8 +86,9 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from backend.app.providers.shard_capacity import (
-    ShardMemory, WriteBudget, calibrate_bytes_per_edge, compute_write_budget,
-    estimate_margin_pct_default, format_refusal, read_shard_memory,
+    ShardMemory, WriteBudget, bytes_per_edge_default, calibrate_bytes_per_edge,
+    compute_write_budget, estimate_margin_pct_default, format_refusal,
+    read_shard_memory, shard_reserve_pct_default,
 )
 from backend.common.providers.identity import (
     node_identity_expr as _shared_identity_expr,
@@ -299,6 +300,41 @@ def _max_cube_edges() -> int:
     return _env_int("AGGREGATION_MAX_CUBE_EDGES", 8_000_000, 10_000, 50_000_000)
 
 
+def _budget_recheck_edges() -> int:
+    """How many first-touch edges APPLY writes between re-reads of the
+    owning shard. The post-compute check answered for the whole result at
+    one instant; a shard shared with another graph's rebuild can fill up
+    while a multi-million-edge apply is still landing, and under
+    ``noeviction`` the write that fills it fails every graph's writes on
+    that shard. Re-measuring every N edges turns that into a loud refusal
+    a person can resume from the cursor once memory is freed."""
+    return _env_int("AGGREGATION_BUDGET_RECHECK_EDGES", 1_000_000, 100_000, 100_000_000)
+
+
+def env_tuning_defaults() -> Dict[str, Any]:
+    """Every tuning knob's ENV-resolved default, read live and keyed the way
+    ``tuning_json`` stores them — so the settings API can tell the editors
+    what "empty" really means instead of each editor hard-coding a guess.
+    The last three are information only: env-only, shown, never settable
+    through ``AggregationTuning``."""
+    return {
+        "scan_range_width": _scan_range_width(),
+        "max_pending_pairs": _max_pending_pairs(),
+        "apply_chunk": _apply_chunk(),
+        "delete_chunk": _delete_chunk(),
+        "write_pacing_ratio": _pacing_ratio(),
+        "extract_concurrency": _extract_concurrency(),
+        "materialize_leaf_pairs": _materialize_leaf_pairs(),
+        "materialize_fine_pairs": _materialize_fine_pairs_mode(),
+        "max_materialized_edges": _max_materialized_edges(),
+        "shard_reserve_pct": shard_reserve_pct_default(),
+        "bytes_per_edge": bytes_per_edge_default(),
+        "estimate_margin_pct": estimate_margin_pct_default(),
+        "max_cube_edges": _max_cube_edges(),
+        "budget_recheck_edges": _budget_recheck_edges(),
+    }
+
+
 class MaterializationBudgetExceeded(ValueError):
     """The result would not fit the owning shard's headroom — or, when the
     shard cannot be measured, exceeds ``max_materialized_edges``.
@@ -449,6 +485,7 @@ class AggregationPipeline:
         self._edges_before: int = 0
         self._calibration: Optional[Dict[str, Any]] = None
         self._fresh_run: bool = True
+        self._budget_rechecks: int = 0       # mid-apply shard re-reads this run
         # Per-job tuning overrides (frozen on the job row at trigger time)
         # layered over env defaults — see _knob_int/_knob_float/_knob_bool.
         self._tuning: Dict[str, Any] = dict(tuning or {})
@@ -894,6 +931,12 @@ class AggregationPipeline:
                         "scan_shrinks": self._scan_shrinks,
                     }
                     if self._scan_min_width is not None else {}
+                ),
+                # Mid-apply shard re-reads — present only when APPLY was long
+                # enough to need one, same convention as the ladder above.
+                **(
+                    {"budget_rechecks": self._budget_rechecks}
+                    if self._budget_rechecks else {}
                 ),
                 # Conformance advisories (identity / casing gaps) — present
                 # only when a gap was detected, so a clean run's run_stats is
@@ -2000,26 +2043,38 @@ class AggregationPipeline:
             ", ".join(f"d{rk}={n}" for rk, n in sorted(by_rank.items())),
         )
 
-    async def _check_write_budget(self, *, wave: Optional[List[int]] = None) -> None:
+    async def _check_write_budget(
+        self, *, wave: Optional[List[int]] = None,
+        growth_edges: Optional[int] = None, note: Optional[str] = None,
+    ) -> None:
         """Refuse a write the owning shard cannot take — failing the job
         with the numbers beats OOM-killing a shared instance.
 
         Growth, not size, is what the shard pays for. Before the apply it is
         every cell the graph does not already hold; for an overflow ``wave``
         it is that wave's first-touch keys, the shard having been re-read so
-        the waves before it are already inside ``used``."""
+        the waves before it are already inside ``used``; for a mid-apply
+        recheck it is ``growth_edges``, what is still to land. ``note`` rides
+        into the refusal so the message says which check refused."""
         # Union, not sum: a key flushed earlier AND re-touched since sits
         # in both sets — summing double-counts it and terminally fails a
         # legitimately under-budget job.
         flushed = self._flushed
         projected = len(flushed) + sum(1 for k in self._acc if k not in flushed)
-        growth = len(wave) if wave is not None else max(0, projected - self._edges_before)
+        if growth_edges is not None:
+            growth = max(0, int(growth_edges))
+        elif wave is not None:
+            growth = len(wave)
+        else:
+            growth = max(0, projected - self._edges_before)
         budget = await self._budget()
         verdict = budget.verdict(projected=projected, growth_edges=growth)
         if not verdict.ok:
+            composition = self._budget_composition()
+            if note:
+                composition = f"{composition}; {note}"
             raise MaterializationBudgetExceeded(format_refusal(
-                budget, verdict, graph=self.p._graph_name,
-                composition=self._budget_composition(),
+                budget, verdict, graph=self.p._graph_name, composition=composition,
             ))
 
     def _budget_composition(self) -> str:
@@ -2746,6 +2801,13 @@ class AggregationPipeline:
         chunk_size = self._knob_int("apply_chunk", _apply_chunk, 1_000, 200_000)
         done = 0
         flushed = self._flushed
+        # Only first-touch ("overwrite") keys grow the shard: a flushed key
+        # already sits there and its remainder ADDs weight in place. What
+        # the mid-apply recheck charges is the first-touch keys still to land.
+        first_touch_total = sum(1 for k in missing if k not in flushed)
+        first_touch_done = 0
+        since_recheck = 0
+        recheck_every = _budget_recheck_edges()
 
         for start in range(0, len(missing), chunk_size):
             chunk = missing[start:start + chunk_size]
@@ -2761,6 +2823,27 @@ class AggregationPipeline:
             await self._checkpoint(
                 PHASE_APPLY, self._max_applied_key, phase_label="applying",
             )
+            # Re-measure the owning shard every N first-touch edges: the
+            # post-compute check answered at one instant, and a shard shared
+            # with another graph's rebuild can fill up while this apply is
+            # still landing. The checkpoint above is already committed, so a
+            # refusal here resumes from the cursor once memory is freed —
+            # deterministic, not retried, and never the write that fills the
+            # shard and fails every graph on it. The fresh reading already
+            # contains every chunk landed so far; only the remainder is owed.
+            first_touch_done += len(overwrite)
+            since_recheck += len(overwrite)
+            remaining = first_touch_total - first_touch_done
+            if since_recheck >= recheck_every and remaining > 0:
+                since_recheck = 0
+                self._budget_rechecks += 1
+                await self._check_write_budget(
+                    growth_edges=remaining,
+                    note=(
+                        f"mid-apply recheck after {done:,} of {len(missing):,} "
+                        f"keys; {remaining:,} new edges still to write"
+                    ),
+                )
 
     async def _stamp_run_meta(self, edge_count: int) -> None:
         """Persist run metadata IN the graph — atomic with the data it

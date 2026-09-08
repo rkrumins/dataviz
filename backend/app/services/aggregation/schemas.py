@@ -1028,9 +1028,42 @@ class AggregationSettingsRequest(BaseModel):
         populate_by_name = True
 
 
+class EnvTuningDefaults(BaseModel):
+    """Every tuning knob's ENV-resolved default, read live on each GET — so
+    an editor can show what "empty" really means and label a value by where
+    it came from, instead of hard-coding a guess that drifts from the
+    deployment. The last three are information only: env-only, shown, never
+    settable through ``AggregationTuning``."""
+    scan_range_width: Optional[int] = Field(None, alias="scanRangeWidth")
+    max_pending_pairs: Optional[int] = Field(None, alias="maxPendingPairs")
+    apply_chunk: Optional[int] = Field(None, alias="applyChunk")
+    delete_chunk: Optional[int] = Field(None, alias="deleteChunk")
+    write_pacing_ratio: Optional[float] = Field(None, alias="writePacingRatio")
+    extract_concurrency: Optional[int] = Field(None, alias="extractConcurrency")
+    materialize_leaf_pairs: Optional[bool] = Field(None, alias="materializeLeafPairs")
+    materialize_fine_pairs: Optional[Literal["auto", "true", "false"]] = Field(
+        None, alias="materializeFinePairs",
+    )
+    max_materialized_edges: Optional[int] = Field(None, alias="maxMaterializedEdges")
+    shard_reserve_pct: Optional[int] = Field(None, alias="shardReservePct")
+    bytes_per_edge: Optional[int] = Field(None, alias="bytesPerEdge")
+    estimate_margin_pct: Optional[int] = Field(None, alias="estimateMarginPct")
+    max_cube_edges: Optional[int] = Field(None, alias="maxCubeEdges")
+    budget_recheck_edges: Optional[int] = Field(None, alias="budgetRecheckEdges")
+
+    class Config:
+        populate_by_name = True
+
+
 class AggregationSettingsResponse(BaseModel):
     tuning: Optional[AggregationTuning] = None
     cadence: Optional[AggregationCadence] = None
+    # What every knob resolves to when nothing overrides it, read live —
+    # the editors show these as the placeholder and the "Environment
+    # default" chip. Present whether or not a row exists.
+    env_tuning_defaults: Optional[EnvTuningDefaults] = Field(
+        None, alias="envTuningDefaults",
+    )
     # Effective ENV defaults (read server-side), so the cadence editor can
     # seed its controls from ``persisted ?? envDefault`` — a no-op save then
     # round-trips the real current default instead of pinning a wrong value.
@@ -1135,6 +1168,154 @@ class FreshnessSettingsResponse(BaseModel):
     paused_until: Optional[str] = Field(None, alias="pausedUntil")
     # True when this PATCH reset the breaker (echo of the action, not state).
     reset_breaker: Optional[bool] = Field(None, alias="resetBreaker")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── Capacity: what the write budget measures, for people ─────────────
+#
+# The rebuild reads the shard that owns a graph before it writes rollups
+# (``providers.shard_capacity``). These models carry the SAME reading and the
+# SAME arithmetic to the Freshness page, the per-source drawer and the
+# re-trigger dialog, so what an operator sees is what the next run decides.
+
+
+class CapacityLimitValue(BaseModel):
+    """One resolved fleet limit and where it came from: the stored Defaults
+    row (``global``) or the environment (``default``)."""
+    value: Optional[Union[int, float, str, bool]] = None
+    source: Literal["global", "default"] = "default"
+
+
+class CapacityLimits(BaseModel):
+    shard_reserve_pct: CapacityLimitValue = Field(alias="shardReservePct")
+    bytes_per_edge: CapacityLimitValue = Field(alias="bytesPerEdge")
+    # ``value`` None = no ceiling set: the shard governs.
+    max_materialized_edges: CapacityLimitValue = Field(alias="maxMaterializedEdges")
+    # 'auto' | 'true' | 'false' — the fleet-wide Rollup storage.
+    rollup_storage: CapacityLimitValue = Field(alias="rollupStorage")
+    # Environment-only: shown, never settable.
+    estimate_margin_pct: int = Field(alias="estimateMarginPct")
+    max_cube_edges: int = Field(alias="maxCubeEdges")
+    static_cap: int = Field(alias="staticCap")
+    budget_recheck_edges: int = Field(alias="budgetRecheckEdges")
+
+    class Config:
+        populate_by_name = True
+
+
+class CapacitySource(BaseModel):
+    """One aggregated source as its shard sees it: what it holds today and
+    what the last run learned about it."""
+    data_source_id: str = Field(alias="dataSourceId")
+    label: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    provider_name: Optional[str] = Field(None, alias="providerName")
+    graph_key: Optional[str] = Field(None, alias="graphKey")
+    projection_mode: Optional[str] = Field(None, alias="projectionMode")
+    aggregation_status: Optional[str] = Field(None, alias="aggregationStatus")
+    edge_count: int = Field(0, alias="edgeCount")
+    bytes_per_edge: int = Field(alias="bytesPerEdge")
+    bytes_per_edge_source: Literal["calibrated", "default"] = Field(alias="bytesPerEdgeSource")
+    footprint_bytes: int = Field(alias="footprintBytes")
+    last_cube_estimate: Optional[int] = Field(None, alias="lastCubeEstimate")
+    last_regime: Optional[str] = Field(None, alias="lastRegime")
+    last_failure_category: Optional[str] = Field(None, alias="lastFailureCategory")
+
+    class Config:
+        populate_by_name = True
+
+
+class ShardCapacity(BaseModel):
+    """One graph-store node under the fleet reserve. ``measurable`` False
+    means the budget cannot govern here (no ``maxmemory``, or the read
+    failed) and ``whyNot`` says why; the static count rule applies."""
+    endpoint: str
+    used: Optional[int] = None
+    maxmemory: Optional[int] = None
+    policy: Optional[str] = None
+    measurable: bool
+    why_not: Optional[str] = Field(None, alias="whyNot")
+    used_pct: Optional[float] = Field(None, alias="usedPct")
+    reserve_pct: int = Field(alias="reservePct")
+    reserve_bytes: Optional[int] = Field(None, alias="reserveBytes")
+    available_bytes: Optional[int] = Field(None, alias="availableBytes")
+    # How many more rollup edges fit at the fleet bytes-per-edge; None when
+    # the shard cannot be measured.
+    allowed_growth_edges: Optional[int] = Field(None, alias="allowedGrowthEdges")
+    governed_by: str = Field(alias="governedBy")
+    static_cap: int = Field(alias="staticCap")
+    sources: List[CapacitySource] = Field(default_factory=list)
+
+    class Config:
+        populate_by_name = True
+
+
+class UnresolvedSource(BaseModel):
+    """A source the sweep could not place on a shard, and why (coarse)."""
+    data_source_id: str = Field(alias="dataSourceId")
+    label: Optional[str] = None
+    workspace_id: Optional[str] = Field(None, alias="workspaceId")
+    provider_id: Optional[str] = Field(None, alias="providerId")
+    why_not: str = Field(alias="whyNot")
+
+    class Config:
+        populate_by_name = True
+
+
+class AggregationCapacityResponse(BaseModel):
+    limits: CapacityLimits
+    shards: List[ShardCapacity] = Field(default_factory=list)
+    unresolved: List[UnresolvedSource] = Field(default_factory=list)
+    sources_total: int = Field(0, alias="sourcesTotal")
+    truncated: bool = False
+    measured_at: str = Field(alias="measuredAt")
+    cache_age_ms: int = Field(0, alias="cacheAgeMs")
+
+    class Config:
+        populate_by_name = True
+
+
+class FullDetailPreflight(BaseModel):
+    """Would a FORCED full cube fit today? ``unknown`` until a source has
+    one successful run (the cube estimate is persisted on success only);
+    otherwise the pipeline's own verdict on the last run's estimate against
+    the live shard reading, margin included."""
+    estimate_edges: Optional[int] = Field(None, alias="estimateEdges")
+    estimate_source: Optional[Literal["lastRun"]] = Field(None, alias="estimateSource")
+    growth_edges: Optional[int] = Field(None, alias="growthEdges")
+    needed_bytes: Optional[int] = Field(None, alias="neededBytes")
+    verdict: Literal["fits", "short", "unknown"]
+    blocked_by: Optional[str] = Field(None, alias="blockedBy")
+    shortfall_bytes: Optional[int] = Field(None, alias="shortfallBytes")
+    shortfall_edges: Optional[int] = Field(None, alias="shortfallEdges")
+    margin_pct: int = Field(alias="marginPct")
+
+    class Config:
+        populate_by_name = True
+
+
+class AutoPreflight(BaseModel):
+    """Auto is never refused: it stores the cube only while the cube fits
+    both its own ceiling and the shard, and the depth-diagonal otherwise."""
+    never_refused: bool = Field(True, alias="neverRefused")
+    cube_ceiling: int = Field(alias="cubeCeiling")
+    would_store_cube: Optional[bool] = Field(None, alias="wouldStoreCube")
+    fallback: str = "diagonal"
+
+    class Config:
+        populate_by_name = True
+
+
+class SourceCapacityResponse(BaseModel):
+    source: CapacitySource
+    shard: ShardCapacity
+    limits: CapacityLimits
+    full_detail: FullDetailPreflight = Field(alias="fullDetail")
+    auto: AutoPreflight
+    measured_at: str = Field(alias="measuredAt")
 
     class Config:
         populate_by_name = True

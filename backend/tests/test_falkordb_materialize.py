@@ -2069,3 +2069,105 @@ def test_the_workers_calibrated_figure_beats_the_default_and_tuning_beats_both(m
     assert run_with({}, {}) == (512, "default")
     assert run_with({"bytes_per_edge_observed": 900}, {}) == (900, "calibrated")
     assert run_with({"bytes_per_edge_observed": 900}, {"bytes_per_edge": 1024}) == (1024, "tuning")
+
+
+# ── mid-apply recheck ───────────────────────────────────────────────────
+
+
+class _FillingShard(_ShardFake):
+    """A shard another graph is filling while this apply lands: it reads
+    roomy until anything of ours has landed, then full."""
+
+    async def __call__(self, db, *, mode, graph_key, timeout):
+        m = await super().__call__(db, mode=mode, graph_key=graph_key, timeout=timeout)
+        if self.fake.agg:
+            return _ShardMemory(m.endpoint, self.maxmemory, self.maxmemory, m.policy, 0.0, "measured")
+        return m
+
+
+def _small_apply_chunks(monkeypatch, size=2):
+    """The apply-chunk knob floors at 1,000 — far more than a fixture graph
+    holds — so the recheck's between-chunks path needs chunks of two."""
+    orig = mat.AggregationPipeline._knob_int
+
+    def knob(self, name, env_default, lo, hi):
+        return size if name == "apply_chunk" else orig(self, name, env_default, lo, hi)
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_knob_int", knob)
+
+
+def test_a_shard_that_fills_mid_apply_is_refused_loudly_after_a_checkpoint(monkeypatch):
+    """The post-compute check answered at one instant. When the shard fills
+    while the apply is landing, the recheck refuses with the numbers — after
+    the chunk's checkpoint, so a person can resume from the cursor once
+    memory is freed — instead of the write that fills the shard failing
+    every graph on it."""
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1)
+    _small_apply_chunks(monkeypatch)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _FillingShard(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    cursors = []
+
+    async def progress(processed, total, cursor, created, phase, *, progress_pct=None, stats=None):
+        cursors.append((cursor, phase))
+
+    # The full cube (8+ cells) so APPLY spans several chunks of two; the
+    # boundary result of this fixture is two cells, one chunk, no recheck.
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(p, progress=progress, tuning={"materialize_fine_pairs": True}))
+
+    msg = str(exc.value)
+    assert msg.startswith("write budget:") and "mid-apply recheck" in msg
+    assert "new edges still to write" in msg and "10.0.0.1:6379" in msg
+    assert len(fake.agg) == 2                       # the first chunk landed, the rest did not
+    last_cursor, last_phase = cursors[-1]
+    assert last_phase == "applying"
+    assert mat.parse_cursor(last_cursor)[1] == mat.PHASE_APPLY
+
+
+def test_a_roomy_shard_is_rechecked_and_the_run_says_so(monkeypatch):
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1)
+    _small_apply_chunks(monkeypatch)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+
+    result = _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
+
+    assert result["errors"] == 0 and len(fake.agg) > 2
+    assert result["run_stats"]["budget_rechecks"] >= 1
+    # A run that never needed a recheck carries no key (the ladder's convention).
+    fake2 = _FakeFalkor()
+    levels2 = _seed_two_chain_graph(fake2)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake2, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1_000_000)
+    assert "budget_rechecks" not in _run(_materialize(_make_provider(fake2, levels2)))["run_stats"]
+
+
+def test_the_recheck_charges_only_what_is_still_to_land(monkeypatch):
+    """The fresh reading already contains every chunk that landed; the
+    growth owed is the first-touch keys not yet written, shrinking by the
+    chunk each time."""
+    monkeypatch.setattr(mat, "_budget_recheck_edges", lambda: 1)
+    _small_apply_chunks(monkeypatch)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    charged = []
+    orig = mat.AggregationPipeline._check_write_budget
+
+    async def spy(self, *, wave=None, growth_edges=None, note=None):
+        if growth_edges is not None:
+            charged.append(growth_edges)
+        return await orig(self, wave=wave, growth_edges=growth_edges, note=note)
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_check_write_budget", spy)
+    _run(_materialize(p, tuning={"materialize_fine_pairs": True}))
+
+    n = len(fake.agg)
+    assert n > 2
+    assert charged == list(range(n - 2, 0, -2))

@@ -186,6 +186,39 @@ def _endpoint_of(conn: Any) -> str:
     return f"{host}:{port}" if host else "unknown"
 
 
+async def _owner(conn: Any, mode: Optional[str], graph_key: str) -> tuple:
+    """``(endpoint, node)`` for the node that owns ``graph_key`` through
+    ``conn`` — ``node`` is the cluster node to target, ``None`` outside
+    cluster mode (one node; the sentinel client follows failover inside its
+    pool). Raises like the client does; the callers decide what that means."""
+    if mode == "cluster":
+        init = getattr(conn, "initialize", None)
+        if init is not None:
+            await init()
+        node = conn.nodes_manager.get_node_from_slot(conn.keyslot(graph_key))
+        return f"{getattr(node, 'host', '?')}:{getattr(node, 'port', '?')}", node
+    return _endpoint_of(conn), None
+
+
+async def owner_endpoint(
+    db: Any, *, mode: Optional[str], graph_key: str, timeout: float,
+) -> str:
+    """Which node ``graph_key`` lives on — ``host:port`` — WITHOUT reading
+    its memory. A fleet view groups graphs by this and pays one ``INFO`` per
+    node instead of one per graph. Never raises: ``"unknown"`` when the
+    client cannot say."""
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return "unknown"
+    try:
+        async with asyncio.timeout(timeout):
+            endpoint, _ = await _owner(conn, mode, graph_key)
+            return endpoint
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.info("owner of %r unknown: %s", graph_key, exc)
+        return "unknown"
+
+
 async def read_shard_memory(
     db: Any, *, mode: Optional[str], graph_key: str, timeout: float,
 ) -> ShardMemory:
@@ -212,15 +245,10 @@ async def read_shard_memory(
     endpoint = "unknown"
     try:
         async with asyncio.timeout(timeout):
-            if mode == "cluster":
-                init = getattr(conn, "initialize", None)
-                if init is not None:
-                    await init()
-                node = conn.nodes_manager.get_node_from_slot(conn.keyslot(graph_key))
-                endpoint = f"{getattr(node, 'host', '?')}:{getattr(node, 'port', '?')}"
+            endpoint, node = await _owner(conn, mode, graph_key)
+            if node is not None:
                 raw = await conn.execute_command("INFO", "memory", target_nodes=node)
             else:
-                endpoint = _endpoint_of(conn)
                 raw = await conn.info("memory")
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("shard memory for %r via %s unavailable: %s",

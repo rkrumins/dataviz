@@ -1327,6 +1327,24 @@ def test_settings_read_is_ingestion_read_and_write_stays_admin():
     assert agg_mod._REQUIRE_SYSTEM_ADMIN in put_fns
 
 
+def test_capacity_reads_are_ingestion_read_never_admin_only():
+    """The capacity view shows the audience that already reads a refusal's
+    endpoints and byte figures the same numbers before the refusal — and
+    system:admin is one of the ingestion-read permissions, so the
+    Infrastructure page reaches it too."""
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+
+    for path in ("/aggregation/capacity", "/data-sources/{ds_id}/capacity"):
+        route = next(
+            (r for r in agg_mod.router.routes if r.path == path and "GET" in r.methods),
+            None,
+        )
+        assert route is not None, path
+        fns = _dep_calls(route.dependant)
+        assert any(getattr(f, "__name__", "") == "_require_ingestion_read" for f in fns), path
+        assert agg_mod._REQUIRE_SYSTEM_ADMIN not in fns, path
+
+
 # ── F9: per-source rebuild-cadence override PATCH ───────────────────────
 
 

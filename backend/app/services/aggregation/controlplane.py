@@ -622,6 +622,40 @@ async def put_settings(
     return await svc.put_settings(session, body.tuning, cadence=body.cadence)
 
 
+# ── GET /aggregation/capacity, /aggregation/data-sources/{ds_id}/capacity ──
+# The web tier proxies both here in proxy mode: the sweep resolves providers
+# and reads INFO memory, which belongs on the control plane's short-timeout
+# registry, not the web pool.
+
+@app.get(
+    "/aggregation/capacity",
+    summary="Graph-store capacity for rollups: every shard, what fits, the sources on it",
+)
+async def get_capacity(
+    fresh: bool = Query(False),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    from .capacity import assemble_fleet_capacity
+    return await assemble_fleet_capacity(session, svc._registry, fresh=fresh)
+
+
+@app.get(
+    "/aggregation/data-sources/{ds_id}/capacity",
+    summary="One source's footprint, its shard's headroom, and whether a rebuild would fit",
+)
+async def get_source_capacity(
+    ds_id: str,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    from .capacity import assemble_source_capacity
+    doc = await assemble_source_capacity(session, svc._registry, ds_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Data source {ds_id} not found")
+    return doc
+
+
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────
 
 @app.get(

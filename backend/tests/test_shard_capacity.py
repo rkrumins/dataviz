@@ -251,6 +251,27 @@ def _db(conn):
     return types.SimpleNamespace(connection=conn)
 
 
+def test_owner_endpoint_names_the_node_without_reading_it():
+    """A fleet view groups graphs by node and reads each node once, so it
+    needs the owner WITHOUT an INFO."""
+    conn = _Cluster({"used_memory": "1"})
+    assert _run(sc.owner_endpoint(_db(conn), mode="cluster", graph_key="g", timeout=1)) == "10.0.0.7:6379"
+    assert conn.initialized and conn.targets == []       # slot map yes, INFO no
+    single = _Standalone({"used_memory": "1"})
+    assert _run(sc.owner_endpoint(_db(single), mode="standalone", graph_key="g", timeout=1)) == "falkor:6379"
+
+
+def test_owner_endpoint_is_unknown_when_the_client_cannot_say():
+    class _Broken:
+        nodes_manager = None
+
+        async def initialize(self):
+            raise RuntimeError("cluster down")
+
+    assert _run(sc.owner_endpoint(_db(_Broken()), mode="cluster", graph_key="g", timeout=1)) == "unknown"
+    assert _run(sc.owner_endpoint(types.SimpleNamespace(), mode="cluster", graph_key="g", timeout=1)) == "unknown"
+
+
 def test_a_standalone_reading_is_measured_with_its_endpoint():
     conn = _Standalone({"used_memory": "1000", "maxmemory": 4000, "maxmemory_policy": "noeviction"})
     m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))

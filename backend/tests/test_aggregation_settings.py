@@ -176,6 +176,25 @@ def test_effective_tuning_without_settings_row():
     assert merged == {}
 
 
+def test_settings_report_the_live_env_default_of_every_knob(monkeypatch):
+    """The editors used to hard-code what "empty" meant; a changed env var
+    still showed the old number. The response now carries every knob's
+    env-resolved default, read live, whether or not a row exists."""
+    monkeypatch.setenv("AGGREGATION_SHARD_RESERVE_PCT", "35")
+    monkeypatch.setenv("AGGREGATION_SCAN_RANGE_WIDTH", "123456")
+    svc = _make_service()
+    for row in (None, _FakeSettingsRow()):
+        res = _run(svc.get_settings(_FakeSession(row)))
+        env = res.env_tuning_defaults
+        assert env is not None
+        assert env.shard_reserve_pct == 35 and env.scan_range_width == 123456
+        assert env.bytes_per_edge == 512 and env.max_cube_edges == 8_000_000
+        assert env.materialize_fine_pairs in ("auto", "true", "false")
+        # Every settable knob has its default on the wire, under its own name.
+        for key in AggregationTuning.model_fields:
+            assert getattr(env, key, "missing") != "missing", key
+
+
 # ── pipeline knob resolution ────────────────────────────────────────────
 
 
