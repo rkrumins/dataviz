@@ -13,6 +13,39 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Rollup capacity you can see, and every limit you can set.** Ingestion → Freshness gains a
+*Graph store capacity* card: one row per shard with a meter of memory in use, the fleet reserve
+marked on it, what is free after that reserve, how many more rollup edges that is, and the
+sources whose rollups live there — each a way into its drawer. A shard the budget cannot govern
+says why and which rule applies instead; a *would not fit* count filters the table to the
+sources whose last rebuild was refused. A source's drawer gains a *Capacity* block (footprint,
+shard headroom, last decision, and a pre-flight for Full detail versus Auto) and a per-source
+**Rollup storage** control in ③ Act — the control the "would not fit" guidance always named —
+settable before a large source's first build and honoured by automation and manual rebuilds
+alike. The re-trigger dialog answers whether *this* run would fit before it is queued,
+re-deciding as the form changes. Behind all of it: `GET /admin/aggregation/capacity` and
+`GET /admin/data-sources/{id}/capacity`, the write budget's own reading and arithmetic
+assembled for people, one `INFO` per shard, under a deadline, never raising.
+
+**A Defaults dialog on the house shell.** Every tuning knob in one place, grouped (Capacity,
+Reading, Writing, Rollup storage), each value labelled *Set here* or *Environment default*
+from the server's live env defaults (`envTuningDefaults` on the settings GET, so the editors'
+placeholders can no longer drift from the deployment), a Reset that sends the explicit null the
+merging server needs, a dirty guard, and a live what-if: as the reserve or bytes per edge is
+edited, the dialog restates how many more rollup edges each measured shard would take, before
+Save. Reachable from the workspace dashboard and from the capacity card.
+
+**The apply re-measures the shard.** Every `AGGREGATION_BUDGET_RECHECK_EDGES` (1,000,000)
+first-touch edges written, a rebuild re-reads the shard that owns its graph and refuses, with
+the numbers, when the remainder would not fit — after the chunk's checkpoint, so it can be
+resumed from its cursor once memory is freed, and never as the write that fills a shard shared
+with another graph. `run_stats.budget_rechecks` says it happened.
+
+**An operator guide, in the app.** *Rollup Capacity & Large Graphs* under For Administrators,
+linked from every new control; the automatic-reconciliation and external-change-notification
+feature docs are registered in the docs viewer for the first time, so the ordered "graph too
+big" runbook is finally reachable from the product.
+
 **A top-level Analytics section at `/analytics`.** Six tabs — Overview, Growth,
 Engagement, Content, Health, Workspaces — under one range control (7d/14d/30d/90d/6m/1y
 or any custom range) that every chart, figure and table on the page re-renders against,
@@ -65,6 +98,16 @@ to lie). The table had no horizon because its contents used to be rare; it now t
 per view open, lineage trace and graph search.
 
 ### Changed
+
+**Memory headroom on the Infrastructure page shows every measurable node, always**, with
+the rollup reserve marked and what still fits at the fleet bytes-per-edge. It used to appear
+only once a node was 85% full — after the one number that decides whether a rebuild fits had
+already stopped mattering.
+
+**The per-job Advanced tuning form and the fleet Defaults share one knob catalogue.** A knob is
+described once; an empty per-job field says which value it inherits and from where. The
+onboarding wizard's tuning step now shows the Rollup storage the fleet actually resolves instead
+of assuming Full detail.
 
 **The aggregation write budget measures the graph store instead of counting to a
 number.** "Writing this would risk exhausting the FalkorDB instance's memory" was a static
@@ -192,6 +235,14 @@ that cannot fail proves nothing.
 
 ### Upgrading
 
+**Run the migration.** `20260908_1000_rollup_storage` adds the nullable
+`aggregation.data_source_state.rollup_storage` column (inspector-guarded; the Control Plane's
+start-up init adds it too, so a Control Plane that boots before the migration is fine).
+
+**Set `maxmemory` where you want capacity measured.** The capacity card, the drawer block and
+the fit check read the same `INFO memory` pair the write budget does; a node without a
+`maxmemory` shows as *cannot be measured* with the static cap that governs it.
+
 **Presets no longer pin `maxMaterializedEdges`, and a stored one now overrides the shard.**
 An explicit ceiling on a job wins over the measured budget — that is what it is for — so a
 25M value left in Ingestion → Freshness → Defaults from an earlier preset will keep every
@@ -232,6 +283,21 @@ is required for correctness, but without it readers pay the aggregation on the r
 
 ### Known limitations
 
+- **The rebuild worker's own memory is bounded by a pair count, not by measurement.**
+  `AGGREGATION_MAX_PENDING_PAIRS` (50,000,000, and its upper bound) is the only thing that
+  bounds worker RSS, and at 50M pairs it sits above the reference 4Gi pod limit — a graph
+  producing ~30M+ pairs can be OOM-killed before the early flush fires. Lower the cap or raise
+  the pod limit before aggregating a graph of that size; a memory-aware flush is the fix.
+- Two rebuilds landing on the same shard at once each measure the shard for themselves: the
+  reserve, the fresh per-wave reading and the mid-apply recheck bound the overlap, but no
+  reservation is held between them.
+- `AGGREGATION_MAX_CUBE_EDGES` and `AGGREGATION_ESTIMATE_MARGIN_PCT` stay environment-only;
+  the Defaults dialog shows them for information.
+- The status probe and the capacity sweep can name the same node differently under an address
+  remap (the probe reads the env topology, the sweep the provider's own client); the
+  Infrastructure page unions the two by endpoint rather than joining them.
+- The Full-detail pre-flight is *unknown* until a source has one successful rebuild: the cube
+  estimate it needs is recorded on success only.
 - A custom role granted **only** `system:analytics:read` gets no nav item: the catalogue spec
   is `["system:admin", "system:org-admin", "system:audit:read"]`, so the client hides what the
   server would serve. The three seeded roles each also hold one of those, so this does not bite

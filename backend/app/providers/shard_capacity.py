@@ -186,14 +186,23 @@ def _endpoint_of(conn: Any) -> str:
     return f"{host}:{port}" if host else "unknown"
 
 
-async def _owner(conn: Any, mode: Optional[str], graph_key: str) -> tuple:
+async def _owner(
+    conn: Any, mode: Optional[str], graph_key: str, *, refresh: bool = True,
+) -> tuple:
     """``(endpoint, node)`` for the node that owns ``graph_key`` through
     ``conn`` — ``node`` is the cluster node to target, ``None`` outside
     cluster mode (one node; the sentinel client follows failover inside its
-    pool). Raises like the client does; the callers decide what that means."""
+    pool). Raises like the client does; the callers decide what that means.
+
+    ``refresh`` re-fetches the cluster's slot map first (one ``CLUSTER
+    SLOTS``), which is what a reading that must follow a failover wants.
+    A fleet sweep placing hundreds of graphs wants the client's CURRENT map
+    instead — the one its writes route by, kept fresh by the client on any
+    MOVED — and pays that round trip only when the map is not there yet."""
     if mode == "cluster":
         init = getattr(conn, "initialize", None)
-        if init is not None:
+        have_map = bool(getattr(getattr(conn, "nodes_manager", None), "slots_cache", None))
+        if init is not None and (refresh or not have_map):
             await init()
         node = conn.nodes_manager.get_node_from_slot(conn.keyslot(graph_key))
         return f"{getattr(node, 'host', '?')}:{getattr(node, 'port', '?')}", node
@@ -212,7 +221,7 @@ async def owner_endpoint(
         return "unknown"
     try:
         async with asyncio.timeout(timeout):
-            endpoint, _ = await _owner(conn, mode, graph_key)
+            endpoint, _ = await _owner(conn, mode, graph_key, refresh=False)
             return endpoint
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("owner of %r unknown: %s", graph_key, exc)

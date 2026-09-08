@@ -309,6 +309,20 @@ export const docEntries: DocEntry[] = [
     description: 'Type/ontology assignment precedence and schema mapping',
     importFn: () => import('@docs/services/ASSIGNMENTS.md?raw'),
   },
+  {
+    slug: 'feature-aggregation-reconciliation',
+    section: 'services',
+    title: 'Automatic Aggregation Reconciliation',
+    description: 'The sweep that keeps rolled-up lineage matching each source, its holds, and the runbook',
+    importFn: () => import('@docs/features/aggregation-reconciliation.md?raw'),
+  },
+  {
+    slug: 'feature-external-change-notification',
+    section: 'services',
+    title: 'External Change Notification',
+    description: 'Telling the platform an external data source changed',
+    importFn: () => import('@docs/features/external-change-notification.md?raw'),
+  },
 
   // Versioning
   {

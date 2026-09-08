@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.providers.shard_capacity import (
@@ -294,25 +294,35 @@ async def latest_completed_stats_map(
 ) -> Dict[str, Dict[str, Any]]:
     """``{ds_id: run_stats}`` of each source's NEWEST completed job — where
     the cube estimate and the storage regime live (persisted on success
-    only). One bounded query; best-effort, never raises."""
+    only).
+
+    One query that reads ONE row per source: the newest completed job is
+    found by a grouped subquery and joined back, so a source with thousands
+    of completed runs costs the same as one with a single run — run_stats
+    is a JSON blob, and reading every historical one would make this the
+    slowest read on the page. Best-effort, never raises."""
     if not ds_ids:
         return {}
+    J = AggregationJobORM
     try:
+        newest = (
+            select(J.data_source_id.label("ds_id"), func.max(J.updated_at).label("at"))
+            .where(J.data_source_id.in_(ds_ids))
+            .where(J.status == "completed")
+            .group_by(J.data_source_id)
+            .subquery()
+        )
         rows = (await session.execute(
-            select(AggregationJobORM.data_source_id, AggregationJobORM.run_stats)
-            .where(AggregationJobORM.data_source_id.in_(ds_ids))
-            .where(AggregationJobORM.status == "completed")
-            .order_by(
-                AggregationJobORM.data_source_id,
-                AggregationJobORM.updated_at.desc().nullslast(),
-            )
+            select(J.data_source_id, J.run_stats)
+            .join(newest, and_(J.data_source_id == newest.c.ds_id, J.updated_at == newest.c.at))
+            .where(J.status == "completed")
         )).all()
     except Exception as exc:
         logger.warning("latest completed-run map failed: %s", exc)
         return {}
     out: Dict[str, Dict[str, Any]] = {}
     for ds_id, raw in rows:
-        if ds_id not in out:                      # first per source = newest
+        if ds_id not in out:                      # two runs sharing an instant: first wins
             out[ds_id] = _safe_json(raw)
     return out
 

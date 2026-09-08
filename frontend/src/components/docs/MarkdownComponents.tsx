@@ -52,6 +52,11 @@ export const filenameMap: Record<string, string> = {
   'SEARCH.md': 'services-search',
   'CONTEXT_ENGINE.md': 'services-context-engine',
   'ASSIGNMENTS.md': 'services-assignments',
+  // Feature docs (subfolder; the two link each other by basename)
+  'features/aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
+  'features/external-change-notification.md': 'feature-external-change-notification',
+  'aggregation-reconciliation.md': 'feature-aggregation-reconciliation',
+  'external-change-notification.md': 'feature-external-change-notification',
 }
 
 // ── Callouts ────────────────────────────────────────────────────────

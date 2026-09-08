@@ -340,7 +340,6 @@ FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUER
 | `FALKORDB_CLUSTER_NODES` | 3 shard-0 pod DNS names | Any three seeds; the client discovers the rest |
 | `REDIS_CACHE_*` (legacy `CACHE_REDIS_URL`) | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020/ADR-022) refuses to co-locate on FalkorDB |
 | `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | ≈ shard `maxmemory` × 0.8 per provider | Turns on cold-graph eviction so residency tracks the ~40M working set, not the full 45M+growth corpus |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | `true` (default) | Constant-memory, crash-resumable aggregation instead of full-graph in-memory accumulation |
 | `AGGREGATION_SHARD_RESERVE_PCT` | `20` (default) | Share of a shard's `maxmemory` a rebuild must leave free: the write budget reads the owning shard's `used_memory` before storing rollups and refuses, naming the shortfall, rather than filling it |
 | `GRAPHVER_READ_MAX_LAG` | `0` (strict) — small `>0` acceptable during bulk imports | Governs FalkorDB-vs-Cloud-SQL read-freshness fallback |
 
@@ -444,5 +443,4 @@ Phased; each gate verifiable before the next.
 | `GRAPHVER_FALKOR_BUDGETS` / `_MAX_RESIDENT` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | `8` |
 | `GRAPHVER_READ_MAX_LAG` | web tiers | `0` (strict) |
-| `AGGREGATION_STREAMING_REBUILD_ENABLED` | workers | `true` |
 | `IMPORT_COMMIT_WINDOW` | import worker | `50000` |

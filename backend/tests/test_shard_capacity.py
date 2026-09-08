@@ -261,6 +261,18 @@ def test_owner_endpoint_names_the_node_without_reading_it():
     assert _run(sc.owner_endpoint(_db(single), mode="standalone", graph_key="g", timeout=1)) == "falkor:6379"
 
 
+def test_owner_endpoint_uses_the_client_map_it_has_and_the_reading_refreshes_it():
+    """A fleet sweep asks for hundreds of owners; each must not cost a
+    CLUSTER SLOTS round trip once the client holds a map. The reading the
+    pipeline takes before it writes still refreshes, to follow a failover."""
+    conn = _Cluster({"used_memory": "1", "maxmemory": "4"})
+    conn.nodes_manager.slots_cache = {42: [_Node()]}         # a map already in hand
+    assert _run(sc.owner_endpoint(_db(conn), mode="cluster", graph_key="g", timeout=1)) == "10.0.0.7:6379"
+    assert conn.initialized is False
+    _run(sc.read_shard_memory(_db(conn), mode="cluster", graph_key="g", timeout=1))
+    assert conn.initialized is True
+
+
 def test_owner_endpoint_is_unknown_when_the_client_cannot_say():
     class _Broken:
         nodes_manager = None

@@ -178,7 +178,42 @@ rebalance by moving a graph, per
 Under `noeviction` a full shard fails writes for every graph on it, and
 with `cluster-require-full-coverage no` the rest of the cluster keeps
 serving, so that failure is partial and confusing rather than obvious —
-which is why the budget refuses BEFORE the shard fills, not at the cap. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
+which is why the budget refuses BEFORE the shard fills, not at the cap.
+
+**The apply re-measures.** The post-compute check answered for the whole
+result at one instant; a multi-million-edge APPLY can run for a long time
+while another graph's rebuild lands on the same shard. Every
+`AGGREGATION_BUDGET_RECHECK_EDGES` first-touch edges written, the pipeline
+re-reads the shard and refuses — with the numbers, and with "mid-apply
+recheck" in the message — when the REMAINDER would not fit. The refusal
+comes after the chunk's checkpoint, so the job can be resumed from its
+cursor once memory is freed; `run_stats.budget_rechecks` counts them.
+
+**Rollup storage per source.** A source can be pinned to Auto (or Full
+detail) on its own, from the drawer's ③ Act, before its first build if need
+be; the override is resolved into the job's frozen tuning at trigger time,
+so automation and manual rebuilds honour it alike and a per-job request
+still wins. The freshness row and doc carry the resolved value and where it
+came from (`rollupStorageOverride` / `resolvedRollupStorage` /
+`rollupStorageSource`).
+
+### The capacity API
+
+What the budget measures, for people: `GET /api/v1/admin/aggregation/capacity`
+maps every aggregated source to the node its rollups land on (the projection
+graph in dedicated mode) and reads each node ONCE — used, `maxmemory`, the
+reserve, what is free after it, how many more rollup edges that is at the
+fleet bytes-per-edge, and the sources on each shard with their footprint and
+what their last run learned. `GET /api/v1/admin/data-sources/{id}/capacity`
+adds the pre-flight: the pipeline's own verdict on the last run's cube
+estimate against the live reading (Full detail fits / short by / unknown
+until a first run; Auto is never refused). Both are ingestion-read like the
+settings GET and proxy to the control plane in proxy mode; the fleet sweep
+runs under `AGGREGATION_CAPACITY_DEADLINE_S`, reports anything it could not
+place with a coarse reason, never raises, and is cached for
+`AGGREGATION_CAPACITY_CACHE_TTL_S`. The Freshness page's capacity card, the
+drawer's Capacity block, the re-trigger fit check, the Defaults dialog's
+what-if and the Infrastructure page's memory headroom all read it. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
 ontology level map — or with a SINGLE-LEVEL map (no container types) —
 fall back to it automatically. An empty graph completes as a clean
@@ -309,9 +344,12 @@ the **first checkpoint**, before any graph work. Resume rules:
 
 ## Tuning
 
-Resolution order per knob: **job `tuning` (frozen at trigger) → stored
-global defaults (`GET/PUT /api/v1/admin/aggregation/settings`, editable
-in the admin Defaults dialog) → env var → code default.** Per-job
+Resolution order per knob: **job `tuning` (frozen at trigger) → the
+source's Rollup storage override (`rollup_storage` on its state row, set
+from the drawer's ③ Act; the one per-source knob) → stored global defaults
+(`GET/PUT /api/v1/admin/aggregation/settings`, editable in the Defaults
+dialog, which shows every knob's live env default and where each value
+came from) → env var → code default.** Per-job
 overrides ride the trigger/resume APIs (`tuning` object with camelCase
 fields mirroring the env vars below plus `extractConcurrency`); the
 control plane freezes the merged dict onto the job row so workers stay
@@ -334,6 +372,10 @@ pipeline).
 | `AGGREGATION_ESTIMATE_MARGIN_PCT` | 25 | Write budget: slack applied to the pre-write UPPER-BOUND estimate (and to the static cap) so a loose estimate does not refuse a cube the exact post-compute check would pass (0-100) |
 | `AGGREGATION_MAX_MATERIALIZED_EDGES` | 25000000 | Static edge cap, in force ONLY when the owning shard cannot be measured (no `maxmemory`, or the `INFO` read failed). Per-job / Defaults as `maxMaterializedEdges` it is instead an optional explicit ceiling layered over the measured budget; no preset sets it. Bound 500M |
 | `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate. Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Not per-job tunable |
+| `AGGREGATION_BUDGET_RECHECK_EDGES` | 1000000 | Write budget: how many first-touch edges APPLY writes between re-reads of the owning shard. A shard that fills up mid-run (another graph landing on it) is refused loudly after a checkpoint — resumable from the cursor — instead of at its cap (100k-100M) |
+| `AGGREGATION_CAPACITY_CACHE_TTL_S` | 10 | Capacity API: how long one fleet sweep is served to every viewer before the next |
+| `AGGREGATION_CAPACITY_DEADLINE_S` | 8 | Capacity API: the fleet sweep's deadline; sources not reached are reported as unresolved |
+| `AGGREGATION_CAPACITY_MAX_SOURCES` | 500 | Capacity API: sources per sweep, largest first; the response says when it was truncated |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. Matches what every UI trigger path sends as `timeoutSecs`; the machine paths (reconciliation, Refresh rollups, the projector heal hook) send nothing and land here. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS` |
