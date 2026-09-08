@@ -959,6 +959,21 @@ def test_source_probe_failure_does_not_write_counts(monkeypatch):
          "exceeding max_materialized_edges=25,000,000. The shard's memory could not be "
          "measured, so the static cap governed.", "write_budget"),
         ("asyncio.TimeoutError: query timed out after 30s", "timeout"),
+        # The pipeline's own outage verdict after every backoff retry at the
+        # narrowest scan: a TimeoutError with a message, and its bucket.
+        ("scan extract:FLOWS over ID range [0, 64) (width 64) timed out 7 times in a "
+         "row at the narrowest width (query timeout 30s, graph store cap 180s) — "
+         "treating as a graph-store outage; the job resumes from its checkpoint.",
+         "timeout"),
+        # The single-row memory verdict names the scan and the ceiling and
+        # must still land in query_memory, not timeout/out_of_memory.
+        ("scan extract:FLOWS — source edges of type FLOWS (two IDs per row) — over ID "
+         "range [7, 8) exceeded the graph store's per-query memory ceiling "
+         "(QUERY_MEM_CAPACITY (512.0 MB)). The graph store reported: \"Query's mem "
+         "consumption exceeded capacity\". The pipeline had already dropped read "
+         "concurrency to 1, and this slice is 1 row wide: a SINGLE row of this "
+         "projection is larger than the ceiling, so no narrower read exists.",
+         "query_memory"),
         ("OntologyResolutionError: no ontology assigned to this source", "ontology"),
         ("ConflictError: job already active for this source", "conflict"),
         ("ConnectionError: provider unavailable, connection refused", "provider_unavailable"),

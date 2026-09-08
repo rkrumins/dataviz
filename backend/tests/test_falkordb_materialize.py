@@ -41,6 +41,7 @@ class _FakeFalkor:
         self._next_agg_rid = 0
         self._urn_ids = {}
         self.write_queries = 0
+        self.lookup_queries = 0
         self.deleted_pairs = []
         self.meta = None       # last _AggMeta stamp params
 
@@ -142,16 +143,33 @@ class _FakeFalkor:
         if "max(ID(r))" in cypher:
             rids = [v["rid"] for v in self.agg.values()]
             return _Result([[max(rids, default=None)]])
+        if "UNWIND $keys AS k" in cypher and "RETURN k, ID(r)" in cypher:
+            # Keys-only reconcile, pass 2: comparison columns by aggKey.
+            self.lookup_queries += 1
+            wanted = set(params["keys"])
+            rows = []
+            for v in self.agg.values():
+                if v.get("aggKey") in wanted:
+                    rows.append([
+                        v["aggKey"], v["rid"], v["weight"], v["digest"],
+                        v.get("types") or [], v.get("sl"), v.get("tl"),
+                        v.get("sd"), v.get("td"),
+                    ])
+            return _Result(rows)
         if "WHERE ID(r) >= $lo AND ID(r) < $hi" in cypher:
             lo, hi = params["lo"], params["hi"]
+            keys_only = "RETURN ID(a), ID(b), ID(r), r.aggKey, r.latestUpdate" in cypher
             rows = []
             for (aid, bid), v in self.agg.items():
                 if lo <= v["rid"] < hi:
-                    rows.append([
-                        aid, bid, v["aggKey"], v["weight"], v["digest"],
-                        v["latest"], v.get("types") or [], v.get("sl"),
-                        v.get("tl"), v.get("sd"), v.get("td"),
-                    ])
+                    if keys_only:
+                        rows.append([aid, bid, v["rid"], v["aggKey"], v["latest"]])
+                    else:
+                        rows.append([
+                            aid, bid, v["aggKey"], v["weight"], v["digest"],
+                            v["latest"], v.get("types") or [], v.get("sl"),
+                            v.get("tl"), v.get("sd"), v.get("td"),
+                        ])
             return _Result(rows)
         raise AssertionError(f"unhandled agg read: {cypher}")
 
@@ -236,7 +254,7 @@ def _run(coro):
 
 
 async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None,
-                       tuning=None):
+                       tuning=None, capacity_hints_override=None):
     # The suite pins the BOUNDARY (depth-diagonal) mechanics — the mode
     # every graph too big for the full cube runs in. Auto/cube behavior
     # has its own dedicated tests below.
@@ -251,6 +269,7 @@ async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None
         intra_batch_callback=None,
         should_cancel=should_cancel,
         tuning=merged,
+        capacity_hints=capacity_hints_override,
     )
 
 
@@ -1859,7 +1878,9 @@ def test_query_memory_refusal_at_floor_width_is_terminal(monkeypatch):
     assert "extract:" in msg
     assert "10000" in msg
     assert "Query's mem consumption exceeded capacity" in msg
-    assert "AGGREGATION_SCAN_SHRINK_FLOOR" in msg
+    # The descent was stopped by the floor, and the message says so — and
+    # says what to do about it (set it to 1).
+    assert "AGGREGATION_SCAN_SHRINK_FLOOR" in msg and "scanShrinkFloor" in msg
     assert "QUERY_MEM_CAPACITY" in msg
     assert "NOT retried" in msg
 
@@ -1885,6 +1906,7 @@ def test_timeout_at_floor_width_still_propagates_unchanged(monkeypatch):
     provider outage, not a payload-size fact, and must keep propagating as a
     TimeoutError so the worker's ordinary retry path handles it."""
     monkeypatch.setenv("AGGREGATION_SCAN_SHRINK_FLOOR", "10000")
+    monkeypatch.setenv("AGGREGATION_SCAN_TIMEOUT_RETRIES", "0")
     fake = _FakeFalkor()
     levels = _seed_two_chain_graph(fake)
     p = _make_provider(fake, levels)
@@ -1907,6 +1929,273 @@ def test_clean_run_reports_no_scan_pressure():
     stats = pipe._result(10)["run_stats"]
     assert "scan_width_min" not in stats
     assert "scan_shrinks" not in stats
+    assert "adapted" not in stats
+
+
+# ── the ladder never gives up before a single row ──────────────────────
+#
+# The operator's ask: go slower, but always complete. Every per-query
+# pressure signal (memory ceiling, timeout — client deadline OR the server's
+# own refusal) is absorbed by reading less per query: serial waves first,
+# then the keys-only reconcile strategy, then narrower and narrower slices
+# down to ONE row; writes and deletes halve their batches the same way. Only
+# a single row that still exceeds the ceiling is terminal, and the message
+# names it.
+
+
+def test_first_pressure_event_drops_wave_concurrency_to_one(monkeypatch):
+    """Four concurrent scans of a store that just refused one for size get
+    nothing from three more of them: the first pressure event of a run pins
+    wave concurrency to 1, and the run says so."""
+    monkeypatch.delenv("AGGREGATION_SCAN_SHRINK_FLOOR", raising=False)
+    fake, p, ceiling = _seeded_provider_with_ceiling(fits=100_000)
+
+    result = _run(_materialize(p, tuning={
+        "scan_range_width": 200_000, "extract_concurrency": 4,
+    }))
+
+    assert ceiling.refusals >= 1
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["extract_concurrency"] == 1
+    assert adapted["scan_width_min"] == 100_000
+    assert adapted["pressure"][0]["kind"] == "memory"
+    # Containment is scanned first, so that is the scan the event names.
+    assert adapted["by_scan"]["extract:CONTAINS"]["events"] >= 1
+
+
+def test_effective_concurrency_is_pinned_by_the_first_pressure_event():
+    pipe = _make_pipeline()
+    pipe._tuning["extract_concurrency"] = 4
+    assert pipe._effective_conc() == 4
+    pipe._on_pressure("extract:FLOWS", "timeout", 0, 100, size=100)
+    assert pipe._effective_conc() == 1
+    # A later event does not "re-drop"; the cap is sticky for the run.
+    pipe._on_pressure("reconcile:AGGREGATED", "memory", 0, 100, size=100)
+    assert pipe._effective_conc() == 1
+    assert pipe._adapted_snapshot()["extract_concurrency"] == 1
+
+
+def _seed_reconcile_scenario(fake):
+    """A previous generation with every kind of drift the reconcile must
+    classify: a stale cell, a desired cell with a wrong weight, and a
+    desired cell that is already right."""
+    levels = _seed_two_chain_graph(fake)
+    fake.seed_aggregated(1, 12, weight=9, latest=1000, agg_key="urn:domain_abc|urn:table_b")  # stale
+    fake.seed_aggregated(2, 12, weight=7, latest=1000, sl=1, tl=1, sd=1, td=1)              # wrong weight
+    fake.seed_aggregated(1, 11, weight=2, latest=1000, digest="digest-1",
+                         sl=0, tl=0, sd=0, td=0)                                              # already right
+    return levels
+
+
+def test_reconcile_switches_to_keys_only_under_pressure_and_the_result_is_identical(monkeypatch):
+    """When halving the 11-column RECONCILE projection would take it under
+    the keys-only width, the scan switches strategy instead: a light key
+    pass, then an aggKey index seek for the desired keys only. The graph
+    must end up byte-identical to what the single-pass reconcile produces
+    on the same drift."""
+    monkeypatch.delenv("AGGREGATION_SCAN_SHRINK_FLOOR", raising=False)
+    monkeypatch.setenv("AGGREGATION_RECONCILE_KEYS_ONLY_WIDTH", "100000")
+
+    plain = _FakeFalkor()
+    levels = _seed_reconcile_scenario(plain)
+    _run(_materialize(_make_provider(plain, levels), tuning={"scan_range_width": 200_000}))
+
+    pressed = _FakeFalkor()
+    levels = _seed_reconcile_scenario(pressed)
+    p = _make_provider(pressed, levels)
+    ceiling = _MemoryCeiling(pressed.ro_query, 100_000, only_aggregated=True)
+    p._ro_query = ceiling
+    p._proj_ro_query = ceiling
+    result = _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    assert ceiling.refusals >= 1
+    assert pressed.lookup_queries >= 1, "pass 2 must have run"
+    assert result["run_stats"]["adapted"]["reconcile_strategy"] == "keys_only"
+    # The switch replaced a halving: the width stayed at 200k → 100k.
+    assert result["run_stats"]["adapted"].get("scan_width_min", 100_000) >= 100_000
+    # Identical outcome: same cells, same weights, same deletions.
+    assert {k: v["weight"] for k, v in pressed.agg.items()} == {k: v["weight"] for k, v in plain.agg.items()}
+    assert set(pressed.deleted_pairs) == set(plain.deleted_pairs)
+    assert (1, 12) in pressed.deleted_pairs
+    assert pressed.agg[(2, 12)]["weight"] == 2 and pressed.agg[(1, 11)]["weight"] == 2
+    assert set(pressed.agg) == _EXPECTED_PAIRS
+
+
+def test_keys_only_reconcile_reads_comparison_columns_only_for_desired_keys():
+    """Pass 2 is bounded by the desired, not-yet-flushed keys pass 1 saw —
+    never by the stale ones, which go straight to the delete list."""
+    fake = _FakeFalkor()
+    levels = _seed_reconcile_scenario(fake)
+    p = _make_provider(fake, levels)
+    seen_keys = []
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, **kw):
+        if "UNWIND $keys AS k" in cypher:
+            seen_keys.extend(params["keys"])
+        return await orig(cypher, params, **kw)
+
+    p._ro_query = spy
+    p._proj_ro_query = spy
+    pipe = mat.AggregationPipeline(
+        p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+        last_cursor=None, progress_callback=None, intra_batch_callback=None,
+        should_cancel=None,
+        tuning={"materialize_fine_pairs": False, "scan_range_width": 200_000},
+    )
+    pipe._reconcile_strategy = "keys_only"
+    _run(pipe.run())
+    assert seen_keys, "pass 2 must have run for the desired keys"
+    # The stale mixed-level cell's key is never looked up.
+    assert "urn:domain_abc|urn:table_b" not in seen_keys
+    assert "urn:table_a|urn:table_b" in seen_keys
+
+
+def test_single_row_memory_refusal_is_terminal_and_names_the_row(monkeypatch):
+    """With the floor at its default (1), the ladder narrows to one row
+    before it concludes; the message names the scan, the ID, the ceiling,
+    and says a narrower read does not exist."""
+    monkeypatch.delenv("AGGREGATION_SCAN_SHRINK_FLOOR", raising=False)
+    _fake, p, _ceiling = _seeded_provider_with_ceiling(fits=0)
+
+    with pytest.raises(mat.MaterializationQueryMemoryExceeded) as exc:
+        _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    msg = str(exc.value)
+    assert "extract:" in msg and "[0, 1)" in msg
+    assert "SINGLE row" in msg and "QUERY_MEM_CAPACITY" in msg
+    assert "dropped read concurrency to 1" in msg
+    assert "NOT retried" in msg
+    from backend.app.services.aggregation.service import classify_failure
+    assert classify_failure(msg) == "query_memory"
+
+
+def test_write_pressure_halves_the_merge_batch_and_every_edge_still_lands(monkeypatch):
+    """A MERGE batch the store refuses (timeout here) is re-issued as two
+    halves, down to one row, and the run completes with every edge written
+    exactly once at the right weight — and reports the batch it needed.
+
+    Writes are batched per LABEL PAIR, so a third chain (table_c under
+    domain_abc, col_c → col_b) makes the table→table batch two rows wide."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    fake.add_node(21, "urn:table_c", "table")
+    fake.add_node(22, "urn:col_c", "column")
+    fake.add_edge("CONTAINS", 4, 1, 21)
+    fake.add_edge("CONTAINS", 5, 21, 22)
+    fake.add_edge("FLOWS", 12, 22, 13)
+    p = _make_provider(fake, levels)
+    orig = fake.proj_query
+    refusals = []
+
+    async def refuse_wide(cypher, params=None, **kw):
+        batch = (params or {}).get("batch")
+        if batch is not None and "MERGE (s)-[r:AGGREGATED" in cypher and len(batch) > 1:
+            refusals.append(len(batch))
+            raise Exception("Query timed out")
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refuse_wide
+    result = _run(_materialize(p))
+
+    assert refusals == [2], refusals
+    assert {k: v["weight"] for k, v in fake.agg.items()} == {(2, 12): 2, (21, 12): 1, (1, 11): 3}
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["write_batch_min"] == 1 and adapted["write_shrinks"] >= 1
+    assert adapted["pressure"][0]["scan"] == "apply:merge"
+    assert result["writes"] == 3
+
+
+def test_delete_pressure_halves_the_chunk_and_every_stale_cell_still_goes(monkeypatch):
+    """The keyed delete halves under a memory refusal exactly like a write:
+    three stale cells refused as one chunk go one by one."""
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    for pair in ((1, 12), (2, 11), (3, 12)):
+        fake.seed_aggregated(*pair, weight=5, latest=1000)
+    p = _make_provider(fake, levels)
+    orig = fake.proj_query
+    refusals = []
+
+    async def refuse_wide(cypher, params=None, **kw):
+        keys = (params or {}).get("keys")
+        if keys is not None and "DELETE r" in cypher and len(keys) > 1:
+            refusals.append(len(keys))
+            raise Exception("Query's mem consumption exceeded capacity")
+        return await orig(cypher, params, **kw)
+
+    p._proj_query = refuse_wide
+    result = _run(_materialize(p))
+
+    assert refusals == [3, 2] or refusals == [3, 2, 2], refusals
+    assert {(1, 12), (2, 11), (3, 12)} <= set(fake.deleted_pairs)
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["delete_chunk_min"] == 1
+    assert result["deletes"] == 3
+
+
+def test_single_row_write_memory_refusal_is_terminal_with_write_guidance():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    async def refuse_all(cypher, params=None, **kw):
+        if (params or {}).get("batch") is not None and "MERGE (s)-[r:AGGREGATED" in cypher:
+            raise Exception("Query's mem consumption exceeded capacity")
+        return await fake.proj_query(cypher, params, **kw)
+
+    p._proj_query = refuse_all
+    with pytest.raises(mat.MaterializationQueryMemoryExceeded) as exc:
+        _run(_materialize(p))
+    msg = str(exc.value)
+    assert "write query apply:merge" in msg and "1 rows" in msg
+    assert "NOT retried" in msg
+
+
+# ── pure ladder primitives ─────────────────────────────────────────────
+
+
+def test_pressure_kind_covers_both_timeout_signals_and_the_memory_ceiling():
+    assert mat._pressure_kind(asyncio.TimeoutError()) == "timeout"
+    assert mat._pressure_kind(TimeoutError()) == "timeout"
+    assert mat._pressure_kind(Exception("Query timed out")) == "timeout"
+    assert mat._pressure_kind(Exception("Query's execution time exceeded the limit")) == "timeout"
+    assert mat._pressure_kind(Exception("Query's mem consumption exceeded capacity")) == "memory"
+    assert mat._pressure_kind(ConnectionError("Connection refused")) is None
+    assert mat._pressure_kind(Exception("OOM command not allowed when used memory > 'maxmemory'.")) is None
+
+
+def test_sticky_cap_halves_toward_the_floor_and_regrows_after_eight_successes():
+    cap = mat._StickyCap(1)
+    assert cap.apply(500) == 500                      # no cap in force
+    assert cap.shrink(500) == 250
+    assert cap.apply(500) == 250 and cap.minimum == 250 and cap.shrinks == 1
+    assert cap.shrink(2) == 1                          # floor
+    assert cap.at_floor(1) and not cap.at_floor(2)
+    for _ in range(8):
+        cap.note_success()
+    assert cap.value == 2                              # doubled once
+    assert cap.minimum == 1                            # the high-water mark stays
+
+
+def test_next_scan_width_never_regrows_straight_into_a_failed_width():
+    # Not enough successes yet → unchanged.
+    assert mat._next_scan_width(1_000, 200_000, 4_000, streak=7) == 1_000
+    # Eight successes → double, but 2,000 → 4,000 would hit the failed width.
+    assert mat._next_scan_width(2_000, 200_000, 4_000, streak=8) == 2_000
+    # After a long streak the ladder probes past it once.
+    assert mat._next_scan_width(2_000, 200_000, 4_000, streak=64) == 4_000
+    # No failure recorded for this scan → plain doubling, back to the knob.
+    assert mat._next_scan_width(2_000, 200_000, None, streak=8) == 4_000
+    assert mat._next_scan_width(100_000, 200_000, None, streak=8) is None
+    assert mat._next_scan_width(None, 200_000, None, streak=8) is None
+
+
+def test_backoff_grows_and_caps(monkeypatch):
+    monkeypatch.setattr(mat.random, "uniform", lambda a, b: 0.0)
+    assert [mat._backoff_s(n) for n in range(6)] == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
 
 
 # ── the write budget reads the shard ─────────────────────────────────

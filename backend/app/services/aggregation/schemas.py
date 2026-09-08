@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field, field_validator
 def _validate_timeout_secs(value: Optional[int]) -> Optional[int]:
     if value is None:
         return value
-    if not (60 <= value <= 86400):
-        raise ValueError("timeout_secs must be between 60 and 86400 (24h)")
+    if not (60 <= value <= 604_800):
+        raise ValueError("timeout_secs must be between 60 and 604800 (7 days)")
     return value
 
 
@@ -169,6 +169,40 @@ class AggregationTuning(BaseModel):
                     "figure the last successful rebuild measured on the shard "
                     "(and the 512 B default before any run has).",
     )
+    scan_shrink_floor: Optional[int] = Field(
+        None, alias="scanShrinkFloor", ge=1, le=5_000_000,
+        description="Narrowest scan slice the pressure ladder descends to "
+                    "before a single row is declared too large for the graph "
+                    "store's per-query ceiling. Default 1 — the ladder narrows "
+                    "all the way to one row.",
+    )
+    scan_timeout_s: Optional[float] = Field(
+        None, alias="scanTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for read scans, seconds. Values above "
+                    "the graph store's TIMEOUT_MAX are capped by the store.",
+    )
+    write_timeout_s: Optional[float] = Field(
+        None, alias="writeTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for write and delete batches, seconds. "
+                    "Capped by the graph store's TIMEOUT_MAX like scanTimeoutS.",
+    )
+    stall_timeout_secs: Optional[int] = Field(
+        None, alias="stallTimeoutSecs", ge=60, le=604_800,
+        description="Fleet default for the stall window: how long a job may "
+                    "make no forward progress before the watchdog kills it. A "
+                    "job's own timeoutSecs wins over it.",
+    )
+    max_wall_secs: Optional[int] = Field(
+        None, alias="maxWallSecs", ge=3_600, le=604_800,
+        description="Wall-clock safety net for a job, seconds — never lower "
+                    "than its stall window. Raisable on a running job.",
+    )
+    ignore_observed: Optional[bool] = Field(
+        None, alias="ignoreObserved",
+        description="Start from the knobs as set, ignoring what the last run "
+                    "of this source learned (the narrowed widths, serial reads "
+                    "and strategy it needed).",
+    )
 
     class Config:
         populate_by_name = True
@@ -208,7 +242,8 @@ class AggregationTriggerRequest(BaseModel):
     timeout_secs: Optional[int] = Field(
         None,
         alias="timeoutSecs",
-        description="Per-job timeout in seconds; 60 \u2264 value \u2264 86400 (24h).",
+        description="Per-job stall window in seconds (no forward progress "
+                    "for this long kills the job); 60 \u2264 value \u2264 604800 (7 days).",
     )
     max_retries: Optional[int] = Field(
         None,
@@ -280,7 +315,8 @@ class InternalTriggerRequest(BaseModel):
     timeout_secs: Optional[int] = Field(
         None,
         alias="timeoutSecs",
-        description="Per-job timeout in seconds; 60 \u2264 value \u2264 86400 (24h).",
+        description="Per-job stall window in seconds (no forward progress "
+                    "for this long kills the job); 60 \u2264 value \u2264 604800 (7 days).",
     )
     max_retries: Optional[int] = Field(
         None,
@@ -326,7 +362,8 @@ class ResumeOverrides(BaseModel):
     timeout_secs: Optional[int] = Field(
         None,
         alias="timeoutSecs",
-        description="Per-job timeout in seconds; 60 \u2264 value \u2264 86400 (24h).",
+        description="Per-job stall window in seconds (no forward progress "
+                    "for this long kills the job); 60 \u2264 value \u2264 604800 (7 days).",
     )
     tuning: Optional[AggregationTuning] = Field(
         None,
@@ -1044,7 +1081,7 @@ class EnvTuningDefaults(BaseModel):
     """Every tuning knob's ENV-resolved default, read live on each GET — so
     an editor can show what "empty" really means and label a value by where
     it came from, instead of hard-coding a guess that drifts from the
-    deployment. The last three are information only: env-only, shown, never
+    deployment. The trailing six are information only: env-only, shown, never
     settable through ``AggregationTuning``."""
     scan_range_width: Optional[int] = Field(None, alias="scanRangeWidth")
     max_pending_pairs: Optional[int] = Field(None, alias="maxPendingPairs")
@@ -1059,9 +1096,22 @@ class EnvTuningDefaults(BaseModel):
     max_materialized_edges: Optional[int] = Field(None, alias="maxMaterializedEdges")
     shard_reserve_pct: Optional[int] = Field(None, alias="shardReservePct")
     bytes_per_edge: Optional[int] = Field(None, alias="bytesPerEdge")
+    scan_shrink_floor: Optional[int] = Field(None, alias="scanShrinkFloor")
+    scan_timeout_s: Optional[float] = Field(None, alias="scanTimeoutS")
+    write_timeout_s: Optional[float] = Field(None, alias="writeTimeoutS")
+    stall_timeout_secs: Optional[int] = Field(None, alias="stallTimeoutSecs")
+    max_wall_secs: Optional[int] = Field(None, alias="maxWallSecs")
+    ignore_observed: Optional[bool] = Field(None, alias="ignoreObserved")
     estimate_margin_pct: Optional[int] = Field(None, alias="estimateMarginPct")
     max_cube_edges: Optional[int] = Field(None, alias="maxCubeEdges")
     budget_recheck_edges: Optional[int] = Field(None, alias="budgetRecheckEdges")
+    # Information only (env-only): how many backoff retries a narrowest
+    # scan gets before an outage is declared, the width at which RECONCILE
+    # switches to keys-only, and the graph store's own per-query cap that
+    # bounds every timeout knob above.
+    scan_timeout_retries: Optional[int] = Field(None, alias="scanTimeoutRetries")
+    reconcile_keys_only_width: Optional[int] = Field(None, alias="reconcileKeysOnlyWidth")
+    server_timeout_max_ms: Optional[int] = Field(None, alias="serverTimeoutMaxMs")
 
     class Config:
         populate_by_name = True

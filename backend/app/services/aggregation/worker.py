@@ -42,6 +42,7 @@ from backend.app.providers.falkordb_materialize import (
     MaterializationBudgetExceeded,
     MaterializationPreconditionFailed,
     MaterializationQueryMemoryExceeded,
+    MaterializationScanTimedOut,
 )
 
 from backend.app.jobs import (
@@ -86,6 +87,15 @@ _MAX_WALL_SECS: int = int(os.getenv("AGGREGATION_JOB_MAX_WALL_SECS", "86400"))
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _tuning_int(tuning: dict, key: str) -> Optional[int]:
+    """A positive int from a tuning dict, or None (absent / unparsable)."""
+    try:
+        value = int(tuning.get(key))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 class AggregationWorker:
@@ -424,7 +434,21 @@ class AggregationWorker:
                 # intra-batch heartbeats both count as progress), or when
                 # it exceeds the wall-clock safety net. A steadily
                 # progressing multi-hour job is never killed by a timer.
-                stall_timeout = job.timeout_secs or _STALL_TIMEOUT_SECS
+                # Stall window: the job's own value, else the fleet's
+                # ``stallTimeoutSecs`` default frozen in its tuning, else
+                # env. The wall clock likewise comes from tuning and is
+                # never lower than the stall window — an operator who
+                # allowed a job 48h of quiet meant it to run that long.
+                job_tuning = self._job_tuning(job)
+                stall_timeout = (
+                    job.timeout_secs
+                    or _tuning_int(job_tuning, "stall_timeout_secs")
+                    or _STALL_TIMEOUT_SECS
+                )
+                wall_limit = max(
+                    _tuning_int(job_tuning, "max_wall_secs") or _MAX_WALL_SECS,
+                    stall_timeout,
+                )
                 progress_marker = {"at": time.monotonic()}
 
                 materialize_task = asyncio.create_task(
@@ -481,9 +505,9 @@ class AggregationWorker:
                                 f"no forward progress for {int(stalled_for)}s "
                                 f"(stall timeout {stall_timeout}s)"
                             )
-                        elif now - wall_start > _MAX_WALL_SECS:
+                        elif now - wall_start > wall_limit:
                             timeout_reason = (
-                                f"exceeded wall-clock safety net {_MAX_WALL_SECS}s"
+                                f"exceeded wall-clock safety net {wall_limit}s"
                             )
                         if timeout_reason:
                             materialize_task.cancel()
@@ -623,6 +647,47 @@ class AggregationWorker:
                     job_id, job.processed_edges, job.created_edges,
                     _run_writes, _run_deletes,
                 )
+
+            except MaterializationScanTimedOut as scan_exc:
+                # The pipeline's own verdict after every backoff retry at
+                # the narrowest scan: the graph store is not answering. A
+                # TimeoutError like the watchdog's, but its message names
+                # the scan, the width, the budget and the cap — it must
+                # not be reported as a watchdog kill.
+                job.status = "failed"
+                job.error_message = str(scan_exc)[:2000]
+                logger.error(
+                    "Aggregation job %s: graph store stopped answering: %s",
+                    job_id, scan_exc,
+                )
+
+                await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
+
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                await record_terminal(
+                    session,
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    sequence=terminal_seq,
+                    status="failed",
+                    payload={"error_message": job.error_message, "reason": "timeout"},
+                )
+                await emitter.terminal(
+                    job_id=job_id,
+                    kind="aggregation",
+                    scope=scope,
+                    status="failed",
+                    payload={"error_message": job.error_message, "reason": "timeout"},
+                )
+
+                if self._events:
+                    await self._events.job_failed(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
+                        error_message=job.error_message,
+                    )
 
             except asyncio.TimeoutError as timeout_exc:
                 reason = str(timeout_exc) or "watchdog timeout"
@@ -978,6 +1043,14 @@ class AggregationWorker:
             list(flat.lineage_edge_types),
             levels,
         )
+
+    @staticmethod
+    def _job_tuning(job: Any) -> dict:
+        """The job's frozen tuning dict (``{}`` when NULL or unparsable)."""
+        try:
+            return json.loads(getattr(job, "tuning_json", None) or "{}") or {}
+        except (TypeError, ValueError):
+            return {}
 
     @staticmethod
     async def _durable_cancel_set(job_id: str) -> bool:
@@ -1427,19 +1500,17 @@ class AggregationWorker:
             """
             if progress_marker is not None:
                 progress_marker["at"] = time.monotonic()
+            # The pressure ladder heartbeats from inside EXTRACT too, when
+            # nothing has been written yet; publishing ``created_edges: 0``
+            # there would flicker a resumed job's count back to zero.
+            counted = {"created_edges": running_aggregated} if running_aggregated > 0 else {}
             await emitter.publish(
                 job_id=job.id,
                 kind="aggregation",
                 scope=scope,
                 type="progress",
-                payload={
-                    "boundary": "intra_batch",
-                    "created_edges": running_aggregated,
-                },
-                live_state={
-                    "created_edges": running_aggregated,
-                    "last_heartbeat_at": _now(),
-                },
+                payload={"boundary": "intra_batch", **counted},
+                live_state={**counted, "last_heartbeat_at": _now()},
             )
 
         # Cooperative cancel hook handed to the provider. The pipeline
@@ -1452,10 +1523,7 @@ class AggregationWorker:
         def should_cancel() -> bool:
             return cancel_event.is_set()
 
-        try:
-            job_tuning = json.loads(getattr(job, "tuning_json", None) or "{}") or {}
-        except (TypeError, ValueError):
-            job_tuning = {}
+        job_tuning = self._job_tuning(job)
         # What a previous run of this graph measured on its shard — a hint,
         # never tuning: an operator's override of the same figure arrives in
         # ``job_tuning`` and wins over it.

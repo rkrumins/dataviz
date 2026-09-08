@@ -701,6 +701,13 @@ class AggregationService:
             # OntologyResolutionError inside ``_resolve_ontology``. The
             # frozen list still gets persisted for the worker.
 
+            # Request overrides layered over the source's override, the
+            # stored global defaults and env — frozen here so the worker
+            # stays stateless. Resolved once: the same dict seeds
+            # ``tuning_json`` AND the stall window below.
+            effective_tuning = await self._effective_tuning(
+                session, getattr(request, "tuning", None), ds_id=ds_id,
+            )
             # Create job with frozen edge types + denormalized graph metadata
             job_kwargs = dict(
                 id=_generate_id(),
@@ -726,14 +733,14 @@ class AggregationService:
                 trigger_source=trigger_source,
                 batch_size=request.batch_size,
                 idempotency_key=idem_key,
-                # Per-job overrides: when None, the worker / ORM defaults
-                # apply (timeout_secs → stall-timeout env, max_retries → 3).
-                timeout_secs=request.timeout_secs,
-                # Pipeline tuning: request overrides layered over the stored
-                # global defaults, frozen here so the worker stays stateless.
-                tuning_json=(lambda t: json.dumps(t) if t else None)(
-                    await self._effective_tuning(session, getattr(request, "tuning", None), ds_id=ds_id)
+                # Per-job stall window: the request's, else the fleet's
+                # ``stallTimeoutSecs`` default, else NULL (the worker's env
+                # default). max_retries → 3 via the ORM default.
+                timeout_secs=(
+                    request.timeout_secs if request.timeout_secs is not None
+                    else effective_tuning.get("stall_timeout_secs")
                 ),
+                tuning_json=json.dumps(effective_tuning) if effective_tuning else None,
                 created_at=_now(),
             )
             # Only set max_retries when caller supplied one, so the ORM

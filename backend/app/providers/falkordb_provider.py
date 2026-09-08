@@ -439,6 +439,39 @@ def _is_query_memory_error(exc: BaseException) -> bool:
     return False
 
 
+#: How FalkorDB words a query it aborted at its own ``TIMEOUT``. The same
+#: substrings the versioning bootstrap worker treats as "oversized".
+_QUERY_TIMEOUT_TEXT = ("query timed out", "query's execution time exceeded")
+
+
+def _is_query_timeout_error(exc: BaseException) -> bool:
+    """True when *exc* is FalkorDB reporting that it aborted a query at its
+    server-side ``TIMEOUT`` (``Query timed out`` / ``Query's execution time
+    exceeded``).
+
+    This is the signal a slow scan ACTUALLY produces in production: every
+    query goes out with ``TIMEOUT = client budget − 500 ms``
+    (:meth:`FalkorDBProvider._db_timeout_ms`), so the server gives up
+    first and answers with a generic ``ResponseError`` — the client-side
+    ``asyncio.TimeoutError`` only fires when the socket itself stalls past
+    the budget. A consumer that listens for the client error alone (the
+    aggregation scan ladder did, until this helper existed) never sees a
+    real timeout and lets it escape as an unclassified failure.
+
+    Matched by message, like :func:`_is_query_memory_error`, walking the
+    ``__cause__``/``__context__`` chain because the signal arrives wrapped.
+    """
+    seen = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        text = str(seen).lower()
+        if any(marker in text for marker in _QUERY_TIMEOUT_TEXT):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 class _EmptyResult:
     """Stand-in for a FalkorDB query result with no rows — returned by the
     tolerant read path when the graph key doesn't exist yet."""
