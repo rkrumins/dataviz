@@ -54,6 +54,40 @@ const REFRESH_URL = '/api/v1/auth/refresh'
  *  the client can repair a lost cookie in place. See {@link healCsrfToken}. */
 const CSRF_HEAL_URL = '/api/v1/auth/csrf'
 const LOGIN_PATH = '/login'
+
+/**
+ * The CSRF token the server last handed us in a response BODY — from
+ * ``/auth/me``, ``/auth/login``, ``/auth/refresh`` or ``/auth/csrf``.
+ *
+ * This is the authoritative source for the ``X-CSRF-Token`` header, in
+ * preference to reading the ``nx_csrf`` cookie back. Reading the cookie
+ * is where the whole "CSRF error until I refresh" class lived: a
+ * duplicate cookie left under another path/domain scope by an earlier
+ * deploy, the browser's document.cookie order, a ``Secure`` cookie
+ * silently dropped over plain HTTP — any of them makes the value we read
+ * for the header differ from what the server minted, and the write 403s.
+ * Holding the server's own value in memory removes that read entirely.
+ *
+ * The middleware verifies the header's cryptographic binding to the
+ * session (not header==cookie), so a header sourced this way is exactly
+ * what it checks. Falls back to the cookie for a tab that has not yet
+ * heard from any of those endpoints, and for the sid-less double-submit.
+ */
+let knownCsrfToken: string | null = null
+
+/** Record the CSRF token the server returned in a session response body.
+ *  Called by the auth store (bootstrap / login) and by the refresh + heal
+ *  paths here. Ignores empty values so a response without the field never
+ *  clears a good token. */
+export function setCsrfToken(token: string | null | undefined): void {
+  if (token) knownCsrfToken = token
+}
+
+/** Forget the in-memory CSRF token — on sign-out, so a next session's
+ *  writes never carry the previous one's, and for test isolation. */
+export function clearCsrfToken(): void {
+  knownCsrfToken = null
+}
 const SESSION_LOST_EVENT = 'auth:session-lost'
 /** Dispatched after the session cookies have been rotated, by either
  *  trigger. {@link module:store/sessionKeepalive} listens so it can
@@ -194,6 +228,15 @@ async function attemptRefresh(): Promise<{
       headers: { 'Content-Type': 'application/json' },
     })
     if (res.ok) {
+      // A rotation mints a fresh CSRF token bound to the new sid, and
+      // hands it back in the body — capture it so the next write's header
+      // is the rotated value, not a cookie we might read stale.
+      try {
+        const body = (await res.clone().json()) as { csrfToken?: string }
+        setCsrfToken(body?.csrfToken)
+      } catch {
+        // best-effort — buildHeaders falls back to the re-minted cookie.
+      }
       // Phase 10: the new JWT carries re-resolved claims (the
       // backend refresh path calls ``permission_service.resolve``
       // — see auth_service/service.py:365). Re-hydrate the FE
@@ -445,7 +488,19 @@ async function healCsrfToken(): Promise<CsrfHealOutcome> {
         method: 'GET',
         credentials: 'include',
       })
-      return res.ok ? 'ok' : 'no-session'
+      if (res.ok) {
+        // Take the token from the body — the value we send as the header
+        // no longer depends on reading the cookie back.
+        try {
+          const body = (await res.clone().json()) as { csrfToken?: string }
+          setCsrfToken(body?.csrfToken)
+        } catch {
+          // Older backend without the body field — the Set-Cookie still
+          // landed, and buildHeaders falls back to reading it.
+        }
+        return 'ok'
+      }
+      return 'no-session'
     } catch {
       return 'no-session'
     } finally {
@@ -762,7 +817,10 @@ function buildHeaders(
 ): Headers {
   const headers = new Headers(raw)
   if (!SAFE_METHODS.has(method) && !headers.has(CSRF_HEADER)) {
-    const csrf = readScopedCookie(CSRF_COOKIE)
+    // The in-memory token the server handed us wins over the cookie read —
+    // see ``knownCsrfToken``. The cookie is the fallback before bootstrap
+    // and for sid-less sessions.
+    const csrf = knownCsrfToken ?? readScopedCookie(CSRF_COOKIE)
     if (csrf) headers.set(CSRF_HEADER, csrf)
   }
   if (typeof body === 'string' && body.length > 0 && !headers.has('Content-Type')) {

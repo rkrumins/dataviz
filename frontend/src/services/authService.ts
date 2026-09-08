@@ -500,6 +500,10 @@ export interface SessionResponse {
      *  the backend sets no ``AUTH_ENVIRONMENT_ID``, which is also when
      *  those names are unscoped. */
     environment_id?: string | null
+    /** The CSRF token for this session, handed over directly so the client
+     *  can send it as ``X-CSRF-Token`` without reading the ``nx_csrf``
+     *  cookie back — see ``setCsrfToken`` in fetchWithTimeout. */
+    csrfToken?: string | null
 }
 
 /**

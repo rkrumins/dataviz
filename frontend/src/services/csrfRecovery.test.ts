@@ -19,9 +19,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+    clearCsrfToken,
     ensureCsrfToken,
     fetchWithTimeout,
     setAuthEnvironmentId,
+    setCsrfToken,
 } from './fetchWithTimeout'
 
 const CSRF_403 = {
@@ -48,6 +50,7 @@ function clearCookies(): void {
 beforeEach(() => {
     clearCookies()
     setAuthEnvironmentId(null)
+    clearCsrfToken()
     vi.restoreAllMocks()
 })
 
@@ -184,6 +187,29 @@ describe('CSRF failure recovery', () => {
         await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
 
         expect(sent).toBe('mine')
+    })
+
+    it('sends the in-memory token as the header, not the cookie', async () => {
+        // The fundamental fix: once the server has handed us the token in a
+        // response body, the header is that value — NOT whatever we read
+        // back from document.cookie, which duplicates / scope / a dropped
+        // Secure cookie make unreliable. Here the cookie is deliberately a
+        // different, stale value, and the header must still be the token.
+        setCsrfToken('authoritative-token')
+        setCookie('nx_csrf', 'stale-or-duplicate-cookie-value')
+
+        let sent: string | null = null
+        vi.stubGlobal(
+            'fetch',
+            vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+                sent = new Headers(init?.headers).get('X-CSRF-Token')
+                return json({ ok: true }, 200)
+            }),
+        )
+
+        await fetchWithTimeout('/api/v1/views/v1', { method: 'DELETE' })
+
+        expect(sent).toBe('authoritative-token')
     })
 
     it('falls back to the unscoped cookie before bootstrap answers', async () => {

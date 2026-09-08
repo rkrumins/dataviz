@@ -224,23 +224,36 @@ across replicas stay authenticated.
 > on every run. Deploying from a different machine, or after re-running setup, silently
 > changes the key. Store it out-of-band and treat it as long-lived.
 
-### A CSRF failure repairs itself
+### The CSRF header does not depend on reading a cookie back
 
-`nx_csrf` can go missing while the session stays perfectly valid — a sibling deployment's
-sign-out sweeps the shared parent domain, or the cookie is cleared by hand — and until it
-is restored every write 403s. The page cannot fix it locally: the token is bound to the
-session's `sid` under a server secret, and the `sid` lives in the HttpOnly access cookie
-the page cannot read, so only the server can mint a correctly bound one.
+The persistent "CSRF error until I refresh" came from ONE fragile step: the client built its
+`X-CSRF-Token` header by reading the `nx_csrf` cookie back out of `document.cookie`. That read
+is unreliable in ways the page cannot see or fix — a duplicate cookie left under another
+path/domain scope by an earlier deploy, the browser's cookie send-order versus
+`document.cookie` order, a `Secure` cookie silently dropped over plain HTTP. Any of them makes
+the value the client reads for the header differ from what the server minted, and every write
+403s on a session that is perfectly valid until a full reload re-seeds everything.
 
-The repair is `GET /api/v1/auth/csrf` — the same heal a page reload runs on `/auth/me`, on
-its own route. It re-mints the cookie against the live access token **without rotating the
-session**. That distinction matters: the earlier repair rotated the whole session (`POST
-/auth/refresh`) to restore one cookie, which is per-session rate-limited and runs the
-session ceilings, so a repair could trip the SSO / idle / absolute ceiling and sign the
-user out — and when it merely failed transiently it left the 403 stranded until the user
-manually refreshed the page. A heal has none of those failure modes; a rotation is now only
-the fallback, taken when there is no live session to heal against (the access token lapsed
-too), which re-mints the cookie as a side effect.
+Two changes remove the read:
+
+1. **The server hands the token to the client in the response body** of `/auth/login`,
+   `/auth/refresh`, `/auth/me` and `/auth/csrf` (`csrfToken`), not only in the cookie. The
+   client holds it in memory and sends *that* as the header. Its header no longer depends on
+   reading the cookie at all. (The cookie is still set as a fallback for a tab that has not yet
+   heard from any of those endpoints.)
+2. **For a session that carries a `sid`, the middleware verifies the header's cryptographic
+   binding to that session** — that the header is a token minted for this `sid` under the
+   signing key — rather than that the header *equals* the cookie. This is a complete CSRF
+   defence and a stronger one: a cross-site attacker cannot set an `X-CSRF-Token` header at all
+   (it is not CORS-safelisted, so the browser refuses the send to a foreign origin), and cannot
+   forge a bound token without the key. The Origin check is the second, independent layer.
+   Sessions with no `sid` keep plain double-submit (`header == cookie`).
+
+The cookie can still go missing (a sibling deployment's sign-out sweeps the shared parent
+domain), so the in-place heal `GET /api/v1/auth/csrf` remains — it re-mints against the live
+access token **without rotating the session**, and returns the fresh `csrfToken` in its body.
+A rotation (`POST /auth/refresh`) is only the fallback, taken when there is no live session to
+heal against.
 
 The backend answers a CSRF failure with a structured body, matching the shape `requires()`
 uses for a permission denial:

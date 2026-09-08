@@ -240,16 +240,46 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         cookie = request.cookies.get(CSRF_COOKIE_NAME)
         header = request.headers.get(CSRF_HEADER_NAME)
+        sid = self._session_sid(request)
 
-        if (
-            not cookie
-            or not header
-            or not secrets.compare_digest(cookie, header)
-            or not verify_csrf_token(cookie, self._session_sid(request))
-        ):
+        # For a session that carries a ``sid`` — every real one does — the
+        # check is that the HEADER carries a token cryptographically bound
+        # to THIS session, not that the header equals the cookie. That
+        # distinction is the whole robustness of this: the equality form
+        # depended on the client reading its own ``nx_csrf`` cookie back to
+        # build the header, and that read is unreliable in ways the client
+        # cannot see or fix — a duplicate cookie left under another
+        # path/domain scope by an earlier deploy, the browser's send-order
+        # vs. document.cookie order, a ``Secure`` cookie silently dropped
+        # over plain HTTP. Any of them makes header≠cookie for a session
+        # that is perfectly valid, and the write 403s until a full reload.
+        #
+        # Binding the header is a COMPLETE CSRF defence on its own, and a
+        # stronger one: a cross-site attacker cannot set an ``X-CSRF-Token``
+        # header at all (it is not CORS-safelisted, so the browser refuses
+        # the send without a preflight grant we never give a foreign
+        # origin), and even if they could, they cannot forge a token
+        # bound to the victim's ``sid`` without the signing key. The Origin
+        # check above is the second, independent layer. The cookie is still
+        # set — the client reads it as a fallback when it has no token in
+        # memory, and the sid-less branch below still needs it.
+        #
+        # No ``sid`` to bind against (a session minted without one — the
+        # test client, and any legacy token) falls back to plain
+        # double-submit, exactly as before.
+        if sid:
+            ok = bool(header) and verify_csrf_token(header, sid)
+        else:
+            ok = (
+                bool(cookie)
+                and bool(header)
+                and secrets.compare_digest(cookie, header)
+            )
+
+        if not ok:
             logger.warning(
-                "CSRF check failed for %s %s (cookie_present=%s header_present=%s)",
-                request.method, path, bool(cookie), bool(header),
+                "CSRF check failed for %s %s (cookie_present=%s header_present=%s bound=%s)",
+                request.method, path, bool(cookie), bool(header), bool(sid),
             )
             # Structured, like the ``requires()`` 403, and for a sharper
             # reason: this is NOT an authorization failure, and a client

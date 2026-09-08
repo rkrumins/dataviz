@@ -29,9 +29,11 @@ import {
     writeUserCache,
 } from '@/store/userCache'
 import {
+    clearCsrfToken,
     ensureCsrfToken,
     resetSessionLostLatch,
     setAuthEnvironmentId,
+    setCsrfToken,
 } from '@/services/fetchWithTimeout'
 import { bumpAvatarCache } from '@/lib/avatarImage'
 import type { NavPermissionSpec } from '@/lib/navPermissions'
@@ -316,7 +318,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         }
 
         try {
-            const { user, environment_id } = await authService.me()
+            const { user, environment_id, csrfToken } = await authService.me()
+            // Hold the session's CSRF token in memory so the first write's
+            // header is the server's own value, not a cookie we read back.
+            setCsrfToken(csrfToken)
             // Before anything schedules a rotation: the keepalive reads
             // an environment-suffixed cookie by name, and reading a
             // sibling deployment's copy would schedule this tab past its
@@ -372,8 +377,9 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // the picture appears without a hard refresh.
         bumpAvatarCache()
         try {
-            const { user, environment_id } = await authService.login({ email, password })
+            const { user, environment_id, csrfToken } = await authService.login({ email, password })
             setAuthEnvironmentId(environment_id)
+            setCsrfToken(csrfToken)
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
             await hydratePermissions(set)
@@ -397,9 +403,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // the picture appears without a hard refresh.
         bumpAvatarCache()
         try {
-            const { user } = await authService.loginWithBrowserProfile(
+            const { user, csrfToken } = await authService.loginWithBrowserProfile(
                 providerSlug, payload,
             )
+            setCsrfToken(csrfToken)
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
             await hydratePermissions(set)
@@ -424,7 +431,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         // the picture appears without a hard refresh.
         bumpAvatarCache()
         try {
-            const { user } = await loginWithBackchannel(providerSlug, body)
+            const { user, csrfToken } = await loginWithBackchannel(providerSlug, body)
+            setCsrfToken(csrfToken)
             set({ ..._authenticated(user), error: null, isLoading: false })
             writeUserCache(user)
             await hydratePermissions(set)
@@ -498,6 +506,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
             // ignore
         }
         clearUserCache()
+        clearCsrfToken()
         resetClaimRecovery()
         set({ ..._unauthenticated, error: null, isLoading: false })
         // Other tabs share the cookie jar, so their session is gone too —

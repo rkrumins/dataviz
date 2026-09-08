@@ -276,6 +276,14 @@ class SessionResponse(BaseModel):
     #: case where the names are unscoped — so the client's fallback and
     #: this field agree without either having to special-case it.
     environment_id: Optional[str] = None
+    #: The CSRF token for this session, ALSO handed over here — not only in
+    #: the readable ``nx_csrf`` cookie. The client keeps it in memory and
+    #: sends it as ``X-CSRF-Token`` directly, so its header never depends on
+    #: reading the cookie back (a read that duplicate/again-scoped cookies
+    #: and ``Secure``-over-HTTP make unreliable). Same value the cookie
+    #: carries — the middleware verifies the header's binding — so exposing
+    #: it here leaks nothing the JS-readable cookie did not already.
+    csrf_token: Optional[str] = Field(default=None, alias="csrfToken")
 
 
 class _Ack(BaseModel):
@@ -1120,7 +1128,11 @@ async def login(
     await accounts.reset("login", body.email, RATELIMIT_LOGIN_PER_ACCOUNT)
     set_session_cookies(response, tokens)
     logger.info("Login succeeded for user=%s", user.id)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        csrf_token=tokens.csrf_token,
+    )
 
 
 # ── POST /auth/logout ─────────────────────────────────────────────────
@@ -1209,15 +1221,21 @@ async def refresh(request: Request, response: Response):
         )
 
     set_session_cookies(response, tokens)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        csrf_token=tokens.csrf_token,
+    )
 
 
 # ── GET /auth/me ──────────────────────────────────────────────────────
 
 
-def _heal_csrf_cookie(request: Request, response: Response) -> None:
+def _heal_csrf_cookie(request: Request, response: Response) -> str | None:
     """Re-mint ``nx_csrf`` when a valid session presents none, or one
-    that does not verify for this session's ``sid``.
+    that does not verify for this session's ``sid``, and RETURN the token
+    the session should present — the existing valid one, or the freshly
+    minted replacement — so the caller can hand it back in the body too.
 
     Nothing else mints this cookie outside a rotation, so a reload —
     all GETs — used to change nothing and every write kept failing
@@ -1233,12 +1251,14 @@ def _heal_csrf_cookie(request: Request, response: Response) -> None:
     except Exception:  # noqa: BLE001 — unreadable token; same fallback as the middleware
         sid = None
     if presented and verify_csrf_token(presented, sid):
-        return
+        return presented
+    token = mint_csrf_token(sid)
     set_csrf_cookie(
         response,
-        mint_csrf_token(sid),
+        token,
         max_age_seconds=JWT_REFRESH_EXPIRY_DAYS * 24 * 60 * 60,
     )
+    return token
 
 
 @router.get(
@@ -1261,14 +1281,28 @@ async def me(request: Request, response: Response):
         )
     # The bootstrap GET is where a lost CSRF cookie gets healed — the
     # one moment we know the session is valid before any write happens.
-    _heal_csrf_cookie(request, response)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    # The token rides back in the body too, so the SPA holds it in memory
+    # and never has to read the cookie to build its ``X-CSRF-Token``.
+    csrf = _heal_csrf_cookie(request, response)
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        csrf_token=csrf,
+    )
 
 
 # ── GET /auth/csrf ────────────────────────────────────────────────────
 
 
-@router.get("/csrf", response_model=_Ack)
+class CsrfTokenResponse(BaseModel):
+    """Body of ``GET /auth/csrf``: the token the session should present as
+    ``X-CSRF-Token``. The client holds it in memory so its header does not
+    depend on reading the ``nx_csrf`` cookie back."""
+    model_config = ConfigDict(populate_by_name=True)
+    csrf_token: Optional[str] = Field(default=None, alias="csrfToken")
+
+
+@router.get("/csrf", response_model=CsrfTokenResponse, response_model_by_alias=True)
 async def csrf(request: Request, response: Response):
     """Repair ``nx_csrf`` for the current session, in place — no rotation.
 
@@ -1305,8 +1339,7 @@ async def csrf(request: Request, response: Response):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
-    _heal_csrf_cookie(request, response)
-    return _Ack()
+    return CsrfTokenResponse(csrf_token=_heal_csrf_cookie(request, response))
 
 
 # ── GET /auth/diagnostics ─────────────────────────────────────────────
@@ -2380,7 +2413,11 @@ async def backchannel_handle_login(
     if read_link_intent_cookie(request) is not None:
         clear_link_intent_cookie(response)
     logger.info("Back-channel login succeeded (slug=%s, user=%s)", slug, user.id)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        csrf_token=tokens.csrf_token,
+    )
 
 
 @router.post("/{slug}/browser-profile", response_model=SessionResponse,
@@ -2457,4 +2494,8 @@ async def custom_profile_browser_login(
         clear_link_intent_cookie(response)
     logger.info("Custom profile login succeeded (slug=%s, user=%s, source=%s)",
                 slug, user.id, provider.settings.source)
-    return SessionResponse(user=user, environment_id=AUTH_ENVIRONMENT_ID or None)
+    return SessionResponse(
+        user=user,
+        environment_id=AUTH_ENVIRONMENT_ID or None,
+        csrf_token=tokens.csrf_token,
+    )

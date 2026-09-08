@@ -278,6 +278,38 @@ async def test_csrf_endpoint_without_session_401s_and_mints_nothing(
     assert _csrf_set_cookies(resp) == []
 
 
+async def test_the_csrf_token_rides_back_in_the_body(
+    test_client: AsyncClient, db_session: AsyncSession
+):
+    """Login, /me and /csrf all hand the token over in the body, not only
+    in the cookie — the client holds it in memory and sends it as the
+    header, so its header never depends on reading the cookie back."""
+    await _seed(db_session)
+    login = await test_client.post(
+        "/api/v1/auth/login",
+        json={"email": "cookie@example.com", "password": _PASSWORD},
+    )
+    assert login.status_code == 200
+    cookie_val = login.cookies.get(CSRF_COOKIE_NAME)
+    assert cookie_val
+    # The login body carries the same token the cookie does.
+    assert login.json()["csrfToken"] == cookie_val
+
+    # /me carries it too — a real, non-empty token the SPA holds in memory.
+    me = await test_client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert isinstance(me.json()["csrfToken"], str) and me.json()["csrfToken"]
+
+    # /csrf returns the token it (re-)mints, matching its own Set-Cookie.
+    test_client.cookies.delete(CSRF_COOKIE_NAME)
+    healed = await test_client.get("/api/v1/auth/csrf")
+    assert healed.status_code == 200
+    minted = _csrf_set_cookies(healed)
+    assert len(minted) == 1
+    set_value = minted[0].split(";", 1)[0].split("=", 1)[1]
+    assert healed.json()["csrfToken"] == set_value
+
+
 async def test_csrf_endpoint_evicts_a_foreign_cookie(test_client: AsyncClient):
     # A cookie from another deployment can never be healed here; it is
     # classified and evicted, same as on /me, so the client stops retrying
