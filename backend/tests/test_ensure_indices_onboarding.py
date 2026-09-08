@@ -105,10 +105,21 @@ class _FailingGraph:
 
 
 def _bare_provider(graph):
+    from types import SimpleNamespace
+
     from backend.app.providers.falkordb_provider import FalkorDBProvider
 
     p = object.__new__(FalkorDBProvider)
     p._graph = graph
+    p._graph_name = "g"
+    # ``ensure_indices`` refuses to issue DDL against a graph key that does not
+    # exist (it would implicitly CREATE it). These tests are about failure
+    # accounting on a graph that IS there, so the probe answers 1.
+    async def _exists(cmd, *args):
+        assert cmd == "EXISTS"
+        return 1
+
+    p._db = SimpleNamespace(execute_command=_exists)
     return p
 
 

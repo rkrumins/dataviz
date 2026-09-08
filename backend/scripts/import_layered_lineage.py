@@ -325,7 +325,12 @@ async def push_to_falkordb(builder, graph_name: str, declared_labels=None, *, bu
         # net, declared-first so a sparse type is still indexed before its first write.
         labels = sorted(set(declared_labels or ()) | {n.entity_type for n in builder.nodes if n.entity_type})
         logger.info(f"Ensuring urn indices for labels {labels} before load...")
-        await provider.ensure_indices(entity_type_ids=labels)
+        # ``may_create_graph`` because this call is deliberately BEFORE the first write
+        # — the whole point is to have the indices in place for it. Background callers
+        # default to skipping DDL on a graph that does not exist yet (so a deleted graph
+        # is never implicitly recreated); a loader that is about to create the graph is
+        # exactly the caller that opts out of that.
+        await provider.ensure_indices(entity_type_ids=labels, may_create_graph=True)
 
         # Batch size is tunable — smaller batches bound per-query memory/time (fewer rows in
         # flight) at the cost of more round-trips.

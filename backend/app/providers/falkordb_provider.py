@@ -1904,6 +1904,38 @@ class FalkorDBProvider(GraphDataProvider):
 
         return await self._guarded_timed(_call, kind="ro", cypher=cypher, op=op, budget=t)
 
+    async def _graph_key_exists(self, name: str, db) -> bool:
+        """Whether the graph KEY ``name`` currently exists on ``db``'s instance.
+
+        The gate on background index DDL. FalkorDB has no ``CREATE GRAPH``: a
+        write-mode ``GRAPH.QUERY`` — which ``CREATE INDEX`` is — creates the key
+        implicitly. So reconciling indexes against a graph an operator deleted
+        out-of-band silently RESURRECTS it, with 0 nodes and 0 edges.
+
+        ``EXISTS`` is a KEYED command, so a cluster client routes it to the node
+        that owns the graph — unlike the keyless ``GRAPH.LIST``. Same probe
+        :meth:`_empty_key_is_genuine` already relies on.
+
+        FAILS CLOSED: a probe error (or no client) returns False, so the DDL is
+        skipped. Missing indexes are best-effort and self-heal on the next
+        connect; a resurrected graph does not heal at all.
+        """
+        if db is None:                               # pragma: no cover - defensive
+            return False
+        try:
+            exists = await asyncio.wait_for(
+                db.execute_command("EXISTS", name),
+                timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+            )
+        except Exception as exc:
+            logger.warning(
+                "FalkorDB %s: EXISTS probe for %r failed (%s) — skipping index DDL "
+                "rather than risk recreating a graph that was deleted.",
+                self._graph_name, name, exc,
+            )
+            return False
+        return int(exists or 0) > 0
+
     async def _empty_key_is_genuine(self) -> bool:
         """Whether an "Invalid graph operation on empty key" really means the
         graph is empty.
@@ -2246,7 +2278,8 @@ class FalkorDBProvider(GraphDataProvider):
             )
         return stamped
 
-    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
+    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None,
+                             *, may_create_graph: bool = False):
         """Create indices for node labels and properties.
 
         When *entity_type_ids* is provided (e.g. from the resolved ontology),
@@ -2255,14 +2288,36 @@ class FalkorDBProvider(GraphDataProvider):
         The label/property policy lives in ``index_policy`` — shared with the
         alignment-analysis endpoint so its performance predictions can never
         drift from what is actually indexed here.
+
+        ``may_create_graph`` is for callers that are about to POPULATE the graph
+        and want the indexes in place first. Everyone else gets the default,
+        which skips the DDL entirely when the graph key does not exist —
+        ``CREATE INDEX`` would otherwise implicitly create it (FalkorDB has no
+        ``CREATE GRAPH``), silently resurrecting a graph an operator deleted.
         """
         from backend.app.providers.index_policy import INDEXED_NODE_PROPS, indexed_labels
 
         labels = indexed_labels(entity_type_ids)
         # Remember the ontology vocabulary the indices were built for, so
         # label-union readers (get_nodes_by_layer) can anchor on the same
-        # label set the label-scoped indexes actually cover.
+        # label set the label-scoped indexes actually cover. Set BEFORE the
+        # existence guard below: skipping the DDL must not also strip the
+        # label-union anchor out from under the readers.
         self._indexed_entity_type_ids = list(entity_type_ids or [])
+
+        # ``CREATE INDEX`` is a write-mode GRAPH.QUERY, and FalkorDB creates a
+        # graph key on first write. Every background caller here (the connect-time
+        # reconcile, ontology resolution, an aggregation job) would therefore
+        # resurrect a graph an operator deleted, as an empty 0/0 one. Only a caller
+        # that is about to POPULATE the graph passes ``may_create_graph``.
+        if not may_create_graph and not await self._graph_key_exists(
+            self._graph_name, self._db,
+        ):
+            logger.debug(
+                "ensure_indices: graph %r does not exist on this instance — "
+                "skipping index DDL.", self._graph_name,
+            )
+            return
         # Idempotent CREATE INDEX is fine if the index already exists.
         properties = list(INDEXED_NODE_PROPS)
         # Index the source's URN-equivalent too, so the identity-urn stamp's
@@ -4209,6 +4264,23 @@ class FalkorDBProvider(GraphDataProvider):
         and fall through silently on older releases (the existing per-label
         URN indexes remain in place for labeled queries).
         """
+
+        # Same resurrection guard as ``ensure_indices``, against the key ``_proj``
+        # actually writes to: the SOURCE graph in ``in_source`` mode (so unguarded
+        # DDL here recreates a deleted source), or ``{graph}_proj`` in ``dedicated``
+        # mode (where it would mint a phantom projection graph). ``_proj_db`` is
+        # only populated in dedicated mode; in_source shares the source client.
+        dedicated = (
+            self._projection_mode == "dedicated" and self._proj_graph is not None
+        )
+        proj_name = f"{self._graph_name}_proj" if dedicated else self._graph_name
+        proj_db = self._proj_db if (dedicated and self._proj_db is not None) else self._db
+        if not await self._graph_key_exists(proj_name, proj_db):
+            logger.debug(
+                "ensure_projections: graph %r does not exist on this instance — "
+                "skipping index DDL.", proj_name,
+            )
+            return
 
         try:
             await self._proj_query("CREATE INDEX FOR (n:_Projection) ON (n.urn)")
@@ -11026,7 +11098,9 @@ class FalkorDBProvider(GraphDataProvider):
         # idempotent but there's no point re-issuing DDL per chunk.
         if nodes_by_label and not getattr(self, "_save_indices_ensured", False):
             try:
-                await self.ensure_indices(list(nodes_by_label.keys()))
+                await self.ensure_indices(
+                    list(nodes_by_label.keys()), may_create_graph=True,
+                )
                 self._save_indices_ensured = True
             except Exception as exc:
                 logger.warning(
