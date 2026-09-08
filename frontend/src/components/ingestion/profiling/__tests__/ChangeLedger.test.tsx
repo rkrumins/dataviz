@@ -16,6 +16,7 @@ function obs(over: Partial<Observation> & { at: string; id: string }): Observati
         lane: 'probe', reason: 'changed', refresh_event_id: null,
         node_count: 1000, edge_count: 500, node_delta: 10, edge_delta: 0,
         entity_type_counts: {}, edge_type_counts: {}, type_deltas: null,
+        check_error: null,
         significance: { nodes: 'normal', edges: 'normal' },
         ...over,
     }
@@ -31,8 +32,11 @@ function payload(
         baselines: { nodes: 25, edges: 25 }, events: [],
         counts: {
             observations: observations.length,
-            moved: observations.filter((o) => o.reason !== 'heartbeat').length,
+            moved: observations.filter(
+                (o) => o.reason !== 'heartbeat' && o.reason !== 'unavailable',
+            ).length,
             checkpoints: observations.filter((o) => o.reason === 'heartbeat').length,
+            unavailable: observations.filter((o) => o.reason === 'unavailable').length,
             runs: 0,
             ...counts,
         },
@@ -118,5 +122,38 @@ describe('ChangeLedger', () => {
             obs({ id: 'f1', at: '2026-08-24T09:00:00Z', reason: 'first', node_delta: null, edge_delta: null }),
         ]))
         expect(screen.getByText(/the record starts here/i)).toBeInTheDocument()
+    })
+})
+
+describe('a check that could not measure', () => {
+    it('says so, instead of claiming nothing changed', () => {
+        // The generic fallback ("No change — still N entities") would be a
+        // false statement here: we did not observe that the counts held, we
+        // failed to observe at all.
+        renderIt(payload([
+            obs({
+                id: 'o1', at: '2026-08-24T10:00:00Z', reason: 'unavailable',
+                node_delta: 0, edge_delta: 0, node_count: 1000,
+                check_error: 'tcp_refused: falkor:6379',
+            }),
+        ]))
+        expect(screen.getByText(/could not be checked/i)).toBeInTheDocument()
+        expect(screen.getByText(/tcp_refused/)).toBeInTheDocument()
+        expect(screen.queryByText(/No change/i)).not.toBeInTheDocument()
+    })
+
+    it('does not reset how long the source has been steady', () => {
+        // An outage is not a movement. Folding it in would restart "steady for"
+        // every time the collector had a bad minute.
+        renderIt(payload([
+            obs({ id: 'o3', at: '2026-08-24T10:00:00Z', reason: 'heartbeat', node_delta: 0 }),
+            obs({
+                id: 'o2', at: '2026-08-23T10:00:00Z', reason: 'unavailable',
+                node_delta: 0, edge_delta: 0,
+            }),
+            obs({ id: 'o1', at: '2026-08-01T10:00:00Z', reason: 'changed', node_delta: 10 }),
+        ]))
+        // Measured from the CHANGE on the 1st, not the outage on the 23rd.
+        expect(screen.getByText(/23 days/i)).toBeInTheDocument()
     })
 })

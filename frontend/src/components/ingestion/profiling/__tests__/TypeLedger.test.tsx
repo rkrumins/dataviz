@@ -29,6 +29,7 @@ function payload(
         totals: { nodes: [], edges: [], total: [] },
         platform_wide: true, truncated: false, vanished_types: [],
         coverage_from: null, sources_observed: 1,
+        observations: 0, unavailable: 0, last_observed_at: null,
     }
 }
 

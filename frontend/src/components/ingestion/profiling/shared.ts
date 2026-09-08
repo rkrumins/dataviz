@@ -68,6 +68,9 @@ export const REASON_LABEL: Record<Observation['reason'], string> = {
     changed: 'Counts changed',
     heartbeat: 'Checkpoint',
     run: 'Refresh run',
+    // The check ran and could not measure. Distinct from a checkpoint, which
+    // confirms stillness — this confirms only that the pipeline is alive.
+    unavailable: 'Could not check',
 }
 
 /** Signed, and stillness is not a movement. `+0` reads as a change; `—` does
@@ -190,6 +193,23 @@ export function formatBucket(bucket: string): string {
  * varies. Eliding it also turns the day boundary into something a reader can
  * SEE, because the only labels carrying a date are the ones that start one.
  */
+/** "How long ago", from a capture instant.
+ *
+ *  Still pads a bucket key, because a source with no stats row falls back to
+ *  one — a coarse answer beats none, and the two agree to within a bucket. */
+export function relativeShort(bucket: string): string {
+    const padded = bucket.length <= 10
+        ? `${bucket}T00:00:00Z`
+        : bucket.length <= 13 ? `${bucket}:00:00Z` : bucket
+    const at = new Date(padded).getTime()
+    if (Number.isNaN(at)) return bucket
+    const mins = Math.round((Date.now() - at) / 60000)
+    if (mins < 60) return `${Math.max(0, mins)}m ago`
+    const hours = Math.round(mins / 60)
+    if (hours < 48) return `${hours}h ago`
+    return `${Math.round(hours / 24)}d ago`
+}
+
 export function axisLabels(buckets: string[]): string[] {
     let lastDate: string | null = null
     return buckets.map((bucket) => {

@@ -54,6 +54,15 @@ export interface SeriesPayload {
      *  than reading as data loss. */
     coverage_from: string | null
     sources_observed: number
+    /** How many times this scope was OBSERVED in the window, counted over raw
+     *  snapshots rather than drawn buckets — at hour or day grain the two
+     *  differ by an order of magnitude, and the bucket count reads as a
+     *  pipeline running far slower than it is. */
+    observations: number
+    /** Of those, how many could not measure. */
+    unavailable: number
+    /** When the most recent check ran, whatever it found. */
+    last_observed_at: string | null
     previous?: SeriesPayload
 }
 
@@ -97,7 +106,10 @@ export interface Observation {
     id: string
     at: string
     lane: 'probe' | 'poll' | 'deep' | 'sweep' | 'write'
-    reason: 'first' | 'changed' | 'heartbeat' | 'run'
+    /** `unavailable` = the check RAN and could not measure the graph. Such a
+     *  row carries the LAST KNOWN counts forward (never a fabricated zero), so
+     *  it is safe to draw but must never be counted as movement. */
+    reason: 'first' | 'changed' | 'heartbeat' | 'run' | 'unavailable'
     /** The refresh event whose run produced this, when one did. */
     refresh_event_id: string | null
     node_count: number
@@ -107,6 +119,8 @@ export interface Observation {
     entity_type_counts: Record<string, number>
     edge_type_counts: Record<string, number>
     type_deltas: string | null
+    /** Why an `unavailable` check could not measure. Null on every other kind. */
+    check_error: string | null
     significance: { nodes: Significance; edges: Significance }
 }
 
@@ -141,6 +155,8 @@ export interface ObservationsPayload {
         observations: number
         moved: number
         checkpoints: number
+        /** Checks that ran and could not measure — alive, but not a reading. */
+        unavailable: number
         runs: number
     }
 }

@@ -66,7 +66,9 @@ _GRAIN_SUFFIX = {"hour": ":00:00+00:00", "day": "T00:00:00+00:00"}
 _GRAIN_DELTA = {"hour": timedelta(hours=1), "day": timedelta(days=1)}
 
 #: Reasons that represent something happening rather than a continuity tick.
-#: ``first`` counts: a source appearing is an event.
+#: ``first`` counts: a source appearing is an event. ``heartbeat`` and
+#: ``unavailable`` do not: one confirms stillness, the other admits the check
+#: could not measure — neither is a movement the source made.
 _EVENTFUL = ("first", "changed", "run")
 
 #: Most buckets one compaction pass will build. Bounds a first-run backfill
@@ -1046,6 +1048,38 @@ async def coverage_from(
     return min(candidates) if candidates else None
 
 
+async def observation_stats(
+    session: AsyncSession, *, scope: str, scope_id: Optional[str],
+    visible: Optional[Sequence[str]], frm: str, to: str,
+) -> Dict[str, Any]:
+    """How many times this scope was OBSERVED in the window, and when last.
+
+    Counted over raw snapshots, never over drawn buckets. The chart's bucket
+    count answers "how many points did we plot", which at hour or day grain is
+    a much smaller number — so a source checked 96 times in a day rendered as
+    "24 observations" and read as a pipeline running four times slower than it
+    is. ``unavailable`` rows are counted separately: a check that ran and could
+    not measure is evidence the pipeline is alive, but it is not a reading.
+    """
+    rows = (await session.execute(
+        select(_SNAP.capture_reason, func.count(_SNAP.id), func.max(_SNAP.captured_at))
+        .where(
+            _SNAP.captured_at >= frm, _SNAP.captured_at <= to,
+            *_scope_conditions(
+                _SNAP, scope=scope, scope_id=scope_id, visible=visible,
+            ),
+        )
+        .group_by(_SNAP.capture_reason)
+    )).all()
+    by_reason = {reason: int(count or 0) for reason, count, _ in rows}
+    last_at = max((r[2] for r in rows if r[2]), default=None)
+    return {
+        "observations": sum(by_reason.values()),
+        "unavailable": by_reason.get("unavailable", 0),
+        "last_observed_at": last_at,
+    }
+
+
 async def resolve_source_id(session: AsyncSession, given: str) -> str:
     """Accept a catalog-item id where a data source id is expected.
 
@@ -1322,14 +1356,20 @@ async def window_counts(
     )).all()
     by_reason = {reason: int(count or 0) for reason, count in rows}
     observations = sum(by_reason.values())
-    # A checkpoint is the system confirming stillness; everything else is
-    # something happening. `first` counts as an event — a source appearing is
-    # the most consequential thing in its record.
+    # A checkpoint is the system confirming stillness; an ``unavailable`` row is
+    # the system admitting it could not look. Neither is movement.
+    #
+    # ``moved`` is summed from ``_EVENTFUL`` rather than derived by subtraction.
+    # It used to be ``observations - checkpoints``, which silently reclassified
+    # any reason it had not been told about — so the first outage marker would
+    # have been reported as a change the source never made.
     checkpoints = by_reason.get("heartbeat", 0)
+    unavailable = by_reason.get("unavailable", 0)
     return {
         "observations": observations,
-        "moved": observations - checkpoints,
+        "moved": sum(by_reason.get(reason, 0) for reason in _EVENTFUL),
         "checkpoints": checkpoints,
+        "unavailable": unavailable,
         "runs": by_reason.get("run", 0),
     }
 
@@ -1382,6 +1422,9 @@ async def observations_for_source(
             "edge_count": int(r.edge_count or 0),
             "node_delta": r.node_delta,
             "edge_delta": r.edge_delta,
+            # Only ever set on an ``unavailable`` row: why the check could not
+            # measure. NULL everywhere else.
+            "check_error": r.check_error,
             # Derived artifacts stripped on READ so snapshots captured before
             # the providers stopped recording them stop showing the platform's
             # own bookkeeping as a type that appears and disappears.

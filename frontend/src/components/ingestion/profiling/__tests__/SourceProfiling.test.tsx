@@ -29,7 +29,9 @@ vi.mock('@/services/profilingService', () => ({
             id: 'ds_a', from: '', to: '', window: '30d', observations: [],
             total: 0, offset: 0, limit: 50,
             baselines: { nodes: 25, edges: 25 }, events: [],
-            counts: { observations: 0, moved: 0, checkpoints: 0, runs: 0 },
+            counts: {
+                observations: 0, moved: 0, checkpoints: 0, unavailable: 0, runs: 0,
+            },
         }),
         getFindings: vi.fn().mockResolvedValue({
             alerts: [], total: 0, openCount: 0, offset: 0, limit: 20,
@@ -55,6 +57,7 @@ function series(over: Partial<SeriesPayload> = {}): SeriesPayload {
         totals: { nodes: [100, 140], edges: [50, 60], total: [150, 200] },
         platform_wide: true, truncated: false, vanished_types: [],
         coverage_from: '2026-08-23', sources_observed: 1,
+        observations: 96, unavailable: 0, last_observed_at: '2026-08-24T00:00:00Z',
         ...over,
     }
 }

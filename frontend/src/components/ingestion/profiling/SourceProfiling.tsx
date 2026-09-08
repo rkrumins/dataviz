@@ -37,7 +37,7 @@ import { SeriesVerdict } from './Verdict'
 import { Segmented } from './BoardFilters'
 import { TypeLedger } from './TypeLedger'
 import { UtcChip } from './UtcChip'
-import { formatBucket, formatDay, signed } from './shared'
+import { formatBucket, formatDay, relativeShort, signed } from './shared'
 
 interface Props {
     dataSourceId: string
@@ -202,12 +202,24 @@ export function SourceProfiling({
                     comparisonLabel={`vs ${windowLabel} ago`}
                     sub={edgeMove ? undefined : 'unchanged'}
                 />
+                {/*
+                  Counted over raw observations, not over drawn buckets. At hour
+                  or day grain the two differ by an order of magnitude — a source
+                  checked 96 times in a day rendered as "24", which reads as a
+                  pipeline running four times slower than it is, and is exactly
+                  the ambiguity this tile exists to remove. The sub line answers
+                  "and is it still running?", which a count alone cannot.
+                */}
                 <KpiCard
                     label="Observations"
-                    value={exact(payload.buckets.length)}
+                    value={exact(payload.observations)}
                     icon={Activity}
                     accent="violet"
-                    sub={{ raw: 'every capture', hour: 'by hour', day: 'by day' }[payload.grain]}
+                    sub={
+                        payload.last_observed_at
+                            ? `last checked ${relativeShort(payload.last_observed_at)}${payload.unavailable ? ` · ${exact(payload.unavailable)} could not measure` : ''}`
+                            : 'never checked'
+                    }
                 />
                 <KpiCard
                     label="Largest drop"

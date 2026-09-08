@@ -42,7 +42,8 @@ import { ProfilingSettings } from './ProfilingSettings'
 import { ProfilingSourceDrawer } from './ProfilingSourceDrawer'
 import { BoardVerdict } from './Verdict'
 import {
-    MEASURE_LABEL, formatInstant, deltaTone, metricNoun, signed, significanceMeta,
+    MEASURE_LABEL, formatInstant, deltaTone, metricNoun, relativeShort, signed,
+    significanceMeta,
 } from './shared'
 
 const WINDOW_KEYS = PROFILING_WINDOWS.map((w) => w.key) as readonly ProfilingWindowKey[]
@@ -381,7 +382,7 @@ function BoardTable({
         return (
             <EmptyPanel
                 title="Nothing to rank yet"
-                body="Counts are captured whenever they change, at every refresh run, and at least once an hour otherwise. Widening the window reaches further back — it cannot reach before a source's first capture."
+                body="Counts are captured whenever they change, at every refresh run, and on a regular checkpoint otherwise. Widening the window reaches further back — it cannot reach before a source's first capture."
             />
         )
     }
@@ -601,23 +602,6 @@ function Row({
 function varies(points: number[]): boolean {
     if (points.length < 3) return false
     return points.some((v) => v !== points[0])
-}
-
-/** "How long ago", from a capture instant.
- *
- *  Still pads a bucket key, because a source with no stats row falls back to
- *  one — a coarse answer beats none, and the two agree to within a bucket. */
-function relativeShort(bucket: string): string {
-    const padded = bucket.length <= 10
-        ? `${bucket}T00:00:00Z`
-        : bucket.length <= 13 ? `${bucket}:00:00Z` : bucket
-    const at = new Date(padded).getTime()
-    if (Number.isNaN(at)) return bucket
-    const mins = Math.round((Date.now() - at) / 60000)
-    if (mins < 60) return `${Math.max(0, mins)}m ago`
-    const hours = Math.round(mins / 60)
-    if (hours < 48) return `${hours}h ago`
-    return `${Math.round(hours / 24)}d ago`
 }
 
 function BoardSkeleton() {

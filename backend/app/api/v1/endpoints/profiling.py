@@ -208,6 +208,15 @@ async def get_series(
             session, scope=scope, scope_id=scope_id, visible=visible,
         ),
         "sources_observed": len({o.data_source_id for o in observations}),
+        # Counted over raw snapshots, not over drawn buckets — the two differ by
+        # the grain, and the bucket count reads as a pipeline running slower
+        # than it is. This is what lets the page say "checked 96 times, last 4m
+        # ago" instead of leaving a flat line ambiguous between a stable source
+        # and a dead collector.
+        **await profiling_repo.observation_stats(
+            session, scope=scope, scope_id=scope_id, visible=visible,
+            frm=frm_iso, to=to_iso,
+        ),
     })
 
     if compare:

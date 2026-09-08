@@ -1151,8 +1151,17 @@ class DataSourceCountSnapshotORM(Base):
     lane = Column(Text, nullable=False, default="poll")
     # Why the row exists. ``heartbeat`` rows are continuity, not events — the
     # change ledger filters to ``changed`` so a reader sees movement, not ticks.
+    # ``unavailable`` is the third kind: the check RAN and could not measure the
+    # graph. It carries the last known counts forward (never a fabricated zero —
+    # see ``record_unavailable``) so the series stays continuous, and it is what
+    # makes an outage read as an outage instead of as silence.
     # NOT named ``trigger``: that is a reserved word in SQL.
     capture_reason = Column(Text, nullable=False, default="changed")
+    #: Why an ``unavailable`` observation could not measure. NULL on every other
+    #: kind. Kept beside the row rather than only in the polling config's
+    #: ``last_error`` so the ledger can say what went wrong at a given instant,
+    #: not just what went wrong most recently.
+    check_error = Column(Text, nullable=True)
 
     # Deltas against the observation this one replaced. NULL on the first
     # snapshot of a source, which has nothing to be a delta from.
@@ -1190,7 +1199,8 @@ class DataSourceCountSnapshotORM(Base):
             name="ck_dscs_lane",
         ),
         CheckConstraint(
-            "capture_reason IN ('first', 'changed', 'heartbeat', 'run')",
+            "capture_reason IN ('first', 'changed', 'heartbeat', 'run', "
+            "'unavailable')",
             name="ck_dscs_reason",
         ),
     )

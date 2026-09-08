@@ -33,7 +33,14 @@ collection facets and a discovery path:
   freshness markers advance.
 - **Discovery** — pre-registration asset listing and per-asset stats for a
   provider, so the registry UI can browse a provider's assets before a data
-  source is created.
+  source is created. Its loop wakes on `DISCOVERY_TICK_INTERVAL_SECS` and
+  enqueues each cached row when it is past **its own** deadline — the owning
+  data source's configured `interval_seconds`, or
+  `DISCOVERY_REFRESH_INTERVAL_SECS` for a row that has no data source. The two
+  used to be one number, which meant a source configured to poll every five
+  minutes could not be honoured: the loop was not awake to notice. Every
+  completed attempt stamps `last_attempt_at`, so a provider that keeps refusing
+  is distinguishable from a sweep that has stopped.
 
 Every counts write also **captures a history snapshot** — see below.
 
@@ -150,12 +157,33 @@ showed ~9 points for a source that had been polled ~96 times. Nine flat points
 reads as a dead pipeline, which is the exact ambiguity this feature exists to
 remove — and it made "stable" indistinguishable from "unwatched".
 
-**What a failed collection writes: nothing.** Capture is reached only after
-the provider has answered. A FalkorDB pod rotation makes the collection raise
-upstream — in `_run_guarded`'s retry, the circuit breaker, or the admission
-gate's soft-retry — so no row is written and no phantom zero enters the
-series. A *genuinely* empty graph is different: the provider verifies absence
-via `EXISTS` before reporting zero, so that zero is real.
+**What a failed collection writes: no COUNTS.** Capture of a reading is reached
+only after the provider has answered. A FalkorDB pod rotation makes the
+collection raise upstream — in `_run_guarded`'s retry, the circuit breaker, or
+the admission gate's soft-retry — so no counts are written and no phantom zero
+enters the series. A *genuinely* empty graph is different: the provider verifies
+absence via `EXISTS` before reporting zero, so that zero is real.
+
+It does write a **marker**. A failed check records one
+`capture_reason = 'unavailable'` observation carrying the LAST KNOWN counts
+forward, with zero deltas and a `check_error` — see
+`stats_history_repo.record_unavailable`. The drawn series is therefore
+unchanged; only the reason says what happened. This exists because silence was
+ambiguous: a stable source, a stopped collector and a refusing provider all
+looked identical, and "was this even checked?" is the question an operator opens
+the page with. Three rules keep it honest:
+
+- **Never invented.** With no prior observation there is nothing to carry, so
+  nothing is written. A source whose very first check fails still has no series.
+- **Heartbeat-gated**, like a continuity tick — the 60s probe lane during an
+  hour-long outage produces one row per window, not sixty.
+- **Not movement.** `unavailable` is excluded from `_EVENTFUL`, and
+  `window_counts` reports it as its own figure, so an outage is never counted
+  as a change the source made and never resets "steady for N days".
+
+Written from the worker's failure paths, including the **soft-retry** path
+(open breaker / throttled provider) — the most common outage shape, and one that
+ACKs without ever reaching `_handle_failure`.
 
 ### Tiered retention
 
@@ -414,9 +442,12 @@ Scheduler / worker tunables (defaults in parentheses):
 | `STATS_DRAIN_TIMEOUT_SECS` | `60` | Graceful-drain budget on shutdown. |
 | `STATS_HEALTH_PORT` | `8092` | Liveness endpoint port (also `--health-port`). |
 | `INSIGHTS_TRIM_INTERVAL_SECS` | `3600` | Stream-trim cadence. |
+| `DISCOVERY_TICK_INTERVAL_SECS` | `60` | How often the discovery loop WAKES. Not how often a row is refreshed — each row is enqueued when it is past its own deadline. Set it to `DISCOVERY_REFRESH_INTERVAL_SECS` to restore the old fixed-cadence sweep. |
+| `DISCOVERY_REFRESH_INTERVAL_SECS` | `1800` | The deadline a cached row inherits when it has no data source, or none with a configured interval. A registered source uses its own `data_source_polling_configs.interval_seconds` instead. |
+| `DISCOVERY_READ_HEAL_FACTOR` | `3` | How many missed deadlines before a READ may enqueue one repair for the row it is serving. Measured from the last *attempt*, so a provider being retried and failing is never piled on; bounded by a per-scope `SET NX` cooldown. `0` disables. |
 | `INSIGHTS_COUNTS_PARITY_CHECK` | `0` | Diagnostic: run direct count scans alongside the deep facet and log divergence. |
 | `PROFILING_ENABLED` | `true` | Master switch for capture. |
-| `PROFILING_HEARTBEAT_SECS` | `3600` | Continuity snapshot when nothing changed. |
+| `PROFILING_HEARTBEAT_SECS` | `900` | Continuity snapshot when nothing changed, and the gate on `unavailable` markers. Aligned to the counts poll: at the old hourly value a source polled ~96 times a day recorded ~9 points, and nine flat points read as a dead pipeline. |
 | `PROFILING_RAW_RETENTION_DAYS` | `7` | Full-fidelity tier. |
 | `PROFILING_HOURLY_RETENTION_DAYS` | `45` | Carries the 30-day product floor, with headroom. |
 | `PROFILING_DAILY_RETENTION_DAYS` | `400` | Long tier: this quarter vs the same quarter last year. |

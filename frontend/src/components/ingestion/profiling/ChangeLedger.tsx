@@ -14,7 +14,7 @@
  * conclusion from "no movement" than one who knows they picked 24 hours.
  */
 import { useMemo, useState } from 'react'
-import { CheckCircle2, ChevronRight, Clock, Zap } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronRight, Clock, Zap } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { exact } from '@/lib/formatMetric'
@@ -140,6 +140,11 @@ function Row({
                                 <Zap className="w-3 h-3" aria-hidden /> run
                             </span>
                         )}
+                        {row.reason === 'unavailable' && (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                                <AlertTriangle className="w-3 h-3" aria-hidden /> not measured
+                            </span>
+                        )}
                         {worst !== 'normal' && (
                             <span className={cn('text-[11px] font-bold uppercase tracking-wide', meta.tone)}>
                                 {meta.label}
@@ -164,11 +169,13 @@ function Row({
                         // A run that moved nothing is a finding, not a blank
                         // row: the loader ran and produced no change.
                         <span className="mt-1 block text-xs text-ink-muted">
-                            {row.reason === 'run'
-                                ? `This run changed nothing — still ${exact(row.node_count)} ${metricNoun('nodes', row.node_count)}.`
-                                : row.reason === 'first'
-                                    ? `The record starts here — ${exact(row.node_count)} ${metricNoun('nodes', row.node_count)}, ${exact(row.edge_count)} ${metricNoun('edges', row.edge_count)}.`
-                                    : `No change — still ${exact(row.node_count)} ${metricNoun('nodes', row.node_count)}.`}
+                            {row.reason === 'unavailable'
+                                ? `The source could not be checked — still showing ${exact(row.node_count)} ${metricNoun('nodes', row.node_count)} from the last successful reading.${row.check_error ? ` ${row.check_error}` : ''}`
+                                : row.reason === 'run'
+                                    ? `This run changed nothing — still ${exact(row.node_count)} ${metricNoun('nodes', row.node_count)}.`
+                                    : row.reason === 'first'
+                                        ? `The record starts here — ${exact(row.node_count)} ${metricNoun('nodes', row.node_count)}, ${exact(row.edge_count)} ${metricNoun('edges', row.edge_count)}.`
+                                        : `No change — still ${exact(row.node_count)} ${metricNoun('nodes', row.node_count)}.`}
                         </span>
                     )}
                 </span>
@@ -253,15 +260,25 @@ export function ChangeLedger({
             | { kind: 'silence'; span: string; checkpoints: number }
         )[] = []
 
+        // Two filters, not one. ``movements`` is what gets DRAWN — an outage is
+        // something a reader needs to see. ``changes`` is what counts as the
+        // source having MOVED; folding outages into it would reset "steady for
+        // 3 days" every time the collector had a bad minute, which is the exact
+        // opposite of what that banner is for.
         const movements = all.filter((o) => o.reason !== 'heartbeat')
+        const changes = movements.filter((o) => o.reason !== 'unavailable')
         // Newest-first, so "since" is measured from the newest movement to now.
         const newest = all[0]
-        const newestMovement = movements[0]
+        const newestMovement = changes[0]
         const steadyFor = newestMovement && newest && newest.id !== newestMovement.id
             ? {
                 span: humanSpan(spanMs(newestMovement.at, newest.at)),
                 since: newestMovement.at,
-                checkpoints: all.findIndex((o) => o.id === newestMovement.id),
+                // Checkpoints only: an outage confirms the pipeline is alive,
+                // not that the counts held still.
+                checkpoints: all.filter(
+                    (o) => o.at > newestMovement.at && o.reason === 'heartbeat',
+                ).length,
             }
             : null
 

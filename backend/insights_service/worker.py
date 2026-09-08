@@ -39,6 +39,7 @@ from backend.common.adapters.circuit import ProviderUnavailable
 from . import dispatcher
 from .admission import AdmissionDenied
 from .collector import record_failure as stats_record_failure  # noqa: F401  (forces self-registration)
+from .collector import record_unavailable_check
 from .config import StatsServiceConfig
 from .discovery import record_failure as discovery_record_failure  # noqa: F401
 from .purge import record_failure as purge_record_failure  # noqa: F401
@@ -54,6 +55,7 @@ from .schemas import (
     JobEnvelope,
     ProbeJobEnvelope,
     PurgeJobEnvelope,
+    StatsDeepJobEnvelope,
     StatsJobEnvelope,
     parse_envelope,
 )
@@ -343,6 +345,14 @@ class InsightsJobConsumer:
                     "ACK + release claim; scheduler will re-enqueue",
                     envelope.kind, envelope.scope_key, duration, reason,
                 )
+                # An open breaker or a throttled provider is the COMMON outage
+                # shape, and this path ACKs without ever reaching
+                # ``_handle_failure`` — so without this the ledger would show a
+                # silent gap for exactly the outages that matter most.
+                if isinstance(envelope, StatsJobEnvelope):
+                    await record_unavailable_check(
+                        envelope.data_source_id, self._lane_of(envelope), reason,
+                    )
                 await self._ack(stream_cfg, msg_id)
                 await release_claim(envelope.scope_key, stream=stream_cfg)
             else:
@@ -410,6 +420,11 @@ class InsightsJobConsumer:
                 "scheduler retries on its next tick",
                 envelope.scope_key, error[:200],
             )
+            # A probe owns no polling-config lifecycle (see above), but it does
+            # own an observation: it looked, and it could not measure.
+            await record_unavailable_check(
+                envelope.data_source_id, "probe", error,
+            )
             await self._ack(stream_cfg, msg_id)
             await release_claim(envelope.scope_key, stream=stream_cfg)
             return
@@ -422,6 +437,9 @@ class InsightsJobConsumer:
         try:
             if isinstance(envelope, StatsJobEnvelope):
                 await stats_record_failure(envelope.data_source_id, error)
+                await record_unavailable_check(
+                    envelope.data_source_id, self._lane_of(envelope), error,
+                )
             elif isinstance(envelope, DiscoveryJobEnvelope):
                 await discovery_record_failure(
                     envelope.provider_id, envelope.asset_name, error
@@ -596,6 +614,20 @@ class InsightsJobConsumer:
             self._scope_key_cache.pop(oldest, None)
         self._scope_key_cache[ds_id] = (resolved, node_count, now)
         return resolved, node_count
+
+    @staticmethod
+    def _lane_of(envelope: JobEnvelope) -> str:
+        """Which collection lane observed (or failed to observe) this source.
+
+        ``ProbeJobEnvelope`` subclasses ``StatsJobEnvelope``, so it is tested
+        first — the same trap ``_resolve_timeout_and_bucket`` and
+        ``_handle_failure`` both guard against.
+        """
+        if isinstance(envelope, ProbeJobEnvelope):
+            return "probe"
+        if isinstance(envelope, StatsDeepJobEnvelope):
+            return "deep"
+        return "poll"
 
     async def _resolve_scope_lock_key(self, envelope: JobEnvelope) -> str | None:
         """Return the asyncio.Semaphore key for this envelope, or None for a

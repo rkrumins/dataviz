@@ -490,6 +490,80 @@ async def maybe_capture_snapshot(
     return row
 
 
+async def record_unavailable(
+    session: AsyncSession,
+    *,
+    ds_id: str,
+    lane: str,
+    error: str,
+    policy: HistoryPolicy,
+) -> Optional[DataSourceCountSnapshotORM]:
+    """Record that a check RAN and could not measure the graph.
+
+    Returns the row, or ``None`` when nothing should be written.
+
+    A failed collection used to write nothing at all, deliberately: a scan that
+    errored must never enter the series as a zero, because a phantom wipe is
+    worse than a gap. That constraint is kept here rather than traded away —
+
+    * the row carries the LAST KNOWN counts and digest forward, so the drawn
+      series is exactly what it would have been, and only the reason and
+      ``check_error`` say what happened;
+    * with no prior observation there is nothing to carry, so nothing is
+      written. A source whose very first check fails still has no series, which
+      is the honest answer;
+    * deltas are zero, matching what a heartbeat row stores, so the movement
+      baseline and the significance classifier are untouched.
+
+    Heartbeat-gated on the same clock as continuity ticks: an outage that
+    retries every 60s produces one row per window, not a wall of them.
+
+    Unlike :func:`maybe_capture_snapshot` this DOES stamp ``last_snapshot_at``
+    itself. That function leaves it to its caller because on a source's very
+    first write the stats row does not exist yet; here a missing row is a
+    reason to write nothing at all, so the row is always in hand.
+    """
+    if not policy.enabled:
+        return None
+
+    stats = await session.get(DataSourceStatsORM, ds_id)
+    if stats is None:
+        return None
+    prev_captured_at = getattr(stats, "last_snapshot_at", None)
+    if not prev_captured_at:
+        # Nothing observed yet. Writing counts here would be inventing them.
+        return None
+
+    now = datetime.now(timezone.utc)
+    if not _stale(prev_captured_at, now, policy.heartbeat_secs):
+        return None
+
+    workspace_id, provider_id, graph_name = await _identity_for(session, ds_id)
+    row = DataSourceCountSnapshotORM(
+        id=f"snp_{uuid.uuid4().hex[:12]}",
+        data_source_id=ds_id,
+        captured_at=now.isoformat(),
+        workspace_id=workspace_id,
+        provider_id=provider_id,
+        graph_name=graph_name,
+        node_count=int(stats.node_count or 0),
+        edge_count=int(stats.edge_count or 0),
+        entity_type_counts=json.dumps(loads_counts(stats.entity_type_counts)),
+        edge_type_counts=json.dumps(loads_counts(stats.edge_type_counts)),
+        counts_digest=stats.counts_digest or "",
+        lane=lane if lane in ("probe", "poll", "deep", "sweep", "write") else "poll",
+        capture_reason="unavailable",
+        prev_captured_at=prev_captured_at,
+        node_delta=0,
+        edge_delta=0,
+        type_deltas=None,
+        check_error=error[:500] if error else None,
+    )
+    session.add(row)
+    stats.last_snapshot_at = row.captured_at
+    return row
+
+
 # ── reads ────────────────────────────────────────────────────────────
 
 

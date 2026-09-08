@@ -510,6 +510,38 @@ async def record_failure(data_source_id: str, error: str) -> None:
         config.last_polled_at = datetime.now(timezone.utc).isoformat()
 
 
+async def record_unavailable_check(
+    data_source_id: str, lane: str, error: str,
+) -> None:
+    """Note in the profiling ledger that a check ran and could not measure.
+
+    Deliberately NOT part of :func:`record_failure`. That writes
+    ``polling_config.last_status = "error"``, which the reconcile sweep treats
+    as an absolute "stats unhealthy" guard — this must only ever be able to
+    append to ``data_source_count_snapshots``, so it is its own function with
+    its own short session.
+
+    Best-effort by contract: the ledger is evidence, not control flow, and a
+    write here must never turn a handled failure into an unhandled one. The
+    heartbeat gate inside ``record_unavailable`` bounds an outage that retries
+    every 60s to one row per window.
+    """
+    from backend.app.db.repositories import stats_history_repo
+
+    try:
+        async with get_jobs_session() as session:
+            policy = await stats_history_repo.resolve_history_policy(session)
+            await stats_history_repo.record_unavailable(
+                session, ds_id=data_source_id, lane=lane, error=error,
+                policy=policy,
+            )
+    except Exception as exc:
+        logger.warning(
+            "unavailable_marker.failed ds=%s lane=%s: %s",
+            data_source_id, lane, exc,
+        )
+
+
 async def probe_counts(envelope: StatsJobEnvelope) -> None:
     """Drift probe — the counts facet with no scan behind it.
 

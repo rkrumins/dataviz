@@ -115,7 +115,7 @@ export function SeriesVerdict({
         return (
             <Line tone="new">
                 Nothing recorded in this window yet. Counts are captured whenever they
-                change, at every refresh run, and at least once an hour otherwise.
+                change, at every refresh run, and on a regular checkpoint otherwise.
             </Line>
         )
     }
