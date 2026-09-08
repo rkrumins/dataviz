@@ -81,6 +81,11 @@ export interface RefreshEventSummary {
     jobId?: string | null
 }
 
+/** Rollup storage on the wire: 'auto' stores the full cube only while it
+ *  fits and the depth-diagonal otherwise; 'true' forces full detail; 'false'
+ *  forces the diagonal. */
+export type RollupStorage = 'auto' | 'true' | 'false'
+
 export interface FreshnessRow {
     dataSourceId: string
     workspaceId?: string | null
@@ -126,6 +131,11 @@ export interface FreshnessRow {
      *  name the cause without opening the drawer. */
     lastFailureReason?: string | null
     lastFailureCategory?: FailureCategory | null
+    /** Rollup storage, resolved server-side: the per-source override (null =
+     *  none), what this source actually runs with, and where it came from. */
+    rollupStorageOverride?: RollupStorage | null
+    resolvedRollupStorage?: RollupStorage | null
+    rollupStorageSource?: 'custom' | 'global' | 'default' | null
     /** True when a live versioned graph exists — mastered here, not external.
      *  Also true under ``projectionStalled``: a wedged source keeps its
      *  "mastered here" badge at exactly the moment an operator most needs to
@@ -172,6 +182,9 @@ export interface FreshnessDoc extends FreshnessRow {
     resolvedRebuildIntervalSecs?: number | null
     /** Where the resolved interval came from. */
     rebuildIntervalSource?: 'custom' | 'global' | 'default' | null
+    /** What "Inherit" resolves to for this source right now, so the control
+     *  can label the choice while an override is set. */
+    inheritedRollupStorage?: RollupStorage | null
     /** How many rebuild attempts have been made (doc-only). */
     retryCount?: number | null
     /** The two numbers the integrity meter compares: what the statistics scan
@@ -214,6 +227,7 @@ export interface FreshnessSettings {
     probeEnabled?: boolean | null
     probeIntervalSecs?: number | null
     pausedUntil?: string | null
+    rollupStorage?: RollupStorage | null
     /** Echo of the action: true when this PATCH reset the breaker. */
     resetBreaker?: boolean | null
 }
@@ -229,6 +243,9 @@ export interface FreshnessSettingsPatch {
     /** Operator snooze: an ISO instant to hold automation until. Explicit
      *  null resumes immediately. */
     pausedUntil?: string | null
+    /** Per-source Rollup storage. Explicit null clears the override (inherit
+     *  the fleet default). Takes effect at the next rebuild. */
+    rollupStorage?: RollupStorage | null
     /** An ACTION, not a setting: true resumes automation on a source the
      *  circuit breaker suspended (zeroes its count, lifts ``suspended``). */
     resetBreaker?: boolean

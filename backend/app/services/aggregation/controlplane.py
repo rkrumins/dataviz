@@ -740,6 +740,11 @@ async def set_freshness_settings(
             pause = await svc.set_source_pause(
                 ds_id, session, paused_until=body.paused_until,
             )
+        rollup = None
+        if "rollup_storage" in sent:
+            rollup = await svc.set_source_rollup_storage(
+                ds_id, session, body.rollup_storage,
+            )
         breaker = {}
         if body.reset_breaker:
             breaker = await svc.reset_source_breaker(ds_id, session)
@@ -753,6 +758,7 @@ async def set_freshness_settings(
         probe_enabled=probe.get("probe_enabled"),
         probe_interval_secs=probe.get("probe_interval_secs"),
         paused_until=pause.get("paused_until"),
+        rollup_storage=rollup,
         reset_breaker=breaker.get("reset_breaker"),
     )
 

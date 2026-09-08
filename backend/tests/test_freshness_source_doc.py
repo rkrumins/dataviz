@@ -292,3 +292,47 @@ def test_freshness_row_kwargs_leaks_doc_only_keys_but_row_ignores_them():
 
     row = FreshnessRow(**kwargs)
     assert not hasattr(row, "last_finding_reason")
+
+
+@pytest.mark.asyncio
+async def test_rollup_storage_override_round_trips_and_reports_its_source(session_factory):
+    """The drawer's "Would not fit" guidance sends an operator to set THIS
+    source's Rollup storage; the setting must exist before a first build,
+    survive a re-read, and say where the effective value came from."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services.aggregation.models import (
+        AggregationDataSourceStateORM,
+    )
+    from backend.app.services.aggregation.service import (
+        AggregationService, _state_map, resolve_rollup_storage,
+        rollup_storage_to_tuning,
+    )
+
+    async with session_factory() as s:
+        s.add(WorkspaceDataSourceORM(id="ds_1", workspace_id="ws_1", provider_id="p_1"))
+        await s.commit()
+
+    svc = AggregationService.__new__(AggregationService)
+    # Never built — no state row yet — and settable all the same.
+    async with session_factory() as s:
+        assert await s.get(AggregationDataSourceStateORM, "ds_1") is None
+        assert await svc.set_source_rollup_storage("ds_1", s, "auto") == "auto"
+    async with session_factory() as s:
+        assert (await _state_map(s, ["ds_1"]))["ds_1"]["rollup_storage"] == "auto"
+    async with session_factory() as s:
+        assert await svc.set_source_rollup_storage("ds_1", s, None) is None
+    async with session_factory() as s:
+        assert (await _state_map(s, ["ds_1"]))["ds_1"]["rollup_storage"] is None
+    async with session_factory() as s:
+        with pytest.raises(ValueError):
+            await svc.set_source_rollup_storage("ds_1", s, "cube")
+
+    # Resolution: override → stored global → env; the wire word becomes the
+    # pipeline's value only at the freeze point.
+    assert resolve_rollup_storage("auto", "true", "true") == ("auto", "custom")
+    assert resolve_rollup_storage(None, "auto", "true") == ("auto", "global")
+    assert resolve_rollup_storage(None, None, "true") == ("true", "default")
+    assert resolve_rollup_storage(None, True, "auto") == ("true", "global")
+    assert rollup_storage_to_tuning("false") is False
+    assert rollup_storage_to_tuning("auto") == "auto"
+    assert rollup_storage_to_tuning(None) is None

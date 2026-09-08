@@ -45,7 +45,7 @@ import { overrideWarning, rowHold, timeUntil, type RowHold } from './holds'
 import { isPlatformMastered, isProjectionStalled } from './freshnessTriage'
 import { activityFromEvent, recentActivityEvents } from './lastActivity'
 import type {
-    FailureCategory, FreshnessDoc, FreshnessSettingsPatch, RefreshEventSummary,
+    FailureCategory, FreshnessDoc, FreshnessSettingsPatch, RefreshEventSummary, RollupStorage,
 } from '@/services/freshnessService'
 import { MOTION } from '@/lib/motion'
 
@@ -566,6 +566,88 @@ function CheckSection({ doc }: { doc: FreshnessDoc }) {
  * rebuild window sat in a box of its own above it. They are one decision, and
  * the snooze is the third face of it: a hold rather than an opt-out.
  */
+const ROLLUP_LABEL: Record<RollupStorage, string> = {
+    auto: 'Auto',
+    true: 'Full detail',
+    false: 'Diagonal',
+}
+
+/** One line on what the RESOLVED choice does to this source's rebuilds. */
+function rollupHint(resolved: RollupStorage | null | undefined, source: string | null | undefined): string {
+    const from = source === 'custom' ? 'Set on this source.'
+        : source === 'global' ? 'Inherited from the fleet Defaults.'
+            : 'Inherited from the deployment default.'
+    if (resolved === 'auto') {
+        return `${from} Full detail wherever it fits what the shard can hold; above that, the depth-diagonal is stored and finer granularities are derived on demand \u2014 slower drills on the largest graphs, but it degrades instead of failing.`
+    }
+    if (resolved === 'false') {
+        return `${from} Only the depth-diagonal is stored; finer granularities are derived at read time.`
+    }
+    return `${from} Every combination is pre-created, so no drill comes back thin. A cube the owning shard cannot take is refused before anything is written.`
+}
+
+/**
+ * Per-source Rollup storage: Inherit (labelled with what that resolves to
+ * right now) / Auto / Full detail. Writes the override through the same
+ * freshness-settings PATCH as the cadences; an explicit null clears it.
+ */
+function RollupStorageRow({ doc, editable, pending, onChange }: {
+    doc: FreshnessDoc
+    editable: boolean
+    pending: boolean
+    onChange: (value: RollupStorage | null) => void
+}) {
+    const override = doc.rollupStorageOverride ?? null
+    const inherited = doc.inheritedRollupStorage ?? doc.resolvedRollupStorage ?? 'true'
+    const options: { id: 'inherit' | 'auto' | 'true'; label: string }[] = [
+        { id: 'inherit', label: `Inherit (${ROLLUP_LABEL[inherited]})` },
+        { id: 'auto', label: 'Auto' },
+        { id: 'true', label: 'Full detail' },
+    ]
+    const selected: 'inherit' | 'auto' | 'true' = override == null ? 'inherit'
+        : override === 'auto' ? 'auto' : 'true'
+    return (
+        <SettingRow
+            label="Rollup storage"
+            hint={rollupHint(doc.resolvedRollupStorage, doc.rollupStorageSource)}
+            disabled={!editable}
+        >
+            <span
+                className="flex shrink-0 rounded-lg border border-glass-border p-0.5"
+                role="radiogroup"
+                aria-label="Rollup storage for this source"
+            >
+                {options.map(({ id, label }) => {
+                    const isSelected = selected === id
+                    return (
+                        <button
+                            key={id}
+                            type="button"
+                            role="radio"
+                            aria-checked={isSelected}
+                            disabled={!editable || pending}
+                            onClick={() => {
+                                if (isSelected) return
+                                onChange(id === 'inherit' ? null : id)
+                            }}
+                            className={cn(
+                                'rounded-md px-2.5 py-1 text-[12px] transition-colors duration-150',
+                                'outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50',
+                                isSelected
+                                    ? 'bg-indigo-500/10 text-ink font-medium'
+                                    : 'text-ink-muted hover:text-ink-secondary',
+                                (!editable || pending) && 'cursor-not-allowed opacity-60',
+                            )}
+                        >
+                            {label}
+                        </button>
+                    )
+                })}
+            </span>
+        </SettingRow>
+    )
+}
+
 function ActSection({ doc }: { doc: FreshnessDoc }) {
     const { notify } = useAppNotifications()
     const canManage = usePermission('workspace:datasource:manage', doc.workspaceId ?? undefined)
@@ -670,6 +752,30 @@ function ActSection({ doc }: { doc: FreshnessDoc }) {
                             )}
                         />
                     )}
+
+                    {/* Per-source Rollup storage. Upserts its state row like the
+                        snooze, so it is settable BEFORE a first build — a graph
+                        too big for the full cube is exactly the source to put on
+                        Auto before it runs. A segmented control, not a toggle:
+                        neither state is the absence of the other, and Inherit
+                        is a third, labelled with what it currently means. */}
+                    <RollupStorageRow
+                        doc={doc}
+                        editable={canManage}
+                        pending={setSettings.isPending}
+                        onChange={(value) => setSettings.mutate(
+                            { dsId: doc.dataSourceId, rollupStorage: value },
+                            {
+                                onSuccess: () => notify('success', value == null
+                                    ? 'Rollup storage now inherits the fleet default for this source.'
+                                    : value === 'auto'
+                                        ? 'Rollup storage set to Auto for this source \u2014 applies from the next rebuild.'
+                                        : 'Rollup storage set to Full detail for this source \u2014 applies from the next rebuild.'),
+                                onError: (e) => notify('error',
+                                    e.message || 'Could not update Rollup storage.'),
+                            },
+                        )}
+                    />
 
                     {/* The snooze upserts its state row, so unlike the cadence
                         above it stays available on a never-built source — which
@@ -863,7 +969,7 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         // shortfall — so the technical details are the primary evidence
         // here, and a retry is deterministic until something changes.
         why: 'The rebuild measured the graph-store shard that owns this graph and refused before writing: the rollups would not fit in its free memory.',
-        how: "The technical details below name the shard, the memory the rollups need and the shortfall. Set this source's Rollup storage to Auto so it stores far fewer summary edges, or free or add memory on that shard; an administrator can also lower the shard memory reserve or correct bytes per edge in Defaults if the headroom is real, or clear an explicit edge ceiling set in tuning.",
+        how: "The technical details below name the shard, the memory the rollups need and the shortfall. Set Rollup storage to Auto in \u2462 Act below so this source stores the depth-diagonal instead of the full cube, or free or add memory on that shard; an administrator can also lower the shard memory reserve or correct bytes per edge in Defaults if the headroom is real, or clear an explicit edge ceiling set in tuning.",
         showClear: true, showRetry: true, primary: 'clear',
         retryWarning: 'will refuse the same way until the rollup setting, the shard\u2019s memory or the limits change.',
     },

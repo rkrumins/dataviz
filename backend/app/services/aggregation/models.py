@@ -233,6 +233,12 @@ class AggregationDataSourceStateORM(Base):
     # planning default (512 B). NULL until a fresh run with material growth
     # has calibrated it — see ``providers.shard_capacity``.
     observed_bytes_per_edge = Column(Integer, nullable=True)
+    # Per-source Rollup storage override: 'auto' | 'true' (full detail) |
+    # 'false' (depth-diagonal). NULL = inherit the fleet default (the stored
+    # Defaults row, then the env). Resolved at trigger time into the job's
+    # frozen ``materialize_fine_pairs`` by ``_effective_tuning``; a per-job
+    # request still wins over it.
+    rollup_storage = Column(Text, nullable=True)
     graph_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
     # Per-source rebuild-cooldown override (seconds). NULL = fall through to

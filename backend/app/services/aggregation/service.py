@@ -266,6 +266,46 @@ def resolve_probe_interval(
     return AGGREGATION_PROBE_INTERVAL_SECS
 
 
+# ── Rollup storage (per-source override → stored global → env) ────────
+#
+# The wire vocabulary is 'auto' | 'true' | 'false'. The pipeline's own knob
+# (``materialize_fine_pairs``) is a bool or the string "auto", and its
+# ``_fine_mode`` reads ANY truthy value as full detail — so the string
+# "false" must never reach a job: ``rollup_storage_to_tuning`` is the one
+# place the wire word becomes the pipeline's value.
+
+
+def normalize_rollup_storage(raw: Any) -> Optional[str]:
+    """Anything a stored or requested value may look like → the wire word,
+    or None for "not set"."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    if isinstance(raw, str):
+        v = raw.strip().lower()
+        return v if v in ("auto", "true", "false") else None
+    return None
+
+
+def resolve_rollup_storage(
+    override: Any, global_value: Any, env_value: Any,
+) -> tuple:
+    """``(value, source)`` — per-source override ('custom') → stored global
+    ('global') → env ('default'). Always answers: the env is never unset."""
+    for raw, source in ((override, "custom"), (global_value, "global")):
+        v = normalize_rollup_storage(raw)
+        if v is not None:
+            return v, source
+    return normalize_rollup_storage(env_value) or "true", "default"
+
+
+def rollup_storage_to_tuning(value: Optional[str]) -> Any:
+    """The wire word as the pipeline's ``materialize_fine_pairs`` value."""
+    v = normalize_rollup_storage(value)
+    return {"auto": "auto", "true": True, "false": False}.get(v)  # type: ignore[arg-type]
+
+
 def reconcile_policy_from_cadence(cadence) -> "ReconcilePolicy":
     """Build the detectors' :class:`Policy` from the persisted global cadence.
 
@@ -309,6 +349,37 @@ async def read_global_cadence(session: AsyncSession) -> AggregationCadence:
             "Global cadence read failed (using env defaults): %s", exc,
         )
     return cadence
+
+
+def _env_rollup_storage() -> str:
+    """The env tri-state, read live (an operator may flip it on a running
+    deploy to rescue a fleet). Local import: the providers package pulls in
+    the graph client, and this module is imported long before it."""
+    from backend.app.providers.falkordb_materialize import (
+        _materialize_fine_pairs_mode,
+    )
+    return _materialize_fine_pairs_mode()
+
+
+async def read_global_rollup_storage(session: AsyncSession) -> Optional[str]:
+    """The fleet-wide Rollup storage from the stored Defaults row
+    (``tuning_json.materialize_fine_pairs``), as the wire word — or None
+    when unset, so callers fall through to the env. An identity-map hit
+    after ``read_global_cadence`` on the same session; never raises."""
+    from .models import AggregationSettingsORM
+
+    try:
+        row = await session.get(AggregationSettingsORM, "global")
+        raw = getattr(row, "tuning_json", None) if row is not None else None
+        if raw:
+            return normalize_rollup_storage(
+                (json.loads(raw) or {}).get("materialize_fine_pairs"),
+            )
+    except Exception as exc:  # pragma: no cover - defensive, never fail a read
+        logger.warning(
+            "Global rollup-storage read failed (using env default): %s", exc,
+        )
+    return None
 
 # Bounds for ``refresh_source(wait="complete")`` — it polls a queued rebuild
 # to a terminal status before returning, so an operator can refresh-then-read
@@ -661,7 +732,7 @@ class AggregationService:
                 # Pipeline tuning: request overrides layered over the stored
                 # global defaults, frozen here so the worker stays stateless.
                 tuning_json=(lambda t: json.dumps(t) if t else None)(
-                    await self._effective_tuning(session, getattr(request, "tuning", None))
+                    await self._effective_tuning(session, getattr(request, "tuning", None), ds_id=ds_id)
                 ),
                 created_at=_now(),
             )
@@ -1111,12 +1182,21 @@ class AggregationService:
 
     async def _effective_tuning(
         self, session: AsyncSession, request_tuning: Optional[AggregationTuning],
+        *, ds_id: Optional[str] = None,
     ) -> dict:
-        """Request tuning layered over the stored global defaults. The
-        merged dict is frozen onto the job row so the worker never reads
-        the settings table (stateless jobs; consistent with the frozen
-        edge-type pattern)."""
-        from .models import AggregationSettingsORM
+        """Request tuning layered over the source's Rollup storage override
+        layered over the stored global defaults. The merged dict is frozen
+        onto the job row so the worker never reads the settings table
+        (stateless jobs; consistent with the frozen edge-type pattern).
+
+        The per-source layer carries ONE knob: ``materialize_fine_pairs``
+        from the state row's ``rollup_storage``. It sits between the request
+        and the global on purpose — an operator's explicit choice for this
+        source beats the fleet default, and a per-job request still beats
+        both. Automation triggers carry no request tuning, so this is how
+        the override reaches every rebuild, not only the ones a person
+        starts."""
+        from .models import AggregationDataSourceStateORM, AggregationSettingsORM
 
         defaults: dict = {}
         try:
@@ -1127,6 +1207,19 @@ class AggregationService:
             logger.warning(
                 "Aggregation settings read failed (using env defaults): %s", exc,
             )
+        if ds_id is not None:
+            try:
+                state = await session.get(AggregationDataSourceStateORM, ds_id)
+                override = rollup_storage_to_tuning(
+                    getattr(state, "rollup_storage", None),
+                )
+                if override is not None:
+                    defaults["materialize_fine_pairs"] = override
+            except Exception as exc:
+                logger.warning(
+                    "Rollup-storage override read failed for %s (using the fleet "
+                    "default): %s", ds_id, exc,
+                )
         if request_tuning is None:
             return defaults
         return request_tuning.merged_over(defaults)
@@ -1739,6 +1832,28 @@ class AggregationService:
             "probe_enabled": state.probe_enabled,
             "probe_interval_secs": state.probe_interval_secs,
         }
+
+    async def set_source_rollup_storage(
+        self, ds_id: str, session: AsyncSession, value: Optional[str],
+    ) -> Optional[str]:
+        """Set or clear this source's Rollup storage override ('auto' |
+        'true' | 'false'; None = inherit the fleet default).
+
+        UPSERTS like the probe and reconcile setters: a never-built source has
+        no state row, and a graph too big for the full cube is exactly the
+        source an operator wants on Auto BEFORE its first build. Takes effect
+        at the next trigger — a running job keeps its frozen tuning."""
+        normalized = normalize_rollup_storage(value)
+        if value is not None and normalized is None:
+            raise ValueError(f"rollup_storage must be auto|true|false, got {value!r}")
+        state = await self._get_or_create_state(ds_id, session)
+        state.rollup_storage = normalized
+        await session.commit()
+        logger.info(
+            "Rollup storage override %s for data source %s",
+            normalized if normalized is not None else "cleared", ds_id,
+        )
+        return normalized
 
     def hold_for_state(
         self, state, cadence, *, provider_id: Optional[str] = None,
@@ -2541,6 +2656,8 @@ class AggregationService:
         cadence = await read_global_cadence(session)
         states = await _state_map(session, [ds.id])
         scope_holds = await read_scope_holds(session, [ds.provider_id])
+        rollup_global = await read_global_rollup_storage(session)
+        rollup_env = _env_rollup_storage()
         state_row = states.get(ds.id, {})
         override_secs = state_row.get("rebuild_min_interval_secs")
         cooldown_interval_secs = resolve_rebuild_interval(
@@ -2651,7 +2768,14 @@ class AggregationService:
                 platform_mastered=ds.id in versioned,
                 projector_health=health.get(ds.id),
                 scope_holds=scope_holds,
+                rollup_storage_global=rollup_global,
+                rollup_storage_env=rollup_env,
             ),
+            # What "Inherit" would mean for this source right now, so the
+            # drawer can label the choice while an override is set.
+            inherited_rollup_storage=resolve_rollup_storage(
+                None, rollup_global, rollup_env,
+            )[0],
             lkg_count=lkg_count,
             lkg_oldest_age_secs=lkg_oldest_age,
             cache_key_count=cache_key_count,
@@ -3327,6 +3451,8 @@ def _freshness_row_kwargs(
     projector_health=None,
     scope_holds=None,
     drift_auto_rebuild_global: Optional[bool] = None,
+    rollup_storage_global: Optional[str] = None,
+    rollup_storage_env: Optional[str] = None,
 ) -> dict:
     """Map one workspace_data_sources row + its cache signals into the
     snake_case kwargs shared by ``FreshnessRow`` and ``FreshnessDoc``.
@@ -3344,6 +3470,9 @@ def _freshness_row_kwargs(
     st = state_row or {}
     auto_reconcile = resolve_reconcile_enabled(
         st.get("reconcile_enabled"), reconcile_enabled_global,
+    )
+    rollup_storage, rollup_storage_source = resolve_rollup_storage(
+        st.get("rollup_storage"), rollup_storage_global, rollup_storage_env,
     )
     hold = resolve_hold(
         scope_holds=scope_holds, provider_id=ds.provider_id,
@@ -3392,6 +3521,11 @@ def _freshness_row_kwargs(
         last_finding_evidence=st.get("last_finding_evidence"),
         last_failure_reason=last_failure_reason,
         last_failure_category=last_failure_category,
+        # Rollup storage, resolved: the per-source override (None = none),
+        # what this source will actually run with, and where that came from.
+        rollup_storage_override=normalize_rollup_storage(st.get("rollup_storage")),
+        resolved_rollup_storage=rollup_storage,
+        rollup_storage_source=rollup_storage_source,
         # Both stamps are only ever written for a versioned source, so either
         # one still identifies this source as platform-mastered when the live
         # lookup is down. ``projectionStalled`` had to join ``managed`` here:
@@ -3599,6 +3733,7 @@ async def _state_map(
                 S.paused_until,
                 S.aggregation_edge_count,
                 S.observed_bytes_per_edge,
+                S.rollup_storage,
             ).where(S.data_source_id.in_(ds_ids))
         )).all()
     except Exception as exc:  # pragma: no cover - defensive, never fail a read
@@ -3626,6 +3761,8 @@ async def _state_map(
             # measured per new edge on its shard (None until calibrated).
             "aggregation_edge_count": r[15],
             "observed_bytes_per_edge": r[16],
+            # Per-source Rollup storage override (None = inherit).
+            "rollup_storage": r[17],
         }
         for r in rows
     }
@@ -3726,6 +3863,10 @@ async def assemble_fleet_freshness(
     # global + ONE batched query for the per-source overrides, so the
     # ``cooldownUntil`` badge honors both without any per-row reads.
     cadence = await read_global_cadence(session)
+    # Rollup storage: the stored global (same row, identity-map hit) and the
+    # env, read once so every row resolves its override → global → env.
+    rollup_global = await read_global_rollup_storage(session)
+    rollup_env = _env_rollup_storage()
     states = await _state_map(session, ds_ids)
     # Fleet/provider holds: one PK read for the fleet row plus one per
     # distinct provider on the page (never per row).
@@ -3760,6 +3901,8 @@ async def assemble_fleet_freshness(
             platform_mastered=ds.id in versioned,
             projector_health=health.get(ds.id),
             scope_holds=scope_holds,
+            rollup_storage_global=rollup_global,
+            rollup_storage_env=rollup_env,
         ))
         for ds in ds_list
     ]

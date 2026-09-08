@@ -176,6 +176,53 @@ def test_effective_tuning_without_settings_row():
     assert merged == {}
 
 
+class _SessionByOrm:
+    """``get`` answers per ORM class: the settings row for one, the state
+    row for the other — the two reads ``_effective_tuning`` makes."""
+
+    def __init__(self, settings_row, state_row):
+        self._settings, self._state = settings_row, state_row
+
+    async def get(self, orm, key):
+        return self._settings if orm.__name__ == "AggregationSettingsORM" else self._state
+
+
+def test_a_source_rollup_override_sits_between_the_request_and_the_global():
+    """Automation triggers carry no request tuning, so the per-source choice
+    must reach the job through the freeze point itself."""
+    import types
+    svc = _make_service()
+    session = _SessionByOrm(_FakeSettingsRow(), types.SimpleNamespace(rollup_storage="auto"))
+
+    merged = _run(svc._effective_tuning(session, None, ds_id="ds-1"))
+    assert merged["materialize_fine_pairs"] == "auto"
+    assert merged["scan_range_width"] == 111_000            # the global still layers under it
+
+    # A per-job request still wins over the source's override.
+    merged = _run(svc._effective_tuning(
+        session, AggregationTuning(materialize_fine_pairs=True), ds_id="ds-1",
+    ))
+    assert merged["materialize_fine_pairs"] is True
+
+
+def test_a_stored_false_freezes_as_a_real_bool_never_the_string():
+    """The pipeline reads ANY truthy value as full detail, so the string
+    "false" on a job would force the cube — the exact opposite of the ask."""
+    import types
+    svc = _make_service()
+    for stored, expected in (("false", False), ("true", True), ("auto", "auto")):
+        session = _SessionByOrm(None, types.SimpleNamespace(rollup_storage=stored))
+        merged = _run(svc._effective_tuning(session, None, ds_id="ds-1"))
+        assert merged["materialize_fine_pairs"] is expected or merged["materialize_fine_pairs"] == expected, stored
+    # No override, no row, junk: the fleet default governs (nothing frozen).
+    for state in (None, types.SimpleNamespace(rollup_storage=None), types.SimpleNamespace(rollup_storage="cube")):
+        assert "materialize_fine_pairs" not in _run(
+            svc._effective_tuning(_SessionByOrm(None, state), None, ds_id="ds-1"),
+        )
+    # The two-argument call keeps working, and never reads a state row.
+    assert _run(svc._effective_tuning(_FakeSession(None), None)) == {}
+
+
 def test_settings_report_the_live_env_default_of_every_knob(monkeypatch):
     """The editors used to hard-code what "empty" meant; a changed env var
     still showed the old number. The response now carries every knob's

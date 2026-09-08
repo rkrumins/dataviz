@@ -717,6 +717,14 @@ class FreshnessRow(BaseModel):
     last_reconciled_at: Optional[str] = Field(None, alias="lastReconciledAt")
     last_reconcile_reason: Optional[str] = Field(None, alias="lastReconcileReason")
     last_reconcile_mode: Optional[str] = Field(None, alias="lastReconcileMode")
+    # Rollup storage, resolved server-side so a ds:manage viewer never needs
+    # the global settings: the per-source override (null = none), what this
+    # source actually runs with ('auto' | 'true' | 'false'), and where that
+    # came from ('custom' | 'global' | 'default'). On the row, not just the
+    # doc, so the fleet table can badge a source that is pinned to Auto.
+    rollup_storage_override: Optional[str] = Field(None, alias="rollupStorageOverride")
+    resolved_rollup_storage: Optional[str] = Field(None, alias="resolvedRollupStorage")
+    rollup_storage_source: Optional[str] = Field(None, alias="rollupStorageSource")
     # Failure surfacing for the fleet table: populated only when
     # aggregation_status is failed and the latest job is failed. Same
     # classifier as the drawer — so the row can name the cause without a
@@ -781,6 +789,10 @@ class FreshnessDoc(FreshnessRow):
     rebuild_interval_source: Optional[str] = Field(
         None, alias="rebuildIntervalSource",
     )
+    # What "Inherit" would resolve to for this source right now (the stored
+    # global, else the env), so the drawer can label the choice while an
+    # override is in force.
+    inherited_rollup_storage: Optional[str] = Field(None, alias="inheritedRollupStorage")
     # Per-source cache footprint: a bounded SCAN of the CURRENT-generation
     # primary cache keys, tallied by endpoint. Doc-only (never on the fleet
     # path) — see ``count_cache_keys_by_endpoint``. ``None`` on a Redis
@@ -1132,6 +1144,14 @@ class FreshnessSettingsRequest(BaseModel):
         description="ISO-8601 instant until which automation is held for this "
                     "source. Null resumes immediately.",
     )
+    rollup_storage: Optional[Literal["auto", "true", "false"]] = Field(
+        None, alias="rollupStorage",
+        description="Per-source Rollup storage: 'auto' stores the full cube "
+                    "only while it fits and the depth-diagonal otherwise; "
+                    "'true' forces full detail (fails loudly when it cannot "
+                    "fit); 'false' forces the diagonal. Null inherits the "
+                    "fleet default. Takes effect at the next rebuild.",
+    )
     # An ACTION, not a setting: true resets the circuit breaker (zeroes the
     # consecutive-action count and lifts the ``suspended`` verdict) so
     # automation resumes on the next sweep. False/absent does nothing.
@@ -1166,6 +1186,7 @@ class FreshnessSettingsResponse(BaseModel):
     probe_enabled: Optional[bool] = Field(None, alias="probeEnabled")
     probe_interval_secs: Optional[int] = Field(None, alias="probeIntervalSecs")
     paused_until: Optional[str] = Field(None, alias="pausedUntil")
+    rollup_storage: Optional[str] = Field(None, alias="rollupStorage")
     # True when this PATCH reset the breaker (echo of the action, not state).
     reset_breaker: Optional[bool] = Field(None, alias="resetBreaker")
 

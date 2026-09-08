@@ -206,6 +206,36 @@ def _patch_cadence(monkeypatch, *, global_secs=None, overrides=None,
 # ── Fleet assembly ──────────────────────────────────────────────────────
 
 
+def test_fleet_rows_resolve_rollup_storage_override_then_global_then_env(monkeypatch):
+    """Every row says what Rollup storage it will run with and where that
+    came from, at zero extra queries: the override off the state map, the
+    global off the settings row, the env otherwise."""
+    ds_a, ds_b = _ds(id="ds-a"), _ds(id="ds-b", ws="ws-2")
+    _patch_fleet_collaborators(monkeypatch)
+    _patch_cadence(monkeypatch, states={"ds-a": {"rollup_storage": "auto"}})
+
+    async def _global(session):
+        return "true"
+    monkeypatch.setattr(svc_mod, "read_global_rollup_storage", _global)
+    monkeypatch.setattr(svc_mod, "_env_rollup_storage", lambda: "auto")
+    session = _FakeSession([
+        _FakeResult(scalar=2),
+        _FakeResult(rows=[(ds_a, "Prov A"), (ds_b, "Prov B")]),
+    ])
+    resp = _run(assemble_fleet_freshness(session, page=1, page_size=50))
+
+    a, b = resp.rows
+    assert (a.rollup_storage_override, a.resolved_rollup_storage, a.rollup_storage_source) == ("auto", "auto", "custom")
+    assert (b.rollup_storage_override, b.resolved_rollup_storage, b.rollup_storage_source) == (None, "true", "global")
+
+    async def _no_global(session):
+        return None
+    monkeypatch.setattr(svc_mod, "read_global_rollup_storage", _no_global)
+    session = _FakeSession([_FakeResult(scalar=1), _FakeResult(rows=[(ds_b, "Prov B")])])
+    row = _run(assemble_fleet_freshness(session, page=1, page_size=50)).rows[0]
+    assert (row.resolved_rollup_storage, row.rollup_storage_source) == ("auto", "default")
+
+
 def test_fleet_assembles_rows_and_total(monkeypatch):
     ds_a, ds_b = _ds(id="ds-a"), _ds(id="ds-b", ws="ws-2")
     _patch_fleet_collaborators(
@@ -1375,6 +1405,44 @@ class _FakeSettingsSvc:
         if self._raises:
             raise self._raises
         return {"paused_until": paused_until}
+
+    async def set_source_rollup_storage(self, ds_id, session, value):
+        self.rollup_called_with = (ds_id, value)
+        if self._raises:
+            raise self._raises
+        return value
+
+
+def test_rollup_storage_patch_applies_only_when_sent_and_null_clears(_direct_mode):
+    """The per-source Rollup storage rides the same partial PATCH: absent
+    means untouched, an explicit null clears the override, and the response
+    echoes what was stored."""
+    svc = _FakeSettingsSvc()
+    out = _run(fresh_mod.patch_freshness_settings(
+        "ds-1", FreshnessSettingsRequest(rollupStorage="auto"), _FakeRequest(),
+        svc=svc, session=object(),
+    ))
+    assert svc.rollup_called_with == ("ds-1", "auto")
+    assert out.rollup_storage == "auto"
+    assert svc.called_with is None                       # the cadence was not touched
+
+    svc = _FakeSettingsSvc()
+    out = _run(fresh_mod.patch_freshness_settings(
+        "ds-1", FreshnessSettingsRequest(rollupStorage=None), _FakeRequest(),
+        svc=svc, session=object(),
+    ))
+    assert svc.rollup_called_with == ("ds-1", None) and out.rollup_storage is None
+
+    svc = _FakeSettingsSvc()
+    _run(fresh_mod.patch_freshness_settings(
+        "ds-1", FreshnessSettingsRequest(rebuildMinIntervalSecs=60), _FakeRequest(),
+        svc=svc, session=object(),
+    ))
+    assert not hasattr(svc, "rollup_called_with")        # absent = untouched
+
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        FreshnessSettingsRequest(rollupStorage="cube")
 
 
 def test_freshness_settings_request_validates_bounds():
