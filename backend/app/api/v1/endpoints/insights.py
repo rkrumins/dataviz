@@ -64,6 +64,7 @@ from backend.app.db.models import (
     ProviderORM,
     WorkspaceDataSourceORM,
 )
+from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.insights_service.admission import invalidate_config as invalidate_admission_cache
 from backend.insights_service.enqueue import enqueue_discovery_job_safe
 from backend.insights_service.redis_streams import DISCOVERY_STREAM, claim_exists
@@ -475,6 +476,111 @@ async def get_asset_stats(
     return await _build_response(
         session=session, provider_id=provider_id, asset_name=asset_name,
     )
+
+
+# ── Orphan graphs (operator cleanup) ────────────────────────────────
+#
+# Background index DDL used to resurrect any graph deleted out of band —
+# FalkorDB has no CREATE GRAPH, so CREATE INDEX on a missing key minted it
+# empty. That is fixed at the source; these two endpoints deal with the
+# phantoms it already left behind. Read the module docstring in
+# ``services/orphan_graphs.py`` before changing either: the asymmetry between
+# leaking a graph and destroying one is the whole design.
+
+
+class OrphanCleanupRequest(BaseModel):
+    """What to drop, and whether to actually do it.
+
+    ``names`` is required and has no "everything you found" form: the server
+    never decides which graphs to delete. ``dry_run`` defaults to ON, so the
+    destructive call is the one you have to ask for twice.
+    """
+
+    names: List[str] = Field(..., min_length=1)
+    dry_run: bool = True
+
+
+@router.get("/providers/{provider_id}/orphan-graphs")
+async def list_orphan_graphs(
+    provider_id: str = Path(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Every graph key on this provider, with a verdict on each.
+
+    Read-only. Protected keys are listed too — a preview that showed only the
+    deletable ones would be asking the operator to trust a filter they cannot
+    see.
+    """
+    from backend.app.services import orphan_graphs
+
+    await _ensure_provider_exists(session, provider_id)
+    try:
+        candidates = await orphan_graphs.scan_orphan_graphs(provider_id)
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        # A reference set we could not read is indistinguishable from an empty
+        # one at the point where it matters, so this fails loud rather than
+        # reporting graphs as unreferenced.
+        logger.warning(
+            "orphan scan failed for provider %s: %s", provider_id, exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cannot verify which graphs are referenced — refusing to report "
+                f"any as orphaned. ({type(exc).__name__}: {exc})"
+            ),
+        )
+    return {
+        "provider_id": provider_id,
+        "keys_total": len(candidates),
+        "deletable": sum(1 for c in candidates if c.deletable),
+        "candidates": [c.to_dict() for c in candidates],
+    }
+
+
+@router.post("/providers/{provider_id}/orphan-graphs/cleanup")
+async def cleanup_orphan_graphs(
+    provider_id: str = Path(...),
+    body: OrphanCleanupRequest = Body(...),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Drop the named graphs, if they are still empty and unreferenced.
+
+    Re-verifies every name at delete time rather than trusting the preview: a
+    graph can be registered, or filled, between looking and deciding. A name
+    that is no longer deletable comes back with its protection verdict and is
+    left alone; one refusal never aborts the rest.
+    """
+    from backend.app.services import orphan_graphs
+
+    await _ensure_provider_exists(session, provider_id)
+    try:
+        results = await orphan_graphs.delete_orphan_graphs(
+            provider_id, body.names, dry_run=body.dry_run,
+        )
+    except ProviderConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.warning(
+            "orphan cleanup failed for provider %s: %s", provider_id, exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cannot verify which graphs are referenced — refusing to delete "
+                f"anything. ({type(exc).__name__}: {exc})"
+            ),
+        )
+    return {
+        "provider_id": provider_id,
+        "dry_run": body.dry_run,
+        "deleted": sum(1 for r in results if r.verdict == "dropped"),
+        "results": [r.to_dict() for r in results],
+    }
 
 
 # ── On-demand refresh (user-driven escape hatch) ────────────────────

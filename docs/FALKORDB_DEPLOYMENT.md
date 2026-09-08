@@ -231,6 +231,48 @@ runbook by design — quarantining data should be a human decision made against 
 known-good backup, and a crash loop should surface as CrashLoopBackOff and page
 an operator, not silently discard writes.
 
+## 5d. Deleting a Graph Out of Band
+
+> **Important:** FalkorDB has no `CREATE GRAPH`. A graph key is created
+> implicitly by the first **write-mode** `GRAPH.QUERY` against that name —
+> and `CREATE INDEX` is a write-mode query. `GRAPH.RO_QUERY` does not create
+> anything; it returns `Invalid graph operation on empty key`.
+
+That asymmetry is why a graph deleted in the FalkorDB UI used to come back,
+empty, within one background sweep. Every provider instance schedules a
+fire-and-forget schema reconcile on its first successful connect
+(`ensure_indices` + `ensure_projections`), so the next discovery job, counts
+poll, drift probe, aggregation job or provider-touching request re-minted the
+key with its indexes and **0 nodes / 0 edges**. The list-all discovery job did
+the same to a graph named `nexus_lineage` on every registered instance, because
+its provider is built with no graph name and defaults to that one.
+
+Both DDL paths now gate on an `EXISTS` probe for the key they target and skip
+when it is absent — failing *closed*, because a missing index heals on the next
+connect and a resurrected graph does not. Only a caller that is about to
+populate a graph (`save_custom_graph`, the bulk loader's deliberate
+index-before-write pass) opts out, via `may_create_graph=True`.
+
+**Cleaning up phantoms that already exist.** Two operator endpoints, both
+`system:admin`:
+
+```
+GET  /api/v1/admin/insights/providers/{provider_id}/orphan-graphs
+POST /api/v1/admin/insights/providers/{provider_id}/orphan-graphs/cleanup
+```
+
+The `GET` is read-only and lists **every** key on the instance with a verdict —
+including the protected ones, so you can see what will not be touched and why.
+The `POST` takes `{"names": [...], "dry_run": true}`: names are required (there
+is no "delete everything you found"), `dry_run` defaults to on, and every name
+is re-verified at delete time rather than trusting the preview. A key is
+protected if it is non-empty, if it could not be probed, if it is named by
+`catalog_items`, `workspace_data_sources` (including `dedicated_graph_name`) or
+any `projection_state` row at any status, or if it is the `{graph}_proj` sibling
+of a protected name. Names match across **all** providers on purpose: a false
+protection leaks a graph, a false deletion does not come back. If the reference
+sets cannot be read, the call fails with `503` and deletes nothing.
+
 ## 6. Disaster Recovery (Cross-Region)
 
 In the event of a total GCP Region loss (e.g., `us-central1` goes completely offline), standard HA mechanisms fail. The following DR strategy must be implemented proactively:
