@@ -883,6 +883,22 @@ describe('live rebuild progress in the row', () => {
         expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
     })
 
+    it('says when the rebuild is narrowing its scans to fit the graph store', () => {
+        render(
+            <table><tbody>
+                <FreshnessRow
+                    row={rebuildingRow}
+                    job={{ id: 'job_1', dataSourceId: 'ds_live', status: 'running',
+                           currentPhase: 'reconciling', progress: 61,
+                           runStats: { adapted: { scan_width: 12_500, reconcile_strategy: 'keys_only' } } } as never}
+                    onOpenDrawer={() => {}} onRefresh={() => {}} colSpan={6}
+                />
+            </tbody></table>,
+            { wrapper: MemoryRouter },
+        )
+        expect(screen.getByText(/61% · narrowing/)).toBeInTheDocument()
+    })
+
     it('never guesses at an unrecognized phase', () => {
         render(
             <table><tbody>

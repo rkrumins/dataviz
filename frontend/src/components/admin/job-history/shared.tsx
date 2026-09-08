@@ -3,6 +3,7 @@
  * job-history views.  Extracted from RegistryJobHistory.tsx so that both the
  * global (registry) and per-workspace history pages can reuse them.
  */
+import type { AggregationRunStats } from '@/services/aggregationService'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
@@ -514,7 +515,7 @@ export const PHASE_BANDS: Record<string, [number, number]> = {
  */
 export function PhaseStepper({ currentPhase, runStats, status }: {
     currentPhase: string | null | undefined
-    runStats: Record<string, number | string | Record<string, number>> | null | undefined
+    runStats: AggregationRunStats | null | undefined
     status: string
 }) {
     const completed = status === 'completed'

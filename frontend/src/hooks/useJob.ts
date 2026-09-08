@@ -45,6 +45,15 @@ export interface JobLiveOverlay {
         currentPhase: string
         writes: number
         deletes: number
+        /** What the pressure ladder has changed so far (see AdaptedRunState). */
+        adapted_scan_width: number
+        adapted_scan_width_min: number
+        adapted_scan_shrinks: number
+        adapted_extract_concurrency: number
+        adapted_reconcile_strategy: string
+        adapted_write_batch: number
+        adapted_delete_chunk: number
+        adapted_timeout_retries: number
     }>
 }
 
@@ -141,6 +150,16 @@ export function useJob(
             if (writes !== undefined) next.writes = writes
             const deletes = _coerceNumeric(payload['deletes'])
             if (deletes !== undefined) next.deletes = deletes
+            for (const key of [
+                'adapted_scan_width', 'adapted_scan_width_min', 'adapted_scan_shrinks',
+                'adapted_extract_concurrency', 'adapted_write_batch', 'adapted_delete_chunk',
+                'adapted_timeout_retries',
+            ] as const) {
+                const v = _coerceNumeric(payload[key])
+                if (v !== undefined) next[key] = v
+            }
+            const strategy = payload['adapted_reconcile_strategy']
+            if (typeof strategy === 'string') next.adapted_reconcile_strategy = strategy
 
             setState((prev) => ({
                 connected: true,

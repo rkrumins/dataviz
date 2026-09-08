@@ -15,6 +15,18 @@ export interface AggregationTuning {
   deleteChunk?: number | null;         // 100 .. 50,000
   writePacingRatio?: number | null;    // 0 .. 10
   extractConcurrency?: number | null;  // 1 .. 4
+  /** Narrowest scan slice the pressure ladder descends to (default 1 row). 1 .. 5,000,000 */
+  scanShrinkFloor?: number | null;
+  /** Per-query budget for read scans, seconds (capped by the store's TIMEOUT_MAX). 5 .. 600 */
+  scanTimeoutS?: number | null;
+  /** Per-query budget for write/delete batches, seconds (capped by the store's TIMEOUT_MAX). 5 .. 600 */
+  writeTimeoutS?: number | null;
+  /** Fleet default for the stall window, seconds; a job's own timeoutSecs wins. 60 .. 604,800 */
+  stallTimeoutSecs?: number | null;
+  /** Wall-clock safety net, seconds — never below the stall window. 3,600 .. 604,800 */
+  maxWallSecs?: number | null;
+  /** Start from the knobs as set, ignoring what the last run of this source learned. */
+  ignoreObserved?: boolean | null;
   materializeLeafPairs?: boolean;
   /**
    * Rollup storage. `true` (the shipped default) pre-creates every
@@ -107,9 +119,114 @@ export interface AggregationJobResponse {
    * on the self-tuning pipeline.
    */
   tuning?: Record<string, unknown> | null;
-  /** Per-phase run stats (keys: extract_s, compute_s, reconcile_s, apply_s, writes, deletes, pairs, scanned_edges). */
-  runStats?: Record<string, number | string | Record<string, number>> | null;
+  /**
+   * The run's durable record: per-phase seconds and counters on success,
+   * plus — written at the first checkpoint, so a failed or cancelled run has
+   * it too — what the run ran with (`effective_tuning`) and what its pressure
+   * ladder adapted to (`adapted`).
+   */
+  runStats?: AggregationRunStats | null;
   workerId?: string | null;
+  /**
+   * The same coarse bucket the Freshness cockpit shows for a failure
+   * (`query_memory`, `timeout`, `write_budget`, `out_of_memory`, …); null
+   * when there is no error.
+   */
+  failureCategory?: string | null;
+}
+
+/** Where a knob's value came from for one run. */
+export type RunKnobSource = 'job' | 'hint' | 'env';
+
+/**
+ * Every knob's value for one run (snake_case, as the pipeline stores them)
+ * and, under `sources`, where each came from. `stall_timeout_secs`,
+ * `max_wall_secs` and `max_retries` are the worker's own limits.
+ */
+export interface EffectiveTuningSnapshot {
+  scan_range_width?: number;
+  max_pending_pairs?: number;
+  apply_chunk?: number;
+  delete_chunk?: number;
+  write_pacing_ratio?: number;
+  extract_concurrency?: number;
+  materialize_leaf_pairs?: boolean;
+  materialize_fine_pairs?: 'auto' | 'true' | 'false' | string;
+  max_materialized_edges?: number | null;
+  shard_reserve_pct?: number;
+  bytes_per_edge?: number;
+  scan_shrink_floor?: number;
+  scan_timeout_s?: number;
+  write_timeout_s?: number;
+  ignore_observed?: boolean;
+  stall_timeout_secs?: number;
+  max_wall_secs?: number;
+  max_retries?: number;
+  sources?: Record<string, RunKnobSource | string>;
+  [key: string]: unknown;
+}
+
+/** One per-query pressure event the ladder absorbed. */
+export interface PressureEvent {
+  scan: string;
+  kind: 'memory' | 'timeout' | string;
+  lo?: number;
+  hi?: number;
+  size?: number;
+}
+
+/**
+ * What the pressure ladder changed during a run — the current sticky scan
+ * width, the narrowest it needed, how often it shrank, the read concurrency
+ * and reconcile strategy in force, the write batch / delete chunk it settled
+ * on, timeout retries, and (bounded) which scans were under pressure. Absent
+ * on a run that ran at its settings.
+ */
+export interface AdaptedRunState {
+  scan_width?: number | null;
+  scan_width_min?: number;
+  scan_shrinks?: number;
+  extract_concurrency?: number;
+  reconcile_strategy?: 'keys_only' | string;
+  write_batch?: number | null;
+  write_batch_min?: number;
+  write_shrinks?: number;
+  delete_chunk?: number | null;
+  delete_chunk_min?: number;
+  delete_shrinks?: number;
+  timeout_retries?: number;
+  budget_rechecks?: number;
+  pressure?: PressureEvent[];
+  by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
+  /** What the previous run of this source taught it, applied at the start. */
+  from_last_run?: Record<string, number | string>;
+}
+
+export interface AggregationRunStats {
+  extract_s?: number;
+  compute_s?: number;
+  reconcile_s?: number;
+  apply_s?: number;
+  writes?: number;
+  deletes?: number;
+  pairs?: number;
+  scanned_edges?: number;
+  fine_merges_skipped?: number;
+  regime?: 'cube' | 'boundary' | string;
+  materialize_budget?: number;
+  cube_estimate?: number;
+  write_budget?: Record<string, unknown>;
+  bytes_per_edge_observed?: number;
+  scan_width_min?: number;
+  scan_shrinks?: number;
+  budget_rechecks?: number;
+  /** The store's per-query ceiling the ladder narrowed against; null when unknown. */
+  query_mem_capacity?: number | null;
+  effective_tuning?: EffectiveTuningSnapshot;
+  adapted?: AdaptedRunState;
+  advisories?: Array<{ kind: string; severity?: string; message: string }>;
+  pairs_by_level?: Record<string, number>;
+  [key: string]: unknown;
 }
 
 export interface ResumeOverrides {
@@ -225,9 +342,21 @@ export interface EnvTuningDefaults {
   maxMaterializedEdges?: number | null;
   shardReservePct?: number | null;
   bytesPerEdge?: number | null;
+  scanShrinkFloor?: number | null;
+  scanTimeoutS?: number | null;
+  writeTimeoutS?: number | null;
+  stallTimeoutSecs?: number | null;
+  maxWallSecs?: number | null;
+  ignoreObserved?: boolean | null;
   estimateMarginPct?: number | null;
   maxCubeEdges?: number | null;
   budgetRecheckEdges?: number | null;
+  /** Information only: backoff retries a narrowest scan gets before an outage is declared. */
+  scanTimeoutRetries?: number | null;
+  /** Information only: the width at or below which RECONCILE switches to keys-only. */
+  reconcileKeysOnlyWidth?: number | null;
+  /** Information only: the graph store's own per-query cap (TIMEOUT_MAX), milliseconds. */
+  serverTimeoutMaxMs?: number | null;
 }
 
 export interface AggregationSettingsResponse {

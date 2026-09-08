@@ -275,6 +275,9 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
     const pct = phase && typeof job?.progress === 'number'
         ? Math.min(100, Math.max(0, Math.round(job.progress)))
         : null
+    // The pressure ladder's current scan width, when the running job had to
+    // narrow (recorded at every checkpoint, so at most seconds behind).
+    const narrowingWidth = job?.status === 'running' ? job.runStats?.adapted?.scan_width ?? null : null
 
     if (state === 'failed') {
         badges.push(
@@ -292,8 +295,10 @@ export function FreshnessBadges({ row, job, showProgressBar = true }: {
                 <Badge
                     tone="bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
                     Icon={Loader2} spin
-                    label={pct != null ? `Recomputing · ${phase} · ${pct}%` : 'Recomputing'}
-                    title="A lineage rebuild is running now. Open Job History for the full detail."
+                    label={(pct != null ? `Recomputing · ${phase} · ${pct}%` : 'Recomputing') + (narrowingWidth != null ? ' · narrowing' : '')}
+                    title={narrowingWidth != null
+                        ? `A lineage rebuild is running now, reading ${narrowingWidth.toLocaleString()} rows per scan to fit the graph store's per-query limits — slower, still progressing. Open Job History for the full detail.`
+                        : 'A lineage rebuild is running now. Open Job History for the full detail.'}
                 />
             </Link>,
         )
@@ -740,6 +745,12 @@ export function FreshnessRow({
                             runStats={job.runStats}
                             status={job.status}
                         />
+                        {job.status === 'running' && job.runStats?.adapted?.scan_width != null && (
+                            <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                                Going slower to fit the graph store: scans narrowed to {job.runStats.adapted.scan_width.toLocaleString()} rows
+                                {job.runStats.adapted.reconcile_strategy === 'keys_only' ? ', keys-only reconcile' : ''}. It keeps going.
+                            </p>
+                        )}
                         <div className="flex justify-end">
                             <Link
                                 to={jobHistoryPath({ dataSourceId: row.dataSourceId })}

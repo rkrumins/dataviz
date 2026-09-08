@@ -2250,6 +2250,57 @@ def test_run_stats_always_carry_the_query_ceiling_when_the_shard_says(monkeypatc
     assert "query_mem_capacity" not in result["run_stats"]["write_budget"]["shard"]
 
 
+# ── the per-run record: what it ran with, where each value came from ───
+
+
+def test_effective_tuning_resolves_exactly_as_the_knob_readers_do(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_SCAN_RANGE_WIDTH", "150000")
+    tuning = {"scan_range_width": 9_000_000, "write_pacing_ratio": "2.5", "materialize_fine_pairs": "auto",
+              "delete_chunk": "nope", "max_materialized_edges": 1_000_000, "scan_shrink_floor": 500_000}
+    hints = {"bytes_per_edge_observed": 640}
+    values, sources = mat.resolve_effective_tuning(tuning, hints, bulk_timeout_default=45.0)
+    p = _make_provider(_FakeFalkor(), {"domain": 0})
+    p._bulk_create_timeout_s = 45.0
+    pipe = mat.AggregationPipeline(
+        p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"], last_cursor=None,
+        progress_callback=None, intra_batch_callback=None, should_cancel=None,
+        tuning=tuning, capacity_hints=hints,
+    )
+    assert values["scan_range_width"] == pipe._knob_int("scan_range_width", mat._scan_range_width, 10_000, 5_000_000) == 5_000_000
+    assert values["write_pacing_ratio"] == pipe._pacing_ratio == 2.5
+    assert values["delete_chunk"] == 10_000 and sources["delete_chunk"] == "env"     # unparsable → env
+    assert values["materialize_fine_pairs"] == "auto" and sources["materialize_fine_pairs"] == "job"
+    assert values["max_materialized_edges"] == 1_000_000 and sources["max_materialized_edges"] == "job"
+    assert values["bytes_per_edge"] == 640 and sources["bytes_per_edge"] == "hint"
+    assert values["scan_shrink_floor"] == 500_000 and values["write_timeout_s"] == 45.0
+    assert values["scan_timeout_s"] == 30.0 and sources["scan_timeout_s"] == "env"
+    assert pipe._effective == values and pipe._effective_sources == sources
+
+    values, sources = mat.resolve_effective_tuning(None, None)
+    assert values["scan_range_width"] == 150_000 and sources["scan_range_width"] == "env"
+    assert values["max_materialized_edges"] is None and values["bytes_per_edge"] == 512
+    assert values["ignore_observed"] is False and sources["ignore_observed"] == "env"
+
+
+def test_checkpoints_carry_the_snapshot_and_the_adaptation_and_the_result_keeps_both():
+    seen = []
+
+    async def progress(*args, **kw):
+        seen.append(kw.get("stats"))
+
+    fake, p, ceiling = _seeded_provider_with_ceiling(fits=100_000)
+    result = _run(_materialize(p, progress=progress, tuning={"scan_range_width": 200_000}))
+    assert ceiling.refusals >= 1
+    stats = [s for s in seen if s]
+    assert stats and all("effective_tuning" in s for s in stats)
+    assert stats[0]["effective_tuning"]["scan_range_width"] == 200_000
+    assert stats[0]["effective_tuning"]["sources"]["scan_range_width"] == "job"
+    assert any(s.get("adapted", {}).get("scan_width_min") == 100_000 for s in stats)
+    eff = result["run_stats"]["effective_tuning"]
+    assert eff["scan_range_width"] == 200_000 and eff["sources"]["materialize_fine_pairs"] == "job"
+    assert result["run_stats"]["adapted"]["scan_width_min"] == 100_000
+
+
 # ── pure ladder primitives ─────────────────────────────────────────────
 
 

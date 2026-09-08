@@ -391,6 +391,21 @@ const PRESET_MATCH_KEYS: (keyof AggregationTuning)[] = [
     'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
 ]
 
+/**
+ * Which profile a set of overrides IS, or null for a custom mix. Strict on
+ * purpose: a form that differs from a preset in any knob the preset sets is
+ * not that preset. Shared with Job History's Run settings panel, which asks
+ * the same question of the values a run actually ran with.
+ */
+export function presetIdFor(value: Pick<AggregationOverridesValue, 'maxRetries' | 'timeoutMinutes' | 'tuning'>): ConfigPreset['id'] | null {
+    const tuning = value.tuning ?? {}
+    return CONFIG_PRESETS.find(p =>
+        p.maxRetries === value.maxRetries &&
+        p.timeoutMinutes === value.timeoutMinutes &&
+        PRESET_MATCH_KEYS.every(k => tuning[k] === p.tuning[k])
+    )?.id ?? null
+}
+
 // ============================================
 // Component
 // ============================================
@@ -406,14 +421,10 @@ export function AggregationOverridesForm({
 }: AggregationOverridesFormProps): JSX.Element {
     const [showAdvanced, setShowAdvanced] = useState(false)
 
-    const activePreset = useMemo(() => {
-        const tuning = value.tuning ?? {}
-        return CONFIG_PRESETS.find(p =>
-            p.maxRetries === value.maxRetries &&
-            p.timeoutMinutes === value.timeoutMinutes &&
-            PRESET_MATCH_KEYS.every(k => tuning[k] === p.tuning[k])
-        )?.id ?? null
-    }, [value.maxRetries, value.timeoutMinutes, value.tuning])
+    const activePreset = useMemo(
+        () => presetIdFor({ maxRetries: value.maxRetries, timeoutMinutes: value.timeoutMinutes, tuning: value.tuning }),
+        [value.maxRetries, value.timeoutMinutes, value.tuning],
+    )
 
     const currentTraits = useMemo(() => {
         const mr = value.maxRetries

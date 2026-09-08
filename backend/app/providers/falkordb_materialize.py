@@ -389,6 +389,83 @@ def env_tuning_defaults() -> Dict[str, Any]:
     }
 
 
+def resolve_effective_tuning(
+    tuning: Optional[Dict[str, Any]], hints: Optional[Dict[str, Any]], *,
+    bulk_timeout_default: float = 60.0,
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """Every knob's value for a run and where each came from —
+    ``"job"`` (the frozen tuning), ``"hint"`` (what a previous run of the
+    same source measured; bytes per edge only), or ``"env"``. Resolves
+    exactly as the pipeline's own readers do (same bounds, same env
+    fallbacks), so the record a run leaves in ``run_stats`` is what it
+    actually ran with. Pure; also used by tests to pin the parity."""
+    t = dict(tuning or {})
+    h = dict(hints or {})
+    values: Dict[str, Any] = {}
+    sources: Dict[str, str] = {}
+
+    def _num(name: str, env_default: Callable[[], Any], lo: Any, hi: Any, cast: Callable) -> None:
+        raw = t.get(name)
+        if raw is None:
+            values[name], sources[name] = env_default(), "env"
+            return
+        try:
+            values[name], sources[name] = max(lo, min(hi, cast(raw))), "job"
+        except (TypeError, ValueError):
+            values[name], sources[name] = env_default(), "env"
+
+    _num("scan_range_width", _scan_range_width, 10_000, 5_000_000, int)
+    _num("max_pending_pairs", _max_pending_pairs, 50_000, 50_000_000, int)
+    _num("apply_chunk", _apply_chunk, 1_000, 200_000, int)
+    _num("delete_chunk", _delete_chunk, 100, 50_000, int)
+    _num("write_pacing_ratio", _pacing_ratio, 0.0, 10.0, float)
+    _num("extract_concurrency", _extract_concurrency, 1, 4, int)
+    _num("shard_reserve_pct", shard_reserve_pct_default, 0, 90, int)
+    _num("scan_shrink_floor", _scan_shrink_floor, 1, 5_000_000, int)
+    _num("scan_timeout_s", _scan_timeout_s, 5.0, 600.0, float)
+    _num("write_timeout_s", lambda: float(bulk_timeout_default), 5.0, 600.0, float)
+    values["scan_shrink_floor"] = min(values["scan_shrink_floor"], values["scan_range_width"])
+
+    for name, env_default in (
+        ("materialize_leaf_pairs", _materialize_leaf_pairs),
+        ("ignore_observed", lambda: False),
+    ):
+        raw = t.get(name)
+        values[name], sources[name] = (bool(raw), "job") if raw is not None else (env_default(), "env")
+
+    raw_fine = t.get("materialize_fine_pairs")
+    if raw_fine is None:
+        values["materialize_fine_pairs"], sources["materialize_fine_pairs"] = (
+            _materialize_fine_pairs_mode(), "env",
+        )
+    elif isinstance(raw_fine, str) and raw_fine.strip().lower() == "auto":
+        values["materialize_fine_pairs"], sources["materialize_fine_pairs"] = "auto", "job"
+    else:
+        values["materialize_fine_pairs"] = "true" if raw_fine else "false"
+        sources["materialize_fine_pairs"] = "job"
+
+    raw_cap = t.get("max_materialized_edges")
+    try:
+        cap = int(raw_cap) if raw_cap is not None else None
+    except (TypeError, ValueError):
+        cap = None
+    # None = no explicit ceiling: the measured shard governs (the env count
+    # cap applies only when the shard cannot be measured).
+    values["max_materialized_edges"], sources["max_materialized_edges"] = (
+        (cap, "job") if cap else (None, "env")
+    )
+
+    raw_bpe = t.get("bytes_per_edge")
+    hint_bpe = h.get("bytes_per_edge_observed")
+    if raw_bpe is not None:
+        values["bytes_per_edge"], sources["bytes_per_edge"] = int(raw_bpe), "job"
+    elif hint_bpe:
+        values["bytes_per_edge"], sources["bytes_per_edge"] = int(hint_bpe), "hint"
+    else:
+        values["bytes_per_edge"], sources["bytes_per_edge"] = bytes_per_edge_default(), "env"
+    return values, sources
+
+
 class MaterializationBudgetExceeded(ValueError):
     """The result would not fit the owning shard's headroom — or, when the
     shard cannot be measured, exceeds ``max_materialized_edges``.
@@ -779,6 +856,13 @@ class AggregationPipeline:
         self._hints_applied: Dict[str, Any] = {}
         if not self._knob_bool("ignore_observed", lambda: False):
             self._apply_hints(ceiling)
+        # What this run ran with, and where each value came from — the
+        # per-run record the worker persists at the first checkpoint, so a
+        # run that fails or is cancelled still shows its settings.
+        self._effective, self._effective_sources = resolve_effective_tuning(
+            self._tuning, self._capacity_hints,
+            bulk_timeout_default=float(getattr(self.p, "_bulk_create_timeout_s", 60.0)),
+        )
 
         # ── Conformance diagnostics (Phase IV — loud, never silent) ──
         # Structured advisories surfaced in run_stats (and thus the job-detail
@@ -1225,6 +1309,8 @@ class AggregationPipeline:
                 # The per-query ceiling the ladder narrows against, when the
                 # shard could say — always present, None when unknown.
                 "query_mem_capacity": self._query_mem_capacity,
+                # What the run ran with and where each value came from.
+                "effective_tuning": {**self._effective, "sources": dict(self._effective_sources)},
                 # Conformance advisories (identity / casing gaps) — present
                 # only when a gap was detected, so a clean run's run_stats is
                 # unchanged. Advisory-only: never flips the job off "completed".
@@ -1250,7 +1336,14 @@ class AggregationPipeline:
             self._scanned, max(self._total, self._scanned), cursor,
             self._writes, phase_label,
         )
-        live_stats = {"writes": self._writes, "deletes": self._deletes}
+        live_stats: Dict[str, Any] = {"writes": self._writes, "deletes": self._deletes}
+        # ~40 scalars: what the run runs with (sent every checkpoint so the
+        # worker needs no acknowledgement) and what the ladder has changed
+        # so far (only when it has).
+        live_stats["effective_tuning"] = {**self._effective, "sources": dict(self._effective_sources)}
+        adapted = self._adapted_snapshot()
+        if adapted:
+            live_stats["adapted"] = adapted
         from backend.app.services.aggregation.cancel import JobCancelled
         try:
             if self._cb_accepts_pct is False:

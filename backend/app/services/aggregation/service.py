@@ -1182,6 +1182,7 @@ class AggregationService:
             tuning=AggregationService._job_tuning_dict(job),
             run_stats=AggregationService._job_run_stats_dict(job),
             worker_id=getattr(job, "worker_id", None),
+            failure_category=classify_failure(getattr(job, "error_message", None)),
         )
 
 
@@ -3279,6 +3280,7 @@ class AggregationService:
             tuning=AggregationService._job_tuning_dict(job),
             run_stats=AggregationService._job_run_stats_dict(job),
             worker_id=getattr(job, "worker_id", None),
+            failure_category=classify_failure(getattr(job, "error_message", None)),
         )
 
 

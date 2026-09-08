@@ -1,0 +1,116 @@
+/**
+ * Every run shows what it ran with — each knob, its value and where it came
+ * from — and what its pressure ladder adapted to; a run without the record
+ * falls back to its frozen tuning, and a clean run says so plainly.
+ */
+import { render, screen, within } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
+
+import type { AggregationJobResponse } from '@/services/aggregationService'
+import { RunSettingsPanel } from './RunSettingsPanel'
+import { adaptationSentences, presetForRun, runSettingsRows } from './runSettings'
+
+const EFFECTIVE = {
+    scan_range_width: 200_000, max_pending_pairs: 50_000_000, apply_chunk: 20_000, delete_chunk: 10_000,
+    write_pacing_ratio: 1.0, extract_concurrency: 1, materialize_leaf_pairs: false, materialize_fine_pairs: 'true',
+    max_materialized_edges: null, shard_reserve_pct: 20, bytes_per_edge: 640, scan_shrink_floor: 1,
+    scan_timeout_s: 120, write_timeout_s: 60, ignore_observed: false,
+    stall_timeout_secs: 10_800, max_wall_secs: 86_400, max_retries: 3,
+    sources: {
+        scan_range_width: 'job', max_pending_pairs: 'job', apply_chunk: 'env', delete_chunk: 'env',
+        write_pacing_ratio: 'job', extract_concurrency: 'job', materialize_leaf_pairs: 'env',
+        materialize_fine_pairs: 'env', max_materialized_edges: 'env', shard_reserve_pct: 'job',
+        bytes_per_edge: 'hint', scan_shrink_floor: 'env', scan_timeout_s: 'job', write_timeout_s: 'env',
+        ignore_observed: 'env', stall_timeout_secs: 'job', max_wall_secs: 'env', max_retries: 'job',
+    },
+}
+
+function job(over: Partial<AggregationJobResponse> = {}): AggregationJobResponse {
+    return {
+        id: 'agg_1', dataSourceId: 'ds-1', status: 'completed', triggerSource: 'manual', progress: 100,
+        totalEdges: 10, processedEdges: 10, createdEdges: 4, batchSize: 1000, resumable: false, retryCount: 0,
+        createdAt: '2026-09-09T10:00:00Z', ...over,
+    } as AggregationJobResponse
+}
+
+describe('runSettingsRows', () => {
+    it('labels every value by where it came from, and a job value equal to the fleet default as the fleet default', () => {
+        const rows = runSettingsRows(EFFECTIVE, { shardReservePct: 20, scanRangeWidth: 100_000 })
+        const byKey = Object.fromEntries(rows.map(r => [r.key, r]))
+        expect(byKey.scan_range_width).toMatchObject({ value: '200,000', source: 'job' })
+        expect(byKey.shard_reserve_pct).toMatchObject({ value: '20%', source: 'global' })
+        expect(byKey.bytes_per_edge).toMatchObject({ value: '640 B', source: 'hint' })
+        expect(byKey.apply_chunk).toMatchObject({ value: '20,000', source: 'env' })
+        expect(byKey.max_materialized_edges.value).toBe('Shard governs')
+        expect(byKey.materialize_fine_pairs.value).toBe('Full detail')
+        expect(byKey.stall_timeout_secs).toMatchObject({ value: '3h', source: 'job' })
+        expect(byKey.scan_timeout_s.value).toBe('120 s')
+        expect(byKey.ignore_observed).toBeUndefined()          // only shown when set
+        expect(rows.map(r => r.key)[0]).toBe('scan_range_width')
+    })
+})
+
+describe('presetForRun', () => {
+    it('names the profile a run matches and null for a custom mix', () => {
+        expect(presetForRun(EFFECTIVE)).toBe('Balanced')
+        expect(presetForRun({ ...EFFECTIVE, scan_range_width: 123_456 })).toBeNull()
+        expect(presetForRun(null)).toBeNull()
+    })
+})
+
+describe('adaptationSentences', () => {
+    it('says what the ladder changed, in plain words', () => {
+        const s = adaptationSentences({
+            scan_width_min: 12_500, scan_shrinks: 3, extract_concurrency: 1, reconcile_strategy: 'keys_only',
+            write_batch_min: 60, write_shrinks: 2, timeout_retries: 4, budget_rechecks: 2,
+            by_scan: { 'reconcile:AGGREGATED': { events: 2, min_size: 12_500, kind: 'memory' }, 'extract:FLOWS': { events: 1, min_size: 50_000, kind: 'timeout' } },
+        }, { bytesPerEdgeObserved: 640 })
+        expect(s).toEqual([
+            'Scans narrowed to 12,500 rows after 3 shrinks (reconcile:AGGREGATED, extract:FLOWS)',
+            'Read concurrency dropped to 1',
+            'Reconcile switched to keys-only (two passes)',
+            'Write batch shrank to 60 rows after 2 shrinks',
+            '4 timeout retries at the narrowest width',
+            'Shard re-measured 2× during the apply',
+            'Calibrated 640 B per rollup edge',
+        ])
+    })
+
+    it('credits the last run for what it started from, and says nothing for a clean run', () => {
+        expect(adaptationSentences({ from_last_run: { scan_width: 12_500, extract_concurrency: 1 }, extract_concurrency: 1 }))
+            .toEqual(['Started from what the last run learned: scans at 12,500, serial reads'])
+        expect(adaptationSentences(null)).toEqual([])
+    })
+})
+
+describe('RunSettingsPanel', () => {
+    it('renders the record for a completed run with its profile and adaptation', () => {
+        render(<RunSettingsPanel job={job({ runStats: { effective_tuning: EFFECTIVE, adapted: { scan_width_min: 12_500, scan_shrinks: 3 }, bytes_per_edge_observed: 640 } })} />)
+        const panel = screen.getByTestId('run-settings-panel')
+        expect(within(panel).getByText('Balanced profile')).toBeInTheDocument()
+        expect(within(panel).getByText('Scan range width')).toBeInTheDocument()
+        expect(within(panel).getByText('Learned from last run')).toBeInTheDocument()
+        expect(within(panel).getByText('Scans narrowed to 12,500 rows after 3 shrinks')).toBeInTheDocument()
+        expect(within(panel).getByText('Calibrated 640 B per rollup edge')).toBeInTheDocument()
+    })
+
+    it('says a clean run ran at its settings, and reads the live overlay first while running', () => {
+        render(<RunSettingsPanel job={job({ runStats: { effective_tuning: EFFECTIVE } })} />)
+        expect(screen.getByText('Nothing — ran at its settings')).toBeInTheDocument()
+
+        render(<RunSettingsPanel
+            job={job({ status: 'running', runStats: { effective_tuning: EFFECTIVE, adapted: { scan_width: 50_000, scan_width_min: 50_000 } } })}
+            live={{ scan_width: 25_000, scan_width_min: 25_000, extract_concurrency: 1 }}
+        />)
+        expect(screen.getByText('Adapting during the run')).toBeInTheDocument()
+        expect(screen.getByText('Scans narrowed to 25,000 rows')).toBeInTheDocument()
+        expect(screen.getByText('Read concurrency dropped to 1')).toBeInTheDocument()
+    })
+
+    it('falls back to the frozen tuning for a legacy row, labelled as such', () => {
+        render(<RunSettingsPanel job={job({ tuning: { scan_range_width: 100_000, write_pacing_ratio: 2 } })} />)
+        expect(screen.getByText('Legacy record')).toBeInTheDocument()
+        expect(screen.getAllByText('Frozen tuning')).toHaveLength(2)
+        expect(screen.getByText('×2')).toBeInTheDocument()
+    })
+})

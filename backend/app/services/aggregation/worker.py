@@ -90,6 +90,37 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: ``run_stats.adapted`` scalars the live overlay carries (HSET / SSE
+#: payload values must be str|int|float): what the ladder has changed so far.
+_ADAPTED_LIVE_KEYS = ("scan_width", "scan_width_min", "scan_shrinks",
+                      "extract_concurrency", "reconcile_strategy", "write_batch",
+                      "delete_chunk", "timeout_retries")
+
+
+def _adapted_scalars(adapted: Any) -> dict:
+    """The scalar subset of an ``adapted`` record, for ``live_state``."""
+    if not isinstance(adapted, dict):
+        return {}
+    out = {}
+    for key in _ADAPTED_LIVE_KEYS:
+        value = adapted.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            out[f"adapted_{key}"] = value
+    return out
+
+
+def _merge_run_doc(existing: Any, incoming: Any) -> dict:
+    """``run_stats`` is written progressively: the effective-tuning snapshot
+    and the live ``adapted`` record at checkpoints, the pipeline's full
+    stats on success. Later values win key by key, so the snapshot a
+    checkpoint wrote survives the success write and a failed run keeps
+    whatever it had recorded."""
+    out = dict(existing) if isinstance(existing, dict) else {}
+    if isinstance(incoming, dict):
+        out.update(incoming)
+    return out
+
+
 #: Learned-state keys the worker persists per source and hands back as
 #: capacity hints (``<key>_observed``). Every one only ever makes the next
 #: run STRICTER; the pipeline ignores a hint looser than the knob in force.
@@ -491,6 +522,7 @@ class AggregationWorker:
                 )
                 progress_marker = {"at": time.monotonic()}
 
+                limits = {"stall_timeout": stall_timeout, "wall_limit": wall_limit}
                 materialize_task = asyncio.create_task(
                     self._materialize_with_retries(
                         session=session,
@@ -502,6 +534,7 @@ class AggregationWorker:
                         emitter=emitter,
                         scope=scope,
                         progress_marker=progress_marker,
+                        limits=limits,
                     )
                 )
                 wall_start = time.monotonic()
@@ -586,9 +619,15 @@ class AggregationWorker:
                 job.created_edges = result.get("aggregated_edges_affected", 0)
                 # Durable per-phase timings + write/delete counters for the
                 # job detail UI (best-effort; NULL on legacy providers).
+                # Merged over what the checkpoints already recorded (the
+                # effective-tuning snapshot, the live adapted record): the
+                # pipeline's final values win key by key, the snapshot
+                # survives.
                 if hasattr(job, "run_stats") and isinstance(result.get("run_stats"), dict):
                     try:
-                        job.run_stats = json.dumps(result["run_stats"])
+                        job.run_stats = json.dumps(
+                            _merge_run_doc(self._job_run_stats(job), result["run_stats"])
+                        )
                     except (TypeError, ValueError):
                         pass
                 job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
@@ -1105,6 +1144,15 @@ class AggregationWorker:
         )
 
     @staticmethod
+    def _job_run_stats(job: Any) -> dict:
+        """The row's ``run_stats`` document (``{}`` when NULL or unparsable)."""
+        try:
+            doc = json.loads(getattr(job, "run_stats", None) or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return doc if isinstance(doc, dict) else {}
+
+    @staticmethod
     def _job_tuning(job: Any) -> dict:
         """The job's frozen tuning dict (``{}`` when NULL or unparsable)."""
         try:
@@ -1136,6 +1184,7 @@ class AggregationWorker:
         emitter: Any,
         scope: PlatformJobScope,
         progress_marker: Optional[dict] = None,
+        limits: Optional[dict] = None,
     ) -> dict:
         """Retry wrapper around _materialize_with_checkpoints.
 
@@ -1197,6 +1246,7 @@ class AggregationWorker:
                     emitter=emitter,
                     scope=scope,
                     progress_marker=progress_marker,
+                    limits=limits,
                 )
             except JobCancelled:
                 # Cooperative cancel — control-flow signal, not a transient
@@ -1388,6 +1438,7 @@ class AggregationWorker:
         emitter: Any,
         scope: PlatformJobScope,
         progress_marker: Optional[dict] = None,
+        limits: Optional[dict] = None,
     ) -> dict:
         """Run batch materialization with coalesced DB checkpointing.
 
@@ -1408,6 +1459,20 @@ class AggregationWorker:
         # happen immediately.
         is_first_checkpoint = True
 
+        # The per-run record, seeded from the row (a resume keeps what the
+        # previous attempt recorded) and updated from what the pipeline
+        # hands over at each checkpoint. Dumped onto the row only inside
+        # the coalesced commit below — never an extra write.
+        run_doc: dict = _merge_run_doc(self._job_run_stats(job), None)
+        run_doc_dirty = False
+        job_tuning = self._job_tuning(job)
+        stall_timeout = (limits or {}).get("stall_timeout") or (
+            job.timeout_secs or _tuning_int(job_tuning, "stall_timeout_secs") or _STALL_TIMEOUT_SECS
+        )
+        wall_limit = (limits or {}).get("wall_limit") or max(
+            _tuning_int(job_tuning, "max_wall_secs") or _MAX_WALL_SECS, stall_timeout,
+        )
+
         async def checkpoint(
             processed: int, total: int, cursor: Optional[str],
             aggregated: int = 0, phase: Optional[str] = None,
@@ -1415,6 +1480,7 @@ class AggregationWorker:
             stats: Optional[dict] = None,
         ) -> None:
             nonlocal last_commit_monotonic, batches_since_commit, is_first_checkpoint
+            nonlocal run_doc_dirty
             # Cooperative cancel point at the outer-batch boundary. The
             # checkpoint that just fired captured ``cursor`` for the
             # batch we've now committed; raising here means the next
@@ -1449,6 +1515,30 @@ class AggregationWorker:
             job.progress = max(job.progress or 0, computed_pct)
             job.updated_at = _now()
             job.last_checkpoint_at = _now()
+            # What the run ran with (once is enough, but it is ~40 scalars
+            # and arrives every time) and what the ladder has changed so
+            # far. The stall window and wall clock are the worker's, not
+            # the pipeline's, so they are added here with their sources.
+            if isinstance(stats, dict):
+                effective = stats.get("effective_tuning")
+                if isinstance(effective, dict) and run_doc.get("effective_tuning") != effective:
+                    doc = dict(effective)
+                    src = dict(doc.get("sources") or {})
+                    doc["stall_timeout_secs"] = stall_timeout
+                    src["stall_timeout_secs"] = (
+                        "job" if (job.timeout_secs or _tuning_int(job_tuning, "stall_timeout_secs")) else "env"
+                    )
+                    doc["max_wall_secs"] = wall_limit
+                    src["max_wall_secs"] = "job" if _tuning_int(job_tuning, "max_wall_secs") else "env"
+                    doc["max_retries"] = job.max_retries
+                    src["max_retries"] = "job"
+                    doc["sources"] = src
+                    run_doc["effective_tuning"] = doc
+                    run_doc_dirty = True
+                adapted = stats.get("adapted")
+                if isinstance(adapted, dict) and run_doc.get("adapted") != adapted:
+                    run_doc["adapted"] = adapted
+                    run_doc_dirty = True
             batches_since_commit += 1
             elapsed = time.monotonic() - last_commit_monotonic
             should_commit = (
@@ -1479,6 +1569,12 @@ class AggregationWorker:
             # worker a counter that won't collide with sequences
             # already published from this same boundary.
             job.last_sequence = (job.last_sequence or 0) + 1
+            if run_doc_dirty and hasattr(job, "run_stats"):
+                try:
+                    job.run_stats = json.dumps(run_doc)
+                    run_doc_dirty = False
+                except (TypeError, ValueError):
+                    pass
             try:
                 await session.commit()
                 last_commit_monotonic = time.monotonic()
@@ -1528,6 +1624,7 @@ class AggregationWorker:
                     "current_phase": job.current_phase or "",
                     "writes": (stats or {}).get("writes"),
                     "deletes": (stats or {}).get("deletes"),
+                    **_adapted_scalars((stats or {}).get("adapted")),
                 },
                 live_state={
                     "status": "running",
@@ -1540,6 +1637,7 @@ class AggregationWorker:
                     "current_phase": job.current_phase or "",
                     "writes": (stats or {}).get("writes", 0) or 0,
                     "deletes": (stats or {}).get("deletes", 0) or 0,
+                    **_adapted_scalars((stats or {}).get("adapted")),
                 },
             )
 
@@ -1583,7 +1681,6 @@ class AggregationWorker:
         def should_cancel() -> bool:
             return cancel_event.is_set()
 
-        job_tuning = self._job_tuning(job)
         # What a previous run of this graph measured on its shard — a hint,
         # never tuning: an operator's override of the same figure arrives in
         # ``job_tuning`` and wins over it.

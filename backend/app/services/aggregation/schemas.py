@@ -455,6 +455,11 @@ class AggregationJobResponse(BaseModel):
     tuning: Optional[dict] = None
     run_stats: Optional[dict] = Field(None, alias="runStats")
     worker_id: Optional[str] = Field(None, alias="workerId")
+    # ``classify_failure`` over ``error_message`` — the same bucket the
+    # Freshness cockpit shows, so Job History can pre-select the Gentle
+    # profile for a per-query memory or timeout failure without parsing
+    # the message client-side. None when there is no error.
+    failure_category: Optional[str] = Field(None, alias="failureCategory")
 
     class Config:
         populate_by_name = True

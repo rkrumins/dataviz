@@ -708,6 +708,7 @@ export function RegistryJobHistory() {
                                                 purgeConfirm={purgeConfirm}
                                                 setPurgeConfirm={setPurgeConfirm}
                                                 actionLoading={actionLoading === job.id}
+                                                storedGlobal={defaultTuning ?? null}
                                             />
                                         ))}
                                     </tbody>
