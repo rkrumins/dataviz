@@ -304,6 +304,8 @@ export interface ShardCapacity {
   allowedGrowthEdges?: number | null;
   governedBy: string;
   staticCap: number;
+  /** The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes; null when unlimited or unreadable. */
+  queryMemCapacity?: number | null;
   sources: CapacitySource[];
 }
 

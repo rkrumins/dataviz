@@ -189,6 +189,7 @@ def shard_row(reading: ShardMemory, limits: CapacityLimits) -> ShardCapacity:
         allowed_growth_edges=budget.allowed_growth_edges,
         governed_by=budget.governed_by,
         static_cap=budget.static_cap,
+        query_mem_capacity=getattr(reading, "query_mem_capacity", None),
     )
 
 

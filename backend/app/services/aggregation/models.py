@@ -239,6 +239,13 @@ class AggregationDataSourceStateORM(Base):
     # frozen ``materialize_fine_pairs`` by ``_effective_tuning``; a per-job
     # request still wins over it.
     rollup_storage = Column(Text, nullable=True)
+    # What the last successful rebuild of this source LEARNED under
+    # per-query pressure — JSON: the narrowest scan width it needed, whether
+    # it had to read serially, the reconcile strategy it switched to, the
+    # write batch / delete chunk it settled on, plus observed_at / job_id.
+    # Fed back to the next run as capacity hints that only ever make it
+    # stricter (never widen a knob); ``"{}"`` = the last run needed nothing.
+    observed_tuning = Column(Text, nullable=True)
     graph_fingerprint = Column(Text, nullable=True)
     aggregation_schedule = Column(Text, nullable=True)  # cron expression
     # Per-source rebuild-cooldown override (seconds). NULL = fall through to

@@ -773,6 +773,12 @@ class AggregationPipeline:
             "write_timeout_s", lambda: float(getattr(self.p, "_bulk_create_timeout_s", 60.0)),
             5.0, 600.0,
         )
+        # What the last run of this source learned under pressure, applied
+        # only where it is STRICTER than the knob in force (a hint never
+        # widens anything) and unless the operator opted out.
+        self._hints_applied: Dict[str, Any] = {}
+        if not self._knob_bool("ignore_observed", lambda: False):
+            self._apply_hints(ceiling)
 
         # ── Conformance diagnostics (Phase IV — loud, never silent) ──
         # Structured advisories surfaced in run_stats (and thus the job-detail
@@ -812,6 +818,52 @@ class AggregationPipeline:
         if raw is None:
             return env_default()
         return bool(raw)
+
+    def _apply_hints(self, ceiling: int) -> None:
+        """Seed the ladder from ``capacity_hints`` (the previous run's
+        ``observed_tuning``): start the scans at the width that run needed,
+        pin concurrency if it had to read serially, start the reconcile in
+        keys-only if it switched, cap the write batch / delete chunk where
+        it settled. Each applies only when stricter than the knob; the
+        ladder's normal re-growth then probes upward during the run, so a
+        graph that no longer needs the narrowing is found out within it."""
+        hints = self._capacity_hints
+
+        def _pos_int(key: str) -> Optional[int]:
+            try:
+                value = int(hints.get(key))
+            except (TypeError, ValueError):
+                return None
+            return value if value > 0 else None
+
+        width = _pos_int("scan_width_observed")
+        if width is not None and width < ceiling:
+            self._scan_subwidth = max(self._scan_floor, width)
+            self._hints_applied["scan_width"] = self._scan_subwidth
+        conc = _pos_int("extract_concurrency_observed")
+        if conc is not None and conc < self._knob_int(
+            "extract_concurrency", _extract_concurrency, 1, 4,
+        ):
+            self._scan_conc_cap = conc
+            self._hints_applied["extract_concurrency"] = conc
+        if hints.get("reconcile_strategy_observed") == "keys_only":
+            self._reconcile_strategy = "keys_only"
+            self._hints_applied["reconcile_strategy"] = "keys_only"
+        batch = _pos_int("write_batch_observed")
+        if batch is not None and batch < getattr(self.p, "_MERGE_SUB_BATCH_SIZE", 500):
+            self._write_cap.value = batch
+            self._hints_applied["write_batch"] = batch
+        chunk = _pos_int("delete_chunk_observed")
+        if chunk is not None and chunk < self._knob_int(
+            "delete_chunk", _delete_chunk, 100, 50_000,
+        ):
+            self._delete_cap.value = chunk
+            self._hints_applied["delete_chunk"] = chunk
+        if self._hints_applied:
+            logger.info(
+                "aggregation pipeline on %s: starting from what the last run "
+                "learned — %s.", self.p._graph_name, self._hints_applied,
+            )
 
     def _scan_timeout(self) -> float:
         """Per-query budget for scans: the live override an operator raised
@@ -1165,8 +1217,14 @@ class AggregationPipeline:
                 # settings. The per-run "what did it adapt to" record.
                 **(
                     {"adapted": self._adapted_snapshot()}
-                    if (self._pressure_log or self._scan_min_width is not None) else {}
+                    if (
+                        self._pressure_log or self._scan_min_width is not None
+                        or self._hints_applied
+                    ) else {}
                 ),
+                # The per-query ceiling the ladder narrows against, when the
+                # shard could say — always present, None when unknown.
+                "query_mem_capacity": self._query_mem_capacity,
                 # Conformance advisories (identity / casing gaps) — present
                 # only when a gap was detected, so a clean run's run_stats is
                 # unchanged. Advisory-only: never flips the job off "completed".
@@ -1619,6 +1677,8 @@ class AggregationPipeline:
             out["pressure"] = list(self._pressure_log)
         if self._by_scan:
             out["by_scan"] = {k: dict(v) for k, v in self._by_scan.items()}
+        if self._hints_applied:
+            out["from_last_run"] = dict(self._hints_applied)
         return out
 
     async def _fetch_range(
@@ -2121,6 +2181,9 @@ class AggregationPipeline:
         """A fresh reading plus the operator's limits. Bytes per edge:
         tuning → what a previous run of this graph measured → env."""
         shard = await self._read_shard()
+        cap = getattr(shard, "query_mem_capacity", None)
+        if cap:
+            self._query_mem_capacity = int(cap)
         raw_bpe = self._tuning.get("bytes_per_edge")
         hint = self._capacity_hints.get("bytes_per_edge_observed")
         if raw_bpe is not None:

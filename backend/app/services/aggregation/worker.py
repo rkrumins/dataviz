@@ -31,6 +31,7 @@ import logging
 import os
 import random
 import time
+import types
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -87,6 +88,45 @@ _MAX_WALL_SECS: int = int(os.getenv("AGGREGATION_JOB_MAX_WALL_SECS", "86400"))
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+#: Learned-state keys the worker persists per source and hands back as
+#: capacity hints (``<key>_observed``). Every one only ever makes the next
+#: run STRICTER; the pipeline ignores a hint looser than the knob in force.
+_LEARNED_KEYS = ("scan_width", "extract_concurrency", "reconcile_strategy",
+                 "write_batch", "delete_chunk")
+
+
+def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
+    """What this run's ``adapted`` record teaches the next run of the same
+    source: the narrowest scan width it needed, whether it read serially,
+    the reconcile strategy it switched to, the write batch / delete chunk it
+    settled on. Learned from THIS run's pressure only — a run that hit no
+    pressure returns ``{}``, which CLEARS the previous lesson (a hinted run
+    re-grows its width during the run, so a graph that no longer needs the
+    narrowing is found out within that run, e.g. after a QUERY_MEM_CAPACITY
+    raise)."""
+    if not isinstance(run_stats, dict):
+        return {}
+    adapted = run_stats.get("adapted")
+    if not isinstance(adapted, dict) or not adapted.get("pressure"):
+        return {}
+    out: dict = {}
+    if adapted.get("scan_width_min"):
+        out["scan_width"] = int(adapted["scan_width_min"])
+    if adapted.get("extract_concurrency") == 1:
+        out["extract_concurrency"] = 1
+    if adapted.get("reconcile_strategy") == "keys_only":
+        out["reconcile_strategy"] = "keys_only"
+    if adapted.get("write_batch_min"):
+        out["write_batch"] = int(adapted["write_batch_min"])
+    if adapted.get("delete_chunk_min"):
+        out["delete_chunk"] = int(adapted["delete_chunk_min"])
+    if out:
+        out["observed_at"] = _now()
+        if job_id:
+            out["job_id"] = job_id
+    return out
 
 
 def _tuning_int(tuning: dict, key: str) -> Optional[int]:
@@ -568,6 +608,13 @@ class AggregationWorker:
                         (result.get("run_stats") or {}).get("bytes_per_edge_observed")
                         if isinstance(result.get("run_stats"), dict) else None
                     ),
+                    # What this run learned under per-query pressure, for
+                    # the next run to start from. Always written: a clean
+                    # run stores "{}", which clears the previous lesson
+                    # (``_update_ds_state`` skips None, so a string it is).
+                    observed_tuning=json.dumps(
+                        _learned_from(result.get("run_stats"), job_id=job.id)
+                    ),
                 )
                 await self._sync_workspace_ds_row(
                     session, job,
@@ -838,10 +885,13 @@ class AggregationWorker:
                         pass
 
     async def _capacity_hints(self, session: AsyncSession, data_source_id: str) -> dict:
-        """What the worker knows about this graph's cost on its shard that
-        the pipeline cannot measure before it runs: the bytes per new edge a
-        previous successful rebuild observed. Best-effort — no row, no
-        column, no hint."""
+        """What the worker knows about this graph that the pipeline cannot
+        measure before it runs: the bytes per new edge a previous successful
+        rebuild observed, and what that rebuild LEARNED under per-query
+        pressure (``observed_tuning``: the narrowest scan width it needed,
+        serial reads, the reconcile strategy, the write batch / delete
+        chunk), each handed over as ``<key>_observed``. Best-effort — no row,
+        no column, unparsable JSON: no hint."""
         from .models import AggregationDataSourceStateORM
 
         try:
@@ -849,8 +899,18 @@ class AggregationWorker:
         except Exception as exc:
             logger.debug("capacity hints unavailable for %s: %s", data_source_id, exc)
             return {}
+        hints: dict = {}
         observed = getattr(state, "observed_bytes_per_edge", None)
-        return {"bytes_per_edge_observed": observed} if observed else {}
+        if observed:
+            hints["bytes_per_edge_observed"] = observed
+        learned = self._job_tuning(types.SimpleNamespace(
+            tuning_json=getattr(state, "observed_tuning", None),
+        ))
+        for key in _LEARNED_KEYS:
+            value = learned.get(key) if isinstance(learned, dict) else None
+            if value:
+                hints[f"{key}_observed"] = value
+        return hints
 
     async def _update_ds_state(
         self,

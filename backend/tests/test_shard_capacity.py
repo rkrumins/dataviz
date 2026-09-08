@@ -209,8 +209,10 @@ def _run(coro):
 
 
 class _Standalone:
-    def __init__(self, info, *, raise_exc=None, delay=0.0):
+    def __init__(self, info, *, raise_exc=None, delay=0.0, config=None, config_exc=None):
         self._info, self._raise, self._delay = info, raise_exc, delay
+        self._config, self._config_exc = config, config_exc
+        self.commands = []
         self.connection_pool = types.SimpleNamespace(
             connection_kwargs={"host": "falkor", "port": 6379},
         )
@@ -223,16 +225,24 @@ class _Standalone:
             raise self._raise
         return self._info
 
+    async def execute_command(self, *args, **kw):
+        self.commands.append(args)
+        assert args == ("GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY")
+        if self._config_exc:
+            raise self._config_exc
+        return self._config
+
 
 class _Node:
     host, port = "10.0.0.7", 6379
 
 
 class _Cluster:
-    def __init__(self, info):
-        self._info = info
+    def __init__(self, info, config=None):
+        self._info, self._config = info, config
         self.initialized = False
         self.targets = []
+        self.config_targets = []
         self.nodes_manager = types.SimpleNamespace(get_node_from_slot=lambda slot: _Node())
 
     async def initialize(self):
@@ -242,6 +252,9 @@ class _Cluster:
         return 42
 
     async def execute_command(self, *args, target_nodes=None):
+        if args == ("GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY"):
+            self.config_targets.append(target_nodes)
+            return self._config
         assert args == ("INFO", "memory")
         self.targets.append(target_nodes)
         return self._info
@@ -249,6 +262,54 @@ class _Cluster:
 
 def _db(conn):
     return types.SimpleNamespace(connection=conn)
+
+
+def test_the_reading_carries_the_per_query_ceiling_beside_the_memory():
+    """QUERY_MEM_CAPACITY is what the pressure ladder narrows against; the
+    reading names it so run_stats and the capacity view can. Read on the
+    OWNING node in cluster mode, through the same client."""
+    conn = _Standalone({"used_memory": "100", "maxmemory": "1000"},
+                       config=[b"QUERY_MEM_CAPACITY", 536870912])
+    m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))
+    assert m.measurable and m.query_mem_capacity == 536870912
+    assert m.as_stats()["query_mem_capacity"] == 536870912
+
+    cluster = _Cluster({"used_memory": "100", "maxmemory": "1000"},
+                       config={"10.0.0.7:6379": ["QUERY_MEM_CAPACITY", "1024"]})
+    m = _run(sc.read_shard_memory(_db(cluster), mode="cluster", graph_key="g", timeout=1))
+    assert m.query_mem_capacity == 1024
+    assert len(cluster.config_targets) == 1 and isinstance(cluster.config_targets[0], _Node)
+
+
+@pytest.mark.parametrize("config", [
+    ["QUERY_MEM_CAPACITY", 0],          # 0 = unlimited
+    ["QUERY_MEM_CAPACITY", "nope"],
+    None,
+    [],
+])
+def test_an_unlimited_or_unreadable_ceiling_reads_as_none(config):
+    conn = _Standalone({"used_memory": "100", "maxmemory": "1000"}, config=config)
+    m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))
+    assert m.measurable and m.query_mem_capacity is None
+    assert "query_mem_capacity" not in m.as_stats()
+
+
+def test_a_failing_ceiling_read_never_costs_the_memory_reading():
+    conn = _Standalone({"used_memory": "100", "maxmemory": "1000"},
+                       config_exc=RuntimeError("unknown command GRAPH.CONFIG"))
+    m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))
+    assert m.measurable and m.used == 100 and m.query_mem_capacity is None
+    assert _run(sc.read_query_mem_capacity(_db(conn), mode="standalone", graph_key="g", timeout=1)) is None
+
+
+def test_parse_config_reply_accepts_every_client_shape():
+    parse = sc._parse_config_reply
+    assert parse([b"QUERY_MEM_CAPACITY", b"2048"], "QUERY_MEM_CAPACITY") == 2048
+    assert parse({"QUERY_MEM_CAPACITY": 4096}, "QUERY_MEM_CAPACITY") == 4096
+    assert parse({"node": [b"QUERY_MEM_CAPACITY", 8192]}, "QUERY_MEM_CAPACITY") == 8192
+    assert parse([["QUERY_MEM_CAPACITY", 16]], "QUERY_MEM_CAPACITY") == 16
+    assert parse(["OTHER", 16], "QUERY_MEM_CAPACITY") is None
+    assert parse(0, "QUERY_MEM_CAPACITY") is None
 
 
 def test_owner_endpoint_names_the_node_without_reading_it():

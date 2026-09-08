@@ -233,6 +233,11 @@ async def init_aggregation_db() -> None:
                 # 'false', NULL = inherit the fleet default.
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS rollup_storage TEXT NULL",
+                # What the last rebuild learned under per-query pressure
+                # (2026-09-09), mirrored in alembic 20260909_1000_observed_tuning:
+                # JSON hints the next run starts from, never widening a knob.
+                f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
+                "ADD COLUMN IF NOT EXISTS observed_tuning TEXT NULL",
             )
             async with engine.begin() as conn:
                 for stmt in _additive_migrations:

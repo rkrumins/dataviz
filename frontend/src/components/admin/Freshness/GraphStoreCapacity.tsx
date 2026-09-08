@@ -92,6 +92,11 @@ function ShardRow({ shard, bytesPerEdge, onOpenSource }: {
                     {shard.policy && shard.policy !== 'noeviction' && (
                         <span className="text-[10px] text-amber-600 dark:text-amber-400">policy {shard.policy}</span>
                     )}
+                    {shard.queryMemCapacity != null && (
+                        <span className="text-[10px] text-ink-muted" title="QUERY_MEM_CAPACITY — the ceiling one query may use; rebuilds narrow their scans until each query fits under it">
+                            per-query limit {compactBytes(shard.queryMemCapacity)}
+                        </span>
+                    )}
                 </div>
                 <span className="text-[12px] text-ink tabular-nums">
                     {compactBytes(used)} of {compactBytes(max)} used ({Math.round(usedPct)}%)

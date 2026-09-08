@@ -2154,6 +2154,102 @@ def test_single_row_write_memory_refusal_is_terminal_with_write_guidance():
     assert "NOT retried" in msg
 
 
+# ── learn and remember: hints seed the ladder, never widen it ──────────
+
+
+class _WidthSpy:
+    """Records every ID-range scan width the pipeline issues."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.widths = []
+
+    async def __call__(self, cypher, params=None, **kw):
+        params = params or {}
+        if params.get("lo") is not None and params.get("hi") is not None:
+            self.widths.append(params["hi"] - params["lo"])
+        return await self._inner(cypher, params, **kw)
+
+
+def _spied_provider():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    spy = _WidthSpy(fake.ro_query)
+    p._ro_query = spy
+    p._proj_ro_query = spy
+    return fake, p, spy
+
+
+def test_hints_start_the_scans_at_what_the_last_run_needed():
+    fake, p, spy = _spied_provider()
+    result = _run(_materialize(
+        p, tuning={"scan_range_width": 200_000},
+        capacity_hints_override={"scan_width_observed": 50_000, "extract_concurrency_observed": 1},
+    ))
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    assert spy.widths and spy.widths[0] == 50_000, spy.widths
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["from_last_run"] == {"scan_width": 50_000}   # conc hint == knob → not stricter
+    # A run that hit no pressure of its own reports none — and so teaches
+    # nothing (the worker's _learned_from clears the lesson).
+    assert "pressure" not in adapted and "scan_width_min" not in adapted
+
+
+def test_a_stricter_knob_beats_a_looser_hint_and_ignore_observed_starts_from_the_knob():
+    _fake, p, spy = _spied_provider()
+    _run(_materialize(
+        p, tuning={"scan_range_width": 20_000},
+        capacity_hints_override={"scan_width_observed": 50_000},
+    ))
+    assert spy.widths[0] == 20_000                     # the hint would have widened it
+
+    _fake, p, spy = _spied_provider()
+    result = _run(_materialize(
+        p, tuning={"scan_range_width": 200_000, "ignore_observed": True},
+        capacity_hints_override={"scan_width_observed": 50_000, "reconcile_strategy_observed": "keys_only"},
+    ))
+    assert spy.widths[0] == 200_000
+    assert "adapted" not in result["run_stats"]
+
+
+def test_a_keys_only_hint_starts_the_reconcile_in_keys_only():
+    fake = _FakeFalkor()
+    levels = _seed_reconcile_scenario(fake)
+    p = _make_provider(fake, levels)
+    result = _run(_materialize(
+        p, tuning={"scan_range_width": 200_000},
+        capacity_hints_override={"reconcile_strategy_observed": "keys_only", "extract_concurrency_observed": 1},
+    ))
+    assert fake.lookup_queries >= 1
+    assert result["run_stats"]["adapted"]["reconcile_strategy"] == "keys_only"
+    assert result["run_stats"]["adapted"]["from_last_run"]["reconcile_strategy"] == "keys_only"
+    assert (1, 12) in fake.deleted_pairs and fake.agg[(2, 12)]["weight"] == 2
+
+
+def test_run_stats_always_carry_the_query_ceiling_when_the_shard_says(monkeypatch):
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    async def shard_with_cap(db, *, mode, graph_key, timeout):
+        return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured",
+                            None, 512 * 2**20)
+
+    monkeypatch.setattr(mat, "read_shard_memory", shard_with_cap)
+    result = _run(_materialize(p))
+    assert result["run_stats"]["query_mem_capacity"] == 512 * 2**20
+    assert result["run_stats"]["write_budget"]["shard"]["query_mem_capacity"] == 512 * 2**20
+
+    async def shard_without_cap(db, *, mode, graph_key, timeout):
+        return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured")
+
+    monkeypatch.setattr(mat, "read_shard_memory", shard_without_cap)
+    result = _run(_materialize(_make_provider(_FakeFalkor(), levels)))
+    assert result["run_stats"]["query_mem_capacity"] is None
+    assert "query_mem_capacity" not in result["run_stats"]["write_budget"]["shard"]
+
+
 # ── pure ladder primitives ─────────────────────────────────────────────
 
 

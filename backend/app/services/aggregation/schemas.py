@@ -1318,6 +1318,10 @@ class ShardCapacity(BaseModel):
     allowed_growth_edges: Optional[int] = Field(None, alias="allowedGrowthEdges")
     governed_by: str = Field(alias="governedBy")
     static_cap: int = Field(alias="staticCap")
+    # The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes — what
+    # the pressure ladder narrows scans against. None when unlimited or
+    # unreadable.
+    query_mem_capacity: Optional[int] = Field(None, alias="queryMemCapacity")
     sources: List[CapacitySource] = Field(default_factory=list)
 
     class Config:

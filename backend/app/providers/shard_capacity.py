@@ -116,6 +116,10 @@ class ShardMemory:
     observed_at: float
     source: str                     # "measured" | "unavailable"
     note: Optional[str] = None      # why unavailable, or "no maxmemory"
+    # The shard's per-query memory ceiling (``QUERY_MEM_CAPACITY``), bytes;
+    # None when unlimited, unreadable, or the client cannot ask. A second,
+    # separately guarded read — it never costs the memory reading.
+    query_mem_capacity: Optional[int] = None
 
     @property
     def measurable(self) -> bool:
@@ -147,6 +151,10 @@ class ShardMemory:
             "policy": self.policy,
             "source": self.source,
             **({"note": self.note} if self.note else {}),
+            **(
+                {"query_mem_capacity": self.query_mem_capacity}
+                if self.query_mem_capacity is not None else {}
+            ),
         }
 
 
@@ -177,6 +185,54 @@ def _parse_info(raw: Any) -> Dict[str, Any]:
                 k, _, v = line.partition(":")
                 out[k.strip()] = v.strip()
     return out
+
+
+def _parse_config_reply(raw: Any, name: str) -> Optional[int]:
+    """The value of one ``GRAPH.CONFIG GET <name>`` reply, whatever shape
+    the client hands back: ``[name, value]``, ``{node: [name, value]}`` from
+    a cluster call, a ``{name: value}`` map, bytes for either part. ``0``
+    means unlimited and reads as None, like an unreadable value."""
+    def _text(v: Any) -> str:
+        if isinstance(v, (bytes, bytearray)):
+            return v.decode("utf-8", "replace")
+        return str(v)
+
+    value: Any = None
+    if isinstance(raw, dict):
+        if name in raw:
+            value = raw[name]
+        else:
+            inner = [v for v in raw.values() if isinstance(v, (list, tuple, dict))]
+            if len(inner) == 1:
+                return _parse_config_reply(inner[0], name)
+            for k, v in raw.items():
+                if _text(k).upper() == name:
+                    value = v
+    elif isinstance(raw, (list, tuple)):
+        if len(raw) == 2 and _text(raw[0]).upper() == name:
+            value = raw[1]
+        elif len(raw) == 1 and isinstance(raw[0], (list, tuple, dict)):
+            return _parse_config_reply(raw[0], name)
+    else:
+        value = raw
+    n = _as_int(value)
+    return n if n and n > 0 else None
+
+
+async def _read_query_mem_capacity(conn: Any, node: Any) -> Optional[int]:
+    """``GRAPH.CONFIG GET QUERY_MEM_CAPACITY`` on the owning node. Never
+    raises — the memory reading must not lose to a config read."""
+    try:
+        if node is not None:
+            raw = await conn.execute_command(
+                "GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY", target_nodes=node,
+            )
+        else:
+            raw = await conn.execute_command("GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY")
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.info("QUERY_MEM_CAPACITY unreadable: %s", exc)
+        return None
+    return _parse_config_reply(raw, "QUERY_MEM_CAPACITY")
 
 
 def _endpoint_of(conn: Any) -> str:
@@ -252,6 +308,7 @@ async def read_shard_memory(
         return ShardMemory("unknown", None, None, None, now, "unavailable",
                            "no client")
     endpoint = "unknown"
+    query_cap: Optional[int] = None
     try:
         async with asyncio.timeout(timeout):
             endpoint, node = await _owner(conn, mode, graph_key)
@@ -259,6 +316,10 @@ async def read_shard_memory(
                 raw = await conn.execute_command("INFO", "memory", target_nodes=node)
             else:
                 raw = await conn.info("memory")
+            # The per-query ceiling the pressure ladder narrows against —
+            # read beside the memory so run_stats and the capacity view can
+            # name it. Its own guard: a failure here costs nothing above.
+            query_cap = await _read_query_mem_capacity(conn, node)
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("shard memory for %r via %s unavailable: %s",
                     graph_key, endpoint, exc)
@@ -270,9 +331,27 @@ async def read_shard_memory(
     policy = info.get("maxmemory_policy")
     if used is None:
         return ShardMemory(endpoint, None, maxmemory, policy, now, "unavailable",
-                           "no used_memory in INFO")
+                           "no used_memory in INFO", query_cap)
     return ShardMemory(endpoint, used, maxmemory or 0,
-                       str(policy) if policy is not None else None, now, "measured")
+                       str(policy) if policy is not None else None, now, "measured",
+                       None, query_cap)
+
+
+async def read_query_mem_capacity(
+    db: Any, *, mode: Optional[str], graph_key: str, timeout: float,
+) -> Optional[int]:
+    """Only the per-query ceiling of the shard that owns ``graph_key``, for
+    callers that already hold a memory reading. Never raises."""
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return None
+    try:
+        async with asyncio.timeout(timeout):
+            _endpoint, node = await _owner(conn, mode, graph_key, refresh=False)
+            return await _read_query_mem_capacity(conn, node)
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.info("QUERY_MEM_CAPACITY for %r unknown: %s", graph_key, exc)
+        return None
 
 
 # ── The allowance ────────────────────────────────────────────────────────
