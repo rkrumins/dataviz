@@ -32,13 +32,13 @@ function job(over: Partial<AggregationJobResponse> = {}): AggregationJobResponse
 
 const noop = () => {}
 
-function renderRow(j: AggregationJobResponse) {
+function renderRow(j: AggregationJobResponse, onExtend?: (job: AggregationJobResponse, patch: unknown) => void) {
     return render(
         <table><tbody>
             <JobRow
                 job={j} expanded onToggle={noop} onCancel={noop} onResume={noop} onRetrigger={noop}
                 onDelete={noop} onPurge={noop} purgeConfirm={null} setPurgeConfirm={noop} actionLoading={false}
-                storedGlobal={{ scanRangeWidth: 200_000 }}
+                storedGlobal={{ scanRangeWidth: 200_000 }} onExtend={onExtend}
             />
         </tbody></table>,
     )
@@ -83,5 +83,37 @@ describe('JobRow run settings', () => {
     it('stays quiet on a running job that is running at its settings', () => {
         renderRow(job({ status: 'running', progress: 30, currentPhase: 'extracting', completedAt: undefined }))
         expect(screen.queryByTestId('narrowing-state')).not.toBeInTheDocument()
+    })
+})
+
+describe('JobRow extend time limit', () => {
+    it('offers more time on a running job and sends the exact patch', async () => {
+        const onExtend = vi.fn()
+        renderRow(job({
+            status: 'running', progress: 60, currentPhase: 'reconciling', completedAt: undefined, timeoutSecs: 10_800,
+            startedAt: new Date(Date.now() - 2 * 3600_000).toISOString(),
+            lastCheckpointAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+            liveOverrides: { history: [{ at: new Date().toISOString(), by: 'ops@example.com', field: 'timeout_secs', from: 7_200, to: 10_800 }] },
+        }), onExtend)
+
+        const toggle = screen.getByRole('button', { name: /Extend time limit/ })
+        expect(toggle).toHaveTextContent('stall window 3 h')
+        expect(toggle).toHaveTextContent('left')
+        await userEvent.click(toggle)
+        await userEvent.click(screen.getByRole('button', { name: '+3 h' }))
+        expect(onExtend).toHaveBeenCalledWith(expect.objectContaining({ id: 'agg_row1' }), { timeoutSecs: 21_600 })
+
+        await userEvent.click(screen.getByRole('button', { name: /Double it/ }))
+        expect(onExtend).toHaveBeenLastCalledWith(expect.anything(), { maxWallSecs: 172_800 })
+
+        await userEvent.type(screen.getByLabelText('Scan timeout, seconds'), '120')
+        await userEvent.click(screen.getByRole('button', { name: 'Apply' }))
+        expect(onExtend).toHaveBeenLastCalledWith(expect.anything(), { scanTimeoutS: 120 })
+        expect(screen.getByText(/ops@example.com raised the stall window 2 h → 3 h/)).toBeInTheDocument()
+    })
+
+    it('is absent on a terminal row', () => {
+        renderRow(job(), vi.fn())
+        expect(screen.queryByRole('button', { name: /Extend time limit/ })).not.toBeInTheDocument()
     })
 })

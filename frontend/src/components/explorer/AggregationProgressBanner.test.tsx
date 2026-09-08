@@ -10,13 +10,13 @@
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { getReadiness } = vi.hoisted(() => ({ getReadiness: vi.fn() }))
+const { getReadiness, setJobLimits } = vi.hoisted(() => ({ getReadiness: vi.fn(), setJobLimits: vi.fn() }))
 
 vi.mock('@/services/aggregationService', async () => {
     const actual = await vi.importActual<typeof import('@/services/aggregationService')>('@/services/aggregationService')
     return {
         ...actual,
-        aggregationService: { ...actual.aggregationService, getReadiness },
+        aggregationService: { ...actual.aggregationService, getReadiness, setJobLimits },
     }
 })
 
@@ -73,5 +73,23 @@ describe('AggregationProgressBanner under a hold', () => {
         renderBanner()
 
         expect(await screen.findByText(/Automatic rebuilds are paused for this source/)).toBeInTheDocument()
+    })
+})
+
+describe('AggregationProgressBanner while a rebuild runs', () => {
+    beforeEach(() => vi.clearAllMocks())
+
+    it('lets the person give the running job more time without cancelling it', async () => {
+        const { default: userEvent } = await import('@testing-library/user-event')
+        setJobLimits.mockResolvedValue({})
+        getReadiness.mockResolvedValue({
+            dataSourceId: 'ds-1', isReady: false, aggregationStatus: 'running', canCreateViews: false,
+            driftDetected: false, aggregationEdgeCount: 0,
+            activeJob: { id: 'agg_9', dataSourceId: 'ds-1', status: 'running', progress: 42, timeoutSecs: 10_800 },
+        })
+        renderBanner()
+
+        await userEvent.click(await screen.findByRole('button', { name: /Give it more time/ }))
+        expect(setJobLimits).toHaveBeenCalledWith('ds-1', 'agg_9', { timeoutSecs: 21_600 })
     })
 })

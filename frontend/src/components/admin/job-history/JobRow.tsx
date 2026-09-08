@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
-import type { AdaptedRunState, AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
+import type { AdaptedRunState, AggregationJobResponse, AggregationTuning, JobLimitsPatch } from '@/services/aggregationService'
 import { useJob } from '@/hooks/useJob'
 import { getProviderLogo } from '../ProviderLogos'
 import {
@@ -15,6 +15,7 @@ import {
 } from './shared'
 import { RunSettingsPanel } from './RunSettingsPanel'
 import { presetForRun } from './runSettings'
+import { ExtendLimits } from './ExtendLimits'
 // One vocabulary for the detector codes across Job History and the Freshness
 // cockpit — they must never disagree about what "overlay_missing" is called,
 // nor about what its evidence means.
@@ -134,9 +135,11 @@ export interface JobRowProps {
     previousJob?: AggregationJobResponse
     /** The fleet Defaults row, so a run's value that equals it reads "Fleet default". */
     storedGlobal?: AggregationTuning | null
+    /** Raise a pending or running job's time limits without cancelling it. */
+    onExtend?: (job: AggregationJobResponse, patch: JobLimitsPatch) => void | Promise<void>
 }
 
-export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob, storedGlobal }: JobRowProps) {
+export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, onToggle, onCancel, onResume, onRetrigger, onDelete, onPurge, purgeConfirm, setPurgeConfirm, actionLoading, compact, previousJob, storedGlobal, onExtend }: JobRowProps) {
     // Open the SSE stream only for actively-running jobs so terminal
     // rows (the bulk of Job History) don't open dead EventSources.
     // Phase 3's useJobsLive(scope) consolidates this to one connection
@@ -750,6 +753,11 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                 />
                                             )}
                                         </div>
+
+                                        {/* More time for a job that is still going */}
+                                        {(isRunning || isPending) && onExtend && job.triggerSource !== 'purge' && (
+                                            <ExtendLimits job={job} onExtend={onExtend} busy={actionLoading} />
+                                        )}
 
                                         {/* What this run ran with, and what it adapted to */}
                                         {showSettings && job.triggerSource !== 'purge' && (

@@ -133,6 +133,43 @@ export interface AggregationJobResponse {
    * when there is no error.
    */
   failureCategory?: string | null;
+  /**
+   * Limits raised on the running job: the wall clock and per-query budgets in
+   * force, and a bounded history of who raised what, from what, to what. The
+   * stall window in force is `timeoutSecs`.
+   */
+  liveOverrides?: LiveOverrides | null;
+}
+
+export interface LiveLimitChange {
+  at: string;
+  by?: string | null;
+  field: 'timeout_secs' | 'max_wall_secs' | 'scan_timeout_s' | 'write_timeout_s' | string;
+  from?: number | null;
+  to?: number | null;
+}
+
+export interface LiveOverrides {
+  max_wall_secs?: number;
+  scan_timeout_s?: number;
+  write_timeout_s?: number;
+  history?: LiveLimitChange[];
+}
+
+/**
+ * The four time limits that can be raised on a pending or running job without
+ * cancelling it. Scan shape (width, floor, concurrency, pacing, chunks) is the
+ * ladder's own state and applies from the next Resume or Re-trigger.
+ */
+export interface JobLimitsPatch {
+  /** Stall window, seconds (60 .. 604,800). */
+  timeoutSecs?: number;
+  /** Wall-clock safety net, seconds (3,600 .. 604,800); never applied below the stall window. */
+  maxWallSecs?: number;
+  /** Per-query budget for read scans, seconds (5 .. 600). */
+  scanTimeoutS?: number;
+  /** Per-query budget for write/delete batches, seconds (5 .. 600). */
+  writeTimeoutS?: number;
 }
 
 /** Where a knob's value came from for one run. */
@@ -561,6 +598,19 @@ class AggregationService {
     return authFetch<AggregationJobResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/resume`,
       init,
+    );
+  }
+
+  /**
+   * Raise (or lower) a pending or running job's time limits without
+   * cancelling it. The worker re-reads the row within ~30 s; per-query
+   * budgets apply to the next query. 422 on a terminal job — use Resume
+   * with overrides there.
+   */
+  async setJobLimits(dataSourceId: string, jobId: string, patch: JobLimitsPatch): Promise<AggregationJobResponse> {
+    return authFetch<AggregationJobResponse>(
+      `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/limits`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
     );
   }
 

@@ -3,6 +3,7 @@ import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { aggregationService, type DataSourceReadinessResponse } from '@/services/aggregationService';
 import { DEFAULT_TIMEOUT_SECS, gentlePreset } from '@/components/admin/shared/AggregationOverridesForm';
 import { friendlyError } from '@/services/providerService';
+import { extendStallPatch } from '@/components/admin/job-history/timeLimits';
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage';
 import { SkipAggregationDialog } from './SkipAggregationDialog';
 
@@ -149,6 +150,18 @@ export function AggregationProgressBanner({
         </div>
         
         <div className="flex items-center gap-3">
+          {readiness.aggregationStatus === 'running' && activeJob && dataSourceId && (
+            <button
+              type="button"
+              className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-indigo-500/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10 transition-colors"
+              title="Raise this job's stall window by three hours without cancelling it"
+              onClick={() => {
+                aggregationService.setJobLimits(dataSourceId, activeJob.id, extendStallPatch(activeJob, 3)).catch(() => {});
+              }}
+            >
+              Give it more time (+3 h)
+            </button>
+          )}
           {readiness.aggregationStatus === 'running' && (
             <div className="flex flex-col items-end gap-1">
               <span className="text-xs font-semibold text-indigo-500">{progress}%</span>

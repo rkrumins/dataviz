@@ -3704,6 +3704,7 @@ async def materialize_aggregated_edges(
     tuning: Optional[Dict[str, Any]] = None,
     job_id: Optional[str] = None,
     capacity_hints: Optional[Dict[str, Any]] = None,
+    live_limits: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Entry point used by ``FalkorDBProvider.materialize_aggregated_edges_batch``."""
     pipeline = AggregationPipeline(
@@ -3717,5 +3718,6 @@ async def materialize_aggregated_edges(
         tuning=tuning,
         job_id=job_id,
         capacity_hints=capacity_hints,
+        live_limits=live_limits,
     )
     return await pipeline.run()

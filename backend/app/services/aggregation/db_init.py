@@ -102,6 +102,12 @@ async def init_aggregation_db() -> None:
                 "ADD COLUMN IF NOT EXISTS run_stats TEXT NULL",
                 f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
                 "ADD COLUMN IF NOT EXISTS worker_id TEXT NULL",
+                # Limits raised on a RUNNING job (2026-09-09), mirrored in
+                # alembic 20260909_1100_job_live_overrides: wall clock and
+                # per-query timeouts plus who raised what; the stall window
+                # itself is timeout_secs.
+                f"ALTER TABLE {SCHEMA_NAME}.aggregation_jobs "
+                "ADD COLUMN IF NOT EXISTS live_overrides TEXT NULL",
                 # F9 (2026-07-19) — configurable rebuild cadence, mirrored in
                 # alembic 20260719_1200_agg_cadence: a per-source cooldown
                 # override on the state table and the persisted GLOBAL cadence

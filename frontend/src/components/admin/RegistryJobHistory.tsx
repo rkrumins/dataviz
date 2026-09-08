@@ -17,7 +17,7 @@ import {
 import { cn } from '@/lib/utils'
 import {
     aggregationService,
-    type AggregationJobResponse,
+    type AggregationJobResponse, type JobLimitsPatch,
     type AggregationTuning,
     type JobHistoryFilters,
     type JobsSummary,
@@ -39,6 +39,7 @@ import { JobHistoryFilterBar } from './job-history/JobHistoryFilterBar'
 import { JobHistoryKPIs } from './job-history/JobHistoryKPIs'
 import { JobHistoryGroupedView } from './job-history/JobHistoryGroupedView'
 import { gentlePreset, type AggregationOverridesValue } from './shared/AggregationOverridesForm'
+import { extendStallPatch } from './job-history/timeLimits'
 import { PageContainer } from '@/components/layout/PageContainer'
 
 // ── Defaults ─────────────────────────────────────────────────────────
@@ -392,6 +393,32 @@ export function RegistryJobHistory() {
         [withAction],
     )
 
+    const handleExtend = useCallback((job: AggregationJobResponse, patch: JobLimitsPatch) =>
+        withAction(job.id, () => aggregationService.setJobLimits(job.dataSourceId, job.id, patch),
+            'Time limit raised. The worker picks it up within about thirty seconds; per-query budgets apply to the next query.',
+            'Could not raise that job’s time limit.'),
+        [withAction],
+    )
+
+    // Every running or queued job at once — the same +3 h each, one toast.
+    const runningJobs = useMemo(
+        () => (data?.items ?? []).filter(j => (j.status === 'running' || j.status === 'pending') && j.triggerSource !== 'purge'),
+        [data?.items],
+    )
+    const [extendingAll, setExtendingAll] = useState(false)
+    const handleExtendAll = useCallback(async () => {
+        if (runningJobs.length === 0) return
+        setExtendingAll(true)
+        const results = await Promise.allSettled(
+            runningJobs.map(j => aggregationService.setJobLimits(j.dataSourceId, j.id, extendStallPatch(j, 3))),
+        )
+        setExtendingAll(false)
+        const failed = results.filter(r => r.status === 'rejected').length
+        if (failed === 0) notify('success', `Gave ${results.length} running ${results.length === 1 ? 'job' : 'jobs'} 3 more hours.`)
+        else notify('error', `Raised ${results.length - failed} of ${results.length}; ${failed} could not be raised.`)
+        await fetchJobs()
+    }, [runningJobs, notify, fetchJobs])
+
     // Both Resume and Re-trigger buttons on JobRow open the same dialog. The
     // user picks the action inside (Resume preserves last_cursor; Re-trigger
     // starts from scratch). This keeps the headline timeout-recovery flow on
@@ -698,6 +725,23 @@ export function RegistryJobHistory() {
                         </div>
                     )}
 
+                    {/* Every running job at once */}
+                    {runningJobs.length > 1 && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-indigo-500/20 bg-indigo-500/5 px-4 py-2.5" data-testid="extend-all-running">
+                            <p className="text-[11px] text-ink">
+                                <span className="font-semibold">{runningJobs.length} jobs</span> are running or queued. Give every one of them more time without cancelling anything.
+                            </p>
+                            <button
+                                type="button"
+                                onClick={handleExtendAll}
+                                disabled={extendingAll}
+                                className="px-3 py-1.5 rounded-lg bg-indigo-500 text-white text-[11px] font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-60"
+                            >
+                                {extendingAll ? 'Raising…' : 'Extend all by +3 h'}
+                            </button>
+                        </div>
+                    )}
+
                     {/* Job Table */}
                     {data && data.items.length > 0 && (
                         <div className="glass-panel rounded-xl border border-glass-border overflow-hidden">
@@ -737,6 +781,7 @@ export function RegistryJobHistory() {
                                                 setPurgeConfirm={setPurgeConfirm}
                                                 actionLoading={actionLoading === job.id}
                                                 storedGlobal={defaultTuning ?? null}
+                                                onExtend={handleExtend}
                                             />
                                         ))}
                                     </tbody>

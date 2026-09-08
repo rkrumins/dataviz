@@ -2301,6 +2301,40 @@ def test_checkpoints_carry_the_snapshot_and_the_adaptation_and_the_result_keeps_
     assert result["run_stats"]["adapted"]["scan_width_min"] == 100_000
 
 
+# ── per-query budgets raised on a running job ──────────────────────────
+
+
+def test_a_raised_scan_timeout_applies_to_the_next_query_without_a_restart():
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    budgets = []
+    live = {}
+    orig = fake.ro_query
+
+    async def spy(cypher, params=None, timeout=None, **kw):
+        if (params or {}).get("lo") is not None:
+            budgets.append(timeout)
+            # An operator raises the budget while the run is in flight.
+            live["scan_timeout_s"] = 240
+        return await orig(cypher, params, **kw)
+
+    p._ro_query = spy
+    p._proj_ro_query = spy
+    _run(mat.materialize_aggregated_edges(
+        p, containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"],
+        tuning={"materialize_fine_pairs": False, "scan_timeout_s": 45}, live_limits=live,
+    ))
+    assert budgets[0] == 45.0 and budgets[-1] == 240.0, budgets
+
+    pipe = _make_pipeline()
+    assert pipe._write_timeout() == 60.0                    # the provider's bulk timeout
+    pipe._live["write_timeout_s"] = "nope"
+    assert pipe._write_timeout() == 60.0                    # garbage is ignored
+    pipe._live["write_timeout_s"] = 5_000
+    assert pipe._write_timeout() == 600.0                   # clamped to the knob's bound
+
+
 # ── pure ladder primitives ─────────────────────────────────────────────
 
 

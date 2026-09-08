@@ -37,6 +37,7 @@ from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
 from backend.app.services.aggregation.internal_auth import internal_auth_headers
 from backend.app.services.aggregation.schemas import (
+    JobLimitsPatch,
     ResumeOverrides,
     SourceChangedRequest,
     SourceChangedResponse,
@@ -897,6 +898,42 @@ async def resume_job(
     _, _, _, _, NotFoundError = _direct_imports()
     try:
         return await svc.resume(ds_id, job_id, session, overrides=overrides)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+# ── PATCH .../limits ────────────────────────────────────────────────
+
+@router.patch(
+    "/data-sources/{ds_id}/aggregation-jobs/{job_id}/limits",
+    summary="Raise a running job's time limits without cancelling it",
+)
+async def set_job_limits(
+    ds_id: str,
+    job_id: str,
+    patch: JobLimitsPatch,
+    request: Request,
+    user: User = Depends(_REQUIRE_DS_MANAGE),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The stall window, wall clock and per-query timeouts of a pending or
+    running job. The same gate as cancel/resume; the actor is always the
+    authenticated user, never what the client body says."""
+    patch.actor = str(getattr(user, "id", None) or getattr(user, "email", None) or "")[:255] or None
+    if _PROXY_ENABLED:
+        body = patch.model_dump_json(by_alias=True, exclude_none=True).encode()
+        return await _proxy(
+            "PATCH",
+            f"/aggregation/data-sources/{ds_id}/jobs/{job_id}/limits",
+            request,
+            body=body,
+        )
+    _, _, _, _, NotFoundError = _direct_imports()
+    try:
+        return await svc.set_job_limits(ds_id, job_id, session, patch)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

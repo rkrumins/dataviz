@@ -5895,6 +5895,7 @@ class FalkorDBProvider(GraphDataProvider):
         tuning: Optional[Dict[str, Any]] = None,
         job_id: Optional[str] = None,
         capacity_hints: Optional[Dict[str, Any]] = None,
+        live_limits: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Materialize :AGGREGATED rollup edges (single resumable pipeline).
 
@@ -5924,6 +5925,7 @@ class FalkorDBProvider(GraphDataProvider):
             tuning=tuning,
             job_id=job_id,
             capacity_hints=capacity_hints,
+            live_limits=live_limits,
         )
 
     async def get_aggregated_edges_between(

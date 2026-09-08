@@ -289,6 +289,7 @@ async def _get_session(request: Request):
 # ── Schemas (import here to avoid circular) ─────────────────────────
 
 from .schemas import (  # noqa: E402
+    JobLimitsPatch,
     AggregationTriggerRequest,
     AggregationSettingsRequest,
     AggregationSettingsResponse,
@@ -508,6 +509,28 @@ async def cancel_job(
 ):
     try:
         return await svc.cancel(ds_id, job_id, session)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+# ── PATCH /aggregation/data-sources/{ds_id}/jobs/{job_id}/limits ─────
+
+@app.patch(
+    "/aggregation/data-sources/{ds_id}/jobs/{job_id}/limits",
+    response_model=AggregationJobResponse,
+    summary="Raise a running job's time limits without cancelling it",
+)
+async def set_job_limits(
+    ds_id: str,
+    job_id: str,
+    patch: JobLimitsPatch,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    try:
+        return await svc.set_job_limits(ds_id, job_id, session, patch)
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

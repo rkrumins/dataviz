@@ -395,6 +395,40 @@ class ResumeOverrides(BaseModel):
         populate_by_name = True
 
 
+class JobLimitsPatch(BaseModel):
+    """Limits an operator raises on a PENDING or RUNNING job, applied
+    without cancelling it. Only the four time limits are live: the stall
+    window (the job's ``timeout_secs``), the wall clock, and the per-query
+    scan and write budgets. Scan shape (width, floor, concurrency, pacing,
+    chunks) is the ladder's own state and applies from the next Resume.
+    ``actor`` is set by the web tier from the authenticated user."""
+    timeout_secs: Optional[int] = Field(
+        None, alias="timeoutSecs",
+        description="Stall window, seconds; 60 \u2264 value \u2264 604800.",
+    )
+    max_wall_secs: Optional[int] = Field(
+        None, alias="maxWallSecs", ge=3_600, le=604_800,
+        description="Wall-clock safety net, seconds — never applied below the stall window.",
+    )
+    scan_timeout_s: Optional[float] = Field(
+        None, alias="scanTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for read scans, seconds (capped by the store's TIMEOUT_MAX).",
+    )
+    write_timeout_s: Optional[float] = Field(
+        None, alias="writeTimeoutS", ge=5.0, le=600.0,
+        description="Per-query budget for write/delete batches, seconds.",
+    )
+    actor: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("timeout_secs")
+    @classmethod
+    def _check_timeout_secs(cls, v: Optional[int]) -> Optional[int]:
+        return _validate_timeout_secs(v)
+
+    class Config:
+        populate_by_name = True
+
+
 # ── Responses ────────────────────────────────────────────────────────
 
 
@@ -460,6 +494,11 @@ class AggregationJobResponse(BaseModel):
     # profile for a per-query memory or timeout failure without parsing
     # the message client-side. None when there is no error.
     failure_category: Optional[str] = Field(None, alias="failureCategory")
+    # Limits raised on the running job — ``max_wall_secs`` /
+    # ``scan_timeout_s`` / ``write_timeout_s`` in force and a bounded
+    # ``history`` of who raised what, from what, to what. The stall window
+    # in force is ``timeout_secs`` above.
+    live_overrides: Optional[dict] = Field(None, alias="liveOverrides")
 
     class Config:
         populate_by_name = True

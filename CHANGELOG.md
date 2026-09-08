@@ -41,6 +41,16 @@ profile in the re-trigger dialog — narrow scans, serial reads, generous pacing
 timeout — pre-selected, with the reason, after a per-query memory or timeout failure; the canvas
 banner offers the same retry. The capacity card shows each node's per-query limit.
 
+**More time for a job that is still going — one, or all of them.** A pending or running job's
+stall window, wall clock and per-query timeouts can be raised without cancelling it:
+`PATCH /admin/data-sources/{id}/aggregation-jobs/{job}/limits` (the same gate as cancel and
+resume; the actor is always the authenticated user), an *Extend time limit* control in the
+running row — what the job is running under, what is left of it, one-click +1/+3/+6/+12 h,
+a wall-clock doubling, the per-query budgets, and who raised what — an *Extend all by +3 h*
+strip when several jobs are running, and *Give it more time* on the canvas banner. The worker
+re-reads the row every thirty seconds through a fresh session; per-query budgets apply to the
+next query. The history lives on the job row, shown in Job History.
+
 **Rollup capacity you can see, and every limit you can set.** Ingestion → Freshness gains a
 *Graph store capacity* card: one row per shard with a meter of memory in use, the fleet reserve
 marked on it, what is free after that reserve, how many more rollup edges that is, and the
@@ -273,9 +283,10 @@ that cannot fail proves nothing.
 
 ### Upgrading
 
-- Migration `20260909_1000_observed_tuning` adds `data_source_state.observed_tuning` (what the
-  last rebuild of a source learned under pressure); mirrored in `init_aggregation_db`, so a
-  control plane that boots first is fine.
+- Migrations `20260909_1000_observed_tuning` (`data_source_state.observed_tuning`, what the
+  last rebuild of a source learned under pressure) and `20260909_1100_job_live_overrides`
+  (`aggregation_jobs.live_overrides`, limits raised on a running job); both mirrored in
+  `init_aggregation_db`, so a control plane that boots first is fine.
 - `AGGREGATION_SCAN_SHRINK_FLOOR` now defaults to 1 (was 10,000): a rebuild narrows all the way
   to one row before it concludes. Set the *Scan floor* knob to restore an early stop.
 - The stall window and wall clock accept up to seven days; `timeoutSecs` above 86,400 is no

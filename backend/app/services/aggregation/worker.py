@@ -160,6 +160,15 @@ def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
     return out
 
 
+def _merge_live_limits(stall_timeout: int, wall_base: int, fresh: dict) -> tuple:
+    """``(stall, wall)`` after a live re-read: the row's ``timeout_secs``
+    replaces the stall window when set; the raised wall clock (else the
+    job's base) is never below the stall window."""
+    stall = int(fresh.get("timeout_secs") or stall_timeout)
+    wall = int(fresh.get("max_wall_secs") or wall_base)
+    return stall, max(wall, stall)
+
+
 def _tuning_int(tuning: dict, key: str) -> Optional[int]:
     """A positive int from a tuning dict, or None (absent / unparsable)."""
     try:
@@ -522,7 +531,13 @@ class AggregationWorker:
                 )
                 progress_marker = {"at": time.monotonic()}
 
-                limits = {"stall_timeout": stall_timeout, "wall_limit": wall_limit}
+                # Per-query budgets an operator may raise on the running
+                # job: the pipeline reads this dict per query; the watchdog
+                # tick below refreshes it from the row.
+                live: dict = {}
+                limits = {"stall_timeout": stall_timeout, "wall_limit": wall_limit, "live": live}
+                wall_base = _tuning_int(job_tuning, "max_wall_secs") or _MAX_WALL_SECS
+                ticks = 0
                 materialize_task = asyncio.create_task(
                     self._materialize_with_retries(
                         session=session,
@@ -571,6 +586,33 @@ class AggregationWorker:
                                 "next checkpoint", job.id,
                             )
                             cancel_event.set()
+                        # Limits raised on the RUNNING job (PATCH …/limits):
+                        # one indexed read per 30s, through a fresh session —
+                        # never the job's own, which the materialize task is
+                        # using. Lowering is honoured too.
+                        ticks += 1
+                        if ticks % 3 == 0:
+                            fresh = await self._live_limits(job.id)
+                            if fresh:
+                                new_stall, new_wall = _merge_live_limits(
+                                    stall_timeout, wall_base, fresh,
+                                )
+                                if (new_stall, new_wall) != (stall_timeout, wall_limit):
+                                    logger.info(
+                                        "Aggregation job %s: time limits changed while "
+                                        "running — stall window %ss → %ss, wall clock "
+                                        "%ss → %ss", job.id, stall_timeout, new_stall,
+                                        wall_limit, new_wall,
+                                    )
+                                    stall_timeout, wall_limit = new_stall, new_wall
+                                    limits["stall_timeout"], limits["wall_limit"] = new_stall, new_wall
+                                for key in ("scan_timeout_s", "write_timeout_s"):
+                                    if fresh.get(key) is not None and live.get(key) != fresh[key]:
+                                        logger.info(
+                                            "Aggregation job %s: %s raised to %ss while running "
+                                            "— applies to the next query", job.id, key, fresh[key],
+                                        )
+                                        live[key] = fresh[key]
                         now = time.monotonic()
                         stalled_for = now - progress_marker["at"]
                         if stalled_for > stall_timeout:
@@ -1143,6 +1185,36 @@ class AggregationWorker:
             levels,
         )
 
+    async def _live_limits(self, job_id: str) -> dict:
+        """The job row's current time limits — ``timeout_secs`` and the
+        ``live_overrides`` document — read through a FRESH session (the
+        job's own session belongs to the materialize task). Never raises:
+        ``{}`` means "no change as far as we can tell", retried next tick."""
+        if self._session_factory is None:
+            return {}
+        try:
+            from sqlalchemy import select
+            async with self._session_factory() as s:
+                row = (await s.execute(
+                    select(AggregationJobORM.timeout_secs, AggregationJobORM.live_overrides)
+                    .where(AggregationJobORM.id == job_id)
+                )).first()
+        except Exception as exc:
+            logger.debug("live limits unavailable for %s: %s", job_id, exc)
+            return {}
+        if row is None:
+            return {}
+        timeout_secs, raw = row[0], row[1]
+        out: dict = {}
+        if timeout_secs:
+            out["timeout_secs"] = int(timeout_secs)
+        doc = self._job_tuning(types.SimpleNamespace(tuning_json=raw))
+        for key in ("max_wall_secs", "scan_timeout_s", "write_timeout_s"):
+            value = doc.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                out[key] = value
+        return out
+
     @staticmethod
     def _job_run_stats(job: Any) -> dict:
         """The row's ``run_stats`` document (``{}`` when NULL or unparsable)."""
@@ -1691,6 +1763,9 @@ class AggregationWorker:
             batch_size=job.batch_size,
             tuning=job_tuning,
             capacity_hints=capacity_hints,
+            # Per-query budgets an operator may raise on the running job —
+            # the watchdog refreshes this dict; the pipeline reads it per query.
+            live_limits=(limits or {}).get("live"),
             job_id=job.id,
             last_cursor=job.last_cursor,
             progress_callback=checkpoint,

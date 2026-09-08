@@ -133,6 +133,12 @@ class AggregationJobORM(Base):
     run_stats = Column(Text, nullable=True)
     # worker_id: which worker (pod/consumer) executed this job.
     worker_id = Column(Text, nullable=True)
+    # live_overrides: limits an operator raised on the RUNNING job (JSON:
+    # max_wall_secs, scan_timeout_s, write_timeout_s, and a bounded history
+    # of who changed what, from what, to what). The stall window itself is
+    # ``timeout_secs``. The worker re-reads both from the row while the job
+    # runs, so a raise takes effect without cancelling anything.
+    live_overrides = Column(Text, nullable=True)
 
     # ── Fingerprinting (change detection) ────────────────────────────
     graph_fingerprint_before = Column(Text, nullable=True)

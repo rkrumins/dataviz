@@ -38,6 +38,7 @@ from .schemas import (
     RefreshEventSummary,
     RefreshResponse,
     ResumeOverrides,
+    JobLimitsPatch,
     SourceChangedResponse,
 )
 from .fingerprint import compute_graph_fingerprint, fingerprints_match
@@ -1183,6 +1184,7 @@ class AggregationService:
             run_stats=AggregationService._job_run_stats_dict(job),
             worker_id=getattr(job, "worker_id", None),
             failure_category=classify_failure(getattr(job, "error_message", None)),
+            live_overrides=AggregationService._job_live_overrides_dict(job),
         )
 
 
@@ -1444,6 +1446,63 @@ class AggregationService:
             "max_retries=%d)", job_id, job.max_retries,
         )
 
+        return self._to_response(job)
+
+    # ── Live limits ──────────────────────────────────────────────────
+
+    async def set_job_limits(
+        self, ds_id: str, job_id: str, session: AsyncSession, patch: "JobLimitsPatch",
+    ) -> AggregationJobResponse:
+        """Raise (or lower) a PENDING or RUNNING job's time limits without
+        cancelling it: the stall window (``timeout_secs``), the wall clock
+        and the two per-query budgets. The worker re-reads the row every
+        few watchdog ticks and the pipeline reads the per-query budgets per
+        query, so the change takes effect within a minute. A terminal job
+        takes Resume overrides instead (422 here).
+
+        The audit trail is the row itself: ``live_overrides.history`` keeps
+        the last 20 changes (who, when, field, from, to) — deliberately not
+        a ``job_event_log`` row, whose CHECK constraint and consumers expect
+        terminal events only — plus one INFO log line per change."""
+        job = await session.get(AggregationJobORM, job_id, with_for_update=True)
+        if not job or job.data_source_id != ds_id:
+            raise NotFoundError(f"Aggregation job {job_id} not found")
+        if job.status not in ("pending", "running"):
+            raise ValueError(
+                f"Job {job_id} is {job.status}; limits can only be raised on a "
+                "pending or running job — use Resume with overrides instead"
+            )
+        doc = AggregationService._job_live_overrides_dict(job) or {}
+        history = list(doc.get("history") or [])
+        changes: list = []
+        now = _now()
+
+        def _record(field: str, old: Any, new: Any) -> None:
+            if old == new:
+                return
+            entry = {"at": now, "by": patch.actor or None, "field": field, "from": old, "to": new}
+            history.append(entry)
+            changes.append(entry)
+
+        if patch.timeout_secs is not None:
+            _record("timeout_secs", job.timeout_secs, int(patch.timeout_secs))
+            job.timeout_secs = int(patch.timeout_secs)
+        for field in ("max_wall_secs", "scan_timeout_s", "write_timeout_s"):
+            value = getattr(patch, field)
+            if value is not None:
+                _record(field, doc.get(field), value)
+                doc[field] = value
+        if not changes:
+            raise ValueError("No limit changed: send at least one of timeoutSecs, maxWallSecs, scanTimeoutS, writeTimeoutS")
+        doc["history"] = history[-20:]
+        job.live_overrides = json.dumps(doc)
+        job.updated_at = now
+        await session.commit()
+        for entry in changes:
+            logger.info(
+                "Aggregation job %s: %s raised %s from %s to %s (live)",
+                job_id, entry["by"] or "an operator", entry["field"], entry["from"], entry["to"],
+            )
         return self._to_response(job)
 
     # ── Cancel ────────────────────────────────────────────────────────
@@ -3237,6 +3296,15 @@ class AggregationService:
             return None
 
     @staticmethod
+    def _job_live_overrides_dict(job) -> dict | None:
+        try:
+            raw = getattr(job, "live_overrides", None)
+            doc = json.loads(raw) if raw else None
+            return doc if isinstance(doc, dict) else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _job_run_stats_dict(job) -> dict | None:
         try:
             raw = getattr(job, "run_stats", None)
@@ -3281,6 +3349,7 @@ class AggregationService:
             run_stats=AggregationService._job_run_stats_dict(job),
             worker_id=getattr(job, "worker_id", None),
             failure_category=classify_failure(getattr(job, "error_message", None)),
+            live_overrides=AggregationService._job_live_overrides_dict(job),
         )
 
 
