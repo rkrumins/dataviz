@@ -1030,3 +1030,110 @@ async def test_a_legitimate_csv_filename_is_still_readable(
         resp.headers["content-disposition"]
         == 'attachment; filename="profiling-workspace-ws_1-raw.csv"'
     )
+
+
+# ── /checks: the record that a check RAN ─────────────────────────────
+
+
+async def _check(
+    session: AsyncSession, ds_id: str, at: str, *,
+    lane: str = "probe", outcome: str = "ok", detail: str | None = None,
+):
+    from backend.app.db.models import DataSourceCheckEventORM
+
+    session.add(DataSourceCheckEventORM(
+        id=f"chk_{ds_id}_{lane}_{at}", data_source_id=ds_id, checked_at=at,
+        lane=lane, outcome=outcome, detail=detail,
+    ))
+    await session.flush()
+
+
+async def test_checks_answers_the_question_the_counts_series_cannot(
+    db_session: AsyncSession,
+):
+    """A source with ONE snapshot and a day of healthy checks is steady. The
+    same source with one snapshot and no checks is unwatched. The counts series
+    renders those identically; this is what separates them."""
+    await _source(db_session, "ds_a")
+    await _snap(db_session, "ds_a", _iso(20), nodes=100)
+    for hour in range(1, 13):
+        await _check(db_session, "ds_a", _iso(hour), lane="probe")
+    await _check(db_session, "ds_a", _iso(2), lane="deep")
+
+    out = await profiling.get_checks(
+        id="ds_a", window="24h", frm=None, to=None, limit=5000,
+        session=db_session, claims=OPERATOR,
+    )
+    data = out["data"]
+    assert data["summary"]["total"] == 13
+    assert data["summary"]["ok"] == 13 and data["summary"]["error"] == 0
+    assert data["summary"]["lanes"]["probe"]["total"] == 12
+    assert data["summary"]["lanes"]["deep"]["total"] == 1
+    # Oldest first: the strip reads left to right in time.
+    stamps = [c["checkedAt"] for c in data["checks"]]
+    assert stamps == sorted(stamps)
+
+
+async def test_checks_reports_failures_and_what_they_said(
+    db_session: AsyncSession,
+):
+    await _source(db_session, "ds_a")
+    await _check(db_session, "ds_a", _iso(3), lane="poll")
+    await _check(
+        db_session, "ds_a", _iso(2), lane="poll",
+        outcome="error", detail="connect timeout",
+    )
+
+    out = await profiling.get_checks(
+        id="ds_a", window="24h", frm=None, to=None, limit=5000,
+        session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["summary"]["error"] == 1
+    assert any(
+        c["detail"] == "connect timeout" for c in out["data"]["checks"]
+    )
+
+
+async def test_checks_carries_the_sampling_interval(db_session: AsyncSession):
+    """Without it the strip overstates its own precision: a check that found
+    nothing new inside the interval is coalesced away, so a short gap is not
+    evidence that nothing ran."""
+    await _source(db_session, "ds_a")
+    out = await profiling.get_checks(
+        id="ds_a", window="24h", frm=None, to=None, limit=5000,
+        session=db_session, claims=OPERATOR,
+    )
+    assert out["data"]["summary"]["sample_secs"] >= 0
+    assert out["data"]["summary"]["total"] == 0
+    assert out["data"]["truncated"] is False
+
+
+async def test_checks_says_when_it_is_showing_a_slice(db_session: AsyncSession):
+    await _source(db_session, "ds_a")
+    for minute in range(1, 6):
+        await _check(db_session, "ds_a", _iso(minute / 60), lane="probe")
+
+    out = await profiling.get_checks(
+        id="ds_a", window="24h", frm=None, to=None, limit=2,
+        session=db_session, claims=OPERATOR,
+    )
+    assert len(out["data"]["checks"]) == 2
+    assert out["data"]["truncated"] is True
+    # The summary counts the WINDOW, never the page.
+    assert out["data"]["summary"]["total"] == 5
+
+
+async def test_checks_is_bound_by_the_same_visibility_as_every_other_read(
+    db_session: AsyncSession,
+):
+    """A liveness series is still per-source data — leaking one tenant's
+    check history is a smaller leak than their counts, not a different kind."""
+    await _source(db_session, "ds_theirs", workspace="ws_2")
+    await _check(db_session, "ds_theirs", _iso(1))
+
+    with pytest.raises(HTTPException) as exc:
+        await profiling.get_checks(
+            id="ds_theirs", window="24h", frm=None, to=None, limit=5000,
+            session=db_session, claims=workspace_claims("ws_1"),
+        )
+    assert exc.value.status_code in (403, 404)

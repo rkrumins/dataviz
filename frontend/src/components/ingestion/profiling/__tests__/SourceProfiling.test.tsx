@@ -35,6 +35,14 @@ vi.mock('@/services/profilingService', () => ({
             alerts: [], total: 0, openCount: 0, offset: 0, limit: 20,
             platform_wide: true,
         }),
+        getChecks: vi.fn().mockResolvedValue({
+            id: 'ds_a', from: '2026-08-23T00:00:00Z', to: '2026-08-24T00:00:00Z',
+            window: '30d', checks: [], limit: 5000, truncated: false,
+            summary: {
+                total: 0, ok: 0, error: 0, skipped: 0,
+                first_at: null, last_at: null, lanes: {}, sample_secs: 300,
+            },
+        }),
         exportUrl: () => '#',
         acknowledge: vi.fn(),
     },

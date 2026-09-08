@@ -531,10 +531,16 @@ async def _maybe_run_profiling_retention() -> None:
     if any(result.values()):
         logger.info(
             "profiling_retention: removed %d raw (>%dd), %d over cap, "
-            "%d hour (>%dd), %d day (>%dd), %d acknowledged alert(s)",
+            "%d hour (>%dd), %d day (>%dd), %d check event(s) (>%dd), "
+            "%d acknowledged alert(s)",
             result["raw"], policy.raw_days, result["over_cap"],
             result["hour"], policy.hourly_days,
-            result["day"], policy.daily_days, result["alerts"],
+            result["day"], policy.daily_days,
+            # ``.get``: the checks tier is newer than this log line, and a
+            # caller (or a test double) returning the older shape must not
+            # KeyError a retention pass that already did its work.
+            result.get("checks", 0), resilience.PROFILING_CHECK_RETENTION_DAYS,
+            result["alerts"],
         )
 
 

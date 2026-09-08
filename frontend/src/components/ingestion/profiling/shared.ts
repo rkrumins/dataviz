@@ -5,7 +5,9 @@
  * ledger and the findings band all describe the same events and a reader who
  * learns "severe" in one must not meet a different meaning in another.
  */
-import type { Observation, ProfilingMetric, Significance } from '@/types/profiling'
+import type {
+    CheckLane, CheckOutcome, Observation, ProfilingMetric, Significance,
+} from '@/types/profiling'
 
 /** Plain nouns for the two measures. "Nodes" and "edges" are what the graph
  *  calls them; these are what the people who onboard the data call them. */
@@ -61,6 +63,44 @@ export const LANE_LABEL: Record<Observation['lane'], string> = {
     deep: 'Deep profile',
     sweep: 'Reconcile sweep',
     write: 'Platform write',
+}
+
+/** Every lane that can record a CHECK — a superset of the lanes that can
+ *  record an observation, because two of them validate without ever writing
+ *  counts. Kept beside `LANE_LABEL` so the two never name the same lane
+ *  differently on two cards of the same drawer. */
+export const CHECK_LANE_LABEL: Record<CheckLane, string> = {
+    probe: 'Drift probe',
+    poll: 'Scheduled poll',
+    deep: 'Deep profile',
+    sweep: 'Reconcile sweep',
+    write: 'Platform write',
+    reconcile: 'Reconciliation',
+    discovery: 'Asset discovery',
+}
+
+export const CHECK_OUTCOME = {
+    ok: {
+        label: 'Healthy',
+        // The only saturated colour in the strip. A run of healthy checks is
+        // the common case and must read as texture, not as an alarm.
+        mark: 'bg-emerald-500/70',
+        text: 'text-emerald-600 dark:text-emerald-400',
+    },
+    skipped: {
+        label: 'Not validated',
+        mark: 'bg-slate-300 dark:bg-slate-600',
+        text: 'text-ink-muted',
+    },
+    error: {
+        label: 'Failed',
+        mark: 'bg-rose-500',
+        text: 'text-rose-600 dark:text-rose-400',
+    },
+} as const
+
+export function checkOutcomeMeta(outcome: CheckOutcome) {
+    return CHECK_OUTCOME[outcome] ?? CHECK_OUTCOME.ok
 }
 
 export const REASON_LABEL: Record<Observation['reason'], string> = {

@@ -137,6 +137,30 @@ be ~43k rows per source per month describing a graph that mostly did not
 change. So a snapshot is written when `counts_digest` moves, and at most once
 per `PROFILING_HEARTBEAT_SECS` otherwise.
 
+**What a gated series still cannot tell you.** Whether anybody was watching.
+Capture is change-gated, and a failed collection deliberately writes nothing at
+all, so a source that has been steady for a day and a source nobody has been
+able to reach for a day produce the same picture: no rows. Reading liveness out
+of the absence of movement is the inference that hides an outage.
+
+`data_source_check_events` is the other half — the record that a lane LOOKED.
+Every lane that validates a source writes one: the counts and deep facets, the
+drift probe (including the "no constant-time counts here" skip, which is
+`skipped` rather than `ok`), the reconcile sweep, and asset discovery, which is
+keyed on a physical graph and so fans out to every live source bound to it.
+Successful checks ride the same write chokepoint as the snapshot, so they commit
+with the observation they describe; failures record on their own short session,
+because a liveness row must never be able to fail the failure path.
+
+It is sampled the same way and for the same reason: a row is written when the
+signature moves — a different outcome, or a different error — and otherwise at
+most once per `PROFILING_CHECK_SAMPLE_SECS`. So a failure is never delayed by
+sampling, a source stuck on one error does not write a row a minute, and a
+healthy source is a visible pulse rather than one ancient row. Read it at
+`GET /api/v1/profiling/checks`; the per-source drawer draws it as one strip per
+lane, because merging the lanes lets the fastest one fill every gap the others
+leave.
+
 **A change is never gated.** Only the heartbeat is suppressed inside its
 window — see `maybe_capture_snapshot`. So an incident is always pinned to the
 observation that saw it, at the observing lane's own resolution (60s on the
@@ -279,6 +303,7 @@ agree with.
 |---|---|---|
 | GET | `/profiling/series` | The time series at any scope |
 | GET | `/profiling/observations` | The change ledger for one source, run-bound |
+| GET | `/profiling/checks` | The liveness pulse: when one source was checked, by which lane, and how it went |
 | GET | `/profiling/sources` | The board — what moved, ranked |
 | GET | `/profiling/export.csv` | The same series as CSV |
 | GET | `/profiling/alerts` | Recorded findings with frozen evidence |
@@ -385,7 +410,7 @@ returns `200` with `meta.status="computing"`.
 | DELETE | `/dlq/{msg_id}` | Drop a DLQ message. |
 | GET | `/admission/{provider_id}` | Read admission knobs + rolling-window health. |
 | PUT | `/admission/{provider_id}` | Upsert per-provider admission knobs. |
-| GET | `/discovery/status` | Last discovery-scheduler tick summary. |
+| GET | `/discovery/status` | Last discovery-scheduler tick summary, including the `asset_due` / `asset_deferred` backlog gauges. |
 | POST | `/discovery/trigger` | Run one discovery tick immediately. |
 | GET | `/config` | Frontend-facing insights UX tuning values. |
 
@@ -428,6 +453,14 @@ Scheduler / worker tunables (defaults in parentheses):
 | `PROFILING_ALERT_COOLDOWN_SECS` | `21600` | At most one finding per source **per metric** per this interval. |
 | `PROFILING_ALERT_INTERVAL_SECS` | `900` | How often findings are judged. Now genuinely 900s: these used to ride the hourly stream-trim tick, where a cadence gate can never fire faster than its host loop. |
 | `PROFILING_SILENT_AFTER_SECS` | `21600` | A source unheard-from this long is `silent`. |
+| `PROFILING_CHECK_SAMPLE_SECS` | `300` | How often a repeat check that found nothing new is recorded, per (source, lane). A different outcome — or a different error — is never coalesced, so a failure is recorded the instant it happens. `0` records every check. |
+| `PROFILING_CHECK_RETENTION_DAYS` | `7` | Age cutoff for check events. Nothing rolls them up, so they follow the raw tier rather than the 45/400-day ones. |
+| `DISCOVERY_REFRESH_INTERVAL_SECS` | `1800` | Background sweep cadence for `asset_discovery_cache`. |
+| `DISCOVERY_CACHE_FRESH_SECS` | `1800` | Read-path freshness window; a row is fresh until the next sweep would have replaced it. |
+| `DISCOVERY_SWEEP_REGISTERED_ONLY` | `false` | `true` limits the sweep to catalog-registered assets — which is what left an unregistered asset's row untouched until absolute expiry. |
+| `DISCOVERY_SWEEP_MAX_PER_TICK` | `200` | Per-tick ceiling on per-asset refreshes. The sweep is due-ness filtered and oldest-first, so this bounds load without starving anything. |
+| `DISCOVERY_CACHE_SELF_HEAL_SECS` | `3 x DISCOVERY_REFRESH_INTERVAL_SECS` | Past this a READ enqueues one refresh itself: the row is not stale, it is stuck. Capped at one job per `DISCOVERY_DEDUP_TTL_SECS` by the existing claim. `0` disables it. |
+| `INSIGHTS_UI_STALE_THRESHOLD_SECS` | `DISCOVERY_CACHE_SELF_HEAL_SECS` | Where the chip stops showing a row as green. Defaults to the self-heal floor: the point at which the platform stops calling a row acceptable. |
 
 Per-provider admission knobs (`bucket_capacity`, `refill_per_sec`) are stored in
 `provider_admission_config` and tuned live via the `PUT /admission/{provider_id}`

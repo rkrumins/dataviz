@@ -304,6 +304,30 @@ PROFILING_ENABLED: bool = os.getenv("PROFILING_ENABLED", "true").lower() == "tru
 # so 30- and 90-day coverage costs exactly what it did before.
 PROFILING_HEARTBEAT_SECS: int = int(os.getenv("PROFILING_HEARTBEAT_SECS", "900"))
 
+# ── Profiling: the record that a check RAN ──────────────────────────
+# Sampling interval for ``data_source_check_events``. The snapshot series
+# answers "what did this source contain, and when did that change"; it cannot
+# answer "was anybody watching", because capture is change-gated and a FAILED
+# collection deliberately writes nothing — so a steady source and an
+# unreachable one look identical. This is the pulse that separates them.
+#
+# A row is written whenever the SIGNATURE changes (outcome, or a different
+# error), and otherwise at most this often per (source, lane). At 300s the 60s
+# probe lane contributes 12 rows/source/hour instead of 60, and a source that
+# breaks still records the transition the instant it happens. Set to 0 to write
+# a row for every check (faithful, and ~1,440/source/day from the probe lane
+# alone); PROFILING_ENABLED=false turns the whole thing off.
+PROFILING_CHECK_SAMPLE_SECS: int = int(
+    os.getenv("PROFILING_CHECK_SAMPLE_SECS", "300")
+)
+
+# Age cutoff for check events. They are a liveness pulse, not a value series —
+# nothing rolls them up, and nobody asks whether a source was reachable last
+# quarter — so they follow the RAW tier rather than the 45/400-day tiers.
+PROFILING_CHECK_RETENTION_DAYS: int = int(
+    os.getenv("PROFILING_CHECK_RETENTION_DAYS", "7")
+)
+
 # ── Profiling: tiered retention ─────────────────────────────────────
 # Raw is the record of what was OBSERVED; the rollup tiers are the record
 # of what a PERIOD looked like. Compaction builds hour buckets from raw

@@ -69,6 +69,13 @@ _DEFAULT_WINDOW = "30d"
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 500
 
+#: Check events are a dense pulse, not a paged ledger — the whole point of the
+#: strip is seeing a day of them at once. 24h of the 60s probe lane at the
+#: default 300s sample is ~288 rows, and every other lane is slower, so this
+#: covers a day of every lane at once with headroom for a deployment that has
+#: turned sampling off.
+_MAX_CHECK_ROWS = 5000
+
 #: Everything outside this becomes "_" in the CSV download's filename.
 #:
 #: ``scope_id`` reaches the filename straight from the query string:
@@ -337,6 +344,62 @@ async def get_observations(
         # aggregation domain. Absence is informative and surfaced as such —
         # if nothing of ours ran, whatever changed the graph came from outside.
         "events": events,
+    }}
+
+
+@router.get("/checks", summary="When this source was checked, and how it went")
+async def get_checks(
+    id: str = Query(..., description="Data source id"),
+    window: Optional[str] = Query(None),
+    frm: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    limit: int = Query(_MAX_CHECK_ROWS, ge=1, le=_MAX_CHECK_ROWS),
+    session: AsyncSession = Depends(get_db_session),
+    claims: PermissionClaims = Depends(get_permission_claims),
+) -> dict:
+    """The liveness pulse: every recorded check of one source, oldest first.
+
+    The counts series answers "what did this source contain, and when did that
+    change". It is change-gated, and a failed collection writes nothing at all,
+    so a source that has been steady for a day and a source nobody has been
+    able to reach for a day are the same picture there — no rows. This is the
+    other half: the record that a lane LOOKED, whether or not the numbers moved.
+
+    ``summary`` is counted in SQL over the whole window, so "96 checks, all
+    healthy" is a claim about the period rather than about whichever rows fit
+    in ``limit``. ``summary.sample_secs`` is what a gap in the series means: a
+    check that found nothing new inside that interval is coalesced away, so
+    absence of a row is not absence of a check until the gap exceeds it.
+    """
+    id = await profiling_repo.resolve_source_id(session, id)
+    await ensure_data_source_visible(session, claims, id)
+    frm_iso, to_iso, label = _resolve_window(window, frm, to)
+
+    rows = await stats_history_repo.list_check_events(
+        session, id, frm=frm_iso, to=to_iso, limit=limit,
+    )
+    summary = await stats_history_repo.check_summary(
+        session, id, frm=frm_iso, to=to_iso,
+    )
+    return {"data": {
+        "id": id, "from": frm_iso, "to": to_iso, "window": label,
+        "checks": [
+            {
+                "id": r.id,
+                "checkedAt": r.checked_at,
+                "lane": r.lane,
+                "outcome": r.outcome,
+                "changed": r.changed,
+                "detail": r.detail,
+                "durationMs": r.duration_ms,
+            }
+            for r in rows
+        ],
+        "summary": summary,
+        "limit": limit,
+        # Truthful pagination: the strip must be able to say it is showing a
+        # slice, rather than implying the window simply held fewer checks.
+        "truncated": len(rows) >= limit,
     }}
 
 

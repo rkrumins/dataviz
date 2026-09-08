@@ -12,6 +12,7 @@
 import { authFetch } from './apiClient'
 import type {
     BoardPayload,
+    ChecksPayload,
     FindingsPayload,
     ObservationsPayload,
     ProfilingBreakdown,
@@ -94,6 +95,15 @@ export const profilingService = {
     ): Promise<ObservationsPayload> {
         return authFetch<Wrapped<ObservationsPayload>>(
             `${BASE}/observations${qs(q)}`, { signal, silent403: true },
+        ).then((r) => r.data)
+    },
+
+    getChecks(
+        q: { id: string; window?: string; from?: string; to?: string; limit?: number },
+        signal?: AbortSignal,
+    ): Promise<ChecksPayload> {
+        return authFetch<Wrapped<ChecksPayload>>(
+            `${BASE}/checks${qs(q)}`, { signal, silent403: true },
         ).then((r) => r.data)
     },
 

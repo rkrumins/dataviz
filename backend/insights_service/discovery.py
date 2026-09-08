@@ -123,6 +123,9 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
                 # don't waste 5 retries on a clearly-broken config; the
                 # UI surfaces ``last_error`` so the user knows what to fix.
                 await record_failure(provider_id, asset_name, error_msg)
+                await _record_discovery_check(
+                    provider_id, asset_name, outcome="error", detail=error_msg,
+                )
                 return
 
             if is_list_all:
@@ -159,11 +162,14 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
                         "last known counts and flagging the row.",
                         provider_id, asset_name,
                     )
-                    await record_failure(
-                        provider_id, asset_name,
+                    missing = (
                         f"graph_missing: {asset_name!r} no longer exists on this "
                         "FalkorDB instance — showing last known counts. Restore "
-                        "it, re-run ingestion, or unregister the data source.",
+                        "it, re-run ingestion, or unregister the data source."
+                    )
+                    await record_failure(provider_id, asset_name, missing)
+                    await _record_discovery_check(
+                        provider_id, asset_name, outcome="error", detail=missing,
                     )
                     return
                 try:
@@ -194,6 +200,9 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
                         else f"Stats refresh failed (provider reachable): {stats_exc}"
                     )
                     await record_failure(provider_id, asset_name, note)
+                    await _record_discovery_check(
+                        provider_id, asset_name, outcome="error", detail=note,
+                    )
                     return
                 payload = {
                     "nodeCount": raw.get("node_count", raw.get("nodeCount", 0)),
@@ -255,11 +264,41 @@ async def collect(envelope: DiscoveryJobEnvelope) -> None:
             last_error=drift,
         )
 
+    if not is_list_all:
+        await _record_discovery_check(provider_id, asset_name)
+
     duration = asyncio.get_event_loop().time() - start_ts
     logger.info(
         "discovery.completion provider=%s asset=%s duration_secs=%.2f payload_size=%d",
         provider_id, asset_name or "<list-all>",
         duration, len(json.dumps(payload)),
+    )
+
+
+async def _record_discovery_check(
+    provider_id: str, asset_name: str, *,
+    outcome: str = "ok", detail: str | None = None,
+) -> None:
+    """Pulse into the per-source check history.
+
+    Discovery is keyed on a PHYSICAL GRAPH, not a data source, so the repo
+    fans out to every live source bound to it. Only the per-asset flavour: a
+    list-all job validates the provider's keyspace, not any one source, and
+    stamping every source it happens to enumerate would claim a check that did
+    not happen.
+
+    Best-effort, and deliberately not inside the admission gate: a liveness row
+    must never hold a token or fail the refresh it describes.
+    """
+    if not asset_name:
+        return
+    from backend.app.db.repositories.stats_history_repo import (
+        record_graph_check_safe,
+    )
+
+    await record_graph_check_safe(
+        provider_id=provider_id, graph_name=asset_name,
+        lane="discovery", outcome=outcome, detail=detail,
     )
 
 

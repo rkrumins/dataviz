@@ -1203,6 +1203,90 @@ class DataSourceCountSnapshotORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# data_source_check_events (the record that a check RAN)               #
+# ------------------------------------------------------------------ #
+
+class DataSourceCheckEventORM(Base):
+    """One occurrence of a lane LOOKING at a data source, and what it found.
+
+    ``data_source_count_snapshots`` answers "what did this source contain, and
+    when did that change". It cannot answer "was anybody watching" — capture is
+    change-gated, and a FAILED collection writes nothing at all by design, so a
+    flat series and a source nobody has been able to reach for two days are the
+    same picture: no rows.
+
+    That is the gap this table fills. Every lane that validates a source — the
+    60s drift probe, the counts poll, the deep profile, the reconcile sweep —
+    records that it ran and how it went, whether or not the numbers moved. The
+    profiling drawer can then say "checked 96 times in the last 24h, all
+    healthy" instead of leaving the reader to infer liveness from the absence
+    of movement, which is exactly the inference that hides an outage.
+
+    **Sampled, not exhaustive.** The probe lane alone would write 1,440 rows per
+    source per day describing a source that did not change and did not fail.
+    ``record_check`` writes when the SIGNATURE changes — outcome or detail —
+    and otherwise at most once per ``PROFILING_CHECK_SAMPLE_SECS``. So a
+    healthy source produces a steady, cheap pulse; a source that breaks records
+    the transition the moment it happens, and every DISTINCT error after it.
+
+    **No foreign key**, deliberately, and for the same reason as the snapshots
+    beside it: the check history of a source that was removed is exactly the
+    history someone comes looking for.
+    """
+
+    __tablename__ = "data_source_check_events"
+
+    id = Column(Text, primary_key=True, default=lambda: f"chk_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    checked_at = Column(Text, nullable=False, default=_now)
+
+    # Which lane looked. The lanes have very different cadence and cost, and
+    # "only the hourly sweep has touched this source all week" is a real
+    # diagnosis — the same reason the snapshot table keeps a lane.
+    lane = Column(Text, nullable=False, default="poll")
+    # ok      — the lane reached the source and got an answer.
+    # error   — it could not (unreachable, timed out, auth, graph gone).
+    # skipped — it deliberately did not look (gated, throttled, not applicable).
+    #           Distinct from ``error``: nothing is wrong, but nothing was
+    #           validated either, and a wall of skips is why a series is flat.
+    outcome = Column(Text, nullable=False, default="ok")
+
+    # Did the observation differ from the previous one? NULL when the lane does
+    # not compute counts (the reconcile sweep evaluating stored numbers, say).
+    # Recorded rather than derived so this table answers "was it checked AND
+    # was it steady" without joining to the snapshot series.
+    changed = Column(Boolean, nullable=True)
+
+    # Error text or skip reason, truncated. NULL on a clean ok.
+    detail = Column(Text, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        # The window read: one source, ordered in time.
+        Index("ix_dsce_ds_checked", "data_source_id", "checked_at"),
+        # The coalescing lookup on every check: the latest row for one
+        # (source, lane). Without it each check scans the source's history.
+        Index("ix_dsce_ds_lane_checked", "data_source_id", "lane", "checked_at"),
+        # Retention prunes by age across all sources.
+        Index("ix_dsce_checked", "checked_at"),
+        CheckConstraint(
+            "lane IN ('probe', 'poll', 'deep', 'sweep', 'write', 'reconcile', "
+            "'discovery')",
+            name="ck_dsce_lane",
+        ),
+        CheckConstraint(
+            "outcome IN ('ok', 'error', 'skipped')", name="ck_dsce_outcome",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceCheckEvent ds_id={self.data_source_id!r} "
+            f"at={self.checked_at!r} lane={self.lane!r} outcome={self.outcome!r}>"
+        )
+
+
+# ------------------------------------------------------------------ #
 # data_source_count_rollups (the compacted tiers)                      #
 # ------------------------------------------------------------------ #
 

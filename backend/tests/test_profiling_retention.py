@@ -130,7 +130,9 @@ async def test_retention_on_a_clean_table_deletes_nothing(
         raw_days=7, hourly_days=45, daily_days=400, max_rows_per_source=5000,
     )
     result = await profiling_repo.run_retention(db_session, policy)
-    assert result == {"raw": 0, "over_cap": 0, "hour": 0, "day": 0}
+    assert result == {
+        "checks": 0, "raw": 0, "over_cap": 0, "hour": 0, "day": 0,
+    }
 
 
 async def test_the_batch_bounds_a_single_pass(db_session: AsyncSession):

@@ -44,6 +44,35 @@ from sqlalchemy import func, select, text
 
 from .reconcile import Observation, Verdict, evaluate
 
+# Skips that mean "the sweep ran and deliberately validated nothing", as
+# opposed to "the sweep ran and reached a verdict". Anything else — a finding,
+# an in-sync pass, a seed — is a real evaluation.
+_NON_VALIDATING_SKIPS = frozenset(
+    {"suspended", "stats_stale", "stats_unhealthy", "projection_stalled"}
+)
+
+
+async def _record_sweep_check(session, ds_id: str, verdict: "Verdict") -> None:
+    """Pulse into ``data_source_check_events``. Never raises: the sweep's job
+    is reconciliation, and a liveness row failing to write must not cost a pass
+    (or, on Postgres, poison the transaction that holds the advisory lock).
+    """
+    from backend.app.db.repositories.stats_history_repo import record_check
+
+    skipping = verdict.skip in _NON_VALIDATING_SKIPS
+    try:
+        async with session.begin_nested():
+            await record_check(
+                session,
+                ds_id=ds_id,
+                lane="reconcile",
+                outcome="skipped" if skipping else "ok",
+                detail=verdict.skip if skipping else None,
+            )
+    except Exception:                                # pragma: no cover - best effort
+        logger.debug("reconcile sweep: check pulse failed for %s",
+                     ds_id, exc_info=True)
+
 logger = logging.getLogger(__name__)
 
 
@@ -481,6 +510,20 @@ class ReconciliationSweeper:
                 result.scanned += 1
                 verdict = evaluate(obs, policy)
                 now = _now_iso()
+
+                # One pulse per evaluated source, here where every branch below
+                # still converges. ``last_reconcile_checked_at`` on the state
+                # row keeps only the LATEST check — which answers "is the sweep
+                # running" but never "was it running at 3am on Tuesday", the
+                # question anyone actually asks after finding a source wrong.
+                #
+                # A verdict that reached a decision is ``ok``: the sweep looked
+                # and answered. A skip is ``skipped`` — the sweep ran but
+                # deliberately validated nothing (suspended, stats too stale to
+                # trust), which is a different fact and the usual reason a
+                # source appears unwatched.
+                if not dry_run:
+                    await _record_sweep_check(session, state.data_source_id, verdict)
                 prev_drift = state.drift_state
                 # Unevaluated skips leave drift_state None — keep the prior stamp.
                 if verdict.drift_state is not None:

@@ -145,6 +145,69 @@ export interface ObservationsPayload {
     }
 }
 
+/**
+ * The record that a check RAN, as opposed to the record that a value moved.
+ *
+ * The counts series is change-gated and a failed collection writes nothing, so
+ * a source that has been steady all day and one nobody has been able to reach
+ * all day are the same picture there — no rows. This series says who looked,
+ * when, and how it went.
+ */
+export type CheckLane =
+    | 'probe' | 'poll' | 'deep' | 'sweep' | 'write' | 'reconcile' | 'discovery'
+
+/** `skipped` is not a failure: the lane ran and deliberately validated
+ *  nothing (suspended, throttled, no constant-time counts on this provider).
+ *  It is usually the reason a value series is flat, which is exactly what a
+ *  reader is trying to explain. */
+export type CheckOutcome = 'ok' | 'error' | 'skipped'
+
+export interface CheckEvent {
+    id: string
+    checkedAt: string
+    lane: CheckLane
+    outcome: CheckOutcome
+    /** Whether the observation differed from the previous one. Null when the
+     *  lane computes no counts. */
+    changed: boolean | null
+    detail: string | null
+    durationMs: number | null
+}
+
+export interface CheckLaneSummary {
+    total: number
+    ok: number
+    error: number
+    skipped: number
+    first_at: string | null
+    last_at: string | null
+}
+
+export interface CheckSummary {
+    total: number
+    ok: number
+    error: number
+    skipped: number
+    first_at: string | null
+    last_at: string | null
+    lanes: Record<string, CheckLaneSummary>
+    /** What a gap MEANS. A check that found nothing new inside this interval
+     *  is coalesced away, so absence of a row is not absence of a check until
+     *  the gap exceeds it. */
+    sample_secs: number
+}
+
+export interface ChecksPayload {
+    id: string
+    from: string
+    to: string
+    window: ProfilingWindow
+    checks: CheckEvent[]
+    summary: CheckSummary
+    limit: number
+    truncated: boolean
+}
+
 export type FindingKind = 'movement' | 'type_gone' | 'silent'
 
 export interface Finding {

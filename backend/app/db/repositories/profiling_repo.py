@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.common.derived_artifacts import strip_derived_counts
 from backend.app.db.models import (
+    DataSourceCheckEventORM,
     DataSourceCountRollupORM,
     DataSourceCountSnapshotORM,
 )
@@ -54,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 _SNAP = DataSourceCountSnapshotORM
 _ROLL = DataSourceCountRollupORM
+_CHECKS = DataSourceCheckEventORM
 
 #: Prefix lengths that turn an ISO instant into a bucket key. ISO timestamps
 #: are lexically ordered, so a bucket is a prefix — no date parsing, no
@@ -734,11 +736,45 @@ async def purge_over_cap(
     return removed
 
 
+async def purge_check_events(
+    session: AsyncSession, *, cutoff: str, batch: int = 5000,
+) -> int:
+    """Delete check events older than ``cutoff``. Returns rows deleted.
+
+    Unbounded by any watermark, unlike raw snapshots: nothing rolls check
+    events up, because nobody asks whether a source was reachable last quarter.
+    They are a liveness pulse with a short, flat window.
+    """
+    if not cutoff:
+        return 0
+    doomed = (await session.execute(
+        select(_CHECKS.id).where(_CHECKS.checked_at < cutoff).limit(batch)
+    )).scalars().all()
+    if not doomed:
+        return 0
+    await session.execute(delete(_CHECKS).where(_CHECKS.id.in_(list(doomed))))
+    return len(doomed)
+
+
+def check_event_cutoff(now: Optional[datetime] = None) -> str:
+    """Age cutoff for check events, from ``PROFILING_CHECK_RETENTION_DAYS``.
+
+    Read from env rather than carried on ``RetentionPolicy``: the tiers on that
+    policy nest into each other and are operator-editable for that reason,
+    while this window belongs to a series nothing compacts and nobody tunes
+    against the others.
+    """
+    from backend.app.config import resilience as _cfg
+
+    days = max(_MIN_DAYS, int(_cfg.PROFILING_CHECK_RETENTION_DAYS))
+    return ((now or datetime.now(timezone.utc)) - timedelta(days=days)).isoformat()
+
+
 async def run_retention(
     session: AsyncSession, policy: RetentionPolicy, *,
     now: Optional[datetime] = None, batch: int = 5000,
 ) -> Dict[str, int]:
-    """One retention pass across all three tiers.
+    """One retention pass across all three tiers, plus the check-event pulse.
 
     Order matters: compaction has already run by the time this is called, and
     raw is bounded by the watermark, so nothing is deleted before it has been
@@ -746,6 +782,9 @@ async def run_retention(
     """
     at = now or datetime.now(timezone.utc)
     return {
+        "checks": await purge_check_events(
+            session, cutoff=check_event_cutoff(at), batch=batch,
+        ),
         "raw": await purge_raw(
             session,
             cutoff=await raw_purge_cutoff(session, policy, now=at),

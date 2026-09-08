@@ -410,6 +410,18 @@ class InsightsJobConsumer:
                 "scheduler retries on its next tick",
                 envelope.scope_key, error[:200],
             )
+            # Dropped, but not unrecorded. A probe that fails every minute for
+            # an hour writes no counts and no polling-config error, so before
+            # the check series the ONLY trace of it was a log line — and a flat
+            # chart with no explanation beside it.
+            from backend.app.db.repositories.stats_history_repo import (
+                record_check_safe,
+            )
+
+            await record_check_safe(
+                ds_id=envelope.data_source_id, lane="probe",
+                outcome="error", detail=error,
+            )
             await self._ack(stream_cfg, msg_id)
             await release_claim(envelope.scope_key, stream=stream_cfg)
             return
@@ -421,7 +433,14 @@ class InsightsJobConsumer:
         # record_failure helpers open their own short JOBS sessions.
         try:
             if isinstance(envelope, StatsJobEnvelope):
-                await stats_record_failure(envelope.data_source_id, error)
+                # ProbeJobEnvelope subclasses StatsJobEnvelope and returned
+                # above, so the only kinds reaching here are the two poll
+                # facets — and they belong to different lanes in the check
+                # series, exactly as they do in the snapshot series.
+                await stats_record_failure(
+                    envelope.data_source_id, error,
+                    lane="deep" if envelope.kind == "stats_deep" else "poll",
+                )
             elif isinstance(envelope, DiscoveryJobEnvelope):
                 await discovery_record_failure(
                     envelope.provider_id, envelope.asset_name, error

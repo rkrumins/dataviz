@@ -468,10 +468,20 @@ async def _log_counts_parity(provider, schema_stats, ds_id: str) -> None:
         )
 
 
-async def record_failure(data_source_id: str, error: str) -> None:
+async def record_failure(
+    data_source_id: str, error: str, *, lane: str = "poll",
+) -> None:
     """Write an error into the polling config — used by the worker after
     a failed poll of either facet (per-source, not crash-level). Opens
-    its own short JOBS session so the worker doesn't manage one."""
+    its own short JOBS session so the worker doesn't manage one.
+
+    Also records the failed check. The polling config keeps only the LATEST
+    error, so a source that failed at 02:00, recovered, and failed again at
+    09:00 reads as one incident; the check series keeps both, and keeps the
+    recovery between them.
+    """
+    from backend.app.db.repositories.stats_history_repo import record_check_safe
+
     async with get_jobs_session() as session:
         config = await session.get(DataSourcePollingConfigORM, data_source_id)
         if config is None:
@@ -479,6 +489,12 @@ async def record_failure(data_source_id: str, error: str) -> None:
         config.last_status = "error"
         config.last_error = error[:2000]
         config.last_polled_at = datetime.now(timezone.utc).isoformat()
+
+    # Separate short session, deliberately: the pulse is observability ABOUT
+    # observability and must never be able to fail the failure path.
+    await record_check_safe(
+        ds_id=data_source_id, lane=lane, outcome="error", detail=error,
+    )
 
 
 async def probe_counts(envelope: StatsJobEnvelope) -> None:

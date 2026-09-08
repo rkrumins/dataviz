@@ -19,6 +19,7 @@ import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { profilingService, type SeriesQuery } from '@/services/profilingService'
 import type {
     BoardPayload,
+    ChecksPayload,
     FindingsPayload,
     ObservationsPayload,
     ProfilingPolicy,
@@ -118,6 +119,21 @@ export function useProfilingObservations(
             query.limit ?? null, query.offset ?? 0,
         ],
         queryFn: ({ signal }) => profilingService.getObservations(query, signal),
+        enabled: (options.enabled ?? true) && Boolean(query.id),
+        ...CADENCE,
+    })
+}
+
+export function useProfilingChecks(
+    query: Parameters<typeof profilingService.getChecks>[0],
+    options: { enabled?: boolean } = {},
+): UseQueryResult<ChecksPayload, Error> {
+    return useQuery<ChecksPayload, Error>({
+        queryKey: [
+            PROFILING_KEY, 'checks', query.id,
+            query.window ?? DEFAULT_WINDOW, query.limit ?? null,
+        ],
+        queryFn: ({ signal }) => profilingService.getChecks(query, signal),
         enabled: (options.enabled ?? true) && Boolean(query.id),
         ...CADENCE,
     })

@@ -26,11 +26,13 @@ import { KpiCard } from '@/components/analytics/KpiCard'
 import { profilingService } from '@/services/profilingService'
 import {
     DEFAULT_WINDOW, PROFILING_WINDOWS, type ProfilingWindowKey,
-    useProfilingFindings, useProfilingObservations, useProfilingSeries,
+    useProfilingChecks, useProfilingFindings, useProfilingObservations,
+    useProfilingSeries,
 } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import type { ProfilingBreakdown, ProfilingMetric } from '@/types/profiling'
 import { ChangeLedger } from './ChangeLedger'
+import { CheckPulse } from './CheckPulse'
 import { FindingsBand } from './FindingsBand'
 import { ProfilingChart, type BreakdownView } from './ProfilingChart'
 import { SeriesVerdict } from './Verdict'
@@ -77,6 +79,14 @@ export function SourceProfiling({
     )
     const ledger = useProfilingObservations(
         { id: dataSourceId, window, onlyNotable, limit: 50 },
+        { enabled: canRead },
+    )
+    // The liveness half of the profile, fetched independently of the counts
+    // series and rendered even when that series is EMPTY — which is precisely
+    // the case where a reader most needs to know whether anything has been
+    // looking, and the only case where nothing else on this surface can say.
+    const checks = useProfilingChecks(
+        { id: dataSourceId, window },
         { enabled: canRead },
     )
 
@@ -162,6 +172,19 @@ export function SourceProfiling({
 
             <SeriesVerdict series={payload} sourceName={sourceName} />
             <FindingsBand dataSourceId={dataSourceId} />
+
+            {/*
+              Above the numbers, not below them. "Were these figures being
+              checked" qualifies everything underneath — a flat series over a
+              healthy pulse is a stable source, and the same flat series over a
+              gap is a source nobody could reach.
+            */}
+            <CheckPulse
+                payload={checks.data}
+                isLoading={checks.isLoading}
+                isError={checks.isError}
+                windowLabel={windowLabel}
+            />
 
             {/*
               The profile itself — the same numbers the Overview shows, now

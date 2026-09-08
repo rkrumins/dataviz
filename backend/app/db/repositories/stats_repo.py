@@ -99,13 +99,20 @@ async def upsert_data_source_stats(
 async def touch_schema_freshness(session: AsyncSession, ds_id: str) -> None:
     """Advance both freshness markers WITHOUT rewriting any data —
     used when a deep poll's cheap probe shows the graph is unchanged,
-    so the expensive scans (and a pointless row rewrite) are skipped."""
+    so the expensive scans (and a pointless row rewrite) are skipped.
+
+    Still a check that RAN, and the most valuable kind to record: this path
+    writes no counts, so without a pulse here a source whose deep lane
+    successfully verified "nothing changed" every 15 minutes for a day is
+    indistinguishable in the history from one the deep lane never reached.
+    """
     existing = await get_data_source_stats(session, ds_id)
     if existing is None:
         return
     now_iso = datetime.now(timezone.utc).isoformat()
     existing.updated_at = now_iso
     existing.schema_updated_at = now_iso
+    await _record_check(session, ds_id, lane="deep", changed=False)
     await session.flush()
 
 
@@ -190,6 +197,22 @@ async def _capture_history(
     policy = await stats_history_repo.resolve_history_policy(session)
     if not policy.enabled:
         return None
+
+    # The pulse rides the same chokepoint, for the same reason the snapshot
+    # does: this is the ONE place every lane's successful observation passes
+    # through, so "was anybody watching" gets one definition instead of one per
+    # lane. Recorded even when the snapshot is gated away — that is the entire
+    # point. A change-gated series cannot distinguish a source that has been
+    # steady all day from one nobody has been able to reach all day, and this is
+    # what separates them.
+    await stats_history_repo.record_check(
+        session,
+        ds_id=ds_id,
+        lane=lane,
+        outcome="ok",
+        changed=previous is None or (previous.counts_digest or "") != digest,
+    )
+
     snapshot = await stats_history_repo.maybe_capture_snapshot(
         session,
         ds_id=ds_id,
@@ -203,6 +226,28 @@ async def _capture_history(
         policy=policy,
     )
     return snapshot.captured_at if snapshot is not None else None
+
+
+async def _record_check(
+    session: AsyncSession,
+    ds_id: str,
+    *,
+    lane: str,
+    outcome: str = "ok",
+    changed: Optional[bool] = None,
+    detail: Optional[str] = None,
+) -> None:
+    """Pulse for the write paths that produce no counts, and so never reach
+    :func:`_capture_history`. Same session, same policy gate."""
+    from . import stats_history_repo
+
+    policy = await stats_history_repo.resolve_history_policy(session)
+    if not policy.enabled:
+        return
+    await stats_history_repo.record_check(
+        session, ds_id=ds_id, lane=lane, outcome=outcome,
+        changed=changed, detail=detail,
+    )
 
 
 def _counts_digest(entity_type_counts: str, edge_type_counts: str) -> str:
@@ -320,6 +365,20 @@ async def touch_probe_stamp(session: AsyncSession, ds_id: str) -> None:
     # value in the UPDATE keeps the hook from firing.
     flag_modified(existing, "updated_at")
     await session.flush()
+    # AFTER the flush, deliberately: the pulse issues a SELECT, whose autoflush
+    # would otherwise write this row's pending change without the pinned
+    # ``updated_at`` in the statement — firing the very onupdate hook the
+    # flag_modified above exists to suppress, and making stale counts look
+    # freshly polled.
+    #
+    # Skipped, not ok: the probe ran and deliberately produced nothing, which
+    # is why the value series is flat here. Recording it as "ok" would claim a
+    # validation that did not happen; recording nothing would leave the flat
+    # line unexplained.
+    await _record_check(
+        session, ds_id, lane="probe", outcome="skipped",
+        detail="no constant-time counts available on this provider/graph",
+    )
 
 
 async def set_top_level_nodes(session: AsyncSession, ds_id: str, payload_json: str) -> None:

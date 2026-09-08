@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config import resilience
 from ..models import (
+    DataSourceCheckEventORM,
     DataSourceCountSnapshotORM,
     DataSourceStatsORM,
     PlatformSettingsORM,
@@ -488,6 +489,262 @@ async def maybe_capture_snapshot(
     # the NEXT write saw a null marker and called itself "first" all over
     # again. The caller owns the row in both branches, so the caller stamps it.
     return row
+
+
+# ── check events (the record that a check RAN) ───────────────────────
+#
+# The snapshot series above answers "what did this source contain, and when did
+# that change". It cannot answer "was anybody watching": capture is
+# change-gated, and a failed collection deliberately writes nothing, so a source
+# that has been steady all day and one nobody has been able to reach all day
+# produce the same picture — no rows. Reading liveness out of the absence of
+# movement is the inference that hides an outage, and this is what replaces it.
+
+_VALID_LANES = ("probe", "poll", "deep", "sweep", "write", "reconcile", "discovery")
+_VALID_OUTCOMES = ("ok", "error", "skipped")
+
+#: Detail is a diagnosis, not a payload — long provider tracebacks would
+#: dominate the table without telling a reader anything the first line does not.
+_DETAIL_MAX = 500
+
+
+async def _last_check(
+    session: AsyncSession, ds_id: str, lane: str,
+) -> Optional[DataSourceCheckEventORM]:
+    row = await session.execute(
+        select(DataSourceCheckEventORM)
+        .where(
+            DataSourceCheckEventORM.data_source_id == ds_id,
+            DataSourceCheckEventORM.lane == lane,
+        )
+        .order_by(DataSourceCheckEventORM.checked_at.desc())
+        .limit(1)
+    )
+    return row.scalars().first()
+
+
+async def record_check(
+    session: AsyncSession,
+    *,
+    ds_id: str,
+    lane: str,
+    outcome: str = "ok",
+    changed: Optional[bool] = None,
+    detail: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+    sample_secs: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> Optional[DataSourceCheckEventORM]:
+    """Record that ``lane`` validated ``ds_id``. Returns the row, or ``None``
+    when this check was coalesced into the previous one.
+
+    Sampled, not exhaustive. The probe lane alone runs every 60s, and a row per
+    check would be 1,440 a day per source describing a source that neither
+    changed nor failed. A row is written when:
+
+    * nothing has been recorded for this (source, lane) yet;
+    * the SIGNATURE moved — a different outcome, or a different error. So the
+      transition into failure is recorded the instant it happens, and no
+      DISTINCT error is ever coalesced away behind an earlier one; or
+    * ``sample_secs`` have passed since the last recorded check, which is what
+      turns a healthy source into a visible pulse instead of one ancient row.
+
+    ``sample_secs`` defaults to ``PROFILING_CHECK_SAMPLE_SECS``; 0 records every
+    check. Runs in the caller's session, like :func:`maybe_capture_snapshot`, so
+    the pulse commits with the work it describes.
+    """
+    lane = lane if lane in _VALID_LANES else "poll"
+    outcome = outcome if outcome in _VALID_OUTCOMES else "ok"
+    detail = (detail or None) and str(detail)[:_DETAIL_MAX]
+    at = now or datetime.now(timezone.utc)
+    interval = (
+        resilience.PROFILING_CHECK_SAMPLE_SECS if sample_secs is None
+        else sample_secs
+    )
+
+    previous = await _last_check(session, ds_id, lane)
+    if previous is not None:
+        same_signature = (
+            previous.outcome == outcome and (previous.detail or None) == detail
+        )
+        if same_signature and interval > 0 and not _stale(
+            previous.checked_at, at, interval,
+        ):
+            return None
+
+    row = DataSourceCheckEventORM(
+        id=f"chk_{uuid.uuid4().hex[:12]}",
+        data_source_id=ds_id,
+        checked_at=at.isoformat(),
+        lane=lane,
+        outcome=outcome,
+        changed=changed,
+        detail=detail,
+        duration_ms=None if duration_ms is None else int(duration_ms),
+    )
+    session.add(row)
+    return row
+
+
+async def record_check_safe(
+    *,
+    ds_id: str,
+    lane: str,
+    outcome: str = "ok",
+    changed: Optional[bool] = None,
+    detail: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+) -> None:
+    """:func:`record_check` on its own short JOBS session, never raising.
+
+    For the lanes that have already closed their session by the time they know
+    how the check went. A liveness pulse must never be able to fail the work it
+    describes — an unwritten row costs a gap in a chart, a raised exception
+    costs the poll.
+    """
+    if not resilience.PROFILING_ENABLED:
+        return
+    try:
+        from backend.app.db.engine import get_jobs_session
+
+        async with get_jobs_session() as session:
+            await record_check(
+                session, ds_id=ds_id, lane=lane, outcome=outcome,
+                changed=changed, detail=detail, duration_ms=duration_ms,
+            )
+    except Exception:                                # pragma: no cover - best effort
+        logger.debug("record_check_safe failed for ds=%s lane=%s",
+                     ds_id, lane, exc_info=True)
+
+
+async def record_graph_check_safe(
+    *,
+    provider_id: str,
+    graph_name: str,
+    lane: str,
+    outcome: str = "ok",
+    detail: Optional[str] = None,
+) -> None:
+    """:func:`record_check_safe` for a lane keyed on a PHYSICAL GRAPH rather
+    than a data source — asset discovery is the only one.
+
+    Fans out to every live data source bound to that graph: several workspaces
+    can bind the same physical asset, they are all watching the same thing, and
+    a check of it is a check of each of them. Soft-deleted sources are excluded
+    — nothing is watching those.
+
+    Never raises, for the same reason as :func:`record_check_safe`.
+    """
+    if not resilience.PROFILING_ENABLED:
+        return
+    try:
+        from backend.app.db.engine import get_jobs_session
+
+        async with get_jobs_session() as session:
+            rows = await session.execute(
+                select(WorkspaceDataSourceORM.id).where(
+                    WorkspaceDataSourceORM.provider_id == provider_id,
+                    WorkspaceDataSourceORM.graph_name == graph_name,
+                    WorkspaceDataSourceORM.is_active.is_(True),
+                    WorkspaceDataSourceORM.deleted_at.is_(None),
+                )
+            )
+            for (ds_id,) in rows.all():
+                await record_check(
+                    session, ds_id=ds_id, lane=lane, outcome=outcome,
+                    detail=detail,
+                )
+    except Exception:                                # pragma: no cover - best effort
+        logger.debug("record_graph_check_safe failed for %s/%s",
+                     provider_id, graph_name, exc_info=True)
+
+
+async def list_check_events(
+    session: AsyncSession,
+    ds_id: str,
+    *,
+    frm: str,
+    to: str,
+    limit: int = 5000,
+) -> List[DataSourceCheckEventORM]:
+    """Check events for one source in ``[frm, to]``, oldest first."""
+    rows = await session.execute(
+        select(DataSourceCheckEventORM)
+        .where(
+            DataSourceCheckEventORM.data_source_id == ds_id,
+            DataSourceCheckEventORM.checked_at >= frm,
+            DataSourceCheckEventORM.checked_at <= to,
+        )
+        .order_by(DataSourceCheckEventORM.checked_at.asc())
+        .limit(limit)
+    )
+    return list(rows.scalars().all())
+
+
+async def check_summary(
+    session: AsyncSession, ds_id: str, *, frm: str, to: str,
+) -> Dict[str, Any]:
+    """Facts about the PERIOD, counted in SQL: how many checks, how they went,
+    per lane, and when the first and last of them ran.
+
+    Counted rather than derived from whichever page of events was returned —
+    "96 checks, all healthy" is a claim about the window, and a claim about the
+    window cannot be read off a page of it.
+    """
+    rows = await session.execute(
+        select(
+            DataSourceCheckEventORM.lane,
+            DataSourceCheckEventORM.outcome,
+            func.count(DataSourceCheckEventORM.id),
+            func.min(DataSourceCheckEventORM.checked_at),
+            func.max(DataSourceCheckEventORM.checked_at),
+        )
+        .where(
+            DataSourceCheckEventORM.data_source_id == ds_id,
+            DataSourceCheckEventORM.checked_at >= frm,
+            DataSourceCheckEventORM.checked_at <= to,
+        )
+        .group_by(DataSourceCheckEventORM.lane, DataSourceCheckEventORM.outcome)
+    )
+
+    total = 0
+    by_outcome: Dict[str, int] = {}
+    by_lane: Dict[str, Dict[str, Any]] = {}
+    first_at: Optional[str] = None
+    last_at: Optional[str] = None
+
+    for lane, outcome, count, lo, hi in rows.all():
+        count = int(count or 0)
+        total += count
+        by_outcome[outcome] = by_outcome.get(outcome, 0) + count
+        lane_row = by_lane.setdefault(
+            lane, {"total": 0, "ok": 0, "error": 0, "skipped": 0,
+                   "first_at": None, "last_at": None},
+        )
+        lane_row["total"] += count
+        lane_row[outcome] = lane_row.get(outcome, 0) + count
+        if lo and (lane_row["first_at"] is None or lo < lane_row["first_at"]):
+            lane_row["first_at"] = lo
+        if hi and (lane_row["last_at"] is None or hi > lane_row["last_at"]):
+            lane_row["last_at"] = hi
+        if lo and (first_at is None or lo < first_at):
+            first_at = lo
+        if hi and (last_at is None or hi > last_at):
+            last_at = hi
+
+    return {
+        "total": total,
+        "ok": by_outcome.get("ok", 0),
+        "error": by_outcome.get("error", 0),
+        "skipped": by_outcome.get("skipped", 0),
+        "first_at": first_at,
+        "last_at": last_at,
+        "lanes": by_lane,
+        # What a gap in the strip means: below this interval a check that found
+        # nothing new is coalesced away, so absence of a row is not absence of a
+        # check until the gap exceeds it.
+        "sample_secs": resilience.PROFILING_CHECK_SAMPLE_SECS,
+    }
 
 
 # ── reads ────────────────────────────────────────────────────────────
