@@ -380,6 +380,18 @@ class ProviderManager:
 
     # Alias for backward compatibility during migration. ContextEngine,
     # aggregation worker, and health-check endpoint call this name.
+    def instantiated(self, provider_id: str) -> List[Any]:
+        """Provider proxies for ``provider_id`` ALREADY built in this process.
+
+        A read-only view (capacity, topology) may tell a live provider what
+        its node allows, but must never instantiate one to do it: building a
+        provider dials the store, and a page refresh is not a reason to
+        connect. Pure dict lookup — no I/O, no side effects."""
+        return [
+            proxy for (pid, _graph), proxy in self._providers.items()
+            if pid == str(provider_id)
+        ]
+
     async def get_provider_for_workspace(
         self,
         workspace_id: str,

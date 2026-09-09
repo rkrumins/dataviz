@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from backend.common.interfaces.provider import ProviderConfigurationError
 
@@ -116,6 +116,28 @@ async def resolve_provider_conn_config(provider_id: str, session_factory=None):
             f"provider lookup for {provider_id!r} failed — refusing to silently "
             f"route its graphs to the DEFAULT FalkorDB instance") from exc
 
+    return conn_config_from_row(row, creds, host=host, port=port)
+
+
+def conn_config_from_row(row: Any, creds: dict, *, host=None, port=None):
+    """One provider ROW (+ its decrypted credentials) → its
+    ``FalkorDBConnConfig``: topology block, auth gate, TLS.
+
+    Split out of ``resolve_provider_conn_config`` so a caller that already
+    holds the rows — the graph store topology sweep reads every provider in
+    one pass — resolves them identically without a lookup each. ``host``/
+    ``port`` may be passed pre-resolved; otherwise they are resolved here
+    exactly as the pinned path does.
+    """
+    from backend.app.providers.falkordb_connection import load_connection_config
+    from backend.app.providers.falkordb_provider import resolve_falkordb_target
+
+    if host is None or port is None:
+        host, port = resolve_falkordb_target(row.host, int(row.port or 6379))
+    try:
+        extra = json.loads(row.extra_config) if row.extra_config else {}
+    except (TypeError, ValueError):
+        extra = {}
     falkor_conn = (extra or {}).get("falkordbConnection")
     # authEnabled=false → this instance takes no AUTH (parity with the read path's
     # single chokepoint; sending AUTH to an unauthenticated FalkorDB errors out).

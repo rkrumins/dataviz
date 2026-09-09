@@ -129,6 +129,13 @@ class ShardMemory:
     timeout_max_ms: Optional[int] = None
     timeout_default_ms: Optional[int] = None
     thread_count: Optional[int] = None
+    # ``EFFECTS_THRESHOLD``, microseconds per modification: above it a write
+    # replicates to the replicas as a compact change log, below it the
+    # replicas RE-RUN the whole query on their main thread. A rollup batch
+    # is thousands of cheap MERGEs, so it falls below the default (300) and
+    # every replica repeats the rebuild's work — the shape that takes a
+    # shard down under a large rebuild. 0 = always replicate as effects.
+    effects_threshold_us: Optional[int] = None
 
     @property
     def measurable(self) -> bool:
@@ -172,6 +179,10 @@ class ShardMemory:
                 {"thread_count": self.thread_count}
                 if self.thread_count is not None else {}
             ),
+            **(
+                {"effects_threshold_us": self.effects_threshold_us}
+                if self.effects_threshold_us is not None else {}
+            ),
         }
 
 
@@ -204,7 +215,9 @@ def _parse_info(raw: Any) -> Dict[str, Any]:
     return out
 
 
-def _parse_config_reply(raw: Any, name: str) -> Optional[int]:
+def _parse_config_reply(
+    raw: Any, name: str, *, zero_is_a_value: bool = False,
+) -> Optional[int]:
     """The value of one ``GRAPH.CONFIG GET <name>`` reply, whatever shape
     the client hands back: ``[name, value]``, ``{node: [name, value]}`` from
     a cluster call, a ``{name: value}`` map, bytes for either part. ``0``
@@ -233,6 +246,8 @@ def _parse_config_reply(raw: Any, name: str) -> Optional[int]:
     else:
         value = raw
     n = _as_int(value)
+    if zero_is_a_value:
+        return n if n is not None and n >= 0 else None
     return n if n and n > 0 else None
 
 
@@ -243,7 +258,14 @@ _LIMIT_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("TIMEOUT_MAX", "timeout_max_ms"),
     ("TIMEOUT_DEFAULT", "timeout_default_ms"),
     ("THREAD_COUNT", "thread_count"),
+    ("EFFECTS_THRESHOLD", "effects_threshold_us"),
 )
+
+#: Fields where ``0`` is a VALUE, not "unset". Every ceiling reads 0 as
+#: unlimited, but ``EFFECTS_THRESHOLD 0`` is the setting that makes replicas
+#: apply a change log instead of re-running each write — reading it as unset
+#: would hide the one configuration that keeps replicas responsive.
+_ZERO_IS_A_VALUE = frozenset({"effects_threshold_us"})
 
 
 def _parse_config_all(raw: Any) -> Dict[str, Any]:
@@ -283,14 +305,16 @@ async def _graph_config(conn: Any, node: Any, *args: Any) -> Any:
     return await conn.execute_command("GRAPH.CONFIG", *args)
 
 
-async def _read_config_int(conn: Any, node: Any, name: str) -> Optional[int]:
+async def _read_config_int(
+    conn: Any, node: Any, name: str, *, zero_is_a_value: bool = False,
+) -> Optional[int]:
     """``GRAPH.CONFIG GET <name>`` on the owning node. Never raises."""
     try:
         raw = await _graph_config(conn, node, "GET", name)
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("%s unreadable: %s", name, exc)
         return None
-    return _parse_config_reply(raw, name)
+    return _parse_config_reply(raw, name, zero_is_a_value=zero_is_a_value)
 
 
 async def _read_server_limits(conn: Any, node: Any) -> Dict[str, Optional[int]]:
@@ -307,10 +331,16 @@ async def _read_server_limits(conn: Any, node: Any) -> Dict[str, Optional[int]]:
         out: Dict[str, Optional[int]] = {}
         for name, field in _LIMIT_FIELDS:
             n = _as_int(found.get(name))
-            out[field] = n if n and n > 0 else None
+            if field in _ZERO_IS_A_VALUE:
+                out[field] = n if n is not None and n >= 0 else None
+            else:
+                out[field] = n if n and n > 0 else None
         return out
     return {
-        field: await _read_config_int(conn, node, name) for name, field in _LIMIT_FIELDS
+        field: await _read_config_int(
+            conn, node, name, zero_is_a_value=field in _ZERO_IS_A_VALUE,
+        )
+        for name, field in _LIMIT_FIELDS
     }
 
 

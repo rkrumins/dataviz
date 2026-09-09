@@ -161,7 +161,13 @@ def _parse_nodes(raw: Any) -> List[Tuple[str, int]]:
       - ``"h1:26379,h2:26379"``                 (env-var CSV string)
       - ``[["h1", 26379], ["h2", 26379]]``      (JSON array of pairs)
       - ``[{"host": "h1", "port": 26379}, ...]`` (JSON array of objects)
+      - ``["h1:26379", "h2:26379"]``            (JSON array of strings)
     Unparseable entries are skipped with a warning.
+
+    The string-in-a-list shape is handled explicitly because indexing it
+    like a pair reads its first two CHARACTERS as a host and port: an entry
+    of ``"10.0.0.1:6379"`` became ``("1", 0)`` — a silently wrong address
+    rather than the skip-with-a-warning this function promises.
     """
     if not raw:
         return []
@@ -185,6 +191,10 @@ def _parse_nodes(raw: Any) -> List[Tuple[str, int]]:
             if isinstance(entry, dict):
                 host = entry.get("host")
                 port = int(entry.get("port"))
+            elif isinstance(entry, (str, bytes, bytearray)):
+                text = entry.decode() if isinstance(entry, (bytes, bytearray)) else entry
+                host, _, port_text = text.strip().rpartition(":")
+                port = int(port_text)
             else:  # pair/list/tuple
                 host, port = entry[0], int(entry[1])
             if host:
