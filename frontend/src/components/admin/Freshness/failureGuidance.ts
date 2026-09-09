@@ -25,7 +25,7 @@ export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
     query_memory:
         'A single row of one rebuild scan is larger than the graph store’s per-query limit, even after the rebuild narrowed its scans as far as they go.',
     provider_unavailable:
-        'The graph store was unreachable during the rebuild.',
+        'A graph store node stopped answering during the rebuild — usually a shard restarting or failing over. Everything already written was kept.',
     ontology:
         "This data source has no ontology assigned, so its lineage can't be aggregated.",
     timeout: 'The graph store stopped answering, or the rebuild made no progress for longer than its stall window.',
@@ -34,6 +34,24 @@ export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
 }
 
 const KNOWN = new Set<string>(Object.keys(FAILURE_CATEGORY_LABEL))
+
+/**
+ * The graph store node named in a connection failure, or null.
+ *
+ * A rebuild that gave up on an unreachable node says so in words ("the graph
+ * store node host:port did not answer for …"); a run the circuit breaker cut
+ * short carries the reason that started it instead ("… First failure: Error
+ * 111 connecting to host:port"). Either way the endpoint is the one fact an
+ * operator needs, and it is the fact the breaker's own text loses.
+ */
+export function graphStoreNodeFromReason(
+    reason: string | null | undefined,
+): string | null {
+    if (!reason) return null
+    // A host:port whose host holds a dot — an address, never a clock time.
+    const match = /\b((?:[A-Za-z0-9_-]+\.)+[A-Za-z0-9_-]+:\d{2,5})\b/.exec(reason)
+    return match ? match[1] : null
+}
 
 export function asFailureCategory(
     raw: string | null | undefined,

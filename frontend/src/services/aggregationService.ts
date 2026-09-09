@@ -284,6 +284,12 @@ export interface AdaptedRunState {
   replica_wait_s?: number;
   replica_holds?: number;
   replica_max_lag_bytes?: number;
+  /** A graph store node stopped answering mid-run: how many times the run
+   *  waited it out, for how long in total, and any node that came back with a
+   *  new run id (proof it restarted rather than being slow). */
+  store_outage_holds?: number;
+  store_outage_s?: number;
+  node_restarts?: { endpoint: string; at: string; uptime_s?: number | null }[];
   pressure?: PressureEvent[];
   by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
   /** What the previous run of this source taught it, applied at the start. */

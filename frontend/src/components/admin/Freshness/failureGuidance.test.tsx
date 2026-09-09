@@ -6,6 +6,7 @@ import {
     countFailuresByCategory,
     failureBadgeLabel,
     failureBadgeWhy,
+    graphStoreNodeFromReason,
     relatedFailureCount,
 } from './failureGuidance'
 import { matchesFailureFacet } from './freshnessTriage'
@@ -15,6 +16,27 @@ const row = (over: Partial<FreshnessRow>): FreshnessRow => ({
     aggregationStatus: over.aggregationStatus ?? 'failed',
     lastFailureCategory: over.lastFailureCategory ?? null,
     ...over,
+})
+
+describe('graphStoreNodeFromReason', () => {
+    it('finds the node in both messages a connection failure arrives as', () => {
+        expect(graphStoreNodeFromReason(
+            'the graph store node 10.0.0.3:6379 did not answer for 15 minute(s) during apply '
+            + '(ConnectionError: Error 111 connecting to 10.0.0.3:6379. Connection refused.). '
+            + 'The run keeps its checkpoint — Resume it once the node is back',
+        )).toBe('10.0.0.3:6379')
+        // The breaker's own text names no node; the reason it kept does.
+        expect(graphStoreNodeFromReason(
+            "Provider 'Warehouse' unavailable: Circuit open; will probe downstream again in ~28s. "
+            + 'First failure: Error 111 connecting to falkordb-1.falkordb.svc.cluster.local:6379.',
+        )).toBe('falkordb-1.falkordb.svc.cluster.local:6379')
+    })
+
+    it('does not mistake a clock time or an elapsed window for an address', () => {
+        expect(graphStoreNodeFromReason('Job killed by watchdog: no progress for 30:00')).toBeNull()
+        expect(graphStoreNodeFromReason('Held twice at 12:04')).toBeNull()
+        expect(graphStoreNodeFromReason(null)).toBeNull()
+    })
 })
 
 describe('failureGuidance', () => {

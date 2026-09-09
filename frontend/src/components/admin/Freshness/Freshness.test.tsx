@@ -696,6 +696,30 @@ describe('Freshness cockpit', () => {
         expect(screen.getByText(/OutOfMemoryError/)).toBeInTheDocument()
     })
 
+    it('names the node that went away and offers a Resume, not a fresh attempt', async () => {
+        // What the operator used to get was the breaker's text — "Circuit
+        // open; will probe downstream again in ~28s" — which names no node
+        // and reads like the store is broken. The reason behind it does name
+        // one, and the run kept every byte it had written.
+        getSourceDoc.mockResolvedValue({
+            ...baseDoc,
+            aggregationStatus: 'failed',
+            lastFailureCategory: 'provider_unavailable',
+            lastFailureReason:
+                'the graph store node 10.0.0.7:6379 did not answer for 15 minute(s) during apply '
+                + '(ConnectionError: Error 111 connecting to 10.0.0.7:6379. Connection refused.). '
+                + 'The run keeps its checkpoint — Resume it once the node is back.',
+        })
+        renderDrawer()
+
+        expect(await screen.findByText(/stopped answering during the rebuild/i)).toBeInTheDocument()
+        expect(screen.getByText('10.0.0.7:6379')).toBeInTheDocument()
+        expect(screen.getByText(/carries on from its checkpoint/i)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /resume rebuild/i })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /retry rebuild/i })).not.toBeInTheDocument()
+        expect(screen.getByText(/work already done is not repeated/i)).toBeInTheDocument()
+    })
+
     it('fires the clear scope from the drawer Clear-cache CTA', async () => {
         const user = userEvent.setup()
         getSourceDoc.mockResolvedValue(oomDoc)

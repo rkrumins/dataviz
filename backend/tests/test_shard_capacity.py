@@ -245,8 +245,10 @@ class _Standalone:
             connection_kwargs={"host": "falkor", "port": 6379},
         )
 
-    async def info(self, section=None):
-        assert section == "memory"
+    async def info(self, *sections):
+        # The reading asks for memory AND server in one round trip: how full
+        # the node is, and whether it is the same process it was a minute ago.
+        assert sections == ("memory", "server"), sections
         if self._delay:
             await asyncio.sleep(self._delay)
         if self._raise:
@@ -283,7 +285,7 @@ class _Cluster:
         if args == ("GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY"):
             self.config_targets.append(target_nodes)
             return self._config
-        assert args == ("INFO", "memory")
+        assert args == ("INFO", "memory", "server"), args
         self.targets.append(target_nodes)
         return self._info
 

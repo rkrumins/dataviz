@@ -142,6 +142,13 @@ export function frozenTuningRows(tuning: Record<string, unknown> | null | undefi
 
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString()} ${count === 1 ? one : many}`
 
+/** Clock time of a moment inside the run, in the reader's timezone. */
+function atTime(iso: string | undefined): string | null {
+    if (!iso) return null
+    const d = new Date(iso)
+    return Number.isNaN(d.getTime()) ? null : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
 /** Plain sentences for what the ladder changed, in the order it happens. */
 function mb(n: number): string {
     return n >= 1024 ? `${(n / 1024).toFixed(1)} GB` : `${Math.round(n)} MB`
@@ -188,19 +195,36 @@ export function adaptationSentences(
         out.push(`Shard re-measured ${adapted.budget_rechecks}× during the apply`)
     }
     if (adapted?.replica_waits || adapted?.replica_holds) {
-        const parts: string[] = []
-        if (adapted.replica_holds) {
-            parts.push(`Waited for the graph store’s replicas ${plural(adapted.replica_holds, 'time', 'times')}`)
-        } else {
-            parts.push('Paced against the graph store’s replicas')
-        }
+        const lead = adapted.replica_holds
+            ? `Waited for the graph store’s replicas ${plural(adapted.replica_holds, 'time', 'times')}`
+            : 'Paced against the graph store’s replicas'
+        const detail: string[] = []
         if (typeof adapted.replica_wait_s === 'number' && adapted.replica_wait_s >= 1) {
-            parts.push(`(${formatDuration(adapted.replica_wait_s)} in total`)
+            detail.push(`${formatDuration(adapted.replica_wait_s)} in total`)
         }
         if (typeof adapted.replica_max_lag_bytes === 'number' && adapted.replica_max_lag_bytes > 0) {
-            parts.push(`${parts.length > 1 ? ',' : '('}up to ${mb(adapted.replica_max_lag_bytes / 1024 / 1024)} behind`)
+            detail.push(`up to ${mb(adapted.replica_max_lag_bytes / 1024 / 1024)} behind`)
         }
-        out.push(parts.join(' ') + (parts.length > 1 ? ')' : ''))
+        out.push(detail.length ? `${lead} (${detail.join(', ')})` : lead)
+    }
+    if (adapted?.store_outage_holds || adapted?.node_restarts?.length) {
+        // Not pressure and not a failure: the node the run writes to went
+        // away, the run waited, and it carried on at the same width.
+        const restarts = adapted.node_restarts ?? []
+        const nodes = [...new Set(restarts.map(r => r.endpoint))]
+        const where = nodes.length === 1 ? nodes[0] : 'the graph store node'
+        const parts: string[] = [
+            adapted.store_outage_holds
+                ? `Held ${plural(adapted.store_outage_holds, 'time', 'times')} while ${where} was unreachable`
+                : `Waited while ${where} was unreachable`,
+        ]
+        if (typeof adapted.store_outage_s === 'number' && adapted.store_outage_s >= 1) {
+            parts.push(`(${formatDuration(adapted.store_outage_s)})`)
+        }
+        const at = restarts.length ? atTime(restarts[restarts.length - 1].at) : null
+        if (at) parts.push(`— it restarted at ${at} and the run resumed from its checkpoint`)
+        else if (restarts.length) parts.push('— it restarted and the run resumed from its checkpoint')
+        out.push(parts.join(' '))
     }
     if (adapted?.memory_flushes || adapted?.memory_rollups) {
         const parts: string[] = []

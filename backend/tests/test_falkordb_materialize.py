@@ -2453,13 +2453,24 @@ def test_a_raised_scan_timeout_applies_to_the_next_query_without_a_restart():
 # ── pure ladder primitives ─────────────────────────────────────────────
 
 
-def test_pressure_kind_covers_both_timeout_signals_and_the_memory_ceiling():
+def test_pressure_kind_tells_the_three_signals_apart():
+    """Two kinds a query can absorb by asking for less, and one it cannot.
+
+    A node that is not answering does not care how small the next query is
+    — the run waits for it and carries on from its checkpoint — so it is a
+    kind of its own rather than the "None, re-raise" it used to be, which
+    is what made a restarted shard a terminal failure."""
     assert mat._pressure_kind(asyncio.TimeoutError()) == "timeout"
     assert mat._pressure_kind(TimeoutError()) == "timeout"
     assert mat._pressure_kind(Exception("Query timed out")) == "timeout"
     assert mat._pressure_kind(Exception("Query's execution time exceeded the limit")) == "timeout"
     assert mat._pressure_kind(Exception("Query's mem consumption exceeded capacity")) == "memory"
-    assert mat._pressure_kind(ConnectionError("Connection refused")) is None
+    assert mat._pressure_kind(
+        ConnectionError("Error 111 connecting to 10.0.0.3:6379. Connection refused.")
+    ) == "connection"
+    assert mat._pressure_kind(ConnectionRefusedError()) == "connection"
+    # The store answering with its own out-of-memory refusal is neither: the
+    # instance is up and saying no, and shrinking the query does not help.
     assert mat._pressure_kind(Exception("OOM command not allowed when used memory > 'maxmemory'.")) is None
 
 

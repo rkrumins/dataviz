@@ -290,6 +290,14 @@ _CLUSTER_ROUTING_EXC_NAMES = frozenset({
 # budget while letting redis-py hand out a fresh pooled connection.
 _TRANSIENT_RETRY_BACKOFFS: tuple = (0.25, 0.5, 1.0)
 
+# A REFUSED connection in cluster mode is a different wait. The cluster
+# cannot even begin a failover until ``cluster-node-timeout`` has passed
+# (5 s in the shipped manifests, and the deployment guide raises it), and
+# an election follows — so the old 1.75 s window closed before a promoted
+# replica existed, every re-resolve returned the same dead address, and the
+# breaker opened on a shard that recovered seconds later.
+_REFUSED_RETRY_BACKOFFS: tuple = (0.5, 2.0, 5.0, 10.0)
+
 # Redis transient exception classes matched by *identity* (not by name) so a
 # redis socket ``TimeoutError`` is retried while the unrelated
 # ``asyncio.TimeoutError`` (the per-op deadline) is NOT — both share the name
@@ -472,17 +480,50 @@ def _is_query_timeout_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_connection_refused_error(exc: BaseException) -> bool:
+    """True when nothing was listening at the address at all.
+
+    ``Error 111 connecting to host:port. Connection refused.`` is what a
+    client sees when a graph store node has gone away — an OOM kill, a
+    health-probe restart, a drained pod. It is worth telling apart from a
+    reset connection: a refusal PROVES the address is dead, so re-resolving
+    the topology at once is right, while a reset may just be one bad
+    socket. Walks the cause chain like its siblings."""
+    seen: Optional[BaseException] = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        if isinstance(seen, (ConnectionRefusedError,)) or getattr(seen, "errno", None) == 111:
+            return True
+        text = str(seen).lower()
+        if "connection refused" in text or "error 111" in text:
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 def _pressure_kind(exc: BaseException) -> Optional[str]:
-    """``"memory"`` when the store refused a query at its per-query memory
-    ceiling, ``"timeout"`` when it aborted one at its time limit — the
-    server's own refusal or the client deadline — else None. The two
-    signals a query can absorb by asking for less at a time: the aggregation
-    pipeline's scan ladder and the aggregated-edge read ladder both key on
-    this one classifier."""
+    """What KIND of pressure an exception is, or None.
+
+    ``"memory"`` — the store refused a query at its per-query memory
+    ceiling; ``"timeout"`` — it aborted one at its time limit (its own
+    refusal or the client deadline); ``"connection"`` — the node itself is
+    not answering: refused, reset, or a cluster that cannot route to it.
+
+    The first two a query absorbs by asking for less at a time. The third
+    is different in kind: asking for less does not help a node that is
+    restarting, and the answer is to wait for it and carry on from the
+    checkpoint. Both aggregation ladders and the aggregated-edge read
+    ladder key on this one classifier, so it is the single place that
+    decides which of those three a failure is."""
     if _is_query_memory_error(exc):
         return "memory"
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or _is_query_timeout_error(exc):
         return "timeout"
+    if _is_connection_refused_error(exc) or _is_transient_connection_error(exc):
+        return "connection"
+    if _is_cluster_routing_error(exc):
+        return "connection"
     return None
 
 
@@ -1934,6 +1975,24 @@ class FalkorDBProvider(GraphDataProvider):
         except (TypeError, ValueError):
             return None
 
+    async def reconnect_owner(self, graph_key: Optional[str] = None) -> bool:
+        """Re-resolve the node a graph lives on and rebuild the client.
+
+        Called by a run that is waiting out a node it could not reach: a
+        restarted pod comes back at a new address, and a failover moves the
+        graph to a promoted replica, so the way back is a fresh topology
+        lookup rather than redialing what used to answer. True when the
+        rebuild completed — not a promise that the node is up, which the
+        next query settles.
+        """
+        try:
+            await self._rebuild_graph_client_for_failover(self._conn_generation)
+            return True
+        except Exception as exc:                      # noqa: BLE001 — the caller waits again
+            logger.info("FalkorDB %s: reconnect attempt failed: %s",
+                        self._graph_name, exc)
+            return False
+
     def _endpoint_label(self) -> str:
         """``host:port`` of the configured endpoint, for log lines."""
         cfg = self._conn_cfg
@@ -2086,7 +2145,8 @@ class FalkorDBProvider(GraphDataProvider):
         per-op deadline) is never retried.
         """
         attempt = 0
-        max_retries = len(_TRANSIENT_RETRY_BACKOFFS)
+        schedule = _TRANSIENT_RETRY_BACKOFFS
+        max_retries = len(schedule)
         # In-flight op count: the manager's recovery-eviction defers close()
         # while this is > 0 so it can't tear the pool out from under a job.
         self._inflight += 1
@@ -2136,8 +2196,15 @@ class FalkorDBProvider(GraphDataProvider):
                     # handle is still live (redis-py self-heals the pool) and a
                     # full rebuild when close() nulled it.
                     handle_lost = _is_null_handle_error(exc)
+                    refused = cluster and _is_connection_refused_error(exc)
+                    if refused and schedule is not _REFUSED_RETRY_BACKOFFS:
+                        # Nothing is listening: give the cluster time to
+                        # notice and promote, instead of spending the whole
+                        # budget redialing a dead address.
+                        schedule = _REFUSED_RETRY_BACKOFFS
+                        max_retries = len(schedule)
                     if (handle_lost or _is_transient_connection_error(exc)) and attempt < max_retries:
-                        backoff = _TRANSIENT_RETRY_BACKOFFS[attempt]
+                        backoff = schedule[attempt]
                         attempt += 1
                         # Cluster: the pinned single-node pool redials the SAME
                         # address, so once a plain redial has also failed
@@ -2148,7 +2215,10 @@ class FalkorDBProvider(GraphDataProvider):
                         # redialing a corpse. The first retry stays the cheap
                         # redial: it absorbs same-node blips (reset-by-peer)
                         # without pool churn.
-                        reresolve = cluster and not handle_lost and attempt >= 2
+                        # A refusal is proof the address is dead, so re-resolve
+                        # from the FIRST retry; a reset may be one bad socket,
+                        # which the cheap redial absorbs without pool churn.
+                        reresolve = cluster and not handle_lost and (refused or attempt >= 2)
                         logger.warning(
                             "FalkorDB %s: %s (%s) — %s + retry %d/%d after %.2fs.",
                             self._graph_name,

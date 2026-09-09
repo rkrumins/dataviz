@@ -136,6 +136,14 @@ class ShardMemory:
     # every replica repeats the rebuild's work — the shape that takes a
     # shard down under a large rebuild. 0 = always replicate as effects.
     effects_threshold_us: Optional[int] = None
+    # Identity and liveness, read in the same round trip as the memory: a
+    # changed ``run_id`` (regenerated on every start) or an uptime shorter
+    # than the run itself is PROOF the node restarted mid-rebuild — the
+    # evidence that was missing when a run died against a refused
+    # connection and nothing could say why.
+    uptime_s: Optional[int] = None
+    run_id: Optional[str] = None
+    loading: Optional[bool] = None
 
     @property
     def measurable(self) -> bool:
@@ -451,10 +459,14 @@ async def read_shard_memory(
     try:
         async with asyncio.timeout(timeout):
             endpoint, node = await _owner(conn, mode, graph_key)
+            # "memory" plus "server": the same round trip that says how full
+            # the node is says whether it is the same process it was a
+            # minute ago. INFO with two sections is one command.
             if node is not None:
-                raw = await conn.execute_command("INFO", "memory", target_nodes=node)
+                raw = await conn.execute_command(
+                    "INFO", "memory", "server", target_nodes=node)
             else:
-                raw = await conn.info("memory")
+                raw = await conn.info("memory", "server")
             # The node's own limits — the per-query ceiling the pressure
             # ladder narrows against, the time cap every timeout knob is
             # clamped to, the thread count the container formula needs —
@@ -471,12 +483,17 @@ async def read_shard_memory(
     used = _as_int(info.get("used_memory"))
     maxmemory = _as_int(info.get("maxmemory"))
     policy = info.get("maxmemory_policy")
+    liveness = {
+        "uptime_s": _as_int(info.get("uptime_in_seconds")),
+        "run_id": info.get("run_id") or None,
+        "loading": bool(_as_int(info.get("loading"))) if info.get("loading") is not None else None,
+    }
     if used is None:
         return ShardMemory(endpoint, None, maxmemory, policy, now, "unavailable",
-                           "no used_memory in INFO", **limits)
+                           "no used_memory in INFO", **limits, **liveness)
     return ShardMemory(endpoint, used, maxmemory or 0,
                        str(policy) if policy is not None else None, now, "measured",
-                       None, **limits)
+                       None, **limits, **liveness)
 
 
 async def read_query_mem_capacity(

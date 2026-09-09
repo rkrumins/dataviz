@@ -3456,6 +3456,20 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
         return "out_of_memory"
     if "mem consumption exceeded" in error_message.lower():
         return "query_memory"
+    # A node that is not answering, in the wording the client actually
+    # produces. Checked BEFORE the timeout test: redis phrases a refused
+    # connect as "Error 111 connecting to host:port. Connection refused.",
+    # which matches none of the buckets below on its own — it only ever
+    # landed in provider_unavailable because the breaker happened to
+    # prefix it with the word "unavailable".
+    lowered = error_message.lower()
+    if (
+        "connection refused" in lowered
+        or "error 111" in lowered
+        or "did not answer for" in lowered
+        or "unreachable" in lowered
+    ):
+        return "provider_unavailable"
     if "timeout" in error_message or "TimeoutError" in error_message:
         return "timeout"
     if "ontology" in error_message or "OntologyResolution" in error_message:
@@ -3463,9 +3477,8 @@ def classify_failure(error_message: Optional[str]) -> Optional[str]:
     if "conflict" in error_message or "ConflictError" in error_message:
         return "conflict"
     if (
-        "unavailable" in error_message
-        or "unreachable" in error_message
-        or "connection" in error_message
+        "unavailable" in lowered
+        or "connection" in lowered
     ):
         return "provider_unavailable"
     return "unknown"

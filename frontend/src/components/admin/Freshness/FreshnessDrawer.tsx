@@ -41,6 +41,7 @@ import { SettingRow, StageRow } from './StageRow'
 import { SnoozeRow } from './SnoozeRow'
 import { SourceCapacityBlock } from './SourceCapacityBlock'
 import { RaisePerQueryLimitLink } from '../shared/RaisePerQueryLimitLink'
+import { graphStoreNodeFromReason } from './failureGuidance'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, MasteryTag } from './FreshnessRow'
 import { overrideWarning, rowHold, timeUntil, type RowHold } from './holds'
@@ -960,6 +961,10 @@ interface CategoryGuidance {
     primary: 'clear' | 'retry'
     /** Inline caution shown under Retry when a retry is likely to fail again. */
     retryWarning?: string
+    /** Reassurance shown under Retry when the retry is safe and cheap. */
+    retryNote?: string
+    /** Overrides the Retry button's label where "Resume" is the truer word. */
+    retryLabel?: string
     /** The way to the node's own per-query limit, for system administrators
      *  (rendered once the source's shard is known). */
     raiseLimitLink?: true
@@ -997,9 +1002,14 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         raiseLimitLink: true,
     },
     provider_unavailable: {
-        why: 'The graph store was unreachable during the rebuild.',
-        how: 'Check that the graph store is back online, then retry the rebuild.',
+        // Not a broken rebuild: a node went away under it. The run waited,
+        // and gave up holding every byte it had written — so the useful
+        // things to say are WHICH node and that this is a Resume.
+        why: 'A graph store node stopped answering during the rebuild — a shard restarting or failing over. Nothing about this source is wrong, and everything the rebuild had already written was kept.',
+        how: 'Check that the node is back (a shard that was restarted by its orchestrator comes back on its own, usually within a minute or two), then resume — the rebuild carries on from its checkpoint instead of starting over. If the node keeps restarting during rebuilds, its container was most likely killed for memory or by its health probe while replicas replayed the writes.',
         showClear: true, showRetry: true, primary: 'retry',
+        retryLabel: 'Resume rebuild',
+        retryNote: 'Resume continues from the last checkpoint — the work already done is not repeated.',
     },
     ontology: {
         why: "This data source has no ontology assigned, so its lineage can't be aggregated.",
@@ -1040,6 +1050,11 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
     const category: FailureCategory = doc.lastFailureCategory ?? 'unknown'
     // ?? unknown: a future backend category we don't map yet must not throw.
     const g = GUIDANCE[category] ?? GUIDANCE.unknown
+    // The breaker's "Circuit open" text names no node; the message behind it
+    // does, and that is the one thing an operator needs to go and look at.
+    const node = category === 'provider_unavailable'
+        ? graphStoreNodeFromReason(doc.lastFailureReason)
+        : null
     const attempts = doc.retryCount != null && doc.retryCount > 1 ? doc.retryCount : null
 
     const primaryCls = 'text-white bg-indigo-600 hover:bg-indigo-700'
@@ -1057,7 +1072,7 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
             key="retry" type="button" onClick={onRetry} disabled={busy}
             className={cn('inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50', g.primary === 'retry' ? primaryCls : secondaryCls)}
         >
-            <RotateCcw className="w-3.5 h-3.5" /> Retry rebuild
+            <RotateCcw className="w-3.5 h-3.5" /> {g.retryLabel ?? 'Retry rebuild'}
         </button>
     ) : null
     const buttons = g.primary === 'clear' ? [clearBtn, retryBtn] : [retryBtn, clearBtn]
@@ -1079,6 +1094,12 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
 
             {/* Why */}
             <p className="text-xs text-ink-secondary leading-relaxed">{g.why}</p>
+            {node && (
+                <p className="text-xs text-ink-secondary leading-relaxed">
+                    The node that stopped answering was{' '}
+                    <span className="font-mono text-[11px] text-ink">{node}</span>.
+                </p>
+            )}
 
             {/* How */}
             <div className="space-y-1">
@@ -1099,8 +1120,11 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
                     )}
                     {g.showRetry && g.retryWarning && (
                         <p className="text-[11px] text-amber-600 dark:text-amber-400 flex items-start gap-1">
-                            <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> Retry rebuild {g.retryWarning}
+                            <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" /> {g.retryLabel ?? 'Retry rebuild'} {g.retryWarning}
                         </p>
+                    )}
+                    {g.showRetry && g.retryNote && (
+                        <p className="text-[11px] text-ink-muted">{g.retryNote}</p>
                     )}
                 </div>
             )}
@@ -1187,7 +1211,14 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
         )
     }
     const docHold = doc ? rowHold(doc) : null
-    const retryMessage = (doc?.lastFailureCategory === 'out_of_memory'
+    // One word for the same act, on the button, the confirm and its title:
+    // after a node went away this is a Resume, not a fresh attempt.
+    const retryLabel =
+        (doc?.lastFailureCategory && GUIDANCE[doc.lastFailureCategory]?.retryLabel)
+        || 'Retry rebuild'
+    const retryMessage = (doc?.lastFailureCategory === 'provider_unavailable'
+        ? 'Resumes the aggregated-lineage rebuild for this source from its last checkpoint. If the graph store node is still away it will wait for it again.'
+        : doc?.lastFailureCategory === 'out_of_memory'
         ? 'Retries the aggregated-lineage rebuild for this source. It may fail again until memory is freed in the graph store.'
         : doc?.lastFailureCategory === 'write_budget'
             ? 'Retries the aggregated-lineage rebuild for this source. It will refuse the same way until the rollup setting, the shard\u2019s memory or the limits change.'
@@ -1446,9 +1477,9 @@ export function FreshnessDrawer({ dsId, isOpen, onClose, workspaceName }: {
             {/* Retry-rebuild confirm — gates the OOM "may fail again" case. */}
             <ConfirmDialog
                 open={retryOpen}
-                title="Retry rebuild"
+                title={retryLabel}
                 message={retryMessage}
-                confirmLabel="Retry rebuild"
+                confirmLabel={retryLabel}
                 confirmColor="bg-indigo-600 hover:bg-indigo-700 shadow-md"
                 confirmIcon={RotateCcw}
                 loading={refresh.isPending}

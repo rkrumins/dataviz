@@ -44,6 +44,7 @@ from backend.app.providers.falkordb_materialize import (
     MaterializationPreconditionFailed,
     MaterializationQueryMemoryExceeded,
     MaterializationScanTimedOut,
+    MaterializationStoreUnreachable,
 )
 
 from backend.app.jobs import (
@@ -194,6 +195,27 @@ def _tuning_int(tuning: dict, key: str) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def _named_failure(
+    exc: ProviderUnavailable, first_failure: Optional[str]
+) -> Optional[ProviderUnavailable]:
+    """Re-word a breaker verdict so it still names the node that died.
+
+    Once the breaker is open its reason is "Circuit open; will probe
+    downstream again in ~28s" — true, and useless to an operator, because
+    the text that named the shard ("Error 111 connecting to 10.0.0.3:6379")
+    belonged to the failure three attempts ago. Returns ``None`` when the
+    reason already says everything.
+    """
+    first = (first_failure or "").strip()
+    if not first or first in (exc.reason or ""):
+        return None
+    return ProviderUnavailable(
+        exc.provider_name,
+        f"{exc.reason}. First failure: {first}",
+        exc.retry_after_seconds,
+    )
 
 
 class AggregationWorker:
@@ -804,6 +826,42 @@ class AggregationWorker:
                     _run_writes, _run_deletes,
                 )
 
+            except MaterializationStoreUnreachable as store_exc:
+                # A node went away mid-run and did not come back inside the
+                # run's outage budget. Everything computed so far is intact
+                # and the cursor is committed, so this is a Resume, not a
+                # re-run — and the message NAMES the node, which the
+                # breaker's "Circuit open" text used to overwrite.
+                job.status = "failed"
+                job.error_message = str(store_exc)[:2000]
+                logger.error(
+                    "Aggregation job %s: graph store node unreachable: %s",
+                    job_id, store_exc,
+                )
+
+                await self._update_ds_state(session, job.data_source_id, aggregation_status="failed")
+                await self._sync_workspace_ds_row(session, job, aggregation_status="failed")
+
+                terminal_seq = emitter.current_sequence(job_id) + 1
+                for send in (
+                    lambda payload: record_terminal(
+                        session, job_id=job_id, kind="aggregation", scope=scope,
+                        sequence=terminal_seq, status="failed", payload=payload,
+                    ),
+                    lambda payload: emitter.terminal(
+                        job_id=job_id, kind="aggregation", scope=scope,
+                        status="failed", payload=payload,
+                    ),
+                ):
+                    await send({"error_message": job.error_message, "reason": "connection"})
+
+                if self._events:
+                    await self._events.job_failed(
+                        job_id=job_id,
+                        data_source_id=job.data_source_id,
+                        error_message=job.error_message,
+                    )
+
             except MaterializationScanTimedOut as scan_exc:
                 # The pipeline's own verdict after every backoff retry at
                 # the narrowest scan: the graph store is not answering. A
@@ -1314,6 +1372,7 @@ class AggregationWorker:
         max_attempts = (job.max_retries or 3) + 1
         last_error: Exception | None = None
         provider_unavailable_count = 0
+        first_provider_error: Optional[str] = None
 
         # Phase 2 — quiesce events (ProviderBusy raised by the provider
         # when write p95 climbs above the trigger) are flow control,
@@ -1461,6 +1520,14 @@ class AggregationWorker:
                     last_progress = job.processed_edges or 0
                 provider_unavailable_count += 1
                 job.retry_count = attempt + 1
+                reason_text = (e.reason or "").strip()
+                if (
+                    first_provider_error is None
+                    and "circuit open" not in reason_text.lower()
+                ):
+                    # Keep the reason that started this: by the time the
+                    # breaker trips, its own text no longer names the node.
+                    first_provider_error = reason_text
 
                 # Second occurrence whose reason is "Circuit open" — fail fast.
                 # Retrying further is pointless: the breaker has already
@@ -1469,17 +1536,23 @@ class AggregationWorker:
                     provider_unavailable_count >= 2
                     and "circuit open" in (e.reason or "").lower()
                 ):
+                    named = _named_failure(e, first_provider_error)
                     job.error_message = (
                         f"Provider {e.provider_name} unavailable after "
                         f"{attempt + 1} attempts; circuit breaker open"
+                        + (f". First failure: {first_provider_error}"
+                           if first_provider_error else "")
                     )[:2000]
                     job.updated_at = _now()
                     await session.commit()
                     logger.warning(
                         "Aggregation job %s: aborting — provider %s circuit "
-                        "open after %d attempts",
+                        "open after %d attempts (first failure: %s)",
                         job.id, e.provider_name, attempt + 1,
+                        first_provider_error or "n/a",
                     )
+                    if named is not None:
+                        raise named from e
                     raise
 
                 if attempt < max_attempts - 1:
@@ -1503,7 +1576,12 @@ class AggregationWorker:
                     _mark_alive()
                     attempt += 1
                 else:
-                    # Final attempt exhausted — let the caller handle it
+                    # Final attempt exhausted — let the caller handle it,
+                    # still carrying the reason that started the run of
+                    # failures rather than only the breaker's verdict.
+                    named = _named_failure(e, first_provider_error)
+                    if named is not None:
+                        raise named from e
                     raise
             except Exception as e:
                 last_error = e

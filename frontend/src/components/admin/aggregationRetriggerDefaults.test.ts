@@ -9,7 +9,7 @@
  * projection lives rather than how fast it is built.
  */
 import { describe, expect, it } from 'vitest'
-import { buildInitialOverridesFromJob, gentleRetryReason } from './RegistryJobHistory'
+import { buildInitialOverridesFromJob, gentleRetryReason, retryPresetReason } from './RegistryJobHistory'
 import type { AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
 
 const CONFIGURED_DEFAULTS: AggregationTuning = {
@@ -87,6 +87,18 @@ describe('a retry after the graph store kept refusing starts from the Gentle pro
         expect(value.maxRetries).toBe(5)
         expect(gentleRetryReason(refused)).toMatch(/per-query memory limit/)
         expect(gentleRetryReason({ status: 'failed', failureCategory: 'timeout' })).toMatch(/timed out/)
+    })
+
+    it('keeps the settings after a node went away — narrowing does not bring one back', () => {
+        const away = {
+            ...jobWithStaleTuning, status: 'failed', failureCategory: 'provider_unavailable',
+        } as AggregationJobResponse
+        expect(buildInitialOverridesFromJob(away, CONFIGURED_DEFAULTS).tuning).toEqual(CONFIGURED_DEFAULTS)
+        expect(gentleRetryReason(away)).toBeNull()          // not a Gentle case
+        expect(retryPresetReason(away)).toMatch(/not answering/)
+        expect(retryPresetReason(away)).toMatch(/checkpoint/)
+        // The Gentle cases still speak for themselves through the same call.
+        expect(retryPresetReason(refused)).toMatch(/per-query memory limit/)
     })
 
     it('leaves every other failure — and a completed run — on the configured defaults', () => {

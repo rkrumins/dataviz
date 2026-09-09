@@ -194,6 +194,20 @@ def _replica_ack_timeout_ms() -> int:
     return _env_int("AGGREGATION_REPLICA_ACK_TIMEOUT_MS", 5_000, 500, 60_000)
 
 
+def _store_outage_hold_s() -> int:
+    """How long one run waits out a graph store node that is not answering
+    before it gives up and keeps its checkpoint.
+
+    A node that goes away mid-rebuild — an OOM kill, a health-probe
+    restart, a drained pod, a failover — used to end the attempt at once:
+    a refused connection was not "pressure", so it flew past the ladder and
+    the job burned a retry re-running EXTRACT from zero. Waiting is almost
+    always right: the node comes back (a full AOF replay of a large shard
+    is minutes), the run reconnects to it or to the replica promoted in its
+    place, and carries on from where it was."""
+    return _env_int("AGGREGATION_STORE_OUTAGE_HOLD_S", 900, 30, 7_200)
+
+
 def _delete_chunk() -> int:
     return _env_int("AGGREGATION_DELETE_CHUNK", 10_000, 100, 50_000)
 
@@ -567,6 +581,19 @@ class MaterializationScanTimedOut(TimeoutError):
     kill."""
 
 
+class MaterializationStoreUnreachable(ConnectionError):
+    """The graph store node the run writes to stopped answering and did not
+    come back inside the run's outage budget.
+
+    Not the same failure as a query the store refuses: nothing about the
+    query is wrong, and the run holds every byte of progress it had. It
+    subclasses ``ConnectionError`` so the worker's existing transient path
+    resumes the job from its checkpoint, and it carries the endpoint and how
+    long the wait was — the two facts a failed run used to lose entirely,
+    because the breaker's "Circuit open" text overwrote the only message
+    that named the node."""
+
+
 # ---------------------------------------------------------------------------
 # Pressure ladder primitives — pure, so they are unit-testable without a
 # provider. The pipeline reacts to two kinds of per-query pressure the same
@@ -576,8 +603,8 @@ class MaterializationScanTimedOut(TimeoutError):
 
 
 def _pressure_kind(exc: BaseException) -> Optional[str]:
-    """``"timeout"`` / ``"memory"`` for the two per-query pressure signals
-    the ladder absorbs, ``None`` for everything else (which propagates).
+    """``"timeout"`` / ``"memory"`` / ``"connection"`` — the three signals
+    the pipeline reacts to; ``None`` for everything else (which propagates).
 
     A timeout is EITHER the client deadline (``asyncio.TimeoutError`` /
     ``TimeoutError``) OR the server's own ``Query timed out`` refusal — the
@@ -587,6 +614,12 @@ def _pressure_kind(exc: BaseException) -> Optional[str]:
     from backend.app.providers.falkordb_provider import _pressure_kind as _kind
     return _kind(exc)
     return None
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _backoff_s(attempt: int) -> float:
@@ -913,6 +946,13 @@ class AggregationPipeline:
         self._repl_state_at = 0.0
         self._no_replicas_logged = False
         self._replication_advisory: Optional[Dict[str, Any]] = None
+        # Waiting out a node that is not answering, and what the node said
+        # about itself when it came back.
+        self._outage_hold_s = _store_outage_hold_s()
+        self._outage_holds = 0
+        self._outage_s = 0.0
+        self._node_restarts: List[Dict[str, Any]] = []
+        self._node_identity: Dict[str, Tuple[Optional[str], Optional[int]]] = {}
         self._rss_high_water_mb: Optional[float] = None
         self._mem_limit_mb: Optional[float] = None
         # Values an operator may raise on a RUNNING job (stall/wall windows
@@ -1210,6 +1250,105 @@ class AggregationPipeline:
             if len(self._pressure_log) > 8:
                 del self._pressure_log[0]
         return held
+
+    async def _through_outage(
+        self, attempt: Callable[[], Awaitable[Any]], *, op: str,
+    ) -> Any:
+        """Run ``attempt``; if the store is not answering, wait for it and
+        run the SAME thing again.
+
+        Deliberately no narrowing: a node that is restarting does not care
+        how small the next query is, and shrinking the scan would leave the
+        run limping at a fraction of its width long after the node
+        recovered. The ladder handles queries the store refuses; this
+        handles the store not being there.
+        """
+        while True:
+            try:
+                return await attempt()
+            except Exception as exc:
+                if _pressure_kind(exc) != "connection":
+                    raise
+                await self._hold_for_store(exc, op)
+
+    async def _hold_for_store(self, exc: Exception, op: str) -> None:
+        """One wait for a node that is not answering. Raises
+        :class:`MaterializationStoreUnreachable` once the run has waited
+        longer than it is allowed to."""
+        endpoint = self._store_endpoint()
+        if self._outage_holds == 0:
+            self._outage_started = time.monotonic()
+            await self._note_node_identity(endpoint)
+            logger.warning(
+                "aggregation pipeline on %s: the graph store node %s is not "
+                "answering (%s) during %s — waiting for it; the run keeps its "
+                "checkpoint.", self.p._graph_name, endpoint, type(exc).__name__, op,
+            )
+            self._on_pressure(op, "connection", 0, 0, size=0)
+        waited = time.monotonic() - self._outage_started
+        if waited >= self._outage_hold_s:
+            raise MaterializationStoreUnreachable(
+                f"the graph store node {endpoint} did not answer for "
+                f"{waited / 60:.0f} minute(s) during {op} ({type(exc).__name__}: "
+                f"{str(exc)[:160]}). The run keeps its checkpoint — Resume it "
+                f"once the node is back, and check whether the container was "
+                f"killed for memory or by its health probe."
+            )
+        self._outage_holds += 1
+        await self._ladder_heartbeat()
+        self._cancel_check()
+        delay = _backoff_s(min(self._outage_holds, 4))
+        await asyncio.sleep(delay)
+        self._outage_s += delay
+        # A restarted pod comes back at a new address and a failover moves
+        # the graph to a promoted replica: re-resolve rather than redial.
+        reconnect = getattr(self.p, "reconnect_owner", None)
+        if reconnect is not None:
+            await reconnect()
+        await self._note_node_identity(endpoint)
+
+    def _store_endpoint(self) -> str:
+        shard = self._last_budget.shard if self._last_budget is not None else None
+        endpoint = getattr(shard, "endpoint", None)
+        if endpoint and endpoint != "unknown":
+            return endpoint
+        label = getattr(self.p, "_endpoint_label", None)
+        return label() if label is not None else "the graph store"
+
+    async def _note_node_identity(self, endpoint: str) -> None:
+        """Remember (and compare) what the node says about itself.
+
+        A run id is regenerated on every start, so one that CHANGED while
+        the run was waiting is proof the node restarted rather than merely
+        being slow — the evidence a failed run never had."""
+        try:
+            shard = await self._read_shard()
+        except Exception:                             # noqa: BLE001 — evidence is optional
+            return
+        run_id = getattr(shard, "run_id", None)
+        uptime = getattr(shard, "uptime_s", None)
+        if run_id is None and uptime is None:
+            return
+        before = self._node_identity.get(endpoint)
+        if before is not None:
+            was_run, was_uptime = before
+            restarted = (
+                (run_id is not None and was_run is not None and run_id != was_run)
+                or (uptime is not None and was_uptime is not None and uptime < was_uptime)
+            )
+            if restarted:
+                self._node_restarts.append({
+                    "endpoint": endpoint,
+                    "uptime_s": uptime,
+                    "at": _now_iso(),
+                })
+                logger.warning(
+                    "aggregation pipeline on %s: node %s RESTARTED during this run "
+                    "(up %ss). Check whether the container was killed for memory or "
+                    "by its health probe.",
+                    self.p._graph_name, endpoint, uptime,
+                )
+        self._node_identity[endpoint] = (run_id, uptime)
 
     def _effective_conc(self) -> int:
         """Wave concurrency in force: the knob, capped by a value set on the
@@ -1561,6 +1700,7 @@ class AggregationPipeline:
                         or self._hints_applied or self._live
                         or self._memory_flushes or self._memory_rollups
                         or self._replica_waits or self._replica_holds
+                        or self._outage_holds or self._node_restarts
                     ) else {}
                 ),
                 # The per-query ceiling the ladder narrows against, when the
@@ -2042,6 +2182,11 @@ class AggregationPipeline:
             out["by_scan"] = {k: dict(v) for k, v in self._by_scan.items()}
         if self._hints_applied:
             out["from_last_run"] = dict(self._hints_applied)
+        if self._outage_holds or self._node_restarts:
+            out["store_outage_holds"] = self._outage_holds
+            out["store_outage_s"] = round(self._outage_s, 1)
+            if self._node_restarts:
+                out["node_restarts"] = list(self._node_restarts)
         if self._replica_waits or self._replica_holds:
             out["replica_waits"] = self._replica_waits
             out["replica_wait_s"] = round(self._replica_wait_s, 1)
@@ -2109,7 +2254,7 @@ class AggregationPipeline:
                 cur = min(cur + sticky, hi)
             return rows
         try:
-            rows = await run_one(lo, hi)
+            rows = await self._through_outage(lambda: run_one(lo, hi), op=label)
         except Exception as exc:
             kind = _pressure_kind(exc)
             if kind is None:
@@ -3379,7 +3524,7 @@ class AggregationPipeline:
             ))
 
         try:
-            elapsed, _ = await _issue(rows)
+            elapsed, _ = await self._through_outage(lambda: _issue(rows), op=label)
         except Exception as exc:
             kind = _pressure_kind(exc)
             if kind is None:
@@ -3846,7 +3991,7 @@ class AggregationPipeline:
         one-key timeout with backoff, and treat a one-key memory refusal
         as terminal."""
         try:
-            return await run_batch(batch)
+            return await self._through_outage(lambda: run_batch(batch), op=label)
         except Exception as exc:
             kind = _pressure_kind(exc)
             if kind is None:

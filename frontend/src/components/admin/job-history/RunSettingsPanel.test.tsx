@@ -124,6 +124,27 @@ describe('adaptationSentences — changed while running', () => {
     })
 })
 
+describe('adaptationSentences — replicas and a node that went away', () => {
+    it('says the run paced itself against the replicas, and how far behind they got', () => {
+        expect(adaptationSentences({ replica_holds: 12, replica_wait_s: 204, replica_max_lag_bytes: 1_288_490_188 }))
+            .toContain('Waited for the graph store’s replicas 12 times (3m 24s in total, up to 1.2 GB behind)')
+        // Acknowledged every time: no hold, so the sentence is not a warning.
+        expect(adaptationSentences({ replica_waits: 40, replica_wait_s: 2 }))
+            .toContain('Paced against the graph store’s replicas (2s in total)')
+    })
+
+    it('says which node went away, for how long, and that the run kept its place', () => {
+        const s = adaptationSentences({
+            store_outage_holds: 2, store_outage_s: 92,
+            node_restarts: [{ endpoint: '10.0.0.3:6379', at: '2026-09-09T12:04:00Z', uptime_s: 12 }],
+        })
+        expect(s.some(line => /^Held 2 times while 10\.0\.0\.3:6379 was unreachable \(1m 32s\) — it restarted at \d{1,2}:\d{2}/.test(line))).toBe(true)
+        // Waited but nothing proved a restart: no claim that one happened.
+        expect(adaptationSentences({ store_outage_holds: 1, store_outage_s: 30 }))
+            .toEqual(['Held 1 time while the graph store node was unreachable (30s)'])
+    })
+})
+
 describe('adaptationSentences — worker memory', () => {
     it('says how often the run flushed on memory, with the peak against the limit', () => {
         expect(adaptationSentences({ memory_flushes: 3, rss_high_water_mb: 2_970, mem_limit_mb: 4_096 }))

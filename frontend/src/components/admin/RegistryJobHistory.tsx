@@ -110,6 +110,25 @@ export function gentleRetryReason(job: Pick<AggregationJobResponse, 'failureCate
     return null
 }
 
+/**
+ * The note above a retry's settings — the Gentle pre-selection, or, after a
+ * node went away, why the settings are deliberately left alone.
+ *
+ * Narrowing scans does not bring a node back, so a connection failure keeps
+ * the run's own settings: the rebuild resumes from its checkpoint at the same
+ * width once the node answers again.
+ */
+export function retryPresetReason(
+    job: Pick<AggregationJobResponse, 'failureCategory' | 'status'>,
+): string | null {
+    const gentle = gentleRetryReason(job)
+    if (gentle) return gentle
+    if (job.status === 'failed' && job.failureCategory === 'provider_unavailable') {
+        return 'Kept this run’s settings: the last attempt stopped because a graph store node was not answering, not because it read too much. Check the node is back — the rebuild resumes from its checkpoint.'
+    }
+    return null
+}
+
 /** The control that goes with the Gentle pre-selection: after a per-query
  *  memory failure, the way to the node's own limit (system administrators). */
 export function gentleRetryAction(job: Pick<AggregationJobResponse, 'failureCategory' | 'status'>): 'raise-per-query-limit' | null {
@@ -437,13 +456,13 @@ export function RegistryJobHistory() {
     // appears one frame later, which still reads as instant.
     const handleResume = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job), presetAction: gentleRetryAction(job) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: retryPresetReason(job), presetAction: gentleRetryAction(job) })
         })
     }, [defaultTuning])
 
     const handleRetrigger = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job), presetAction: gentleRetryAction(job) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: retryPresetReason(job), presetAction: gentleRetryAction(job) })
         })
     }, [defaultTuning])
 
