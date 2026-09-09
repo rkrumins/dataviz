@@ -1770,6 +1770,15 @@ class FalkorDBProvider(GraphDataProvider):
     def _db_timeout_ms(self, seconds: float) -> int:
         return _clamp_db_timeout_ms(seconds, self._server_timeout_cap_ms())
 
+    def _known_server_limits(self) -> Dict[str, Dict[str, Optional[int]]]:
+        """The per-node limits read so far. Tolerates a provider built
+        without ``__init__`` (the bare fakes in tests): nothing read, so the
+        env values apply, exactly as before the first node is read."""
+        limits = getattr(self, "_server_limits", None)
+        if limits is None:
+            limits = self._server_limits = {}
+        return limits
+
     def _server_timeout_cap_ms(self) -> int:
         """The per-query time cap in force, milliseconds; 0 = no cap.
 
@@ -1781,7 +1790,7 @@ class FalkorDBProvider(GraphDataProvider):
         unknown here, so the env value still bounds it: the harmless
         direction."""
         known = [
-            int(v["timeout_max_ms"]) for v in self._server_limits.values()
+            int(v["timeout_max_ms"]) for v in self._known_server_limits().values()
             if v.get("timeout_max_ms")
         ]
         if known:
@@ -1794,14 +1803,14 @@ class FalkorDBProvider(GraphDataProvider):
         from any node this provider's graphs live on; None until a node has
         been read, or when every node read is unlimited."""
         known = [
-            int(v["query_mem_capacity"]) for v in self._server_limits.values()
+            int(v["query_mem_capacity"]) for v in self._known_server_limits().values()
             if v.get("query_mem_capacity")
         ]
         return min(known) if known else None
 
     def server_limits_for(self, endpoint: str) -> Dict[str, Optional[int]]:
         """What has been read for one node — ``{}`` when nothing has."""
-        return dict(self._server_limits.get(endpoint, {}))
+        return dict(self._known_server_limits().get(endpoint, {}))
 
     def note_server_limits(
         self, endpoint: str, *,
@@ -1817,7 +1826,7 @@ class FalkorDBProvider(GraphDataProvider):
         endpoint is ignored."""
         if not endpoint or endpoint == "unknown":
             return
-        slot = self._server_limits.setdefault(endpoint, {})
+        slot = self._known_server_limits().setdefault(endpoint, {})
         for key, value in (
             ("timeout_max_ms", timeout_max_ms),
             ("query_mem_capacity", query_mem_capacity),
@@ -6971,7 +6980,7 @@ class FalkorDBProvider(GraphDataProvider):
         to the limits dialog: the node with the lowest known per-query
         ceiling, else the configured endpoint."""
         known = {
-            ep: int(v["query_mem_capacity"]) for ep, v in self._server_limits.items()
+            ep: int(v["query_mem_capacity"]) for ep, v in self._known_server_limits().items()
             if v.get("query_mem_capacity")
         }
         if known:
