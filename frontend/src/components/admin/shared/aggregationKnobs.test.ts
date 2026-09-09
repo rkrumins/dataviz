@@ -18,7 +18,7 @@ const NUMERIC_TUNING_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk', 'writePacingRatio',
     'extractConcurrency', 'maxMaterializedEdges', 'shardReservePct', 'bytesPerEdge',
     'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS', 'stallTimeoutSecs', 'maxWallSecs',
-    'flushMemPct',
+    'flushMemPct', 'maxCubeEdges', 'estimateMarginPct',
 ]
 
 describe('the knob catalogue', () => {
@@ -40,6 +40,11 @@ describe('the knob catalogue', () => {
         // The memory flush is a fleet default too, and bounded like the server.
         expect([KNOB_BY_KEY.flushMemPct.min, KNOB_BY_KEY.flushMemPct.max]).toEqual([30, 90])
         expect(KNOB_BY_KEY.flushMemPct.fleetOnly).toBe(true)
+        // Auto's cube ceiling and the estimate margin: fleet defaults, bounded like the server.
+        expect([KNOB_BY_KEY.maxCubeEdges.min, KNOB_BY_KEY.maxCubeEdges.max]).toEqual([10_000, 50_000_000])
+        expect([KNOB_BY_KEY.estimateMarginPct.min, KNOB_BY_KEY.estimateMarginPct.max]).toEqual([0, 100])
+        expect(KNOB_BY_KEY.maxCubeEdges.fleetOnly).toBe(true)
+        expect(KNOB_BY_KEY.estimateMarginPct.fleetOnly).toBe(true)
     })
 
     it('says when a per-query timeout is past the graph store’s own cap', () => {

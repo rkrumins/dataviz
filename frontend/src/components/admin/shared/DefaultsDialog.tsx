@@ -361,8 +361,7 @@ export function DefaultsDialog({ open, onClose }: { open: boolean; onClose: () =
                                                         )}
                                                         {env && (
                                                             <p className="text-[11px] text-ink-muted">
-                                                                Set by the deployment: Auto’s cube ceiling {compactEdges(env.maxCubeEdges)} edges,
-                                                                estimate margin {env.estimateMarginPct ?? 25}%, shard re-measured every {compactEdges(env.budgetRecheckEdges)} edges written.
+                                                                Set by the deployment: the shard is re-measured every {compactEdges(env.budgetRecheckEdges)} edges written during the apply.
                                                             </p>
                                                         )}
                                                     </div>

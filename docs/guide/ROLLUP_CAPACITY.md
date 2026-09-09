@@ -78,6 +78,8 @@ the source's Rollup storage override → the fleet Defaults → the environment.
 | **Shard memory reserve** | Share of a shard's `maxmemory` a rebuild must leave free — for live queries and every other graph on that shard. Default 20%. | Defaults dialog, or per job in Advanced tuning |
 | **Bytes per rollup edge** | What one stored edge is assumed to cost when free memory is turned into an edge count. Each successful rebuild **measures** the real figure for its graph and uses it next time; set this only to pin the estimate by hand. Default 512 B. | Defaults dialog, or per job |
 | **Edge ceiling** | An *optional* explicit cap on the total edges a graph may store, layered over the measured budget. Leave it empty — the shard governs. Set it only to hold a graph below what its shard could take. | Defaults dialog, or per job |
+| **Auto's cube ceiling** | The largest full-detail estimate **Auto** stores in full; above it Auto keeps the depth-diagonal and derives finer granularities on demand. Default 8,000,000. Separate from the write budget on purpose — a cube the shard would refuse is never picked regardless — and best kept below any edge ceiling. | Defaults dialog (fleet) |
+| **Estimate margin** | Slack on the upper-bound estimate a forced **Full detail** run is checked with before anything is computed, so a loose estimate does not refuse a cube the exact count would pass. Default 25%. | Defaults dialog (fleet) |
 | **Rollup storage** | **Auto** stores full detail while it fits and the depth-diagonal otherwise, deriving finer granularities on demand: slower drills on the largest graphs, but it never fails. **Full detail** pre-creates every combination and is refused, before anything is written, when it cannot fit. | Automation modal (fleet), a source's drawer (this source), Re-trigger (this run) |
 | **Memory flush** | The share of the rebuild worker's own memory limit at which the pipeline writes the pairs it holds to the graph early and frees them — however many there are — so a graph that produces more pairs than the worker can hold flushes instead of being OOM-killed. Default 60%. Needs the worker's cgroup limit to be readable and at least the deployment's minimum pairs in memory. | Defaults dialog (fleet) |
 | **Scan floor** | The narrowest scan slice a rebuild descends to under the graph store's per-query pressure before it concludes that one row is too large. Default 1 row: the rebuild narrows all the way. | Defaults dialog, or per job |
@@ -89,9 +91,8 @@ the source's Rollup storage override → the fleet Defaults → the environment.
 The Defaults dialog shows every value with where it came from — **Set here**
 or **Environment default** — and, as you edit the reserve or bytes per edge,
 restates how many more rollup edges each measured shard would take **before**
-you save. Three figures are set by the deployment and shown for information
-only: Auto's cube ceiling, the estimate margin, and how often the apply
-re-measures the shard.
+you save. One figure is set by the deployment and shown for information only:
+how often the apply re-measures the shard.
 
 > **Tip:** Nothing in the presets sets the edge ceiling, on purpose. A ceiling
 > on a job wins over the measurement, so a 25,000,000 left in Defaults from an

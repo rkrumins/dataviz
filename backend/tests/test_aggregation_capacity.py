@@ -41,6 +41,17 @@ def test_limits_prefer_the_stored_defaults_and_label_where_each_came_from(monkey
     assert (limits.rollup_storage.value, limits.rollup_storage.source) == ("true", "global")
     assert limits.static_cap == 25_000_000          # env default: no ceiling set
     assert limits.max_cube_edges == 8_000_000 and limits.budget_recheck_edges == 1_000_000
+    assert (limits.max_cube_edges_source, limits.estimate_margin_pct_source) == ("default", "default")
+
+
+def test_the_cube_ceiling_and_the_estimate_margin_are_fleet_knobs_over_the_env():
+    limits = cap.effective_limits({"max_cube_edges": 2_000_000, "estimate_margin_pct": 10})
+    assert (limits.max_cube_edges, limits.max_cube_edges_source) == (2_000_000, "global")
+    assert (limits.estimate_margin_pct, limits.estimate_margin_pct_source) == (10, "global")
+    # Clamped to the pipeline's bounds; garbage falls back to the environment.
+    limits = cap.effective_limits({"max_cube_edges": 1, "estimate_margin_pct": "x"})
+    assert (limits.max_cube_edges, limits.max_cube_edges_source) == (10_000, "global")
+    assert (limits.estimate_margin_pct, limits.estimate_margin_pct_source) == (25, "default")
 
 
 def test_an_explicit_ceiling_is_the_static_cap_too():

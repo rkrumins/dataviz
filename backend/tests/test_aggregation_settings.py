@@ -40,6 +40,10 @@ def test_tuning_bounds_enforced():
         AggregationTuning(write_pacing_ratio=-1)
     with pytest.raises(ValidationError):
         AggregationTuning(flushMemPct=95)              # > 90: the worker needs headroom
+    with pytest.raises(ValidationError):
+        AggregationTuning(maxCubeEdges=5_000)          # < 10k
+    with pytest.raises(ValidationError):
+        AggregationTuning(estimateMarginPct=101)       # > 100
     t = AggregationTuning(scanRangeWidth=100_000, extractConcurrency=3)
     assert t.scan_range_width == 100_000
     assert t.extract_concurrency == 3

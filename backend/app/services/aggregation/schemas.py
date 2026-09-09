@@ -176,6 +176,21 @@ class AggregationTuning(BaseModel):
                     "Fleet-wide; needs at least AGGREGATION_FLUSH_MIN_PAIRS "
                     "pairs in memory to fire, and both readings to be known.",
     )
+    max_cube_edges: Optional[int] = Field(
+        None, alias="maxCubeEdges", ge=10_000, le=50_000_000,
+        description="Auto's cube ceiling: the largest full-cube estimate "
+                    "Auto stores in full (default 8,000,000); above it Auto "
+                    "keeps the depth-diagonal. Fleet-wide. Deliberately not "
+                    "the write budget — a cube the shard would refuse is "
+                    "never picked regardless.",
+    )
+    estimate_margin_pct: Optional[int] = Field(
+        None, alias="estimateMarginPct", ge=0, le=100,
+        description="Slack on the pre-compute upper-bound estimate a forced "
+                    "full cube is checked with (default 25): a loose estimate "
+                    "must not refuse a cube the exact post-compute check "
+                    "would pass. Fleet-wide.",
+    )
     scan_shrink_floor: Optional[int] = Field(
         None, alias="scanShrinkFloor", ge=1, le=5_000_000,
         description="Narrowest scan slice the pressure ladder descends to "
@@ -1341,10 +1356,14 @@ class CapacityLimits(BaseModel):
     max_materialized_edges: CapacityLimitValue = Field(alias="maxMaterializedEdges")
     # 'auto' | 'true' | 'false' — the fleet-wide Rollup storage.
     rollup_storage: CapacityLimitValue = Field(alias="rollupStorage")
-    # Environment-only: shown, never settable.
+    # Fleet knobs (the Defaults row over the environment); ``*_source`` says
+    # which — 'global' or 'default'. Plain ints so the what-ifs consume them.
     estimate_margin_pct: int = Field(alias="estimateMarginPct")
     max_cube_edges: int = Field(alias="maxCubeEdges")
+    estimate_margin_pct_source: str = Field("default", alias="estimateMarginPctSource")
+    max_cube_edges_source: str = Field("default", alias="maxCubeEdgesSource")
     static_cap: int = Field(alias="staticCap")
+    # Environment-only: shown, never settable.
     budget_recheck_edges: int = Field(alias="budgetRecheckEdges")
     # The graph store container's memory limit, when the deployment states
     # it (``FALKORDB_CONTAINER_MEMORY_BYTES``) — the app cannot read it, and

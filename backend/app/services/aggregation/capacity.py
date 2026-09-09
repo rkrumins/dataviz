@@ -126,6 +126,21 @@ def effective_limits(stored_tuning: Optional[Dict[str, Any]]) -> CapacityLimits:
     except (TypeError, ValueError):
         ceiling = None
     rollup = _rollup_storage_value(stored.get("materialize_fine_pairs"))
+
+    def knob(key: str, env_value: int, lo: int, hi: int) -> Tuple[int, str]:
+        """A fleet knob the pipeline reads with the same bounds
+        (``resolve_effective_tuning``): the stored value clamped, else the env."""
+        raw = stored.get(key)
+        try:
+            value = int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            value = None
+        if value is None:
+            return env_value, "default"
+        return max(lo, min(hi, value)), "global"
+
+    margin, margin_source = knob("estimate_margin_pct", estimate_margin_pct_default(), 0, 100)
+    cube, cube_source = knob("max_cube_edges", _max_cube_edges(), 10_000, 50_000_000)
     return CapacityLimits(
         shard_reserve_pct=pick("shard_reserve_pct", shard_reserve_pct_default()),
         bytes_per_edge=pick("bytes_per_edge", bytes_per_edge_default()),
@@ -136,8 +151,10 @@ def effective_limits(stored_tuning: Optional[Dict[str, Any]]) -> CapacityLimits:
             CapacityLimitValue(value=rollup, source="global") if rollup is not None
             else CapacityLimitValue(value=_materialize_fine_pairs_mode(), source="default")
         ),
-        estimate_margin_pct=estimate_margin_pct_default(),
-        max_cube_edges=_max_cube_edges(),
+        estimate_margin_pct=margin,
+        max_cube_edges=cube,
+        estimate_margin_pct_source=margin_source,
+        max_cube_edges_source=cube_source,
         static_cap=ceiling if ceiling else _max_materialized_edges(),
         budget_recheck_edges=_budget_recheck_edges(),
         container_memory_bytes=container_memory_bytes_env(),

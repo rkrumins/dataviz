@@ -17,6 +17,9 @@ export interface AggregationTuning {
   extractConcurrency?: number | null;  // 1 .. 4
   /** Share of the worker's memory limit at which the pipeline flushes early (fleet-wide). 30 .. 90 */
   flushMemPct?: number | null;
+  /** Fleet knobs: Auto's cube ceiling and the slack on the pre-compute estimate. */
+  maxCubeEdges?: number | null;
+  estimateMarginPct?: number | null;
   /** Narrowest scan slice the pressure ladder descends to (default 1 row). 1 .. 5,000,000 */
   scanShrinkFloor?: number | null;
   /** Per-query budget for read scans, seconds (capped by the store's TIMEOUT_MAX). 5 .. 600 */
@@ -466,6 +469,9 @@ export interface CapacityLimits {
   rollupStorage: CapacityLimitValue;
   estimateMarginPct: number;
   maxCubeEdges: number;
+  /** Where the two came from: the stored Defaults row or the environment. */
+  estimateMarginPctSource?: 'global' | 'default';
+  maxCubeEdgesSource?: 'global' | 'default';
   staticCap: number;
   budgetRecheckEdges: number;
   /** The graph store container's memory limit when the deployment states it

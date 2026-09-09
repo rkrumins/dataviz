@@ -93,6 +93,12 @@ capacity card, a source's Capacity block, Infrastructure's memory headroom and t
 dialog's what-if all show *held by N running rebuilds* and subtract it; a refusal names it. The
 ledger fails open like the rest of admission: without the bus, the node is measured alone.
 
+**Auto's cube ceiling and the estimate margin are fleet knobs.** Both sit in the Defaults
+dialog's Capacity group, resolved like every other knob (stored Defaults over the environment,
+clamped to the pipeline's bounds, labelled by source in the capacity API) and recorded in every
+run's settings. The run warns when the cube ceiling sits above an explicit edge ceiling. Only
+the apply's re-measure interval remains the deployment's.
+
 **The graph store's own limits, from the UI.** `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` no longer
 live only in the deployment. Infrastructure → Memory headroom shows each node's per-query memory
 ceiling, query time cap and thread count (read with the capacity sweep), and system administrators
@@ -411,8 +417,6 @@ is required for correctness, but without it readers pay the aggregation on the r
   top-level pages keep their current behaviour under the store's per-query limits.
 - The memory-aware flush reads the worker's cgroup limit; on a host without one only the
   pair cap (`AGGREGATION_MAX_PENDING_PAIRS`) bounds worker memory, as before.
-- `AGGREGATION_MAX_CUBE_EDGES` and `AGGREGATION_ESTIMATE_MARGIN_PCT` stay environment-only;
-  the Defaults dialog shows them for information.
 - The status probe and the capacity sweep can name the same node differently under an address
   remap (the probe reads the env topology, the sweep the provider's own client); the
   Infrastructure page unions the two by endpoint rather than joining them.

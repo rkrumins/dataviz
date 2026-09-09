@@ -22,7 +22,7 @@ export type TuningKnobKey =
     | 'writePacingRatio' | 'extractConcurrency' | 'scanShrinkFloor'
     | 'shardReservePct' | 'bytesPerEdge' | 'maxMaterializedEdges'
     | 'scanTimeoutS' | 'writeTimeoutS' | 'stallTimeoutSecs' | 'maxWallSecs'
-    | 'flushMemPct'
+    | 'flushMemPct' | 'maxCubeEdges' | 'estimateMarginPct'
 
 export type KnobGroup = 'capacity' | 'reading' | 'writing' | 'timeouts'
 
@@ -88,6 +88,20 @@ export const TUNING_KNOBS: TuningKnob[] = [
         help: 'Explicit cap over the measured budget; empty lets the shard govern (10,000-500,000,000)',
         min: 10_000, max: 500_000_000, group: 'capacity', fallback: 25_000_000,
         emptyMeans: 'shard governs',
+    },
+    {
+        key: 'maxCubeEdges',
+        label: 'Auto’s cube ceiling',
+        tip: 'The largest full-detail estimate Auto stores in full; above it Auto keeps the depth-diagonal and derives finer granularities on demand. Deliberately separate from the write budget: a cube the shard would refuse is never picked regardless, and raising the budget must not silently turn Auto into Always full detail. Keep it below any edge ceiling.',
+        help: 'Largest full-detail estimate Auto stores (10,000-50,000,000 edges)',
+        min: 10_000, max: 50_000_000, group: 'capacity', fallback: 8_000_000, fleetOnly: true,
+    },
+    {
+        key: 'estimateMarginPct',
+        label: 'Estimate margin',
+        tip: 'Slack on the upper-bound estimate a forced Full detail run is checked with before anything is computed, so a loose estimate does not refuse a cube the exact count after compute would pass. The exact check still stands behind it.',
+        help: 'Slack on the pre-compute estimate (0-100%)',
+        min: 0, max: 100, group: 'capacity', fallback: 25, fleetOnly: true,
     },
     {
         key: 'scanRangeWidth',

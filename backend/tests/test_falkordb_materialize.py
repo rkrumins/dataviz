@@ -2639,6 +2639,63 @@ def test_another_rebuilds_hold_on_the_node_counts_as_used_memory(monkeypatch):
     assert not any(c[0] in ("reserve", "update", "release") for c in ledger.calls)
 
 
+def test_the_cube_ceiling_is_a_fleet_knob_read_over_the_env(monkeypatch):
+    """The same 18-cell graph: the env ceiling (10) alone keeps Auto on the
+    depth-diagonal; a Defaults value (the 10,000 floor) on the job lets the
+    cube through — and the run's record says where the ceiling came from."""
+    monkeypatch.setattr(mat, "_max_cube_edges", lambda: 10)
+    fake = _FakeFalkor()
+    levels = _seed_self_nesting_graph(fake, depth=3)
+    result = _run(_materialize(_make_provider(fake, levels), tuning={"materialize_fine_pairs": "auto"}))
+    assert result["run_stats"]["regime"] == "boundary" and result["run_stats"]["cube_estimate"] == 18
+    assert result["run_stats"]["effective_tuning"]["max_cube_edges"] == 10
+    assert result["run_stats"]["effective_tuning"]["sources"]["max_cube_edges"] == "env"
+
+    fake2 = _FakeFalkor()
+    levels2 = _seed_self_nesting_graph(fake2, depth=3)
+    result = _run(_materialize(_make_provider(fake2, levels2), tuning={
+        "materialize_fine_pairs": "auto", "max_cube_edges": 10_000,
+    }))
+    assert result["run_stats"]["regime"] == "cube"
+    assert result["run_stats"]["effective_tuning"]["max_cube_edges"] == 10_000
+    assert result["run_stats"]["effective_tuning"]["sources"]["max_cube_edges"] == "job"
+
+
+def test_the_cube_ceiling_and_margin_resolve_like_every_other_knob(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_MAX_CUBE_EDGES", "4000000")
+    monkeypatch.setenv("AGGREGATION_ESTIMATE_MARGIN_PCT", "30")
+    values, sources = mat.resolve_effective_tuning({"max_cube_edges": 20_000, "estimate_margin_pct": 150}, None)
+    assert (values["max_cube_edges"], sources["max_cube_edges"]) == (20_000, "job")
+    assert (values["estimate_margin_pct"], sources["estimate_margin_pct"]) == (100, "job")   # clamped
+    values, sources = mat.resolve_effective_tuning(None, None)
+    assert (values["max_cube_edges"], sources["max_cube_edges"]) == (4_000_000, "env")
+    assert (values["estimate_margin_pct"], sources["estimate_margin_pct"]) == (30, "env")
+    env = mat.env_tuning_defaults()
+    assert env["max_cube_edges"] == 4_000_000 and env["estimate_margin_pct"] == 30
+
+
+def test_the_estimate_margin_is_a_fleet_knob_a_forced_cube_is_checked_with(monkeypatch):
+    """The two-chain graph estimates 18 cells and stores 8. Room for 15:
+    the default 25% margin lets the estimate through and the exact count
+    lands; a margin of 0 on the job refuses the same cube up front."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    for margin, expect_ok in ((None, True), (0, False)):
+        fake = _FakeFalkor()
+        levels = _seed_two_chain_graph(fake)
+        monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=40 * 2 ** 30 - 15 * 512, maxmemory=40 * 2 ** 30))
+        tuning = {"materialize_fine_pairs": True, "shard_reserve_pct": 0}
+        if margin is not None:
+            tuning["estimate_margin_pct"] = margin
+        if expect_ok:
+            result = _run(_materialize(_make_provider(fake, levels), tuning=tuning))
+            assert result["run_stats"]["cube_estimate"] == 18 and len(fake.agg) == 8
+            assert result["run_stats"]["effective_tuning"]["estimate_margin_pct"] == 25
+        else:
+            with pytest.raises(mat.MaterializationBudgetExceeded, match="0% margin"):
+                _run(_materialize(_make_provider(fake, levels), tuning=tuning))
+            assert fake.agg == {}
+
+
 def test_auto_never_picks_a_cube_the_shard_would_refuse(monkeypatch):
     """Auto's own ceiling is generous here; the SHARD is what says no. The
     depth-diagonal still fits, so the run degrades instead of failing."""

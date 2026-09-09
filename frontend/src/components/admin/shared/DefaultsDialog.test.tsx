@@ -37,7 +37,7 @@ import { DefaultsDialog } from './DefaultsDialog'
 const GB = 2 ** 30
 
 const SETTINGS = {
-    tuning: { shardReservePct: 10, scanRangeWidth: 300_000 },
+    tuning: { shardReservePct: 10, scanRangeWidth: 300_000, maxCubeEdges: 2_000_000 },
     envMaterializeFinePairs: 'true',
     envTuningDefaults: {
         scanRangeWidth: 200_000, maxPendingPairs: 50_000_000, applyChunk: 20_000, deleteChunk: 10_000,
@@ -86,8 +86,27 @@ describe('DefaultsDialog', () => {
         expect(bpe.value).toBe('')
         expect(bpe.placeholder).toBe('512')
         expect(screen.getByText('Environment default: 512')).toBeInTheDocument()
-        // The env-only knobs are shown, never offered.
-        expect(screen.getByText(/cube ceiling 8\.0M edges/)).toBeInTheDocument()
+        // Auto's cube ceiling and the estimate margin are fleet knobs now: editable, labelled by source.
+        const cube = screen.getByLabelText(/^Auto’s cube ceiling/) as HTMLInputElement
+        expect(cube.value).toBe('2000000')
+        expect(screen.getByText('Set here: 2,000,000 (environment default 8,000,000)')).toBeInTheDocument()
+        const margin = screen.getByLabelText(/^Estimate margin/) as HTMLInputElement
+        expect(margin.value).toBe('')
+        expect(margin.placeholder).toBe('25')
+        // Only the recheck interval is still the deployment's.
+        expect(screen.getByText(/re-measured every 1\.0M edges/)).toBeInTheDocument()
+        expect(screen.queryByText(/cube ceiling 8\.0M edges/)).not.toBeInTheDocument()
+    })
+
+    it('Reset on Auto’s cube ceiling sends an explicit null like any other knob', async () => {
+        wrap(<DefaultsDialog open onClose={() => {}} />)
+        await screen.findByLabelText(/^Auto’s cube ceiling/)
+
+        await userEvent.click(screen.getByRole('button', { name: 'Reset Auto’s cube ceiling to the environment default' }))
+        await userEvent.click(screen.getByRole('button', { name: 'Save defaults' }))
+
+        await waitFor(() => expect(putAggregationSettings).toHaveBeenCalledTimes(1))
+        expect(putAggregationSettings.mock.calls[0][0].maxCubeEdges).toBeNull()
     })
 
     it('Reset sends an explicit null so the server clears the stored key', async () => {

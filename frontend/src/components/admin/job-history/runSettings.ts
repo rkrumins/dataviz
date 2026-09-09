@@ -59,6 +59,8 @@ const ROW_SPECS: Array<{ key: string; label: string; fmt: (v: unknown) => string
     { key: 'shard_reserve_pct', label: 'Shard memory reserve', fmt: v => (typeof v === 'number' ? `${v}%` : '—') },
     { key: 'bytes_per_edge', label: 'Bytes per rollup edge', fmt: v => (typeof v === 'number' ? `${v} B` : '—') },
     { key: 'max_materialized_edges', label: 'Edge ceiling', fmt: v => (typeof v === 'number' ? v.toLocaleString() : 'Shard governs') },
+    { key: 'max_cube_edges', label: 'Auto’s cube ceiling', fmt: n },
+    { key: 'estimate_margin_pct', label: 'Estimate margin', fmt: v => (typeof v === 'number' ? `${v}%` : '—') },
     { key: 'materialize_fine_pairs', label: 'Rollup storage', fmt: storage },
     { key: 'materialize_leaf_pairs', label: 'Leaf pairs', fmt: v => (v ? 'On' : 'Off') },
     { key: 'ignore_observed', label: 'Ignore last run', fmt: () => 'Yes', onlyWhen: v => v === true },

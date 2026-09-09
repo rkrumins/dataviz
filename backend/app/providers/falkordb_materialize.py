@@ -356,7 +356,9 @@ def _max_cube_edges() -> int:
     pinned to what the owning SHARD can actually hold (~8M edges ≈ 4GB at
     0.5KB/edge) while the write budget stays a runaway backstop. Keep it
     strictly below ``_max_materialized_edges`` — a cube the write budget
-    would reject should never be selected in the first place."""
+    would reject should never be selected in the first place (the run
+    warns when a Defaults value sits above an explicit ceiling). Fleet-wide
+    from the Defaults dialog as ``maxCubeEdges``; this is the env default."""
     return _env_int("AGGREGATION_MAX_CUBE_EDGES", 8_000_000, 10_000, 50_000_000)
 
 
@@ -445,6 +447,8 @@ def resolve_effective_tuning(
     _num("scan_timeout_s", _scan_timeout_s, 5.0, 600.0, float)
     _num("write_timeout_s", lambda: float(bulk_timeout_default), 5.0, 600.0, float)
     _num("flush_mem_pct", _flush_mem_pct, 30, 90, int)
+    _num("max_cube_edges", _max_cube_edges, 10_000, 50_000_000, int)
+    _num("estimate_margin_pct", estimate_margin_pct_default, 0, 100, int)
     values["scan_shrink_floor"] = min(values["scan_shrink_floor"], values["scan_range_width"])
 
     for name, env_default in (
@@ -2662,7 +2666,7 @@ class AggregationPipeline:
         # The estimate is an UPPER bound on cells, so it is checked with a
         # margin; the exact post-compute check stands behind it.
         budget = await self._budget()
-        margin = estimate_margin_pct_default()
+        margin = self._knob_int("estimate_margin_pct", estimate_margin_pct_default, 0, 100)
         verdict = budget.verdict(
             projected=estimate, growth_edges=max(0, estimate - self._edges_before),
             margin_pct=margin,
@@ -2685,7 +2689,15 @@ class AggregationPipeline:
         # appetite, a product choice, while the budget is what the shard can
         # take. Auto keeps its ceiling AND never picks a cube the shard would
         # refuse. See _max_cube_edges.
-        cap = _max_cube_edges()
+        cap = self._knob_int("max_cube_edges", _max_cube_edges, 10_000, 50_000_000)
+        ceiling = self._explicit_ceiling()
+        if ceiling is not None and cap > ceiling:
+            logger.warning(
+                "aggregation pipeline on %s: the cube ceiling (%d) sits above the "
+                "explicit edge ceiling maxMaterializedEdges=%d — a cube Auto would "
+                "pick could be refused by the budget; keep maxCubeEdges below it.",
+                self.p._graph_name, cap, ceiling,
+            )
         self._cube_mode = estimate <= cap and verdict.ok
         logger.info(
             "aggregation pipeline on %s: auto mode — full-cube estimate "
