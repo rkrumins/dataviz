@@ -968,11 +968,44 @@ class AggregationPipeline:
         except (TypeError, ValueError):
             return self._write_timeout_knob
 
+    def _live_pacing_ratio(self) -> float:
+        """The pacing ratio in force: a value set on the running job (PATCH
+        …/limits; 0 = no pacing) wins over the knob, from the next write."""
+        live = self._live.get("write_pacing_ratio")
+        if live is None:
+            return self._pacing_ratio
+        try:
+            return max(0.0, min(10.0, float(live)))
+        except (TypeError, ValueError):
+            return self._pacing_ratio
+
+    def _live_scan_width(self) -> Optional[int]:
+        """A cap on the scan width set on the running job, clamped to
+        [scan floor, the width knob]; None when none is set. Applied on
+        every READ of the sticky width and never written into it, so the
+        ladder's own narrowing and re-growth stay its own."""
+        live = self._live.get("scan_width")
+        if not live:
+            return None
+        try:
+            width = int(live)
+        except (TypeError, ValueError):
+            return None
+        ceiling = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
+        return max(self._scan_floor, min(ceiling, width))
+
     def _effective_conc(self) -> int:
-        """Wave concurrency in force: the knob, pinned by the ladder to 1
-        after the first pressure event of the run (a graph store refusing
-        one query for size or time gets nothing from three more of them)."""
+        """Wave concurrency in force: the knob, capped by a value set on the
+        running job, pinned by the ladder to 1 after the first pressure
+        event of the run (a graph store refusing one query for size or time
+        gets nothing from three more of them)."""
         conc = self._knob_int("extract_concurrency", _extract_concurrency, 1, 4)
+        live = self._live.get("extract_concurrency")
+        if live:
+            try:
+                conc = min(conc, max(1, int(live)))
+            except (TypeError, ValueError):
+                pass
         return min(conc, self._scan_conc_cap) if self._scan_conc_cap else conc
 
     def _mark_phase(self, name: str) -> None:
@@ -1303,7 +1336,7 @@ class AggregationPipeline:
                     {"adapted": self._adapted_snapshot()}
                     if (
                         self._pressure_log or self._scan_min_width is not None
-                        or self._hints_applied
+                        or self._hints_applied or self._live
                     ) else {}
                 ),
                 # The per-query ceiling the ladder narrows against, when the
@@ -1390,7 +1423,7 @@ class AggregationPipeline:
         else:
             result = await coro_factory()
         elapsed = time.monotonic() - t0
-        pace = elapsed * self._pacing_ratio
+        pace = elapsed * self._live_pacing_ratio()
         if pace > 0:
             await asyncio.sleep(min(pace, 30.0))
         return elapsed, result
@@ -1780,6 +1813,13 @@ class AggregationPipeline:
             out["by_scan"] = {k: dict(v) for k, v in self._by_scan.items()}
         if self._hints_applied:
             out["from_last_run"] = dict(self._hints_applied)
+        # What an operator changed on the running job, in force now.
+        live = {
+            k: v for k, v in self._live.items()
+            if isinstance(v, (int, float, str)) and not isinstance(v, bool)
+        }
+        if live:
+            out["live"] = live
         return out
 
     async def _fetch_range(
@@ -1811,6 +1851,9 @@ class AggregationPipeline:
         floor = self._scan_floor
         width = hi - lo
         sticky = self._scan_subwidth
+        live_cap = self._live_scan_width()
+        if live_cap is not None:
+            sticky = live_cap if sticky is None else min(sticky, live_cap)
         if sticky is not None and width > sticky:
             rows: list = []
             cur = lo

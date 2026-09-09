@@ -54,6 +54,12 @@ export interface JobLiveOverlay {
         adapted_write_batch: number
         adapted_delete_chunk: number
         adapted_timeout_retries: number
+        /** What an operator changed on the running job, in force now. */
+        adapted_live_scan_timeout_s: number
+        adapted_live_write_timeout_s: number
+        adapted_live_write_pacing_ratio: number
+        adapted_live_extract_concurrency: number
+        adapted_live_scan_width: number
     }>
 }
 
@@ -154,6 +160,8 @@ export function useJob(
                 'adapted_scan_width', 'adapted_scan_width_min', 'adapted_scan_shrinks',
                 'adapted_extract_concurrency', 'adapted_write_batch', 'adapted_delete_chunk',
                 'adapted_timeout_retries',
+                'adapted_live_scan_timeout_s', 'adapted_live_write_timeout_s', 'adapted_live_write_pacing_ratio',
+                'adapted_live_extract_concurrency', 'adapted_live_scan_width',
             ] as const) {
                 const v = _coerceNumeric(payload[key])
                 if (v !== undefined) next[key] = v

@@ -401,8 +401,8 @@ export function RegistryJobHistory() {
 
     const handleExtend = useCallback((job: AggregationJobResponse, patch: JobLimitsPatch) =>
         withAction(job.id, () => aggregationService.setJobLimits(job.dataSourceId, job.id, patch),
-            'Time limit raised. The worker picks it up within about thirty seconds; per-query budgets apply to the next query.',
-            'Could not raise that job’s time limit.'),
+            'Change applied. The worker picks it up within about thirty seconds; per-query budgets, pacing, concurrency and scan width apply from the next query.',
+            'Could not change that job’s limits.'),
         [withAction],
     )
 

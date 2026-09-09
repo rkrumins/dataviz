@@ -44,12 +44,22 @@ banner offers the same retry. The capacity card shows each node's per-query limi
 **More time for a job that is still going — one, or all of them.** A pending or running job's
 stall window, wall clock and per-query timeouts can be raised without cancelling it:
 `PATCH /admin/data-sources/{id}/aggregation-jobs/{job}/limits` (the same gate as cancel and
-resume; the actor is always the authenticated user), an *Extend time limit* control in the
+resume; the actor is always the authenticated user), an *Adjust this run* control in the
 running row — what the job is running under, what is left of it, one-click +1/+3/+6/+12 h,
 a wall-clock doubling, the per-query budgets, and who raised what — an *Extend all by +3 h*
 strip when several jobs are running, and *Give it more time* on the canvas banner. The worker
 re-reads the row every thirty seconds through a fresh session; per-query budgets apply to the
 next query. The history lives on the job row, shown in Job History.
+
+**Go gentler on a job that is still going.** The same `PATCH …/limits` now takes the scan shape:
+a pacing ratio (from the next write; 0 = no pacing), a cap on read concurrency (from the next
+wave) and a cap on the scan width (from the next scan — a ceiling the pressure ladder may still
+narrow below on its own), plus `reset` to clear live values back to the job's settings. The
+worker's watchdog re-reads them with the time limits every thirty seconds — a failed read changes
+nothing, and an absent key clears — and the pipeline reads them per write, wave and scan. *Adjust
+this run* in Job History gains a **Go gentler** group — the shape in force, *Pace ×2*, *Pace ×4*,
+*Serial reads*, *Halve scans*, *Back to settings* — and the run's record and the live row show
+*Changed while running*.
 
 **The graph store's own limits, from the UI.** `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` no longer
 live only in the deployment. Infrastructure → Memory headroom shows each node's per-query memory
@@ -363,8 +373,8 @@ is required for correctness, but without it readers pay the aggregation on the r
   `FALKORDB_ARGS` fragment); the container-memory guard trusts the figure entered or
   `FALKORDB_CONTAINER_MEMORY_BYTES`, since the application cannot read the container limit;
   `THREAD_COUNT`, `OMP_THREAD_COUNT` and `CACHE_SIZE` remain load-time only.
-- Scan shape (width, floor, concurrency, pacing, chunks, rollup storage) changes on the next
-  Resume or Re-trigger, not on a running job; only the time limits are live.
+- The scan floor, the chunk sizes and rollup storage change on the next Resume or Re-trigger,
+  not on a running job; the time limits, pacing, read concurrency and the scan width are live.
 - The canvas's own reads have no pressure ladder: a per-query refusal on a drill is a read
   error, not a narrower read.
 - **The rebuild worker's own memory is bounded by a pair count, not by measurement.**

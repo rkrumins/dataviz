@@ -179,6 +179,16 @@ export function adaptationSentences(
     if (adapted?.budget_rechecks) {
         out.push(`Shard re-measured ${adapted.budget_rechecks}× during the apply`)
     }
+    if (adapted?.live && Object.keys(adapted.live).length > 0) {
+        const l = adapted.live
+        const parts: string[] = []
+        if (l.write_pacing_ratio != null) parts.push(l.write_pacing_ratio === 0 ? 'no pacing' : `pacing ${l.write_pacing_ratio}×`)
+        if (l.extract_concurrency != null) parts.push(l.extract_concurrency === 1 ? 'serial reads' : `reads ${l.extract_concurrency} at a time`)
+        if (l.scan_width != null) parts.push(`scans capped at ${l.scan_width.toLocaleString()} rows`)
+        if (l.scan_timeout_s != null) parts.push(`scan timeout ${l.scan_timeout_s} s`)
+        if (l.write_timeout_s != null) parts.push(`write timeout ${l.write_timeout_s} s`)
+        out.push(`Changed while running: ${parts.join(', ')}`)
+    }
     if (typeof extra?.bytesPerEdgeObserved === 'number') {
         out.push(`Calibrated ${extra.bytesPerEdgeObserved} B per rollup edge`)
     }

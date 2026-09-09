@@ -96,9 +96,19 @@ _ADAPTED_LIVE_KEYS = ("scan_width", "scan_width_min", "scan_shrinks",
                       "extract_concurrency", "reconcile_strategy", "write_batch",
                       "delete_chunk", "timeout_retries")
 
+#: The pipeline knobs an operator may change on the RUNNING job (PATCH
+#: …/limits): the worker's watchdog re-reads them from the row and hands
+#: them to the pipeline through the shared ``live`` dict — per-query
+#: budgets read per query, pacing per write, concurrency per wave, the scan
+#: width cap on every read of the sticky width.
+_LIVE_PIPELINE_KEYS = ("scan_timeout_s", "write_timeout_s", "write_pacing_ratio",
+                       "extract_concurrency", "scan_width")
+
 
 def _adapted_scalars(adapted: Any) -> dict:
-    """The scalar subset of an ``adapted`` record, for ``live_state``."""
+    """The scalar subset of an ``adapted`` record, for ``live_state`` —
+    the ladder's own state, plus the live changes in force flattened as
+    ``adapted_live_<key>``."""
     if not isinstance(adapted, dict):
         return {}
     out = {}
@@ -106,6 +116,11 @@ def _adapted_scalars(adapted: Any) -> dict:
         value = adapted.get(key)
         if isinstance(value, (str, int, float)) and not isinstance(value, bool):
             out[f"adapted_{key}"] = value
+    live = adapted.get("live")
+    if isinstance(live, dict):
+        for key, value in live.items():
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                out[f"adapted_live_{key}"] = value
     return out
 
 
@@ -593,7 +608,10 @@ class AggregationWorker:
                         ticks += 1
                         if ticks % 3 == 0:
                             fresh = await self._live_limits(job.id)
-                            if fresh:
+                            # None = the row could not be read this tick: keep
+                            # every live value in force (a hiccup never clears
+                            # a cap) and try again next tick.
+                            if fresh is not None:
                                 new_stall, new_wall = _merge_live_limits(
                                     stall_timeout, wall_base, fresh,
                                 )
@@ -606,13 +624,20 @@ class AggregationWorker:
                                     )
                                     stall_timeout, wall_limit = new_stall, new_wall
                                     limits["stall_timeout"], limits["wall_limit"] = new_stall, new_wall
-                                for key in ("scan_timeout_s", "write_timeout_s"):
-                                    if fresh.get(key) is not None and live.get(key) != fresh[key]:
+                                for key in _LIVE_PIPELINE_KEYS:
+                                    if key in fresh:
+                                        if live.get(key) != fresh[key]:
+                                            logger.info(
+                                                "Aggregation job %s: %s set to %s while running "
+                                                "— applies from the next query", job.id, key, fresh[key],
+                                            )
+                                            live[key] = fresh[key]
+                                    elif key in live:
                                         logger.info(
-                                            "Aggregation job %s: %s raised to %ss while running "
-                                            "— applies to the next query", job.id, key, fresh[key],
+                                            "Aggregation job %s: live %s cleared — back to the "
+                                            "job's settings from the next query", job.id, key,
                                         )
-                                        live[key] = fresh[key]
+                                        live.pop(key, None)
                         now = time.monotonic()
                         stalled_for = now - progress_marker["at"]
                         if stalled_for > stall_timeout:
@@ -1185,13 +1210,15 @@ class AggregationWorker:
             levels,
         )
 
-    async def _live_limits(self, job_id: str) -> dict:
-        """The job row's current time limits — ``timeout_secs`` and the
+    async def _live_limits(self, job_id: str) -> Optional[dict]:
+        """The job row's current live limits — ``timeout_secs`` and the
         ``live_overrides`` document — read through a FRESH session (the
         job's own session belongs to the materialize task). Never raises:
-        ``{}`` means "no change as far as we can tell", retried next tick."""
+        ``None`` means the row could not be read this tick (nothing changes,
+        retried next tick); a dict is the truth, and a key absent from it
+        has been cleared."""
         if self._session_factory is None:
-            return {}
+            return None
         try:
             from sqlalchemy import select
             async with self._session_factory() as s:
@@ -1201,9 +1228,9 @@ class AggregationWorker:
                 )).first()
         except Exception as exc:
             logger.debug("live limits unavailable for %s: %s", job_id, exc)
-            return {}
+            return None
         if row is None:
-            return {}
+            return None
         timeout_secs, raw = row[0], row[1]
         out: dict = {}
         if timeout_secs:
@@ -1211,7 +1238,15 @@ class AggregationWorker:
         doc = self._job_tuning(types.SimpleNamespace(tuning_json=raw))
         for key in ("max_wall_secs", "scan_timeout_s", "write_timeout_s"):
             value = doc.get(key)
-            if isinstance(value, (int, float)) and value > 0:
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                out[key] = value
+        # Pacing may be set to 0 (no pacing); the two caps are positive ints.
+        pacing = doc.get("write_pacing_ratio")
+        if isinstance(pacing, (int, float)) and not isinstance(pacing, bool) and pacing >= 0:
+            out["write_pacing_ratio"] = float(pacing)
+        for key in ("extract_concurrency", "scan_width"):
+            value = _tuning_int(doc, key)
+            if value is not None:
                 out[key] = value
         return out
 

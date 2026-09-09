@@ -450,6 +450,17 @@ def _is_resumable(job) -> bool:
     return job.status in ("failed", "cancelled")
 
 
+#: ``JobLimitsPatch.reset`` keys (the wire names) → the ``live_overrides``
+#: fields they clear.
+_LIVE_RESET_FIELDS = {
+    "writePacingRatio": "write_pacing_ratio",
+    "extractConcurrency": "extract_concurrency",
+    "scanWidth": "scan_width",
+    "scanTimeoutS": "scan_timeout_s",
+    "writeTimeoutS": "write_timeout_s",
+}
+
+
 class AggregationService:
     """REST API-driven aggregation orchestrator.
 
@@ -1453,12 +1464,14 @@ class AggregationService:
     async def set_job_limits(
         self, ds_id: str, job_id: str, session: AsyncSession, patch: "JobLimitsPatch",
     ) -> AggregationJobResponse:
-        """Raise (or lower) a PENDING or RUNNING job's time limits without
-        cancelling it: the stall window (``timeout_secs``), the wall clock
-        and the two per-query budgets. The worker re-reads the row every
-        few watchdog ticks and the pipeline reads the per-query budgets per
-        query, so the change takes effect within a minute. A terminal job
-        takes Resume overrides instead (422 here).
+        """Change a PENDING or RUNNING job's limits without cancelling it:
+        the stall window (``timeout_secs``), the wall clock, the two
+        per-query budgets, and the scan shape — pacing ratio, a cap on read
+        concurrency, a cap on the scan width — or clear live values with
+        ``reset``. The worker re-reads the row every few watchdog ticks and
+        the pipeline reads the live values per query, write or wave, so a
+        change takes effect within a minute. A terminal job takes Resume
+        overrides instead (422 here).
 
         The audit trail is the row itself: ``live_overrides.history`` keeps
         the last 20 changes (who, when, field, from, to) — deliberately not
@@ -1487,21 +1500,33 @@ class AggregationService:
         if patch.timeout_secs is not None:
             _record("timeout_secs", job.timeout_secs, int(patch.timeout_secs))
             job.timeout_secs = int(patch.timeout_secs)
-        for field in ("max_wall_secs", "scan_timeout_s", "write_timeout_s"):
+        for field in (
+            "max_wall_secs", "scan_timeout_s", "write_timeout_s",
+            "write_pacing_ratio", "extract_concurrency", "scan_width",
+        ):
             value = getattr(patch, field)
             if value is not None:
                 _record(field, doc.get(field), value)
                 doc[field] = value
+        for key in patch.reset or []:
+            field = _LIVE_RESET_FIELDS[key]
+            if field in doc:
+                _record(field, doc.get(field), None)
+                doc.pop(field, None)
         if not changes:
-            raise ValueError("No limit changed: send at least one of timeoutSecs, maxWallSecs, scanTimeoutS, writeTimeoutS")
+            raise ValueError(
+                "No limit changed: send at least one of timeoutSecs, maxWallSecs, scanTimeoutS, "
+                "writeTimeoutS, writePacingRatio, extractConcurrency, scanWidth, or a reset"
+            )
         doc["history"] = history[-20:]
         job.live_overrides = json.dumps(doc)
         job.updated_at = now
         await session.commit()
         for entry in changes:
             logger.info(
-                "Aggregation job %s: %s raised %s from %s to %s (live)",
-                job_id, entry["by"] or "an operator", entry["field"], entry["from"], entry["to"],
+                "Aggregation job %s: %s changed %s from %s to %s (live)",
+                job_id, entry["by"] or "an operator", entry["field"], entry["from"],
+                "the job's setting" if entry["to"] is None else entry["to"],
             )
         return self._to_response(job)
 

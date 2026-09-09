@@ -144,8 +144,11 @@ export interface AggregationJobResponse {
 export interface LiveLimitChange {
   at: string;
   by?: string | null;
-  field: 'timeout_secs' | 'max_wall_secs' | 'scan_timeout_s' | 'write_timeout_s' | string;
+  field:
+    | 'timeout_secs' | 'max_wall_secs' | 'scan_timeout_s' | 'write_timeout_s'
+    | 'write_pacing_ratio' | 'extract_concurrency' | 'scan_width' | string;
   from?: number | null;
+  /** null = cleared, back to the job's setting. */
   to?: number | null;
 }
 
@@ -153,13 +156,21 @@ export interface LiveOverrides {
   max_wall_secs?: number;
   scan_timeout_s?: number;
   write_timeout_s?: number;
+  /** The scan shape changed on the running job: pacing (0 = none), a read-concurrency cap, a scan-width cap. */
+  write_pacing_ratio?: number;
+  extract_concurrency?: number;
+  scan_width?: number;
   history?: LiveLimitChange[];
 }
 
+/** Live values a patch may clear — back to the job's settings. */
+export type LiveResetKey = 'writePacingRatio' | 'extractConcurrency' | 'scanWidth' | 'scanTimeoutS' | 'writeTimeoutS';
+
 /**
- * The four time limits that can be raised on a pending or running job without
- * cancelling it. Scan shape (width, floor, concurrency, pacing, chunks) is the
- * ladder's own state and applies from the next Resume or Re-trigger.
+ * What can be changed on a pending or running job without cancelling it: the
+ * four time limits, and the scan shape — pacing from the next write, a
+ * read-concurrency cap from the next wave, a scan-width cap from the next scan
+ * (the ladder may still narrow below it on its own).
  */
 export interface JobLimitsPatch {
   /** Stall window, seconds (60 .. 604,800). */
@@ -170,6 +181,14 @@ export interface JobLimitsPatch {
   scanTimeoutS?: number;
   /** Per-query budget for write/delete batches, seconds (5 .. 600). */
   writeTimeoutS?: number;
+  /** Sleep-after-write ratio (0 .. 10; 0 = no pacing), from the next write. */
+  writePacingRatio?: number;
+  /** A cap on read concurrency (1 .. 4), from the next wave. */
+  extractConcurrency?: number;
+  /** A cap on the scan width (1 .. 5,000,000), from the next scan. */
+  scanWidth?: number;
+  /** Live values to clear — back to the job's settings. */
+  reset?: LiveResetKey[];
 }
 
 /** Where a knob's value came from for one run. */
@@ -237,6 +256,8 @@ export interface AdaptedRunState {
   by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
   /** What the previous run of this source taught it, applied at the start. */
   from_last_run?: Record<string, number | string>;
+  /** What an operator changed on the running job, in force now. */
+  live?: Partial<Record<'scan_timeout_s' | 'write_timeout_s' | 'write_pacing_ratio' | 'extract_concurrency' | 'scan_width', number>>;
 }
 
 export interface AggregationRunStats {

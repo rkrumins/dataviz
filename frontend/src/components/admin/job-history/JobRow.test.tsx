@@ -86,7 +86,7 @@ describe('JobRow run settings', () => {
     })
 })
 
-describe('JobRow extend time limit', () => {
+describe('JobRow adjust this run', () => {
     it('offers more time on a running job and sends the exact patch', async () => {
         const onExtend = vi.fn()
         renderRow(job({
@@ -96,7 +96,7 @@ describe('JobRow extend time limit', () => {
             liveOverrides: { history: [{ at: new Date().toISOString(), by: 'ops@example.com', field: 'timeout_secs', from: 7_200, to: 10_800 }] },
         }), onExtend)
 
-        const toggle = screen.getByRole('button', { name: /Extend time limit/ })
+        const toggle = screen.getByRole('button', { name: /Adjust this run/ })
         expect(toggle).toHaveTextContent('stall window 3 h')
         expect(toggle).toHaveTextContent('left')
         await userEvent.click(toggle)
@@ -109,11 +109,16 @@ describe('JobRow extend time limit', () => {
         await userEvent.type(screen.getByLabelText('Scan timeout, seconds'), '120')
         await userEvent.click(screen.getByRole('button', { name: 'Apply' }))
         expect(onExtend).toHaveBeenLastCalledWith(expect.anything(), { scanTimeoutS: 120 })
+        // …and a gentler shape, from the same disclosure.
+        await userEvent.click(screen.getByRole('button', { name: 'Pace ×2' }))
+        expect(onExtend).toHaveBeenLastCalledWith(expect.anything(), { writePacingRatio: 2 })
+        await userEvent.click(screen.getByRole('button', { name: 'Halve scans' }))
+        expect(onExtend).toHaveBeenLastCalledWith(expect.anything(), { scanWidth: 100_000 })
         expect(screen.getByText(/ops@example.com raised the stall window 2 h → 3 h/)).toBeInTheDocument()
     })
 
     it('is absent on a terminal row', () => {
         renderRow(job(), vi.fn())
-        expect(screen.queryByRole('button', { name: /Extend time limit/ })).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Adjust this run/ })).not.toBeInTheDocument()
     })
 })

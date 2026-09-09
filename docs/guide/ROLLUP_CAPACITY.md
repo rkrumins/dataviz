@@ -174,8 +174,16 @@ and the wall clock are knobs in the Defaults dialog and per job. The two
 per-query timeouts are capped by the store's `TIMEOUT_MAX` (180 s as
 shipped), read from the node — the editors show the cap in force — and an
 administrator raises the cap itself from Infrastructure (below). A
-**running** job's limits can be raised without cancelling it — *Extend time
-limit* in Job History, one job or every running job at once.
+**running** job's limits can be raised without cancelling it — *Adjust this
+run* in Job History, one job or every running job at once (*Extend all*).
+
+**So is the scan shape.** The same disclosure offers **Go gentler**: pace the
+writes (×2, ×4), read serially, halve the scans, or go back to the job's
+settings — each applied from the next write, wave or scan without cancelling
+the job, each a ceiling the pressure ladder may still narrow below on its
+own, and each shown in the run's record as *Changed while running*. The
+scan floor, the chunk sizes and rollup storage still change on the next
+Resume or Re-trigger.
 
 ---
 

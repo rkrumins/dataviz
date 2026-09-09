@@ -396,12 +396,14 @@ class ResumeOverrides(BaseModel):
 
 
 class JobLimitsPatch(BaseModel):
-    """Limits an operator raises on a PENDING or RUNNING job, applied
-    without cancelling it. Only the four time limits are live: the stall
-    window (the job's ``timeout_secs``), the wall clock, and the per-query
-    scan and write budgets. Scan shape (width, floor, concurrency, pacing,
-    chunks) is the ladder's own state and applies from the next Resume.
-    ``actor`` is set by the web tier from the authenticated user."""
+    """What an operator changes on a PENDING or RUNNING job without
+    cancelling it. The time limits — the stall window (the job's
+    ``timeout_secs``), the wall clock, the per-query scan and write budgets
+    — and the scan shape: a pacing ratio (from the next write), a cap on
+    read concurrency (from the next wave) and a cap on the scan width (from
+    the next scan; the ladder may still narrow below it on its own).
+    ``reset`` clears live values — back to the job's settings. ``actor`` is
+    set by the web tier from the authenticated user."""
     timeout_secs: Optional[int] = Field(
         None, alias="timeoutSecs",
         description="Stall window, seconds; 60 \u2264 value \u2264 604800.",
@@ -417,6 +419,24 @@ class JobLimitsPatch(BaseModel):
     write_timeout_s: Optional[float] = Field(
         None, alias="writeTimeoutS", ge=5.0, le=600.0,
         description="Per-query budget for write/delete batches, seconds.",
+    )
+    write_pacing_ratio: Optional[float] = Field(
+        None, alias="writePacingRatio", ge=0.0, le=10.0,
+        description="Sleep-after-write ratio in force from the next write; 0 = no pacing.",
+    )
+    extract_concurrency: Optional[int] = Field(
+        None, alias="extractConcurrency", ge=1, le=4,
+        description="A cap on read concurrency from the next wave.",
+    )
+    scan_width: Optional[int] = Field(
+        None, alias="scanWidth", ge=1, le=5_000_000,
+        description="A cap on the scan width from the next scan; the ladder may narrow below it.",
+    )
+    reset: Optional[List[Literal[
+        "writePacingRatio", "extractConcurrency", "scanWidth", "scanTimeoutS", "writeTimeoutS",
+    ]]] = Field(
+        None,
+        description="Live values to clear — back to the job's settings from the next query.",
     )
     actor: Optional[str] = Field(None, max_length=255)
 

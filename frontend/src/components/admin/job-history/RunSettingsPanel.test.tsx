@@ -114,3 +114,12 @@ describe('RunSettingsPanel', () => {
         expect(screen.getByText('×2')).toBeInTheDocument()
     })
 })
+
+describe('adaptationSentences — changed while running', () => {
+    it('says what an operator changed on the running job', () => {
+        expect(adaptationSentences({ live: { write_pacing_ratio: 2, extract_concurrency: 1, scan_width: 5_000, scan_timeout_s: 120 } }))
+            .toContain('Changed while running: pacing 2×, serial reads, scans capped at 5,000 rows, scan timeout 120 s')
+        expect(adaptationSentences({ live: { write_pacing_ratio: 0 } })).toContain('Changed while running: no pacing')
+        expect(adaptationSentences({ live: {} })).toEqual([])
+    })
+})

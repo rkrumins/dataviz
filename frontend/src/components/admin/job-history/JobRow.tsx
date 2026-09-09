@@ -15,7 +15,7 @@ import {
 } from './shared'
 import { RunSettingsPanel } from './RunSettingsPanel'
 import { presetForRun } from './runSettings'
-import { ExtendLimits } from './ExtendLimits'
+import { AdjustRunningJob } from './AdjustRunningJob'
 // One vocabulary for the detector codes across Job History and the Freshness
 // cockpit — they must never disagree about what "overlay_missing" is called,
 // nor about what its evidence means.
@@ -191,10 +191,19 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
         if (snap.adapted_write_batch !== undefined) out.write_batch = snap.adapted_write_batch
         if (snap.adapted_delete_chunk !== undefined) out.delete_chunk = snap.adapted_delete_chunk
         if (snap.adapted_timeout_retries !== undefined) out.timeout_retries = snap.adapted_timeout_retries
+        const live: NonNullable<AdaptedRunState['live']> = {}
+        if (snap.adapted_live_scan_timeout_s !== undefined) live.scan_timeout_s = snap.adapted_live_scan_timeout_s
+        if (snap.adapted_live_write_timeout_s !== undefined) live.write_timeout_s = snap.adapted_live_write_timeout_s
+        if (snap.adapted_live_write_pacing_ratio !== undefined) live.write_pacing_ratio = snap.adapted_live_write_pacing_ratio
+        if (snap.adapted_live_extract_concurrency !== undefined) live.extract_concurrency = snap.adapted_live_extract_concurrency
+        if (snap.adapted_live_scan_width !== undefined) live.scan_width = snap.adapted_live_scan_width
+        if (Object.keys(live).length > 0) out.live = live
         return Object.keys(out).length > 0 ? out : null
     }, [isActive, liveOverlay.terminal, snap.adapted_scan_width, snap.adapted_scan_width_min, snap.adapted_scan_shrinks,
         snap.adapted_extract_concurrency, snap.adapted_reconcile_strategy, snap.adapted_write_batch,
-        snap.adapted_delete_chunk, snap.adapted_timeout_retries])
+        snap.adapted_delete_chunk, snap.adapted_timeout_retries, snap.adapted_live_scan_timeout_s,
+        snap.adapted_live_write_timeout_s, snap.adapted_live_write_pacing_ratio,
+        snap.adapted_live_extract_concurrency, snap.adapted_live_scan_width])
     const adaptedNow: Partial<AdaptedRunState> | null = liveAdapted ?? jobFromList.runStats?.adapted ?? null
     const narrowing = jobFromList.status === 'running' && !!adaptedNow && (
         adaptedNow.scan_width != null || adaptedNow.extract_concurrency != null
@@ -754,9 +763,9 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                             )}
                                         </div>
 
-                                        {/* More time for a job that is still going */}
+                                        {/* More time, or a gentler shape, for a job that is still going */}
                                         {(isRunning || isPending) && onExtend && job.triggerSource !== 'purge' && (
-                                            <ExtendLimits job={job} onExtend={onExtend} busy={actionLoading} />
+                                            <AdjustRunningJob job={job} onAdjust={onExtend} busy={actionLoading} />
                                         )}
 
                                         {/* What this run ran with, and what it adapted to */}

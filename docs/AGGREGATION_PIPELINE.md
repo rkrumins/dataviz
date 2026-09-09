@@ -380,11 +380,11 @@ pipeline).
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `AGGREGATION_SCAN_RANGE_WIDTH` | 200000 | Edge-ID range width per scan query |
+| `AGGREGATION_SCAN_RANGE_WIDTH` | 200000 | Edge-ID range width per scan query. Cappable live on a running job (Job History → Adjust this run → Halve scans) |
 | `AGGREGATION_MAX_PENDING_PAIRS` | 50000000 | In-memory pair cap before overflow flush |
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
-| `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing |
+| `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing. Changeable live on a running job (Pace ×2 / ×4), from the next write |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query budget (s). Per-job / Defaults as `scanTimeoutS` (5-600); the server caps any query at its `TIMEOUT_MAX`, read from the node (`FALKORDB_SERVER_TIMEOUT_MAX_MS` is the fallback until then; raisable at runtime from Infrastructure → Memory headroom). Raisable on a running job |
 | `FALKORDB_BULK_CREATE_TIMEOUT_S` | 60 | Per-query budget for the pipeline's write and delete batches (s). Per-job / Defaults as `writeTimeoutS` (5-600), capped by the server like the scan budget. Raisable on a running job |
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 1 | Narrowest range width the pressure ladder descends to. Per-job / Defaults as `scanShrinkFloor`. At 1 the only terminal outcome is a single row larger than `QUERY_MEM_CAPACITY`; a floor-width timeout is retried with backoff and then reported as an outage (resumable) |
@@ -402,7 +402,7 @@ pipeline).
 | `AGGREGATION_CAPACITY_DEADLINE_S` | 8 | Capacity API: the fleet sweep's deadline; sources not reached are reported as unresolved |
 | `AGGREGATION_CAPACITY_MAX_SOURCES` | 500 | Capacity API: sources per sweep, largest first; the response says when it was truncated |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
-| `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves) |
+| `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves). Cappable live on a running job (Serial reads), from the next wave |
 | `AGGREGATION_STALL_TIMEOUT_SECS` | 10800 | Watchdog stall window. The job's `timeoutSecs` wins; a job that sends none (the machine paths: reconciliation, Refresh rollups, the projector heal hook) takes the fleet Defaults' `stallTimeoutSecs`, then this. Bound 7 days. Keep below `2 × AGGREGATION_JOB_TIMEOUT_SECS`. Raisable on a running job |
 | `AGGREGATION_JOB_MAX_WALL_SECS` | 86400 | Watchdog wall-clock safety net; per-job / Defaults as `maxWallSecs` (1h-7d), never lower than the job's stall window. Raisable on a running job |
 | `AGGREGATION_MEM_HIGH_WATER_PCT` | 75 | Worker defers new claims above this RSS/limit % |

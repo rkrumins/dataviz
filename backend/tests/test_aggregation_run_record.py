@@ -43,6 +43,10 @@ def test_adapted_scalars_are_the_live_subset():
         "adapted_reconcile_strategy": "keys_only",
     }
     assert _adapted_scalars(None) == {}
+    # Live changes in force ride along, flattened, so the running row can show them.
+    assert _adapted_scalars({"live": {"write_pacing_ratio": 2.0, "scan_width": 5_000, "junk": [1]}}) == {
+        "adapted_live_write_pacing_ratio": 2.0, "adapted_live_scan_width": 5_000,
+    }
 
 
 # ── the checkpoint records it, on the commit it was making anyway ──────

@@ -101,8 +101,9 @@ container memory limit first, and the failed source's guidance links straight
 to it; a narrowest scan that kept timing out means the store stopped
 answering — check it, then **Resume from cursor** (raise the store's query
 time cap the same way if scans need longer than it allows). Retry with the **Gentle**
-profile (pre-selected after either failure), or give a running job more time
-with **Extend time limit**. See [Rollup capacity](/guide/rollup-capacity).
+profile (pre-selected after either failure), or — on a running job — give it
+more time or go gentler (pace the writes, read serially, halve the scans)
+with **Adjust this run**, without cancelling it. See [Rollup capacity](/guide/rollup-capacity).
 
 ### I changed an ontology and many Views shifted
 - That's expected if a new version was assigned — check the **audit trail** to see

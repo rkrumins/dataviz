@@ -25,7 +25,9 @@ from backend.app.db.engine import Base
 from backend.app.services.aggregation.models import AggregationJobORM
 from backend.app.services.aggregation.schemas import JobLimitsPatch
 from backend.app.services.aggregation.service import AggregationService, NotFoundError
-from backend.app.services.aggregation.worker import AggregationWorker, _merge_live_limits
+from backend.app.services.aggregation.worker import (
+    AggregationWorker, _LIVE_PIPELINE_KEYS, _merge_live_limits,
+)
 
 
 @pytest_asyncio.fixture
@@ -93,6 +95,42 @@ async def test_raising_limits_on_a_running_job_records_who_changed_what(session_
 
 
 @pytest.mark.asyncio
+async def test_the_scan_shape_can_be_changed_and_cleared_on_a_running_job(session_factory):
+    """Pacing, a read-concurrency cap and a scan-width cap are live too, and
+    ``reset`` clears them back to the job's settings — each change and each
+    clearing on the history."""
+    async with session_factory() as s:
+        s.add(_job())
+        await s.commit()
+    svc = _service()
+    async with session_factory() as s:
+        out = await svc.set_job_limits(
+            "ds_1", "agg_lim1", s,
+            JobLimitsPatch(writePacingRatio=2.0, extractConcurrency=1, scanWidth=5_000, actor="ops@example.com"),
+        )
+    live = out.live_overrides
+    assert (live["write_pacing_ratio"], live["extract_concurrency"], live["scan_width"]) == (2.0, 1, 5_000)
+    assert [h["field"] for h in live["history"]] == ["write_pacing_ratio", "extract_concurrency", "scan_width"]
+
+    async with session_factory() as s:
+        out = await svc.set_job_limits(
+            "ds_1", "agg_lim1", s, JobLimitsPatch(reset=["writePacingRatio", "scanWidth"], actor="ops@example.com"),
+        )
+    live = out.live_overrides
+    assert "write_pacing_ratio" not in live and "scan_width" not in live and live["extract_concurrency"] == 1
+    cleared = [(h["field"], h["from"], h["to"]) for h in live["history"] if h["to"] is None]
+    assert cleared == [("write_pacing_ratio", 2.0, None), ("scan_width", 5_000, None)]
+
+    # Clearing what is not set changes nothing.
+    async with session_factory() as s:
+        with pytest.raises(ValueError, match="No limit changed"):
+            await svc.set_job_limits("ds_1", "agg_lim1", s, JobLimitsPatch(reset=["scanWidth"]))
+    for bad in ({"writePacingRatio": 11}, {"extractConcurrency": 0}, {"scanWidth": 0}, {"reset": ["nope"]}):
+        with pytest.raises(ValidationError):
+            JobLimitsPatch(**bad)
+
+
+@pytest.mark.asyncio
 async def test_limits_cannot_be_raised_on_a_terminal_or_foreign_job(session_factory):
     async with session_factory() as s:
         s.add(_job(status="completed"))
@@ -132,30 +170,47 @@ def test_merge_live_limits_never_puts_the_wall_clock_below_the_stall_window():
 
 @pytest.mark.asyncio
 async def test_live_limits_are_read_through_a_fresh_session(session_factory):
+    """Time limits and the live scan shape alike; pacing may be 0 (no
+    pacing), the two caps must be positive, and junk is left out."""
     async with session_factory() as s:
         s.add(_job(timeout_secs=7_200, live_overrides=json.dumps({
             "max_wall_secs": 172_800, "scan_timeout_s": 120.0, "history": [],
+            "write_pacing_ratio": 0, "extract_concurrency": 1, "scan_width": 5_000,
+        })))
+        s.add(_job(id="agg_lim2", live_overrides=json.dumps({
+            "write_pacing_ratio": -1, "extract_concurrency": "two", "scan_width": 0,
         })))
         await s.commit()
     worker = AggregationWorker(session_factory=session_factory, registry=None, event_publisher=None)
     assert await worker._live_limits("agg_lim1") == {
         "timeout_secs": 7_200, "max_wall_secs": 172_800, "scan_timeout_s": 120.0,
+        "write_pacing_ratio": 0.0, "extract_concurrency": 1, "scan_width": 5_000,
     }
-    assert await worker._live_limits("agg_missing") == {}
+    assert await worker._live_limits("agg_lim2") == {"timeout_secs": 10_800}
+    # A missing row is "could not read", never "everything cleared".
+    assert await worker._live_limits("agg_missing") is None
 
 
 def test_a_failing_read_never_touches_the_watchdog():
+    """None, not an empty dict: an empty dict would clear every live value
+    on the next tick, so a database hiccup must read as "no answer"."""
     def broken_factory():
         raise RuntimeError("db down")
     worker = AggregationWorker(session_factory=broken_factory, registry=None, event_publisher=None)
-    assert asyncio.run(worker._live_limits("agg_lim1")) == {}
-    assert asyncio.run(AggregationWorker(session_factory=None, registry=None, event_publisher=None)._live_limits("x")) == {}
+    assert asyncio.run(worker._live_limits("agg_lim1")) is None
+    assert asyncio.run(AggregationWorker(session_factory=None, registry=None, event_publisher=None)._live_limits("x")) is None
 
 
 def test_the_watchdog_tick_re_reads_the_limits_and_hands_the_live_dict_to_the_pipeline():
     src = inspect.getsource(AggregationWorker.run)
     assert "await self._live_limits(job.id)" in src
     assert "_merge_live_limits(" in src
+    # A failed read changes nothing; a present key is set, an absent one popped.
+    assert "if fresh is not None:" in src
+    assert "for key in _LIVE_PIPELINE_KEYS:" in src and "live.pop(key, None)" in src
+    assert set(_LIVE_PIPELINE_KEYS) == {
+        "scan_timeout_s", "write_timeout_s", "write_pacing_ratio", "extract_concurrency", "scan_width",
+    }
     src = inspect.getsource(AggregationWorker._materialize_with_checkpoints)
     assert 'live_limits=(limits or {}).get("live")' in src
 

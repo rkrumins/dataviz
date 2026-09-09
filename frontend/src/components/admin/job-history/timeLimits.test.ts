@@ -5,7 +5,8 @@
 import { describe, expect, it } from 'vitest'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import {
-    describeChange, doubleWallPatch, extendStallPatch, formatWindow, limitsInForce, perQueryPatch, secondsLeft,
+    backToSettingsPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
+    limitsInForce, pacePatch, perQueryPatch, secondsLeft, serialReadsPatch, shapeInForce,
 } from './timeLimits'
 
 function job(over: Partial<AggregationJobResponse> = {}): AggregationJobResponse {
@@ -65,5 +66,42 @@ describe('what is left, and the history', () => {
         expect(formatWindow(1_800)).toBe('30 min')
         expect(formatWindow(5_400)).toBe('1.5 h')
         expect(formatWindow(259_200)).toBe('3 d')
+    })
+})
+
+describe('the scan shape', () => {
+    it('reads what is in force: live first, then the run record, then the defaults', () => {
+        expect(shapeInForce(job())).toEqual({
+            pacingRatio: 1, extractConcurrency: 1, scanWidth: 200_000, scanWidthNow: null,
+            live: { pacing: false, concurrency: false, scanWidth: false },
+        })
+        const j = job({
+            runStats: {
+                effective_tuning: { write_pacing_ratio: 0.5, extract_concurrency: 4, scan_range_width: 100_000 },
+                adapted: { scan_width: 12_500 },
+            },
+            liveOverrides: { extract_concurrency: 2 },
+        })
+        expect(shapeInForce(j)).toEqual({
+            pacingRatio: 0.5, extractConcurrency: 2, scanWidth: 100_000, scanWidthNow: 12_500,
+            live: { pacing: false, concurrency: true, scanWidth: false },
+        })
+    })
+
+    it('builds the gentler patches from what is in force', () => {
+        expect(pacePatch(job(), 2)).toEqual({ writePacingRatio: 2 })
+        expect(pacePatch(job({ liveOverrides: { write_pacing_ratio: 0 } }), 4)).toEqual({ writePacingRatio: 4 })   // pacing off counts as 1×
+        expect(pacePatch(job({ liveOverrides: { write_pacing_ratio: 6 } }), 2)).toEqual({ writePacingRatio: 10 })  // the bound
+        expect(serialReadsPatch()).toEqual({ extractConcurrency: 1 })
+        expect(halveScansPatch(job())).toEqual({ scanWidth: 100_000 })
+        expect(halveScansPatch(job({ runStats: { adapted: { scan_width: 12_500 } } }))).toEqual({ scanWidth: 6_250 })
+        expect(halveScansPatch(job({ liveOverrides: { scan_width: 1 } }))).toEqual({ scanWidth: 1 })
+        expect(backToSettingsPatch()).toEqual({ reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth'] })
+    })
+
+    it('describes a shape change, and a clearing, in words', () => {
+        expect(describeChange({ at: 'x', by: 'ops', field: 'write_pacing_ratio', from: 1, to: 2 })).toBe('ops set the write pacing 1× → 2×')
+        expect(describeChange({ at: 'x', by: 'ops', field: 'scan_width', from: 5_000, to: null })).toBe('ops cleared the scan width (5,000 rows → the job’s setting)')
+        expect(describeChange({ at: 'x', by: null, field: 'extract_concurrency', from: null, to: 1 })).toBe('An operator set the read concurrency the job’s setting → 1 at a time')
     })
 })
