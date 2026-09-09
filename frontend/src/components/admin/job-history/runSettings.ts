@@ -49,6 +49,7 @@ const ROW_SPECS: Array<{ key: string; label: string; fmt: (v: unknown) => string
     { key: 'max_pending_pairs', label: 'Max pending pairs', fmt: n },
     { key: 'flush_mem_pct', label: 'Memory flush', fmt: v => (typeof v === 'number' ? `at ${v}% of the worker limit` : '—') },
     { key: 'write_pacing_ratio', label: 'Write pacing ratio', fmt: v => (typeof v === 'number' ? `×${v}` : '—') },
+    { key: 'replica_ack_min', label: 'Replica acknowledgement', fmt: v => (typeof v !== 'number' ? '—' : v === 0 ? 'Not waited for' : `${v} replica${v === 1 ? '' : 's'} per write`) },
     { key: 'apply_chunk', label: 'Apply chunk', fmt: n },
     { key: 'delete_chunk', label: 'Delete chunk', fmt: n },
     { key: 'scan_timeout_s', label: 'Scan timeout', fmt: secs },
@@ -186,6 +187,21 @@ export function adaptationSentences(
     if (adapted?.budget_rechecks) {
         out.push(`Shard re-measured ${adapted.budget_rechecks}× during the apply`)
     }
+    if (adapted?.replica_waits || adapted?.replica_holds) {
+        const parts: string[] = []
+        if (adapted.replica_holds) {
+            parts.push(`Waited for the graph store’s replicas ${plural(adapted.replica_holds, 'time', 'times')}`)
+        } else {
+            parts.push('Paced against the graph store’s replicas')
+        }
+        if (typeof adapted.replica_wait_s === 'number' && adapted.replica_wait_s >= 1) {
+            parts.push(`(${formatDuration(adapted.replica_wait_s)} in total`)
+        }
+        if (typeof adapted.replica_max_lag_bytes === 'number' && adapted.replica_max_lag_bytes > 0) {
+            parts.push(`${parts.length > 1 ? ',' : '('}up to ${mb(adapted.replica_max_lag_bytes / 1024 / 1024)} behind`)
+        }
+        out.push(parts.join(' ') + (parts.length > 1 ? ')' : ''))
+    }
     if (adapted?.memory_flushes || adapted?.memory_rollups) {
         const parts: string[] = []
         if (adapted.memory_flushes) parts.push(`Flushed ${adapted.memory_flushes}× on worker memory`)
@@ -202,6 +218,7 @@ export function adaptationSentences(
         if (l.write_pacing_ratio != null) parts.push(l.write_pacing_ratio === 0 ? 'no pacing' : `pacing ${l.write_pacing_ratio}×`)
         if (l.extract_concurrency != null) parts.push(l.extract_concurrency === 1 ? 'serial reads' : `reads ${l.extract_concurrency} at a time`)
         if (l.scan_width != null) parts.push(`scans capped at ${l.scan_width.toLocaleString()} rows`)
+        if (l.replica_ack_min != null) parts.push(l.replica_ack_min === 0 ? 'no replica wait' : `waiting for ${l.replica_ack_min} replica${l.replica_ack_min === 1 ? '' : 's'}`)
         if (l.scan_timeout_s != null) parts.push(`scan timeout ${l.scan_timeout_s} s`)
         if (l.write_timeout_s != null) parts.push(`write timeout ${l.write_timeout_s} s`)
         out.push(`Changed while running: ${parts.join(', ')}`)

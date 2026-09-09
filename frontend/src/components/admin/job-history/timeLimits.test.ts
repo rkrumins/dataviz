@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import {
-    backToSettingsPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
+    backToSettingsPatch, waitForReplicasPatch, releaseReplicaWaitPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
     limitsInForce, pacePatch, perQueryPatch, secondsLeft, serialReadsPatch, shapeInForce,
 } from './timeLimits'
 
@@ -73,18 +73,20 @@ describe('the scan shape', () => {
     it('reads what is in force: live first, then the run record, then the defaults', () => {
         expect(shapeInForce(job())).toEqual({
             pacingRatio: 1, extractConcurrency: 1, scanWidth: 200_000, scanWidthNow: null,
-            live: { pacing: false, concurrency: false, scanWidth: false },
+            replicaAckMin: 1,
+            live: { pacing: false, concurrency: false, scanWidth: false, replicaAck: false },
         })
         const j = job({
             runStats: {
                 effective_tuning: { write_pacing_ratio: 0.5, extract_concurrency: 4, scan_range_width: 100_000 },
                 adapted: { scan_width: 12_500 },
             },
-            liveOverrides: { extract_concurrency: 2 },
+            liveOverrides: { extract_concurrency: 2, replica_ack_min: 2 },
         })
         expect(shapeInForce(j)).toEqual({
             pacingRatio: 0.5, extractConcurrency: 2, scanWidth: 100_000, scanWidthNow: 12_500,
-            live: { pacing: false, concurrency: true, scanWidth: false },
+            replicaAckMin: 2,
+            live: { pacing: false, concurrency: true, scanWidth: false, replicaAck: true },
         })
     })
 
@@ -96,7 +98,13 @@ describe('the scan shape', () => {
         expect(halveScansPatch(job())).toEqual({ scanWidth: 100_000 })
         expect(halveScansPatch(job({ runStats: { adapted: { scan_width: 12_500 } } }))).toEqual({ scanWidth: 6_250 })
         expect(halveScansPatch(job({ liveOverrides: { scan_width: 1 } }))).toEqual({ scanWidth: 1 })
-        expect(backToSettingsPatch()).toEqual({ reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth'] })
+        expect(backToSettingsPatch()).toEqual({
+            reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin'],
+        })
+        // Replication backpressure: one more replica per write, or none at all.
+        expect(waitForReplicasPatch(job())).toEqual({ replicaAckMin: 2 })
+        expect(waitForReplicasPatch(job({ liveOverrides: { replica_ack_min: 5 } }))).toEqual({ replicaAckMin: 5 })
+        expect(releaseReplicaWaitPatch()).toEqual({ replicaAckMin: 0 })
     })
 
     it('describes a shape change, and a clearing, in words', () => {

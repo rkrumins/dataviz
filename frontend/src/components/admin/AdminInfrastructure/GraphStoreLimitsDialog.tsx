@@ -55,7 +55,7 @@ function rememberContainerGb(endpoint: string, gb: string) {
     try { localStorage.setItem(storageKey(endpoint), gb) } catch { /* private mode, blocked storage */ }
 }
 
-const EMPTY: LimitsDraft = { timeoutS: '', capMb: '', containerGb: '', concurrent: '', applyToAll: false }
+const EMPTY: LimitsDraft = { timeoutS: '', capMb: '', containerGb: '', concurrent: '', effectsUs: '', applyToAll: false }
 
 function Field({ id, label, unit, help, value, disabled, min, step, onChange }: {
     id: string
@@ -150,6 +150,7 @@ export function GraphStoreLimitsDialog({ open, endpoint, onClose }: {
                 ? String(Math.round(containerFromEnv / GIB * 100) / 100)
                 : rememberedContainerGb(endpoint),
             concurrent: String(shard.threadCount ?? THREADS_ASSUMED),
+            effectsUs: shard.effectsThresholdUs != null ? String(shard.effectsThresholdUs) : '',
             applyToAll: false,
         }
         setDraft(initial)
@@ -301,6 +302,19 @@ export function GraphStoreLimitsDialog({ open, endpoint, onClose }: {
                                                             id="limits-cap" label="Per-query memory ceiling (QUERY_MEM_CAPACITY)" unit="MB"
                                                             help="What one query may hold at once, per thread. The rebuild narrows its scans to fit under it; a single row larger than it is the one thing it cannot narrow past. Raising it needs the container limit below."
                                                             value={draft.capMb} disabled={!editable} min={1} step={1} onChange={set('capMb')}
+                                                        />
+                                                    </div>
+                                                </section>
+                                                <section>
+                                                    <h3 className="text-[11px] font-bold uppercase tracking-[0.13em] text-ink-muted">Replication</h3>
+                                                    <p className="mt-1 text-[12px] text-ink-muted leading-snug">
+                                                        Below this threshold the store replicates a write by having every replica <em>re-run</em> it, on the replica’s main thread and with no timeout. A rollup batch is thousands of small writes, so it falls below the 300 µs default and each replica repeats the whole rebuild — which is what leaves a replica unable to answer its health check. 0 always ships a compact change log instead.
+                                                    </p>
+                                                    <div className="mt-2 border-t border-glass-border divide-y divide-glass-border">
+                                                        <Field
+                                                            id="limits-effects" label="Effects threshold (EFFECTS_THRESHOLD)" unit="µs"
+                                                            help={<>Microseconds per modification. Leave it at 0 on any node with replicas.{shard.effectsThresholdUs != null && shard.effectsThresholdUs > 0 && ' This node re-runs writes on its replicas today.'}</>}
+                                                            value={draft.effectsUs ?? ''} disabled={!editable} min={0} step={50} onChange={set('effectsUs')}
                                                         />
                                                     </div>
                                                 </section>

@@ -210,6 +210,9 @@ def test_the_watchdog_tick_re_reads_the_limits_and_hands_the_live_dict_to_the_pi
     assert "for key in _LIVE_PIPELINE_KEYS:" in src and "live.pop(key, None)" in src
     assert set(_LIVE_PIPELINE_KEYS) == {
         "scan_timeout_s", "write_timeout_s", "write_pacing_ratio", "extract_concurrency", "scan_width",
+        # Replication backpressure is live too: lowering the acknowledgement
+        # bar to 0 is what releases a run held behind a lagging replica.
+        "replica_ack_min", "replica_ack_timeout_ms",
     }
     src = inspect.getsource(AggregationWorker._materialize_with_checkpoints)
     assert 'live_limits=(limits or {}).get("live")' in src

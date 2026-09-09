@@ -141,8 +141,20 @@ def validate_limits(current: ShardMemory, patch: GraphStoreLimitsPatch) -> Valid
                 )
         pairs.append(("QUERY_MEM_CAPACITY", new_cap))
 
+    if patch.effects_threshold_us is not None:
+        # How this node replicates. Below the threshold FalkorDB ships a
+        # write to its replicas by having them RE-RUN it, on their main
+        # thread and without a timeout; a rollup batch is thousands of cheap
+        # MERGEs and sits well below the 300 µs default, which is what makes
+        # a large rebuild stall a shard's replicas. 0 always ships the
+        # compact change log instead. Nothing to guard against: it costs no
+        # memory and cannot exceed a container.
+        pairs.append(("EFFECTS_THRESHOLD", int(patch.effects_threshold_us)))
+
     if not pairs:
-        raise GraphStoreLimitsError("Give at least one limit: timeoutMaxMs or queryMemCapacity.")
+        raise GraphStoreLimitsError(
+            "Give at least one limit: timeoutMaxMs, queryMemCapacity or "
+            "effectsThresholdUs.")
     return ValidatedLimits(pairs, needed, concurrent, assumed)
 
 
@@ -154,6 +166,7 @@ def _reading_value(reading: ShardMemory, name: str) -> Optional[int]:
     return {
         "TIMEOUT_MAX": reading.timeout_max_ms,
         "QUERY_MEM_CAPACITY": reading.query_mem_capacity,
+        "EFFECTS_THRESHOLD": reading.effects_threshold_us,
     }[name]
 
 

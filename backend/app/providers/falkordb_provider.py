@@ -1836,6 +1836,104 @@ class FalkorDBProvider(GraphDataProvider):
             if value is not None:
                 slot[key] = int(value)
 
+    # ── Replication: how far behind the replicas of a graph's node are ──
+    #
+    # A rollup rebuild writes thousands of small batches to ONE node, and
+    # FalkorDB replicates a write query below EFFECTS_THRESHOLD by having
+    # every replica RE-RUN it — on the replica's main thread, with no
+    # timeout. Nothing in the write path used to look at that, so a rebuild
+    # could outrun its replicas until buffers overflowed, resyncs looped,
+    # and the health probe killed a node that was busy applying. These two
+    # primitives are what let the pipeline pace itself against the replicas
+    # instead of only against the master's latency.
+
+    def _rollup_graph_key(self) -> str:
+        """The graph the rollups land on — the projection graph in
+        dedicated mode, which may live on a different node."""
+        if getattr(self, "_projection_mode", None) == "dedicated":
+            return f"{self._graph_name}_proj"
+        return self._graph_name
+
+    def _rollup_client(self):
+        dedicated = getattr(self, "_projection_mode", None) == "dedicated"
+        return (getattr(self, "_proj_db", None) if dedicated else None) or self._db
+
+    async def _owner_of(self, graph_key: Optional[str] = None):
+        """``(connection, node)`` for the node owning ``graph_key`` — the
+        node itself in cluster mode, ``None`` (the only node) otherwise."""
+        from .shard_capacity import _owner
+
+        db = self._rollup_client()
+        conn = getattr(db, "connection", None)
+        if conn is None:
+            return None, None
+        key = graph_key or self._rollup_graph_key()
+        mode = getattr(self._conn_cfg, "mode", None)
+        _endpoint, node = await _owner(conn, mode, key, refresh=False)
+        return conn, node
+
+    async def replication_state(
+        self, graph_key: Optional[str] = None, *, timeout_s: float = 3.0,
+    ) -> Dict[str, Any]:
+        """``INFO replication`` on the node the rollups are written to.
+
+        Returns the parsed state (role, connected replicas, per-replica
+        offsets and lag, link status) or ``{}`` when it cannot be read.
+        Never raises: replication awareness is a governor on the write
+        rate, and a governor that can fail a run is worse than none.
+        """
+        from backend.app.services.graph_store import info_parse
+
+        try:
+            conn, node = await self._owner_of(graph_key)
+            if conn is None:
+                return {}
+            async with asyncio.timeout(timeout_s):
+                if node is not None:
+                    raw = await conn.execute_command(
+                        "INFO", "replication", target_nodes=node)
+                else:
+                    raw = await conn.info("replication")
+        except Exception as exc:                      # noqa: BLE001 — by contract
+            logger.debug("FalkorDB %s: replication state unreadable: %s",
+                         self._graph_name, exc)
+            return {}
+        return info_parse.replication_stats(info_parse.parse_info_text(raw))
+
+    async def wait_for_replicas(
+        self, graph_key: Optional[str] = None, *,
+        min_replicas: int = 1, timeout_ms: int = 5000,
+    ) -> Optional[int]:
+        """``WAIT`` on the node the rollups are written to: how many
+        replicas have acknowledged everything written so far.
+
+        ``None`` when the question could not be asked at all (no client, a
+        refusal) — the caller then proceeds rather than holding on a
+        reading it does not have. The count may be below ``min_replicas``;
+        that is the signal to slow down, not an error.
+        """
+        try:
+            conn, node = await self._owner_of(graph_key)
+            if conn is None:
+                return None
+            budget = max(0.5, timeout_ms / 1000 + 1.0)
+            async with asyncio.timeout(budget):
+                if node is not None:
+                    acked = await conn.execute_command(
+                        "WAIT", int(min_replicas), int(timeout_ms), target_nodes=node)
+                else:
+                    acked = await conn.execute_command(
+                        "WAIT", int(min_replicas), int(timeout_ms))
+        except Exception as exc:                      # noqa: BLE001 — by contract
+            logger.debug("FalkorDB %s: WAIT unavailable: %s", self._graph_name, exc)
+            return None
+        if isinstance(acked, (list, tuple)) and acked:
+            acked = acked[0]
+        try:
+            return int(acked)
+        except (TypeError, ValueError):
+            return None
+
     def _endpoint_label(self) -> str:
         """``host:port`` of the configured endpoint, for log lines."""
         cfg = self._conn_cfg
@@ -2346,10 +2444,18 @@ class FalkorDBProvider(GraphDataProvider):
                     ),
                     timeout=t,
                 )
-            finally:
-                # Record latency regardless of success/failure so quiesce
-                # trips even when slow writes are also erroring out (the
-                # symptom we'd want to back off from).
+            except Exception as exc:
+                # A write that FAILED slowly is still a slow write — that is
+                # the symptom to back off from. But a refused connection
+                # returns in about a millisecond, and recording those
+                # near-zero samples DILUTES the p95: a burst of instant
+                # failures could un-arm a quiesce a genuinely slow node had
+                # just earned. Connection faults are the outage path's
+                # business, not the pacing circuit's.
+                if not _is_transient_connection_error(exc):
+                    self._record_write_latency(time.monotonic() - t_start)
+                raise
+            else:
                 self._record_write_latency(time.monotonic() - t_start)
 
         async with self._write_semaphore:

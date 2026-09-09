@@ -95,7 +95,8 @@ def _now() -> str:
 _ADAPTED_LIVE_KEYS = ("scan_width", "scan_width_min", "scan_shrinks",
                       "extract_concurrency", "reconcile_strategy", "write_batch",
                       "delete_chunk", "timeout_retries", "memory_flushes",
-                      "rss_high_water_mb", "mem_limit_mb")
+                      "rss_high_water_mb", "mem_limit_mb",
+                      "replica_waits", "replica_holds", "replica_max_lag_bytes")
 
 #: The pipeline knobs an operator may change on the RUNNING job (PATCH
 #: …/limits): the worker's watchdog re-reads them from the row and hands
@@ -103,7 +104,8 @@ _ADAPTED_LIVE_KEYS = ("scan_width", "scan_width_min", "scan_shrinks",
 #: budgets read per query, pacing per write, concurrency per wave, the scan
 #: width cap on every read of the sticky width.
 _LIVE_PIPELINE_KEYS = ("scan_timeout_s", "write_timeout_s", "write_pacing_ratio",
-                       "extract_concurrency", "scan_width")
+                       "extract_concurrency", "scan_width",
+                       "replica_ack_min", "replica_ack_timeout_ms")
 
 
 def _adapted_scalars(adapted: Any) -> dict:

@@ -16,6 +16,7 @@ export const DEFAULT_WALL_SECS = 86_400
 export const DEFAULT_PACING = 1
 export const DEFAULT_CONCURRENCY = 1
 export const DEFAULT_SCAN_WIDTH = 200_000
+export const DEFAULT_REPLICA_ACK = 1
 export const MAX_PACING = 10
 
 export interface LimitsInForce {
@@ -84,8 +85,10 @@ export interface ShapeInForce {
     scanWidth: number
     /** The width the pressure ladder has narrowed to right now, when it has. */
     scanWidthNow: number | null
-    /** Which of the three are live changes on this run. */
-    live: { pacing: boolean; concurrency: boolean; scanWidth: boolean }
+    /** Replicas of the write node that must confirm each batch; 0 = none. */
+    replicaAckMin: number
+    /** Which of these are live changes on this run. */
+    live: { pacing: boolean; concurrency: boolean; scanWidth: boolean; replicaAck: boolean }
 }
 
 /** The scan shape the job is running with: live changes first, then the run record, then the defaults. */
@@ -98,10 +101,12 @@ export function shapeInForce(job: AggregationJobResponse): ShapeInForce {
         extractConcurrency: live?.extract_concurrency ?? eff?.extract_concurrency ?? DEFAULT_CONCURRENCY,
         scanWidth: live?.scan_width ?? eff?.scan_range_width ?? DEFAULT_SCAN_WIDTH,
         scanWidthNow: typeof now === 'number' ? now : null,
+        replicaAckMin: live?.replica_ack_min ?? eff?.replica_ack_min ?? DEFAULT_REPLICA_ACK,
         live: {
             pacing: live?.write_pacing_ratio != null,
             concurrency: live?.extract_concurrency != null,
             scanWidth: live?.scan_width != null,
+            replicaAck: live?.replica_ack_min != null,
         },
     }
 }
@@ -125,9 +130,20 @@ export function halveScansPatch(job: AggregationJobResponse): JobLimitsPatch {
     return { scanWidth: Math.max(1, Math.floor(base / 2)) }
 }
 
+/** Wait for one more replica of the write node to confirm each batch — the
+ *  control for a rebuild that is outrunning the store's replicas. */
+export function waitForReplicasPatch(job: AggregationJobResponse): JobLimitsPatch {
+    return { replicaAckMin: Math.min(5, shapeInForce(job).replicaAckMin + 1) }
+}
+
+/** Stop waiting for replicas — releases a run held behind a lagging replica. */
+export function releaseReplicaWaitPatch(): JobLimitsPatch {
+    return { replicaAckMin: 0 }
+}
+
 /** Clear every live shape change — back to the job's settings. */
 export function backToSettingsPatch(): JobLimitsPatch {
-    return { reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth'] }
+    return { reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin'] }
 }
 
 export function formatWindow(seconds: number): string {
@@ -146,9 +162,14 @@ const FIELD_LABEL: Record<string, string> = {
     write_pacing_ratio: 'write pacing',
     extract_concurrency: 'read concurrency',
     scan_width: 'scan width',
+    replica_ack_min: 'replica acknowledgement',
+    replica_ack_timeout_ms: 'replica ack timeout',
 }
 
-const SHAPE_FIELDS = new Set(['write_pacing_ratio', 'extract_concurrency', 'scan_width'])
+const SHAPE_FIELDS = new Set([
+    'write_pacing_ratio', 'extract_concurrency', 'scan_width',
+    'replica_ack_min', 'replica_ack_timeout_ms',
+])
 
 /** One history entry as a sentence: "ops@x raised the stall window 3 h → 6 h", "ops@x set the write pacing 1× → 2×". */
 export function describeChange(entry: LiveLimitChange): string {
@@ -160,6 +181,8 @@ export function describeChange(entry: LiveLimitChange): string {
             case 'write_pacing_ratio': return `${v}×`
             case 'extract_concurrency': return `${v} at a time`
             case 'scan_width': return `${v.toLocaleString()} rows`
+            case 'replica_ack_min': return v === 0 ? 'no wait' : `${v} replica${v === 1 ? '' : 's'}`
+            case 'replica_ack_timeout_ms': return `${v} ms`
             default: return formatWindow(v)
         }
     }

@@ -21,7 +21,8 @@ import type { AggregationJobResponse, JobLimitsPatch } from '@/services/aggregat
 import { timeAgo } from './shared'
 import {
     backToSettingsPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
-    limitsInForce, pacePatch, perQueryPatch, secondsLeft, serialReadsPatch, shapeInForce,
+    limitsInForce, pacePatch, perQueryPatch, releaseReplicaWaitPatch, secondsLeft, serialReadsPatch,
+    shapeInForce, waitForReplicasPatch,
 } from './timeLimits'
 
 const BUTTON = 'px-2 py-1 rounded-md border border-glass-border text-[11px] font-semibold text-ink hover:border-indigo-500/40 hover:text-indigo-500 transition-colors disabled:opacity-40'
@@ -131,6 +132,7 @@ export function AdjustRunningJob({ job, onAdjust, busy }: {
                                 {' · '}{shape.extractConcurrency === 1 ? 'serial reads' : `${shape.extractConcurrency} reads at a time`}{shape.live.concurrency && <Live />}
                                 {' · '}scans {shape.scanWidth.toLocaleString()} rows{shape.live.scanWidth && <Live />}
                                 {shape.scanWidthNow != null && shape.scanWidthNow < shape.scanWidth && ` (narrowed to ${shape.scanWidthNow.toLocaleString()} by the ladder)`}
+                                {' · '}{shape.replicaAckMin === 0 ? 'no replica wait' : `waits for ${shape.replicaAckMin} replica${shape.replicaAckMin === 1 ? '' : 's'}`}{shape.live.replicaAck && <Live />}
                             </span>
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
@@ -139,12 +141,14 @@ export function AdjustRunningJob({ job, onAdjust, busy }: {
                             <button type="button" disabled={busy} className={BUTTON} onClick={send(pacePatch(job, 4))} title="Sleep four times as long after every write">Pace ×4</button>
                             <button type="button" disabled={busy || shape.extractConcurrency === 1} className={BUTTON} onClick={send(serialReadsPatch())} title="One read scan at a time from the next wave">Serial reads</button>
                             <button type="button" disabled={busy} className={BUTTON} onClick={send(halveScansPatch(job))} title="Cap the scan width at half of what it scans with now">Halve scans</button>
+                            <button type="button" disabled={busy || shape.replicaAckMin >= 5} className={BUTTON} onClick={send(waitForReplicasPatch(job))} title="Wait for one more replica of the graph store node to confirm each write before sending the next">Wait for replicas</button>
+                            <button type="button" disabled={busy || shape.replicaAckMin === 0} className={BUTTON} onClick={send(releaseReplicaWaitPatch())} title="Stop waiting for replicas — releases a run held behind one that is behind">Stop waiting</button>
                             <button type="button" disabled={busy || !anyLive} className={BUTTON} onClick={send(backToSettingsPatch())} title="Clear every live change">Back to settings</button>
                         </div>
                     </section>
 
                     <p className="text-[10px] text-ink-muted">
-                        Takes effect within about thirty seconds — per-query budgets, pacing, concurrency and scan width from the next query, write, wave or scan. A cap is a ceiling: the pressure ladder may still narrow further on its own. Scan floor, chunks and rollup storage change on the next Resume or Re-trigger.
+                        Takes effect within about thirty seconds — per-query budgets, pacing, concurrency, scan width and the replica wait from the next query, write, wave or scan. A cap is a ceiling: the pressure ladder may still narrow further on its own. Waiting for replicas keeps the graph store’s copies from falling behind, which is what stops a node being restarted mid-rebuild. Scan floor, chunks and rollup storage change on the next Resume or Re-trigger.
                     </p>
                     {history.length > 0 && (
                         <ul className="space-y-0.5" aria-label="Recent limit changes">

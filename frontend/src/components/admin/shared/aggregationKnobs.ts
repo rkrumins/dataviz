@@ -23,6 +23,7 @@ export type TuningKnobKey =
     | 'shardReservePct' | 'bytesPerEdge' | 'maxMaterializedEdges'
     | 'scanTimeoutS' | 'writeTimeoutS' | 'stallTimeoutSecs' | 'maxWallSecs'
     | 'flushMemPct' | 'maxCubeEdges' | 'estimateMarginPct'
+    | 'replicaAckMin' | 'replicaAckTimeoutMs'
 
 export type KnobGroup = 'capacity' | 'reading' | 'writing' | 'timeouts'
 
@@ -144,6 +145,20 @@ export const TUNING_KNOBS: TuningKnob[] = [
         tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
         help: 'Pause between writes (0-10)',
         min: 0, max: 10, step: 0.1, float: true, group: 'writing', fallback: 1.0,
+    },
+    {
+        key: 'replicaAckMin',
+        label: 'Replica acknowledgement',
+        tip: 'How many replicas of the node a rebuild writes to must confirm each batch before the next one is sent. The graph store replicates a small write by having every replica RE-RUN it, on the replica’s main thread and with no timeout — so a rebuild that only watches the master can run its replicas into a full resync and a restarted node. Waiting makes the replicas’ real capacity the write rate. 0 waits for none (a store with no replicas, or one you deliberately let fall behind).',
+        help: 'Replicas that must confirm each write (0-5)',
+        min: 0, max: 5, group: 'writing', fallback: 1,
+    },
+    {
+        key: 'replicaAckTimeoutMs',
+        label: 'Replica ack timeout',
+        tip: 'How long one acknowledgement wait may block before the rebuild holds, says the replicas are behind, and tries again. Not a failure: the run keeps its checkpoint and its heartbeat throughout, and its time limits stay the only bound.',
+        help: 'Milliseconds per acknowledgement wait (500-60,000)',
+        min: 500, max: 60_000, step: 500, group: 'writing', fallback: 5_000,
     },
     {
         key: 'applyChunk',

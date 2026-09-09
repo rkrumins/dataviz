@@ -58,7 +58,9 @@ describe('AdjustRunningJob', () => {
         expect(screen.getByTestId('shape-in-force')).toHaveTextContent(/pacing 2× \(live\) · serial reads \(live\) · scans 200,000 rows/)
         expect(screen.getByRole('button', { name: 'Serial reads' })).toBeDisabled()
         await userEvent.click(screen.getByRole('button', { name: 'Back to settings' }))
-        expect(onAdjust).toHaveBeenLastCalledWith(expect.anything(), { reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth'] })
+        expect(onAdjust).toHaveBeenLastCalledWith(expect.anything(), {
+            reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin'],
+        })
         expect(screen.getByText(/ops@example.com set the write pacing 1× → 2×/)).toBeInTheDocument()
     })
 })

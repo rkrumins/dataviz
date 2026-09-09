@@ -191,6 +191,19 @@ class AggregationTuning(BaseModel):
                     "must not refuse a cube the exact post-compute check "
                     "would pass. Fleet-wide.",
     )
+    replica_ack_min: Optional[int] = Field(
+        None, alias="replicaAckMin", ge=0, le=5,
+        description="Replicas of the write node that must acknowledge each "
+                    "rollup batch before the next one is sent (default 1). "
+                    "Replicas re-run every write below the store's effects "
+                    "threshold, so this is what keeps a rebuild from outrunning "
+                    "them. 0 waits for none.",
+    )
+    replica_ack_timeout_ms: Optional[int] = Field(
+        None, alias="replicaAckTimeoutMs", ge=500, le=60_000,
+        description="How long one acknowledgement wait may block before the run "
+                    "holds and re-checks (default 5000 ms). Not a failure.",
+    )
     scan_shrink_floor: Optional[int] = Field(
         None, alias="scanShrinkFloor", ge=1, le=5_000_000,
         description="Narrowest scan slice the pressure ladder descends to "
@@ -454,8 +467,18 @@ class JobLimitsPatch(BaseModel):
         None, alias="scanWidth", ge=1, le=5_000_000,
         description="A cap on the scan width from the next scan; the ladder may narrow below it.",
     )
+    replica_ack_min: Optional[int] = Field(
+        None, alias="replicaAckMin", ge=0, le=5,
+        description="Replicas that must acknowledge each write, from the next batch; "
+                    "0 releases a run that is waiting on them.",
+    )
+    replica_ack_timeout_ms: Optional[int] = Field(
+        None, alias="replicaAckTimeoutMs", ge=500, le=60_000,
+        description="How long one acknowledgement wait may block, from the next batch.",
+    )
     reset: Optional[List[Literal[
         "writePacingRatio", "extractConcurrency", "scanWidth", "scanTimeoutS", "writeTimeoutS",
+        "replicaAckMin", "replicaAckTimeoutMs",
     ]]] = Field(
         None,
         description="Live values to clear — back to the job's settings from the next query.",
@@ -1190,6 +1213,8 @@ class EnvTuningDefaults(BaseModel):
     ignore_observed: Optional[bool] = Field(None, alias="ignoreObserved")
     estimate_margin_pct: Optional[int] = Field(None, alias="estimateMarginPct")
     max_cube_edges: Optional[int] = Field(None, alias="maxCubeEdges")
+    replica_ack_min: Optional[int] = Field(None, alias="replicaAckMin")
+    replica_ack_timeout_ms: Optional[int] = Field(None, alias="replicaAckTimeoutMs")
     budget_recheck_edges: Optional[int] = Field(None, alias="budgetRecheckEdges")
     # Information only (env-only): how many backoff retries a narrowest
     # scan gets before an outage is declared, the width at which RECONCILE
@@ -1537,6 +1562,14 @@ class GraphStoreLimitsPatch(BaseModel):
         None, alias="concurrentQueries", ge=1, le=256,
         description="Queries that may hold the ceiling at once, for the sizing formula; default THREAD_COUNT.",
     )
+    effects_threshold_us: Optional[int] = Field(
+        None, alias="effectsThresholdUs", ge=0, le=10_000_000,
+        description="EFFECTS_THRESHOLD, microseconds per modification. Below it a "
+                    "write is REPLICATED BY RE-RUNNING IT on every replica's main "
+                    "thread; 0 always ships a compact change log instead. A rollup "
+                    "batch sits below the 300 µs default, which is what makes a "
+                    "large rebuild stall a shard's replicas.",
+    )
     apply_to_all_nodes: bool = Field(
         False, alias="applyToAllNodes",
         description="Cluster mode: set the same limits on every primary, not only the node named.",
@@ -1545,8 +1578,11 @@ class GraphStoreLimitsPatch(BaseModel):
 
     @model_validator(mode="after")
     def _at_least_one_limit(self) -> "GraphStoreLimitsPatch":
-        if self.timeout_max_ms is None and self.query_mem_capacity is None:
-            raise ValueError("Give at least one limit: timeoutMaxMs or queryMemCapacity.")
+        if (self.timeout_max_ms is None and self.query_mem_capacity is None
+                and self.effects_threshold_us is None):
+            raise ValueError(
+                "Give at least one limit: timeoutMaxMs, queryMemCapacity or "
+                "effectsThresholdUs.")
         return self
 
     class Config:

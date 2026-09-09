@@ -169,6 +169,31 @@ def _flush_min_pairs() -> int:
     return _env_int("AGGREGATION_FLUSH_MIN_PAIRS", 100_000, 10_000, 50_000_000)
 
 
+def _replica_ack_min() -> int:
+    """How many replicas of the node the rollups land on must acknowledge a
+    write batch before the pipeline sends the next one.
+
+    This is the backpressure that keeps a rebuild from taking a shard down.
+    FalkorDB replicates a write below ``EFFECTS_THRESHOLD`` by having every
+    replica RE-RUN the query — on the replica's main thread, with no
+    timeout — so a rebuild that paces itself only against the master's
+    latency can run the replicas into their output buffers, a full resync,
+    and a health probe that kills a node busy applying. Waiting for the
+    acknowledgement makes the replicas' real capacity the write rate.
+
+    0 disables the wait (a deployment with no replicas, or one that
+    deliberately lets them fall behind). Fleet-wide and per job as
+    ``replicaAckMin``; raisable and lowerable on a RUNNING job."""
+    return _env_int("AGGREGATION_REPLICA_ACK_MIN", 1, 0, 5)
+
+
+def _replica_ack_timeout_ms() -> int:
+    """How long one acknowledgement wait may block before the pipeline
+    treats the replicas as behind and holds. Not a failure — the hold
+    heartbeats, re-reads the replication state and tries again."""
+    return _env_int("AGGREGATION_REPLICA_ACK_TIMEOUT_MS", 5_000, 500, 60_000)
+
+
 def _delete_chunk() -> int:
     return _env_int("AGGREGATION_DELETE_CHUNK", 10_000, 100, 50_000)
 
@@ -407,6 +432,8 @@ def env_tuning_defaults() -> Dict[str, Any]:
         "reconcile_keys_only_width": _reconcile_keys_only_width(),
         "server_timeout_max_ms": int(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS),
         "flush_mem_pct": _flush_mem_pct(),
+        "replica_ack_min": _replica_ack_min(),
+        "replica_ack_timeout_ms": _replica_ack_timeout_ms(),
         "flush_min_pairs": _flush_min_pairs(),
     }
 
@@ -448,6 +475,8 @@ def resolve_effective_tuning(
     _num("write_timeout_s", lambda: float(bulk_timeout_default), 5.0, 600.0, float)
     _num("flush_mem_pct", _flush_mem_pct, 30, 90, int)
     _num("max_cube_edges", _max_cube_edges, 10_000, 50_000_000, int)
+    _num("replica_ack_min", _replica_ack_min, 0, 5, int)
+    _num("replica_ack_timeout_ms", _replica_ack_timeout_ms, 500, 60_000, int)
     _num("estimate_margin_pct", estimate_margin_pct_default, 0, 100, int)
     values["scan_shrink_floor"] = min(values["scan_shrink_floor"], values["scan_range_width"])
 
@@ -870,6 +899,20 @@ class AggregationPipeline:
         self._flush_min_pairs = _flush_min_pairs()
         self._memory_flushes = 0
         self._memory_rollups = 0
+        # Replication backpressure: how many replicas must acknowledge each
+        # write batch, how long one wait may block, and what the waiting
+        # cost this run (for the record and the run settings panel).
+        self._replica_ack_min = self._knob_int("replica_ack_min", _replica_ack_min, 0, 5)
+        self._replica_ack_timeout_ms = self._knob_int(
+            "replica_ack_timeout_ms", _replica_ack_timeout_ms, 500, 60_000)
+        self._replica_waits = 0
+        self._replica_wait_s = 0.0
+        self._replica_holds = 0
+        self._replica_max_lag_bytes = 0
+        self._repl_state: Dict[str, Any] = {}
+        self._repl_state_at = 0.0
+        self._no_replicas_logged = False
+        self._replication_advisory: Optional[Dict[str, Any]] = None
         self._rss_high_water_mb: Optional[float] = None
         self._mem_limit_mb: Optional[float] = None
         # Values an operator may raise on a RUNNING job (stall/wall windows
@@ -1029,6 +1072,144 @@ class AggregationPipeline:
             return None
         ceiling = self._knob_int("scan_range_width", _scan_range_width, 10_000, 5_000_000)
         return max(self._scan_floor, min(ceiling, width))
+
+    def _live_replica_ack_min(self) -> int:
+        """How many replicas must acknowledge each write, in force now: a
+        value set on the RUNNING job wins over the knob (0 ends a hold
+        immediately — the operator's escape hatch)."""
+        live = self._live.get("replica_ack_min")
+        if live is None:
+            return self._replica_ack_min
+        try:
+            return max(0, min(5, int(live)))
+        except (TypeError, ValueError):
+            return self._replica_ack_min
+
+    def _live_replica_ack_timeout_ms(self) -> int:
+        live = self._live.get("replica_ack_timeout_ms")
+        if live is None:
+            return self._replica_ack_timeout_ms
+        try:
+            return max(500, min(60_000, int(live)))
+        except (TypeError, ValueError):
+            return self._replica_ack_timeout_ms
+
+    async def _replication_state(self, *, max_age_s: float = 60.0) -> Dict[str, Any]:
+        """The write node's replication state, re-read at most every
+        ``max_age_s``. One INFO a minute, not one per batch."""
+        now = time.monotonic()
+        if self._repl_state and now - self._repl_state_at < max_age_s:
+            return self._repl_state
+        read = getattr(self.p, "replication_state", None)
+        state = await read() if read is not None else {}
+        self._repl_state = state or {}
+        self._repl_state_at = now
+        return self._repl_state
+
+    def _note_replica_lag(self, state: Dict[str, Any]) -> Optional[int]:
+        lags = [r.get("lagBytes") for r in state.get("replicas", [])
+                if r.get("lagBytes") is not None]
+        worst = max(lags) if lags else None
+        if worst is not None:
+            self._replica_max_lag_bytes = max(self._replica_max_lag_bytes, int(worst))
+        return worst
+
+    async def _replica_gate(self) -> float:
+        """Hold until the write node's replicas have caught up.
+
+        Returns the seconds spent waiting, which the caller folds into the
+        write's own duration — so a replica-bound shard shrinks batches and
+        paces longer exactly as a slow master does, instead of the pipeline
+        cheerfully writing faster than the replicas can apply.
+
+        Never fails a run. No replicas attached, no way to ask, or a
+        governor turned off: the write proceeds. Replicas that are simply
+        behind: the pipeline waits, heartbeating, until they are not — the
+        job's stall window and wall clock (both raisable while it runs)
+        remain the only bound, and lowering ``replicaAckMin`` to 0 ends any
+        hold at once.
+        """
+        want = self._live_replica_ack_min()
+        if want <= 0:
+            return 0.0
+        state = await self._replication_state()
+        attached = int(state.get("connectedReplicas") or 0)
+        if attached <= 0:
+            if not self._no_replicas_logged:
+                self._no_replicas_logged = True
+                logger.info(
+                    "aggregation pipeline on %s: the write node reports no "
+                    "replicas — replication backpressure is off for this run.",
+                    self.p._graph_name,
+                )
+            return 0.0
+        # Never wait for more replicas than exist: a fleet default of 2
+        # against a one-replica shard would hold on every batch forever.
+        target = min(want, attached)
+        wait_for = getattr(self.p, "wait_for_replicas", None)
+        if wait_for is None:
+            return 0.0
+        started = time.monotonic()
+        acked = await wait_for(
+            min_replicas=target, timeout_ms=self._live_replica_ack_timeout_ms())
+        waited = time.monotonic() - started
+        if acked is None:
+            return 0.0
+        self._replica_waits += 1
+        self._replica_wait_s += waited
+        if acked >= target:
+            return waited
+        return waited + await self._hold_for_replicas(target)
+
+    async def _hold_for_replicas(self, target: int) -> float:
+        """Wait out replicas that are behind, saying why, until they catch
+        up or the operator lowers the bar."""
+        self._replica_holds += 1
+        started = time.monotonic()
+        attempt = 0
+        while True:
+            if self._live_replica_ack_min() <= 0:
+                logger.info(
+                    "aggregation pipeline on %s: replica acknowledgement turned "
+                    "off while waiting — continuing.", self.p._graph_name,
+                )
+                break
+            self._cancel_check()
+            await self._ladder_heartbeat()
+            state = await self._replication_state(max_age_s=0.0)
+            lag = self._note_replica_lag(state)
+            attached = int(state.get("connectedReplicas") or 0)
+            if attached <= 0:
+                # The replicas went away entirely: that is the topology's
+                # problem, not this batch's — the Graph store page says so.
+                break
+            waiting_on = min(target, attached)
+            if attempt == 0 or attempt % 4 == 0:
+                logger.warning(
+                    "aggregation pipeline on %s: waiting for %d replica(s) of the "
+                    "write node to catch up%s — the rebuild is going at the "
+                    "replicas' pace.",
+                    self.p._graph_name, waiting_on,
+                    f" (up to {lag:,} bytes behind)" if lag else "",
+                )
+            await asyncio.sleep(_backoff_s(min(attempt, 4)))
+            attempt += 1
+            acked = await self.p.wait_for_replicas(
+                min_replicas=waiting_on,
+                timeout_ms=self._live_replica_ack_timeout_ms(),
+            )
+            if acked is None or acked >= waiting_on:
+                break
+        held = time.monotonic() - started
+        if held >= 60.0:
+            self._pressure_log.append({
+                "scan": "apply", "kind": "replica_lag",
+                "held_s": round(held, 1),
+                "lag_bytes": self._replica_max_lag_bytes or None,
+            })
+            if len(self._pressure_log) > 8:
+                del self._pressure_log[0]
+        return held
 
     def _effective_conc(self) -> int:
         """Wave concurrency in force: the knob, capped by a value set on the
@@ -1302,6 +1483,8 @@ class AggregationPipeline:
 
     def _result(self, affected: int = 0) -> Dict[str, Any]:
         advisories = self._conformance_advisories()
+        if self._replication_advisory is not None:
+            advisories = [*advisories, self._replication_advisory]
         return {
             "processed": self._scanned,
             "aggregated_edges_affected": affected,
@@ -1377,6 +1560,7 @@ class AggregationPipeline:
                         self._pressure_log or self._scan_min_width is not None
                         or self._hints_applied or self._live
                         or self._memory_flushes or self._memory_rollups
+                        or self._replica_waits or self._replica_holds
                     ) else {}
                 ),
                 # The per-query ceiling the ladder narrows against, when the
@@ -1463,6 +1647,11 @@ class AggregationPipeline:
         else:
             result = await coro_factory()
         elapsed = time.monotonic() - t0
+        # Wait for the replicas before the next batch. Their wait counts as
+        # part of THIS write's duration, so the AIMD sizer and the pacing
+        # sleep both see a replica-bound shard for what it is: a slow write
+        # path that wants smaller batches and more room between them.
+        elapsed += await self._replica_gate()
         pace = elapsed * self._live_pacing_ratio()
         if pace > 0:
             await asyncio.sleep(min(pace, 30.0))
@@ -1853,6 +2042,13 @@ class AggregationPipeline:
             out["by_scan"] = {k: dict(v) for k, v in self._by_scan.items()}
         if self._hints_applied:
             out["from_last_run"] = dict(self._hints_applied)
+        if self._replica_waits or self._replica_holds:
+            out["replica_waits"] = self._replica_waits
+            out["replica_wait_s"] = round(self._replica_wait_s, 1)
+            if self._replica_holds:
+                out["replica_holds"] = self._replica_holds
+            if self._replica_max_lag_bytes:
+                out["replica_max_lag_bytes"] = self._replica_max_lag_bytes
         if self._memory_flushes or self._memory_rollups:
             out["memory_flushes"] = self._memory_flushes
             out["memory_rollups"] = self._memory_rollups
@@ -2469,11 +2665,52 @@ class AggregationPipeline:
 
     async def _capacity_baseline(self) -> None:
         """E0 for the growth budget on every run; the shard's ``used`` for
-        the calibration on a FRESH run only (a resumed run's start is gone)."""
+        the calibration on a FRESH run only (a resumed run's start is gone).
+        Also the run's first look at how the write node replicates."""
         self._edges_before = await self._count_aggregated()
         if self._fresh_run:
             shard = await self._read_shard()
             self._used_before = shard.used if shard.measurable else None
+        await self._check_replication_shape()
+
+    async def _check_replication_shape(self) -> None:
+        """Warn when this shard's replicas will RE-RUN every rollup batch.
+
+        FalkorDB ships a write to its replicas as a compact change log only
+        when the average time per modification exceeds ``EFFECTS_THRESHOLD``
+        (300 µs by default). A rollup batch is thousands of cheap MERGEs, so
+        it falls below that and each replica repeats the whole query on its
+        main thread, answering no health check while it works. The rebuild
+        still completes — it paces itself against the acknowledgements — but
+        the fix is one setting, so the run says so.
+        """
+        state = await self._replication_state()
+        attached = int(state.get("connectedReplicas") or 0)
+        if attached <= 0:
+            return
+        self._note_replica_lag(state)
+        shard = self._last_budget.shard if self._last_budget is not None else None
+        threshold = getattr(shard, "effects_threshold_us", None) if shard else None
+        if threshold is None:
+            threshold = getattr(await self._read_shard(), "effects_threshold_us", None)
+        if threshold is None or threshold <= 0:
+            return
+        endpoint = getattr(shard, "endpoint", None) or self.p._endpoint_label()
+        self._replication_advisory = {
+            "kind": "effects_threshold",
+            "endpoint": endpoint,
+            "effects_threshold_us": int(threshold),
+            "replicas": attached,
+            "detail": (
+                f"{attached} replica(s) of {endpoint} re-run every rollup write on "
+                f"their main thread (effects threshold {threshold} µs). Set it to 0 "
+                f"from Admin → Graph store so they apply a change log instead."
+            ),
+        }
+        logger.warning(
+            "aggregation pipeline on %s: %s",
+            self.p._graph_name, self._replication_advisory["detail"],
+        )
 
     async def _calibrate(self) -> None:
         """What this run actually cost the shard per NEW edge, for the next

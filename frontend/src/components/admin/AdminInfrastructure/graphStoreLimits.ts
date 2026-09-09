@@ -33,13 +33,15 @@ export interface LimitsDraft {
     containerGb: string
     /** Queries that may hold the ceiling at once, for the formula. */
     concurrent: string
+    /** EFFECTS_THRESHOLD, microseconds per modification; absent or '' leaves it alone. */
+    effectsUs?: string
     applyToAll: boolean
 }
 
 export interface LimitsPlan {
     /** The request to send, or null while nothing changed or something blocks it. */
     patch: GraphStoreLimitsPatch | null
-    changes: { name: 'TIMEOUT_MAX' | 'QUERY_MEM_CAPACITY'; from: string; to: string }[]
+    changes: { name: 'TIMEOUT_MAX' | 'QUERY_MEM_CAPACITY' | 'EFFECTS_THRESHOLD'; from: string; to: string }[]
     /** What to add to FALKORDB_ARGS to keep the change across a restart. */
     fragment: string
     resultingCap: number | null
@@ -124,6 +126,29 @@ export function planLimits(shard: ShardCapacity | null | undefined, draft: Limit
             if (raising && container != null) patch.containerMemoryBytes = container
             changes.push({ name: 'QUERY_MEM_CAPACITY', from: currentCap != null ? compactBytes(currentCap) : 'unlimited', to: compactBytes(capBytes) })
             fragment.push(`QUERY_MEM_CAPACITY ${capBytes}`)
+        }
+    }
+    // How the node replicates a write. Below the threshold every replica
+    // RE-RUNS the query on its main thread; 0 always ships a compact change
+    // log instead. This is the setting that keeps a large rebuild from
+    // stalling a shard's replicas, so the dialog offers it beside the two
+    // ceilings — it costs no memory and needs no formula.
+    const effectsRaw = parse(draft.effectsUs ?? '')
+    const currentEffects = shard.effectsThresholdUs ?? null
+    if (effectsRaw != null && Math.round(effectsRaw) !== currentEffects) {
+        const us = Math.round(effectsRaw)
+        if (us < 0) {
+            problems.push('The effects threshold cannot be negative — 0 means every write replicates as a change log.')
+        } else if (us > 10_000_000) {
+            problems.push('The effects threshold must be at most 10,000,000 µs.')
+        } else {
+            patch.effectsThresholdUs = us
+            changes.push({
+                name: 'EFFECTS_THRESHOLD',
+                from: currentEffects != null ? `${currentEffects} µs` : 'unknown',
+                to: us === 0 ? '0 (always a change log)' : `${us} µs`,
+            })
+            fragment.push(`EFFECTS_THRESHOLD ${us}`)
         }
     }
     if (draft.applyToAll && changes.length) patch.applyToAllNodes = true

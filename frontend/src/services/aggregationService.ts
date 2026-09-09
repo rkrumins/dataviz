@@ -17,6 +17,12 @@ export interface AggregationTuning {
   extractConcurrency?: number | null;  // 1 .. 4
   /** Share of the worker's memory limit at which the pipeline flushes early (fleet-wide). 30 .. 90 */
   flushMemPct?: number | null;
+  /** Replicas of the write node that must acknowledge each rollup batch before
+   *  the next is sent. Replicas RE-RUN every write below the store's effects
+   *  threshold, so this is what keeps a rebuild from outrunning them. 0 = none. */
+  replicaAckMin?: number | null;
+  /** How long one acknowledgement wait may block before the run holds and re-checks. */
+  replicaAckTimeoutMs?: number | null;
   /** Fleet knobs: Auto's cube ceiling and the slack on the pre-compute estimate. */
   maxCubeEdges?: number | null;
   estimateMarginPct?: number | null;
@@ -165,11 +171,16 @@ export interface LiveOverrides {
   write_pacing_ratio?: number;
   extract_concurrency?: number;
   scan_width?: number;
+  /** Replication backpressure changed on the running job: replicas that must
+   *  confirm each write (0 releases a run held behind one that is behind). */
+  replica_ack_min?: number;
+  replica_ack_timeout_ms?: number;
   history?: LiveLimitChange[];
 }
 
 /** Live values a patch may clear — back to the job's settings. */
-export type LiveResetKey = 'writePacingRatio' | 'extractConcurrency' | 'scanWidth' | 'scanTimeoutS' | 'writeTimeoutS';
+export type LiveResetKey = 'writePacingRatio' | 'extractConcurrency' | 'scanWidth' | 'scanTimeoutS' | 'writeTimeoutS'
+  | 'replicaAckMin' | 'replicaAckTimeoutMs';
 
 /**
  * What can be changed on a pending or running job without cancelling it: the
@@ -192,6 +203,8 @@ export interface JobLimitsPatch {
   extractConcurrency?: number;
   /** A cap on the scan width (1 .. 5,000,000), from the next scan. */
   scanWidth?: number;
+  replicaAckMin?: number;
+  replicaAckTimeoutMs?: number;
   /** Live values to clear — back to the job's settings. */
   reset?: LiveResetKey[];
 }
@@ -211,6 +224,8 @@ export interface EffectiveTuningSnapshot {
   delete_chunk?: number;
   write_pacing_ratio?: number;
   extract_concurrency?: number;
+  replica_ack_min?: number;
+  replica_ack_timeout_ms?: number;
   materialize_leaf_pairs?: boolean;
   materialize_fine_pairs?: 'auto' | 'true' | 'false' | string;
   max_materialized_edges?: number | null;
@@ -263,12 +278,19 @@ export interface AdaptedRunState {
   memory_rollups?: number;
   rss_high_water_mb?: number;
   mem_limit_mb?: number;
+  /** Replication backpressure: waits for the write node's replicas, holds when
+   *  they fell behind, and the worst lag seen. */
+  replica_waits?: number;
+  replica_wait_s?: number;
+  replica_holds?: number;
+  replica_max_lag_bytes?: number;
   pressure?: PressureEvent[];
   by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
   /** What the previous run of this source taught it, applied at the start. */
   from_last_run?: Record<string, number | string>;
   /** What an operator changed on the running job, in force now. */
-  live?: Partial<Record<'scan_timeout_s' | 'write_timeout_s' | 'write_pacing_ratio' | 'extract_concurrency' | 'scan_width', number>>;
+  live?: Partial<Record<'scan_timeout_s' | 'write_timeout_s' | 'write_pacing_ratio' | 'extract_concurrency' | 'scan_width'
+    | 'replica_ack_min' | 'replica_ack_timeout_ms', number>>;
 }
 
 export interface AggregationRunStats {
@@ -428,6 +450,8 @@ export interface EnvTuningDefaults {
   serverTimeoutMaxMs?: number | null;
   /** The memory-aware flush: the share of the worker's memory limit it fires at (a fleet knob). */
   flushMemPct?: number | null;
+  replicaAckMin?: number | null;
+  replicaAckTimeoutMs?: number | null;
   /** Information only: pairs the accumulator must hold before a memory-aware flush fires. */
   flushMinPairs?: number | null;
 }
@@ -518,6 +542,9 @@ export interface ShardCapacity {
   reservedByJobs?: number | null;
   /** The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes; null when unlimited or unreadable. */
   queryMemCapacity?: number | null;
+  /** How this node replicates writes: µs per modification below which a write is
+   *  re-run on every replica instead of shipped as a change log. */
+  effectsThresholdUs?: number | null;
   /** The node's per-query time cap (TIMEOUT_MAX) and its default, ms — what
    *  every timeout knob is really clamped to; null when unlimited or unreadable. */
   timeoutMaxMs?: number | null;
@@ -589,6 +616,10 @@ export interface GraphStoreLimitsPatch {
   containerMemoryBytes?: number;
   /** Queries that may hold the ceiling at once, for the sizing formula (at most, and by default, THREAD_COUNT). */
   concurrentQueries?: number;
+  /** EFFECTS_THRESHOLD, microseconds per modification. Below it a write is
+   *  replicated by RE-RUNNING it on every replica's main thread; 0 always ships
+   *  a compact change log instead. A rollup batch sits below the 300 default. */
+  effectsThresholdUs?: number;
   /** Cluster mode: set the same limits on every primary, not only the node named. */
   applyToAllNodes?: boolean;
 }

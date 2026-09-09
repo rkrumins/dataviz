@@ -19,6 +19,7 @@ const NUMERIC_TUNING_KEYS: (keyof AggregationTuning)[] = [
     'extractConcurrency', 'maxMaterializedEdges', 'shardReservePct', 'bytesPerEdge',
     'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS', 'stallTimeoutSecs', 'maxWallSecs',
     'flushMemPct', 'maxCubeEdges', 'estimateMarginPct',
+    'replicaAckMin', 'replicaAckTimeoutMs',
 ]
 
 describe('the knob catalogue', () => {
@@ -45,6 +46,11 @@ describe('the knob catalogue', () => {
         expect([KNOB_BY_KEY.estimateMarginPct.min, KNOB_BY_KEY.estimateMarginPct.max]).toEqual([0, 100])
         expect(KNOB_BY_KEY.maxCubeEdges.fleetOnly).toBe(true)
         expect(KNOB_BY_KEY.estimateMarginPct.fleetOnly).toBe(true)
+        // Replication backpressure: a per-job knob too, because it is the
+        // control an operator reaches for on a rebuild that is stalling a shard.
+        expect([KNOB_BY_KEY.replicaAckMin.min, KNOB_BY_KEY.replicaAckMin.max]).toEqual([0, 5])
+        expect([KNOB_BY_KEY.replicaAckTimeoutMs.min, KNOB_BY_KEY.replicaAckTimeoutMs.max]).toEqual([500, 60_000])
+        expect(KNOB_BY_KEY.replicaAckMin.fleetOnly).toBeUndefined()
     })
 
     it('says when a per-query timeout is past the graph store’s own cap', () => {

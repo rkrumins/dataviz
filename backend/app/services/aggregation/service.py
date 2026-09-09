@@ -458,6 +458,8 @@ _LIVE_RESET_FIELDS = {
     "scanWidth": "scan_width",
     "scanTimeoutS": "scan_timeout_s",
     "writeTimeoutS": "write_timeout_s",
+    "replicaAckMin": "replica_ack_min",
+    "replicaAckTimeoutMs": "replica_ack_timeout_ms",
 }
 
 
@@ -1503,6 +1505,7 @@ class AggregationService:
         for field in (
             "max_wall_secs", "scan_timeout_s", "write_timeout_s",
             "write_pacing_ratio", "extract_concurrency", "scan_width",
+            "replica_ack_min", "replica_ack_timeout_ms",
         ):
             value = getattr(patch, field)
             if value is not None:
