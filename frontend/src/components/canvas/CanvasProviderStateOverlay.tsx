@@ -144,11 +144,15 @@ export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePi
       <div
         role="status"
         aria-live="polite"
+        // Opaque on purpose: the pill floats over a busy canvas and has to stay
+        // legible. (`bg-canvas-elevated/90` would paint NOTHING — the token is
+        // a bare var() and an alpha suffix emits no rule; the amber variant is
+        // a real palette colour and keeps its alpha in dark mode.)
         className={cn(
-          'pointer-events-auto flex items-center gap-2.5 rounded-full border py-1.5 pl-3.5 pr-2 text-xs shadow-lg backdrop-blur-sm',
+          'pointer-events-auto flex items-center gap-2.5 rounded-full border py-1.5 pl-3.5 pr-2 text-xs shadow-lg',
           calm
-            ? 'border-glass-border bg-canvas-elevated/90 text-ink shadow-black/10'
-            : 'border-amber-300/60 bg-amber-50 text-amber-800 shadow-amber-500/10 dark:border-amber-500/30 dark:bg-amber-950/60 dark:text-amber-300',
+            ? 'border-glass-border bg-canvas-elevated text-ink shadow-black/10'
+            : 'border-amber-300/60 bg-amber-50 text-amber-800 shadow-amber-500/10 backdrop-blur-sm dark:border-amber-500/30 dark:bg-amber-950/60 dark:text-amber-300',
         )}
       >
         <span
