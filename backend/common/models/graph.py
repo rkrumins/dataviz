@@ -669,7 +669,10 @@ class AggregatedEdgeResult(BaseModel):
     # per-query memory ceiling or time limit, at the narrowest page or batch
     # the read-side ladder goes to — what it could read is kept),
     # "source_changed" (source data changed; rebuild in flight — overlaid
-    # post-cache, so cached/composed reads reflect it too).
+    # post-cache, so cached/composed reads reflect it too),
+    # "failing_over" (the graph store node holding this graph is restarting
+    # or being replaced; this answer is the last good one, and the client
+    # retries per Retry-After).
     stale: bool = False
     stale_reason: Optional[str] = Field(default=None, alias="staleReason")
     stamp_version: Optional[int] = Field(default=None, alias="stampVersion")

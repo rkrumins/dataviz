@@ -3031,6 +3031,18 @@ export function ContextViewCanvas({
     ? aggregationStaleReason : null
   const isSystemAdmin = usePermission('system:admin')
 
+  // The graph store node holding this graph is being replaced (a pod
+  // rotation, a promotion). Unlike every other stale reason this one clears
+  // itself in seconds, so the board keeps the rollups it has, says what is
+  // happening, and asks again on its own — no Retry button, and none of the
+  // 30s "Circuit open" wall this used to be.
+  const reconnecting = aggregationStaleReason === 'failing_over'
+  useEffect(() => {
+    if (!reconnecting) return
+    const again = setTimeout(() => { invalidateAggregatedEdges() }, 3000)
+    return () => clearTimeout(again)
+  }, [reconnecting])
+
   // Connections-still-catching-up: when the rollup layer answers SHORT, ask
   // readiness whether this source is actually behind, and if it is, say so on
   // the board. The silent version of this condition — cards drawn with the
@@ -4850,6 +4862,21 @@ export function ContextViewCanvas({
                 Adjust graph store limits
               </Link>
             )}
+          </div>
+        )}
+        {/* Reconnecting banner — the node holding this graph is restarting or
+            failing over. Everything on screen is the last good answer and a
+            fresh one is already on its way. */}
+        {reconnecting && (
+          <div
+            data-canvas-interactive
+            data-testid="canvas-provider-reconnecting-banner"
+            className="mx-4 mt-2 px-3 py-2 rounded-md bg-blue-500/10 border border-blue-500/40 text-blue-700 text-xs flex items-center gap-2 z-20"
+          >
+            <span className="font-medium">
+              Reconnecting to the graph store — the node holding this graph is restarting.
+            </span>
+            <span>Showing the last answer; retrying automatically.</span>
           </div>
         )}
         {/* Stale-source banner — a source-data change queued/ran a rebuild; the

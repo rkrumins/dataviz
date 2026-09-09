@@ -2009,6 +2009,7 @@ async def _provider_error_handler(request, exc):
 # the breaker is open, this handler fires in <1ms with no network I/O.
 from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
+    ProviderFailingOver as _ProviderFailingOver,
     ProviderLoading as _ProviderLoading,
     ProviderUnavailable as _ProviderUnavailable,
 )
@@ -2066,6 +2067,38 @@ async def _provider_loading_handler(request, exc: _ProviderLoading):
     )
 
 
+# ProviderFailingOver is a subclass of ProviderUnavailable but semantically
+# a PAUSE: the cluster node holding this graph is restarting or being
+# replaced, which takes seconds. Distinct code + a 3s Retry-After so the
+# frontend keeps the data on screen, says "reconnecting" and comes back —
+# instead of the 30s error wall every user of that graph used to get while
+# the breaker sat open. Registered BEFORE the parent handler so FastAPI's
+# MRO match picks this one.
+@app.exception_handler(_ProviderFailingOver)
+async def _provider_failing_over_handler(request, exc: _ProviderFailingOver):
+    logger.info(
+        "Provider failing over on %s: provider=%s endpoint=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.endpoint, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_FAILING_OVER",
+                "providerName": exc.provider_name,
+                "endpoint": exc.endpoint,
+                "reason": (
+                    "the graph store node holding this graph is restarting or "
+                    "failing over — retrying automatically"
+                ),
+                "technical": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
 @app.exception_handler(_ProviderUnavailable)
 async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
     logger.warning(
@@ -2079,7 +2112,15 @@ async def _provider_unavailable_handler(request, exc: _ProviderUnavailable):
             "detail": {
                 "code": "PROVIDER_UNAVAILABLE",
                 "providerName": exc.provider_name,
-                "reason": exc.reason,
+                # The breaker's own words ("Circuit open; will probe
+                # downstream again in ~28s") are for an operator, not for
+                # whoever opened a canvas: they read as a defect in the app.
+                # Kept verbatim under ``technical``, which the UI discloses.
+                "reason": (
+                    "the graph store for this provider is not answering; "
+                    "retrying automatically"
+                ),
+                "technical": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },

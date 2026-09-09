@@ -38,7 +38,12 @@ from typing import Any, Callable, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.common.adapters import ProviderUnavailable, ProviderBusy
+from backend.common.adapters import (
+    ProviderBusy,
+    ProviderFailingOver,
+    ProviderUnavailable,
+)
+
 from backend.app.providers.falkordb_materialize import (
     MaterializationBudgetExceeded,
     MaterializationPreconditionFailed,
@@ -186,6 +191,11 @@ def _merge_live_limits(stall_timeout: int, wall_base: int, fresh: dict) -> tuple
     stall = int(fresh.get("timeout_secs") or stall_timeout)
     wall = int(fresh.get("max_wall_secs") or wall_base)
     return stall, max(wall, stall)
+
+
+#: How many times one attempt waits out a node that is being replaced before
+#: calling it a failure. ~3 s apiece, so half a minute of moving slots.
+_FAILOVER_PARKS_MAX = 10
 
 
 def _tuning_int(tuning: dict, key: str) -> Optional[int]:
@@ -1383,6 +1393,7 @@ class AggregationWorker:
         # the job forever — after the cap the job moves to ``failed``.
         max_quiesce_events = int(os.getenv("AGGREGATION_MAX_QUIESCE_EVENTS", "20"))
         quiesce_event_count = 0
+        failover_parks = 0
         zombie_breaks = 0
 
         # Progress-aware retry budget: a job that keeps moving forward past
@@ -1450,6 +1461,33 @@ class AggregationWorker:
                 except Exception as mark_exc:
                     logger.debug("terminal-backoff stamp failed: %s", mark_exc)
                 raise
+            except ProviderFailingOver as e:
+                # A node is being replaced. Like a quiesce park and unlike a
+                # failure: the store is not broken, the cluster is moving the
+                # slots, and in a few seconds the promoted replica answers.
+                # So no attempt is consumed — a rebuild must not burn its
+                # retry budget on a routine pod rotation. Bounded, because
+                # "failing over" that never ends IS a failure.
+                failover_parks += 1
+                if failover_parks > _FAILOVER_PARKS_MAX:
+                    job.error_message = (
+                        f"The graph store node {e.endpoint or 'holding this graph'} "
+                        f"was still not answering after {_FAILOVER_PARKS_MAX} waits. "
+                        f"The run keeps its checkpoint — Resume once the node is back."
+                    )[:2000]
+                    job.updated_at = _now()
+                    await session.commit()
+                    raise
+                delay = (e.retry_after_seconds or 3) + random.uniform(0, 2)
+                logger.info(
+                    "Aggregation job %s: node %s is failing over — waiting %.0fs "
+                    "(wait %d/%d, attempt %d not consumed).",
+                    job.id, e.endpoint or "?", delay, failover_parks,
+                    _FAILOVER_PARKS_MAX, attempt + 1,
+                )
+                await asyncio.sleep(delay)
+                _mark_alive()
+                continue
             except ProviderBusy as e:
                 # ZOMBIE-LEASE takeover: if the park is a graph-lease
                 # conflict and the named holder's job row is already

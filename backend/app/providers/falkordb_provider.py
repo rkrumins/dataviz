@@ -8,6 +8,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -298,6 +299,35 @@ _TRANSIENT_RETRY_BACKOFFS: tuple = (0.25, 0.5, 1.0)
 # breaker opened on a shard that recovered seconds later.
 _REFUSED_RETRY_BACKOFFS: tuple = (0.5, 2.0, 5.0, 10.0)
 
+# A user-facing READ waits for none of that. A person looking at a canvas is
+# better served by "reconnecting, retrying in 3s" over the data they already
+# have than by a request that holds a query slot for 17 s and then fails —
+# especially with a hundred of them at once. One re-resolve (the promoted
+# replica may already be there), then hand back ProviderFailingOver.
+_READ_REFUSED_RETRIES = 1
+
+# ...and for the next few seconds every other read of this graph gets the
+# same answer without dialling the dead address at all. Without this, a
+# hundred concurrent readers each open a socket to a node that is not there.
+_FAILING_OVER_MEMO_S = 2.0
+
+
+def _refused_endpoint(exc: BaseException) -> Optional[str]:
+    """The ``host:port`` a refusal names, walking the cause chain.
+
+    redis words it "Error 111 connecting to 10.0.0.3:6379. Connection
+    refused." — the address is the one fact worth carrying up to the user
+    and the operator, and the one the breaker's text drops."""
+    seen: Optional[BaseException] = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        match = re.search(r"connecting to ([^\s,]+:\d{2,5})", str(seen))
+        if match:
+            return match.group(1).rstrip(".")
+        seen = seen.__cause__ or seen.__context__
+    return None
+
 # Redis transient exception classes matched by *identity* (not by name) so a
 # redis socket ``TimeoutError`` is retried while the unrelated
 # ``asyncio.TimeoutError`` (the per-op deadline) is NOT — both share the name
@@ -523,6 +553,12 @@ def _pressure_kind(exc: BaseException) -> Optional[str]:
     if _is_connection_refused_error(exc) or _is_transient_connection_error(exc):
         return "connection"
     if _is_cluster_routing_error(exc):
+        return "connection"
+    # The provider's own verdict after it spent the failover window. It may
+    # arrive without a cause (answered from the short memo), so it is matched
+    # by type rather than by the text of what it wrapped.
+    from backend.common.adapters import ProviderFailingOver
+    if isinstance(exc, ProviderFailingOver):
         return "connection"
     return None
 
@@ -1792,6 +1828,13 @@ class FalkorDBProvider(GraphDataProvider):
     # (FALKORDB_QUERY_TIMEOUT / FALKORDB_WRITE_TIMEOUT) tunes every
     # consumer rather than each module reading os.getenv directly.
     from ..config import resilience as _resilience
+    # Set while a node this provider talks to is known to be away, so the
+    # next reads are answered without dialling it. Class-level defaults: a
+    # provider built without ``__init__`` (introspection paths do) must read
+    # them too.
+    _failing_over_until: float = 0.0
+    _failing_over_endpoint: Optional[str] = None
+
     _READ_TIMEOUT = _resilience.FALKORDB_QUERY_TIMEOUT_SECS
     _WRITE_TIMEOUT = _resilience.FALKORDB_WRITE_TIMEOUT_SECS
     _EDGES_BETWEEN_TIMEOUT = _resilience.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS
@@ -2116,7 +2159,36 @@ class FalkorDBProvider(GraphDataProvider):
                     old_p = None
                 await aclose_graph_client(old_d, old_p)
 
-    async def _run_guarded(self, call: Callable[[], Awaitable[Any]]) -> Any:
+    def _failing_over(self, exc: BaseException) -> "Exception":
+        """The signal a caller gets while a node is being replaced.
+
+        Sets a short memo first: for the next couple of seconds every other
+        read of this graph is answered from it without dialling, which is
+        what keeps a restarting shard from costing one dead socket per
+        concurrent user."""
+        from backend.common.adapters import ProviderFailingOver
+
+        endpoint = _refused_endpoint(exc) or self._endpoint_label()
+        self._failing_over_endpoint = endpoint
+        self._failing_over_until = time.monotonic() + _FAILING_OVER_MEMO_S
+        logger.warning(
+            "FalkorDB %s: node %s is not answering — reporting a failover "
+            "(readers retry in 3s; the breaker stays closed).",
+            self._graph_name, endpoint,
+        )
+        return ProviderFailingOver(
+            provider_name=self._graph_name,
+            reason=(
+                f"the graph store node {endpoint} holding this graph is "
+                f"restarting or failing over"
+            ),
+            retry_after_seconds=3,
+            endpoint=endpoint,
+        )
+
+    async def _run_guarded(
+        self, call: Callable[[], Awaitable[Any]], *, read_only: bool = False,
+    ) -> Any:
         """Execute a graph call with transparent retries for transient
         failures so the circuit breaker stays closed on blips.
 
@@ -2147,13 +2219,31 @@ class FalkorDBProvider(GraphDataProvider):
         attempt = 0
         schedule = _TRANSIENT_RETRY_BACKOFFS
         max_retries = len(schedule)
+        memo = getattr(self, "_failing_over_until", 0.0)
+        if read_only and memo and time.monotonic() < memo:
+            # A read that arrives while the node is known to be away is
+            # answered now, from what the caller already has.
+            from backend.common.adapters import ProviderFailingOver
+            raise ProviderFailingOver(
+                provider_name=self._graph_name,
+                reason=(
+                    f"the graph store node {self._failing_over_endpoint} holding "
+                    f"this graph is restarting or failing over"
+                ),
+                retry_after_seconds=3,
+                endpoint=self._failing_over_endpoint,
+            )
         # In-flight op count: the manager's recovery-eviction defers close()
         # while this is > 0 so it can't tear the pool out from under a job.
         self._inflight += 1
         try:
             while True:
                 try:
-                    return await call()
+                    result = await call()
+                    if getattr(self, "_failing_over_until", 0.0):
+                        # It answered: the failover is over for everyone.
+                        self._failing_over_until = 0.0
+                    return result
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -2203,6 +2293,10 @@ class FalkorDBProvider(GraphDataProvider):
                         # budget redialing a dead address.
                         schedule = _REFUSED_RETRY_BACKOFFS
                         max_retries = len(schedule)
+                    if refused and read_only and attempt >= _READ_REFUSED_RETRIES:
+                        # One re-resolve was enough to know: the owner is not
+                        # answering and someone is waiting on this read.
+                        raise self._failing_over(exc) from exc
                     if (handle_lost or _is_transient_connection_error(exc)) and attempt < max_retries:
                         backoff = schedule[attempt]
                         attempt += 1
@@ -2258,6 +2352,12 @@ class FalkorDBProvider(GraphDataProvider):
                             raise reconnect_exc from exc
                         await asyncio.sleep(backoff)
                         continue
+                    if refused:
+                        # The full failover window is spent and the node is
+                        # still not there. Not a broken store: a node being
+                        # replaced, so the breaker must not open on it — the
+                        # rebuild waits it out, the reader retries.
+                        raise self._failing_over(exc) from exc
                     raise
         finally:
             self._inflight -= 1
@@ -2288,7 +2388,7 @@ class FalkorDBProvider(GraphDataProvider):
             rows: Optional[int] = None
             err: Optional[str] = None
             try:
-                result = await self._run_guarded(runner)
+                result = await self._run_guarded(runner, read_only=kind.endswith("ro"))
                 rs = getattr(result, "result_set", None)
                 rows = len(rs) if rs is not None else 0
                 return result
@@ -6449,6 +6549,11 @@ class FalkorDBProvider(GraphDataProvider):
                     page = result.result_set or []
                 except Exception as e:
                     kind = _pressure_kind(e)
+                    if kind == "connection":
+                        # A smaller page does not help a node that is not
+                        # answering. Out it goes, so the caller can serve the
+                        # document it already has rather than half a canvas.
+                        raise
                     if kind is None:
                         # Keep the pages already read — they are a correct
                         # prefix of the answer — and let batch_failed drive
@@ -7127,7 +7232,8 @@ class FalkorDBProvider(GraphDataProvider):
             return await issue(urns)
         except Exception as exc:
             kind = _pressure_kind(exc)
-            if kind is None:
+            if kind is None or kind == "connection":
+                # Splitting the batch cannot reach a node that is away.
                 raise
             pressure.note(kind)
             what = "exceeded the per-query memory ceiling" if kind == "memory" else "timed out"

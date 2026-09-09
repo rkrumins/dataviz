@@ -22,6 +22,8 @@ from backend.app.api.v1.endpoints.graph import (
     _enforce_fair_share,
     _provider_health_header,
     get_context_engine,
+    label_failover,
+    watch_for_failover,
 )
 from backend.app.db.engine import get_graph_read_db_session
 from backend.app.models.canvas import (
@@ -181,6 +183,7 @@ async def canvas_bootstrap(
 
     if scope is None:
         return await compute()
+    failing_over: Dict[str, str] = {}
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_CANVAS_BOOTSTRAP,
@@ -193,10 +196,11 @@ async def canvas_bootstrap(
             "lineageEdgeTypes": sorted(request.lineage_edge_types) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types) if request.containment_edge_types else None,
         },
-        compute=_bounded_compute(engine, compute),
+        compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=CanvasBootstrapResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
+    label_failover(response, result.freshness, failing_over)
     await _apply_stale_overlay(scope, result.freshness, result.aggregated)
     return result
 
@@ -263,6 +267,7 @@ async def canvas_expand(
     visible_digest = hashlib.sha256(
         ",".join(sorted(request.visible_urns)).encode()
     ).hexdigest()
+    failing_over: Dict[str, str] = {}
     result = await get_graph_cache().get_or_compute(
         scope=scope,
         endpoint=ENDPOINT_CANVAS_EXPAND,
@@ -275,9 +280,10 @@ async def canvas_expand(
             "lineageEdgeTypes": sorted(request.lineage_edge_types) if request.lineage_edge_types else None,
             "containmentEdgeTypes": sorted(request.containment_edge_types) if request.containment_edge_types else None,
         },
-        compute=_bounded_compute(engine, compute),
+        compute=watch_for_failover(_bounded_compute(engine, compute), failing_over),
         model_cls=CanvasExpandResult,
         on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
     )
+    label_failover(response, result.freshness, failing_over)
     await _apply_stale_overlay(scope, result.freshness, result.aggregated_delta)
     return result

@@ -103,6 +103,14 @@ export type HydrationStatus = 'loading' | 'ready' | 'warming' | 'unavailable'
  *  (has assignments / branch-created delta) but every fetch failed — so the
  *  canvas surfaces the failure instead of a false "empty / Start building".
  *  `warming` = the provider is starting up (retryable), vs a hard outage. */
+/** Provider states worth waiting through rather than reporting as an outage:
+ *  a store loading its dataset, and a cluster node being replaced. Matched on
+ *  the message because that is where the API's ``detail.code`` lands. */
+export function isRetryableProviderState(message: string): boolean {
+    return message.includes('PROVIDER_LOADING')
+        || message.includes('PROVIDER_FAILING_OVER')
+}
+
 class HydrationLoadError extends Error {
     constructor(public warming: boolean) {
         super(warming ? 'PROVIDER_LOADING' : 'provider-unavailable')
@@ -461,7 +469,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                             return await provider.getNodes(q)
                         } catch (e) {
                             anyBatchErrored = true
-                            if (String((e as Error)?.message ?? e).includes('PROVIDER_LOADING')) anyWarming = true
+                            if (isRetryableProviderState(String((e as Error)?.message ?? e))) anyWarming = true
                             return [] as GraphNode[]
                         }
                     }
@@ -697,7 +705,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // transient and auto-retried, shown with a friendly tone. Anything
                     // else that looks like a connectivity failure is a hard outage.
                     const warming = (err instanceof HydrationLoadError && err.warming)
-                        || msg.includes('PROVIDER_LOADING')
+                        || isRetryableProviderState(msg)
+                    // Two reasons to keep waiting, with different words: a
+                    // store still loading its data, and a node being replaced
+                    // by the cluster. Both come back on their own.
+                    const failingOver = msg.includes('PROVIDER_FAILING_OVER')
                     if (warming) {
                         console.warn('[useGraphHydration] Provider warming up — retrying:', msg)
                     } else {
@@ -709,9 +721,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // attempts. Phase → complete so the loading ghosts stop.
                     setHydrationStatus(warming ? 'warming' : 'unavailable')
                     setHydrationError(
-                        warming
-                            ? 'Your graph is starting up…'
-                            : 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.'
+                        failingOver
+                            ? 'Reconnecting to the graph store — the node holding this graph is restarting. This view will load in a moment.'
+                            : warming
+                                ? 'Your graph is starting up…'
+                                : 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.'
                     )
                     setHydrationPhase('complete')
                 }

@@ -220,11 +220,47 @@ class ProviderLoading(ProviderUnavailable):
     """
 
 
+class ProviderFailingOver(ProviderUnavailable):
+    """Flow-control signal — the node holding this graph is restarting or
+    failing over, NOT a store that is gone.
+
+    In a Redis Cluster a node that stops answering is a routine, bounded
+    event: the pod is rotated, the cluster notices after
+    ``cluster-node-timeout``, a replica is promoted and the slots move. The
+    right client behaviour is to come back in a few seconds, which is what
+    ``retry_after_seconds`` (3) says.
+
+    What used to happen instead: the refusal counted toward ``fail_max``,
+    three of them opened the breaker for its whole reset window, and every
+    user of that graph — not just the three who were unlucky — got
+    "Circuit open; will probe downstream again in ~28s" for 30 s at a
+    time, long after the promotion had finished. So this is registered as
+    a *logical* exception like :class:`ProviderLoading`: the breaker never
+    opens because a node is failing over, and it still opens for a store
+    that is genuinely unreachable.
+
+    Carries ``endpoint`` — the node that stopped answering — because the
+    breaker's own text names none, and it is the first thing an operator
+    needs.
+    """
+
+    def __init__(
+        self,
+        provider_name: str,
+        reason: str,
+        retry_after_seconds: int = 3,
+        endpoint: str | None = None,
+    ) -> None:
+        super().__init__(provider_name, reason, retry_after_seconds)
+        self.endpoint = endpoint
+
+
 # Register at import time (before any CircuitBreakerProxy is constructed) so
 # the ``except proxy._ignored`` clause in breaker_guarded catches ProviderLoading
 # ahead of the ``except ProviderUnavailable`` counting clause — a warming
 # instance is re-raised untouched and its breaker stays closed.
 register_logical_exception(ProviderLoading)
+register_logical_exception(ProviderFailingOver)
 
 
 class _AsyncCircuitBreaker:
