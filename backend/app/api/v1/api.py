@@ -11,6 +11,7 @@ from .endpoints import (
     assets, context_models, catalog, views, features,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
+    graph_store,
     groups, workspace_members, view_grants, role_bindings,
     permissions_admin, access_requests, rbac_search, directory, notifications,
     versioning,
@@ -307,6 +308,15 @@ api_router.include_router(
 api_router.include_router(
     redis_config.router, prefix="/admin/redis", tags=["admin:redis"],
     dependencies=[Depends(requires("system:admin"))],
+)
+
+# Graph store topology: /api/v1/admin/graph-store/* — every node of every
+# provider's store (masters AND replicas), the graphs on each shard, and
+# where one data source's graph lives. Gates are PER ROUTE: the fleet view
+# is system:admin, while a single graph's placement rides the Ingestion
+# read gate so a source's own page can show which node holds it.
+api_router.include_router(
+    graph_store.router, prefix="/admin/graph-store", tags=["admin:graph-store"],
 )
 
 # ── Top-level views (first-class, cross-workspace) ─────────────────
