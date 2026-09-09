@@ -97,6 +97,15 @@ describe('useGraphHydration failure classification', () => {
     await waitFor(() => expect(result.current.hydrationStatus).toBe('unavailable'))
   })
 
+  it('code throwing during the load is an error — named as such, never unavailable, never "slow"', async () => {
+    mockProvider.getNodes.mockRejectedValue(
+      new TypeError("Cannot read properties of undefined (reading 'startTime')"),
+    )
+    const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('error'))
+    expect(result.current.hydrationError).toMatch(/hit an error/i)
+  })
+
   it('a warming provider is warming', async () => {
     mockProvider.getNodes.mockRejectedValue(apiError(503, 'PROVIDER_LOADING'))
     const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
@@ -138,6 +147,8 @@ describe('useGraphHydration failure classification', () => {
 describe('worstHydrationFailure', () => {
   it('a confirmed outage outranks warming, which outranks slowness', () => {
     expect(worstHydrationFailure([apiError(504), apiError(429)])).toBe('slow')
+    expect(worstHydrationFailure([apiError(504), new TypeError("reading 'startTime'")])).toBe('error')
+    expect(worstHydrationFailure([new TypeError("reading 'startTime'"), apiError(503, 'PROVIDER_LOADING')])).toBe('warming')
     expect(worstHydrationFailure([apiError(504), apiError(503, 'PROVIDER_LOADING')])).toBe('warming')
     expect(worstHydrationFailure([apiError(503, 'PROVIDER_LOADING'), apiError(503, 'PROVIDER_UNAVAILABLE')])).toBe('unavailable')
     expect(worstHydrationFailure([])).toBe('slow')

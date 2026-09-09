@@ -62,9 +62,9 @@ SMOKE_LOCUST_ARGS = --headless \
         smoke smoke-announcements smoke-views smoke-cached-stats \
         smoke-aggregation-jobs smoke-graph-schema \
         smoke-graph-lineage smoke-graph-walks smoke-graph-children \
-        smoke-mixed smoke-clean \
+        smoke-canvas-open smoke-mixed smoke-clean \
         sweep sweep-clean \
-        stress stress-trace stress-walks stress-children stress-clean
+        stress stress-trace stress-walks stress-children stress-canvas stress-clean
 
 help:
 	@echo "Loadtest targets:"
@@ -79,6 +79,7 @@ help:
 	@echo "    make smoke-graph-lineage       — Tier-1 heavy: trace/v2,    needs seeded graph"
 	@echo "    make smoke-graph-walks         — Tier-1 heavy: ancestors/descendants"
 	@echo "    make smoke-graph-children      — Tier-1 heavy: children/+edges"
+	@echo "    make smoke-canvas-open         — the view open: nodes/query batches + edges/between"
 	@echo "    make smoke-mixed"
 	@echo "    make smoke-clean               — remove $(SMOKE_DIR)/"
 	@echo ""
@@ -92,6 +93,7 @@ help:
 	@echo "    make stress-trace              — POST /graph/trace/v2 at all tiers"
 	@echo "    make stress-walks              — ancestors + descendants at all tiers"
 	@echo "    make stress-children           — children + children-with-edges at all tiers"
+	@echo "    make stress-canvas             — the view open (nodes/query + edges/between) at all tiers"
 	@echo "    make stress-clean              — remove $(STRESS_DIR)/"
 	@echo ""
 	@echo "  Settings:"
@@ -109,7 +111,7 @@ help:
 smoke: smoke-announcements smoke-views smoke-cached-stats \
        smoke-aggregation-jobs smoke-graph-schema \
        smoke-graph-lineage smoke-graph-walks smoke-graph-children \
-       smoke-mixed
+       smoke-canvas-open smoke-mixed
 	@echo ""
 	@echo "All smoke scenarios passed."
 
@@ -153,6 +155,11 @@ smoke-graph-children:
 	$(LOCUST) -f runners/graph_children.py $(SMOKE_LOCUST_ARGS) --csv $(SMOKE_DIR)/graph_children/run
 	$(PYTHON) -m lib.slo --smoke $(SMOKE_DIR)/graph_children/run_stats.csv
 
+smoke-canvas-open:
+	@mkdir -p $(SMOKE_DIR)/canvas_open
+	$(LOCUST) -f runners/canvas_open.py $(SMOKE_LOCUST_ARGS) --csv $(SMOKE_DIR)/canvas_open/run
+	$(PYTHON) -m lib.slo --smoke $(SMOKE_DIR)/canvas_open/run_stats.csv
+
 smoke-mixed:
 	@mkdir -p $(SMOKE_DIR)/mixed
 	$(LOCUST) -f locustfile.py $(SMOKE_LOCUST_ARGS) --csv $(SMOKE_DIR)/mixed/run
@@ -194,7 +201,7 @@ sweep-clean:
 # when the mixed sweep shows trouble and you want to know whether the
 # culprit is trace orchestration, raw traversal, or child enumeration.
 
-stress: stress-trace stress-walks stress-children
+stress: stress-trace stress-walks stress-children stress-canvas
 	@echo ""
 	@echo "All graph stress scenarios complete."
 
@@ -238,6 +245,20 @@ stress-children:
 	        --run-time $(STRESS_RUN_TIME) --only-summary \
 	        --csv $(STRESS_DIR)/children/tier_$$tier/run; \
 	    $(PYTHON) -m lib.slo --tier $$tier $(STRESS_DIR)/children/tier_$$tier/run_stats.csv; \
+	done
+
+stress-canvas:
+	@mkdir -p $(STRESS_DIR)/canvas
+	@set -e; \
+	for tier in $(STRESS_TIERS); do \
+	    echo ""; echo "=== stress-canvas tier: $$tier users ==="; \
+	    mkdir -p $(STRESS_DIR)/canvas/tier_$$tier; \
+	    $(LOCUST) -f runners/canvas_open.py \
+	        --headless --host $(SMOKE_HOST) \
+	        --users $$tier --spawn-rate $(STRESS_SPAWN_RATE) \
+	        --run-time $(STRESS_RUN_TIME) --only-summary \
+	        --csv $(STRESS_DIR)/canvas/tier_$$tier/run; \
+	    $(PYTHON) -m lib.slo --tier $$tier $(STRESS_DIR)/canvas/tier_$$tier/run_stats.csv; \
 	done
 
 stress-clean:

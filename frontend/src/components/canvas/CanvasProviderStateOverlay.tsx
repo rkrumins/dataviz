@@ -90,8 +90,11 @@ function UnavailableMark() {
  *  - `slow`        — the provider is reachable, but this view's requests were
  *                    too slow, were shed under load, or hit a transient
  *                    gateway / session hiccup. The canvas keeps retrying.
- *  - `unavailable` — the backend confirmed the provider is unreachable. */
-export type CanvasProviderState = 'warming' | 'slow' | 'unavailable'
+ *  - `unavailable` — the backend confirmed the provider is unreachable.
+ *  - `error`       — code threw while the view loaded (a bug, not the
+ *                    provider); named as such so it is never mistaken for an
+ *                    outage or a slow graph. */
+export type CanvasProviderState = 'warming' | 'slow' | 'unavailable' | 'error'
 
 export interface CanvasProviderStateOverlayProps {
   state: CanvasProviderState
@@ -102,6 +105,7 @@ const COPY: Record<CanvasProviderState, { title: string; status: string }> = {
   warming: { title: 'Preparing your graph', status: 'Retrying automatically…' },
   slow: { title: 'Taking a little longer than usual', status: 'Retrying automatically…' },
   unavailable: { title: 'Graph service is unavailable', status: 'Watching for recovery…' },
+  error: { title: 'Something went wrong while loading', status: 'Retrying automatically…' },
 }
 
 export interface CanvasProviderStatePillProps {
@@ -135,7 +139,8 @@ export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePi
       : 'Some entities didn’t load')
     : state === 'warming' ? 'Preparing your graph'
       : state === 'slow' ? 'Refreshing is taking longer than usual'
-        : 'Graph service is unavailable'
+        : state === 'error' ? 'This view hit an error while refreshing'
+          : 'Graph service is unavailable'
   const detail = calm
     ? 'showing what’s loaded · retrying automatically'
     : 'showing the last loaded data · watching for recovery'
@@ -233,6 +238,8 @@ export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStat
                 <>Your data is safe — we’re loading it from the graph service. This usually takes a few seconds after it restarts.</>
               ) : state === 'slow' ? (
                 <>The graph service is reachable, but this view is loading slowly right now. <span className="text-ink">Nothing has been lost</span> — we keep trying in the background and it fills in as soon as it answers.</>
+              ) : state === 'error' ? (
+                <>The graph service answered, but this view hit an error while loading. <span className="text-ink">Nothing has been lost</span> — we keep retrying, and a refresh usually clears it. If it keeps happening, the details are in the browser console.</>
               ) : (
                 <>The graph service isn’t responding right now. <span className="text-ink">Nothing has been lost</span> — this view fills in the moment the service is back.</>
               )}

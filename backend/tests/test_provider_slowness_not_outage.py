@@ -16,7 +16,11 @@ These tests pin the new contract:
      retry budget keep working) AND a ``TimeoutError`` (every existing
      ``except asyncio.TimeoutError`` still sees a timeout).
   2. A server error REPLY (bad Cypher, per-query memory cap) is not counted
-     either; a demoted-master ``ReadOnlyError`` still is.
+     either; a demoted-master ``ReadOnlyError`` still is. Two replies are
+     capacity signals and are relabelled: FalkorDB's queue-full rejection
+     (``MAX_QUEUED_QUERIES``) becomes ``ProviderBusy`` (429 + Retry-After) and
+     its own query-timeout kill becomes ``ProviderTimeout`` (504) — the
+     canvas retries both in place instead of showing a rejected query.
   3. Connection-class failures still open the breaker — resilience kept.
   4. The request-path preflight is skipped for a provider real traffic just
      reached, and a timeout-class miss must persist before it gates.
@@ -38,6 +42,7 @@ from backend.app.providers.state import _READ_GATE_PERSISTENCE, is_ambiguous_pro
 from backend.common.adapters import (
     BreakerState,
     CircuitBreakerProxy,
+    ProviderBusy,
     ProviderTimeout,
     ProviderUnavailable,
 )
@@ -147,6 +152,77 @@ async def test_read_only_reply_still_counts() -> None:
         with pytest.raises(ProviderUnavailable):
             await proxy.get_nodes()
     assert proxy.breaker_state == "open"
+
+
+async def test_queue_full_reply_is_shed_as_busy_without_counting() -> None:
+    """FalkorDB's ``MAX_QUEUED_QUERIES`` rejection arrives as a ResponseError
+    like a syntax error would. It is a capacity signal: shed as busy (429 +
+    Retry-After, retried in place by the client), breaker untouched."""
+    from redis.exceptions import ResponseError
+
+    from backend.common.adapters.circuit import breaker_stats
+
+    target = _Provider()
+    target.raise_exc = ResponseError("Max pending queries exceeded")
+    proxy = CircuitBreakerProxy(target, name="t", fail_max=1)
+    before = breaker_stats()["queue_full_not_counted"]
+
+    for _ in range(3):
+        with pytest.raises(ProviderBusy) as exc_info:
+            await proxy.get_nodes()
+        assert exc_info.value.retry_after_seconds == 1
+        assert isinstance(exc_info.value.__cause__, ResponseError)
+        assert "queue is full" in exc_info.value.reason
+
+    assert proxy.breaker_state == "closed"
+    assert proxy.breaker.fail_counter == 0
+    assert target.calls == 3
+    assert breaker_stats()["queue_full_not_counted"] == before + 3
+
+
+async def test_server_side_query_timeout_is_a_provider_timeout() -> None:
+    """The server killing a query at the TIMEOUT the provider sent with it is
+    the same slow-query case as the client's own deadline — the same 504,
+    the same "not counted"."""
+    from redis.exceptions import ResponseError
+
+    target = _Provider()
+    target.raise_exc = ResponseError("Query timed out")
+    proxy = CircuitBreakerProxy(target, name="t", fail_max=1)
+
+    with pytest.raises(ProviderTimeout) as exc_info:
+        await proxy.get_nodes()
+    assert isinstance(exc_info.value, asyncio.TimeoutError)
+    assert isinstance(exc_info.value.__cause__, ResponseError)
+    assert proxy.breaker_state == "closed"
+    assert proxy.breaker.fail_counter == 0
+
+
+async def test_capacity_reply_matching_is_case_insensitive_and_prefix_tolerant() -> None:
+    from redis.exceptions import ResponseError
+
+    for text in ("ERR Max pending queries exceeded", "MAX PENDING QUERIES EXCEEDED"):
+        target = _Provider()
+        target.raise_exc = ResponseError(text)
+        proxy = CircuitBreakerProxy(target, name="t", fail_max=1)
+        with pytest.raises(ProviderBusy):
+            await proxy.get_nodes()
+        assert proxy.breaker_state == "closed"
+
+
+async def test_nested_busy_signal_is_not_counted_by_an_outer_proxy() -> None:
+    """A busy signal raised inside a proxied provider (a write-side quiesce,
+    or an inner proxy's queue-full relabelling) is flow control, not a
+    failure: the outer proxy passes it through without counting."""
+    target = _Provider()
+    target.raise_exc = ProviderBusy(provider_name="inner", reason="queue full", retry_after_seconds=1)
+    proxy = CircuitBreakerProxy(target, name="outer", fail_max=1)
+
+    for _ in range(3):
+        with pytest.raises(ProviderBusy):
+            await proxy.get_nodes()
+    assert proxy.breaker_state == "closed"
+    assert proxy.breaker.fail_counter == 0
 
 
 # ── 3. Connection-class failures still open the breaker ────────────────

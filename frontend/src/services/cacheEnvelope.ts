@@ -31,6 +31,7 @@
  */
 import { getCircuitBreaker } from './circuitBreaker'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { isNetworkError, isProviderOutageSignal, toApiStatusError } from './graphRequestFailure'
 import { useProviderHealthStore } from '@/store/providerHealth'
 import { useCacheStalenessStore } from '@/store/cacheStaleness'
 
@@ -160,13 +161,18 @@ export interface FetchEnvelopedOptions {
  * Returns the parsed JSON body (envelope-shaped or otherwise) for the
  * caller to unwrap, or `null` when:
  *   * the circuit is open (fail-fast — no network call),
- *   * the response is non-OK (counts as failure for the breaker on 5xx),
+ *   * the response is non-OK,
  *   * the request times out / hits a network error,
  *   * the body cannot be parsed as JSON.
  *
- * On 5xx with a `Retry-After` header, the breaker is opened with the
- * server-suggested delay so the frontend honors backpressure rather
- * than stampeding a recovering backend.
+ * What feeds the breaker is the SAME reading as `RemoteGraphProvider._doFetch`
+ * (`services/graphRequestFailure`): only a backend-confirmed outage (503 +
+ * `PROVIDER_UNAVAILABLE`, honoring its `Retry-After`) or a request that never
+ * reached the backend. This path shares the `(workspace, data source)` breaker
+ * with the canvas's own reads, and it used to count ANY 5xx: three 504s from a
+ * slow afternoon on `/stats` or the wizard's entity step opened that breaker,
+ * and the view's next `/nodes/query` fast-failed as "circuit open" — rendered
+ * as "Graph service is unavailable" over a graph that was merely slow.
  *
  * Auth / 401 / CSRF / session-cookie behavior is inherited verbatim
  * from `fetchWithTimeout` — this helper does not add any auth logic.
@@ -196,32 +202,27 @@ async function _runEnvelopeFetch(
             silent403: options?.silent403,
         })
     } catch (err) {
-        // `fetchWithTimeout` throws TypeError on timeout AND on network
-        // failure. Either way it's a "backend unreachable" signal that
-        // should feed the breaker — same policy as `_doFetch`.
-        if (cb && err instanceof TypeError) {
+        // `fetchWithTimeout` throws TypeError on its own timeout AND on a
+        // network failure. Only the latter never reached the backend; a
+        // timeout is a slowness signal — same policy as `_doFetch`.
+        if (cb && isNetworkError(err)) {
             cb.recordFailure()
         }
         return null
     }
 
     if (!res.ok) {
-        if (cb && res.status >= 500) {
-            // Honor Retry-After (RFC 7231) on 503 so the breaker waits at
-            // least as long as the backend asked. Mirror `_doFetch`.
-            const retryAfterRaw = res.headers.get('Retry-After')
-            const retryAfterMs = retryAfterRaw
-                ? parseInt(retryAfterRaw, 10) * 1000
-                : undefined
-            cb.recordFailure(
-                retryAfterMs !== undefined && !isNaN(retryAfterMs)
-                    ? retryAfterMs
-                    : undefined,
-            )
+        if (cb) {
+            // Only a confirmed outage counts, with the backend's own
+            // Retry-After so the breaker waits at least that long. A 504
+            // (slow query), 502 (gateway), 500 (rejected query) or 429
+            // (shed) says nothing about reachability.
+            const error = toApiStatusError(res, await res.text().catch(() => ''))
+            if (isProviderOutageSignal(error)) cb.recordFailure(error.retryAfterMs)
         }
         // 4xx is a logical no-match (404 = data source missing, 401 = auth)
-        // — don't penalize the breaker for those. The handler returns null
-        // and the caller's `?? 0` fallback engages.
+        // — the handler returns null and the caller's `?? 0` fallback
+        // engages.
         return null
     }
 

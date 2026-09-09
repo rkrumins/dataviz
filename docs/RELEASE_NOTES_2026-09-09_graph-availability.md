@@ -209,3 +209,107 @@ automatic; `VITE_HYDRATION_CONCURRENCY` tunes the batch pool at build time.
   replica.
 - CSRF protection still applies to read-only graph POSTs; the heal-and-replay path makes it
   invisible, at the cost of one extra round trip after each session rotation.
+
+---
+
+## 8. Addendum, same day — scale, background jobs, and the second offline path
+
+The first two rounds fixed a slow query being read as a dead provider. Reviewing the
+release for hundreds of concurrent users, and for users sharing the graph with aggregation
+jobs, found four more things worth fixing before shipping, plus one remaining path to the
+"Graph service is unavailable" card in the new frontend.
+
+### What was still wrong
+
+- **FalkorDB's own capacity replies were 500s.** The server answers "Max pending queries
+  exceeded" (its `MAX_QUEUED_QUERIES` cap, the shape of a cold-cache stampede or of jobs
+  and users sharing the instance) and "Query timed out" (its kill of one query at the
+  `TIMEOUT` the provider sent) as ordinary error replies. Round one stopped counting them
+  toward the breaker, but they surfaced as 500 `GRAPH_QUERY_ERROR`, which no client
+  retries: the canvas showed "taking longer" and waited for its paced retry.
+- **The cache-envelope fetch path could still open the canvas's breaker.** Data-source
+  stats, the wizard's entity step and the ontology helpers fetch through
+  `services/cacheEnvelope.ts`, which counted *any* 5xx toward the `(workspace, data
+  source, default)` breaker it shares with `/nodes/query`. Under a slow backend, three
+  504s there opened it, and the view's next node query fast-failed in the browser as
+  "circuit open", which classifies as **unavailable**. This is the one way the new
+  frontend could still show the outage card over a graph that was merely slow.
+- **Writers had no feedback from readers.** Aggregation jobs pace themselves on their own
+  write latency, hold a fleet-wide write lease per graph and keep two write slots per
+  endpoint. A job issuing small, fast MERGE batches while the canvas's reads queued behind
+  them looked healthy from the writer's side, so nothing yielded.
+- **An error thrown by code read as a provider state.** A `TypeError` raised while a view
+  loaded (the reported `Cannot read properties of undefined (reading 'startTime')` is one)
+  classified as transient: "taking a little longer than usual", retrying, over a bug. In
+  the previous frontend it classified as an outage.
+- **The client gave up on children before the server could answer.** `/children-with-edges`
+  runs the children page and then their edges, each on the backend's 15s budget; the
+  client aborted at 30s, so the backend's structured 504 never surfaced and the retry
+  doubled the load.
+- **The load harness never exercised the view open**, and its URN discovery sent a body
+  the endpoint rejects with 422, so every graph scenario ran against an empty pool.
+
+### What changed
+
+| Change | Where | Knob (default) |
+|---|---|---|
+| "Max pending queries exceeded" → `ProviderBusy`: HTTP 429, code `PROVIDER_BUSY`, `Retry-After: 1`. "Query timed out" → `ProviderTimeout`: HTTP 504, `PROVIDER_TIMEOUT`. Neither counts; `ProviderBusy` is now a logical exception so a nested proxy never counts a busy signal either. | `backend/common/adapters/circuit.py` | — |
+| Readers first. The breaker proxy publishes a capacity signal (queue full, server-side timeout, client deadline) to a listener; the web tier stamps `agg:readpressure:{endpoint}` on the job-bus Redis; the materializer's pacing loop paces every write batch on that endpoint at the read-pressure ratio while the key lives. Fails open both ways. | `circuit.py`, `backend/app/services/aggregation/read_pressure.py`, `admission.py`, `backend/app/providers/falkordb_materialize.py`, `main.py` | `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0 → ≤ ~20% write duty cycle), `AGGREGATION_READ_PRESSURE_TTL_S` (30), `AGGREGATION_READ_PRESSURE_POLL_SECS` (2) |
+| The cache-envelope path counts only a confirmed outage (503 `PROVIDER_UNAVAILABLE`) or a request that never reached the backend — the same reading as the graph read path. | `frontend/src/services/cacheEnvelope.ts` | — |
+| A fourth canvas state, **error**: an engine error thrown during the load is named as such ("Something went wrong while loading"), logged with its stack, retried at the calm cadence, never an outage, never counted. | `services/graphRequestFailure.ts`, `hooks/useGraphHydration.ts`, `components/canvas/CanvasProviderStateOverlay.tsx` | — |
+| Children client budget 30s → 45s, above the server's 30s worst case and under the 60s graph tier. | `frontend/src/config/timeouts.ts` | `VITE_TIMEOUT_GET_CHILDREN_MS` (45000) |
+| GCLB `timeoutSec` for the API backend 120 → 180, the same margin the frontend backend got. | `deploy/k8s/base/services/viz-service/backendconfig.yaml` | — |
+| Middleware tier tests for the workspace-scoped graph routes: `/edges/aggregated` and `/edges/between` resolve to the 45s aggregation tier, node and children reads to the 60s graph tier, and every provider budget sits under its tier. | `backend/tests/test_timeout_middleware.py` | — |
+| A canvas view-open scenario (100-URN node batches, four in flight, then one edge scan), smoke and stress targets, tiered SLOs, and the discovery body fix. | `loadtest/` | `SYNODIC_URNS_PER_WORKSPACE` sizes the view |
+
+### Verification
+
+`GET /api/v1/health/deps` → `resilience` gains `breaker.queue_full_not_counted` and a
+`read_pressure` block (`signals_sent`, `signals_coalesced`, `signal_errors`). The healthy
+shape: `queue_full_not_counted` non-zero only during bursts, `signals_sent` moving with it,
+`signal_errors` at 0, `breaker_opens` still flat.
+
+| Line | Meaning |
+|---|---|
+| `query queue full on … (breaker=closed, not counted; shed as busy)` | FalkorDB at its queue cap; the client retries in place |
+| `server-side deadline exceeded on … (breaker=closed, not counted)` | the server killed one query at its budget — a slow query, not an outage |
+| `read pressure on <host:port> (<kind>): aggregation writers yield for the next 30s` | the web tier told the writers to back off |
+| `aggregation on <graph> yielding to interactive reads (<kind>): write pacing ratio 4` / `read pressure cleared` | a worker doing so, and stopping |
+
+Load: `make smoke-canvas-open` against a seeded stack, then `make stress-canvas` (or
+`make sweep`) at 100 / 300 / 500 users with `SYNODIC_URNS_PER_WORKSPACE=500`. A 429 counts
+as a failure in the harness on purpose — it is the capacity signal. Read the counters above
+after each tier; `breaker_opens` must not move.
+
+In the browser, an engine error during a load now reads "Something went wrong while
+loading" with the error in the console at error level, not "taking longer" and not
+"unavailable".
+
+### Rollback
+
+```
+AGGREGATION_READ_PRESSURE_PACING_RATIO=1.0   # equal to the base ratio → no yield
+VITE_TIMEOUT_GET_CHILDREN_MS=30000           # build-time
+```
+
+The reply relabelling, the cache-envelope breaker policy and the error state have no knob:
+they are the fix.
+
+### Known limitations
+
+- The `startTime` `TypeError` is not raised by application code, by the layout engine on
+  the view page, or by anything on the request path; the readers of that property in the
+  bundle are react-dom's resource-timing loop (safe on its own), framer-motion's grouped
+  animation controls, and mermaid's Gantt renderer. It is a symptom of the failed load
+  (elements torn down mid-animation), not its cause, and this release makes it impossible
+  for such an error to read as an outage. Pinning the thrower needs the browser's expanded
+  stack for that console entry.
+- The read-pressure signal is advisory: writers already mid-batch finish that batch, and a
+  job needs one write batch to notice (a few seconds). It slows jobs; it does not pause
+  them.
+- Capacity itself is unchanged: one FalkorDB with 4 query threads and a 64-deep queue.
+  `MAX_QUEUED_QUERIES` decides whether a burst waits (deeper queue, later 504s) or is shed
+  (shallower queue, more 429s retried in place). Responses over 1 MiB are not cached
+  (`GRAPH_CACHE_MAX_PAYLOAD_BYTES`), so the largest views recompute on every open. The
+  per-workspace fair-share limiter is off by default and does not yet cover the view-open
+  endpoints.

@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   classifyGraphFailure,
+  isApplicationError,
   isIdempotentGraphRead,
   isProviderOutageSignal,
   isRetryableGraphFailure,
@@ -142,5 +143,33 @@ describe('isIdempotentGraphRead', () => {
     expect(isIdempotentGraphRead('POST', `${ws}/edges`)).toBe(false)
     expect(isIdempotentGraphRead('POST', `${ws}/save`)).toBe(false)
     expect(isIdempotentGraphRead('DELETE', `${ws}/nodes/x`)).toBe(false)
+  })
+})
+
+describe('an error thrown by code is not a provider state', () => {
+  const thrown = new TypeError("Cannot read properties of undefined (reading 'startTime')")
+
+  it('classifies engine errors as error — never unavailable, never merely transient', () => {
+    expect(classifyGraphFailure(thrown)).toBe('error')
+    expect(classifyGraphFailure(new RangeError('Invalid array length'))).toBe('error')
+    expect(classifyGraphFailure(new SyntaxError('Unexpected token < in JSON at position 0'))).toBe('error')
+    expect(classifyGraphFailure(new ReferenceError('x is not defined'))).toBe('error')
+    expect(isApplicationError(thrown)).toBe(true)
+  })
+
+  it("keeps fetch's own TypeErrors apart: a dropped connection is an outage, a timeout is transient", () => {
+    expect(classifyGraphFailure(new TypeError('Failed to fetch'))).toBe('unavailable')
+    expect(classifyGraphFailure(new TypeError('Request timed out after 30s (client-side limit)'))).toBe('transient')
+    expect(isApplicationError(new TypeError('Failed to fetch'))).toBe(false)
+    expect(isApplicationError(new TypeError('Request timed out after 30s'))).toBe(false)
+  })
+
+  it('a plain Error with no status stays transient', () => {
+    expect(classifyGraphFailure(new Error('boom'))).toBe('transient')
+  })
+
+  it('never feeds the breaker and is not retried in place', () => {
+    expect(isProviderOutageSignal(thrown)).toBe(false)
+    expect(isRetryableGraphFailure(thrown)).toBe(false)
   })
 })

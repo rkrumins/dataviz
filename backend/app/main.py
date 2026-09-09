@@ -434,6 +434,19 @@ async def lifespan(_app: FastAPI):
     configure_json_logging()
     _log_auth_fingerprint()
 
+    # Interactive reads first: when the breaker proxy sees FalkorDB starve a
+    # read (queue full, server-side or client deadline), stamp the shared
+    # read-pressure key so aggregation writers in other pods yield their
+    # write duty cycle. Best-effort, and never on a request's critical path.
+    try:
+        from backend.app.services.aggregation.read_pressure import ReadPressureSignal
+        from backend.app.services.aggregation.redis_client import get_redis
+        from backend.common.adapters.circuit import register_capacity_listener
+
+        register_capacity_listener(ReadPressureSignal(get_redis).on_capacity)
+    except Exception as exc:  # noqa: BLE001 — a missing signal is not a failed start
+        logger.warning("read-pressure signal not registered: %s", exc)
+
     _app.state.degraded = False
     _app.state.degraded_reason = None
     _app.state._recovery_task = None
@@ -2833,11 +2846,13 @@ async def dependency_health():
     # queue decided. Read these to verify a release ("timeouts are rising
     # but breaker_opens is flat" is the healthy shape), not to page on.
     try:
+        from backend.app.services.aggregation.read_pressure import read_pressure_stats
         from backend.common.adapters.circuit import breaker_stats
 
         result["resilience"] = {
             "breaker": breaker_stats(),
             "provider_manager": dict(provider_manager.stats),
+            "read_pressure": read_pressure_stats(),
         }
     except Exception as exc:  # noqa: BLE001 — a report must not 500
         result["resilience"] = {"_error": str(exc)[:200]}

@@ -113,7 +113,12 @@ export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete
  *                           is reachable; calm overlay, keep retrying)
  *   loading → unavailable  (the backend CONFIRMED the provider is unreachable
  *                           — overlay)
- *   warming/slow/unavailable → ready  (a retry succeeded)
+ *   loading → error        (code threw while the load ran — a UI library
+ *                           reading a property of undefined, a body that was
+ *                           not JSON. A bug, named as such: never rendered as
+ *                           an outage, never counted by the breaker, retried
+ *                           at the same calm cadence as `slow`)
+ *   warming/slow/unavailable/error → ready  (a retry succeeded)
  * A retry NEVER leaves a failed state until it actually succeeds, so the
  * overlay stays put and "Start building" can't flash between attempts.
  *
@@ -123,10 +128,10 @@ export type HydrationPhase = 'idle' | 'roots' | 'edges' | 'children' | 'complete
  * token, a client-side timeout on a slow link — all rendered "Graph service
  * is unavailable" over a FalkorDB that was serving fine.
  */
-export type HydrationStatus = 'loading' | 'ready' | 'warming' | 'slow' | 'unavailable'
+export type HydrationStatus = 'loading' | 'ready' | 'warming' | 'slow' | 'unavailable' | 'error'
 
-/** The three ways a load can end without data. See {@link HydrationStatus}. */
-export type HydrationFailure = 'warming' | 'slow' | 'unavailable'
+/** The four ways a load can end without data. See {@link HydrationStatus}. */
+export type HydrationFailure = 'warming' | 'slow' | 'unavailable' | 'error'
 
 /** Thrown by the reference-view load when the view SHOULD have entities
  *  (has assignments / branch-created delta) but every fetch failed — so the
@@ -136,6 +141,7 @@ class HydrationLoadError extends Error {
         super(
             kind === 'warming' ? 'PROVIDER_LOADING'
                 : kind === 'unavailable' ? 'provider-unavailable'
+                : kind === 'error' ? 'application-error'
                 : 'provider-slow',
         )
         this.name = 'HydrationLoadError'
@@ -144,17 +150,19 @@ class HydrationLoadError extends Error {
 
 /** Map a rejected load to the state the canvas should show. Anything the
  *  shared classification calls transient (a slow, shed, or session-repair
- *  failure) is `slow`; only a backend-confirmed outage is `unavailable`. */
+ *  failure) is `slow`; only a backend-confirmed outage is `unavailable`; an
+ *  engine error thrown by code is `error`, never either of those. */
 export function toHydrationFailure(err: unknown): HydrationFailure {
     if (err instanceof HydrationLoadError) return err.kind
     const kind = classifyGraphFailure(err)
     return kind === 'transient' ? 'slow' : kind
 }
 
-const FAILURE_SEVERITY: Record<HydrationFailure, number> = { slow: 0, warming: 1, unavailable: 2 }
+const FAILURE_SEVERITY: Record<HydrationFailure, number> = { slow: 0, error: 1, warming: 2, unavailable: 3 }
 
 /** The state for a load whose batches failed in more than one way: a
- *  confirmed outage outranks a warming provider, which outranks slowness. */
+ *  confirmed outage outranks a warming provider, which outranks a thrown
+ *  error, which outranks slowness. */
 export function worstHydrationFailure(errors: readonly unknown[]): HydrationFailure {
     let worst: HydrationFailure = 'slow'
     for (const err of errors) {
@@ -168,11 +176,12 @@ const HYDRATION_FAILURE_MESSAGE: Record<HydrationFailure, string> = {
     warming: 'Your graph is starting up…',
     slow: 'Your graph is taking longer than usual to load. Retrying automatically…',
     unavailable: 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.',
+    error: 'This view hit an error while loading. Your data is safe — retrying automatically; a refresh usually clears it.',
 }
 
 /** True for the states in which a load ended without (complete) data. */
 export function isHydrationFailure(status: HydrationStatus): status is HydrationFailure {
-    return status === 'warming' || status === 'slow' || status === 'unavailable'
+    return status === 'warming' || status === 'slow' || status === 'unavailable' || status === 'error'
 }
 
 export interface UseGraphHydrationResult {
@@ -801,6 +810,11 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     const failure = toHydrationFailure(err)
                     if (failure === 'unavailable') {
                         console.error('[useGraphHydration] Hydration failed — provider unavailable:', err)
+                    } else if (failure === 'error') {
+                        // A bug, not the provider: logged at error level with
+                        // its stack so it is found, and named as such in the
+                        // UI so nobody chases the graph service for it.
+                        console.error('[useGraphHydration] Hydration failed — code threw during the load (not a provider problem):', err)
                     } else {
                         console.warn(`[useGraphHydration] Hydration deferred (${failure}) — retrying:`, err)
                     }

@@ -93,7 +93,13 @@ export const TIMEOUTS = {
   // Ontology publish runs the impact check and cache invalidation for every
   // assigned data source server-side — give it headroom over the default.
   PUBLISH_MS:           readMs('VITE_TIMEOUT_PUBLISH_MS',           60_000, _LONG),
-  GET_CHILDREN_MS:      readMs('VITE_TIMEOUT_GET_CHILDREN_MS',      30_000, _MEDIUM),
+  // /nodes/{urn}/children and /children-with-edges. The latter runs the
+  // children page and then their edges, each on the backend's 15s children
+  // budget (FALKORDB_CHILDREN_QUERY_TIMEOUT): 30s here aborted the client
+  // while the server was still on the second query, so the backend's
+  // structured 504 never surfaced and the retry doubled the load. Sits
+  // above that 30s worst case and under the 60s graph HTTP tier.
+  GET_CHILDREN_MS:      readMs('VITE_TIMEOUT_GET_CHILDREN_MS',      45_000, _LONG),
   // /nodes/top-level. Must exceed the backend's worst case for this
   // endpoint (page query 15s + best-effort count 5s + queue/serialize
   // overhead — see FALKORDB_TOP_LEVEL_* in resilience.py) so the

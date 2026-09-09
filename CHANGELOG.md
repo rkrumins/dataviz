@@ -153,6 +153,26 @@ load runs its node batches four at a time, and the schema pill says "Schema unav
 (those endpoints read Postgres, never the graph) and stays quiet for a session that is
 merely being renewed.
 
+**The graph's own capacity replies, the last path to the outage card, and jobs that
+never yielded.** FalkorDB answers "Max pending queries exceeded" (its queue cap) and
+"Query timed out" (its kill of one query at the deadline the provider sent) as ordinary
+error replies; they surfaced as 500s that no client retries. The first is now a 429 with
+`Retry-After`, the second a 504 `PROVIDER_TIMEOUT`, and both are retried in place. The
+cache-envelope fetch path (data-source stats, the wizard's entity step, ontology helpers)
+counted *any* 5xx toward the breaker it shares with the canvas's reads, so three 504s on a
+slow afternoon fast-failed the view's next node query as "circuit open" — the one way the
+new frontend could still say "Graph service is unavailable" over a graph that was merely
+slow; it now counts only a confirmed outage. Aggregation writers paced themselves only on
+their own write latency: the web tier now stamps a short-lived read-pressure key on the
+job-bus Redis when FalkorDB starves an interactive read, and every write batch on that
+endpoint runs at the gentler `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0, about a fifth
+of the write duty cycle) until it expires. An engine error thrown while a view loads —
+`TypeError: Cannot read properties of undefined (reading 'startTime')` was the reported
+one — is a fourth canvas state, *error*, named as such and logged with its stack, never an
+outage. The children client budget rose to 45s (the server's worst case is 30s), the API
+load-balancer timeout to 180s, and the load harness gained the canvas view-open scenario it
+never had, with its URN discovery fixed (it sent a body the endpoint rejected).
+
 **A retry no longer takes the data away.** A refresh of a view the user was reading
 emptied the canvas and covered it with the state card until the retry succeeded; a load
 whose batches partly failed rendered silently incomplete; a schema refetch that failed

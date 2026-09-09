@@ -40,7 +40,7 @@ import asyncio
 import logging
 import time
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,11 @@ def _query_response_exceptions() -> tuple[type[BaseException], ...]:
     rendered as "graph service unavailable" while FalkorDB was serving fine.
     Excluded on purpose: ``ReadOnlyError`` (a write reaching a demoted master
     after a failover) is a topology problem the breaker SHOULD react to.
+
+    Two replies are CAPACITY signals rather than rejected queries and are
+    relabelled by ``breaker_guarded`` (see ``_capacity_reply``): the server's
+    queue-full rejection becomes ``ProviderBusy`` and its own query-timeout
+    kill becomes ``ProviderTimeout``. Neither is counted.
     """
     try:
         from redis.exceptions import ReadOnlyError as _ReadOnlyError
@@ -118,6 +123,31 @@ def _is_query_response_error(exc: BaseException) -> bool:
         return False
     read_only = _READ_ONLY_ERROR[0]
     return read_only is None or not isinstance(exc, read_only)
+
+
+# FalkorDB answers two CAPACITY conditions as ordinary error replies, so they
+# arrive as ``ResponseError`` exactly like a syntax error would — and used to
+# surface as HTTP 500 GRAPH_QUERY_ERROR, which no client retries. Both mean
+# "the server is up and busy": queue-full is ``MAX_QUEUED_QUERIES`` (the
+# thread pool's queue is at capacity — the shape of a cold-cache stampede or
+# of aggregation jobs and interactive reads sharing the instance), and the
+# timeout is the server killing ONE query at the ``TIMEOUT`` the provider
+# sent with it. Matched on the server's own message text
+# (``EMSG_MAX_PENDING_QUERIES`` / ``EMSG_QUERY_TIMEOUT`` in FalkorDB's
+# ``error_msgs.h``); case-insensitive so a prefix change upstream cannot
+# silently demote either back to a 500.
+_QUEUE_FULL_REPLY = "max pending queries exceeded"
+_SERVER_TIMEOUT_REPLY = "query timed out"
+
+
+def _capacity_reply(exc: BaseException) -> str | None:
+    """``"queue_full"`` / ``"server_timeout"`` for a capacity reply, else None."""
+    text = str(exc).lower()
+    if _QUEUE_FULL_REPLY in text:
+        return "queue_full"
+    if _SERVER_TIMEOUT_REPLY in text:
+        return "server_timeout"
+    return None
 
 
 # The caller's own deadline firing (``asyncio.wait_for`` around a Cypher
@@ -190,6 +220,7 @@ _QUERY_RESPONSE_EXCEPTIONS = _query_response_exceptions()
 # loop — no lock needed.
 _STATS: dict[str, int] = {
     "deadline_timeouts_not_counted": 0,
+    "queue_full_not_counted": 0,
     "query_errors_not_counted": 0,
     "network_failures_counted": 0,
     "breaker_opens": 0,
@@ -200,6 +231,32 @@ _STATS: dict[str, int] = {
 def breaker_stats() -> dict[str, int]:
     """Snapshot of the process-wide breaker counters (see ``_STATS``)."""
     return dict(_STATS)
+
+
+# ── Capacity-signal listeners ──────────────────────────────────────────
+# A capacity reply or a deadline miss is a fact about the DOWNSTREAM that
+# other processes can act on — the aggregation writers yield their write
+# duty cycle while interactive reads are being starved (see
+# backend/app/services/aggregation/read_pressure.py). This module is
+# generic and Redis-free, so it only publishes: the app registers a
+# listener at startup. A listener is called synchronously with
+# ``(kind, target)`` — kind is "queue_full", "server_timeout" or
+# "deadline", target the wrapped provider — and must be cheap; an
+# exception it raises is swallowed, never surfaced to the request.
+_CAPACITY_LISTENERS: list[Callable[[str, Any], None]] = []
+
+
+def register_capacity_listener(listener: Callable[[str, Any], None]) -> None:
+    if listener not in _CAPACITY_LISTENERS:
+        _CAPACITY_LISTENERS.append(listener)
+
+
+def _notify_capacity(kind: str, target: Any) -> None:
+    for listener in _CAPACITY_LISTENERS:
+        try:
+            listener(kind, target)
+        except Exception as exc:  # noqa: BLE001 — a listener must never fail a request
+            logger.debug("capacity listener %r failed on %s: %s", listener, kind, exc)
 
 
 class BreakerState(str, Enum):
@@ -321,6 +378,10 @@ class ProviderTimeout(ProviderUnavailable, TimeoutError):
 # ProviderTimeout: a nested proxy must not count a slow query either.
 register_logical_exception(ProviderLoading)
 register_logical_exception(ProviderTimeout)
+# ProviderBusy is flow control by definition ("healthy but overloaded right
+# now"): a write-side quiesce raised inside a proxied provider, or the
+# queue-full relabelling below, must pass through an outer proxy uncounted.
+register_logical_exception(ProviderBusy)
 
 
 class _AsyncCircuitBreaker:
@@ -605,6 +666,7 @@ class CircuitBreakerProxy:
                     exc,
                     proxy._breaker.current_state,
                 )
+                _notify_capacity("deadline", proxy._target)
                 raise ProviderTimeout(
                     provider_name=proxy._name,
                     reason=f"{name} exceeded its deadline: {exc}" if str(exc) else f"{name} exceeded its deadline",
@@ -632,6 +694,46 @@ class CircuitBreakerProxy:
                 # ACL refusal) proves the downstream answered. Re-raise it
                 # untouched: not counted, not relabelled as an outage.
                 if _is_query_response_error(exc):
+                    capacity = _capacity_reply(exc)
+                    if capacity == "queue_full":
+                        # MAX_QUEUED_QUERIES reached: shed this request as
+                        # busy (429 + Retry-After) so the client retries in
+                        # place, instead of a 500 it treats as a rejected
+                        # query. The breaker stays closed — the server
+                        # answered, it is merely full.
+                        _STATS["queue_full_not_counted"] += 1
+                        logger.warning(
+                            "Provider %s query queue full on %s: %s (breaker=%s, "
+                            "not counted; shed as busy)",
+                            proxy._name,
+                            name,
+                            exc,
+                            proxy._breaker.current_state,
+                        )
+                        _notify_capacity("queue_full", proxy._target)
+                        raise ProviderBusy(
+                            provider_name=proxy._name,
+                            reason=f"{name} rejected: the graph server's query queue is full",
+                            retry_after_seconds=1,
+                        ) from exc
+                    if capacity == "server_timeout":
+                        # The server killed one query at the deadline the
+                        # provider sent with it — the same slow-query case
+                        # as the client's own wait_for, and the same 504.
+                        _STATS["deadline_timeouts_not_counted"] += 1
+                        logger.info(
+                            "Provider %s server-side deadline exceeded on %s: %s "
+                            "(breaker=%s, not counted)",
+                            proxy._name,
+                            name,
+                            exc,
+                            proxy._breaker.current_state,
+                        )
+                        _notify_capacity("server_timeout", proxy._target)
+                        raise ProviderTimeout(
+                            provider_name=proxy._name,
+                            reason=f"{name} exceeded the server-side query deadline",
+                        ) from exc
                     _STATS["query_errors_not_counted"] += 1
                     logger.info(
                         "Provider %s query rejected on %s: %s=%s (breaker=%s, not counted)",

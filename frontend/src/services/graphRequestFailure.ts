@@ -19,10 +19,17 @@
  *                    `PROVIDER_UNAVAILABLE`: breaker open, preflight down), or
  *                    the browser could not reach the backend at all. The only
  *                    kind that counts toward the client circuit breaker.
- *  - `transient`   — everything else: a slow request (504, client timeout),
- *                    load shedding (429), a gateway hiccup (502), a rejected
- *                    query (500), or a session/CSRF problem the fetch layer
- *                    repairs on its own (401/403). Never an outage.
+ *  - `transient`   — everything else from the network: a slow request (504,
+ *                    client timeout), load shedding (429), a gateway hiccup
+ *                    (502), a rejected query (500), or a session/CSRF problem
+ *                    the fetch layer repairs on its own (401/403). Never an
+ *                    outage.
+ *  - `error`       — not from the network at all: a `TypeError`, `RangeError`,
+ *                    `ReferenceError` or `SyntaxError` thrown by code while the
+ *                    load ran (a UI library reading a property of `undefined`,
+ *                    a body that was not JSON). A bug, not a provider state —
+ *                    it must never be rendered as an outage, never feed the
+ *                    breaker, and never hide behind "taking longer than usual".
  */
 
 export interface ApiStatusError extends Error {
@@ -33,7 +40,7 @@ export interface ApiStatusError extends Error {
   retryAfterMs?: number
 }
 
-export type GraphFailureKind = 'warming' | 'unavailable' | 'transient'
+export type GraphFailureKind = 'warming' | 'unavailable' | 'transient' | 'error'
 
 export function isApiStatusError(err: unknown): err is ApiStatusError {
   return err instanceof Error && typeof (err as Partial<ApiStatusError>).status === 'number'
@@ -60,6 +67,18 @@ export function isNetworkError(err: unknown): boolean {
 /** `fetchWithTimeout`'s own deadline (or its `Request timed out:` rewrap). */
 export function isClientTimeout(err: unknown): boolean {
   return err instanceof Error && err.message.toLowerCase().includes('timed out')
+}
+
+/** An engine error thrown by code, not a failed request: `fetch` rejects
+ *  with a `TypeError` too, so its own messages are ruled out first. */
+export function isApplicationError(err: unknown): boolean {
+  if (isApiStatusError(err) || isNetworkError(err) || isClientTimeout(err)) return false
+  return (
+    err instanceof TypeError
+    || err instanceof RangeError
+    || err instanceof ReferenceError
+    || err instanceof SyntaxError
+  )
 }
 
 /** Build the error a non-OK response becomes. Keeps the legacy
@@ -112,6 +131,7 @@ export function classifyGraphFailure(err: unknown): GraphFailureKind {
   // The client breaker's own rejection: it only opens on confirmed signals.
   if (message.includes('circuit open')) return 'unavailable'
   if (isNetworkError(err)) return 'unavailable'
+  if (isApplicationError(err)) return 'error'
   return 'transient'
 }
 

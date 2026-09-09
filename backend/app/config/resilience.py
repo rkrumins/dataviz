@@ -34,7 +34,12 @@ BREAKER_RESET_TIMEOUT_SECS: int = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_
 # its per-operation deadline surfaces as ProviderTimeout (HTTP 504 +
 # Retry-After, code PROVIDER_TIMEOUT) and is NOT counted — a slow query is a
 # capacity signal, not evidence the provider is unreachable. Server error
-# replies (bad Cypher, per-query memory cap) are not counted either.
+# replies (bad Cypher, per-query memory cap) are not counted either, and two
+# of them are relabelled as capacity signals: FalkorDB's "Max pending queries
+# exceeded" (MAX_QUEUED_QUERIES reached) surfaces as ProviderBusy (HTTP 429 +
+# Retry-After) and its "Query timed out" (the server killed the query at the
+# TIMEOUT sent with it) as ProviderTimeout — both retried in place by the
+# canvas, neither a 500.
 #
 # Per-provider request concurrency (ProviderManager): at most
 # PROVIDER_MAX_CONCURRENCY (8) outbound calls in flight per data source; a
