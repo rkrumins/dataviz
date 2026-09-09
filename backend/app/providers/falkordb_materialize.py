@@ -735,6 +735,11 @@ class AggregationPipeline:
         # override of the same figure comes through ``tuning`` instead.
         self._capacity_hints: Dict[str, Any] = dict(capacity_hints or {})
         self._last_budget: Optional[WriteBudget] = None
+        # This job's entry in the owning node's reservation ledger: the
+        # bytes it may still write that the node's ``used`` does not show.
+        # Held from the first passed budget check, shrunk at each recheck,
+        # released with the lease.
+        self._reservation: Optional[Any] = None
         self._used_before: Optional[int] = None
         self._edges_before: int = 0
         self._calibration: Optional[Dict[str, Any]] = None
@@ -1136,6 +1141,9 @@ class AggregationPipeline:
             )
             return self._result(final_total)
         finally:
+            if admission is not None and self._reservation is not None:
+                await admission.release(self._reservation)
+                self._reservation = None
             if admission is not None and lease is not None:
                 await admission.release_graph_lease(lease)
 
@@ -2388,15 +2396,54 @@ class AggregationPipeline:
             bpe, source = hint, "calibrated"
         else:
             bpe, source = None, "default"
+        reserved_bytes, reserved_count = await self._reserved_by_others(shard)
         budget = compute_write_budget(
             shard,
             reserve_pct=self._tuning.get("shard_reserve_pct"),
             bytes_per_edge=bpe, bpe_source=source,
             explicit_ceiling=self._explicit_ceiling(),
             static_cap=self._static_cap(),
+            reserved_bytes=reserved_bytes, reserved_count=reserved_count,
         )
         self._last_budget = budget
         return budget
+
+    def _ledger(self, shard: ShardMemory) -> Optional[Any]:
+        """The admission controller, when there is one and the node it
+        would keep a ledger for is known and measurable."""
+        admission = getattr(self.p, "_admission_controller", None)
+        if admission is None or not shard.measurable or shard.endpoint == "unknown":
+            return None
+        return admission
+
+    async def _reserved_by_others(self, shard: ShardMemory) -> Tuple[int, int]:
+        """What other rebuilds hold in the node's ledger — allowed to write,
+        not yet in ``used``. ``(0, 0)`` without a controller or a bus."""
+        admission = self._ledger(shard)
+        read = getattr(admission, "reserved_by_others", None)
+        if read is None:
+            return 0, 0
+        return await read(shard.endpoint, self._job_id)
+
+    async def _reserve(self, shard: ShardMemory, nbytes: int) -> None:
+        """Hold what this job may still write in the node's ledger, so a
+        rebuild racing onto the same node budgets against it too. The
+        figure is what ``used`` does not show yet: the whole growth before
+        the apply, one wave for an overflow flush, the remainder at a
+        mid-apply recheck — replaced, never summed. Fail-open like the
+        rest of admission: no bus, nothing held."""
+        admission = self._ledger(shard)
+        if admission is None:
+            return
+        if self._reservation is not None and self._reservation.endpoint != shard.endpoint:
+            await admission.release(self._reservation)      # the graph moved (failover)
+            self._reservation = None
+        if self._reservation is None:
+            reserve = getattr(admission, "reserve", None)
+            if reserve is not None:
+                self._reservation = await reserve(shard.endpoint, self._job_id, nbytes)
+        else:
+            await admission.update(self._reservation, nbytes)
 
     async def _count_aggregated(self) -> int:
         """How many :AGGREGATED edges the graph holds — what a rebuild
@@ -2774,6 +2821,8 @@ class AggregationPipeline:
             raise MaterializationBudgetExceeded(format_refusal(
                 budget, verdict, graph=self.p._graph_name, composition=composition,
             ))
+        # Passed: hold what is still to land in the node's ledger.
+        await self._reserve(budget.shard, int(verdict.needed_bytes or 0))
 
     def _budget_composition(self) -> str:
         """Per-rank-pair histogram of the would-be result, so operators

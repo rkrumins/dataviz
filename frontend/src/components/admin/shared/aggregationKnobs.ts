@@ -287,15 +287,25 @@ export function clampKnob(knob: TuningKnob, value: number): number {
 
 // ── Capacity arithmetic (the pipeline's rule, for what-ifs) ────────────
 
-/** Bytes still free on a shard once the reserve is set aside. Null when the
- *  shard cannot be measured. */
-export function freeAfterReserve(
-    shard: Pick<ShardCapacity, 'used' | 'maxmemory' | 'measurable'>,
-    reservePct: number,
-): number | null {
+/** The shard fields the free-memory rule reads: the reading, and what running
+ *  rebuilds hold in the node's reservation ledger. */
+export type ShardReading = Pick<ShardCapacity, 'used' | 'maxmemory' | 'measurable'> & Partial<Pick<ShardCapacity, 'reservedBytes'>>
+
+/** Bytes still free on a shard once the reserve is set aside and what running
+ *  rebuilds hold is taken off — the pipeline's own rule. Null when the shard
+ *  cannot be measured. */
+export function freeAfterReserve(shard: ShardReading, reservePct: number): number | null {
     if (!shard.measurable || shard.maxmemory == null || shard.used == null || shard.maxmemory <= 0) return null
     const reserve = Math.floor(shard.maxmemory * Math.max(0, Math.min(90, reservePct)) / 100)
-    return Math.max(0, shard.maxmemory - reserve - shard.used)
+    return Math.max(0, shard.maxmemory - reserve - shard.used - Math.max(0, shard.reservedBytes ?? 0))
+}
+
+/** "1.2 GB held by 2 running rebuilds" — what the node's reservation ledger
+ *  holds right now; null when nothing is. */
+export function heldByRebuilds(shard: Pick<ShardCapacity, 'reservedBytes' | 'reservedByJobs'>): string | null {
+    const n = shard.reservedByJobs ?? 0
+    if (n <= 0) return null
+    return `${compactBytes(shard.reservedBytes)} held by ${n} running ${n === 1 ? 'rebuild' : 'rebuilds'}`
 }
 
 /** How many rollup edges fit in ``freeBytes`` at ``bytesPerEdge``. */
@@ -320,7 +330,7 @@ export type FitVerdict = {
  * explicit ceiling on the total that the margin never widens.
  */
 export function fullDetailVerdict(args: {
-    shard: Pick<ShardCapacity, 'used' | 'maxmemory' | 'measurable'>
+    shard: ShardReading
     limits: Pick<CapacityLimits, 'estimateMarginPct'>
     edgeCount: number
     estimateEdges: number | null | undefined

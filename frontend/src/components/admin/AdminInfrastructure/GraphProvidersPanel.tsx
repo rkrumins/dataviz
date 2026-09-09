@@ -19,7 +19,7 @@ import { cn } from '@/lib/utils'
 import type { GraphProvider, ProjectionSection, ServiceEntry } from '@/services/systemStatusService'
 import { STATUS_META, formatBytes, num, obj, str } from './meta'
 import type { AggregationCapacityResponse } from '@/services/aggregationService'
-import { compactBytes, compactEdges } from '../shared/aggregationKnobs'
+import { compactBytes, compactEdges, heldByRebuilds } from '../shared/aggregationKnobs'
 
 /** Neutral type badge — no privileged provider. */
 const TYPE_LABEL: Record<string, string> = {
@@ -71,6 +71,10 @@ interface ShardMemory {
     /** How many more rollup edges fit under that reserve, at bytesPerEdge. */
     fitsEdges?: number | null
     bytesPerEdge?: number | null
+    /** What running rebuilds hold in the node's reservation ledger — already
+     *  off fitsEdges. */
+    reservedBytes?: number | null
+    reservedByJobs?: number | null
     /** The node's own limits, when the capacity sweep read them: the
      *  per-query memory ceiling, the per-query time cap, the thread count. */
     queryMemCapacity?: number | null
@@ -147,6 +151,8 @@ export function graphShardMemory(
             row.reservePct = shard.reservePct
             row.fitsEdges = shard.allowedGrowthEdges ?? null
             row.bytesPerEdge = bytesPerEdge
+            row.reservedBytes = shard.reservedBytes ?? null
+            row.reservedByJobs = shard.reservedByJobs ?? null
         } else {
             rows.push({
                 endpoint: shard.endpoint,
@@ -157,6 +163,8 @@ export function graphShardMemory(
                 reservePct: shard.reservePct,
                 fitsEdges: shard.allowedGrowthEdges ?? null,
                 bytesPerEdge,
+                reservedBytes: shard.reservedBytes ?? null,
+                reservedByJobs: shard.reservedByJobs ?? null,
                 ...limits,
             })
         }
@@ -213,6 +221,7 @@ function ShardMemoryRow({ shard, onAdjustLimits }: {
             {shard.reservePct != null && (
                 <p className="mt-1 text-[11px] text-ink-muted tabular-nums">
                     Rollups keep {shard.reservePct}% in reserve
+                    {heldByRebuilds(shard) && ` \u00b7 ${heldByRebuilds(shard)}`}
                     {shard.fitsEdges != null && ` \u00b7 fits ~${compactEdges(shard.fitsEdges)} more rollup edges`}
                     {shard.bytesPerEdge != null && ` at ${shard.bytesPerEdge} B each`}
                 </p>

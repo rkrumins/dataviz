@@ -56,10 +56,12 @@ describe('GraphProvidersPanel — memory headroom', () => {
         endpoint: 'falkordb:6379', used: 5_368_709_120, maxmemory: 12_884_901_888, policy: 'noeviction', measurable: true,
         usedPct: 41.7, reservePct: 20, reserveBytes: 2_576_980_377, availableBytes: 4_939_212_391,
         allowedGrowthEdges: 9_646_899, governedBy: 'shard', staticCap: 25_000_000, sources: [],
+        reservedBytes: 1_288_490_189, reservedByJobs: 1,
       }],
       unresolved: [], sourcesTotal: 1, truncated: false, measuredAt: '2026-09-08T10:00:00Z', cacheAgeMs: 0,
     }} />)
     expect(screen.getByText(/Rollups keep 20% in reserve/)).toBeInTheDocument()
+    expect(screen.getByText(/1\.2 GB held by 1 running rebuild/)).toBeInTheDocument()
     expect(screen.getByText(/fits ~9\.6M more rollup edges at 512 B each/)).toBeInTheDocument()
   })
 

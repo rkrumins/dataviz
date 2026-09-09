@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 import {
-    KNOB_BY_KEY, TUNING_KNOBS, compactBytes, compactEdges, fitsEdges, freeAfterReserve,
+    KNOB_BY_KEY, TUNING_KNOBS, compactBytes, compactEdges, fitsEdges, freeAfterReserve, heldByRebuilds,
     fullDetailVerdict, knobPlaceholder, resolveKnob, serverCapNote,
     containerNeededBytes, fleetTimeoutCapMs, graphStoreLimitsPath,
 } from './aggregationKnobs'
@@ -83,6 +83,11 @@ describe('the capacity arithmetic', () => {
         expect(fitsEdges(freeAfterReserve(shard, 20), 512)).toBe(Math.floor(22 * GB / 512))
         expect(freeAfterReserve({ measurable: false, used: null, maxmemory: null }, 20)).toBeNull()
         expect(fitsEdges(null, 512)).toBeNull()
+        // What running rebuilds hold in the node's ledger comes off free memory as used memory does.
+        expect(freeAfterReserve({ ...shard, reservedBytes: 2 * GB }, 20)).toBe(20 * GB)
+        expect(heldByRebuilds({ reservedBytes: 2 * GB, reservedByJobs: 1 })).toBe('2.0 GB held by 1 running rebuild')
+        expect(heldByRebuilds({ reservedBytes: 3 * GB, reservedByJobs: 2 })).toBe('3.0 GB held by 2 running rebuilds')
+        expect(heldByRebuilds({ reservedBytes: 0, reservedByJobs: 0 })).toBeNull()
     })
 
     it('charges growth over what the graph holds, with the margin, and never widens a ceiling', () => {

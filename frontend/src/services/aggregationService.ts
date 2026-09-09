@@ -506,6 +506,10 @@ export interface ShardCapacity {
   allowedGrowthEdges?: number | null;
   governedBy: string;
   staticCap: number;
+  /** What running rebuilds hold in the node's reservation ledger — allowed to
+   *  write, not yet in `used` — already taken off `availableBytes`. */
+  reservedBytes?: number | null;
+  reservedByJobs?: number | null;
   /** The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes; null when unlimited or unreadable. */
   queryMemCapacity?: number | null;
   /** The node's per-query time cap (TIMEOUT_MAX) and its default, ms — what

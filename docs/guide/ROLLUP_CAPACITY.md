@@ -18,10 +18,10 @@ Before it writes, a rebuild reads the memory in use and the memory limit
 (`maxmemory`) on the shard that owns the graph, and allows the write only while
 the **new** rollup edges fit under a reserve:
 
-> free for rollups = maxmemory − reserve − memory in use
+> free for rollups = maxmemory − reserve − memory in use − what other running rebuilds hold
 > edges that fit = free for rollups ÷ bytes per rollup edge
 
-Three things follow from that:
+Four things follow from that:
 
 - **Only growth is charged.** Edges the graph already holds are rewritten in
   place; they cost nothing new.
@@ -31,6 +31,12 @@ Three things follow from that:
   computed the result, before each overflow wave, and every million edges
   written during the apply — so a shard that fills up while a long rebuild is
   running is caught as a loud, resumable refusal rather than as an outage.
+- **Two rebuilds cannot both pass on the same headroom.** A rebuild that has
+  been allowed to write enters what it still has to land in its node's
+  reservation ledger, and every other rebuild's budget takes that off the free
+  memory as if it were already in use — until the writes land and the reading
+  shows them, or the job ends. The capacity card and a refusal both name what
+  is held and by how many rebuilds.
 
 A shard with no `maxmemory` configured cannot be measured. There the rebuild
 falls back to a static edge cap and its message says so; set `maxmemory` on
@@ -41,8 +47,9 @@ the node to let the budget read real headroom.
 ## Where to see it
 
 **Ingestion → Freshness → Graph store capacity.** One row per shard: a meter of
-memory in use with the reserve marked on it, what is free after the reserve,
-how many more rollup edges that is, and the sources whose rollups live there.
+memory in use with the reserve marked on it, what is free after the reserve
+(and what running rebuilds already hold), how many more rollup edges that is,
+and the sources whose rollups live there.
 Click a source to open its drawer. A shard that cannot be measured says why. A
 red **would not fit** count filters the table to the sources whose last rebuild
 was refused. **Re-measure** takes a fresh reading.
@@ -268,9 +275,6 @@ check — the projector is not behind.
 - The rebuild **worker**'s memory flush reads the worker's cgroup limit; on a
   host without one (a bare process, or a container with no memory limit) only
   the *max pending pairs* cap bounds worker memory, as before.
-- Two rebuilds landing on the same shard at the same time each measure the
-  shard for themselves; the reserve and the re-measure during the apply bound
-  the overlap, but no reservation is held between them.
 - **Full detail** pre-flight is *unknown* until a source has completed one
   rebuild — the estimate it needs is recorded on success.
 - A single row larger than the graph store's per-query memory ceiling is

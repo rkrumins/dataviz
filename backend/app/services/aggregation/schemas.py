@@ -1397,6 +1397,10 @@ class ShardCapacity(BaseModel):
     allowed_growth_edges: Optional[int] = Field(None, alias="allowedGrowthEdges")
     governed_by: str = Field(alias="governedBy")
     static_cap: int = Field(alias="staticCap")
+    # What running rebuilds hold in the node's reservation ledger — allowed
+    # to write, not yet in ``used`` — already taken off ``availableBytes``.
+    reserved_bytes: int = Field(0, alias="reservedBytes")
+    reserved_by_jobs: int = Field(0, alias="reservedByJobs")
     # The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes — what
     # the pressure ladder narrows scans against. None when unlimited or
     # unreadable.

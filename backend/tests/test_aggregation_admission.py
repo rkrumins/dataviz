@@ -1,11 +1,13 @@
 """Unit tests for the distributed write-admission controller.
 
 Uses a minimal in-memory fake of the job-bus Redis (only the commands the
-controller issues: SET NX PX / GET / PEXPIRE / EVAL / ZREM) so we can
-assert the lease exclusivity, the slot semaphore, and — critically — the
-fail-OPEN behavior when Redis is down.
+controller issues: SET NX PX / GET / PEXPIRE / EVAL / ZREM / HSET /
+HGETALL / HDEL) so we can assert the lease exclusivity, the slot semaphore,
+the reservation ledger, and — critically — the fail-OPEN behavior when
+Redis is down.
 """
 import asyncio
+import json
 import time
 
 import pytest
@@ -19,10 +21,15 @@ class _FakeProvider:
     _conn_cfg = None
 
 
+GB = 2 ** 30
+
+
 class _FakeRedis:
     def __init__(self):
         self.kv = {}
         self.zsets = {}
+        self.hashes = {}
+        self.hset_calls = 0
 
     async def set(self, key, value, nx=False, px=None):
         if nx and key in self.kv:
@@ -63,6 +70,18 @@ class _FakeRedis:
     async def zrem(self, key, member):
         self.zsets.get(key, {}).pop(member, None)
         return 1
+
+    async def hset(self, key, field, value):
+        self.hset_calls += 1
+        self.hashes.setdefault(key, {})[field] = value
+        return 1
+
+    async def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    async def hdel(self, key, *fields):
+        h = self.hashes.get(key, {})
+        return sum(1 for f in fields if h.pop(f, None) is not None)
 
 
 class _DownRedis:
@@ -242,3 +261,78 @@ def test_endpoint_key_prefers_host_port():
 
     assert adm.endpoint_key(_P()) == "falkordb.internal:6379"
     assert adm.endpoint_key(_FakeProvider()) == "graph:g1"
+
+
+# ── the per-node reservation ledger ─────────────────────────────────────
+
+
+def test_reservations_are_per_node_exclude_the_holder_and_are_released():
+    """Two rebuilds on one node: each budgets against what the OTHER holds,
+    a reservation is replaced (never summed) as the apply lands, and a
+    release leaves nothing behind."""
+    async def scenario():
+        redis = _FakeRedis()
+        a, b = adm.AggregationAdmission(redis), adm.AggregationAdmission(redis)
+        ra = await a.reserve("10.0.0.1:6379", "job-a", 3 * GB)
+        assert ra is not None and ra.bytes == 3 * GB and ra.endpoint == "10.0.0.1:6379"
+        assert await a.reserved_by_others("10.0.0.1:6379", "job-a") == (0, 0)      # never its own
+        assert await b.reserved_by_others("10.0.0.1:6379", "job-b") == (3 * GB, 1)
+        assert await b.reserved_by_others("10.0.0.2:6379", "job-b") == (0, 0)      # another node
+        rb = await b.reserve("10.0.0.1:6379", "job-b", GB)
+        assert await a.reserved_by_others("10.0.0.1:6379", "job-a") == (GB, 1)
+        assert await b.reserved_by_others("10.0.0.1:6379", "job-b") == (3 * GB, 1)
+        await a.update(ra, GB // 2)                                                  # the remainder shrinks
+        assert await b.reserved_by_others("10.0.0.1:6379", "job-b") == (GB // 2, 1)
+        await a.release(ra)
+        await asyncio.sleep(0)
+        assert ra.renew_task.cancelled()
+        assert await b.reserved_by_others("10.0.0.1:6379", "job-b") == (0, 0)
+        await b.release(rb)
+        assert redis.hashes[adm.reservation_key("10.0.0.1:6379")] == {}
+        # An unknown node, or no job id, holds nothing.
+        assert await a.reserve("unknown", "job-a", GB) is None
+        assert await a.reserve("10.0.0.1:6379", "", GB) is None
+
+    _run(scenario())
+
+
+def test_a_reservation_is_renewed_and_a_dead_holders_entry_expires(monkeypatch):
+    async def scenario():
+        redis = _FakeRedis()
+        a = adm.AggregationAdmission(redis)
+        monkeypatch.setattr(adm, "_GRAPH_LEASE_RENEW_SECS", 0.01)
+        key = adm.reservation_key("n1")
+        r = await a.reserve("n1", "job-a", GB)
+        first = json.loads(redis.hashes[key]["job-a"])
+        await asyncio.sleep(0.05)
+        renewed = json.loads(redis.hashes[key]["job-a"])
+        assert redis.hset_calls >= 2 and renewed["expires_at"] >= first["expires_at"]
+        assert renewed["bytes"] == GB and renewed["host"]
+        await a.release(r)
+        # A holder that died leaves an entry whose expiry is past; garbage
+        # beside it; a client that answers in bytes. Only the live one counts,
+        # and the rest is pruned on the way.
+        redis.hashes[key] = {
+            "dead": json.dumps({"bytes": 5 * GB, "expires_at": time.time() - 1, "host": "x"}),
+            "garbage": "not json",
+            b"live": json.dumps({"bytes": GB, "expires_at": time.time() + 60, "host": "y"}).encode(),
+        }
+        assert await a.reserved_by_others("n1", "me") == (GB, 1)
+        assert set(redis.hashes[key]) == {b"live"}
+        live = await adm.read_reservations(redis, "n1")
+        assert set(live) == {"live"} and live["live"]["bytes"] == GB and live["live"]["host"] == "y"
+
+    _run(scenario())
+
+
+def test_the_ledger_fails_open_when_redis_is_down():
+    async def scenario():
+        a = adm.AggregationAdmission(_DownRedis())
+        assert await a.reserve("n1", "job", GB) is None              # nothing held
+        assert await a.reserved_by_others("n1", "job") == (0, 0)      # the node is measured alone
+        await a.update(None, GB)
+        await a.release(None)
+        with pytest.raises(ConnectionError):
+            await adm.read_reservations(_DownRedis(), "n1")           # the raw read raises; callers fail open
+
+    _run(scenario())

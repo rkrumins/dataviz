@@ -84,6 +84,15 @@ the Defaults dialog; a run that flushed on memory says so in its record and on t
 (*Flushed 3× on worker memory (peak 2.9 GB of 4.0 GB)*). The readers moved to
 `providers/process_memory.py` (`MemoryGauge`); the fleet's claim deferral shares them.
 
+**Two rebuilds cannot both pass on the same headroom.** A rebuild that passes a budget check
+now enters what it still has to write in its node's reservation ledger (on the job-bus Redis,
+beside the write lease), and every other rebuild's budget takes that off the node's free
+memory as if it were already in use — the whole growth before the apply, one wave for an
+overflow flush, the remainder at each mid-apply recheck, released with the lease. The
+capacity card, a source's Capacity block, Infrastructure's memory headroom and the Defaults
+dialog's what-if all show *held by N running rebuilds* and subtract it; a refusal names it. The
+ledger fails open like the rest of admission: without the bus, the node is measured alone.
+
 **The graph store's own limits, from the UI.** `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` no longer
 live only in the deployment. Infrastructure → Memory headroom shows each node's per-query memory
 ceiling, query time cap and thread count (read with the capacity sweep), and system administrators
@@ -402,9 +411,6 @@ is required for correctness, but without it readers pay the aggregation on the r
   top-level pages keep their current behaviour under the store's per-query limits.
 - The memory-aware flush reads the worker's cgroup limit; on a host without one only the
   pair cap (`AGGREGATION_MAX_PENDING_PAIRS`) bounds worker memory, as before.
-- Two rebuilds landing on the same shard at once each measure the shard for themselves: the
-  reserve, the fresh per-wave reading and the mid-apply recheck bound the overlap, but no
-  reservation is held between them.
 - `AGGREGATION_MAX_CUBE_EDGES` and `AGGREGATION_ESTIMATE_MARGIN_PCT` stay environment-only;
   the Defaults dialog shows them for information.
 - The status probe and the capacity sweep can name the same node differently under an address

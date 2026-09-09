@@ -15,8 +15,10 @@ so we can assert the high-value correctness properties:
 * deterministic v3 cursor round-trip and resume behavior.
 """
 import asyncio
+import contextlib
 import re
 import time
+import types
 
 import pytest
 
@@ -254,7 +256,7 @@ def _run(coro):
 
 
 async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None,
-                       tuning=None, capacity_hints_override=None):
+                       tuning=None, capacity_hints_override=None, job_id=None):
     # The suite pins the BOUNDARY (depth-diagonal) mechanics — the mode
     # every graph too big for the full cube runs in. Auto/cube behavior
     # has its own dedicated tests below.
@@ -265,6 +267,7 @@ async def _materialize(p, *, last_cursor=None, progress=None, should_cancel=None
         containment_edge_types=["CONTAINS"],
         lineage_edge_types=["FLOWS"],
         last_cursor=last_cursor,
+        job_id=job_id,
         progress_callback=progress,
         intra_batch_callback=None,
         should_cancel=should_cancel,
@@ -2556,6 +2559,84 @@ def test_a_forced_cube_the_shard_cannot_take_is_refused_before_any_write(monkeyp
     assert msg.startswith("write budget:")
     assert "upper-bound estimate" in msg and "short by" in msg and "10.0.0.1:6379" in msg
     assert fake.agg == {}
+
+
+class _Ledger:
+    """A stand-in admission controller with only the reservation ledger:
+    records every call; what OTHER rebuilds hold is set by the test."""
+
+    def __init__(self, others=(0, 0)):
+        self.others = others
+        self.calls = []
+
+    async def acquire_graph_lease(self, provider, owner=""):
+        return None
+
+    async def release_graph_lease(self, lease):
+        pass
+
+    def write_slot(self, provider):
+        return contextlib.nullcontext()
+
+    async def reserved_by_others(self, endpoint, job_id):
+        self.calls.append(("others", endpoint, job_id))
+        return self.others
+
+    async def reserve(self, endpoint, job_id, nbytes):
+        self.calls.append(("reserve", endpoint, job_id, nbytes))
+        return types.SimpleNamespace(endpoint=endpoint, job_id=job_id, bytes=nbytes)
+
+    async def update(self, reservation, nbytes):
+        self.calls.append(("update", reservation.endpoint, reservation.job_id, nbytes))
+        reservation.bytes = nbytes
+
+    async def release(self, reservation):
+        self.calls.append(("release", reservation.endpoint, reservation.job_id))
+
+
+def test_a_rebuild_holds_its_growth_in_the_nodes_ledger_until_it_is_done(monkeypatch):
+    """The budget asks what other rebuilds hold on the node, and once a check
+    passes the run enters its own still-to-land bytes — the growth at bytes
+    per edge — under its job id, releasing them when it is done."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=2 ** 30, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    ledger = _Ledger()
+    p._admission_controller = ledger
+
+    result = _run(_materialize(p, tuning={"materialize_fine_pairs": True}, job_id="job-1"))
+
+    assert result["errors"] == 0 and fake.agg
+    assert ("others", "10.0.0.1:6379", "job-1") in ledger.calls
+    reserves = [c for c in ledger.calls if c[0] == "reserve"]
+    assert reserves == [("reserve", "10.0.0.1:6379", "job-1", len(fake.agg) * 512)]   # every cell was new
+    assert ledger.calls[-1] == ("release", "10.0.0.1:6379", "job-1")
+    assert [c for c in ledger.calls if c[0] == "release"] == [ledger.calls[-1]]
+    wb = result["run_stats"]["write_budget"]
+    assert (wb["reserved_bytes"], wb["reserved_by_jobs"]) == (0, 0)
+
+
+def test_another_rebuilds_hold_on_the_node_counts_as_used_memory(monkeypatch):
+    """Room for 100 edges, of which another rebuild holds 99: the cube's 8+
+    cells are refused with the hold named, nothing is written, and nothing
+    is entered in the ledger for a run that never passed a check."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory", _ShardFake(fake, base_used=40 * 2 ** 30 - 100 * 512, maxmemory=40 * 2 ** 30))
+    p = _make_provider(fake, levels)
+    ledger = _Ledger(others=(99 * 512, 1))
+    p._admission_controller = ledger
+
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(p, tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}, job_id="job-2"))
+
+    msg = str(exc.value)
+    assert "49.5 KB held by 1 other rebuild still writing" in msg and "short by" in msg
+    assert fake.agg == {}
+    assert not any(c[0] in ("reserve", "update", "release") for c in ledger.calls)
 
 
 def test_auto_never_picks_a_cube_the_shard_would_refuse(monkeypatch):

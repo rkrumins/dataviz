@@ -135,7 +135,7 @@ client it already holds, and allows the write when the NEW edges fit
 under a reserve:
 
 ```
-allowed_growth = (maxmemory - reserve_pct% x maxmemory - used_memory) / bytes_per_edge
+allowed_growth = (maxmemory - reserve_pct% x maxmemory - used_memory - held_by_other_rebuilds) / bytes_per_edge
 ```
 
 Only growth is charged (edges the graph already holds are re-written in
@@ -168,12 +168,16 @@ at the default bytes/edge), and the message says that the static cap
 governed and why.
 
 Because keyslot placement is deterministic rather than load-aware, the
-case to watch is two graphs landing on the same shard: the reserve, the
-fresh per-wave reading and the measured growth bound it, but two rebuilds
-racing onto one shard can still both pass their estimate (no per-shard
-reservation is held between them) — monitor per-shard `used_memory` and
-rebalance by moving a graph, per
-[Infrastructure: Launch Scale](/docs/infra-launch-scale) §7.4.
+case to watch is two graphs landing on the same shard. Two rebuilds racing
+onto one shard cannot both pass on the same headroom: a rebuild that passes
+a budget check enters what it still has to write in the node's reservation
+ledger (`agg:reserve:{node}` on the job-bus Redis, beside the write lease
+in `admission.py` — the whole growth before the apply, one wave for an
+overflow flush, the remainder at each mid-apply recheck, released with the
+lease), and every other rebuild's budget subtracts it as used memory until
+the writes land or the job ends. The ledger fails open like the rest of
+admission. Still monitor per-shard `used_memory` and rebalance by moving a
+graph, per [Infrastructure: Launch Scale](/docs/infra-launch-scale) §7.4.
 
 Under `noeviction` a full shard fails writes for every graph on it, and
 with `cluster-require-full-coverage no` the rest of the cluster keeps
@@ -202,8 +206,9 @@ came from (`rollupStorageOverride` / `resolvedRollupStorage` /
 What the budget measures, for people: `GET /api/v1/admin/aggregation/capacity`
 maps every aggregated source to the node its rollups land on (the projection
 graph in dedicated mode) and reads each node ONCE — used, `maxmemory`, the
-reserve, what is free after it, how many more rollup edges that is at the
-fleet bytes-per-edge, and the sources on each shard with their footprint and
+reserve, what running rebuilds hold in its ledger, what is free after both,
+how many more rollup edges that is at the fleet bytes-per-edge, and the
+sources on each shard with their footprint and
 what their last run learned. `GET /api/v1/admin/data-sources/{id}/capacity`
 adds the pre-flight: the pipeline's own verdict on the last run's cube
 estimate against the live reading (Full detail fits / short by / unknown
@@ -328,8 +333,12 @@ the **first checkpoint**, before any graph work. Resume rules:
   Redis): a per-graph write lease (one materializing job per graph across
   all pods) and a per-endpoint write-slot semaphore
   (`FALKORDB_ENDPOINT_WRITE_SLOTS`, default 2) so an HPA-scaled worker
-  fleet cannot stampede one FalkorDB. Fails **open** to the per-process
-  limits if Redis is down.
+  fleet cannot stampede one FalkorDB, and a per-node reservation ledger
+  (`agg:reserve:{node}`: what each running rebuild has been allowed to
+  write but the node's `used_memory` does not show yet, subtracted from
+  every other rebuild's write budget so two rebuilds cannot both pass on
+  the same headroom). Fails **open** to the per-process limits if Redis
+  is down.
 * **Pacing**: every write sub-batch is AIMD-sized (shrinks on latency
   creep) and followed by `duration × AGGREGATION_WRITE_PACING_RATIO`
   sleep (default 1.0 → ≤ ~50% write duty cycle), on top of the existing

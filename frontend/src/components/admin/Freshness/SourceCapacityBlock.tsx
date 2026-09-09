@@ -8,7 +8,7 @@ import { useState } from 'react'
 import { CheckCircle2, HelpCircle, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DocsLink } from '@/components/help/DocsLink'
-import { compactBytes, compactEdges } from '../shared/aggregationKnobs'
+import { compactBytes, compactEdges, heldByRebuilds } from '../shared/aggregationKnobs'
 import { useRemeasureCapacity, useSourceCapacity } from '../shared/useAggregationCapacity'
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -83,6 +83,7 @@ export function SourceCapacityBlock({ dsId }: { dsId: string }) {
                             {doc.shard.measurable ? (
                                 <>
                                     {compactBytes(doc.shard.availableBytes)} free after the {doc.shard.reservePct}% reserve
+                                    {heldByRebuilds(doc.shard) && ` and ${heldByRebuilds(doc.shard)}`}
                                     {' → '}fits ~{compactEdges(doc.shard.allowedGrowthEdges)} more rollup edges
                                 </>
                             ) : '—'}

@@ -62,6 +62,19 @@ def test_a_measured_shard_row_carries_the_pipeline_arithmetic():
     assert row.used_pct == 25.0
 
 
+def test_a_shard_row_and_the_preflight_take_what_running_rebuilds_hold_off_the_free_memory():
+    limits = cap.effective_limits({"shard_reserve_pct": 20})
+    row = cap.shard_row(_reading(), limits, reserved=(2 * GB, 1))
+    assert (row.available_bytes, row.allowed_growth_edges) == (20 * GB, 20 * GB // 512)
+    assert (row.reserved_bytes, row.reserved_by_jobs) == (2 * GB, 1)
+    assert (cap.shard_row(_reading(), limits).reserved_bytes, cap.shard_row(_reading(), limits).reserved_by_jobs) == (0, 0)
+    # 4 GB free; 8M new cells at 512 B fit with the margin — not once 2 GB is held.
+    no_reserve = cap.effective_limits({"shard_reserve_pct": 0})
+    plain = cap.full_detail_preflight(_reading(used=36 * GB), no_reserve, edge_count=0, estimate=8_000_000, bytes_per_edge=512)
+    held = cap.full_detail_preflight(_reading(used=36 * GB), no_reserve, edge_count=0, estimate=8_000_000, bytes_per_edge=512, reserved=(2 * GB, 1))
+    assert plain.verdict == "fits" and held.verdict == "short" and held.blocked_by == "shard"
+
+
 def test_an_unmeasurable_shard_row_says_why_and_falls_to_the_static_rule():
     limits = cap.effective_limits({})
     row = cap.shard_row(_reading(maxmemory=0), limits)
@@ -157,8 +170,10 @@ class _Registry:
         return self._providers[data_source_id.split(":")[0]]
 
 
-def _wire(monkeypatch, *, sources, owners, readings, states=None, stats=None, failures=None, stored=None):
-    """Stub the four collaborators around the sweep."""
+def _wire(monkeypatch, *, sources, owners, readings, states=None, stats=None, failures=None, stored=None,
+          reservations=None):
+    """Stub the collaborators around the sweep (the ledger holds nothing
+    unless ``reservations`` says otherwise)."""
     reads = []
 
     async def list_sources(session, *, ds_id=None):
@@ -184,6 +199,10 @@ def _wire(monkeypatch, *, sources, owners, readings, states=None, stats=None, fa
     async def stored_tuning(session):
         return stored or {}
 
+    async def reserved(endpoint):
+        return (reservations or {}).get(endpoint, (0, 0))
+
+    monkeypatch.setattr(cap, "reserved_on", reserved)
     monkeypatch.setattr(cap, "_list_sources", list_sources)
     monkeypatch.setattr(cap, "owner_endpoint", owner)
     monkeypatch.setattr(cap, "read_shard_memory", read)
@@ -352,3 +371,48 @@ def test_invalidating_the_fleet_cache_forces_the_next_view_to_sweep(monkeypatch)
     cap.invalidate_fleet_cache()
     _run(cap.assemble_fleet_capacity(object(), registry))
     assert len(reads) == 2
+
+
+def test_the_sweep_reads_each_nodes_ledger_once_and_the_rows_take_it_off_the_free_memory(monkeypatch):
+    p1, p2 = _Provider("g1"), _Provider("g2")
+    sources = [_ds("p1:a", graph="g1"), _ds("p1:b", graph="g1"), _ds("p2:c", provider="p2", graph="g2")]
+    _wire(monkeypatch, sources=sources, owners={"g1": "n1", "g2": "n2"},
+          readings={"n1": _reading("n1"), "n2": _reading("n2")},
+          stats={"p1:a": {"cube_estimate": 55_000_000}})
+    asks = []
+
+    async def ledger(endpoint):
+        asks.append(endpoint)
+        return {"n1": (2 * GB, 1)}.get(endpoint, (0, 0))
+
+    monkeypatch.setattr(cap, "reserved_on", ledger)
+    registry = _Registry({"p1": p1, "p2": p2})
+
+    res = _run(cap.assemble_fleet_capacity(object(), registry, fresh=True))
+
+    assert asks == ["n1", "n2"]                                   # once per node, not per source
+    n1, n2 = res.shards
+    assert (n1.endpoint, n1.reserved_bytes, n1.reserved_by_jobs, n1.available_bytes) == ("n1", 2 * GB, 1, 20 * GB)
+    assert (n2.endpoint, n2.reserved_bytes, n2.reserved_by_jobs, n2.available_bytes) == ("n2", 0, 0, 22 * GB)
+    # The per-source view and its pre-flight take the same figure: 55M new
+    # cells at 512 B need 26.2 GB — inside 22 GB with the 25% margin, not inside 20.
+    doc = _run(cap.assemble_source_capacity(object(), registry, "p1:a"))
+    assert (doc.shard.reserved_by_jobs, doc.shard.available_bytes) == (1, 20 * GB)
+    assert doc.full_detail.verdict == "short" and doc.full_detail.blocked_by == "shard"
+
+
+def test_an_unreadable_ledger_shows_no_reservations_and_is_asked_only_once(monkeypatch):
+    sources = [_ds("p1:a", graph="g1"), _ds("p2:b", provider="p2", graph="g2")]
+    _wire(monkeypatch, sources=sources, owners={"g1": "n1", "g2": "n2"},
+          readings={"n1": _reading("n1"), "n2": _reading("n2")})
+    asks = []
+
+    async def down(endpoint):
+        asks.append(endpoint)
+        raise ConnectionError("bus down")
+
+    monkeypatch.setattr(cap, "reserved_on", down)
+    registry = _Registry({"p1": _Provider("g1"), "p2": _Provider("g2")})
+    res = _run(cap.assemble_fleet_capacity(object(), registry, fresh=True))
+    assert asks == ["n1"]
+    assert [(s.endpoint, s.reserved_by_jobs, s.available_bytes) for s in res.shards] == [("n1", 0, 22 * GB), ("n2", 0, 22 * GB)]

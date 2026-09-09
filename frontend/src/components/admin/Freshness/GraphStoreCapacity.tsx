@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { DocsLink } from '@/components/help/DocsLink'
 import type { CapacitySource, ShardCapacity } from '@/services/aggregationService'
-import { compactBytes, compactEdges } from '../shared/aggregationKnobs'
+import { compactBytes, compactEdges, heldByRebuilds } from '../shared/aggregationKnobs'
 import { useFleetCapacity, useRemeasureCapacity } from '../shared/useAggregationCapacity'
 
 /** Tone by how much of the room UNDER the reserve is still free. */
@@ -120,6 +120,7 @@ function ShardRow({ shard, bytesPerEdge, onOpenSource }: {
             </div>
             <p className="mt-1.5 text-[11px] text-ink-muted tabular-nums leading-snug">
                 <span className="text-ink-secondary">{compactBytes(shard.availableBytes)}</span> free after the {shard.reservePct}% reserve
+                {heldByRebuilds(shard) && ` and ${heldByRebuilds(shard)}`}
                 {' → '}fits <span className="text-ink-secondary">~{compactEdges(shard.allowedGrowthEdges)}</span> more rollup edges at {bytesPerEdge} B each
             </p>
             {shard.sources.length > 0 ? (

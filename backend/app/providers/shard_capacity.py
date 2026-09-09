@@ -497,6 +497,10 @@ class WriteBudget:
     allowed_growth_edges: Optional[int]
     explicit_ceiling: Optional[int]
     static_cap: int
+    # What OTHER rebuilds hold in the node's reservation ledger — allowed
+    # to write, not yet in ``used`` — already taken off ``available_bytes``.
+    reserved_bytes: int = 0
+    reserved_by_jobs: int = 0
 
     def verdict(self, *, projected: int, growth_edges: int, margin_pct: int = 0) -> Verdict:
         """May ``growth_edges`` new edges land, as part of ``projected`` in
@@ -536,6 +540,8 @@ class WriteBudget:
             "allowed_growth_edges": self.allowed_growth_edges,
             "explicit_ceiling": self.explicit_ceiling,
             "static_cap": self.static_cap,
+            "reserved_bytes": self.reserved_bytes,
+            "reserved_by_jobs": self.reserved_by_jobs,
             "shard": self.shard.as_stats(),
         }
 
@@ -547,29 +553,37 @@ def compute_write_budget(
     bpe_source: str,
     explicit_ceiling: Optional[int],
     static_cap: int,
+    reserved_bytes: int = 0,
+    reserved_count: int = 0,
 ) -> WriteBudget:
     """Pure. ``reserve_pct`` / ``bytes_per_edge`` are the RESOLVED operator
     values (``None`` → env default); ``explicit_ceiling`` is present only
-    when tuning set it; ``static_cap`` is the fallback count rule."""
+    when tuning set it; ``static_cap`` is the fallback count rule.
+    ``reserved_bytes`` is what ``reserved_count`` other rebuilds hold in
+    the node's ledger — allowed to write, not yet in ``used`` — and comes
+    off the free memory exactly as used memory does."""
     reserve = (shard_reserve_pct_default() if reserve_pct is None
                else _clamp(reserve_pct, RESERVE_PCT_LO, RESERVE_PCT_HI, RESERVE_PCT_DEFAULT))
     bpe = (bytes_per_edge_default() if bytes_per_edge is None
            else _clamp(bytes_per_edge, BYTES_PER_EDGE_LO, BYTES_PER_EDGE_HI,
                        BYTES_PER_EDGE_DEFAULT))
+    held = max(0, int(reserved_bytes or 0))
+    holders = max(0, int(reserved_count or 0))
     if shard.measurable:
         maxmemory = int(shard.maxmemory or 0)
         reserve_bytes = maxmemory * reserve // 100
-        available = max(0, maxmemory - reserve_bytes - int(shard.used or 0))
+        available = max(0, maxmemory - reserve_bytes - int(shard.used or 0) - held)
         return WriteBudget(
             shard=shard, governed_by="shard", bytes_per_edge=bpe, bpe_source=bpe_source,
             reserve_pct=reserve, reserve_bytes=reserve_bytes, available_bytes=available,
             allowed_growth_edges=available // bpe, explicit_ceiling=explicit_ceiling,
-            static_cap=static_cap,
+            static_cap=static_cap, reserved_bytes=held, reserved_by_jobs=holders,
         )
     return WriteBudget(
         shard=shard, governed_by="static", bytes_per_edge=bpe, bpe_source=bpe_source,
         reserve_pct=reserve, reserve_bytes=None, available_bytes=None,
         allowed_growth_edges=None, explicit_ceiling=explicit_ceiling, static_cap=static_cap,
+        reserved_bytes=held, reserved_by_jobs=holders,
     )
 
 
@@ -649,11 +663,17 @@ def format_refusal(
             f"Advanced tuning so the measured shard budget governs; or {fixes_auto}."
         )
     if verdict.blocked_by == "shard":
+        # Words chosen to hit no earlier classify_failure bucket.
+        held = (
+            f", {human_bytes(budget.reserved_bytes)} held by {budget.reserved_by_jobs} other "
+            f"rebuild{'s' if budget.reserved_by_jobs != 1 else ''} still writing"
+            if budget.reserved_by_jobs else ""
+        )
         return (
             f"{what}: ~{verdict.growth_edges:,} of them new, needing "
             f"{human_bytes(verdict.needed_bytes)} at {bpe}, but shard {shard.endpoint} has "
             f"{human_bytes(verdict.available_bytes)} free of {human_bytes(shard.maxmemory)} "
-            f"after the {budget.reserve_pct}% reserve ({human_bytes(shard.used)} used) — "
+            f"after the {budget.reserve_pct}% reserve ({human_bytes(shard.used)} used{held}) — "
             f"short by {human_bytes(verdict.shortfall_bytes)}. Writing it would fill the "
             f"shard, and under noeviction that fails every graph's writes on it. {tail}"
             f"Fixes: {fixes_auto}; free or add memory on that shard, or move this graph "

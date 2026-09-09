@@ -66,6 +66,34 @@ def test_growth_not_size_is_what_the_shard_pays_for():
     assert v.shortfall_edges == -(-v.shortfall_bytes // 512)
 
 
+def test_what_other_rebuilds_hold_comes_off_the_free_memory_and_is_named():
+    """Two rebuilds racing onto one shard: the second budgets against what
+    the first holds in the node's ledger as if it were used memory, and its
+    refusal says so — in words that stay in the write-budget bucket."""
+    shard = _shard(30 * GB, 40 * GB)                       # 2 GB free after the 20% reserve
+    plain = _budget(shard, reserve=20)
+    assert plain.available_bytes == 2 * GB and (plain.reserved_bytes, plain.reserved_by_jobs) == (0, 0)
+    b = sc.compute_write_budget(
+        shard, reserve_pct=20, bytes_per_edge=512, bpe_source="default",
+        explicit_ceiling=None, static_cap=25_000_000,
+        reserved_bytes=3 * GB // 2, reserved_count=1,
+    )
+    assert b.available_bytes == GB // 2 and b.allowed_growth_edges == (GB // 2) // 512
+    assert (b.reserved_bytes, b.reserved_by_jobs) == (3 * GB // 2, 1)
+    assert (b.as_stats()["reserved_bytes"], b.as_stats()["reserved_by_jobs"]) == (3 * GB // 2, 1)
+    v = b.verdict(projected=2_000_000, growth_edges=2_000_000)     # needs ~1 GB
+    assert not v.ok and v.blocked_by == "shard"
+    msg = sc.format_refusal(b, v, graph="g", composition="x")
+    assert "512.0 MB free of 40.0 GB" in msg
+    assert "30.0 GB used, 1.5 GB held by 1 other rebuild still writing" in msg
+    for word in _FORBIDDEN:
+        assert word not in msg, word
+    from backend.app.services.aggregation.service import classify_failure
+    assert classify_failure(msg) == "write_budget"
+    # Without a ledger the message is what it always was.
+    assert "held by" not in sc.format_refusal(plain, plain.verdict(projected=10_000_000, growth_edges=10_000_000), graph="g", composition="x")
+
+
 def test_an_unmeasurable_shard_falls_back_to_the_static_count_rule():
     for shard in (
         _shard(10 * GB, 0),                                 # maxmemory 0 = unlimited/unknown

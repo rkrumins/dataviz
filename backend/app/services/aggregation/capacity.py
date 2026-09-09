@@ -172,9 +172,23 @@ def _int_or(value: Any, default: int = 0) -> int:
         return default
 
 
-def shard_row(reading: ShardMemory, limits: CapacityLimits) -> ShardCapacity:
+async def reserved_on(endpoint: str) -> Tuple[int, int]:
+    """(bytes, jobs) the running rebuilds hold in ``endpoint``'s reservation
+    ledger right now — the same ledger the pipeline's budget subtracts.
+    Raises on a bus failure; the sweep decides how to fail open."""
+    from .admission import read_reservations
+    from .redis_client import get_redis
+
+    live = await read_reservations(get_redis(), endpoint)
+    return sum(int(entry["bytes"]) for entry in live.values()), len(live)
+
+
+def shard_row(
+    reading: ShardMemory, limits: CapacityLimits, *, reserved: Tuple[int, int] = (0, 0),
+) -> ShardCapacity:
     """One node under the fleet reserve — the pipeline's own budget
-    arithmetic at the fleet bytes-per-edge."""
+    arithmetic at the fleet bytes-per-edge, ``reserved`` (bytes, jobs)
+    being what running rebuilds hold in the node's ledger."""
     budget = compute_write_budget(
         reading,
         reserve_pct=_int_or(limits.shard_reserve_pct.value, shard_reserve_pct_default()),
@@ -185,6 +199,7 @@ def shard_row(reading: ShardMemory, limits: CapacityLimits) -> ShardCapacity:
             if limits.max_materialized_edges.value else None
         ),
         static_cap=limits.static_cap,
+        reserved_bytes=reserved[0], reserved_count=reserved[1],
     )
     used_pct = None
     if reading.measurable:
@@ -203,6 +218,8 @@ def shard_row(reading: ShardMemory, limits: CapacityLimits) -> ShardCapacity:
         allowed_growth_edges=budget.allowed_growth_edges,
         governed_by=budget.governed_by,
         static_cap=budget.static_cap,
+        reserved_bytes=budget.reserved_bytes,
+        reserved_by_jobs=budget.reserved_by_jobs,
         query_mem_capacity=getattr(reading, "query_mem_capacity", None),
         timeout_max_ms=getattr(reading, "timeout_max_ms", None),
         timeout_default_ms=getattr(reading, "timeout_default_ms", None),
@@ -247,10 +264,12 @@ def source_row(
 def full_detail_preflight(
     reading: ShardMemory, limits: CapacityLimits, *,
     edge_count: int, estimate: Optional[int], bytes_per_edge: int,
+    reserved: Tuple[int, int] = (0, 0),
 ) -> FullDetailPreflight:
     """Would a FORCED full cube land today? The pipeline's own verdict on
     the last run's upper-bound estimate — growth over what the graph already
-    holds, with the estimate margin — against the live reading."""
+    holds, with the estimate margin — against the live reading, less what
+    running rebuilds hold in the node's ledger (``reserved``)."""
     margin = limits.estimate_margin_pct
     if estimate is None:
         return FullDetailPreflight(verdict="unknown", margin_pct=margin)
@@ -264,6 +283,7 @@ def full_detail_preflight(
             if limits.max_materialized_edges.value else None
         ),
         static_cap=limits.static_cap,
+        reserved_bytes=reserved[0], reserved_count=reserved[1],
     )
     growth = max(0, int(estimate) - int(edge_count))
     verdict = budget.verdict(projected=int(estimate), growth_edges=growth, margin_pct=margin)
@@ -398,6 +418,12 @@ class _Sweep:
         self.providers: Dict[Tuple[str, str], Any] = {}
         self.failed: Dict[Tuple[str, str], str] = {}
         self.readings: Dict[str, ShardMemory] = {}
+        # endpoint → (bytes, jobs) running rebuilds hold in its ledger; read
+        # once per node beside the memory reading. One unreadable ledger
+        # (no bus) shows none for the rest of the sweep rather than paying
+        # a connect timeout per node.
+        self.reservations: Dict[str, Tuple[int, int]] = {}
+        self._ledger_ok = True
         self.placed: Dict[str, Tuple[str, str]] = {}     # ds_id → (endpoint, graph_key)
         self.unresolved: Dict[str, str] = {}             # ds_id → why_not
         # endpoint → the providers (with the graph key that placed each)
@@ -453,6 +479,7 @@ class _Sweep:
             self.readings[endpoint] = await read_shard_memory(
                 db, mode=mode, graph_key=key, timeout=timeout,
             )
+            self.reservations[endpoint] = await self._reserved(endpoint, timeout)
         self.placed[ds.id] = (endpoint, key)
         holders = self.providers_by_endpoint.setdefault(endpoint, [])
         if any(held is provider for held, _ in holders):
@@ -471,6 +498,19 @@ class _Sweep:
                 thread_count=getattr(reading, "thread_count", None),
                 timeout_default_ms=getattr(reading, "timeout_default_ms", None),
             )
+
+
+    async def _reserved(self, endpoint: str, timeout: float) -> Tuple[int, int]:
+        if not self._ledger_ok:
+            return 0, 0
+        try:
+            # A bus round trip, not a node read: a second is generous.
+            async with asyncio.timeout(min(timeout, 1.0)):
+                return await reserved_on(endpoint)
+        except Exception as exc:                          # noqa: BLE001 — fail open, once
+            self._ledger_ok = False
+            logger.info("capacity: reservation ledger unreadable (%s) — showing none", exc)
+            return 0, 0
 
 
 async def _assemble(
@@ -524,7 +564,7 @@ async def _assemble(
 
     shards: List[ShardCapacity] = []
     for endpoint, reading in sweep.readings.items():
-        shard = shard_row(reading, limits)
+        shard = shard_row(reading, limits, reserved=sweep.reservations.get(endpoint, (0, 0)))
         shard.sources = sorted(
             by_endpoint.get(endpoint, []), key=lambda s: -s.footprint_bytes,
         )
@@ -535,6 +575,7 @@ async def _assemble(
         "limits": limits, "shards": shards, "unresolved": unresolved,
         "sources_total": total, "truncated": truncated,
         "rows_by_id": rows_by_id, "readings": sweep.readings, "placed": sweep.placed,
+        "reservations": sweep.reservations,
         "states": states, "stats": stats, "providers_by_endpoint": sweep.providers_by_endpoint,
     }
 
@@ -591,6 +632,7 @@ async def assemble_source_capacity(
         return None
     limits: CapacityLimits = parts["limits"]
     row = parts["rows_by_id"].get(ds_id)
+    reserved: Tuple[int, int] = (0, 0)
     if row is None:
         # Placed nowhere: still answer, with the shard marked unmeasurable
         # and the reason on it, so the drawer explains instead of erroring.
@@ -609,10 +651,12 @@ async def assemble_source_capacity(
     else:
         endpoint, _ = parts["placed"][ds_id]
         reading = parts["readings"][endpoint]
-        shard = shard_row(reading, limits)
+        reserved = parts["reservations"].get(endpoint, (0, 0))
+        shard = shard_row(reading, limits, reserved=reserved)
     full = full_detail_preflight(
         reading, limits, edge_count=row.edge_count,
         estimate=row.last_cube_estimate, bytes_per_edge=row.bytes_per_edge,
+        reserved=reserved,
     )
     return SourceCapacityResponse(
         source=row, shard=shard, limits=limits, full_detail=full,

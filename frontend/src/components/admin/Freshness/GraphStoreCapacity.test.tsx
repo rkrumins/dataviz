@@ -35,6 +35,7 @@ const SNAPSHOT = {
             endpoint: '10.0.0.1:6379', used: 30 * GB, maxmemory: 40 * GB, policy: 'noeviction', measurable: true,
             usedPct: 75, reservePct: 20, reserveBytes: 8 * GB, availableBytes: 2 * GB, allowedGrowthEdges: Math.floor(2 * GB / 512),
             governedBy: 'shard', staticCap: 25_000_000, queryMemCapacity: 512 * 2 ** 20,
+            reservedBytes: 1.5 * GB, reservedByJobs: 1,
             sources: [
                 { dataSourceId: 'ds-big', label: 'Warehouse', edgeCount: 30_000_000, bytesPerEdge: 900, bytesPerEdgeSource: 'calibrated', footprintBytes: 27_000_000_000, lastFailureCategory: 'write_budget', lastCubeEstimate: 90_000_000, lastRegime: 'boundary' },
                 { dataSourceId: 'ds-small', label: 'Orders', edgeCount: 50_000, bytesPerEdge: 512, bytesPerEdgeSource: 'default', footprintBytes: 25_600_000 },
@@ -72,6 +73,8 @@ describe('GraphStoreCapacity', () => {
         expect(screen.getByText('Near the reserve')).toBeInTheDocument()
         // The per-query ceiling the rebuild narrows its scans against.
         expect(screen.getByText(/per-query limit 512 MB/)).toBeInTheDocument()
+        // What another running rebuild holds on the node, already off the free figure.
+        expect(screen.getByText(/and 1\.5 GB held by 1 running rebuild/)).toBeInTheDocument()
     })
 
     it('says why a shard cannot be measured and which rule applies instead', async () => {
