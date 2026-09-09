@@ -136,7 +136,7 @@ describe('the graph store’s own limits', () => {
         expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, env, 600_000)).toBeNull()      // the node allows 600 s now
         expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, env, 120_000)).toMatch(/at 120 s \(TIMEOUT_MAX, read from the node\)/)
         expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, env, null)).toMatch(/from the deployment/)
-        expect(serverCapNote(KNOB_BY_KEY.writeTimeoutS, 300, env)).toMatch(/Infrastructure → Memory headroom/)
+        expect(serverCapNote(KNOB_BY_KEY.writeTimeoutS, 300, env)).toMatch(/Admin → Graph store/)
     })
 
     it('takes the lowest cap across the fleet’s shards', () => {
@@ -154,6 +154,9 @@ describe('the graph store’s own limits', () => {
     })
 
     it('links to a node’s limits with the endpoint encoded', () => {
-        expect(graphStoreLimitsPath('10.0.0.1:6379')).toBe('/admin/infrastructure?limits=10.0.0.1%3A6379')
+        // Admin → Graph store is where a node is looked at, so it is where
+        // its limits change; the Infrastructure page still answers the same
+        // deep link for anything bookmarked before the page existed.
+        expect(graphStoreLimitsPath('10.0.0.1:6379')).toBe('/admin/graph-store?limits=10.0.0.1%3A6379')
     })
 })

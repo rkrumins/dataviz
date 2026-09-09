@@ -9,9 +9,13 @@
  * more: the causal claim tying a full node to a stalled publish may only be
  * made when a node is ACTUALLY at its cap.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render as rtlRender, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 import { GraphProvidersPanel } from './GraphProvidersPanel'
+
+/** The panel links to Admin → Graph store, so it needs a router around it. */
+const render = (node: React.ReactNode) => rtlRender(<MemoryRouter>{node}</MemoryRouter>)
 import type { GraphProvider, ProjectionSection, ProjectionWorstRow, ServiceEntry } from '@/services/systemStatusService'
 
 const PROVIDERS: GraphProvider[] = [

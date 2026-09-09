@@ -74,7 +74,7 @@ describe('the canvas says when the graph store refused part of a read', () => {
     expect(text).toContain('showing what it could read after narrowing')
     expect(text).toContain('raise the per-query limit on the store')
     expect(document.querySelector('[data-testid="canvas-read-pressure-link"]'))
-      .toHaveAttribute('href', '/admin/infrastructure?limits=10.0.0.1%3A6379')
+      .toHaveAttribute('href', '/admin/graph-store?limits=10.0.0.1%3A6379')
     // The generic truncation advice yields to the specific one …
     expect(document.body.textContent ?? '').not.toContain('Showing the largest relationships')
     // … and the projector is not asked: nothing is behind.

@@ -15,8 +15,10 @@
  * replacing the card with an error.
  */
 import { useState } from 'react'
-import { Database, HardDrive, Loader2, RefreshCw, SlidersHorizontal } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { ArrowUpRight, Database, HardDrive, Loader2, RefreshCw, SlidersHorizontal } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { usePermission } from '@/store/auth'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { DocsLink } from '@/components/help/DocsLink'
 import type { CapacitySource, ShardCapacity } from '@/services/aggregationService'
@@ -159,6 +161,7 @@ export function GraphStoreCapacity({ onOpenSource, onFacetWouldNotFit, onAdjustL
     onAdjustLimits?: () => void
 }) {
     const capacity = useFleetCapacity(true)
+    const isSystemAdmin = usePermission('system:admin')
     const remeasure = useRemeasureCapacity()
     const [remeasuring, setRemeasuring] = useState(false)
     const data = capacity.data
@@ -186,10 +189,20 @@ export function GraphStoreCapacity({ onOpenSource, onFacetWouldNotFit, onAdjustL
                     </h2>
                     <p className="text-[12px] text-ink-muted mt-0.5">
                         What every rebuild measures on the shard that owns its graph before it writes rollups: the memory
-                        left under the fleet reserve, and how many more rollup edges that is.
+                        left under the fleet reserve, and how many more rollup edges that is. Replicas, replication lag and
+                        the graphs on each shard are on the Graph store page.
                     </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                    {isSystemAdmin && (
+                        <Link
+                            to="/admin/graph-store"
+                            className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-glass-border text-xs font-semibold text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
+                        >
+                            <ArrowUpRight className="w-3.5 h-3.5" />
+                            Open Graph store
+                        </Link>
+                    )}
                     {refusedCount > 0 && (
                         <button
                             type="button"

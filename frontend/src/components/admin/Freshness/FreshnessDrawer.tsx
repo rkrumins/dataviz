@@ -996,7 +996,7 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         // narrowest slice it will go to, and the fix is to make the rebuild
         // read less rather than to free memory.
         why: 'One rebuild query asked the graph store for more than a single query is allowed to hold — after the rebuild had already narrowed its scans to a single row.',
-        how: "A single row of that scan is larger than the store's per-query limit (QUERY_MEM_CAPACITY): an administrator raises it under Infrastructure → Memory headroom → Adjust graph store limits, which checks the change against the container memory limit first. The Gentle profile and Auto rollup storage lighten every query before this point, but cannot shrink one row.",
+        how: "A single row of that scan is larger than the store's per-query limit (QUERY_MEM_CAPACITY): an administrator raises it under Admin → Graph store → Adjust limits, which checks the change against the container memory limit first. The Gentle profile and Auto rollup storage lighten every query before this point, but cannot shrink one row.",
         showClear: true, showRetry: true, primary: 'clear',
         retryWarning: 'will fail the same way until the store limit changes.',
         raiseLimitLink: true,

@@ -59,7 +59,7 @@ describe('RaisePerQueryLimitLink', () => {
         getSourceCapacity.mockResolvedValue(doc({}))
         renderLink()
         const link = await screen.findByTestId('raise-per-query-limit')
-        expect(link).toHaveAttribute('href', '/admin/infrastructure?limits=10.0.0.1%3A6379')
+        expect(link).toHaveAttribute('href', '/admin/graph-store?limits=10.0.0.1%3A6379')
         expect(link).toHaveTextContent(/Raise the per-query limit on 10\.0\.0\.1:6379\s*\(now 512 MB\)/)
     })
 

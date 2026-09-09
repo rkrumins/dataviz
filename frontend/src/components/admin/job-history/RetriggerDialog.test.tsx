@@ -146,7 +146,7 @@ describe('RetriggerDialog', () => {
       </QueryClientProvider>,
     )
     const link = await screen.findByTestId('raise-per-query-limit')
-    expect(link).toHaveAttribute('href', '/admin/infrastructure?limits=10.0.0.1%3A6379')
+    expect(link).toHaveAttribute('href', '/admin/graph-store?limits=10.0.0.1%3A6379')
     expect(screen.getByTestId('retrigger-preset-reason')).toHaveTextContent(/Gentle profile/)
   })
 })

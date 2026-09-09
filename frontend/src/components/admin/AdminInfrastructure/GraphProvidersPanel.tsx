@@ -15,6 +15,7 @@
  * two ends, and an operator has to read that pair in one glance.
  */
 import { Boxes, GitBranch, MemoryStick, SlidersHorizontal } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import type { GraphProvider, ProjectionSection, ServiceEntry } from '@/services/systemStatusService'
 import { STATUS_META, formatBytes, num, obj, str } from './meta'
@@ -275,6 +276,15 @@ function MemoryHeadroom({ shards, onAdjustLimits }: {
                 {worst === 'critical' && meta && (
                     <p className={cn('mt-2 text-[11px] leading-snug', meta.text)}>{CRITICAL_CONSEQUENCE}</p>
                 )}
+                {/* These are the masters this probe reached. Replicas, lag and
+                    the graphs on each shard live on their own page — this one
+                    has never been able to see them. */}
+                <Link
+                    to="/admin/graph-store"
+                    className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                >
+                    Open Graph store for every node, its replicas and their lag
+                </Link>
             </div>
         </div>
     )

@@ -325,7 +325,7 @@ export function DefaultsDialog({ open, onClose }: { open: boolean; onClose: () =
                                                     const cap = typeof capMs === 'number' && capMs > 0 ? `${capMs / 1000} s` : 'no limit'
                                                     return (
                                                         <p className="mt-3 text-[11px] text-ink-muted">
-                                                            The graph store caps any query at {cap} (TIMEOUT_MAX, {shardCapMs != null ? 'read from the store' : 'from the deployment'} — administrators adjust it under Infrastructure → Memory headroom).
+                                                            The graph store caps any query at {cap} (TIMEOUT_MAX, {shardCapMs != null ? 'read from the store' : 'from the deployment'} — administrators adjust it under Admin → Graph store).
                                                             Set by the deployment: a narrowest scan that keeps timing out is retried {env.scanTimeoutRetries ?? 6} times with backoff before the run resumes from its checkpoint;
                                                             the reconcile switches to keys-only at {compactEdges(env.reconcileKeysOnlyWidth ?? 5_000)} rows.
                                                         </p>

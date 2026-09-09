@@ -225,7 +225,7 @@ export function serverCapNote(
     if (typeof capMs !== 'number' || capMs <= 0 || typeof value !== 'number') return null
     const capS = capMs / 1000
     if (value <= capS) return null
-    return `Capped by the graph store at ${capS % 1 === 0 ? capS : capS.toFixed(1)} s (TIMEOUT_MAX, ${fromNode ? 'read from the node' : 'from the deployment'}) — an administrator can raise it under Infrastructure → Memory headroom → Adjust graph store limits.`
+    return `Capped by the graph store at ${capS % 1 === 0 ? capS : capS.toFixed(1)} s (TIMEOUT_MAX, ${fromNode ? 'read from the node' : 'from the deployment'}) — an administrator can raise it under Admin → Graph store → Adjust limits.`
 }
 
 /** The lowest TIMEOUT_MAX read across the measured shards — the cap every
@@ -239,7 +239,10 @@ export function fleetTimeoutCapMs(capacity?: Pick<AggregationCapacityResponse, '
 
 /** Where an administrator adjusts a node's own limits. */
 export function graphStoreLimitsPath(endpoint: string): string {
-    return `/admin/infrastructure?limits=${encodeURIComponent(endpoint)}`
+    // Admin → Graph store is where a node is looked at, so it is where its
+    // limits are changed. Infrastructure still answers the same ``?limits=``
+    // deep link, so anything bookmarked before this keeps working.
+    return `/admin/graph-store?limits=${encodeURIComponent(endpoint)}`
 }
 
 const MIB = 2 ** 20
