@@ -8,6 +8,7 @@ import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregatio
 import {
     KNOB_BY_KEY, TUNING_KNOBS, compactBytes, compactEdges, fitsEdges, freeAfterReserve,
     fullDetailVerdict, knobPlaceholder, resolveKnob, serverCapNote,
+    containerNeededBytes, fleetTimeoutCapMs, graphStoreLimitsPath,
 } from './aggregationKnobs'
 
 const GB = 2 ** 30
@@ -106,5 +107,33 @@ describe('the capacity arithmetic', () => {
         expect(compactEdges(null)).toBe('—')
         expect(compactBytes(22 * GB)).toBe('22.0 GB')
         expect(compactBytes(512 * 1024)).toBe('512 KB')
+    })
+})
+
+describe('the graph store’s own limits', () => {
+    it('lets the cap read from the node win over the deployment mirror, and says where to raise it', () => {
+        const env: EnvTuningDefaults = { serverTimeoutMaxMs: 180_000 }
+        expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, env, 600_000)).toBeNull()      // the node allows 600 s now
+        expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, env, 120_000)).toMatch(/at 120 s \(TIMEOUT_MAX, read from the node\)/)
+        expect(serverCapNote(KNOB_BY_KEY.scanTimeoutS, 300, env, null)).toMatch(/from the deployment/)
+        expect(serverCapNote(KNOB_BY_KEY.writeTimeoutS, 300, env)).toMatch(/Infrastructure → Memory headroom/)
+    })
+
+    it('takes the lowest cap across the fleet’s shards', () => {
+        const shards = (caps: (number | null)[]) =>
+            ({ shards: caps.map(timeoutMaxMs => ({ timeoutMaxMs })) }) as unknown as Parameters<typeof fleetTimeoutCapMs>[0]
+        expect(fleetTimeoutCapMs(shards([300_000, 120_000, null]))).toBe(120_000)
+        expect(fleetTimeoutCapMs(shards([null]))).toBeNull()
+        expect(fleetTimeoutCapMs(null)).toBeNull()
+    })
+
+    it('mirrors the server’s container formula', () => {
+        const GB = 2 ** 30, MB = 2 ** 20
+        expect(containerNeededBytes(6 * GB, 2, 512 * MB)).toBe(Math.floor(1.25 * 6 * GB) + 2 * Math.floor(1.3 * 512 * MB) + 256 * MB)
+        expect(containerNeededBytes(32 * GB, 0, 1)).toBe(Math.floor(1.25 * 32 * GB) + 1 + GB)
+    })
+
+    it('links to a node’s limits with the endpoint encoded', () => {
+        expect(graphStoreLimitsPath('10.0.0.1:6379')).toBe('/admin/infrastructure?limits=10.0.0.1%3A6379')
     })
 })

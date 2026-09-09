@@ -1662,8 +1662,7 @@ class AggregationPipeline:
             except Exception as exc:
                 if _pressure_kind(exc) != "timeout":
                     raise
-        from backend.app.config import resilience
-        cap_ms = int(getattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 0) or 0)
+        cap_ms = self._server_timeout_cap_ms()
         cap_text = f"{cap_ms / 1000:.0f}s" if cap_ms > 0 else "none"
         raise MaterializationScanTimedOut(
             f"scan {label} over ID range [{lo}, {hi}) (width {size}) timed out "
@@ -1673,6 +1672,15 @@ class AggregationPipeline:
             f"graph store, then Resume; raise the scan timeout (scanTimeoutS) if "
             f"the store is merely slow, or run the Gentle profile if this recurs."
         )
+
+    def _server_timeout_cap_ms(self) -> int:
+        """The store's per-query time cap as the provider knows it — read
+        from the node the graph lives on — else the env mirror. 0 = none."""
+        fn = getattr(self.p, "_server_timeout_cap_ms", None)
+        if callable(fn):
+            return int(fn() or 0)
+        from backend.app.config import resilience
+        return int(getattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 0) or 0)
 
     def _query_memory_guidance(
         self, label: str, lo: int, hi: int, *, kind: str = "scan", size: Optional[int] = None,
@@ -2277,6 +2285,18 @@ class AggregationPipeline:
         cap = getattr(shard, "query_mem_capacity", None)
         if cap:
             self._query_mem_capacity = int(cap)
+        # Teach the provider what the node the rollups land on allows, so
+        # its per-query clamp follows the server (a cap raised at runtime
+        # from Infrastructure) rather than the env mirror.
+        note = getattr(self.p, "note_server_limits", None)
+        if note is not None:
+            note(
+                shard.endpoint,
+                timeout_max_ms=getattr(shard, "timeout_max_ms", None),
+                query_mem_capacity=cap or None,
+                thread_count=getattr(shard, "thread_count", None),
+                timeout_default_ms=getattr(shard, "timeout_default_ms", None),
+            )
         raw_bpe = self._tuning.get("bytes_per_edge")
         hint = self._capacity_hints.get("bytes_per_edge_observed")
         if raw_bpe is not None:

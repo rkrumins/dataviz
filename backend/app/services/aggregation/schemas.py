@@ -5,7 +5,7 @@ These live inside the aggregation package so the package is self-contained.
 The thin FastAPI adapter (app/api/v1/endpoints/aggregation.py) imports from here.
 """
 from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Shared validator helpers ─────────────────────────────────────────
@@ -1315,6 +1315,10 @@ class CapacityLimits(BaseModel):
     max_cube_edges: int = Field(alias="maxCubeEdges")
     static_cap: int = Field(alias="staticCap")
     budget_recheck_edges: int = Field(alias="budgetRecheckEdges")
+    # The graph store container's memory limit, when the deployment states
+    # it (``FALKORDB_CONTAINER_MEMORY_BYTES``) — the app cannot read it, and
+    # raising the per-query memory ceiling needs it for the sizing formula.
+    container_memory_bytes: Optional[int] = Field(None, alias="containerMemoryBytes")
 
     class Config:
         populate_by_name = True
@@ -1366,6 +1370,13 @@ class ShardCapacity(BaseModel):
     # the pressure ladder narrows scans against. None when unlimited or
     # unreadable.
     query_mem_capacity: Optional[int] = Field(None, alias="queryMemCapacity")
+    # The node's per-query time cap (TIMEOUT_MAX) and its default, ms — what
+    # every timeout knob is clamped to — and its THREAD_COUNT, which the
+    # container sizing formula multiplies the memory ceiling by. None when
+    # unlimited or unreadable.
+    timeout_max_ms: Optional[int] = Field(None, alias="timeoutMaxMs")
+    timeout_default_ms: Optional[int] = Field(None, alias="timeoutDefaultMs")
+    thread_count: Optional[int] = Field(None, alias="threadCount")
     sources: List[CapacitySource] = Field(default_factory=list)
 
     class Config:
@@ -1434,6 +1445,77 @@ class SourceCapacityResponse(BaseModel):
     limits: CapacityLimits
     full_detail: FullDetailPreflight = Field(alias="fullDetail")
     auto: AutoPreflight
+    measured_at: str = Field(alias="measuredAt")
+
+    class Config:
+        populate_by_name = True
+
+
+# ── The graph store's own limits, set at runtime ─────────────────────
+
+
+class GraphStoreLimitsPatch(BaseModel):
+    """A change to one graph store node's per-query limits, applied at
+    runtime with ``GRAPH.CONFIG SET`` (lasts until the server restarts; the
+    response hands back the ``FALKORDB_ARGS`` fragment that makes it
+    permanent). At least one of the two limits must be given.
+
+    Raising the memory ceiling needs the container's memory limit — the app
+    cannot read it — so the deployment guide's sizing formula can refuse a
+    change that would turn a caught query error into an OOM-killed pod.
+    ``concurrentQueries`` is that formula's planning figure: how many
+    queries may hold the ceiling at once (at most the node's THREAD_COUNT,
+    which is also the default). ``actor`` is set by the web tier from the
+    authenticated user."""
+    timeout_max_ms: Optional[int] = Field(
+        None, alias="timeoutMaxMs", ge=1_000, le=3_600_000,
+        description="TIMEOUT_MAX, milliseconds (1 s .. 1 h). Never below the node's TIMEOUT_DEFAULT.",
+    )
+    query_mem_capacity: Optional[int] = Field(
+        None, alias="queryMemCapacity", ge=1, le=1024 ** 4,
+        description="QUERY_MEM_CAPACITY, bytes per query (up to 1 TiB). 0 (unlimited) is refused.",
+    )
+    container_memory_bytes: Optional[int] = Field(
+        None, alias="containerMemoryBytes", ge=1,
+        description="The graph store container's memory limit, bytes — required to raise the ceiling.",
+    )
+    concurrent_queries: Optional[int] = Field(
+        None, alias="concurrentQueries", ge=1, le=256,
+        description="Queries that may hold the ceiling at once, for the sizing formula; default THREAD_COUNT.",
+    )
+    apply_to_all_nodes: bool = Field(
+        False, alias="applyToAllNodes",
+        description="Cluster mode: set the same limits on every primary, not only the node named.",
+    )
+    actor: Optional[str] = Field(None, max_length=255)
+
+    @model_validator(mode="after")
+    def _at_least_one_limit(self) -> "GraphStoreLimitsPatch":
+        if self.timeout_max_ms is None and self.query_mem_capacity is None:
+            raise ValueError("Give at least one limit: timeoutMaxMs or queryMemCapacity.")
+        return self
+
+    class Config:
+        populate_by_name = True
+
+
+class GraphStoreLimitsResponse(BaseModel):
+    """What was applied, verified by a fresh read of the node."""
+    shard: ShardCapacity
+    # ``{"TIMEOUT_MAX": ms | None, "QUERY_MEM_CAPACITY": bytes | None}`` as
+    # read before the change (None = unlimited or unreadable), and what
+    # the change set.
+    previous: Dict[str, Optional[int]] = Field(default_factory=dict)
+    applied: Dict[str, int] = Field(default_factory=dict)
+    applied_to: List[str] = Field(default_factory=list, alias="appliedTo")
+    # ``TIMEOUT_MAX 300000 QUERY_MEM_CAPACITY 1073741824`` — paste into
+    # FALKORDB_ARGS to keep the change across a restart.
+    args_fragment: str = Field(alias="argsFragment")
+    # The container memory the sizing formula asks for at the applied
+    # ceiling, and the figures it used; None when maxmemory is unknown.
+    container_needed_bytes: Optional[int] = Field(None, alias="containerNeededBytes")
+    concurrent_queries: Optional[int] = Field(None, alias="concurrentQueries")
+    thread_count_assumed: bool = Field(False, alias="threadCountAssumed")
     measured_at: str = Field(alias="measuredAt")
 
     class Config:

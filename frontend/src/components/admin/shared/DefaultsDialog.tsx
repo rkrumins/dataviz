@@ -38,7 +38,7 @@ import {
 } from '@/services/aggregationService'
 import {
     KNOB_BY_KEY, KNOB_GROUPS, TUNING_KNOBS, clampKnob, compactBytes, compactEdges,
-    envDefaultFor, fitsEdges, freeAfterReserve, knobPlaceholder, serverCapNote,
+    envDefaultFor, fitsEdges, fleetTimeoutCapMs, freeAfterReserve, knobPlaceholder, serverCapNote,
     type KnobGroup, type TuningKnob,
 } from './aggregationKnobs'
 import { CAPACITY_KEYS, useFleetCapacity } from './useAggregationCapacity'
@@ -75,10 +75,12 @@ function SourceChip({ set }: { set: boolean }) {
     )
 }
 
-function KnobRow({ knob, value, env, disabled, onChange, onReset }: {
+function KnobRow({ knob, value, env, shardCapMs, disabled, onChange, onReset }: {
     knob: TuningKnob
     value: number | null | undefined
     env: EnvTuningDefaults | null | undefined
+    /** The lowest TIMEOUT_MAX read from the fleet's shards, when known. */
+    shardCapMs: number | null
     disabled: boolean
     onChange: (raw: string, clamp: boolean) => void
     onReset: () => void
@@ -86,7 +88,7 @@ function KnobRow({ knob, value, env, disabled, onChange, onReset }: {
     const set = isSet(value)
     const id = `defaults-${knob.key}`
     const envValue = envDefaultFor(knob, env)
-    const capNote = serverCapNote(knob, set ? value : null, env)
+    const capNote = serverCapNote(knob, set ? value : null, env, shardCapMs)
     const resolvedLine = set
         ? `Set here: ${value.toLocaleString()}${knob.emptyMeans ? '' : ` (environment default ${envValue.toLocaleString()})`}`
         : knob.emptyMeans
@@ -172,6 +174,10 @@ export function DefaultsDialog({ open, onClose }: { open: boolean; onClose: () =
     const env = settingsQ.data?.envTuningDefaults ?? null
     const ready = !!settingsQ.data
     const dirty = fingerprint(draft) !== seed
+    // The cap the per-query timeouts are really bounded by: read from the
+    // shards when the sweep has them (it can be raised at runtime), else the
+    // deployment's mirror.
+    const shardCapMs = fleetTimeoutCapMs(capacityQ.data)
 
     // The a11y hook re-runs its effect — and re-focuses the panel — whenever
     // its close callback changes identity. ``dirty`` changes on every
@@ -301,6 +307,7 @@ export function DefaultsDialog({ open, onClose }: { open: boolean; onClose: () =
                                                             knob={knob}
                                                             value={draft[knob.key] as number | null | undefined}
                                                             env={env}
+                                                            shardCapMs={shardCapMs}
                                                             disabled={!isAdmin || save.isPending}
                                                             onChange={(raw, clamp) => setKnob(knob, raw, clamp)}
                                                             onReset={() => resetKnob(knob)}
@@ -308,13 +315,17 @@ export function DefaultsDialog({ open, onClose }: { open: boolean; onClose: () =
                                                     ))}
                                                 </div>
 
-                                                {group === 'timeouts' && env && (
-                                                    <p className="mt-3 text-[11px] text-ink-muted">
-                                                        Set by the deployment: the graph store caps any query at {typeof env.serverTimeoutMaxMs === 'number' && env.serverTimeoutMaxMs > 0 ? `${env.serverTimeoutMaxMs / 1000} s` : 'no limit'} (TIMEOUT_MAX);
-                                                        a narrowest scan that keeps timing out is retried {env.scanTimeoutRetries ?? 6} times with backoff before the run resumes from its checkpoint;
-                                                        the reconcile switches to keys-only at {compactEdges(env.reconcileKeysOnlyWidth ?? 5_000)} rows.
-                                                    </p>
-                                                )}
+                                                {group === 'timeouts' && env && (() => {
+                                                    const capMs = shardCapMs ?? env.serverTimeoutMaxMs
+                                                    const cap = typeof capMs === 'number' && capMs > 0 ? `${capMs / 1000} s` : 'no limit'
+                                                    return (
+                                                        <p className="mt-3 text-[11px] text-ink-muted">
+                                                            The graph store caps any query at {cap} (TIMEOUT_MAX, {shardCapMs != null ? 'read from the store' : 'from the deployment'} — administrators adjust it under Infrastructure → Memory headroom).
+                                                            Set by the deployment: a narrowest scan that keeps timing out is retried {env.scanTimeoutRetries ?? 6} times with backoff before the run resumes from its checkpoint;
+                                                            the reconcile switches to keys-only at {compactEdges(env.reconcileKeysOnlyWidth ?? 5_000)} rows.
+                                                        </p>
+                                                    )
+                                                })()}
                                                 {group === 'capacity' && (
                                                     <div className="mt-3 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] p-3 space-y-2">
                                                         <p className="text-[11px] font-semibold text-ink-secondary">What these limits mean on your shards right now</p>

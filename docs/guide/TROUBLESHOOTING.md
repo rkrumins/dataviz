@@ -95,9 +95,12 @@ shows *Going slower to fit the graph store* while it happens, and every
 run's **Run settings** disclosure lists what it ran with and what it adapted
 to. It remembers per source, so the next rebuild starts there. If a run does
 fail: a *single row* larger than the per-query memory ceiling means the
-ceiling (`QUERY_MEM_CAPACITY`) must be raised together with the container
-memory limit; a narrowest scan that kept timing out means the store stopped
-answering — check it, then **Resume from cursor**. Retry with the **Gentle**
+ceiling (`QUERY_MEM_CAPACITY`) must be raised — **Infrastructure → Memory
+headroom → Adjust graph store limits** does it at runtime and checks the
+container memory limit first, and the failed source's guidance links straight
+to it; a narrowest scan that kept timing out means the store stopped
+answering — check it, then **Resume from cursor** (raise the store's query
+time cap the same way if scans need longer than it allows). Retry with the **Gentle**
 profile (pre-selected after either failure), or give a running job more time
 with **Extend time limit**. See [Rollup capacity](/guide/rollup-capacity).
 

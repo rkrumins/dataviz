@@ -54,6 +54,9 @@ export interface AggregationOverridesFormProps {
     envDefaults?: EnvTuningDefaults | null
     /** The stored fleet Defaults, so an empty field can say what it inherits. */
     storedGlobal?: AggregationTuning | null
+    /** TIMEOUT_MAX read from the source's own shard: wins over the env mirror
+     *  in the per-query timeout notes. */
+    shardTimeoutMaxMs?: number | null
 }
 
 // ============================================
@@ -133,6 +136,8 @@ export interface TuningFieldsProps {
      *  inherit), ``null`` sends an explicit null (the Defaults dialog: the
      *  server MERGES tuning and only an explicit null clears a stored key). */
     clearMode?: 'delete' | 'null'
+    /** See ``AggregationOverridesFormProps.shardTimeoutMaxMs``. */
+    shardTimeoutMaxMs?: number | null
 }
 
 /**
@@ -149,6 +154,7 @@ export function TuningFields({
     envDefaults,
     storedGlobal,
     clearMode = 'delete',
+    shardTimeoutMaxMs,
 }: TuningFieldsProps): JSX.Element {
     const setField = (spec: TuningKnob, raw: string, clamp: boolean) => {
         const next: AggregationTuning = { ...value }
@@ -255,7 +261,7 @@ export function TuningFields({
                                 )}
                             </p>
                             {(() => {
-                                const note = serverCapNote(spec, resolved.value, envDefaults)
+                                const note = serverCapNote(spec, resolved.value, envDefaults, shardTimeoutMaxMs)
                                 return note ? <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">{note}</p> : null
                             })()}
                         </div>
@@ -441,6 +447,7 @@ export function AggregationOverridesForm({
     defaultFinePairs,
     envDefaults,
     storedGlobal,
+    shardTimeoutMaxMs,
 }: AggregationOverridesFormProps): JSX.Element {
     const [showAdvanced, setShowAdvanced] = useState(false)
 
@@ -711,6 +718,7 @@ export function AggregationOverridesForm({
                                         value={value.tuning ?? {}}
                                         envDefaults={envDefaults}
                                         storedGlobal={storedGlobal}
+                                        shardTimeoutMaxMs={shardTimeoutMaxMs}
                                         onChange={tuning => update({ tuning })}
                                         disabled={disabled}
                                         defaultFinePairs={defaultFinePairs}

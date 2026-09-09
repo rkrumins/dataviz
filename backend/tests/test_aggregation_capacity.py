@@ -288,3 +288,67 @@ def test_source_capacity_explains_an_unplaceable_source_instead_of_failing(monke
     assert doc is not None and not doc.shard.measurable
     assert doc.shard.why_not == "the shard owning this graph could not be determined"
     assert doc.full_detail.verdict == "unknown"
+
+
+# ── the node's own limits ───────────────────────────────────────────────
+
+
+def _limited(endpoint="n1", *, cap=512 * 2 ** 20, timeout_max=180_000, default=30_000, threads=4):
+    return ShardMemory(endpoint, 10 * GB, 40 * GB, "noeviction", 0.0, "measured", None,
+                       cap, timeout_max, default, threads)
+
+
+def test_a_shard_row_carries_the_nodes_own_limits():
+    limits = cap.effective_limits({})
+    row = cap.shard_row(_limited(), limits)
+    assert (row.query_mem_capacity, row.timeout_max_ms, row.timeout_default_ms, row.thread_count) == (
+        512 * 2 ** 20, 180_000, 30_000, 4,
+    )
+    plain = cap.shard_row(_reading(), limits)
+    assert plain.timeout_max_ms is None and plain.thread_count is None
+
+
+def test_the_limits_carry_the_container_figure_only_when_the_deployment_states_it(monkeypatch):
+    monkeypatch.delenv("FALKORDB_CONTAINER_MEMORY_BYTES", raising=False)
+    assert cap.effective_limits({}).container_memory_bytes is None
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", str(10 * GB))
+    assert cap.effective_limits({}).container_memory_bytes == 10 * GB
+    monkeypatch.setenv("FALKORDB_CONTAINER_MEMORY_BYTES", "10Gi")
+    assert cap.effective_limits({}).container_memory_bytes is None
+
+
+class _NotingProvider(_Provider):
+    def __init__(self, graph, **kw):
+        super().__init__(graph, **kw)
+        self.noted = []
+
+    def note_server_limits(self, endpoint, **limits):
+        self.noted.append((endpoint, limits))
+
+
+def test_the_sweep_tells_each_provider_what_its_node_allows_and_remembers_who_lives_where(monkeypatch):
+    """The sweep is the one place every node gets read, so it is where a
+    provider learns the cap its clamp must follow — once per node, however
+    many sources share the provider — and a limits change later finds the
+    providers on a node through the same record."""
+    p1, p2 = _NotingProvider("g1"), _Provider("g2")
+    sources = [_ds("p1:a", graph="g1"), _ds("p1:b", graph="g1"), _ds("p2:c", provider="p2", graph="g2")]
+    _wire(monkeypatch, sources=sources, owners={"g1": "n1", "g2": "n2"},
+          readings={"n1": _limited("n1", cap=2 ** 30, timeout_max=300_000, threads=6), "n2": _reading("n2")})
+    parts = _run(cap._assemble(object(), _Registry({"p1": p1, "p2": p2})))
+    assert p1.noted == [("n1", {
+        "timeout_max_ms": 300_000, "query_mem_capacity": 2 ** 30, "thread_count": 6, "timeout_default_ms": 30_000,
+    })]
+    assert parts["providers_by_endpoint"]["n1"] == [(p1, "g1")]
+    assert parts["providers_by_endpoint"]["n2"] == [(p2, "g2")]
+    assert [(s.endpoint, s.timeout_max_ms, s.thread_count) for s in parts["shards"]] == [("n1", 300_000, 6), ("n2", None, None)]
+
+
+def test_invalidating_the_fleet_cache_forces_the_next_view_to_sweep(monkeypatch):
+    sources = [_ds("p1:a", graph="g1")]
+    reads = _wire(monkeypatch, sources=sources, owners={"g1": "n1"}, readings={"n1": _reading("n1")})
+    registry = _Registry({"p1": _Provider("g1")})
+    _run(cap.assemble_fleet_capacity(object(), registry))
+    cap.invalidate_fleet_cache()
+    _run(cap.assemble_fleet_capacity(object(), registry))
+    assert len(reads) == 2

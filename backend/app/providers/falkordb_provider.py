@@ -472,6 +472,24 @@ def _is_query_timeout_error(exc: BaseException) -> bool:
     return False
 
 
+def _clamp_db_timeout_ms(seconds: float, cap_ms: int) -> int:
+    """The server-side ``TIMEOUT`` for a query with a ``seconds`` client
+    budget: 500 ms under the budget so the server cancels first, never below
+    500 ms, and never above ``cap_ms`` — the store's ``TIMEOUT_MAX`` (0 = no
+    cap), which FalkorDB REJECTS, never runs, a query exceeding."""
+    ms = max(500, int(seconds * 1000) - 500)
+    if cap_ms > 0:
+        ms = min(ms, int(cap_ms))
+    return ms
+
+
+#: The largest per-query budget the app may send (the scan/write timeout
+#: knobs' maximum, seconds). The graph pool's socket timeout is floored
+#: above it: the server's TIMEOUT_MAX can be raised to it at runtime, and a
+#: socket that times out under a legitimate query kills the query.
+_MAX_QUERY_BUDGET_S = 600.0
+
+
 class _EmptyResult:
     """Stand-in for a FalkorDB query result with no rows — returned by the
     tolerant read path when the graph key doesn't exist yet."""
@@ -1008,6 +1026,14 @@ class FalkorDBProvider(GraphDataProvider):
         # defers close() while this is > 0 so it cannot tear the pool out from
         # under a running aggregation job (the 'NoneType has no query' race).
         self._inflight = 0
+        # The graph store's own limits per node (``host:port``), as the
+        # capacity sweep and the write budget read them
+        # (``note_server_limits``): the per-query time cap (``TIMEOUT_MAX``)
+        # every timeout this provider sends is clamped to, the per-query
+        # memory ceiling and the thread count. Until a node has been read,
+        # the env mirror ``FALKORDB_SERVER_TIMEOUT_MAX_MS`` is the cap.
+        self._server_limits: Dict[str, Dict[str, Optional[int]]] = {}
+        self._server_limits_seeded = False
         self._proj_graph = None  # Dedicated projection graph (when mode = "dedicated")
         self._pool = None       # Graph query pool (used by FalkorDB)
         self._redis_pool = None  # Separate pool for Redis data-structure ops (caching, SADD, etc.)
@@ -1572,6 +1598,10 @@ class FalkorDBProvider(GraphDataProvider):
             # ``_graph is not None`` guard above, so reconcile fires once
             # per provider instance, not once per query.
             self._schedule_reconcile_once()
+            # The node's own limits, read off the request path once per
+            # instance, so the per-query clamp follows the server rather
+            # than the env mirror (see ``_server_timeout_cap_ms``).
+            self._seed_server_limits()
 
             # Optional lazy seed (cheap when graph is non-empty; bounded by
             # the same init_timeout for the count query).
@@ -1657,22 +1687,122 @@ class FalkorDBProvider(GraphDataProvider):
     # (e.g. the insights materialization's 600s) must degrade to "run for
     # up to TIMEOUT_MAX" rather than fail instantly with "The query TIMEOUT
     # parameter value cannot exceed the TIMEOUT_MAX configuration parameter".
-    @staticmethod
-    def _db_timeout_ms(seconds: float) -> int:
+    # The cap is what the node itself reports once it has been read
+    # (``note_server_limits``); the env mirror only stands in before that.
+    def _db_timeout_ms(self, seconds: float) -> int:
+        return _clamp_db_timeout_ms(seconds, self._server_timeout_cap_ms())
+
+    def _server_timeout_cap_ms(self) -> int:
+        """The per-query time cap in force, milliseconds; 0 = no cap.
+
+        The LOWEST ``TIMEOUT_MAX`` read from any node this provider's
+        graphs live on — a query is rejected outright by the node that
+        receives it, and a dedicated projection may live on a different
+        node from its source graph — else ``FALKORDB_SERVER_TIMEOUT_MAX_MS``
+        until a node has been read. A node reporting no cap (0) counts as
+        unknown here, so the env value still bounds it: the harmless
+        direction."""
+        known = [
+            int(v["timeout_max_ms"]) for v in self._server_limits.values()
+            if v.get("timeout_max_ms")
+        ]
+        if known:
+            return min(known)
         from ..config import resilience
-        ms = max(500, int(seconds * 1000) - 500)
-        cap = resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS
-        if cap > 0:
-            ms = min(ms, cap)
-        return ms
+        return int(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS or 0)
+
+    def server_query_mem_capacity(self) -> Optional[int]:
+        """The lowest per-query memory ceiling (``QUERY_MEM_CAPACITY``) read
+        from any node this provider's graphs live on; None until a node has
+        been read, or when every node read is unlimited."""
+        known = [
+            int(v["query_mem_capacity"]) for v in self._server_limits.values()
+            if v.get("query_mem_capacity")
+        ]
+        return min(known) if known else None
+
+    def server_limits_for(self, endpoint: str) -> Dict[str, Optional[int]]:
+        """What has been read for one node — ``{}`` when nothing has."""
+        return dict(self._server_limits.get(endpoint, {}))
+
+    def note_server_limits(
+        self, endpoint: str, *,
+        timeout_max_ms: Optional[int] = None,
+        query_mem_capacity: Optional[int] = None,
+        thread_count: Optional[int] = None,
+        timeout_default_ms: Optional[int] = None,
+    ) -> None:
+        """Record what a reading of ``endpoint`` (``host:port``) found. The
+        write budget calls this before every rebuild and the capacity sweep
+        on every view, so a limit raised at runtime reaches the clamp on
+        the next read. None never overwrites a known value; an unknown
+        endpoint is ignored."""
+        if not endpoint or endpoint == "unknown":
+            return
+        slot = self._server_limits.setdefault(endpoint, {})
+        for key, value in (
+            ("timeout_max_ms", timeout_max_ms),
+            ("query_mem_capacity", query_mem_capacity),
+            ("thread_count", thread_count),
+            ("timeout_default_ms", timeout_default_ms),
+        ):
+            if value is not None:
+                slot[key] = int(value)
+
+    def _endpoint_label(self) -> str:
+        """``host:port`` of the configured endpoint, for log lines."""
+        cfg = self._conn_cfg
+        host = getattr(cfg, "host", None) or self._host
+        port = getattr(cfg, "port", None) or self._port
+        return f"{host}:{port}"
+
+    def _seed_server_limits(self) -> None:
+        """Read the connected node's limits once, detached from the connect
+        path — a slow or refused ``GRAPH.CONFIG`` must never delay a query.
+        Idempotent per instance. Failures are logged at INFO; the env
+        mirror stays in force until a later read (the write budget before
+        every rebuild, the capacity sweep on every view) succeeds."""
+        if self._server_limits_seeded or self._db is None:
+            return
+        self._server_limits_seeded = True
+
+        async def _run():
+            try:
+                from backend.app.providers.shard_capacity import read_shard_memory
+                reading = await read_shard_memory(
+                    self._db, mode=getattr(self._conn_cfg, "mode", None),
+                    graph_key=self._graph_name,
+                    timeout=float(os.getenv("FALKORDB_INIT_TIMEOUT", "3")),
+                )
+                self.note_server_limits(
+                    reading.endpoint,
+                    timeout_max_ms=reading.timeout_max_ms,
+                    query_mem_capacity=reading.query_mem_capacity,
+                    thread_count=reading.thread_count,
+                    timeout_default_ms=reading.timeout_default_ms,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.info(
+                    "FalkorDB server limits not read for %s (env cap stays in force): %s",
+                    self._endpoint_label(), exc,
+                )
+
+        self._server_limits_task = asyncio.create_task(
+            _run(), name=f"falkordb-server-limits-{self._host}:{self._port}"
+        )
 
     def _graph_socket_timeout(self) -> float:
         """Socket recv/send timeout for the GRAPH query pools.
 
-        Floored above the server's TIMEOUT_MAX: the redis client applies
-        ``socket_timeout`` to each ``read_response``, and a long-running
-        Cypher query sends no bytes until it completes — a socket timeout
-        below the query budget kills legitimate queries mid-flight. The
+        Floored above the longest query the app may send: the redis client
+        applies ``socket_timeout`` to each ``read_response``, and a
+        long-running Cypher query sends no bytes until it completes — a
+        socket timeout below the query budget kills legitimate queries
+        mid-flight. The floor is the larger of the env cap and the per-query
+        knob maximum (600 s), plus 15 s: the server's ``TIMEOUT_MAX`` can be
+        raised to the knob maximum at runtime, after the pool is built. The
         hang-net role the low per-tier value played is preserved by the
         per-call ``asyncio.wait_for`` in ``_ro_query``/``_query``, which
         bounds every call at its own (much smaller) budget regardless of
@@ -1683,10 +1813,11 @@ class FalkorDBProvider(GraphDataProvider):
             (self._conn_cfg.socket_timeout if self._conn_cfg else None)
             or float(os.getenv("FALKORDB_SOCKET_TIMEOUT", "10"))
         )
-        cap_ms = resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS
-        if cap_ms <= 0:
-            return configured
-        return max(configured, cap_ms / 1000.0 + 15.0)
+        cap_s = max(
+            int(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS or 0) / 1000.0,
+            _MAX_QUERY_BUDGET_S,
+        )
+        return max(float(configured), cap_s + 15.0)
 
     async def _rebuild_graph_client_for_failover(self, seen_generation: int) -> None:
         """Re-resolve and rebuild the FalkorDB client(s) after a cluster

@@ -14,12 +14,12 @@
  * purpose: a full node and a stalled publish are the same incident seen from
  * two ends, and an operator has to read that pair in one glance.
  */
-import { Boxes, GitBranch, MemoryStick } from 'lucide-react'
+import { Boxes, GitBranch, MemoryStick, SlidersHorizontal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { GraphProvider, ProjectionSection, ServiceEntry } from '@/services/systemStatusService'
 import { STATUS_META, formatBytes, num, obj, str } from './meta'
 import type { AggregationCapacityResponse } from '@/services/aggregationService'
-import { compactEdges } from '../shared/aggregationKnobs'
+import { compactBytes, compactEdges } from '../shared/aggregationKnobs'
 
 /** Neutral type badge — no privileged provider. */
 const TYPE_LABEL: Record<string, string> = {
@@ -71,6 +71,14 @@ interface ShardMemory {
     /** How many more rollup edges fit under that reserve, at bytesPerEdge. */
     fitsEdges?: number | null
     bytesPerEdge?: number | null
+    /** The node's own limits, when the capacity sweep read them: the
+     *  per-query memory ceiling, the per-query time cap, the thread count. */
+    queryMemCapacity?: number | null
+    timeoutMaxMs?: number | null
+    threadCount?: number | null
+    /** True when the capacity sweep placed this node — the only rows a
+     *  limits change can reach (it goes through the provider on that node). */
+    capacityKnown?: boolean
 }
 
 /** Memory pressure is its own signal, not a fifth status word — warn and
@@ -127,8 +135,15 @@ export function graphShardMemory(
         ? capacity.limits.bytesPerEdge.value : null
     for (const shard of capacity?.shards ?? []) {
         if (!shard.measurable) continue
+        const limits = {
+            queryMemCapacity: shard.queryMemCapacity ?? null,
+            timeoutMaxMs: shard.timeoutMaxMs ?? null,
+            threadCount: shard.threadCount ?? null,
+            capacityKnown: true as const,
+        }
         const row = rows.find(r => r.endpoint === shard.endpoint)
         if (row) {
+            Object.assign(row, limits)
             row.reservePct = shard.reservePct
             row.fitsEdges = shard.allowedGrowthEdges ?? null
             row.bytesPerEdge = bytesPerEdge
@@ -142,18 +157,36 @@ export function graphShardMemory(
                 reservePct: shard.reservePct,
                 fitsEdges: shard.allowedGrowthEdges ?? null,
                 bytesPerEdge,
+                ...limits,
             })
         }
     }
     return rows
 }
 
-function ShardMemoryRow({ shard }: { shard: ShardMemory }) {
+/** The node's own per-query limits, as one line: what the rebuild's queries
+ *  are bounded by on this node, and — for a system administrator — the way
+ *  to change them. */
+function limitsLine(shard: ShardMemory): string | null {
+    const parts = [
+        shard.queryMemCapacity != null && `per-query memory ${compactBytes(shard.queryMemCapacity)}`,
+        shard.timeoutMaxMs != null && `query time cap ${shard.timeoutMaxMs / 1000} s`,
+        shard.threadCount != null && `${shard.threadCount} thread${shard.threadCount === 1 ? '' : 's'}`,
+    ].filter((p): p is string => typeof p === 'string')
+    return parts.length ? parts.join(' \u00b7 ') : null
+}
+
+function ShardMemoryRow({ shard, onAdjustLimits }: {
+    shard: ShardMemory
+    onAdjustLimits?: (endpoint: string) => void
+}) {
     const level = shard.level ? LEVEL_META[shard.level] : null
     const Icon = level?.meta.icon
     const used = formatBytes(shard.usedMemory)
     const cap = formatBytes(shard.maxmemory)
     const pct = shard.usedPct != null ? `${Math.round(shard.usedPct)}%` : null
+    const limits = limitsLine(shard)
+    const adjustable = !!shard.capacityKnown && !!onAdjustLimits
     return (
         <div>
             <div className="flex items-baseline gap-2 flex-wrap">
@@ -184,6 +217,20 @@ function ShardMemoryRow({ shard }: { shard: ShardMemory }) {
                     {shard.bytesPerEdge != null && ` at ${shard.bytesPerEdge} B each`}
                 </p>
             )}
+            {(limits || adjustable) && (
+                <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-ink-muted tabular-nums">
+                    {limits && <span>Limits: {limits}</span>}
+                    {adjustable && (
+                        <button
+                            type="button"
+                            onClick={() => onAdjustLimits?.(shard.endpoint)}
+                            className="inline-flex items-center gap-1 font-semibold text-indigo-600 dark:text-indigo-400 hover:underline outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 rounded"
+                        >
+                            <SlidersHorizontal className="w-3 h-3" /> Adjust graph store limits
+                        </button>
+                    )}
+                </p>
+            )}
         </div>
     )
 }
@@ -192,7 +239,10 @@ function ShardMemoryRow({ shard }: { shard: ShardMemory }) {
  *  itself with a level word; the nodes that still have room are listed
  *  alongside it, because "move a graph to another shard" is unanswerable
  *  without them, and the rollup reserve is marked on each. */
-function MemoryHeadroom({ shards }: { shards: ShardMemory[] }) {
+function MemoryHeadroom({ shards, onAdjustLimits }: {
+    shards: ShardMemory[]
+    onAdjustLimits?: (endpoint: string) => void
+}) {
     if (shards.length === 0) return null
     const filling = shards.filter(s => s.level)
     const worst = filling.some(s => s.level === 'critical') ? 'critical' : filling.length > 0 ? 'warn' : null
@@ -211,7 +261,7 @@ function MemoryHeadroom({ shards }: { shards: ShardMemory[] }) {
                     </span>
                 </div>
                 <div className="mt-2 space-y-2">
-                    {shards.map(s => <ShardMemoryRow key={s.endpoint} shard={s} />)}
+                    {shards.map(s => <ShardMemoryRow key={s.endpoint} shard={s} onAdjustLimits={onAdjustLimits} />)}
                 </div>
                 {worst === 'critical' && meta && (
                     <p className={cn('mt-2 text-[11px] leading-snug', meta.text)}>{CRITICAL_CONSEQUENCE}</p>
@@ -337,13 +387,17 @@ function PublishingStalled({ projection, providers, nodeFilling }: {
     )
 }
 
-export function GraphProvidersPanel({ providers, services, projection, capacity }: {
+export function GraphProvidersPanel({ providers, services, projection, capacity, onAdjustLimits }: {
     providers: GraphProvider[] | null
     services?: ServiceEntry[] | null
     projection?: ProjectionSection | null
     /** The aggregation capacity sweep, when the page has it: the rollup
-     *  reserve and what fits ride onto the matching shard rows. */
+     *  reserve, what fits and the node's own limits ride onto the matching
+     *  shard rows. */
     capacity?: AggregationCapacityResponse | null
+    /** Offered on every row the sweep placed, when the viewer may change a
+     *  node's limits (system administrators); absent otherwise. */
+    onAdjustLimits?: (endpoint: string) => void
 }) {
     const shards = graphShardMemory(services, capacity)
     const list = providers ?? []
@@ -370,7 +424,7 @@ export function GraphProvidersPanel({ providers, services, projection, capacity 
                     {list.map(p => <ProviderCard key={p.id} p={p} />)}
                 </div>
             )}
-            <MemoryHeadroom shards={shards} />
+            <MemoryHeadroom shards={shards} onAdjustLimits={onAdjustLimits} />
             <PublishingStalled
                 projection={projection}
                 providers={list}

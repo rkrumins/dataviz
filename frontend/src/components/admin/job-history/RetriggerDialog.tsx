@@ -17,6 +17,7 @@
  * open so the user can retry without losing their overrides.
  */
 import { useEffect, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2, Play, RotateCcw, Settings2 } from 'lucide-react'
@@ -27,6 +28,8 @@ import {
     type AggregationOverridesValue,
 } from '../shared/AggregationOverridesForm'
 import { RetriggerFitCheck } from './RetriggerFitCheck'
+import { RaisePerQueryLimitLink } from '../shared/RaisePerQueryLimitLink'
+import { useSourceCapacity } from '../shared/useAggregationCapacity'
 import type { AggregationTuning, EnvTuningDefaults } from '@/services/aggregationService'
 
 export interface RetriggerDialogProps {
@@ -55,10 +58,26 @@ export interface RetriggerDialogProps {
     /** Why the form opened on a profile the operator did not pick (a Gentle
      *  retry after a per-query memory or timeout failure). */
     presetReason?: string | null
+    /** The control that goes with the reason: after a per-query memory
+     *  failure, the way to the node's own limit (system administrators). */
+    presetAction?: 'raise-per-query-limit' | null
     /** Always shown. */
     onConfirmRetrigger: (overrides: AggregationOverridesValue) => Promise<void>
     /** Only shown when originatingJob exists with non-null lastCursor. */
     onConfirmResume?: (overrides: AggregationOverridesValue) => Promise<void>
+}
+
+type ShardCap = { timeoutMaxMs: number | null }
+
+/** The source's own shard cap, for the per-query timeout notes in the form.
+ *  Mounted only when the dialog knows its source, so the dialog itself stays
+ *  free of query hooks (its unit tests render it without a query client). */
+function ShardCapFor({ dataSourceId, children }: {
+    dataSourceId: string
+    children: (cap: ShardCap) => ReactElement
+}) {
+    const q = useSourceCapacity(dataSourceId, true)
+    return children({ timeoutMaxMs: q.data?.shard.timeoutMaxMs ?? null })
 }
 
 export function RetriggerDialog({
@@ -72,6 +91,7 @@ export function RetriggerDialog({
     envDefaults,
     storedGlobal,
     presetReason,
+    presetAction,
     onConfirmRetrigger,
     onConfirmResume,
 }: RetriggerDialogProps) {
@@ -167,29 +187,42 @@ export function RetriggerDialog({
 
                     {/* Body — scrollable form */}
                     <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 space-y-4">
-                        {presetReason && (
-                            <p
-                                data-testid="retrigger-preset-reason"
-                                className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300"
-                            >
-                                {presetReason}
-                            </p>
-                        )}
-                        {dataSourceId && (
-                            <RetriggerFitCheck
-                                dataSourceId={dataSourceId}
-                                draftTuning={value.tuning}
-                                defaultFinePairs={defaultFinePairs}
-                            />
-                        )}
-                        <AggregationOverridesForm
-                            value={value}
-                            onChange={setValue}
-                            disabled={isLoading}
-                            defaultFinePairs={defaultFinePairs}
-                            envDefaults={envDefaults}
-                            storedGlobal={storedGlobal}
-                        />
+                        {(() => {
+                            const body = (cap: ShardCap) => (
+                                <>
+                                    {presetReason && (
+                                        <div
+                                            data-testid="retrigger-preset-reason"
+                                            className="rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300 space-y-1"
+                                        >
+                                            <p>{presetReason}</p>
+                                            {presetAction === 'raise-per-query-limit' && dataSourceId && (
+                                                <RaisePerQueryLimitLink dataSourceId={dataSourceId} />
+                                            )}
+                                        </div>
+                                    )}
+                                    {dataSourceId && (
+                                        <RetriggerFitCheck
+                                            dataSourceId={dataSourceId}
+                                            draftTuning={value.tuning}
+                                            defaultFinePairs={defaultFinePairs}
+                                        />
+                                    )}
+                                    <AggregationOverridesForm
+                                        value={value}
+                                        onChange={setValue}
+                                        disabled={isLoading}
+                                        defaultFinePairs={defaultFinePairs}
+                                        envDefaults={envDefaults}
+                                        storedGlobal={storedGlobal}
+                                        shardTimeoutMaxMs={cap.timeoutMaxMs}
+                                    />
+                                </>
+                            )
+                            return dataSourceId
+                                ? <ShardCapFor dataSourceId={dataSourceId}>{body}</ShardCapFor>
+                                : body({ timeoutMaxMs: null })
+                        })()}
                     </div>
 
                     {/* Footer */}

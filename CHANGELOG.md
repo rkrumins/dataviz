@@ -51,6 +51,23 @@ strip when several jobs are running, and *Give it more time* on the canvas banne
 re-reads the row every thirty seconds through a fresh session; per-query budgets apply to the
 next query. The history lives on the job row, shown in Job History.
 
+**The graph store's own limits, from the UI.** `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` no longer
+live only in the deployment. Infrastructure → Memory headroom shows each node's per-query memory
+ceiling, query time cap and thread count (read with the capacity sweep), and system administrators
+get *Adjust graph store limits*: the node is read fresh; the change is checked — a cap never below
+the node's `TIMEOUT_DEFAULT`, raising the ceiling needs the container memory limit and is refused
+with the shortfall when the deployment guide's sizing formula says the container cannot back it,
+`0` refused, lowering needs nothing; set with `GRAPH.CONFIG SET` on the node or every primary; read
+back, verified, and logged with the actor (`PATCH /admin/graph-store/{endpoint}/limits`). The
+dialog hands over the `FALKORDB_ARGS` fragment that makes a runtime change permanent. The
+application now clamps per-query timeouts to the cap it reads from each node — the write budget
+and the capacity sweep teach every provider — with `FALKORDB_SERVER_TIMEOUT_MAX_MS` as the
+fallback until a node has been read (the socket timeout is floored above the knobs' maximum), so
+a raised cap reaches the next query without a restart; the editors' timeout notes show the cap
+read from the store; a failed source's guidance and the Gentle pre-selection link straight to the
+node's limits. `FALKORDB_CONTAINER_MEMORY_BYTES` (optional) prefills the container field;
+`AGGREGATION_SLOT_STALE_SECS` defaults to 660 so a write allowed a raised cap keeps its slot.
+
 **Rollup capacity you can see, and every limit you can set.** Ingestion → Freshness gains a
 *Graph store capacity* card: one row per shard with a meter of memory in use, the fleet reserve
 marked on it, what is free after that reserve, how many more rollup edges that is, and the
@@ -340,10 +357,12 @@ is required for correctness, but without it readers pay the aggregation on the r
 
 ### Known limitations
 
-- A single row larger than the graph store's per-query memory ceiling is still terminal — the
-  message now names which — and the per-query timeouts cannot exceed the store's `TIMEOUT_MAX`
-  (180 s as shipped) without `FALKORDB_ARGS` and `FALKORDB_SERVER_TIMEOUT_MAX_MS` changing
-  together.
+- A single row larger than the graph store's per-query memory ceiling is still terminal for that
+  rebuild — the message names which, and the ceiling is now adjustable from Infrastructure. A
+  runtime change to the store's limits lasts until the store restarts (the dialog hands over the
+  `FALKORDB_ARGS` fragment); the container-memory guard trusts the figure entered or
+  `FALKORDB_CONTAINER_MEMORY_BYTES`, since the application cannot read the container limit;
+  `THREAD_COUNT`, `OMP_THREAD_COUNT` and `CACHE_SIZE` remain load-time only.
 - Scan shape (width, floor, concurrency, pacing, chunks, rollup storage) changes on the next
   Resume or Re-trigger, not on a running job; only the time limits are live.
 - The canvas's own reads have no pressure ladder: a per-query refusal on a drill is a read

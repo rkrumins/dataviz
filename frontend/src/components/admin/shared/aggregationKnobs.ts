@@ -14,7 +14,7 @@
  * way the next rebuild will decide.
  */
 import type {
-    AggregationTuning, CapacityLimits, EnvTuningDefaults, ShardCapacity,
+    AggregationCapacityResponse, AggregationTuning, CapacityLimits, EnvTuningDefaults, ShardCapacity,
 } from '@/services/aggregationService'
 
 export type TuningKnobKey =
@@ -168,18 +168,59 @@ export const TUNING_KNOBS: TuningKnob[] = [
 ]
 
 /**
- * The graph store's own per-query cap (TIMEOUT_MAX, reported by the server
- * as ``serverTimeoutMaxMs``) bounds the two per-query timeouts above it: a
- * value past the cap is silently capped by the store. Returns the sentence
- * to show under the input when a value is past it, else null.
+ * The graph store's own per-query cap (TIMEOUT_MAX) bounds the two per-query
+ * timeouts above it: a value past the cap is silently capped by the store.
+ * The cap READ FROM THE NODE (``shardTimeoutMaxMs``, from the capacity sweep)
+ * wins over the deployment's mirror (``env.serverTimeoutMaxMs``): the store's
+ * cap can be raised at runtime from Infrastructure, and the mirror does not
+ * follow. Returns the sentence to show under the input when a value is past
+ * the cap, else null.
  */
-export function serverCapNote(knob: TuningKnob, value: number | null | undefined, env?: EnvTuningDefaults | null): string | null {
+export function serverCapNote(
+    knob: TuningKnob,
+    value: number | null | undefined,
+    env?: EnvTuningDefaults | null,
+    shardTimeoutMaxMs?: number | null,
+): string | null {
     if (knob.key !== 'scanTimeoutS' && knob.key !== 'writeTimeoutS') return null
-    const capMs = env?.serverTimeoutMaxMs
+    const fromNode = typeof shardTimeoutMaxMs === 'number' && shardTimeoutMaxMs > 0
+    const capMs = fromNode ? shardTimeoutMaxMs : env?.serverTimeoutMaxMs
     if (typeof capMs !== 'number' || capMs <= 0 || typeof value !== 'number') return null
     const capS = capMs / 1000
     if (value <= capS) return null
-    return `Capped by the graph store at ${capS % 1 === 0 ? capS : capS.toFixed(1)} s (TIMEOUT_MAX) — raise TIMEOUT_MAX in FALKORDB_ARGS and FALKORDB_SERVER_TIMEOUT_MAX_MS together to go higher.`
+    return `Capped by the graph store at ${capS % 1 === 0 ? capS : capS.toFixed(1)} s (TIMEOUT_MAX, ${fromNode ? 'read from the node' : 'from the deployment'}) — an administrator can raise it under Infrastructure → Memory headroom → Adjust graph store limits.`
+}
+
+/** The lowest TIMEOUT_MAX read across the measured shards — the cap every
+ *  per-query timeout is really bounded by — or null when none reported one. */
+export function fleetTimeoutCapMs(capacity?: Pick<AggregationCapacityResponse, 'shards'> | null): number | null {
+    const caps = (capacity?.shards ?? [])
+        .map(s => s.timeoutMaxMs)
+        .filter((v): v is number => typeof v === 'number' && v > 0)
+    return caps.length ? Math.min(...caps) : null
+}
+
+/** Where an administrator adjusts a node's own limits. */
+export function graphStoreLimitsPath(endpoint: string): string {
+    return `/admin/infrastructure?limits=${encodeURIComponent(endpoint)}`
+}
+
+const MIB = 2 ** 20
+const GIB = 2 ** 30
+
+/**
+ * The deployment guide's container sizing rule, mirrored from the server
+ * (``providers/shard_capacity.container_memory_needed``): 1.25 × maxmemory +
+ * concurrent × 1.3 × QUERY_MEM_CAPACITY + overhead (256 MiB; 1 GiB from
+ * 32 GiB). The 1.3 is the reply buffer the ceiling does not count;
+ * ``concurrent`` is how many queries may hold the ceiling at once — at most
+ * the node's THREAD_COUNT, since the ceiling is charged per thread.
+ */
+export function containerNeededBytes(maxmemory: number, concurrent: number, queryMemCapacity: number): number {
+    const overhead = maxmemory >= 32 * GIB ? GIB : 256 * MIB
+    return Math.floor(1.25 * maxmemory)
+        + Math.max(1, Math.floor(concurrent)) * Math.floor(1.3 * queryMemCapacity)
+        + overhead
 }
 
 export const KNOB_BY_KEY: Record<TuningKnobKey, TuningKnob> = Object.fromEntries(

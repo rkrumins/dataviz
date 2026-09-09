@@ -37,6 +37,7 @@ from backend.app.ontology import gate as ontology_gate
 from backend.app.ontology import runtime as ontology_runtime
 from backend.app.services.aggregation.internal_auth import internal_auth_headers
 from backend.app.services.aggregation.schemas import (
+    GraphStoreLimitsPatch,
     JobLimitsPatch,
     ResumeOverrides,
     SourceChangedRequest,
@@ -365,6 +366,46 @@ async def get_data_source_capacity(
             detail=f"Data source {ds_id} not found",
         )
     return doc
+
+
+# ── PATCH /admin/graph-store/{endpoint}/limits ──────────────────────
+#
+# The graph store's own per-query limits — TIMEOUT_MAX and
+# QUERY_MEM_CAPACITY — set at runtime on the node the capacity sweep placed
+# ``endpoint`` on, guarded by the deployment guide's container formula and
+# verified by a fresh read. system:admin, like the settings PUT: this
+# changes the store itself, not a job. The actor is always the
+# authenticated user, never what the client body says.
+
+@router.patch(
+    "/graph-store/{endpoint}/limits",
+    summary="Set a graph store node's per-query limits (TIMEOUT_MAX, QUERY_MEM_CAPACITY) at runtime",
+)
+async def set_graph_store_limits(
+    endpoint: str,
+    patch: GraphStoreLimitsPatch,
+    request: Request,
+    admin: User = Depends(_REQUIRE_SYSTEM_ADMIN),
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(get_graph_read_db_session),
+):
+    patch.actor = str(getattr(admin, "id", None) or getattr(admin, "email", None) or "")[:255] or None
+    if _PROXY_ENABLED:
+        from urllib.parse import quote
+        body = patch.model_dump_json(by_alias=True, exclude_none=True).encode()
+        return await _proxy(
+            "PATCH", f"/aggregation/graph-store/{quote(endpoint, safe='')}/limits",
+            request, body=body,
+        )
+    from backend.app.services.aggregation.graph_store_limits import (
+        GraphStoreEndpointNotFound, GraphStoreLimitsError, apply_graph_store_limits,
+    )
+    try:
+        return await apply_graph_store_limits(session, svc._registry, endpoint, patch)
+    except GraphStoreEndpointNotFound as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except GraphStoreLimitsError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
 
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────

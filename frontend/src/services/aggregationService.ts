@@ -435,6 +435,9 @@ export interface CapacityLimits {
   maxCubeEdges: number;
   staticCap: number;
   budgetRecheckEdges: number;
+  /** The graph store container's memory limit when the deployment states it
+   *  (FALKORDB_CONTAINER_MEMORY_BYTES); the app cannot read it. */
+  containerMemoryBytes?: number | null;
 }
 
 export interface CapacitySource {
@@ -472,6 +475,12 @@ export interface ShardCapacity {
   staticCap: number;
   /** The node's per-query memory ceiling (QUERY_MEM_CAPACITY), bytes; null when unlimited or unreadable. */
   queryMemCapacity?: number | null;
+  /** The node's per-query time cap (TIMEOUT_MAX) and its default, ms — what
+   *  every timeout knob is really clamped to; null when unlimited or unreadable. */
+  timeoutMaxMs?: number | null;
+  timeoutDefaultMs?: number | null;
+  /** The node's THREAD_COUNT: the memory ceiling is charged per thread. */
+  threadCount?: number | null;
   sources: CapacitySource[];
 }
 
@@ -518,6 +527,41 @@ export interface SourceCapacityResponse {
   limits: CapacityLimits;
   fullDetail: FullDetailPreflight;
   auto: AutoPreflight;
+  measuredAt: string;
+}
+
+/**
+ * A change to one graph store node's per-query limits, applied at runtime
+ * with GRAPH.CONFIG SET — it lasts until the server restarts, and the
+ * response hands back the FALKORDB_ARGS fragment that makes it permanent.
+ * At least one of the two limits. Raising the memory ceiling needs the
+ * container's memory limit, which the app cannot read.
+ */
+export interface GraphStoreLimitsPatch {
+  /** TIMEOUT_MAX, milliseconds (1,000 .. 3,600,000); never below the node's TIMEOUT_DEFAULT. */
+  timeoutMaxMs?: number;
+  /** QUERY_MEM_CAPACITY, bytes per query (1 .. 1 TiB); 0 (unlimited) is refused. */
+  queryMemCapacity?: number;
+  /** The graph store container's memory limit, bytes — required to raise the ceiling. */
+  containerMemoryBytes?: number;
+  /** Queries that may hold the ceiling at once, for the sizing formula (at most, and by default, THREAD_COUNT). */
+  concurrentQueries?: number;
+  /** Cluster mode: set the same limits on every primary, not only the node named. */
+  applyToAllNodes?: boolean;
+}
+
+export interface GraphStoreLimitsResponse {
+  shard: ShardCapacity;
+  /** What the changed names read before (null = unlimited or unreadable), and what was set. */
+  previous: Record<string, number | null>;
+  applied: Record<string, number>;
+  appliedTo: string[];
+  /** e.g. `TIMEOUT_MAX 300000 QUERY_MEM_CAPACITY 1073741824` — paste into FALKORDB_ARGS. */
+  argsFragment: string;
+  /** The container memory the sizing formula asks for at the applied ceiling; null when maxmemory is unknown. */
+  containerNeededBytes?: number | null;
+  concurrentQueries?: number | null;
+  threadCountAssumed: boolean;
   measuredAt: string;
 }
 
@@ -610,6 +654,19 @@ class AggregationService {
   async setJobLimits(dataSourceId: string, jobId: string, patch: JobLimitsPatch): Promise<AggregationJobResponse> {
     return authFetch<AggregationJobResponse>(
       `/api/v1/admin/data-sources/${dataSourceId}/aggregation-jobs/${jobId}/limits`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    );
+  }
+
+  /**
+   * Set a graph store node's per-query limits (TIMEOUT_MAX, QUERY_MEM_CAPACITY)
+   * at runtime — system administrators only. Verified by a fresh read of the
+   * node; 422 with the numbers when the change is refused, 404 when the
+   * capacity sweep knows no such node.
+   */
+  async setGraphStoreLimits(endpoint: string, patch: GraphStoreLimitsPatch): Promise<GraphStoreLimitsResponse> {
+    return authFetch<GraphStoreLimitsResponse>(
+      `/api/v1/admin/graph-store/${encodeURIComponent(endpoint)}/limits`,
       { method: 'PATCH', body: JSON.stringify(patch) },
     );
   }

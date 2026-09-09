@@ -110,6 +110,12 @@ export function gentleRetryReason(job: Pick<AggregationJobResponse, 'failureCate
     return null
 }
 
+/** The control that goes with the Gentle pre-selection: after a per-query
+ *  memory failure, the way to the node's own limit (system administrators). */
+export function gentleRetryAction(job: Pick<AggregationJobResponse, 'failureCategory' | 'status'>): 'raise-per-query-limit' | null {
+    return job.status === 'failed' && job.failureCategory === 'query_memory' ? 'raise-per-query-limit' : null
+}
+
 function buildInitialOverridesForDataSource(
     projectionMode?: string | null,
     defaultTuning?: AggregationTuning,
@@ -162,7 +168,7 @@ export function RegistryJobHistory() {
     const [confirmDelete, setConfirmDelete] = useState<AggregationJobResponse | null>(null)
     // Retrigger dialog: either job-derived (from a JobRow) or data-source-derived (from grouped card).
     const [retriggerCtx, setRetriggerCtx] = useState<
-        | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue; presetReason?: string | null }
+        | { kind: 'job'; job: AggregationJobResponse; initialValue: AggregationOverridesValue; presetReason?: string | null; presetAction?: 'raise-per-query-limit' | null }
         | { kind: 'dataSource'; dataSourceId: string; dataSourceLabel: string; initialValue: AggregationOverridesValue }
         | null
     >(null)
@@ -431,13 +437,13 @@ export function RegistryJobHistory() {
     // appears one frame later, which still reads as instant.
     const handleResume = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job), presetAction: gentleRetryAction(job) })
         })
     }, [defaultTuning])
 
     const handleRetrigger = useCallback((job: AggregationJobResponse) => {
         startTransition(() => {
-            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job) })
+            setRetriggerCtx({ kind: 'job', job, initialValue: buildInitialOverridesFromJob(job, defaultTuning), presetReason: gentleRetryReason(job), presetAction: gentleRetryAction(job) })
         })
     }, [defaultTuning])
 
@@ -870,6 +876,7 @@ export function RegistryJobHistory() {
                 envDefaults={envDefaults}
                 storedGlobal={defaultTuning ?? null}
                 presetReason={retriggerCtx?.kind === 'job' ? retriggerCtx.presetReason ?? null : null}
+                presetAction={retriggerCtx?.kind === 'job' ? retriggerCtx.presetAction ?? null : null}
                 onConfirmRetrigger={handleConfirmRetrigger}
                 onConfirmResume={retriggerCtx?.kind === 'job' ? handleConfirmResume : undefined}
             />

@@ -8,14 +8,18 @@
  * Read-only observability (v1): verdicts come from work signals in shared
  * state, so the page is equally truthful on docker-compose and GKE.
  */
+import { useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Activity, AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { usePermission } from '@/store/auth'
 import type { OverviewSection, SystemStatusSnapshot } from '@/services/systemStatusService'
 import { useSystemStatus } from './useSystemStatus'
 import { ServiceTile } from './ServiceTile'
 import { ProjectionPanel } from './ProjectionPanel'
 import { StreamsPanel } from './StreamsPanel'
 import { GraphProvidersPanel } from './GraphProvidersPanel'
+import { GraphStoreLimitsDialog } from './GraphStoreLimitsDialog'
 import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
@@ -127,6 +131,27 @@ export function AdminInfrastructure() {
     // headroom block can mark the reserve and say what still fits.
     const capacity = useFleetCapacity(!!data)
 
+    // A node's own limits are adjusted in a dialog keyed by the URL
+    // (``?limits=<endpoint>``), so the capacity card, a failed source's
+    // guidance and a re-trigger's pre-selection can all link straight to it.
+    const isSystemAdmin = usePermission('system:admin')
+    const [searchParams, setSearchParams] = useSearchParams()
+    const limitsFor = searchParams.get('limits')
+    const openLimits = useCallback((endpoint: string) => {
+        setSearchParams(prev => {
+            const p = new URLSearchParams(prev)
+            p.set('limits', endpoint)
+            return p
+        })
+    }, [setSearchParams])
+    const closeLimits = useCallback(() => {
+        setSearchParams(prev => {
+            const p = new URLSearchParams(prev)
+            p.delete('limits')
+            return p
+        }, { replace: true })
+    }, [setSearchParams])
+
     const hero = data ? HERO[data.status] : null
     const HeroIcon = hero?.icon ?? Loader2
     const updatedAgo = dataUpdatedAt ? formatAgeMs(Date.now() - dataUpdatedAt) : null
@@ -202,7 +227,13 @@ export function AdminInfrastructure() {
                     </div>
 
                     {/* Graph data providers (any type — FalkorDB, Neo4j, …) */}
-                    <GraphProvidersPanel providers={data.graphProviders} services={data.services} projection={data.projection} capacity={capacity.data ?? null} />
+                    <GraphProvidersPanel
+                        providers={data.graphProviders}
+                        services={data.services}
+                        projection={data.projection}
+                        capacity={capacity.data ?? null}
+                        onAdjustLimits={isSystemAdmin ? openLimits : undefined}
+                    />
 
                     {/* Workload KPIs — is the work getting done, and how fast */}
                     <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
@@ -260,6 +291,10 @@ export function AdminInfrastructure() {
                     <StreamsPanel streams={data.streams} outbox={data.outbox} history={history} />
                 </div>
             ) : null}
+
+            {isSystemAdmin && limitsFor && (
+                <GraphStoreLimitsDialog open endpoint={limitsFor} onClose={closeLimits} />
+            )}
         </PageContainer>
     )
 }

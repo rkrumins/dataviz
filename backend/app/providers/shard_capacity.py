@@ -38,7 +38,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,15 @@ class ShardMemory:
     # None when unlimited, unreadable, or the client cannot ask. A second,
     # separately guarded read — it never costs the memory reading.
     query_mem_capacity: Optional[int] = None
+    # The node's other limits beside the ceiling, from the same guarded
+    # ``GRAPH.CONFIG`` read: the per-query time cap (``TIMEOUT_MAX``, ms —
+    # what every timeout knob is clamped to), its default (``TIMEOUT_DEFAULT``,
+    # ms — a cap may never be set below it) and the execution width
+    # (``THREAD_COUNT`` — the ceiling is charged PER THREAD, so the container
+    # formula multiplies by it). None when unlimited, unreadable, or unknown.
+    timeout_max_ms: Optional[int] = None
+    timeout_default_ms: Optional[int] = None
+    thread_count: Optional[int] = None
 
     @property
     def measurable(self) -> bool:
@@ -154,6 +163,14 @@ class ShardMemory:
             **(
                 {"query_mem_capacity": self.query_mem_capacity}
                 if self.query_mem_capacity is not None else {}
+            ),
+            **(
+                {"timeout_max_ms": self.timeout_max_ms}
+                if self.timeout_max_ms is not None else {}
+            ),
+            **(
+                {"thread_count": self.thread_count}
+                if self.thread_count is not None else {}
             ),
         }
 
@@ -219,20 +236,112 @@ def _parse_config_reply(raw: Any, name: str) -> Optional[int]:
     return n if n and n > 0 else None
 
 
+#: The four ``GRAPH.CONFIG`` names the reading carries, and the field each
+#: lands in. ``0`` reads as None for all four (unlimited / no default).
+_LIMIT_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("QUERY_MEM_CAPACITY", "query_mem_capacity"),
+    ("TIMEOUT_MAX", "timeout_max_ms"),
+    ("TIMEOUT_DEFAULT", "timeout_default_ms"),
+    ("THREAD_COUNT", "thread_count"),
+)
+
+
+def _parse_config_all(raw: Any) -> Dict[str, Any]:
+    """``GRAPH.CONFIG GET *`` as ``{NAME: value}``, whatever the client hands
+    back: a list of ``[name, value]`` pairs (the server's shape), a flat
+    ``[name, value, name, value]`` list, a ``{name: value}`` map, or a
+    ``{node: <any of those>}`` map from a cluster call; bytes anywhere."""
+    def _text(v: Any) -> str:
+        if isinstance(v, (bytes, bytearray)):
+            return v.decode("utf-8", "replace")
+        return str(v)
+
+    out: Dict[str, Any] = {}
+    if isinstance(raw, dict):
+        inner = [v for v in raw.values() if isinstance(v, (list, tuple, dict))]
+        if inner and len(inner) == len(raw) and not any(
+            _text(k).upper() == name for k in raw for name, _ in _LIMIT_FIELDS
+        ):
+            return _parse_config_all(inner[0])
+        for k, v in raw.items():
+            out[_text(k).upper()] = v
+        return out
+    if isinstance(raw, (list, tuple)):
+        if raw and all(isinstance(item, (list, tuple)) and len(item) == 2 for item in raw):
+            for name, value in raw:
+                out[_text(name).upper()] = value
+        elif len(raw) % 2 == 0:
+            for i in range(0, len(raw), 2):
+                out[_text(raw[i]).upper()] = raw[i + 1]
+    return out
+
+
+async def _graph_config(conn: Any, node: Any, *args: Any) -> Any:
+    """One ``GRAPH.CONFIG`` round trip, on ``node`` in cluster mode."""
+    if node is not None:
+        return await conn.execute_command("GRAPH.CONFIG", *args, target_nodes=node)
+    return await conn.execute_command("GRAPH.CONFIG", *args)
+
+
+async def _read_config_int(conn: Any, node: Any, name: str) -> Optional[int]:
+    """``GRAPH.CONFIG GET <name>`` on the owning node. Never raises."""
+    try:
+        raw = await _graph_config(conn, node, "GET", name)
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.info("%s unreadable: %s", name, exc)
+        return None
+    return _parse_config_reply(raw, name)
+
+
+async def _read_server_limits(conn: Any, node: Any) -> Dict[str, Optional[int]]:
+    """The node's own limits, keyed by :class:`ShardMemory` field: one
+    ``GRAPH.CONFIG GET *`` when the node answers it, else one GET per name
+    (older servers, and clients that cannot route the wildcard). Never
+    raises — the memory reading must not lose to a config read."""
+    found: Dict[str, Any] = {}
+    try:
+        found = _parse_config_all(await _graph_config(conn, node, "GET", "*"))
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.debug("GRAPH.CONFIG GET * unavailable, reading per name: %s", exc)
+    if any(name in found for name, _ in _LIMIT_FIELDS):
+        out: Dict[str, Optional[int]] = {}
+        for name, field in _LIMIT_FIELDS:
+            n = _as_int(found.get(name))
+            out[field] = n if n and n > 0 else None
+        return out
+    return {
+        field: await _read_config_int(conn, node, name) for name, field in _LIMIT_FIELDS
+    }
+
+
 async def _read_query_mem_capacity(conn: Any, node: Any) -> Optional[int]:
     """``GRAPH.CONFIG GET QUERY_MEM_CAPACITY`` on the owning node. Never
     raises — the memory reading must not lose to a config read."""
-    try:
-        if node is not None:
-            raw = await conn.execute_command(
-                "GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY", target_nodes=node,
-            )
-        else:
-            raw = await conn.execute_command("GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY")
-    except Exception as exc:                          # noqa: BLE001 — by contract
-        logger.info("QUERY_MEM_CAPACITY unreadable: %s", exc)
-        return None
-    return _parse_config_reply(raw, "QUERY_MEM_CAPACITY")
+    return await _read_config_int(conn, node, "QUERY_MEM_CAPACITY")
+
+
+async def set_graph_config(conn: Any, node: Any, pairs: Sequence[Tuple[str, int]]) -> None:
+    """``GRAPH.CONFIG SET`` each ``(name, value)`` in order on ``node`` (the
+    cluster node to target; None outside cluster mode). Raises like the
+    client does on the first failure — the caller names what was already
+    changed. A runtime SET applies now and lasts until the server restarts;
+    the launch arguments (``FALKORDB_ARGS``) make it permanent."""
+    for name, value in pairs:
+        await _graph_config(conn, node, "SET", name, int(value))
+
+
+GIB = 1024 ** 3
+MIB = 1024 ** 2
+
+
+def container_memory_needed(maxmemory: int, concurrent: int, query_mem_capacity: int) -> int:
+    """The deployment guide's sizing rule, in bytes: ``1.25 × maxmemory +
+    concurrent × 1.3 × QUERY_MEM_CAPACITY + overhead`` (256 MiB, 1 GiB from
+    32 GiB). ``concurrent`` is how many queries may hold the ceiling at once
+    — at most the node's ``THREAD_COUNT``, since the ceiling is charged per
+    thread. The 1.3 is the reply buffer, which the ceiling does not count."""
+    overhead = GIB if maxmemory >= 32 * GIB else 256 * MIB
+    return int(1.25 * maxmemory) + max(1, int(concurrent)) * int(1.3 * query_mem_capacity) + overhead
 
 
 def _endpoint_of(conn: Any) -> str:
@@ -308,7 +417,7 @@ async def read_shard_memory(
         return ShardMemory("unknown", None, None, None, now, "unavailable",
                            "no client")
     endpoint = "unknown"
-    query_cap: Optional[int] = None
+    limits: Dict[str, Optional[int]] = {}
     try:
         async with asyncio.timeout(timeout):
             endpoint, node = await _owner(conn, mode, graph_key)
@@ -316,10 +425,13 @@ async def read_shard_memory(
                 raw = await conn.execute_command("INFO", "memory", target_nodes=node)
             else:
                 raw = await conn.info("memory")
-            # The per-query ceiling the pressure ladder narrows against —
-            # read beside the memory so run_stats and the capacity view can
-            # name it. Its own guard: a failure here costs nothing above.
-            query_cap = await _read_query_mem_capacity(conn, node)
+            # The node's own limits — the per-query ceiling the pressure
+            # ladder narrows against, the time cap every timeout knob is
+            # clamped to, the thread count the container formula needs —
+            # read beside the memory so run_stats, the capacity view and the
+            # provider's clamp can name them. Their own guard: a failure
+            # here costs nothing above.
+            limits = await _read_server_limits(conn, node)
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("shard memory for %r via %s unavailable: %s",
                     graph_key, endpoint, exc)
@@ -331,10 +443,10 @@ async def read_shard_memory(
     policy = info.get("maxmemory_policy")
     if used is None:
         return ShardMemory(endpoint, None, maxmemory, policy, now, "unavailable",
-                           "no used_memory in INFO", query_cap)
+                           "no used_memory in INFO", **limits)
     return ShardMemory(endpoint, used, maxmemory or 0,
                        str(policy) if policy is not None else None, now, "measured",
-                       None, query_cap)
+                       None, **limits)
 
 
 async def read_query_mem_capacity(

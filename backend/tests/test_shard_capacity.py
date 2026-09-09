@@ -389,3 +389,119 @@ def test_a_failing_or_slow_client_never_raises():
     assert m.source == "unavailable" and m.note == "no client"
     # The coarse reason never echoes the client's words into the message.
     assert "connection" not in m.why_not
+
+
+# ── the node's own limits ───────────────────────────────────────────
+
+
+class _Wildcard(_Standalone):
+    """A node that answers ``GRAPH.CONFIG GET *`` — the one round trip the
+    reading prefers — takes SETs, and refuses per-name GETs to prove the
+    wildcard is what was used."""
+
+    def __init__(self, info, config_all):
+        super().__init__(info)
+        self._all = config_all
+
+    async def execute_command(self, *args, **kw):
+        self.commands.append(args)
+        if args == ("GRAPH.CONFIG", "GET", "*"):
+            return self._all
+        if args[:2] == ("GRAPH.CONFIG", "SET"):
+            return "OK"
+        raise AssertionError(f"per-name read not expected: {args}")
+
+
+class _ClusterSet(_Cluster):
+    def __init__(self):
+        super().__init__({"used_memory": "1"})
+        self.sets = []
+
+    async def execute_command(self, *args, target_nodes=None):
+        if args[:2] == ("GRAPH.CONFIG", "SET"):
+            self.sets.append((args, target_nodes))
+            return "OK"
+        return await super().execute_command(*args, target_nodes=target_nodes)
+
+
+_CONFIG_ALL = [
+    [b"TIMEOUT", 0], [b"TIMEOUT_MAX", 180000], [b"TIMEOUT_DEFAULT", 30000],
+    [b"THREAD_COUNT", 4], [b"QUERY_MEM_CAPACITY", 536870912], [b"CACHE_SIZE", 50],
+    [b"RESULTSET_SIZE", -1],
+]
+
+
+def test_the_reading_carries_the_nodes_limits_from_one_wildcard_read():
+    """TIMEOUT_MAX is what every timeout knob is clamped to and THREAD_COUNT
+    what the container formula multiplies the ceiling by: one GET * beside
+    the INFO, and the stats name them only when known."""
+    conn = _Wildcard({"used_memory": "100", "maxmemory": "1000"}, _CONFIG_ALL)
+    m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))
+    assert m.measurable
+    assert (m.query_mem_capacity, m.timeout_max_ms, m.timeout_default_ms, m.thread_count) == (
+        536870912, 180000, 30000, 4,
+    )
+    assert conn.commands == [("GRAPH.CONFIG", "GET", "*")]
+    stats = m.as_stats()
+    assert (stats["timeout_max_ms"], stats["thread_count"]) == (180000, 4)
+    assert "timeout_default_ms" not in stats
+
+
+def test_the_reading_falls_back_to_per_name_reads_when_the_wildcard_is_refused():
+    """A server or client that cannot answer ``*``: every limit read per
+    name lands, the rest read as unknown, and the memory reading stands."""
+    conn = _Standalone({"used_memory": "100", "maxmemory": "1000"},
+                       config=[b"QUERY_MEM_CAPACITY", 536870912])
+    m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))
+    assert m.measurable and m.query_mem_capacity == 536870912
+    assert m.timeout_max_ms is None and m.thread_count is None
+    assert conn.commands[0] == ("GRAPH.CONFIG", "GET", "*")
+    assert ("GRAPH.CONFIG", "GET", "TIMEOUT_MAX") in conn.commands
+    assert "timeout_max_ms" not in m.as_stats()
+
+
+def test_parse_config_all_accepts_every_client_shape():
+    parse = sc._parse_config_all
+    assert parse(_CONFIG_ALL)["TIMEOUT_MAX"] == 180000
+    assert parse(["TIMEOUT_MAX", "1000", b"THREAD_COUNT", 2]) == {"TIMEOUT_MAX": "1000", "THREAD_COUNT": 2}
+    assert parse({"timeout_max": 5}) == {"TIMEOUT_MAX": 5}
+    assert parse({"10.0.0.7:6379": _CONFIG_ALL})["THREAD_COUNT"] == 4
+    assert parse(None) == {} and parse([]) == {} and parse("junk") == {}
+
+
+def test_zero_reads_as_no_limit_for_every_name():
+    conn = _Wildcard({"used_memory": "1", "maxmemory": "2"}, [
+        [b"TIMEOUT_MAX", 0], [b"TIMEOUT_DEFAULT", 0], [b"QUERY_MEM_CAPACITY", 0], [b"THREAD_COUNT", "x"],
+    ])
+    m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))
+    assert (m.timeout_max_ms, m.timeout_default_ms, m.query_mem_capacity, m.thread_count) == (None, None, None, None)
+
+
+def test_set_graph_config_sets_each_pair_in_order_on_the_owning_node():
+    conn = _Wildcard({"used_memory": "1"}, _CONFIG_ALL)
+    _run(sc.set_graph_config(conn, None, [("TIMEOUT_MAX", 300000), ("QUERY_MEM_CAPACITY", 2 ** 30)]))
+    assert conn.commands == [
+        ("GRAPH.CONFIG", "SET", "TIMEOUT_MAX", 300000),
+        ("GRAPH.CONFIG", "SET", "QUERY_MEM_CAPACITY", 2 ** 30),
+    ]
+    cluster, node = _ClusterSet(), _Node()
+    _run(sc.set_graph_config(cluster, node, [("TIMEOUT_MAX", 1)]))
+    assert cluster.sets == [(("GRAPH.CONFIG", "SET", "TIMEOUT_MAX", 1), node)]
+
+    class _Refusing(_Wildcard):
+        async def execute_command(self, *args, **kw):
+            raise RuntimeError("ERR read-only replica")
+
+    with pytest.raises(RuntimeError, match="read-only"):
+        _run(sc.set_graph_config(_Refusing({}, []), None, [("TIMEOUT_MAX", 1)]))
+
+
+def test_container_memory_needed_is_the_deployment_guides_rule():
+    """The guide's worked example: 1.25 × 6 GiB + 2 × 1.3 × 512 MiB + 256 MiB ≈ 9.1 GiB."""
+    MB = 2 ** 20
+    needed = sc.container_memory_needed(6 * GB, 2, 512 * MB)
+    assert needed == int(1.25 * 6 * GB) + 2 * int(1.3 * 512 * MB) + 256 * MB
+    assert 9.0 < needed / GB < 9.2
+    # The overhead steps up to 1 GiB from 32 GiB; concurrency is never below 1.
+    assert sc.container_memory_needed(32 * GB, 0, 1) == int(1.25 * 32 * GB) + int(1.3 * 1) + GB
+    assert sc.container_memory_needed(2 * GB, 4, GB) == int(1.25 * 2 * GB) + 4 * int(1.3 * GB) + 256 * MB

@@ -289,6 +289,8 @@ async def _get_session(request: Request):
 # ── Schemas (import here to avoid circular) ─────────────────────────
 
 from .schemas import (  # noqa: E402
+    GraphStoreLimitsPatch,
+    GraphStoreLimitsResponse,
     JobLimitsPatch,
     AggregationTriggerRequest,
     AggregationSettingsRequest,
@@ -677,6 +679,30 @@ async def get_source_capacity(
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Data source {ds_id} not found")
     return doc
+
+
+# ── PATCH /aggregation/graph-store/{endpoint}/limits ─────────────────
+
+@app.patch(
+    "/aggregation/graph-store/{endpoint}/limits",
+    response_model=GraphStoreLimitsResponse,
+    summary="Set a graph store node's per-query limits (TIMEOUT_MAX, QUERY_MEM_CAPACITY) at runtime",
+)
+async def set_graph_store_limits(
+    endpoint: str,
+    patch: GraphStoreLimitsPatch,
+    svc=Depends(_get_svc),
+    session: AsyncSession = Depends(_get_session),
+):
+    from .graph_store_limits import (
+        GraphStoreEndpointNotFound, GraphStoreLimitsError, apply_graph_store_limits,
+    )
+    try:
+        return await apply_graph_store_limits(session, svc._registry, endpoint, patch)
+    except GraphStoreEndpointNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except GraphStoreLimitsError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 # ── GET /aggregation/workers — worker fleet + queue depth ───────────

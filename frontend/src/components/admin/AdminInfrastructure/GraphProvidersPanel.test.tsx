@@ -9,8 +9,8 @@
  * more: the causal claim tying a full node to a stalled publish may only be
  * made when a node is ACTUALLY at its cap.
  */
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 import { GraphProvidersPanel } from './GraphProvidersPanel'
 import type { GraphProvider, ProjectionSection, ProjectionWorstRow, ServiceEntry } from '@/services/systemStatusService'
 
@@ -272,5 +272,45 @@ describe('GraphProvidersPanel — graphs not publishing', () => {
   it('says nothing when the projection probe itself returned nothing', () => {
     render(<GraphProvidersPanel providers={PROVIDERS} services={falkor(HEALTHY_NODE)} projection={null} />)
     expect(screen.queryByText(/not publishing/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('GraphProvidersPanel — the node’s own limits', () => {
+  const capacity = {
+    limits: {
+      shardReservePct: { value: 20, source: 'default' as const }, bytesPerEdge: { value: 512, source: 'default' as const },
+      maxMaterializedEdges: { value: null, source: 'default' as const }, rollupStorage: { value: 'true', source: 'default' as const },
+      estimateMarginPct: 25, maxCubeEdges: 8_000_000, staticCap: 25_000_000, budgetRecheckEdges: 1_000_000,
+    },
+    shards: [{
+      endpoint: 'falkordb:6379', used: 5_368_709_120, maxmemory: 12_884_901_888, policy: 'noeviction', measurable: true,
+      usedPct: 41.7, reservePct: 20, reserveBytes: 2_576_980_377, availableBytes: 4_939_212_391,
+      allowedGrowthEdges: 9_646_899, governedBy: 'shard', staticCap: 25_000_000, sources: [],
+      queryMemCapacity: 536_870_912, timeoutMaxMs: 180_000, threadCount: 4,
+    }],
+    unresolved: [], sourcesTotal: 1, truncated: false, measuredAt: '2026-09-09T10:00:00Z', cacheAgeMs: 0,
+  }
+  const probed = falkor(standalone({ usedMemory: 5_368_709_120, maxmemory: 12_884_901_888, memoryUsedPct: 41.7 }))
+
+  it('names the per-query limits the capacity sweep read on the node', () => {
+    render(<GraphProvidersPanel providers={PROVIDERS} services={probed} capacity={capacity} />)
+    expect(screen.getByText(/Limits: per-query memory 512 MB · query time cap 180 s · 4 threads/)).toBeInTheDocument()
+    // Without a handler there is nothing to click.
+    expect(screen.queryByRole('button', { name: /adjust graph store limits/i })).not.toBeInTheDocument()
+  })
+
+  it('offers Adjust on a node the sweep placed, and only there', () => {
+    const onAdjust = vi.fn()
+    render(<GraphProvidersPanel providers={PROVIDERS} services={falkor({
+      mode: 'cluster', shardsUp: 2, shardsTotal: 2,
+      shards: [
+        { endpoint: 'falkordb:6379', status: 'healthy', usedMemory: 5_368_709_120, maxmemory: 12_884_901_888, memoryUsedPct: 41.7, memoryLevel: null },
+        { endpoint: '10.0.0.9:6379', status: 'healthy', usedMemory: 1_073_741_824, maxmemory: 12_884_901_888, memoryUsedPct: 8.3, memoryLevel: null },
+      ],
+    })} capacity={capacity} onAdjustLimits={onAdjust} />)
+    const buttons = screen.getAllByRole('button', { name: /adjust graph store limits/i })
+    expect(buttons).toHaveLength(1)            // the probe-only node has no client to reach it through
+    fireEvent.click(buttons[0])
+    expect(onAdjust).toHaveBeenCalledWith('falkordb:6379')
   })
 })

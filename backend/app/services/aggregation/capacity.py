@@ -73,6 +73,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def container_memory_bytes_env() -> Optional[int]:
+    """``FALKORDB_CONTAINER_MEMORY_BYTES``: the graph store container's
+    memory limit, which the app cannot read for itself. Optional — it only
+    prefills the limits dialog's container field. None when unset or not a
+    positive integer."""
+    raw = (os.getenv("FALKORDB_CONTAINER_MEMORY_BYTES") or "").strip()
+    try:
+        n = int(raw) if raw else 0
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
 # ── Pure helpers ────────────────────────────────────────────────────────
 
 
@@ -127,6 +140,7 @@ def effective_limits(stored_tuning: Optional[Dict[str, Any]]) -> CapacityLimits:
         max_cube_edges=_max_cube_edges(),
         static_cap=ceiling if ceiling else _max_materialized_edges(),
         budget_recheck_edges=_budget_recheck_edges(),
+        container_memory_bytes=container_memory_bytes_env(),
     )
 
 
@@ -190,6 +204,9 @@ def shard_row(reading: ShardMemory, limits: CapacityLimits) -> ShardCapacity:
         governed_by=budget.governed_by,
         static_cap=budget.static_cap,
         query_mem_capacity=getattr(reading, "query_mem_capacity", None),
+        timeout_max_ms=getattr(reading, "timeout_max_ms", None),
+        timeout_default_ms=getattr(reading, "timeout_default_ms", None),
+        thread_count=getattr(reading, "thread_count", None),
     )
 
 
@@ -383,6 +400,10 @@ class _Sweep:
         self.readings: Dict[str, ShardMemory] = {}
         self.placed: Dict[str, Tuple[str, str]] = {}     # ds_id → (endpoint, graph_key)
         self.unresolved: Dict[str, str] = {}             # ds_id → why_not
+        # endpoint → the providers (with the graph key that placed each)
+        # whose graphs live there: what a limits change must be told, and
+        # the client it goes through.
+        self.providers_by_endpoint: Dict[str, List[Tuple[Any, str]]] = {}
 
     async def _provider_for(self, ds: Any) -> Any:
         key = (str(getattr(ds, "provider_id", "") or ""), str(getattr(ds, "graph_name", "") or ""))
@@ -433,6 +454,23 @@ class _Sweep:
                 db, mode=mode, graph_key=key, timeout=timeout,
             )
         self.placed[ds.id] = (endpoint, key)
+        holders = self.providers_by_endpoint.setdefault(endpoint, [])
+        if any(held is provider for held, _ in holders):
+            return
+        holders.append((provider, key))
+        # The sweep is the one place every provider's node gets read, so it
+        # tells each provider (once per node) what that node allows: the
+        # per-query clamp then follows the server rather than the env mirror.
+        reading = self.readings[endpoint]
+        note = getattr(provider, "note_server_limits", None)
+        if note is not None:
+            note(
+                endpoint,
+                timeout_max_ms=getattr(reading, "timeout_max_ms", None),
+                query_mem_capacity=getattr(reading, "query_mem_capacity", None),
+                thread_count=getattr(reading, "thread_count", None),
+                timeout_default_ms=getattr(reading, "timeout_default_ms", None),
+            )
 
 
 async def _assemble(
@@ -497,12 +535,19 @@ async def _assemble(
         "limits": limits, "shards": shards, "unresolved": unresolved,
         "sources_total": total, "truncated": truncated,
         "rows_by_id": rows_by_id, "readings": sweep.readings, "placed": sweep.placed,
-        "states": states, "stats": stats,
+        "states": states, "stats": stats, "providers_by_endpoint": sweep.providers_by_endpoint,
     }
 
 
 _cache: Optional[Tuple[float, AggregationCapacityResponse]] = None
 _lock = asyncio.Lock()
+
+
+def invalidate_fleet_cache() -> None:
+    """Drop the cached fleet snapshot: the next view sweeps again. Called
+    after a limits change so no viewer sees the old figures for a TTL."""
+    global _cache
+    _cache = None
 
 
 def _with_age(snapshot: AggregationCapacityResponse, cached_at: float) -> AggregationCapacityResponse:

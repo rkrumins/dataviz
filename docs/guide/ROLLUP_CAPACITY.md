@@ -73,7 +73,8 @@ the source's Rollup storage override → the fleet Defaults → the environment.
 | **Edge ceiling** | An *optional* explicit cap on the total edges a graph may store, layered over the measured budget. Leave it empty — the shard governs. Set it only to hold a graph below what its shard could take. | Defaults dialog, or per job |
 | **Rollup storage** | **Auto** stores full detail while it fits and the depth-diagonal otherwise, deriving finer granularities on demand: slower drills on the largest graphs, but it never fails. **Full detail** pre-creates every combination and is refused, before anything is written, when it cannot fit. | Automation modal (fleet), a source's drawer (this source), Re-trigger (this run) |
 | **Scan floor** | The narrowest scan slice a rebuild descends to under the graph store's per-query pressure before it concludes that one row is too large. Default 1 row: the rebuild narrows all the way. | Defaults dialog, or per job |
-| **Scan timeout / Write timeout** | How long one read scan, or one write or delete batch, may run before the store aborts it. Capped by the store's own `TIMEOUT_MAX`. | Defaults dialog, or per job; raisable on a running job |
+| **Scan timeout / Write timeout** | How long one read scan, or one write or delete batch, may run before the store aborts it. Capped by the store's own `TIMEOUT_MAX`, read from the node — the editors say so, and an administrator can raise the cap from Infrastructure. | Defaults dialog, or per job; raisable on a running job |
+| **Graph store limits** | The store's own per-query time cap (`TIMEOUT_MAX`) and memory ceiling (`QUERY_MEM_CAPACITY`), set on the node at runtime and guarded by the container sizing rule. | Infrastructure → Memory headroom → *Adjust graph store limits* (system administrators) |
 | **Stall window** | How long a job may make no forward progress before the watchdog kills it. The per-job *Stall timeout* wins over the fleet default; narrowed scans and backoff retries count as progress. | Defaults dialog (fleet), per job as Stall timeout; raisable on a running job |
 | **Wall clock** | The longest a job may run in total, never lower than its stall window. | Defaults dialog, or per job; raisable on a running job |
 
@@ -141,12 +142,14 @@ memory — the store is healthy — and a rebuild does not fail on either. It
    backoff, heartbeating so the stall window sees the wait as progress.
 
 Only two outcomes stop it. A **single row** larger than the per-query memory
-ceiling is terminal: the message names the scan, the row's ID range and the
-ceiling, and the fix is the ceiling — raise `QUERY_MEM_CAPACITY` **together
-with** the container memory limit (see the sizing formula in the deployment
-guide). A narrowest scan that keeps timing out through every retry means the
-store is not answering: the job fails as an outage, keeps its checkpoint, and
-**Resume from cursor** continues it once the store answers.
+ceiling is terminal for that rebuild: the message names the scan, the row's ID
+range and the ceiling, and the fix is the ceiling — raise it from
+Infrastructure (see *Adjusting the graph store's own limits* below; the
+source's guidance and the re-trigger dialog link straight to it), which checks
+the change against the container memory limit before it sets anything. A
+narrowest scan that keeps timing out through every retry means the store is
+not answering: the job fails as an outage, keeps its checkpoint, and **Resume
+from cursor** continues it once the store answers.
 
 **Where to see it.** A running job shows *Going slower to fit the graph
 store* in Job History with the current width, concurrency and strategy; the
@@ -169,10 +172,57 @@ re-trigger dialog pre-selects it and says why.
 **Time limits are yours to raise.** Scan and write timeouts, the stall window
 and the wall clock are knobs in the Defaults dialog and per job. The two
 per-query timeouts are capped by the store's `TIMEOUT_MAX` (180 s as
-shipped); raising past it needs `TIMEOUT_MAX` in `FALKORDB_ARGS` and
-`FALKORDB_SERVER_TIMEOUT_MAX_MS` changed together. A **running** job's limits
-can be raised without cancelling it — *Extend time limit* in Job History, one
-job or every running job at once.
+shipped), read from the node — the editors show the cap in force — and an
+administrator raises the cap itself from Infrastructure (below). A
+**running** job's limits can be raised without cancelling it — *Extend time
+limit* in Job History, one job or every running job at once.
+
+---
+
+## Adjusting the graph store's own limits
+
+Two limits belong to the graph store itself, not to a rebuild: the
+**per-query time cap** (`TIMEOUT_MAX` — every scan and write timeout is
+clamped to it) and the **per-query memory ceiling** (`QUERY_MEM_CAPACITY` —
+the one thing a rebuild cannot narrow its way past when a single row exceeds
+it). Both accept a runtime change, so a system administrator can adjust them
+without a redeploy: **Infrastructure → Memory headroom**, where every node
+the capacity sweep placed shows its limits (*per-query memory 512 MB · query
+time cap 180 s · 4 threads*) and an **Adjust graph store limits** control. The
+same dialog is one click from a failed source's guidance (*Raise the
+per-query limit on …*) and from the Gentle pre-selection in the re-trigger
+dialog.
+
+What a change does, in order — and every step that can refuse, refuses before
+anything is set:
+
+1. **The node is read fresh:** memory, ceiling, cap, default and thread count.
+2. **The change is checked.** A time cap is never set below the node's
+   `TIMEOUT_DEFAULT`. **Raising the memory ceiling needs the container's
+   memory limit** — the application cannot read it — and is refused, with the
+   shortfall, when the deployment guide's sizing rule says the container
+   cannot back it: `1.25 × maxmemory + concurrent × 1.3 × QUERY_MEM_CAPACITY
+   + overhead` (256 MiB; 1 GiB from 32 GiB), where *concurrent* is how many
+   queries may hold the ceiling at once — at most the node's `THREAD_COUNT`,
+   since the ceiling is charged per thread; the guide plans for 2 when the
+   rebuild is the only heavy reader. The dialog restates that figure as you
+   type. `0` (unlimited) is refused; lowering needs nothing.
+3. **The limits are set** on the node — or on every primary, in cluster mode
+   when asked — read back and verified, and the change is logged with your
+   name.
+4. **Every provider on that node learns the new cap at once,** so a rebuild's
+   per-query timeouts use it on their next query; the capacity views
+   re-measure.
+
+**It lasts until the store restarts.** The dialog hands you the
+`FALKORDB_ARGS` fragment — for example `TIMEOUT_MAX 300000 QUERY_MEM_CAPACITY
+1073741824` — to add to the deployment so the change survives a restart. Keep
+`FALKORDB_SERVER_TIMEOUT_MAX_MS` in step for the time cap: it is only the
+fallback the application clamps by until it has read a node, but a wrong
+fallback would clamp the first queries after a restart too low. Set
+`FALKORDB_CONTAINER_MEMORY_BYTES` in the deployment to prefill the container
+field for every operator; otherwise the dialog remembers what you entered per
+node.
 
 ---
 
@@ -188,8 +238,14 @@ job or every running job at once.
 - **Full detail** pre-flight is *unknown* until a source has completed one
   rebuild — the estimate it needs is recorded on success.
 - A single row larger than the graph store's per-query memory ceiling is
-  still terminal; the message now says exactly which row, and the ceiling is
-  the only fix.
+  still terminal for that rebuild; the message says exactly which row, and
+  the ceiling — adjustable from Infrastructure — is the fix.
+- A runtime change to the store's limits lasts until the store restarts; the
+  dialog hands over the `FALKORDB_ARGS` fragment that keeps it. The
+  container-memory guard trusts the figure entered (or
+  `FALKORDB_CONTAINER_MEMORY_BYTES`), since the application cannot read the
+  container limit. `THREAD_COUNT`, `OMP_THREAD_COUNT` and `CACHE_SIZE` remain
+  load-time settings.
 - The canvas's own reads have no pressure ladder: a per-query refusal on a
   drill still surfaces as a read error rather than a narrower read.
 

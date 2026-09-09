@@ -2250,6 +2250,28 @@ def test_run_stats_always_carry_the_query_ceiling_when_the_shard_says(monkeypatc
     assert "query_mem_capacity" not in result["run_stats"]["write_budget"]["shard"]
 
 
+def test_the_budget_read_teaches_the_provider_its_nodes_cap(monkeypatch):
+    """A cap raised at runtime reaches the clamp on the next rebuild: the
+    budget's reading carries TIMEOUT_MAX and the thread count, and from
+    then on the provider clamps to the node instead of the env mirror."""
+    from backend.app.config import resilience
+    monkeypatch.setattr(resilience, "FALKORDB_SERVER_TIMEOUT_MAX_MS", 180_000)
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    assert p._db_timeout_ms(600) == 180_000
+
+    async def shard_with_limits(db, *, mode, graph_key, timeout):
+        return _ShardMemory("10.0.0.1:6379", 10 * 2**30, 40 * 2**30, "noeviction", 0.0, "measured",
+                            None, 512 * 2**20, 300_000, 30_000, 4)
+
+    monkeypatch.setattr(mat, "read_shard_memory", shard_with_limits)
+    _run(_materialize(p))
+    assert p._server_timeout_cap_ms() == 300_000 and p._db_timeout_ms(600) == 300_000
+    assert p.server_query_mem_capacity() == 512 * 2**20
+    assert p.server_limits_for("10.0.0.1:6379")["thread_count"] == 4
+
+
 # ── the per-run record: what it ran with, where each value came from ───
 
 

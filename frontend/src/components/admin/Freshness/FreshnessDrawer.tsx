@@ -40,6 +40,7 @@ import {
 import { SettingRow, StageRow } from './StageRow'
 import { SnoozeRow } from './SnoozeRow'
 import { SourceCapacityBlock } from './SourceCapacityBlock'
+import { RaisePerQueryLimitLink } from '../shared/RaisePerQueryLimitLink'
 import { useActiveJobs } from './useActiveJobs'
 import { AggStatusPill, FreshnessBadges, MasteryTag } from './FreshnessRow'
 import { overrideWarning, rowHold, timeUntil, type RowHold } from './holds'
@@ -959,6 +960,9 @@ interface CategoryGuidance {
     primary: 'clear' | 'retry'
     /** Inline caution shown under Retry when a retry is likely to fail again. */
     retryWarning?: string
+    /** The way to the node's own per-query limit, for system administrators
+     *  (rendered once the source's shard is known). */
+    raiseLimitLink?: true
 }
 
 const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
@@ -987,9 +991,10 @@ const GUIDANCE: Record<FailureCategory, CategoryGuidance> = {
         // narrowest slice it will go to, and the fix is to make the rebuild
         // read less rather than to free memory.
         why: 'One rebuild query asked the graph store for more than a single query is allowed to hold — after the rebuild had already narrowed its scans to a single row.',
-        how: "A single row of that scan is larger than the store's per-query limit (QUERY_MEM_CAPACITY): an administrator raises it together with the container memory limit. The Gentle profile and Auto rollup storage lighten every query before this point, but cannot shrink one row.",
+        how: "A single row of that scan is larger than the store's per-query limit (QUERY_MEM_CAPACITY): an administrator raises it under Infrastructure → Memory headroom → Adjust graph store limits, which checks the change against the container memory limit first. The Gentle profile and Auto rollup storage lighten every query before this point, but cannot shrink one row.",
         showClear: true, showRetry: true, primary: 'clear',
         retryWarning: 'will fail the same way until the store limit changes.',
+        raiseLimitLink: true,
     },
     provider_unavailable: {
         why: 'The graph store was unreachable during the rebuild.',
@@ -1080,6 +1085,7 @@ function ResolutionGuidance({ doc, canManage, busy, onClear, onRetry }: {
                 <div className="text-[10px] uppercase tracking-wide text-ink-muted">How to resolve</div>
                 <p className="text-xs text-ink-secondary leading-relaxed">{g.how}</p>
                 {g.note && <p className="text-xs text-ink-secondary leading-relaxed">{g.note}</p>}
+                {g.raiseLimitLink && <RaisePerQueryLimitLink dataSourceId={doc.dataSourceId} />}
             </div>
 
             {/* CTAs */}

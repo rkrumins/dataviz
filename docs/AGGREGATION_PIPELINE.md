@@ -315,7 +315,11 @@ the **first checkpoint**, before any graph work. Resume rules:
   it WITH the container limit, never alone), and — critically —
   `OMP_THREAD_COUNT 1`
   (unbounded per-query OpenMP threads on a big node under a small cgroup
-  quota were the main cause of the 150% CPU spikes). See
+  quota were the main cause of the 150% CPU spikes). `TIMEOUT_MAX` and
+  `QUERY_MEM_CAPACITY` can also be changed at runtime from Infrastructure →
+  Memory headroom (`services/aggregation/graph_store_limits.py`: read,
+  validate against the container formula, `GRAPH.CONFIG SET`, verify, tell
+  the providers) — until the next restart. See
   `docs/FALKORDB_DEPLOYMENT.md` for sizing rules.
 * **Distributed admission control**
   (`backend/app/services/aggregation/admission.py`, on the job-bus
@@ -381,7 +385,7 @@ pipeline).
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing |
-| `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query budget (s). Per-job / Defaults as `scanTimeoutS` (5-600); the server caps any query at its `TIMEOUT_MAX` (`FALKORDB_SERVER_TIMEOUT_MAX_MS`). Raisable on a running job |
+| `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query budget (s). Per-job / Defaults as `scanTimeoutS` (5-600); the server caps any query at its `TIMEOUT_MAX`, read from the node (`FALKORDB_SERVER_TIMEOUT_MAX_MS` is the fallback until then; raisable at runtime from Infrastructure → Memory headroom). Raisable on a running job |
 | `FALKORDB_BULK_CREATE_TIMEOUT_S` | 60 | Per-query budget for the pipeline's write and delete batches (s). Per-job / Defaults as `writeTimeoutS` (5-600), capped by the server like the scan budget. Raisable on a running job |
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 1 | Narrowest range width the pressure ladder descends to. Per-job / Defaults as `scanShrinkFloor`. At 1 the only terminal outcome is a single row larger than `QUERY_MEM_CAPACITY`; a floor-width timeout is retried with backoff and then reported as an outage (resumable) |
 | `AGGREGATION_SCAN_TIMEOUT_RETRIES` | 6 | Backoff retries (2s, 4s … 60s + jitter, heartbeating between) a floor-width scan gets before the run raises `MaterializationScanTimedOut` (0-20) |

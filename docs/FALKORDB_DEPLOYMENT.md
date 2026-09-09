@@ -446,6 +446,17 @@ usage denies every write under `noeviction`.
 > message names it — and raising the ceiling, with the container limit, is
 > then the only lever. The ceiling is read into `run_stats.query_mem_capacity`
 > and shown on the capacity card as *per-query limit*.
+>
+> **Both `QUERY_MEM_CAPACITY` and `TIMEOUT_MAX` can be changed at runtime**
+> from **Infrastructure → Memory headroom → Adjust graph store limits**
+> (system administrators). The dialog applies the formula above before it sets
+> anything — enter the container limit, or set
+> `FALKORDB_CONTAINER_MEMORY_BYTES` to prefill it — sets the value with
+> `GRAPH.CONFIG SET`, reads it back, and hands over the `FALKORDB_ARGS`
+> fragment that makes it permanent: a runtime change lasts until the server
+> restarts. The application clamps its per-query timeouts to the `TIMEOUT_MAX`
+> it reads from each node; `FALKORDB_SERVER_TIMEOUT_MAX_MS` is only the
+> fallback until a node has been read, so keep it equal to the launch value.
 
 ### The rebuild reads `maxmemory` before it writes
 
