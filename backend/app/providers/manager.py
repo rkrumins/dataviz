@@ -47,7 +47,12 @@ from backend.common.interfaces.preflight import (
     is_reachable_config_reason,
 )
 
-from .state import ProbeOutcome, ProviderState
+from .state import (
+    _READ_GATE_PERSISTENCE,
+    ProbeOutcome,
+    ProviderState,
+    is_ambiguous_probe_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +92,15 @@ _BREAKER_RESET_TIMEOUT = int(os.getenv("PROVIDER_BREAKER_RESET_TIMEOUT_SECS", "3
 # default 8 absorbs typical bursts while bounding fan-out.
 _MAX_PROVIDER_CONCURRENCY = int(os.getenv("PROVIDER_MAX_CONCURRENCY", "8"))
 # Acquire-budget — how long a request waits for a semaphore slot before
-# fast-failing. Keep tight: if all 8 slots are busy, the provider is in
-# trouble and we'd rather shed load than queue.
-_SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "0.25"))
+# fast-failing with ProviderBusy (429). 2s, not the old 0.25s: the cap on
+# in-flight work is the semaphore SIZE, and that is unchanged — this only
+# decides whether a request that finds every slot busy waits briefly or is
+# bounced immediately. A single canvas open fans out ~10 short queries;
+# at 0.25s the tail of that burst was shed even though each slot frees in
+# ~100ms, so the client paid a 429 + backoff round trip (and, if every
+# batch was shed, rendered "graph service unavailable"). A provider that
+# is genuinely wedged still sheds — its slots never free within 2s.
+_SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "2.0"))
 
 # Inline reachability preflight (WS0.1). Bounds the FIRST request to a
 # just-went-down provider: get_provider runs a fast, deadline-bounded
@@ -99,10 +110,23 @@ _SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "0.
 # while pinning a WEB DB connection the whole time (which drains the pool and
 # stalls unrelated endpoints). The probe checks REACHABILITY, not query
 # speed — a healthy provider mid-trace answers PING instantly and passes, so
-# legitimate long-running reads are unaffected. Warmup-confirmed-healthy
-# providers skip the probe entirely (zero added latency on the hot path).
-_REACHABLE_PROBE_DEADLINE_S = float(os.getenv("PROVIDER_PREFLIGHT_DEADLINE_S", "1.5"))
+# legitimate long-running reads are unaffected. A provider that real traffic
+# reached within PROVIDER_PREFLIGHT_SKIP_AFTER_OK_S skips the probe entirely
+# (zero added latency on the hot path, and no PING that could false-negative
+# on a busy-but-healthy instance).
+_REACHABLE_PROBE_DEADLINE_S = float(os.getenv("PROVIDER_PREFLIGHT_DEADLINE_S", "2.5"))
 _REACHABLE_PROBE_CACHE_S = float(os.getenv("PROVIDER_PREFLIGHT_CACHE_S", "3"))
+# A guarded call succeeded this recently ⇒ the provider is reachable by
+# construction; don't PING it again. Bounds how long a just-died provider
+# can go un-probed: its next query fails (a network-class error the breaker
+# counts), and the request after that probes because the last success is
+# now older than this window.
+_REACHABLE_SKIP_AFTER_OK_S = float(os.getenv("PROVIDER_PREFLIGHT_SKIP_AFTER_OK_S", "10"))
+# Consecutive timeout-class preflight misses before the request path treats
+# the provider as unreachable. One slow PING under load is not an outage —
+# the request proceeds to its own (deadline-bounded) query instead. A dead
+# host misses every probe, so it is still gated after this many.
+_REACHABLE_AMBIGUOUS_PERSISTENCE = int(os.getenv("PROVIDER_PREFLIGHT_AMBIGUOUS_MISSES", "2"))
 
 # Breaker states that positively prove an outage (recovery-eviction check).
 _NON_CLOSED_BREAKER_STATES = (BreakerState.OPEN.value, BreakerState.HALF_OPEN.value)
@@ -221,8 +245,11 @@ class ProviderManager:
         # Short-lived inline reachability verdicts (WS0.1). See the
         # _REACHABLE_PROBE_* constants + _ensure_reachable below.
         # (provider_id, graph_name) -> (verdict, monotonic_ts) where verdict is
-        # "ok" | "loading" | "down".
+        # "ok" | "loading" | "auth" | "config" | "slow" | "down".
         self._reachable_probe: Dict[Tuple[str, str], Tuple[str, float]] = {}
+        # Consecutive timeout-class ("slow") preflight misses per cache_key.
+        # Reset by any "ok" verdict. See _REACHABLE_AMBIGUOUS_PERSISTENCE.
+        self._reachable_misses: Dict[Tuple[str, str], int] = {}
         # Single-flight the inline preflight so a herd of concurrent callers on
         # a just-downed provider triggers ONE probe, not N.
         self._reachable_inflight: Dict[Tuple[str, str], "asyncio.Future[str]"] = {}
@@ -412,8 +439,18 @@ class ProviderManager:
         - Single-flights the probe per (provider, graph): a herd of concurrent
           callers triggers ONE probe, not N.
         - Providers without a preflight() are never gated.
+        - Skipped entirely while real traffic has recently succeeded through
+          the provider's breaker: a guarded call that just returned is better
+          evidence of reachability than a PING, and a PING on a busy instance
+          can miss its deadline while queries are being served.
+        - A timeout-class miss ("slow") must PERSIST across consecutive probes
+          before it gates. One slow PING under load lets the request through
+          to its own deadline-bounded query; only refused/DNS/os_error gate
+          on a single observation.
         """
         now = time.monotonic()
+        if self._recently_served(provider, now):
+            return
         cached = self._reachable_probe.get(cache_key)
         if cached is not None and (now - cached[1]) < _REACHABLE_PROBE_CACHE_S:
             self._raise_for_verdict(cache_key, cached[0])
@@ -421,10 +458,35 @@ class ProviderManager:
         verdict = await self._probe_reachable_singleflight(cache_key, provider)
         self._raise_for_verdict(cache_key, verdict)
 
+    @staticmethod
+    def _recently_served(provider: GraphDataProvider, now: float) -> bool:
+        """True when the provider's operation breaker recorded a success within
+        ``_REACHABLE_SKIP_AFTER_OK_S`` — the hot-path proof of reachability."""
+        breaker = getattr(provider, "breaker", None)
+        last_ok = getattr(breaker, "last_success_at", None)
+        if not isinstance(last_ok, (int, float)):
+            return False
+        return (now - last_ok) < _REACHABLE_SKIP_AFTER_OK_S
+
     def _raise_for_verdict(self, cache_key: Tuple[str, str], verdict: str) -> None:
         if verdict == "ok":
             return
         cp = f"{cache_key[0]}:{cache_key[1]}"
+        if verdict == "slow":
+            # Timeout-class miss: gate only once it has persisted. Below the
+            # threshold the request proceeds — its own query deadline bounds
+            # the cost if the provider really is wedged.
+            misses = self._reachable_misses.get(cache_key, 0)
+            if misses < _REACHABLE_AMBIGUOUS_PERSISTENCE:
+                return
+            raise ProviderUnavailable(
+                provider_name=cp,
+                reason=(
+                    f"provider unreachable (preflight timed out {misses} "
+                    f"consecutive times)"
+                ),
+                retry_after_seconds=_BREAKER_RESET_TIMEOUT,
+            )
         if verdict == "loading":
             # Warming, not down — surface the retryable ProviderLoading signal
             # (the breaker ignores it) so the FE shows "graph is starting up".
@@ -481,7 +543,8 @@ class ProviderManager:
         self, cache_key: Tuple[str, str], provider: GraphDataProvider,
     ) -> str:
         """Run one bounded preflight against the UNWRAPPED provider and cache
-        the verdict ('ok' | 'loading' | 'down'). Never raises."""
+        the verdict ('ok' | 'loading' | 'auth' | 'config' | 'slow' | 'down').
+        Never raises."""
         # Unwrap the CircuitBreakerProxy so a non-raising ok=False result is not
         # recorded as a breaker success (which would reset an open breaker).
         target = getattr(provider, "target", provider)
@@ -513,8 +576,19 @@ class ProviderManager:
                     # cluster_mode_mismatch). Same non-outage semantics, distinct
                     # message at the raise site.
                     verdict = "config"
+                elif is_ambiguous_probe_reason(pf_reason):
+                    # connect_timeout / empty_reply: reachable-but-slow is as
+                    # likely as down. Gated only once it persists.
+                    verdict = "slow"
+            except asyncio.TimeoutError:
+                # The wall-clock backstop fired — same ambiguity as above.
+                verdict = "slow"
             except Exception:
                 verdict = "down"
+        if verdict == "slow":
+            self._reachable_misses[cache_key] = self._reachable_misses.get(cache_key, 0) + 1
+        elif verdict == "ok":
+            self._reachable_misses.pop(cache_key, None)
         self._reachable_probe[cache_key] = (verdict, time.monotonic())
         return verdict
 
@@ -781,6 +855,17 @@ class ProviderManager:
         )
         pre_trip_targets: List[Tuple[Tuple[str, str], AsyncCircuitBreaker]] = []
 
+        # A timeout-class reason (connect_timeout, wall-clock exceeded, empty
+        # reply) is reachable-but-slow as often as it is down — a busy instance
+        # answers a fresh AUTH+PING late — so it must persist for the read
+        # gate's threshold before it pre-trips. Definitive reasons (refused,
+        # DNS, os_error) keep the shorter threshold.
+        pre_trip_after = (
+            max(self._PRE_TRIP_AFTER_N, _READ_GATE_PERSISTENCE)
+            if is_ambiguous_probe_reason(reason)
+            else self._PRE_TRIP_AFTER_N
+        )
+
         async with self._state_lock:
             for cache_key in cache_keys:
                 state = self._ensure_state(cache_key)
@@ -789,7 +874,7 @@ class ProviderManager:
                 if source == "warmup":
                     state.last_warmup_at = outcome.observed_at
 
-                if state.consecutive_failures >= self._PRE_TRIP_AFTER_N:
+                if state.consecutive_failures >= pre_trip_after:
                     ib = self._instantiation_breakers.get(cache_key)
                     if ib is None:
                         ib = self._get_instantiation_breaker(cache_key)
@@ -804,7 +889,7 @@ class ProviderManager:
                 logger.info(
                     "Pre-tripped instantiation breaker for %r after %d consecutive "
                     "%s-observed failures (reason=%s)",
-                    cache_key, self._PRE_TRIP_AFTER_N, source, reason,
+                    cache_key, pre_trip_after, source, reason,
                 )
             except Exception as exc:
                 logger.warning(
@@ -930,6 +1015,7 @@ class ProviderManager:
         # Also reset the instantiation breaker so re-instantiation is attempted
         self._instantiation_breakers.pop(cache_key, None)
         self._reachable_probe.pop(cache_key, None)
+        self._reachable_misses.pop(cache_key, None)
         if provider is None:
             return
         inflight = 0

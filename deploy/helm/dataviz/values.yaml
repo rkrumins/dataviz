@@ -14,7 +14,12 @@ ingress:
   className: nginx
   host: dataviz.example.com
   annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    # Must exceed the backend's slowest ASGI tier (versioning, 120s) AND
+    # match the pod nginx's proxy_read_timeout (180s), so the app's own
+    # structured JSON 504 always wins the race. At 120s the ingress tied
+    # the versioning tier and users saw an opaque edge "upstream timed
+    # out" 504 instead of the backend's retryable error.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "180"
     nginx.ingress.kubernetes.io/proxy-body-size: "32m"
 
 # ── Non-secret config (rendered into a ConfigMap) ─────────────────────

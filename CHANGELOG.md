@@ -122,6 +122,45 @@ does not swing the trend, short enough that "what changed" is still about now.
 
 ### Fixed
 
+**Views opened onto "Graph service is unavailable" while FalkorDB was serving fine.**
+A slow query was being read as a dead provider, at every layer. On the backend, a query
+that ran past its per-operation deadline counted toward the provider's circuit breaker —
+three of them opened it for 30s, every read then 503'd, `/health/providers` reported the
+provider unhealthy and responses carried `X-Provider-Health: unreachable`. A server
+error *reply* (a query over the per-query memory ceiling) counted the same way. The
+request-path health PING (1.5s) and the background warmup probe (1.5s) each misread a
+busy instance answering late as unreachable, and two such misses gated reads. On the
+frontend, every failure that was not the literal warming signal — a 504, a 429 from the
+backend shedding the view's own 20-request burst, a 502 during a deploy, a 401 from an
+access token that had just expired, a client-side timeout on a slow link — became the
+outage overlay, and any three 5xx or timeouts opened the client breaker so later reads
+never left the browser. Only a page reload rebuilt it, which is why refreshing sometimes
+"fixed" it.
+
+Now a deadline miss is a `ProviderTimeout` (HTTP 504, code `PROVIDER_TIMEOUT`, with
+`Retry-After`) that the breaker never counts; only connection-class failures open it.
+Error replies are not counted either (a demoted-master `ReadOnlyError` still is). The
+request-path probe is skipped for a provider real traffic reached in the last 10s, and a
+timeout-class miss — there or in warmup — must persist before it gates. `/nodes/query`,
+the canvas hot path, gets its own 20s budget instead of the generic 5s, a deadline miss
+inside one URN bucket surfaces instead of silently dropping those entities, and a
+request that finds every provider slot busy waits up to 2s for one before being shed.
+The canvas has a third state, *slow* — "taking a little longer than usual", calm, still
+retrying — and reaches *unavailable* only when the backend confirms the provider is
+unreachable. Idempotent graph reads retry in place on 429/502/503/504 and timeouts
+(honouring `Retry-After`), the client breaker counts only confirmed outages, the initial
+load runs its node batches four at a time, and the schema pill says "Schema unavailable"
+(those endpoints read Postgres, never the graph) and stays quiet for a session that is
+merely being renewed.
+
+**Opaque edge 504s and sporadic 502s.** The ingress and load-balancer timeouts (120s)
+tied the backend's slowest tier, so the proxy's "upstream timed out" won the race
+against the app's structured 504; both now sit at 180s like the pod nginx. The
+middleware's 504 carries `code: REQUEST_TIMEOUT` and `Retry-After`. The backend's
+keep-alive (2s) was shorter than the nginx upstream pool kept connections warm, so nginx
+reused sockets the worker had closed; the worker now keeps them 75s and nginx expires
+its pool at 30s.
+
 **The Growth tab crashed against any server that had not deployed yet** —
 `series.previous.buckets is not iterable`, an unguarded spread of a field the running backend
 did not send. Analytics documents are precomputed into Redis and outlive the code that wrote

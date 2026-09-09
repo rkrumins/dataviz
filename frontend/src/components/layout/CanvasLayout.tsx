@@ -6,10 +6,16 @@
  *     navigates to a canvas-bearing route, not on /dashboard or /admin.
  *   - Child routes always mount — they handle their own loading/error states.
  *
- * When the provider is unavailable, the layout renders in degraded mode:
+ * When the schema cannot be read, the layout renders in degraded mode:
  *   - Schema loads from management DB cache (fast, no provider dependency)
  *   - A floating status pill is shown top-center in the canvas
  *   - Graph data queries will fail per-component with inline error messages
+ *
+ * The pill says "Schema unavailable", not "Provider Offline": the schema
+ * endpoints read the management database and never touch the graph
+ * provider, so a failure here says nothing about FalkorDB. A session that
+ * needs renewing (401/403) shows no pill at all — the session-lost and
+ * access-denied flows own that message.
  *
  * AppLayout handles auth, sidebar, topbar, and the view list (lightweight).
  * This component handles the heavier ontology fetch.
@@ -18,7 +24,7 @@
 import { Outlet } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2, RefreshCw, CloudOff } from 'lucide-react'
-import { useGraphSchema } from '@/hooks/useGraphSchema'
+import { isSchemaAuthError, useGraphSchema } from '@/hooks/useGraphSchema'
 import { MOTION } from '@/lib/motion'
 
 export function CanvasLayout() {
@@ -31,7 +37,7 @@ export function CanvasLayout() {
 
       {/* Degraded-mode pill — top-center, floating above the canvas */}
       <AnimatePresence>
-        {isError && (
+        {isError && !isSchemaAuthError(error) && (
           <motion.div
             key="provider-degraded"
             role="status"
@@ -46,7 +52,7 @@ export function CanvasLayout() {
               <CloudOff className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-semibold text-amber-800 dark:text-amber-300 whitespace-nowrap">
-                  Provider Offline
+                  Schema unavailable
                 </span>
                 <span className="text-sm text-amber-600/80 dark:text-amber-400/70 hidden sm:inline">
                   — {error instanceof Error ? error.message : 'showing cached data'}

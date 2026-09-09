@@ -1,6 +1,16 @@
 import { unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
+import {
+    MAX_READ_RETRIES,
+    isClientTimeout,
+    isIdempotentGraphRead,
+    isNetworkError,
+    isProviderOutageSignal,
+    isRetryableGraphFailure,
+    retryDelayMs,
+    toApiStatusError,
+} from '@/services/graphRequestFailure'
 import { TIMEOUTS } from '@/config/timeouts'
 import { useProviderHealthStore } from '@/store/providerHealth'
 import { useCacheStalenessStore } from '@/store/cacheStaleness'
@@ -85,18 +95,11 @@ function normalizeTraceV2(raw: RawTraceV2Result): TraceV2Result {
 const API_BASE = '/api/v1'
 
 
-/** An HTTP failure from the API, carrying the status that produced it. */
-export interface ApiStatusError extends Error {
-    status: number
-}
-
-/** The HTTP status behind a rejection, or null when it did not come from
- *  one (an abort, a timeout, a parse failure). */
-export function httpStatusOf(err: unknown): number | null {
-    if (!(err instanceof Error)) return null
-    const status = (err as Partial<ApiStatusError>).status
-    return typeof status === 'number' ? status : null
-}
+// The error shape and its status accessor live with the shared failure
+// classification now (services/graphRequestFailure) so the request layer and
+// the canvas read one definition; re-exported to keep this import surface.
+export type { ApiStatusError } from '@/services/graphRequestFailure'
+export { httpStatusOf } from '@/services/graphRequestFailure'
 
 export interface RemoteGraphProviderOptions {
     /** Workspace ID. When set, routes through /v1/{ws_id}/graph/... */
@@ -265,114 +268,153 @@ export class RemoteGraphProvider implements GraphDataProvider {
     }
 
     private async _doFetch<T>(url: string, fetchOptions: RequestInit, method: string, cacheKey: string, timeoutMs?: number): Promise<T> {
-        // Per-endpoint-class circuit breaker: a trace 504 opens only the
+        // Per-endpoint-class circuit breaker: a trace failure opens only the
         // 'trace' breaker, never the browse (children/aggregated/canvas)
         // ones — the fix for "one dead endpoint blocked ALL graph reads".
+        //
+        // What the breaker COUNTS is deliberately narrow: only a confirmed
+        // outage (503 PROVIDER_UNAVAILABLE — the backend's own breaker or
+        // preflight said the graph store is unreachable — or a request that
+        // never reached the backend). A slow request (504, a client-side
+        // timeout), load shedding (429), a gateway hiccup (502) or a
+        // rejected query (500) says nothing about reachability; counting
+        // those opened the breaker after three of them and turned a busy
+        // afternoon into "Provider unavailable (circuit open)" on every
+        // read until a page reload rebuilt the breaker.
         const circuitBreaker = getCircuitBreaker(
             this.workspaceId, this.dataSourceId, classifyEndpoint(url),
         )
-        if (!circuitBreaker.canRequest()) {
-            if (!fetchOptions.signal) this._inflight.delete(cacheKey)
-            throw new Error('Provider unavailable (circuit open)')
-        }
+        // Idempotent reads (every GET, and the POSTs that only query) are
+        // retried in place on the transient failures the backend asks us
+        // to retry: 429/503 + Retry-After, 504 from a query that ran out of
+        // budget (the backend's stale-fallback or now-warm cache usually
+        // answers the retry), 502, a client timeout, a dropped connection.
+        // A write is never replayed.
+        const retryable = isIdempotentGraphRead(method, url)
 
         try {
-            // Use the global default timeout (5s). The graph endpoints
-            // are all cache-only post-insights-refactor — they read from
-            // Postgres and respond in <100ms; an empty/computing cache
-            // surfaces as `meta.status="computing"` in the body, never
-            // as a timeout. The legacy 12s window was sized for live
-            // provider calls that no longer happen here.
-            const response = await fetchWithTimeout(url, {
-                ...fetchOptions,
-                ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...fetchOptions?.headers,
-                },
-            })
+            for (let attempt = 0; ; attempt++) {
+                if (!circuitBreaker.canRequest()) {
+                    throw new Error('Provider unavailable (circuit open)')
+                }
 
-            if (!response.ok) {
-                const errorText = await response.text()
-                // The status rides along on the error. Callers that need
-                // to tell "you are not allowed this here" apart from "the
-                // backend is broken" — a share link hitting /search/discover
-                // is the live case — cannot get that out of a message.
-                const error: ApiStatusError = Object.assign(
-                    new Error(`API Error ${response.status}: ${errorText || response.statusText}`),
-                    { status: response.status },
-                )
-                // 5xx errors indicate provider/backend failure — feed circuit breaker
-                if (response.status >= 500) {
-                    // Honor Retry-After header from backend (sent on 503 ProviderUnavailable)
-                    const retryAfter = response.headers.get('Retry-After')
-                    const retryAfterMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : undefined
-                    circuitBreaker.recordFailure(
-                        retryAfterMs && !isNaN(retryAfterMs) ? retryAfterMs : undefined,
+                let response: Response
+                try {
+                    response = await fetchWithTimeout(url, {
+                        ...fetchOptions,
+                        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...fetchOptions?.headers,
+                        },
+                    })
+                } catch (err) {
+                    // A caller-initiated abort (e.g. search-as-you-type
+                    // superseding its own previous request) surfaces here as
+                    // the same generic "timed out" TypeError a real
+                    // client-side timeout would raise — fetchWithTimeout's
+                    // runOnce links both onto one internal AbortController
+                    // and can't tell them apart. It is not a backend health
+                    // signal, so it must not feed the breaker or be retried.
+                    if (fetchOptions.signal?.aborted || !(err instanceof TypeError)) {
+                        throw err
+                    }
+                    const timedOut = isClientTimeout(err)
+                    // A timeout already cost a full deadline — one more go
+                    // is enough; a dropped connection gets the full budget.
+                    const budget = timedOut ? 1 : MAX_READ_RETRIES
+                    if (retryable && attempt < budget && isRetryableGraphFailure(err)) {
+                        await this._retryPause(err, attempt, fetchOptions.signal)
+                        continue
+                    }
+                    // Only a request that never reached the backend — even
+                    // after its retries — is an outage signal; a deadline
+                    // miss is a slowness signal. Counted once per logical
+                    // request, so one blip on a flaky link is one strike.
+                    if (isNetworkError(err)) circuitBreaker.recordFailure()
+                    throw timedOut ? new Error(`Request timed out: ${method} ${url}`) : err
+                }
+
+                if (!response.ok) {
+                    const errorText = await response.text()
+                    // The status (and the backend's structured code) ride
+                    // along on the error. Callers that need to tell "you are
+                    // not allowed this here" apart from "the backend is
+                    // broken" — a share link hitting /search/discover is the
+                    // live case — cannot get that out of a message.
+                    const error = toApiStatusError(response, errorText)
+                    if (isProviderOutageSignal(error)) {
+                        // Honor Retry-After from the backend's own breaker so
+                        // the client waits at least as long as it suggests.
+                        circuitBreaker.recordFailure(error.retryAfterMs)
+                    }
+                    if (retryable && attempt < MAX_READ_RETRIES && isRetryableGraphFailure(error)) {
+                        await this._retryPause(error, attempt, fetchOptions.signal)
+                        continue
+                    }
+                    throw error
+                }
+
+                // Header-borne resilience signals from the backend GraphCache.
+                // - ``X-Provider-Health``: 'healthy' | 'unreachable' — pushed
+                //   into providerHealth store so the UI banner reacts faster
+                //   than the 30s /health/providers poll cycle.
+                // - ``X-Cache-Status: stale-fallback`` — backend served from
+                //   the last-known-good snapshot; signal so the user sees a
+                //   "data may be stale" hint near affected widgets.
+                const providerHealth = response.headers.get('X-Provider-Health')
+                if (providerHealth) {
+                    useProviderHealthStore.getState().markFromHeader(
+                        this.workspaceId, this.dataSourceId, providerHealth,
                     )
                 }
-                throw error
-            }
-
-            // Header-borne resilience signals from the backend GraphCache.
-            // - ``X-Provider-Health``: 'healthy' | 'unreachable' — pushed
-            //   into providerHealth store so the UI banner reacts faster
-            //   than the 30s /health/providers poll cycle.
-            // - ``X-Cache-Status: stale-fallback`` — backend served from
-            //   the last-known-good snapshot; signal so the user sees a
-            //   "data may be stale" hint near affected widgets.
-            const providerHealth = response.headers.get('X-Provider-Health')
-            if (providerHealth) {
-                useProviderHealthStore.getState().markFromHeader(
-                    this.workspaceId, this.dataSourceId, providerHealth,
-                )
-            }
-            const cacheStatus = response.headers.get('X-Cache-Status')
-            if (cacheStatus === 'stale-fallback') {
-                useCacheStalenessStore.getState().markStale(
-                    this.workspaceId, this.dataSourceId, url,
-                )
-            } else if (providerHealth === 'healthy') {
-                // Fresh response from a healthy provider — clear any
-                // stale flag for this scope so the banner disappears on
-                // recovery without waiting for the TTL.
-                useCacheStalenessStore.getState().clear(
-                    this.workspaceId, this.dataSourceId,
-                )
-            }
-
-            const data = await response.json() as T
-
-            // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
-            // metadata 60s, default 2s) so a "expand all" doesn't re-fire
-            // the same children query on every render.
-            if (method === 'GET') {
-                const ttl = RemoteGraphProvider.responseCacheTtlMs(url)
-                this._responseCache.set(cacheKey, { data, ts: Date.now(), ttl })
-            }
-
-            circuitBreaker.recordSuccess()
-            return data
-        } catch (err) {
-            // A caller-initiated abort (e.g. search-as-you-type superseding
-            // its own previous request) surfaces here as the same generic
-            // "timed out" TypeError a real client-side timeout would raise
-            // — fetchWithTimeout's runOnce links both onto one internal
-            // AbortController and can't tell them apart. It is not a
-            // backend health signal, so it must not feed the breaker.
-            if (fetchOptions.signal?.aborted) {
-                throw err
-            }
-            if (err instanceof TypeError) {
-                circuitBreaker.recordFailure()
-                if (err.message.includes('timed out')) {
-                    throw new Error(`Request timed out: ${method} ${url}`)
+                const cacheStatus = response.headers.get('X-Cache-Status')
+                if (cacheStatus === 'stale-fallback') {
+                    useCacheStalenessStore.getState().markStale(
+                        this.workspaceId, this.dataSourceId, url,
+                    )
+                } else if (providerHealth === 'healthy') {
+                    // Fresh response from a healthy provider — clear any
+                    // stale flag for this scope so the banner disappears on
+                    // recovery without waiting for the TTL.
+                    useCacheStalenessStore.getState().clear(
+                        this.workspaceId, this.dataSourceId,
+                    )
                 }
+
+                const data = await response.json() as T
+
+                // Cache GET responses; TTL is per-endpoint (hot read paths 30s,
+                // metadata 60s, default 2s) so a "expand all" doesn't re-fire
+                // the same children query on every render.
+                if (method === 'GET') {
+                    const ttl = RemoteGraphProvider.responseCacheTtlMs(url)
+                    this._responseCache.set(cacheKey, { data, ts: Date.now(), ttl })
+                }
+
+                circuitBreaker.recordSuccess()
+                return data
             }
-            throw err
         } finally {
             if (!fetchOptions.signal) this._inflight.delete(cacheKey)
         }
+    }
+
+    /** Sleep before retry `attempt`, honouring the server's Retry-After and
+     *  bailing out immediately if the caller aborts meanwhile. */
+    private _retryPause(err: unknown, attempt: number, signal?: AbortSignal | null): Promise<void> {
+        const delay = retryDelayMs(err, attempt)
+        return new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                signal?.removeEventListener('abort', onAbort)
+                resolve()
+            }, delay)
+            const onAbort = () => {
+                clearTimeout(timer)
+                reject(signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError'))
+            }
+            signal?.addEventListener('abort', onAbort, { once: true })
+        })
     }
 
     // ==========================================

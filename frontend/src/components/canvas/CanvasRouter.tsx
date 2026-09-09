@@ -66,13 +66,17 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // without hydration (loadChildren/searchChildren only).
   const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
+  // The three ways a load ends without data; each shows the provider-state
+  // overlay (with its own tone) and keeps auto-retrying.
+  const hydrationFailed =
+    hydrationStatus === 'warming' || hydrationStatus === 'slow' || hydrationStatus === 'unavailable'
   useLoadingNotification(
     'hydration',
     isInitialLoad && hydrationStatus === 'loading',
     hydrationPhase === 'roots' ? 'Opening this view…' : hydrationPhase === 'edges' ? 'Loading connections…' : 'Preparing view',
     'View ready',
-    // Never announce "View ready" when the load ended warming/unavailable.
-    hydrationStatus === 'warming' || hydrationStatus === 'unavailable',
+    // Never announce "View ready" when the load ended warming/slow/unavailable.
+    hydrationFailed,
   )
 
   // Mirror hydration phase + status into the canvas store so downstream
@@ -196,9 +200,9 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
           </motion.div>
         </AnimatePresence>
 
-        {(hydrationStatus === 'warming' || hydrationStatus === 'unavailable') && (
+        {hydrationFailed && (
           <CanvasProviderStateOverlay
-            warming={hydrationStatus === 'warming'}
+            state={hydrationStatus}
             onRetry={retryHydration}
           />
         )}

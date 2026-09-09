@@ -55,10 +55,12 @@ logger = logging.getLogger(__name__)
 
 try:
     from redis.exceptions import ConnectionError as _RedisConnectionError
+    from redis.exceptions import ResponseError as _RedisResponseError
     from redis.exceptions import TimeoutError as _RedisTimeoutError
 except Exception:  # pragma: no cover - redis is part of runtime deps
     _RedisConnectionError = ConnectionError
     _RedisTimeoutError = TimeoutError
+    _RedisResponseError = None
 
 
 # ------------------------------------------------------------------ #
@@ -2010,6 +2012,7 @@ async def _provider_error_handler(request, exc):
 from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
     ProviderLoading as _ProviderLoading,
+    ProviderTimeout as _ProviderTimeout,
     ProviderUnavailable as _ProviderUnavailable,
 )
 
@@ -2058,6 +2061,33 @@ async def _provider_loading_handler(request, exc: _ProviderLoading):
         content={
             "detail": {
                 "code": "PROVIDER_LOADING",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# ProviderTimeout is a subclass of ProviderUnavailable but semantically "one
+# operation was too slow for its deadline" — the provider is reachable and
+# the breaker did NOT count it. Map to 504 + Retry-After with a distinct
+# PROVIDER_TIMEOUT code so the frontend retries the request (the stale-
+# fallback cache or a warm cache often answers the retry) instead of
+# declaring the graph provider offline. Registered BEFORE the parent
+# handler so FastAPI's MRO match picks this one.
+@app.exception_handler(_ProviderTimeout)
+async def _provider_timeout_handler(request, exc: _ProviderTimeout):
+    logger.info(
+        "Provider timeout on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=504,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_TIMEOUT",
                 "providerName": exc.provider_name,
                 "reason": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,
@@ -2161,6 +2191,29 @@ app.add_exception_handler(OSError, _provider_error_handler)
 app.add_exception_handler(asyncio.TimeoutError, _provider_error_handler)
 app.add_exception_handler(_RedisConnectionError, _provider_error_handler)
 app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
+
+
+# A graph server error REPLY (bad Cypher, a query over the per-query memory
+# ceiling, an ACL refusal). The breaker proxy no longer relabels these as
+# ProviderUnavailable — the server answered, so the provider is reachable —
+# which means they would otherwise fall to the generic 500 with no code. Keep
+# the 500 (the request failed) but say what happened so the frontend can tell
+# a rejected query apart from an outage and never feeds it to its breaker.
+async def _graph_response_error_handler(request, exc):
+    logger.warning("Graph query rejected on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "GRAPH_QUERY_ERROR",
+                "reason": str(exc)[:200],
+            }
+        },
+    )
+
+
+if _RedisResponseError is not None:
+    app.add_exception_handler(_RedisResponseError, _graph_response_error_handler)
 
 # ------------------------------------------------------------------ #
 # Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
@@ -2499,10 +2552,24 @@ class _TimeoutMiddleware:
                 # T-3: race — inner finished cleanly just before the deadline.
                 return
             if not state["started"]:
-                # T-2 (clean case): we own the wire. Send a fresh 504.
+                # T-2 (clean case): we own the wire. Send a fresh 504. The
+                # body carries a code + Retry-After so the frontend treats
+                # it as "this request was too slow, retry" — a per-request
+                # signal — rather than as evidence the graph provider is
+                # down (reachability is reported by the 503 handlers).
                 response = JSONResponse(
-                    {"detail": f"Request timed out after {timeout:.0f}s — the graph provider may be unreachable."},
+                    {
+                        "detail": {
+                            "code": "REQUEST_TIMEOUT",
+                            "reason": (
+                                f"Request timed out after {timeout:.0f}s. "
+                                "The graph service is still available — retry shortly."
+                            ),
+                            "retryAfterSeconds": 2,
+                        }
+                    },
                     status_code=504,
+                    headers={"Retry-After": "2"},
                 )
                 await response(scope, receive, original_send)
                 state["terminal"] = True
