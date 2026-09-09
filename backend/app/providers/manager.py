@@ -101,6 +101,14 @@ _MAX_PROVIDER_CONCURRENCY = int(os.getenv("PROVIDER_MAX_CONCURRENCY", "8"))
 # batch was shed, rendered "graph service unavailable"). A provider that
 # is genuinely wedged still sheds — its slots never free within 2s.
 _SEMAPHORE_ACQUIRE_BUDGET_S = float(os.getenv("PROVIDER_SEMAPHORE_BUDGET_S", "2.0"))
+# How many requests may WAIT for a slot on one provider (per process) before
+# further arrivals are shed immediately. A waiting request still holds its
+# GRAPH_READ DB session (checked out by the data-source lookup before the
+# slot is requested), so an unbounded queue at a 2s wait would let a burst
+# drain that pool and turn a busy provider into 503s for everyone. Twice the
+# slot count absorbs a canvas open's burst; beyond it, shedding at once is
+# cheaper for the client than waiting 2s to be shed anyway.
+_SLOT_MAX_WAITERS = int(os.getenv("PROVIDER_SLOT_MAX_WAITERS", "16"))
 
 # Inline reachability preflight (WS0.1). Bounds the FIRST request to a
 # just-went-down provider: get_provider runs a fast, deadline-bounded
@@ -241,6 +249,22 @@ class ProviderManager:
         # slots (default 8); on saturation, raises ProviderUnavailable
         # immediately rather than queueing.
         self._provider_semaphores: Dict[Tuple[str, str], asyncio.Semaphore] = {}
+        # Requests currently waiting for a slot, per cache_key — bounded by
+        # _SLOT_MAX_WAITERS so a burst cannot pin the DB pool while queueing.
+        self._slot_waiters: Dict[Tuple[str, str], int] = {}
+
+        # Process-wide counters (monotonic since boot) for the request-path
+        # decisions that used to be invisible: surfaced on /health/deps so a
+        # release can be verified — "preflight skipped because traffic just
+        # succeeded", "slow miss let the request through", "gated", and
+        # "shed" — without grepping logs.
+        self.stats: Dict[str, int] = {
+            "preflight_skipped_recent_ok": 0,
+            "preflight_slow_misses": 0,
+            "preflight_gated": 0,
+            "slots_shed_queue_full": 0,
+            "slots_shed_wait_timeout": 0,
+        }
 
         # Short-lived inline reachability verdicts (WS0.1). See the
         # _REACHABLE_PROBE_* constants + _ensure_reachable below.
@@ -450,6 +474,7 @@ class ProviderManager:
         """
         now = time.monotonic()
         if self._recently_served(provider, now):
+            self.stats["preflight_skipped_recent_ok"] += 1
             return
         cached = self._reachable_probe.get(cache_key)
         if cached is not None and (now - cached[1]) < _REACHABLE_PROBE_CACHE_S:
@@ -479,6 +504,7 @@ class ProviderManager:
             misses = self._reachable_misses.get(cache_key, 0)
             if misses < _REACHABLE_AMBIGUOUS_PERSISTENCE:
                 return
+            self.stats["preflight_gated"] += 1
             raise ProviderUnavailable(
                 provider_name=cp,
                 reason=(
@@ -587,6 +613,7 @@ class ProviderManager:
                 verdict = "down"
         if verdict == "slow":
             self._reachable_misses[cache_key] = self._reachable_misses.get(cache_key, 0) + 1
+            self.stats["preflight_slow_misses"] += 1
         elif verdict == "ok":
             self._reachable_misses.pop(cache_key, None)
         self._reachable_probe[cache_key] = (verdict, time.monotonic())
@@ -948,6 +975,18 @@ class ProviderManager:
         """
         cache_key = (provider_id, graph_name or "")
         sem = self._get_provider_semaphore(cache_key)
+        waiting = self._slot_waiters.get(cache_key, 0)
+        if sem.locked() and waiting >= _SLOT_MAX_WAITERS:
+            # Every slot busy AND the queue already full: shed now rather
+            # than hold a DB session for the full wait budget only to be
+            # shed then. Same 429 + Retry-After contract as below.
+            self.stats["slots_shed_queue_full"] += 1
+            raise ProviderBusy(
+                provider_name=f"{cache_key[0]}:{cache_key[1]}",
+                reason="provider queue full; shed load",
+                retry_after_seconds=1,
+            )
+        self._slot_waiters[cache_key] = waiting + 1
         try:
             await asyncio.wait_for(
                 sem.acquire(), timeout=_SEMAPHORE_ACQUIRE_BUDGET_S,
@@ -957,11 +996,14 @@ class ProviderManager:
             # not a broken one. ProviderBusy maps to HTTP 429 with
             # Retry-After so the client backs off and retries, instead of
             # 503 which clients (rightly) treat as "provider is down".
+            self.stats["slots_shed_wait_timeout"] += 1
             raise ProviderBusy(
                 provider_name=f"{cache_key[0]}:{cache_key[1]}",
                 reason="provider concurrency saturated; shed load",
                 retry_after_seconds=1,
             )
+        finally:
+            self._slot_waiters[cache_key] = max(0, self._slot_waiters.get(cache_key, 1) - 1)
         return sem
 
     # ------------------------------------------------------------------ #

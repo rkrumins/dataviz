@@ -266,6 +266,103 @@ async def test_an_ok_probe_resets_the_miss_streak() -> None:
     assert key not in mgr._reachable_misses
 
 
+# ── 4b. Slot queue: bounded waiters, counted decisions ─────────────────
+
+
+async def test_slot_queue_sheds_immediately_once_the_waiter_cap_is_reached() -> None:
+    """A request that finds every slot busy waits (up to the budget) for one
+    — but only while the queue is short. Beyond the cap it is shed at once,
+    so a burst cannot hold GRAPH_READ DB sessions for the whole wait."""
+    from backend.app.providers import manager as manager_mod
+    from backend.common.adapters import ProviderBusy
+
+    m = ProviderManager()
+    key = ("prov-busy", "g")
+    sem = m._get_provider_semaphore(key)
+    # Occupy every slot.
+    held = [await sem.acquire() for _ in range(manager_mod._MAX_PROVIDER_CONCURRENCY)]
+    assert sem.locked()
+
+    # Fill the queue to the cap with waiters (they block on acquire).
+    waiters = [
+        asyncio.create_task(m.acquire_provider_slot("prov-busy", "g"))
+        for _ in range(manager_mod._SLOT_MAX_WAITERS)
+    ]
+    await asyncio.sleep(0)   # let them register as waiting
+    assert m._slot_waiters[key] == manager_mod._SLOT_MAX_WAITERS
+
+    # The next arrival is shed immediately — no wait budget spent.
+    t0 = time.monotonic()
+    with pytest.raises(ProviderBusy) as exc_info:
+        await m.acquire_provider_slot("prov-busy", "g")
+    assert (time.monotonic() - t0) < 0.5
+    assert "queue full" in exc_info.value.reason
+    assert m.stats["slots_shed_queue_full"] == 1
+
+    # Release the slots: the queued waiters drain and the counter returns to 0.
+    for _ in held:
+        sem.release()
+    for w in waiters:
+        got = await w
+        got.release()
+    assert m._slot_waiters[key] == 0
+
+
+async def test_slot_wait_timeout_is_counted_as_shed() -> None:
+    from backend.app.providers import manager as manager_mod
+    from backend.common.adapters import ProviderBusy
+
+    m = ProviderManager()
+    key = ("prov-slow", "g")
+    sem = m._get_provider_semaphore(key)
+    held = [await sem.acquire() for _ in range(manager_mod._MAX_PROVIDER_CONCURRENCY)]
+    original = manager_mod._SEMAPHORE_ACQUIRE_BUDGET_S
+    manager_mod._SEMAPHORE_ACQUIRE_BUDGET_S = 0.05
+    try:
+        with pytest.raises(ProviderBusy):
+            await m.acquire_provider_slot("prov-slow", "g")
+    finally:
+        manager_mod._SEMAPHORE_ACQUIRE_BUDGET_S = original
+        for _ in held:
+            sem.release()
+    assert m.stats["slots_shed_wait_timeout"] == 1
+    assert m._slot_waiters[key] == 0
+
+
+async def test_preflight_decisions_are_counted() -> None:
+    mgr = ProviderManager()
+    key = ("p", "g")
+    raw = _PreflightProvider([_slow()])
+    proxy = CircuitBreakerProxy(raw, name="p:g")
+    await proxy.get_nodes()                      # real traffic → skip
+    await mgr._ensure_reachable(key, proxy)
+    assert mgr.stats["preflight_skipped_recent_ok"] == 1
+
+    cold = CircuitBreakerProxy(_PreflightProvider([_slow()]), name="p:g2")
+    await mgr._ensure_reachable(("p", "g2"), cold)
+    assert mgr.stats["preflight_slow_misses"] == 1
+
+
+async def test_breaker_counters_distinguish_not_counted_from_counted() -> None:
+    from backend.common.adapters.circuit import breaker_stats
+
+    before = breaker_stats()
+    target = _Provider()
+    proxy = CircuitBreakerProxy(target, name="t", fail_max=1)
+
+    target.raise_exc = asyncio.TimeoutError("slow")
+    with pytest.raises(ProviderTimeout):
+        await proxy.get_nodes()
+    target.raise_exc = ConnectionError("refused")
+    with pytest.raises(ProviderUnavailable):
+        await proxy.get_nodes()
+
+    after = breaker_stats()
+    assert after["deadline_timeouts_not_counted"] == before["deadline_timeouts_not_counted"] + 1
+    assert after["network_failures_counted"] == before["network_failures_counted"] + 1
+    assert after["breaker_opens"] == before["breaker_opens"] + 1
+
+
 # ── 5. Warmup pre-trip: timeout-class reasons need persistence ─────────
 
 

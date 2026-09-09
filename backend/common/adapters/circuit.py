@@ -182,6 +182,26 @@ _NETWORK_EXCEPTIONS = _default_network_exceptions()
 _QUERY_RESPONSE_EXCEPTIONS = _query_response_exceptions()
 
 
+# Process-wide counters, monotonic since boot, surfaced on /health/deps so a
+# release can be verified from a dashboard instead of a log grep: how often
+# the proxy was asked to judge a slow query or a rejected query and correctly
+# did NOT count it, versus how often it counted a real connection failure
+# and how often a breaker actually opened. Plain ints mutated on the event
+# loop — no lock needed.
+_STATS: dict[str, int] = {
+    "deadline_timeouts_not_counted": 0,
+    "query_errors_not_counted": 0,
+    "network_failures_counted": 0,
+    "breaker_opens": 0,
+    "breaker_pretrips": 0,
+}
+
+
+def breaker_stats() -> dict[str, int]:
+    """Snapshot of the process-wide breaker counters (see ``_STATS``)."""
+    return dict(_STATS)
+
+
 class BreakerState(str, Enum):
     """Classic circuit-breaker states. String values chosen to match
     :mod:`pybreaker` (``"closed"``, ``"open"``, ``"half-open"``) so any
@@ -365,6 +385,7 @@ class _AsyncCircuitBreaker:
         self._opened_at = time.monotonic()
         if self._fail_counter < self.fail_max:
             self._fail_counter = self.fail_max
+        _STATS["breaker_pretrips"] += 1
 
     async def _acquire_call_slot(self) -> None:
         """Raise if the breaker will not permit a call right now.
@@ -406,6 +427,7 @@ class _AsyncCircuitBreaker:
                 # Probe failed — re-open immediately.
                 self._state = BreakerState.OPEN
                 self._opened_at = time.monotonic()
+                _STATS["breaker_opens"] += 1
                 logger.info(
                     "Circuit breaker '%s' transition HALF_OPEN -> OPEN "
                     "(probe failed; reset_timeout=%ds)",
@@ -419,6 +441,7 @@ class _AsyncCircuitBreaker:
                 self._state = BreakerState.OPEN
                 self._opened_at = time.monotonic()
                 if was_closed:
+                    _STATS["breaker_opens"] += 1
                     logger.info(
                         "Circuit breaker '%s' transition CLOSED -> OPEN "
                         "(fails=%d/%d; reset_timeout=%ds)",
@@ -574,6 +597,7 @@ class CircuitBreakerProxy:
                 # signal — never counted, the breaker stays closed. Surfaced
                 # as ProviderTimeout (504 + Retry-After) so the client retries
                 # the request instead of treating the provider as down.
+                _STATS["deadline_timeouts_not_counted"] += 1
                 logger.info(
                     "Provider %s deadline exceeded on %s: %s (breaker=%s, not counted)",
                     proxy._name,
@@ -586,6 +610,7 @@ class CircuitBreakerProxy:
                     reason=f"{name} exceeded its deadline: {exc}" if str(exc) else f"{name} exceeded its deadline",
                 ) from exc
             except _NETWORK_EXCEPTIONS as exc:
+                _STATS["network_failures_counted"] += 1
                 state_after, fails_after = await proxy._breaker._record_failure()
                 logger.warning(
                     "Provider %s network error on %s: %s=%s (breaker=%s fails=%d/%d)",
@@ -607,6 +632,7 @@ class CircuitBreakerProxy:
                 # ACL refusal) proves the downstream answered. Re-raise it
                 # untouched: not counted, not relabelled as an outage.
                 if _is_query_response_error(exc):
+                    _STATS["query_errors_not_counted"] += 1
                     logger.info(
                         "Provider %s query rejected on %s: %s=%s (breaker=%s, not counted)",
                         proxy._name,

@@ -21,7 +21,7 @@
  * This component handles the heavier ontology fetch.
  */
 
-import { Outlet } from 'react-router-dom'
+import { Outlet, useMatch } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2, RefreshCw, CloudOff } from 'lucide-react'
 import { isSchemaAuthError, useGraphSchema } from '@/hooks/useGraphSchema'
@@ -29,6 +29,11 @@ import { MOTION } from '@/lib/motion'
 
 export function CanvasLayout() {
   const { isLoading, isFetching, isError, error, refetch } = useGraphSchema()
+  // This hook reads the GLOBAL scope (the sidebar's active workspace). An
+  // open view fetches its own scope through ViewSchemaGate, so a failure
+  // here says nothing about the view on screen — showing it there put an
+  // amber "offline" pill over a canvas whose own schema was fine.
+  const viewOpen = useMatch('/views/:viewId') !== null
 
   return (
     <>
@@ -37,7 +42,7 @@ export function CanvasLayout() {
 
       {/* Degraded-mode pill — top-center, floating above the canvas */}
       <AnimatePresence>
-        {isError && !isSchemaAuthError(error) && (
+        {isError && !viewOpen && !isSchemaAuthError(error) && (
           <motion.div
             key="provider-degraded"
             role="status"

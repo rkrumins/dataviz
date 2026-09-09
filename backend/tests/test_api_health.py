@@ -145,6 +145,32 @@ async def test_deps_includes_provider_breaker_states(test_client: AsyncClient, m
     assert "providers" in body
 
 
+@pytest.mark.asyncio
+async def test_deps_reports_resilience_counters(test_client: AsyncClient, monkeypatch):
+    """The release-verification surface: how the breaker judged slow and
+    rejected queries (not counted) versus real connection failures, and how
+    the request-path preflight and slot queue decided. Always present, with
+    every counter an integer, so a dashboard can plot them from boot."""
+    monkeypatch.setattr(
+        "backend.app.db.engine.get_engine",
+        lambda: _HealthyEngine(),
+    )
+
+    resp = await test_client.get("/api/v1/health/deps")
+    assert resp.status_code == 200
+    resilience = resp.json()["resilience"]
+    for key in (
+        "deadline_timeouts_not_counted", "query_errors_not_counted",
+        "network_failures_counted", "breaker_opens", "breaker_pretrips",
+    ):
+        assert isinstance(resilience["breaker"][key], int)
+    for key in (
+        "preflight_skipped_recent_ok", "preflight_slow_misses", "preflight_gated",
+        "slots_shed_queue_full", "slots_shed_wait_timeout",
+    ):
+        assert isinstance(resilience["provider_manager"][key], int)
+
+
 # ── /health/ready: revocation must be shared ────────────────────────
 #
 # ``get_revocation_service`` catches broadly and installs an in-process

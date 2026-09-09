@@ -101,6 +101,17 @@ interface CanvasState {
   edgesTruncated: boolean
   setEdgesTruncated: (edgesTruncated: boolean) => void
 
+  // Node-fetch integrity — some batches of the initial load failed after
+  // their retries while others succeeded. The canvas renders what arrived
+  // and SAYS so (and keeps retrying), rather than a silently incomplete
+  // view. `missingEntityCount` is the number of assigned entities in the
+  // failed batches (0 when the failed batches were type-shaped, whose
+  // size is unknown until they load).
+  nodeFetchFailures: number
+  missingEntityCount: number
+  noteNodeFetchFailure: (batches: number, entities: number) => void
+  clearNodeFetchFailures: () => void
+
   // One-shot pulse highlight — populated after a "jump to node" reveal so
   // the user sees a visible confirmation of where they landed. A Set
   // because multi-locate flows fire multiple pulses concurrently; using
@@ -260,6 +271,13 @@ export const useCanvasStore = create<CanvasState>()(
       clearEdgeFetchFailures: () => set({ edgeFetchFailures: 0, lastEdgeError: null }),
       edgesTruncated: false,
       setEdgesTruncated: (edgesTruncated) => set({ edgesTruncated }),
+      nodeFetchFailures: 0,
+      missingEntityCount: 0,
+      noteNodeFetchFailure: (batches, entities) => set({
+        nodeFetchFailures: batches,
+        missingEntityCount: entities,
+      }),
+      clearNodeFetchFailures: () => set({ nodeFetchFailures: 0, missingEntityCount: 0 }),
       pulseNodeIds: new Set(),
       pulseNode: (id) => {
         // Add to the pulsing set; each id auto-clears after the

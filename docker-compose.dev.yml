@@ -91,6 +91,8 @@ services:
       - "120"
       - --graceful-timeout
       - "30"
+      - --keep-alive
+      - "75"
 
   aggregation-controlplane:
     volumes:

@@ -57,6 +57,7 @@ vi.mock('@/config/polling', () => ({
 }))
 
 import { useGraphHydration, worstHydrationFailure, toHydrationFailure } from '../useGraphHydration'
+import { useCanvasStore } from '@/store/canvas'
 
 function apiError(status: number, code?: string) {
   return Object.assign(new Error(`API Error ${status}: ${code ?? ''}`), { status, code })
@@ -72,6 +73,7 @@ describe('useGraphHydration failure classification', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     assignUrns(3)
+    useCanvasStore.getState().setGraph([], [])
   })
 
   it.each([
@@ -101,13 +103,17 @@ describe('useGraphHydration failure classification', () => {
     await waitFor(() => expect(result.current.hydrationStatus).toBe('warming'))
   })
 
-  it('a batch that succeeded keeps the canvas ready even when another was slow', async () => {
+  it('a batch that succeeded renders while another that was slow keeps the load retrying', async () => {
     assignUrns(150) // two batches of 100 + 50
     mockProvider.getNodes
       .mockRejectedValueOnce(apiError(504, 'PROVIDER_TIMEOUT'))
       .mockResolvedValueOnce([{ urn: 'urn:e:100', entityType: 'object', displayName: 'x' }])
     const { result } = renderHook(() => useGraphHydration({ hydrate: true }))
-    await waitFor(() => expect(result.current.hydrationStatus).toBe('ready'))
+    // Partial: the entity that arrived is on screen; the status is not
+    // 'ready' (that means complete) but 'slow', which CanvasRouter shows as
+    // a pill over the data rather than the blocking card.
+    await waitFor(() => expect(result.current.hydrationStatus).toBe('slow'))
+    expect(useCanvasStore.getState().nodes.map(n => n.id)).toEqual(['urn:e:100'])
   })
 
   it('loads node batches through a bounded pool, never all at once', async () => {

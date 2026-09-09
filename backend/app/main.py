@@ -2200,12 +2200,17 @@ app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
 # the 500 (the request failed) but say what happened so the frontend can tell
 # a rejected query apart from an outage and never feeds it to its breaker.
 async def _graph_response_error_handler(request, exc):
-    logger.warning("Graph query rejected on %s: %s", request.url.path, exc)
+    path = request.url.path
+    # Only a graph-bound path can attribute the reply to the graph store;
+    # elsewhere (the revocation store, the job bus) the same exception class
+    # means a Redis command was refused, and naming the graph would mislead.
+    code = "GRAPH_QUERY_ERROR" if _is_provider_bound_path(path) else "REDIS_COMMAND_ERROR"
+    logger.warning("%s on %s: %s", code, path, exc)
     return JSONResponse(
         status_code=500,
         content={
             "detail": {
-                "code": "GRAPH_QUERY_ERROR",
+                "code": code,
                 "reason": str(exc)[:200],
             }
         },
@@ -2820,6 +2825,22 @@ async def dependency_health():
         result["providers"] = provider_manager.report_provider_states()
     except Exception as exc:
         result["providers"] = {"_error": str(exc)[:200]}
+
+    # Resilience counters (per process, monotonic since boot). How often the
+    # breaker was asked to judge a slow or rejected query and correctly did
+    # NOT count it, how often it counted a real connection failure and
+    # opened, and how the request-path preflight and the provider slot
+    # queue decided. Read these to verify a release ("timeouts are rising
+    # but breaker_opens is flat" is the healthy shape), not to page on.
+    try:
+        from backend.common.adapters.circuit import breaker_stats
+
+        result["resilience"] = {
+            "breaker": breaker_stats(),
+            "provider_manager": dict(provider_manager.stats),
+        }
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["resilience"] = {"_error": str(exc)[:200]}
 
     # P3.1 — event-loop lag surface. p99 lag > 500ms implies the loop
     # is wedged; > 50ms implies coroutines are queueing.

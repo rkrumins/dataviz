@@ -104,6 +104,77 @@ const COPY: Record<CanvasProviderState, { title: string; status: string }> = {
   unavailable: { title: 'Graph service is unavailable', status: 'Watching for recovery…' },
 }
 
+export interface CanvasProviderStatePillProps {
+  state: CanvasProviderState
+  /** True when the load rendered some of the view but not all of it. */
+  partial: boolean
+  /** Assigned entities the failed batches held (0 when unknown). */
+  missingEntities: number
+  onRetry?: () => void
+}
+
+/**
+ * CanvasProviderStatePill — the NON-blocking sibling of the overlay, for a
+ * canvas that has data on it. A refresh of a view the user is already
+ * reading must never dim the canvas and cover it with a card: the nodes
+ * stay interactive, and this small pill at the top says what is being
+ * retried. Three cases: a partial load (some entities didn't arrive), a
+ * refresh that is slow or warming, and a confirmed outage while the last
+ * loaded data is still shown.
+ */
+export const CanvasProviderStatePill = React.memo(function CanvasProviderStatePill({
+  state,
+  partial,
+  missingEntities,
+  onRetry,
+}: CanvasProviderStatePillProps) {
+  const calm = state !== 'unavailable'
+  const headline = partial
+    ? (missingEntities > 0
+      ? `${missingEntities.toLocaleString()} ${missingEntities === 1 ? 'entity' : 'entities'} didn’t load`
+      : 'Some entities didn’t load')
+    : state === 'warming' ? 'Preparing your graph'
+      : state === 'slow' ? 'Refreshing is taking longer than usual'
+        : 'Graph service is unavailable'
+  const detail = calm
+    ? 'showing what’s loaded · retrying automatically'
+    : 'showing the last loaded data · watching for recovery'
+  return (
+    <div className="pointer-events-none absolute top-4 left-1/2 z-40 -translate-x-1/2">
+      <div
+        role="status"
+        aria-live="polite"
+        className={cn(
+          'pointer-events-auto flex items-center gap-2.5 rounded-full border py-1.5 pl-3.5 pr-2 text-xs shadow-lg backdrop-blur-sm',
+          calm
+            ? 'border-glass-border bg-canvas-elevated/90 text-ink shadow-black/10'
+            : 'border-amber-300/60 bg-amber-50 text-amber-800 shadow-amber-500/10 dark:border-amber-500/30 dark:bg-amber-950/60 dark:text-amber-300',
+        )}
+      >
+        <span
+          className={cn(
+            'inline-block h-1.5 w-1.5 shrink-0 rounded-full animate-pulse',
+            calm ? 'bg-accent-lineage' : 'bg-amber-400',
+          )}
+        />
+        <span className="whitespace-nowrap font-semibold">{headline}</span>
+        <span className={cn('hidden sm:inline', calm ? 'text-ink-muted' : 'text-amber-600/80 dark:text-amber-400/70')}>
+          — {detail}
+        </span>
+        {onRetry && (
+          <button
+            onClick={onRetry}
+            className="ml-1 shrink-0 rounded-full p-1 transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.06]"
+            title="Retry now"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  )
+})
+
 export const CanvasProviderStateOverlay = React.memo(function CanvasProviderStateOverlay({
   state,
   onRetry,

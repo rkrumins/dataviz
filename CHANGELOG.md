@@ -153,6 +153,22 @@ load runs its node batches four at a time, and the schema pill says "Schema unav
 (those endpoints read Postgres, never the graph) and stays quiet for a session that is
 merely being renewed.
 
+**A retry no longer takes the data away.** A refresh of a view the user was reading
+emptied the canvas and covered it with the state card until the retry succeeded; a load
+whose batches partly failed rendered silently incomplete; a schema refetch that failed
+unmounted a canvas whose ontology was fine. Now a canvas with data keeps it — interactive,
+under a small pill that says what is being retried and how many entities are missing —
+and the view schema gate keeps the last good schema mounted. See
+`docs/RELEASE_NOTES_2026-09-09_graph-availability.md` for the risk register, rollout
+order, the resilience counters on `/api/v1/health/deps`, and the rollback knobs.
+
+**A backend stall could take the whole site down.** The frontend pod's readiness probe
+proxied the backend's `/health` with a 3s timeout, so every frontend pod failed readiness
+at once when the backend's event loop stalled, and the load balancer pulled all of them —
+static shell included. `/readyz` is now nginx-local. The provider slot queue is capped
+(`PROVIDER_SLOT_MAX_WAITERS`, 16) so the longer wait for a slot cannot pin the graph-read
+DB pool under a burst.
+
 **Opaque edge 504s and sporadic 502s.** The ingress and load-balancer timeouts (120s)
 tied the backend's slowest tier, so the proxy's "upstream timed out" won the race
 against the app's structured 504; both now sit at 180s like the pod nginx. The

@@ -28,7 +28,8 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
-import { CanvasProviderStateOverlay } from './CanvasProviderStateOverlay'
+import { CanvasProviderStateOverlay, CanvasProviderStatePill } from './CanvasProviderStateOverlay'
+import { isHydrationFailure } from '@/hooks/useGraphHydration'
 import { useAutoDraftForBlankModel } from '@/features/versioning/model/useAutoDraftForBlankModel'
 import { GraphCanvas } from './GraphCanvas'
 import { HierarchyCanvas } from './HierarchyCanvas'
@@ -66,10 +67,16 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // without hydration (loadChildren/searchChildren only).
   const { hydrationStatus, hydrationPhase, retryHydration, isLoading: isHydrating } = useGraphHydration({ hydrate: true })
   const isInitialLoad = isHydrating && hydrationPhase !== 'complete'
-  // The three ways a load ends without data; each shows the provider-state
-  // overlay (with its own tone) and keeps auto-retrying.
-  const hydrationFailed =
-    hydrationStatus === 'warming' || hydrationStatus === 'slow' || hydrationStatus === 'unavailable'
+  // The three ways a load ends without (complete) data. Each keeps
+  // auto-retrying; what the user SEES depends on whether the canvas has
+  // anything on it: an empty canvas gets the state card, a canvas with
+  // data — a partial load, or a refresh of a view already open — keeps its
+  // nodes interactive under a small pill. Never dim data the user has.
+  const failedState = isHydrationFailure(hydrationStatus) ? hydrationStatus : null
+  const hydrationFailed = failedState !== null
+  const hasNodes = useCanvasStore((s) => s.nodes.length > 0)
+  const nodeFetchFailures = useCanvasStore((s) => s.nodeFetchFailures)
+  const missingEntityCount = useCanvasStore((s) => s.missingEntityCount)
   useLoadingNotification(
     'hydration',
     isInitialLoad && hydrationStatus === 'loading',
@@ -200,9 +207,17 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
           </motion.div>
         </AnimatePresence>
 
-        {hydrationFailed && (
+        {failedState && !hasNodes && (
           <CanvasProviderStateOverlay
-            state={hydrationStatus}
+            state={failedState}
+            onRetry={retryHydration}
+          />
+        )}
+        {failedState && hasNodes && (
+          <CanvasProviderStatePill
+            state={failedState}
+            partial={nodeFetchFailures > 0}
+            missingEntities={missingEntityCount}
             onRetry={retryHydration}
           />
         )}

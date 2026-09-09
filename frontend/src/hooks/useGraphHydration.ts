@@ -170,7 +170,8 @@ const HYDRATION_FAILURE_MESSAGE: Record<HydrationFailure, string> = {
     unavailable: 'The graph provider for this view is unavailable. Your data is safe — this view will load automatically once the provider is back.',
 }
 
-function isFailedStatus(status: HydrationStatus): status is HydrationFailure {
+/** True for the states in which a load ended without (complete) data. */
+export function isHydrationFailure(status: HydrationStatus): status is HydrationFailure {
     return status === 'warming' || status === 'slow' || status === 'unavailable'
 }
 
@@ -463,16 +464,34 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             setHydrationPhase('complete')
         }
 
-        // Clear the canvas nodes for the fresh attempt. Do NOT clear
-        // hydrationError/status on a RETRY — that's what caused the overlay to
-        // blink to "Start building" between attempts; a retry only clears them
-        // by SUCCEEDING (markReady) below.
-        setGraph([], [])
-        // Fresh attempt → fresh edge-integrity state; failures from the
-        // previous attempt would otherwise keep the incomplete-canvas
-        // banner up after a clean reload.
+        // A load that rendered SOME of the view but not all of it: the nodes
+        // that arrived stay on screen, the status records why the rest did
+        // not, and the retry loop keeps trying for the remainder. Not 'ready'
+        // — 'ready' means complete — and not the blocking overlay either: the
+        // canvas has data, so CanvasRouter shows a pill over it instead.
+        const markPartial = (failure: HydrationFailure) => {
+            setHydrationStatus(failure)
+            setHydrationError(HYDRATION_FAILURE_MESSAGE[failure])
+            setHydrationPhase('complete')
+        }
+
+        // Clear the canvas ONLY for a genuinely new view. A reload of the SAME
+        // view — a retry after a failed or partial load, a schema-deps churn —
+        // keeps what is on screen until the new load lands (`setGraph` below
+        // replaces atomically), so a slow provider never wipes a canvas the
+        // user is reading; the overlay/pill say a refresh is in progress. The
+        // empty-state gate is status==='ready' && nodes===0, so kept nodes can
+        // never leak into "Start building". Do NOT clear hydrationError/status
+        // on a RETRY either — that's what caused the overlay to blink to "Start
+        // building" between attempts; a retry only clears them by SUCCEEDING
+        // (markReady) below.
+        if (isFreshView) setGraph([], [])
+        // Fresh attempt → fresh integrity state; failures from the previous
+        // attempt would otherwise keep the incomplete-canvas banner/pill up
+        // after a clean reload.
         useCanvasStore.getState().clearEdgeFetchFailures()
         useCanvasStore.getState().setEdgesTruncated(false)
+        useCanvasStore.getState().clearNodeFetchFailures()
 
         const controller = new AbortController()
 
@@ -522,15 +541,22 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // all at once: the backend sheds the tail of an oversized burst
                     // with 429, and a shed batch is a failed batch.
                     const batchErrors: unknown[] = []
+                    // Assigned entities inside the batches that failed — what a
+                    // partial load is missing, by count, for the pill.
+                    let missingEntities = 0
                     const loadNodeBatches = async (queries: NodeQuery[]): Promise<GraphNode[]> => {
                         const settled = await mapWithConcurrency(
                             queries, HYDRATION_CONCURRENCY, q => provider.getNodes(q),
                         )
                         const loaded: GraphNode[] = []
-                        for (const outcome of settled) {
-                            if (outcome.status === 'fulfilled') loaded.push(...outcome.value)
-                            else batchErrors.push(outcome.reason)
-                        }
+                        settled.forEach((outcome, i) => {
+                            if (outcome.status === 'fulfilled') {
+                                loaded.push(...outcome.value)
+                            } else {
+                                batchErrors.push(outcome.reason)
+                                missingEntities += queries[i].urns?.length ?? 0
+                            }
+                        })
                         return loaded
                     }
                     const totalFailure = () => new HydrationLoadError(worstHydrationFailure(batchErrors))
@@ -611,12 +637,16 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         markReady()   // empty view — terminal, not a stall
                         return
                     }
-                    if (batchErrors.length > 0) {
-                        // Partial: render what arrived rather than nothing. The
-                        // request layer already retried each batch; a batch that
-                        // still failed is logged so the gap is diagnosable.
+                    const partial = batchErrors.length > 0
+                    if (partial) {
+                        // Partial: render what arrived rather than nothing, but
+                        // never pretend it is complete — the store records the
+                        // gap for the pill, the status stays failed so the retry
+                        // loop keeps going, and the first error is logged so the
+                        // gap is diagnosable.
+                        useCanvasStore.getState().noteNodeFetchFailure(batchErrors.length, missingEntities)
                         console.warn(
-                            `[useGraphHydration] ${batchErrors.length} node batch(es) failed after retries — rendering the ${allNodes.length} entities that loaded`,
+                            `[useGraphHydration] ${batchErrors.length} node batch(es) failed after retries — rendering the ${allNodes.length} entities that loaded; retrying for the rest`,
                             batchErrors[0],
                         )
                     }
@@ -655,6 +685,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     )
 
                     console.log(`[useGraphHydration] Reference view: loaded ${allNodes.length} nodes (${assignedUrns.size} assigned, ${deltaLoadedCount} branch-created), ${allEdges.length} edges`)
+                    if (partial) {
+                        markPartial(worstHydrationFailure(batchErrors))
+                        return
+                    }
                 } else {
                     // ── Hierarchy / Graph view ──────────────────────────
                     // Mirrors old App.tsx behavior: load roots, then first-level
@@ -828,7 +862,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // each attempt and schedules the next while still failed.
     useEffect(() => {
         if (!enableHydration) return
-        if (!isFailedStatus(hydrationStatus)) {
+        if (!isHydrationFailure(hydrationStatus)) {
             retryCountRef.current = 0
             return
         }
@@ -855,7 +889,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         if (!enableHydration || typeof document === 'undefined') return
         const onVisible = () => {
             if (document.hidden) return
-            if (isFailedStatus(useCanvasStore.getState().hydrationStatus)) retryHydration()
+            if (isHydrationFailure(useCanvasStore.getState().hydrationStatus)) retryHydration()
         }
         document.addEventListener('visibilitychange', onVisible)
         return () => document.removeEventListener('visibilitychange', onVisible)
@@ -877,7 +911,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const was = prev
             prev = curr
             if (was === 'unhealthy' && curr === 'healthy') {
-                if (isFailedStatus(useCanvasStore.getState().hydrationStatus)) retryHydration()
+                if (isHydrationFailure(useCanvasStore.getState().hydrationStatus)) retryHydration()
             }
         })
     }, [enableHydration, providerWsId, providerDsId, retryHydration])
