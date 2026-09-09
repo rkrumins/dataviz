@@ -6,9 +6,16 @@ the node is read first and every refusal comes before anything is set; a
 cap never goes below the node's default; raising the memory ceiling needs
 the container limit and is refused with the shortfall when the deployment
 guide's formula says the container cannot back it; what was set is read
-back and verified; every provider on the node learns the new cap; the fleet
-snapshot is dropped; the change is logged with its actor; and the route is
-system-admin only, with the actor taken from the session, never the body.
+back and verified; every provider already built on the node learns the new
+cap; the fleet snapshot is dropped; the change is logged with its actor; and
+the route is system-admin only, with the actor taken from the session, never
+the body.
+
+The node is now located in the graph store topology and reached over a
+short-lived one-node client built from its instance's own settings — so a
+node that holds no graph with rollups (and a replica, which nothing writes
+to) is as adjustable as the busiest master. It used to have to be a node
+some provider's rollups happened to live on.
 """
 from __future__ import annotations
 
@@ -55,8 +62,11 @@ class _Conn:
             connection_kwargs={"host": "falkor", "port": 6379},
         )
 
-    async def info(self, section=None):
-        return {"used_memory": self.used, "maxmemory": self.maxmemory, "maxmemory_policy": "noeviction"}
+    async def info(self, *sections):
+        return {
+            "used_memory": self.used, "maxmemory": self.maxmemory,
+            "maxmemory_policy": "noeviction", "run_id": "r1", "uptime_in_seconds": 100,
+        }
 
     async def execute_command(self, *args, **kw):
         if args == ("GRAPH.CONFIG", "GET", "*"):
@@ -69,54 +79,91 @@ class _Conn:
         raise AssertionError(args)
 
 
-class _ClusterConn(_Conn):
-    """Cluster: INFO and CONFIG target a node; two primaries, the first owns
-    the graph."""
-
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        self.primaries = [_Node("10.0.0.1"), _Node("10.0.0.2")]
-        self.nodes_manager = types.SimpleNamespace(
-            get_node_from_slot=lambda slot: self.primaries[0], slots_cache={1: []},
-        )
-
-    async def initialize(self):
-        pass
-
-    def keyslot(self, key):
-        return 1
-
-    def get_primaries(self):
-        return list(self.primaries)
-
-    async def execute_command(self, *args, target_nodes=None):
-        if args == ("INFO", "memory"):
-            return await self.info("memory")
-        return await super().execute_command(*args, target_nodes=target_nodes)
+_CFG = types.SimpleNamespace(
+    mode="cluster", probe_deadline_s=None, socket_connect_timeout=None,
+)
 
 
 class _Provider:
-    def __init__(self, conn, *, mode="standalone", graph="g"):
-        self._db = types.SimpleNamespace(connection=conn)
-        self._conn_cfg = types.SimpleNamespace(mode=mode)
-        self._graph_name = graph
+    """A provider already built in this process — it may be TOLD the new cap
+    but is never asked to carry the change."""
+
+    def __init__(self):
         self.noted = []
 
     def note_server_limits(self, endpoint, **limits):
         self.noted.append((endpoint, limits))
 
 
-def _wire(monkeypatch, endpoint, holders):
-    """The capacity sweep, reduced to what the change needs from it."""
-    async def assemble(session, registry, *, ds_id=None):
-        return {"providers_by_endpoint": {endpoint: holders}, "limits": cap.effective_limits({})}
+def _node(endpoint, *, role="master"):
+    from backend.app.services.graph_store.schemas import GraphStoreNode
+
+    return GraphStoreNode(endpoint=endpoint, role=role)
+
+
+def _instance(endpoints, *, providers=("p1",)):
+    """One instance whose masters are ``endpoints`` (an endpoint given as
+    ``(master, replica)`` gets that replica)."""
+    from backend.app.services.graph_store.schemas import (
+        GraphStoreInstance, GraphStoreShard, ProviderRef,
+    )
+
+    shards = []
+    for i, entry in enumerate(endpoints):
+        master, replicas = (entry, ()) if isinstance(entry, str) else entry
+        shards.append(GraphStoreShard(
+            index=i, master=_node(master),
+            replicas=[_node(r, role="replica") for r in replicas],
+        ))
+    return GraphStoreInstance(
+        id="i1", mode="cluster", shards=shards,
+        providers=[ProviderRef(id=pid, name="Falkor") for pid in providers],
+    )
+
+
+def _wire(monkeypatch, clients, *, endpoints=None, providers=()):
+    """The topology, reduced to what a limits change needs: which instance
+    holds a node, how to reach it, and one client per node."""
+    from backend.app.services.graph_store import discovery
+    import backend.app.services.graph_store.topology as topo
+    from backend.app.services.graph_store.schemas import GraphStoreTopologyResponse
+    from backend.app.providers.manager import provider_manager
+
+    instance = _instance(endpoints or list(clients))
+    snapshot = GraphStoreTopologyResponse(instances=[instance], measuredAt="t")
+    closed = []
+
+    async def get_snapshot(*, fresh=False):
+        return snapshot
+
+    def client_for(cfg, host, port, *, socket_timeout):
+        return clients[f"{host}:{port}"]
+
+    async def _closer(client):
+        closed.append(client)
 
     async def stored(session):
         return {}
 
-    monkeypatch.setattr(cap, "_assemble", assemble)
+    # Each fake answers as the node it is dialled as — the reading names
+    # its own endpoint, like a real client does.
+    for endpoint, client in clients.items():
+        host, _, port = endpoint.rpartition(":")
+        client.connection_pool = types.SimpleNamespace(
+            connection_kwargs={"host": host, "port": int(port)},
+        )
+
+    monkeypatch.setattr(topo, "get_topology_snapshot", get_snapshot)
+    monkeypatch.setattr(topo, "conn_config_of", lambda iid: _CFG)
+    monkeypatch.setattr(discovery, "node_client", client_for)
+    monkeypatch.setattr(discovery, "_aclose", _closer)
     monkeypatch.setattr(cap, "_stored_tuning", stored)
+    monkeypatch.setattr(
+        provider_manager, "instantiated",
+        lambda pid: list(providers) if pid == "p1" else [],
+    )
     cap._cache = (0.0, "a cached snapshot")
+    return closed
 
 
 def _patch(**kw):
@@ -124,7 +171,7 @@ def _patch(**kw):
 
 
 def _apply(endpoint, patch):
-    return _run(gsl.apply_graph_store_limits(object(), object(), endpoint, patch))
+    return _run(gsl.apply_graph_store_limits(object(), endpoint, patch))
 
 
 # ── the change ───────────────────────────────────────────────────────
@@ -132,8 +179,8 @@ def _apply(endpoint, patch):
 
 def test_raising_the_time_cap_sets_verifies_tells_providers_and_drops_the_cache(monkeypatch, caplog):
     conn = _Conn()
-    p = _Provider(conn)
-    _wire(monkeypatch, ENDPOINT, [(p, "g")])
+    p = _Provider()
+    _wire(monkeypatch, {ENDPOINT: conn}, providers=[p])
     with caplog.at_level(logging.INFO, logger="backend.app.services.aggregation.graph_store_limits"):
         out = _apply(ENDPOINT, _patch(timeoutMaxMs=300_000, actor="ops@example.com"))
     assert conn.sets == [("TIMEOUT_MAX", 300_000, None)]
@@ -152,7 +199,7 @@ def test_raising_the_time_cap_sets_verifies_tells_providers_and_drops_the_cache(
 
 def test_a_cap_below_the_nodes_default_is_refused_before_anything_is_set(monkeypatch):
     conn = _Conn()
-    _wire(monkeypatch, ENDPOINT, [(_Provider(conn), "g")])
+    _wire(monkeypatch, {ENDPOINT: conn})
     with pytest.raises(gsl.GraphStoreLimitsError) as exc:
         _apply(ENDPOINT, _patch(timeoutMaxMs=20_000))
     assert "20 s" in str(exc.value) and "30 s" in str(exc.value)
@@ -161,7 +208,7 @@ def test_a_cap_below_the_nodes_default_is_refused_before_anything_is_set(monkeyp
 
 def test_raising_the_ceiling_needs_the_container_limit_and_refuses_a_shortfall_with_the_numbers(monkeypatch):
     conn = _Conn(maxmemory=6 * GB)
-    _wire(monkeypatch, ENDPOINT, [(_Provider(conn), "g")])
+    _wire(monkeypatch, {ENDPOINT: conn})
     with pytest.raises(gsl.GraphStoreLimitsError, match="containerMemoryBytes"):
         _apply(ENDPOINT, _patch(queryMemCapacity=GB))
     assert conn.sets == []
@@ -181,7 +228,7 @@ def test_raising_the_ceiling_needs_the_container_limit_and_refuses_a_shortfall_w
 
 def test_concurrency_is_capped_at_the_thread_count_and_an_unreported_thread_count_is_assumed(monkeypatch):
     conn = _Conn(maxmemory=6 * GB, config={"TIMEOUT_MAX": 180_000, "QUERY_MEM_CAPACITY": 256 * MB})
-    _wire(monkeypatch, ENDPOINT, [(_Provider(conn), "g")])
+    _wire(monkeypatch, {ENDPOINT: conn})
     out = _apply(ENDPOINT, _patch(queryMemCapacity=512 * MB, containerMemoryBytes=64 * GB, concurrentQueries=16))
     assert out.thread_count_assumed is True and out.concurrent_queries == gsl.THREAD_COUNT_ASSUMED
     assert out.container_needed_bytes == sc.container_memory_needed(6 * GB, 4, 512 * MB)
@@ -191,7 +238,7 @@ def test_concurrency_is_capped_at_the_thread_count_and_an_unreported_thread_coun
 
 def test_a_node_without_maxmemory_cannot_have_its_ceiling_raised(monkeypatch):
     conn = _Conn(maxmemory=0)
-    _wire(monkeypatch, ENDPOINT, [(_Provider(conn), "g")])
+    _wire(monkeypatch, {ENDPOINT: conn})
     with pytest.raises(gsl.GraphStoreLimitsError, match="no maxmemory"):
         _apply(ENDPOINT, _patch(queryMemCapacity=GB, containerMemoryBytes=64 * GB))
     assert conn.sets == []
@@ -203,7 +250,7 @@ def test_a_node_without_maxmemory_cannot_have_its_ceiling_raised(monkeypatch):
 
 def test_lowering_the_ceiling_needs_nothing_and_zero_is_refused(monkeypatch):
     conn = _Conn()
-    _wire(monkeypatch, ENDPOINT, [(_Provider(conn), "g")])
+    _wire(monkeypatch, {ENDPOINT: conn})
     out = _apply(ENDPOINT, _patch(queryMemCapacity=256 * MB))
     assert conn.sets == [("QUERY_MEM_CAPACITY", 256 * MB, None)]
     assert out.previous == {"QUERY_MEM_CAPACITY": 512 * MB}
@@ -227,16 +274,16 @@ def test_an_empty_patch_is_refused_by_the_schema():
 
 
 def test_an_unknown_node_is_not_found_and_an_unreadable_one_changes_nothing(monkeypatch):
-    _wire(monkeypatch, ENDPOINT, [(_Provider(_Conn()), "g")])
+    _wire(monkeypatch, {ENDPOINT: _Conn()})
     with pytest.raises(gsl.GraphStoreEndpointNotFound, match="known: falkor:6379"):
         _apply("10.9.9.9:6379", _patch(timeoutMaxMs=300_000))
 
     class _Dead(_Conn):
-        async def info(self, section=None):
+        async def info(self, *sections):
             raise ConnectionError("refused")
 
     dead = _Dead()
-    _wire(monkeypatch, ENDPOINT, [(_Provider(dead), "g")])
+    _wire(monkeypatch, {ENDPOINT: dead})
     with pytest.raises(gsl.GraphStoreLimitsError, match="could not be read"):
         _apply(ENDPOINT, _patch(timeoutMaxMs=300_000))
     assert dead.sets == []
@@ -244,39 +291,53 @@ def test_an_unknown_node_is_not_found_and_an_unreadable_one_changes_nothing(monk
 
 def test_a_value_that_does_not_read_back_is_an_error(monkeypatch):
     conn = _Conn(sticky=True)
-    _wire(monkeypatch, ENDPOINT, [(_Provider(conn), "g")])
+    _wire(monkeypatch, {ENDPOINT: conn})
     with pytest.raises(gsl.GraphStoreLimitsError, match="reads back as 180000"):
         _apply(ENDPOINT, _patch(timeoutMaxMs=300_000))
     assert cap._cache is not None                           # nothing verified, nothing dropped
 
 
-def test_cluster_mode_sets_the_owning_node_or_every_primary(monkeypatch):
-    conn = _ClusterConn()
-    p = _Provider(conn, mode="cluster")
-    _wire(monkeypatch, "10.0.0.1:6379", [(p, "g")])
+def test_a_change_reaches_one_node_or_every_node_of_its_instance(monkeypatch):
+    """Replicas included when all nodes are asked: a promoted replica that
+    never got the limit un-applies the change at the worst possible moment,
+    and the old path could not reach a replica at all."""
+    m1, m2, r1 = _Conn(), _Conn(), _Conn()
+    clients = {"10.0.0.1:6379": m1, "10.0.0.2:6379": m2, "10.0.0.9:6379": r1}
+    closed = _wire(monkeypatch, clients,
+                   endpoints=[("10.0.0.1:6379", ("10.0.0.9:6379",)), "10.0.0.2:6379"])
+
     out = _apply("10.0.0.1:6379", _patch(timeoutMaxMs=300_000))
-    assert [(n, v, t.host) for n, v, t in conn.sets] == [("TIMEOUT_MAX", 300_000, "10.0.0.1")]
+    assert [(n, v, t) for n, v, t in m1.sets] == [("TIMEOUT_MAX", 300_000, None)]
+    assert m2.sets == [] and r1.sets == []
     assert out.applied_to == ["10.0.0.1:6379"] and out.shard.endpoint == "10.0.0.1:6379"
-    conn.sets.clear()
+
+    m1.sets.clear()
     out = _apply("10.0.0.1:6379", _patch(timeoutMaxMs=240_000, applyToAllNodes=True))
-    assert [t.host for _, _, t in conn.sets] == ["10.0.0.1", "10.0.0.2"]
-    assert out.applied_to == ["10.0.0.1:6379", "10.0.0.2:6379"]
+    assert out.applied_to == ["10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.9:6379"]
+    assert len(m1.sets) == 1 and len(m2.sets) == 1 and len(r1.sets) == 1
+    # Every one-node client is closed behind it — a page of changes must not
+    # leak a socket per node.
+    assert len(closed) >= 5
+
+
+def test_a_node_with_no_rollups_on_it_is_still_adjustable(monkeypatch):
+    """The old rule — "only a node that holds a graph with rollups" — meant
+    a fresh shard, or one whose sources had not been aggregated yet, could
+    not be prepared before it took traffic."""
+    empty = _Conn()
+    _wire(monkeypatch, {"10.0.0.5:6379": empty})
+    out = _apply("10.0.0.5:6379", _patch(timeoutMaxMs=300_000))
+    assert out.applied_to == ["10.0.0.5:6379"] and len(empty.sets) == 1
 
 
 def test_a_refused_set_names_what_already_landed(monkeypatch):
-    conn = _ClusterConn()
-    seen = {"sets": 0}
-    orig = conn.execute_command
+    m1, m2 = _Conn(), _Conn()
 
-    async def flaky(*args, target_nodes=None):
-        if args[:2] == ("GRAPH.CONFIG", "SET"):
-            seen["sets"] += 1
-            if seen["sets"] == 2:
-                raise RuntimeError("ERR read-only replica")
-        return await orig(*args, target_nodes=target_nodes)
+    async def refuse(*args, **kw):
+        raise RuntimeError("ERR read-only replica")
 
-    conn.execute_command = flaky
-    _wire(monkeypatch, "10.0.0.1:6379", [(_Provider(conn, mode="cluster"), "g")])
+    m2.execute_command = refuse
+    _wire(monkeypatch, {"10.0.0.1:6379": m1, "10.0.0.2:6379": m2})
     with pytest.raises(gsl.GraphStoreLimitsError) as exc:
         _apply("10.0.0.1:6379", _patch(timeoutMaxMs=300_000, applyToAllNodes=True))
     assert "10.0.0.2:6379" in str(exc.value) and "Already applied on 10.0.0.1:6379" in str(exc.value)
@@ -292,7 +353,7 @@ def _dep_calls(dependant):
     return out
 
 
-def test_the_web_route_is_system_admin_only_and_proxies_with_the_actor(monkeypatch):
+def test_the_web_route_is_system_admin_only_and_takes_the_actor_from_the_session(monkeypatch):
     from backend.app.api.v1.endpoints import aggregation as agg_mod
 
     route = next(
@@ -301,51 +362,75 @@ def test_the_web_route_is_system_admin_only_and_proxies_with_the_actor(monkeypat
     )
     assert agg_mod._REQUIRE_SYSTEM_ADMIN in _dep_calls(route.dependant)
 
-    captured = {}
+    seen = {}
 
-    async def _fake_proxy(method, path, request, body=None):
-        captured.update(method=method, path=path, body=body)
-        return "proxied"
+    async def applied(session, endpoint, patch):
+        seen.update(endpoint=endpoint, actor=patch.actor)
+        return "done"
 
-    monkeypatch.setattr(agg_mod, "_proxy", _fake_proxy)
+    monkeypatch.setattr(gsl, "apply_graph_store_limits", applied)
+    # Proxy mode makes no difference: the change goes out from the web tier,
+    # which has the topology and the instance's own settings.
     monkeypatch.setattr(agg_mod, "_PROXY_ENABLED", True)
     out = asyncio.run(agg_mod.set_graph_store_limits(
         "10.0.0.1:6379", _patch(timeoutMaxMs=300_000, actor="spoofed"),
-        types.SimpleNamespace(query_params={}), admin=types.SimpleNamespace(id="admin-1"),
-        svc=None, session=None,
+        admin=types.SimpleNamespace(id="admin-1"), session=None,
     ))
-    assert out == "proxied" and captured["method"] == "PATCH"
-    assert captured["path"] == "/aggregation/graph-store/10.0.0.1%3A6379/limits"
-    assert json.loads(captured["body"]) == {"timeoutMaxMs": 300_000, "applyToAllNodes": False, "actor": "admin-1"}
+    assert out == "done"
+    assert seen == {"endpoint": "10.0.0.1:6379", "actor": "admin-1"}
 
 
 def test_the_web_route_maps_refusals_to_422_and_unknown_nodes_to_404(monkeypatch):
     from fastapi import HTTPException
     from backend.app.api.v1.endpoints import aggregation as agg_mod
 
-    monkeypatch.setattr(agg_mod, "_PROXY_ENABLED", False)
-    request = types.SimpleNamespace(query_params={})
-    svc = types.SimpleNamespace(_registry=None)
-
-    async def refuse(session, registry, endpoint, patch):
+    async def refuse(session, endpoint, patch):
         raise gsl.GraphStoreLimitsError("short by 1.0 GB")
 
     monkeypatch.setattr(gsl, "apply_graph_store_limits", refuse)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(agg_mod.set_graph_store_limits(
-            "n1", _patch(queryMemCapacity=GB), request, admin=types.SimpleNamespace(id="a"), svc=svc, session=None,
+            "n1", _patch(queryMemCapacity=GB), admin=types.SimpleNamespace(id="a"), session=None,
         ))
     assert exc.value.status_code == 422 and "short by" in exc.value.detail
 
-    async def missing(session, registry, endpoint, patch):
+    async def missing(session, endpoint, patch):
         raise gsl.GraphStoreEndpointNotFound("no such node")
 
     monkeypatch.setattr(gsl, "apply_graph_store_limits", missing)
     with pytest.raises(HTTPException) as exc:
         asyncio.run(agg_mod.set_graph_store_limits(
-            "n1", _patch(queryMemCapacity=GB), request, admin=types.SimpleNamespace(id="a"), svc=svc, session=None,
+            "n1", _patch(queryMemCapacity=GB), admin=types.SimpleNamespace(id="a"), session=None,
         ))
     assert exc.value.status_code == 404
+
+
+def test_the_capacity_routes_are_served_in_process_in_every_mode(monkeypatch):
+    """They read the topology snapshot the web tier builds for itself, so
+    forwarding to the control plane would only add a hop and a second cache
+    — and in proxy mode the capacity card used to depend on a service that
+    does not hold the snapshot at all."""
+    from backend.app.api.v1.endpoints import aggregation as agg_mod
+
+    monkeypatch.setattr(agg_mod, "_PROXY_ENABLED", True)
+
+    async def never(*a, **kw):
+        raise AssertionError("proxied a route that reads the local snapshot")
+
+    monkeypatch.setattr(agg_mod, "_proxy", never)
+
+    from backend.app.services.aggregation import capacity as cap_mod
+
+    async def fleet(session, *, fresh=False):
+        return "fleet"
+
+    async def one(session, ds_id):
+        return "source"
+
+    monkeypatch.setattr(cap_mod, "assemble_fleet_capacity", fleet)
+    monkeypatch.setattr(cap_mod, "assemble_source_capacity", one)
+    assert asyncio.run(agg_mod.get_aggregation_capacity(session=None, fresh=False)) == "fleet"
+    assert asyncio.run(agg_mod.get_data_source_capacity("ds-1", session=None)) == "source"
 
 
 def test_the_control_plane_route_takes_the_patch_body():

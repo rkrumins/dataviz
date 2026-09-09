@@ -1456,6 +1456,11 @@ class ShardCapacity(BaseModel):
     timeout_max_ms: Optional[int] = Field(None, alias="timeoutMaxMs")
     timeout_default_ms: Optional[int] = Field(None, alias="timeoutDefaultMs")
     thread_count: Optional[int] = Field(None, alias="threadCount")
+    # One word for what this row IS, so a chip does not have to be inferred
+    # from three nullable fields: measured (the budget governs here),
+    # ungoverned (no maxmemory — the static count rule applies), unreachable
+    # (the node did not answer; ``whyNot`` says what it said).
+    state: Literal["measured", "ungoverned", "unreachable"] = "measured"
     sources: List[CapacitySource] = Field(default_factory=list)
 
     class Config:
@@ -1482,6 +1487,12 @@ class AggregationCapacityResponse(BaseModel):
     truncated: bool = False
     measured_at: str = Field(alias="measuredAt")
     cache_age_ms: int = Field(0, alias="cacheAgeMs")
+    # The reading behind these figures is the last good one: the most recent
+    # attempt to re-read the graph store failed, and ``lastError`` says how.
+    # The rows are still true as of ``measuredAt`` — which is why they are
+    # shown with a note rather than replaced by an error.
+    stale: bool = False
+    last_error: Optional[str] = Field(None, alias="lastError")
 
     class Config:
         populate_by_name = True

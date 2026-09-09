@@ -80,9 +80,41 @@ describe('GraphStoreCapacity', () => {
     it('says why a shard cannot be measured and which rule applies instead', async () => {
         wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
         await screen.findByText('10.0.0.2:6379')
+        expect(screen.getByText('Cannot govern')).toBeInTheDocument()
         expect(screen.getByText(/The shard reports no maxmemory/)).toBeInTheDocument()
         expect(screen.getByText(/static cap of/)).toBeInTheDocument()
         expect(screen.getByText(/Not placed on a shard: Legacy \(provider unavailable/)).toBeInTheDocument()
+    })
+
+    it('tells a node that is not there apart from one that governs nothing', async () => {
+        // The same words used to cover both, and "set maxmemory on this node"
+        // is advice for a node that is running.
+        getFleetCapacity.mockResolvedValue({
+            ...SNAPSHOT,
+            shards: [{
+                ...SNAPSHOT.shards[1], endpoint: '10.0.0.3:6379', state: 'unreachable',
+                whyNot: "the shard's memory could not be measured (Connection refused)",
+            }],
+        })
+        wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+        await screen.findByText('10.0.0.3:6379')
+        expect(screen.getByText('Unreachable')).toBeInTheDocument()
+        expect(screen.getByText(/Connection refused/)).toBeInTheDocument()
+        expect(screen.getByText(/keep their checkpoint/)).toBeInTheDocument()
+        expect(screen.queryByText(/static cap of/)).not.toBeInTheDocument()
+    })
+
+    it('keeps the rows when the reading behind them is the last good one', async () => {
+        // Blanking the whole card on one failed poll — and filling it again on
+        // the next — is the flicker an operator learned not to trust.
+        getFleetCapacity.mockResolvedValue({
+            ...SNAPSHOT, stale: true, lastError: 'no seed answered', cacheAgeMs: 42_000,
+        })
+        wrap(<GraphStoreCapacity onOpenSource={() => {}} onFacetWouldNotFit={() => {}} />)
+        await screen.findByText('10.0.0.1:6379')
+        expect(screen.getByText(/Last refresh failed/)).toBeInTheDocument()
+        expect(screen.getByText(/42s ago: no seed answered/)).toBeInTheDocument()
+        expect(screen.queryByText(/Capacity could not be measured right now/)).not.toBeInTheDocument()
     })
 
     it('opens a source from its chip and filters the table to the refused ones', async () => {

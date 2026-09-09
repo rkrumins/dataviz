@@ -516,6 +516,8 @@ _cache: Optional[Tuple[float, GraphStoreTopologyResponse]] = None
 _last_error: Optional[str] = None
 _prev_nodes: Dict[str, Dict[str, Any]] = {}
 _lock = asyncio.Lock()
+#: instance id → the connection settings that reached it, from the last build.
+_configs: Dict[str, FalkorDBConnConfig] = {}
 
 
 async def _read_all_nodes(
@@ -618,6 +620,14 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     instances.sort(key=lambda i: (
         (i.providers[0].name or "").lower() if i.providers else "~env", i.id,
     ))
+
+    # How to reach each instance again, kept beside the snapshot so a write
+    # (a limits change on one node) can open its own short-lived client with
+    # the instance's own auth and TLS, instead of borrowing whichever
+    # provider happened to be instantiated.
+    global _configs
+    by_id = {_instance_id(slot.key): slot.cfg for slot, _raw in paired}
+    _configs = {i.id: cfg for i in instances if (cfg := by_id.get(i.id)) is not None}
 
     for instance in instances:
         for shard in instance.shards:
@@ -844,6 +854,34 @@ def cached_snapshot() -> Optional[GraphStoreTopologyResponse]:
 
 
 # ── Reading the snapshot ─────────────────────────────────────────────────
+
+
+def instance_of_endpoint(
+    snapshot: GraphStoreTopologyResponse, endpoint: str,
+) -> Optional[GraphStoreInstance]:
+    """The instance that has a node at ``endpoint`` — master or replica."""
+    for instance in snapshot.instances:
+        for shard in instance.shards:
+            for node in (shard.master, *shard.replicas):
+                if node.endpoint == endpoint:
+                    return instance
+    return None
+
+
+def nodes_of(instance: GraphStoreInstance) -> List[GraphStoreNode]:
+    """Every node of an instance, masters first — the order a change that
+    applies to all of them should be made in."""
+    masters = [shard.master for shard in instance.shards]
+    replicas = [r for shard in instance.shards for r in shard.replicas]
+    return [*masters, *replicas]
+
+
+def conn_config_of(instance_id: str) -> Optional[FalkorDBConnConfig]:
+    """The connection settings that reached ``instance_id`` in the last
+    snapshot build: auth, TLS and the address remap, ready for a one-node
+    client. ``None`` before the first build, or for an instance that is gone.
+    """
+    return _configs.get(instance_id)
 
 
 def instance_for_provider(

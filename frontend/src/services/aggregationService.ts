@@ -557,6 +557,9 @@ export interface ShardCapacity {
   timeoutDefaultMs?: number | null;
   /** The node's THREAD_COUNT: the memory ceiling is charged per thread. */
   threadCount?: number | null;
+  /** What this row IS: the budget governs here, the node set no maxmemory
+   *  so only the static count rule applies, or the node did not answer. */
+  state?: 'measured' | 'ungoverned' | 'unreachable';
   sources: CapacitySource[];
 }
 
@@ -576,6 +579,10 @@ export interface AggregationCapacityResponse {
   truncated: boolean;
   measuredAt: string;
   cacheAgeMs: number;
+  /** The reading is the last good one and the refresh behind it failed;
+   *  ``lastError`` says how. The rows are still true as of measuredAt. */
+  stale?: boolean;
+  lastError?: string | null;
 }
 
 export interface FullDetailPreflight {

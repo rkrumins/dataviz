@@ -331,16 +331,15 @@ async def put_aggregation_settings(
     dependencies=[Depends(_require_ingestion_read)],
 )
 async def get_aggregation_capacity(
-    request: Request,
-    svc=Depends(_get_svc),
-    # Bulkhead pool: the sweep holds this across outbound INFO reads.
+    # Bulkhead pool: the assembly holds this across its SQL.
     session: AsyncSession = Depends(get_graph_read_db_session),
     fresh: bool = Query(False),
 ):
-    if _PROXY_ENABLED:
-        return await _proxy("GET", "/aggregation/capacity", request)
+    # Served here even in proxy mode: the figures come from the graph store
+    # topology snapshot, which the web tier builds for itself, so forwarding
+    # to the control plane would only add a hop and a second cache.
     from backend.app.services.aggregation.capacity import assemble_fleet_capacity
-    return await assemble_fleet_capacity(session, svc._registry, fresh=fresh)
+    return await assemble_fleet_capacity(session, fresh=fresh)
 
 
 @router.get(
@@ -350,16 +349,11 @@ async def get_aggregation_capacity(
 )
 async def get_data_source_capacity(
     ds_id: str,
-    request: Request,
-    svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_graph_read_db_session),
 ):
-    if _PROXY_ENABLED:
-        return await _proxy(
-            "GET", f"/aggregation/data-sources/{ds_id}/capacity", request,
-        )
+    # In-process in every mode, like the fleet view above.
     from backend.app.services.aggregation.capacity import assemble_source_capacity
-    doc = await assemble_source_capacity(session, svc._registry, ds_id)
+    doc = await assemble_source_capacity(session, ds_id)
     if doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -384,24 +378,17 @@ async def get_data_source_capacity(
 async def set_graph_store_limits(
     endpoint: str,
     patch: GraphStoreLimitsPatch,
-    request: Request,
     admin: User = Depends(_REQUIRE_SYSTEM_ADMIN),
-    svc=Depends(_get_svc),
     session: AsyncSession = Depends(get_graph_read_db_session),
 ):
     patch.actor = str(getattr(admin, "id", None) or getattr(admin, "email", None) or "")[:255] or None
-    if _PROXY_ENABLED:
-        from urllib.parse import quote
-        body = patch.model_dump_json(by_alias=True, exclude_none=True).encode()
-        return await _proxy(
-            "PATCH", f"/aggregation/graph-store/{quote(endpoint, safe='')}/limits",
-            request, body=body,
-        )
+    # In-process in every mode: the change goes out over a one-node client
+    # built from the instance's own settings, which the web tier has.
     from backend.app.services.aggregation.graph_store_limits import (
         GraphStoreEndpointNotFound, GraphStoreLimitsError, apply_graph_store_limits,
     )
     try:
-        return await apply_graph_store_limits(session, svc._registry, endpoint, patch)
+        return await apply_graph_store_limits(session, endpoint, patch)
     except GraphStoreEndpointNotFound as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except GraphStoreLimitsError as e:

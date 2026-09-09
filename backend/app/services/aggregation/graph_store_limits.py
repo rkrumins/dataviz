@@ -170,51 +170,88 @@ def _reading_value(reading: ShardMemory, name: str) -> Optional[int]:
     }[name]
 
 
-def _node_label(node: Any) -> str:
-    return f"{getattr(node, 'host', '?')}:{getattr(node, 'port', '?')}"
+def _split_endpoint(endpoint: str) -> Tuple[str, int]:
+    host, _, port = endpoint.rpartition(":")
+    return host or endpoint, int(port or 6379)
 
 
-async def _targets(conn: Any, mode: Optional[str], graph_key: str, *, all_nodes: bool) -> List[Tuple[str, Any]]:
-    """``[(endpoint, node)]`` to SET on: the owning node, or every primary
-    in cluster mode when asked. ``node`` is None outside cluster mode."""
-    if mode != "cluster":
-        endpoint, node = await _owner(conn, mode, graph_key)
-        return [(endpoint, node)]
-    if all_nodes:
-        primaries = conn.get_primaries() if hasattr(conn, "get_primaries") else []
-        if primaries:
-            return [(_node_label(n), n) for n in primaries]
-    endpoint, node = await _owner(conn, mode, graph_key)
-    return [(endpoint, node)]
+async def _targets(snapshot: Any, endpoint: str, *, all_nodes: bool) -> List[str]:
+    """The endpoints to SET on: this node, or every node of its instance
+    (masters first) when asked.
+
+    Replicas included on purpose: a promoted replica must already carry the
+    limit, or the change quietly un-applies itself the next time the cluster
+    fails over — which is exactly when the store is under stress.
+    """
+    from backend.app.services.graph_store.topology import instance_of_endpoint, nodes_of
+
+    instance = instance_of_endpoint(snapshot, endpoint)
+    if instance is None:
+        return []
+    if not all_nodes:
+        return [endpoint]
+    return [node.endpoint for node in nodes_of(instance)]
+
+
+class _Direct:
+    """``read_shard_memory`` reads ``db.connection``; a one-node client IS
+    the connection, so this is the whole adapter."""
+
+    def __init__(self, client: Any) -> None:
+        self.connection = client
 
 
 async def apply_graph_store_limits(
-    session: AsyncSession, registry: Any, endpoint: str, patch: GraphStoreLimitsPatch,
+    session: AsyncSession, endpoint: str, patch: GraphStoreLimitsPatch,
 ) -> GraphStoreLimitsResponse:
     """Set ``patch`` on the node ``endpoint`` (``host:port``) and verify it.
-    Raises :class:`GraphStoreEndpointNotFound` (404) when the capacity
-    sweep knows no such node, :class:`GraphStoreLimitsError` (422) when the
-    change is refused or did not land."""
+    Raises :class:`GraphStoreEndpointNotFound` (404) when the topology has no
+    such node, :class:`GraphStoreLimitsError` (422) when the change is
+    refused or did not land."""
+    from backend.app.providers.manager import provider_manager
+    from backend.app.services.graph_store import discovery
+    from backend.app.services.graph_store.topology import (
+        conn_config_of, get_topology_snapshot, instance_of_endpoint,
+    )
     from .capacity import (
-        _assemble, _init_timeout_s, _now_iso, _stored_tuning, client_of, effective_limits,
-        invalidate_fleet_cache, mode_of, shard_row,
+        _now_iso, _stored_tuning, effective_limits, invalidate_fleet_cache, shard_row,
     )
 
-    parts = await _assemble(session, registry) or {}
-    holders: List[Tuple[Any, str]] = (parts.get("providers_by_endpoint") or {}).get(endpoint) or []
-    if not holders:
-        known = sorted((parts.get("providers_by_endpoint") or {}).keys())
-        raise GraphStoreEndpointNotFound(
-            f"No graph store node {endpoint!r} is known to the capacity sweep"
-            + (f" (known: {', '.join(known)})" if known else "")
-            + ". Only a node that holds a graph with rollups can be adjusted here."
+    snapshot = await get_topology_snapshot()
+    instance = instance_of_endpoint(snapshot, endpoint)
+    cfg = conn_config_of(instance.id) if instance is not None else None
+    if instance is None or cfg is None:
+        known = sorted(
+            node.endpoint
+            for inst in snapshot.instances
+            for shard in inst.shards
+            for node in (shard.master, *shard.replicas)
         )
-    provider, graph_key = holders[0]
-    db = client_of(provider)
-    mode = mode_of(provider)
-    timeout = _init_timeout_s()
+        raise GraphStoreEndpointNotFound(
+            f"No graph store node {endpoint!r} is in the topology"
+            + (f" (known: {', '.join(known)})" if known else "")
+            + ". Open Admin → Graph store to see the nodes this deployment has."
+        )
+    from backend.app.providers.falkordb_connection import connect_verify_budget
 
-    current = await read_shard_memory(db, mode=mode, graph_key=graph_key, timeout=timeout)
+    # A limits change is a write with a person waiting: the same window a
+    # node read gets, extended for a provider configured for a slow hop.
+    timeout = connect_verify_budget(cfg, 3.0)
+
+    # One short-lived client per node, built from the instance's own
+    # settings: a node with no graph on it is as adjustable as one with a
+    # hundred, and a replica is reachable even though nothing writes to it.
+    async def _read(target: str) -> ShardMemory:
+        host, port = _split_endpoint(target)
+        client = discovery.node_client(cfg, host, port, socket_timeout=timeout)
+        try:
+            return await read_shard_memory(
+                _Direct(client), mode=None, graph_key="", timeout=timeout,
+            )
+        finally:
+            await discovery._aclose(client)
+
+    current = await _read(endpoint)
     if current.source != "measured":
         raise GraphStoreLimitsError(
             f"{endpoint} could not be read right now ({current.note or 'no reading'}); "
@@ -223,22 +260,23 @@ async def apply_graph_store_limits(
     validated = validate_limits(current, patch)
     previous = {name: _reading_value(current, name) for name, _ in validated.pairs}
 
-    conn = getattr(db, "connection", None)
-    if conn is None:
-        raise GraphStoreLimitsError(f"The provider for {endpoint} holds no client; nothing was changed.")
-    targets = await _targets(conn, mode, graph_key, all_nodes=patch.apply_to_all_nodes)
+    targets = await _targets(snapshot, endpoint, all_nodes=patch.apply_to_all_nodes)
     applied_to: List[str] = []
-    for target_endpoint, node in targets:
+    for target_endpoint in targets:
+        host, port = _split_endpoint(target_endpoint)
+        client = discovery.node_client(cfg, host, port, socket_timeout=timeout)
         try:
-            await set_graph_config(conn, node, validated.pairs)
+            await set_graph_config(client, None, validated.pairs)
         except Exception as exc:                          # noqa: BLE001 — reported, with what already landed
             raise GraphStoreLimitsError(
                 f"GRAPH.CONFIG SET failed on {target_endpoint}: {exc}. "
                 + (f"Already applied on {', '.join(applied_to)}." if applied_to else "Nothing was changed.")
             ) from exc
+        finally:
+            await discovery._aclose(client)
         applied_to.append(target_endpoint)
 
-    after = await read_shard_memory(db, mode=mode, graph_key=graph_key, timeout=timeout)
+    after = await _read(endpoint)
     for name, value in validated.pairs:
         seen = _reading_value(after, name)
         if seen != value:
@@ -246,16 +284,17 @@ async def apply_graph_store_limits(
                 f"{name} was set to {value} on {endpoint} but reads back as "
                 f"{seen if seen is not None else 'unlimited or unreadable'}; check the node."
             )
-    for held, _ in holders:
-        note = getattr(held, "note_server_limits", None)
-        if note is not None:
-            note(
-                endpoint,
-                timeout_max_ms=after.timeout_max_ms,
-                query_mem_capacity=after.query_mem_capacity,
-                thread_count=after.thread_count,
-                timeout_default_ms=after.timeout_default_ms,
-            )
+    for ref in instance.providers:
+        for held in provider_manager.instantiated(ref.id):
+            note = getattr(held, "note_server_limits", None)
+            if note is not None:
+                note(
+                    endpoint,
+                    timeout_max_ms=after.timeout_max_ms,
+                    query_mem_capacity=after.query_mem_capacity,
+                    thread_count=after.thread_count,
+                    timeout_default_ms=after.timeout_default_ms,
+                )
     invalidate_fleet_cache()
     fragment = args_fragment(validated.pairs)
     logger.info(

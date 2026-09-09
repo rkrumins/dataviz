@@ -10,19 +10,27 @@ on it, how many more rollup edges fit), the per-source drawer and the
 re-trigger dialog (this source's footprint and whether Full detail would fit
 before the job is queued).
 
-Shape, so it stays cheap on a large fleet and honest on a broken one:
+Shape, so it stays cheap on a large fleet, honest on a broken one, and —
+the part it did not have — STILL between refreshes:
 
 * One SQL pass over aggregated sources (bounded), the freshness views' own
   state/failure/latest-run maps, and the stored Defaults row.
-* Providers are resolved once per ``(provider_id, graph_name)`` — the
-  manager's own cache key — and every graph is mapped to its owning node
-  with ``owner_endpoint`` so the sweep pays ONE ``INFO memory`` per node,
-  however many graphs share it.
-* The whole sweep runs under a deadline and never raises: a provider that
-  cannot be resolved, a node that cannot be read, or a source the deadline
-  cut off lands in ``unresolved`` with a coarse reason.
+* Every node figure comes from the graph store topology snapshot
+  (``services.graph_store``), which reads all nodes of every instance
+  concurrently behind one 30s cache and keeps its last good reading when a
+  rebuild fails. Capacity itself now dials nothing.
+* Placement is arithmetic, not a round trip: a graph key hashes to a slot
+  and the snapshot says which master owns it. So a source whose provider
+  happens not to be instantiated in this process still appears — where the
+  old per-source provider resolution left it "cannot be measured", and
+  differently on every refresh.
+* Every master is a row, with or without sources on it; a node the snapshot
+  could not read is a row too, marked unreachable with the reason. The
+  order is the snapshot's own, so rows never swap places as utilisation
+  moves under them.
 * The fleet snapshot is cached briefly in-process (stampede-guarded) so a
-  page full of viewers shares one sweep; ``fresh=True`` bypasses it.
+  page full of viewers shares one assembly; ``fresh=True`` rebuilds the
+  topology as well.
 """
 from __future__ import annotations
 
@@ -38,8 +46,8 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.providers.shard_capacity import (
-    ShardMemory, bytes_per_edge_default, compute_write_budget, owner_endpoint,
-    read_shard_memory, shard_reserve_pct_default, estimate_margin_pct_default,
+    ShardMemory, bytes_per_edge_default, compute_write_budget,
+    shard_reserve_pct_default, estimate_margin_pct_default,
 )
 from .models import AggregationJobORM, AggregationSettingsORM
 from .schemas import (
@@ -55,10 +63,6 @@ _AGGREGATED_STATUSES = ("ready", "failed", "pending", "running")
 
 def _ttl_s() -> float:
     return float(os.getenv("AGGREGATION_CAPACITY_CACHE_TTL_S", "10"))
-
-
-def _deadline_s() -> float:
-    return float(os.getenv("AGGREGATION_CAPACITY_DEADLINE_S", "8"))
 
 
 def _max_sources() -> int:
@@ -221,13 +225,30 @@ def shard_row(
     used_pct = None
     if reading.measurable:
         used_pct = round(int(reading.used or 0) * 100.0 / int(reading.maxmemory or 1), 1)
+    # Three states, told apart by what is missing: a node that answered but
+    # set no maxmemory can still be seen (used, graphs, limits) and merely
+    # cannot be governed; one that did not answer shows nothing at all.
+    state = (
+        "measured" if reading.measurable
+        else "ungoverned" if reading.used is not None
+        else "unreachable"
+    )
+    # The coarse reason plus what the node actually said, when it said
+    # anything: "could not be measured" alone sent an operator looking for a
+    # capacity problem on a node that was simply not running.
+    why_not = None
+    if not reading.measurable:
+        why_not = reading.why_not
+        if reading.note:
+            why_not = f"{why_not} ({reading.note})"
     return ShardCapacity(
+        state=state,
         endpoint=reading.endpoint,
         used=reading.used,
         maxmemory=reading.maxmemory,
         policy=reading.policy,
         measurable=reading.measurable,
-        why_not=None if reading.measurable else reading.why_not,
+        why_not=why_not,
         used_pct=used_pct,
         reserve_pct=budget.reserve_pct,
         reserve_bytes=budget.reserve_bytes,
@@ -424,115 +445,55 @@ async def _list_sources(
 # ── Assembly ────────────────────────────────────────────────────────────
 
 
-class _Sweep:
-    """One pass over a set of sources: providers resolved once per cache
-    key, nodes read once per endpoint, everything else recorded as
-    unresolved with a coarse reason."""
-
-    def __init__(self, session: AsyncSession, registry: Any) -> None:
-        self.session = session
-        self.registry = registry
-        self.providers: Dict[Tuple[str, str], Any] = {}
-        self.failed: Dict[Tuple[str, str], str] = {}
-        self.readings: Dict[str, ShardMemory] = {}
-        # endpoint → (bytes, jobs) running rebuilds hold in its ledger; read
-        # once per node beside the memory reading. One unreadable ledger
-        # (no bus) shows none for the rest of the sweep rather than paying
-        # a connect timeout per node.
-        self.reservations: Dict[str, Tuple[int, int]] = {}
-        self._ledger_ok = True
-        self.placed: Dict[str, Tuple[str, str]] = {}     # ds_id → (endpoint, graph_key)
-        self.unresolved: Dict[str, str] = {}             # ds_id → why_not
-        # endpoint → the providers (with the graph key that placed each)
-        # whose graphs live there: what a limits change must be told, and
-        # the client it goes through.
-        self.providers_by_endpoint: Dict[str, List[Tuple[Any, str]]] = {}
-
-    async def _provider_for(self, ds: Any) -> Any:
-        key = (str(getattr(ds, "provider_id", "") or ""), str(getattr(ds, "graph_name", "") or ""))
-        if key in self.providers:
-            return self.providers[key]
-        if key in self.failed:
-            raise RuntimeError(self.failed[key])
-        if self.registry is None:
-            self.failed[key] = "no provider registry"
-            raise RuntimeError(self.failed[key])
+async def _reserved_map(endpoints: List[str]) -> Dict[str, Tuple[int, int]]:
+    """What running rebuilds hold in each node's ledger — one bus round trip
+    per node, and none at all once one has failed: a deployment without the
+    bus must not pay a connect timeout per shard to learn that twice."""
+    out: Dict[str, Tuple[int, int]] = {}
+    ok = True
+    for endpoint in endpoints:
+        if not ok:
+            out[endpoint] = (0, 0)
+            continue
         try:
-            provider = await self.registry.get_provider_for_workspace(
-                getattr(ds, "workspace_id", None), self.session, data_source_id=ds.id,
-            )
-            connect = getattr(provider, "_ensure_connected", None)
-            if connect is not None:
-                async with asyncio.timeout(_init_timeout_s()):
-                    await connect()
-        except Exception as exc:                          # noqa: BLE001 — recorded, never raised
-            # Coarse on purpose: the raw text carries words the failure
-            # classifier keys on, and a person needs the shape, not the trace.
-            self.failed[key] = f"provider unavailable ({type(exc).__name__})"
-            logger.info("capacity: provider for %s unresolved: %s", ds.id, exc)
-            raise RuntimeError(self.failed[key])
-        self.providers[key] = provider
-        return provider
-
-    async def place(self, ds: Any) -> None:
-        """Map one source to its owning node, reading the node once."""
-        try:
-            provider = await self._provider_for(ds)
-        except RuntimeError as exc:
-            self.unresolved[ds.id] = str(exc)
-            return
-        db = client_of(provider)
-        if db is None:
-            self.unresolved[ds.id] = "provider has no graph client"
-            return
-        mode = mode_of(provider)
-        key = graph_key_of(ds, provider)
-        timeout = _init_timeout_s()
-        endpoint = await owner_endpoint(db, mode=mode, graph_key=key, timeout=timeout)
-        if endpoint == "unknown":
-            self.unresolved[ds.id] = "the shard owning this graph could not be determined"
-            return
-        if endpoint not in self.readings:
-            self.readings[endpoint] = await read_shard_memory(
-                db, mode=mode, graph_key=key, timeout=timeout,
-            )
-            self.reservations[endpoint] = await self._reserved(endpoint, timeout)
-        self.placed[ds.id] = (endpoint, key)
-        holders = self.providers_by_endpoint.setdefault(endpoint, [])
-        if any(held is provider for held, _ in holders):
-            return
-        holders.append((provider, key))
-        # The sweep is the one place every provider's node gets read, so it
-        # tells each provider (once per node) what that node allows: the
-        # per-query clamp then follows the server rather than the env mirror.
-        reading = self.readings[endpoint]
-        note = getattr(provider, "note_server_limits", None)
-        if note is not None:
-            note(
-                endpoint,
-                timeout_max_ms=getattr(reading, "timeout_max_ms", None),
-                query_mem_capacity=getattr(reading, "query_mem_capacity", None),
-                thread_count=getattr(reading, "thread_count", None),
-                timeout_default_ms=getattr(reading, "timeout_default_ms", None),
-            )
-
-
-    async def _reserved(self, endpoint: str, timeout: float) -> Tuple[int, int]:
-        if not self._ledger_ok:
-            return 0, 0
-        try:
-            # A bus round trip, not a node read: a second is generous.
-            async with asyncio.timeout(min(timeout, 1.0)):
-                return await reserved_on(endpoint)
+            async with asyncio.timeout(1.0):
+                out[endpoint] = await reserved_on(endpoint)
         except Exception as exc:                          # noqa: BLE001 — fail open, once
-            self._ledger_ok = False
+            ok = False
+            out[endpoint] = (0, 0)
             logger.info("capacity: reservation ledger unreadable (%s) — showing none", exc)
-            return 0, 0
+    return out
+
+
+def _tell_providers(instance: Any, endpoint: str, reading: ShardMemory) -> None:
+    """Tell the providers ALREADY built in this process what this node allows.
+
+    Read-only by construction: ``instantiated`` is a dict lookup, so a page
+    refresh never dials a store to hand it a limit it can learn on its own
+    next time it connects.
+    """
+    from backend.app.providers.manager import provider_manager
+
+    for ref in instance.providers:
+        for provider in provider_manager.instantiated(ref.id):
+            note = getattr(provider, "note_server_limits", None)
+            if note is not None:
+                note(
+                    endpoint,
+                    timeout_max_ms=reading.timeout_max_ms,
+                    query_mem_capacity=reading.query_mem_capacity,
+                    thread_count=reading.thread_count,
+                    timeout_default_ms=reading.timeout_default_ms,
+                )
 
 
 async def _assemble(
-    session: AsyncSession, registry: Any, *, ds_id: Optional[str] = None,
+    session: AsyncSession, *, ds_id: Optional[str] = None, fresh: bool = False,
 ) -> Optional[Dict[str, Any]]:
+    from backend.app.services.graph_store.topology import (
+        get_topology_snapshot, instance_for_provider, place, reading_of,
+    )
+
     sources, total, truncated = await _list_sources(session, ds_id=ds_id)
     if ds_id is not None and not sources:
         return None
@@ -546,31 +507,61 @@ async def _assemble(
     stats = await latest_completed_stats_map(session, ds_ids)
     limits = effective_limits(await _stored_tuning(session))
 
-    sweep = _Sweep(session, registry)
-    try:
-        async with asyncio.timeout(_deadline_s()):
-            for ds, _name in sources:
-                await sweep.place(ds)
-    except TimeoutError:
-        logger.info("capacity sweep hit its %.1fs deadline after %d of %d sources",
-                    _deadline_s(), len(sweep.placed) + len(sweep.unresolved), len(sources))
+    snapshot = await get_topology_snapshot(fresh=fresh)
+
+    # Placement first — arithmetic over the snapshot, no I/O at all.
+    placed: Dict[str, Tuple[str, str]] = {}               # ds_id → (endpoint, graph_key)
+    unresolved_why: Dict[str, str] = {}
     for ds, _name in sources:
-        if ds.id not in sweep.placed and ds.id not in sweep.unresolved:
-            sweep.unresolved[ds.id] = "not measured before the deadline"
+        instance = instance_for_provider(snapshot, str(getattr(ds, "provider_id", "") or ""))
+        if instance is None:
+            unresolved_why[ds.id] = (
+                "no graph store instance is configured for this source's provider"
+            )
+            continue
+        if not instance.reachable and not instance.shards:
+            unresolved_why[ds.id] = instance.error or "the graph store could not be reached"
+            continue
+        key = graph_key_of(ds, None)
+        if not key:
+            unresolved_why[ds.id] = "this source has no graph name"
+            continue
+        shard, slot = place(instance, key)
+        if shard is None:
+            unresolved_why[ds.id] = (
+                f"no shard of this graph store holds slot {slot}"
+            )
+            continue
+        placed[ds.id] = (shard.master.endpoint, key)
+
+    # One row per MASTER, in the snapshot's order — including the masters
+    # with nothing on them and the ones that could not be read, which the
+    # per-source sweep never had a way to mention.
+    masters: List[Tuple[Any, Any]] = [
+        (instance, shard.master)
+        for instance in snapshot.instances
+        for shard in instance.shards
+    ]
+    readings: Dict[str, ShardMemory] = {}
+    for _instance, node in masters:
+        readings.setdefault(node.endpoint, reading_of(node))
+    reservations = await _reserved_map(list(readings))
+    for instance, node in masters:
+        _tell_providers(instance, node.endpoint, readings[node.endpoint])
 
     by_endpoint: Dict[str, List[CapacitySource]] = {}
     unresolved: List[UnresolvedSource] = []
     rows_by_id: Dict[str, CapacitySource] = {}
     for ds, provider_name in sources:
-        if ds.id in sweep.unresolved:
+        if ds.id not in placed:
             unresolved.append(UnresolvedSource(
                 data_source_id=ds.id, label=getattr(ds, "label", None),
                 workspace_id=getattr(ds, "workspace_id", None),
                 provider_id=getattr(ds, "provider_id", None),
-                why_not=sweep.unresolved[ds.id],
+                why_not=unresolved_why.get(ds.id, "this source could not be placed"),
             ))
             continue
-        endpoint, key = sweep.placed[ds.id]
+        endpoint, key = placed[ds.id]
         row = source_row(
             ds, provider_name=provider_name, graph_key=key,
             state=states.get(ds.id, {}), stats=stats.get(ds.id, {}),
@@ -580,20 +571,25 @@ async def _assemble(
         by_endpoint.setdefault(endpoint, []).append(row)
 
     shards: List[ShardCapacity] = []
-    for endpoint, reading in sweep.readings.items():
-        shard = shard_row(reading, limits, reserved=sweep.reservations.get(endpoint, (0, 0)))
+    seen: set = set()
+    for _instance, node in masters:
+        if node.endpoint in seen:
+            continue
+        seen.add(node.endpoint)
+        shard = shard_row(
+            readings[node.endpoint], limits,
+            reserved=reservations.get(node.endpoint, (0, 0)),
+        )
         shard.sources = sorted(
-            by_endpoint.get(endpoint, []), key=lambda s: -s.footprint_bytes,
+            by_endpoint.get(node.endpoint, []), key=lambda s: -s.footprint_bytes,
         )
         shards.append(shard)
-    # Fullest first; the ones the budget cannot govern last.
-    shards.sort(key=lambda s: (not s.measurable, -(s.used_pct or 0.0), s.endpoint))
     return {
         "limits": limits, "shards": shards, "unresolved": unresolved,
         "sources_total": total, "truncated": truncated,
-        "rows_by_id": rows_by_id, "readings": sweep.readings, "placed": sweep.placed,
-        "reservations": sweep.reservations,
-        "states": states, "stats": stats, "providers_by_endpoint": sweep.providers_by_endpoint,
+        "rows_by_id": rows_by_id, "readings": readings, "placed": placed,
+        "reservations": reservations, "states": states, "stats": stats,
+        "stale": snapshot.stale, "last_error": snapshot.last_error,
     }
 
 
@@ -602,10 +598,14 @@ _lock = asyncio.Lock()
 
 
 def invalidate_fleet_cache() -> None:
-    """Drop the cached fleet snapshot: the next view sweeps again. Called
-    after a limits change so no viewer sees the old figures for a TTL."""
+    """Drop the cached fleet snapshot AND the topology reading under it: the
+    next view measures again. Called after a limits change so no viewer sees
+    the old figures for a TTL."""
     global _cache
     _cache = None
+    from backend.app.services.graph_store.topology import invalidate_topology_cache
+
+    invalidate_topology_cache()
 
 
 def _with_age(snapshot: AggregationCapacityResponse, cached_at: float) -> AggregationCapacityResponse:
@@ -615,17 +615,17 @@ def _with_age(snapshot: AggregationCapacityResponse, cached_at: float) -> Aggreg
 
 
 async def assemble_fleet_capacity(
-    session: AsyncSession, registry: Any, *, fresh: bool = False,
+    session: AsyncSession, *, fresh: bool = False,
 ) -> AggregationCapacityResponse:
-    """Every shard with rollups on it, what fits, and the sources on each.
-    Cached briefly so a page of viewers shares one sweep; never raises."""
+    """Every master of every graph store, what fits, and the sources on each.
+    Cached briefly so a page of viewers shares one assembly; never raises."""
     global _cache
     if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
         return _with_age(_cache[1], _cache[0])
     async with _lock:
         if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
             return _with_age(_cache[1], _cache[0])
-        parts = await _assemble(session, registry) or {}
+        parts = await _assemble(session, fresh=fresh) or {}
         snapshot = AggregationCapacityResponse(
             limits=parts.get("limits") or effective_limits({}),
             shards=parts.get("shards") or [],
@@ -633,18 +633,20 @@ async def assemble_fleet_capacity(
             sources_total=parts.get("sources_total") or 0,
             truncated=bool(parts.get("truncated")),
             measured_at=_now_iso(),
+            stale=bool(parts.get("stale")),
+            last_error=parts.get("last_error"),
         )
         _cache = (time.monotonic(), snapshot)
         return _with_age(snapshot, _cache[0])
 
 
 async def assemble_source_capacity(
-    session: AsyncSession, registry: Any, ds_id: str,
+    session: AsyncSession, ds_id: str,
 ) -> Optional[SourceCapacityResponse]:
     """One source's footprint, its shard's headroom and the pre-flight fit
     for Full detail vs Auto — the same reading the next run will take.
     ``None`` when the source does not exist."""
-    parts = await _assemble(session, registry, ds_id=ds_id)
+    parts = await _assemble(session, ds_id=ds_id)
     if parts is None:
         return None
     limits: CapacityLimits = parts["limits"]

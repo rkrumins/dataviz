@@ -3,11 +3,17 @@
  * capacity card, the per-source drawer block, the re-trigger fit check, the
  * Defaults dialog's what-if and the Infrastructure page's headroom block.
  *
- * The server caches the fleet sweep briefly, so a page full of viewers
- * shares one INFO per node; the poll here is slow on purpose — memory moves
- * in minutes, not seconds — and a manual "Re-measure" forces a fresh sweep.
+ * The server caches the fleet reading briefly, so a page full of viewers
+ * shares one pass over the nodes; the poll here is slow on purpose — memory
+ * moves in minutes, not seconds — and a manual "Re-measure" forces a fresh
+ * one.
+ *
+ * ``keepPreviousData`` is the fix for a card that used to blank itself: one
+ * failed poll replaced every row with "capacity could not be measured", and
+ * the next poll brought them back. The figures stay on screen with a note
+ * saying how old they are.
  */
-import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
+import { keepPreviousData, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query'
 import {
     aggregationService,
     type AggregationCapacityResponse, type SourceCapacityResponse,
@@ -27,6 +33,7 @@ export function useFleetCapacity(enabled = true): UseQueryResult<AggregationCapa
         enabled,
         staleTime: 10_000,
         refetchInterval: CAPACITY_POLL_MS,
+        placeholderData: keepPreviousData,
         retry: 1,
     })
 }
@@ -37,6 +44,7 @@ export function useSourceCapacity(dsId: string | null, enabled = true): UseQuery
         queryFn: () => aggregationService.getSourceCapacity(dsId!),
         enabled: enabled && !!dsId,
         staleTime: 10_000,
+        placeholderData: keepPreviousData,
         retry: 1,
     })
 }

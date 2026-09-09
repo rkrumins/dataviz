@@ -648,9 +648,9 @@ async def put_settings(
 
 
 # ── GET /aggregation/capacity, /aggregation/data-sources/{ds_id}/capacity ──
-# The web tier proxies both here in proxy mode: the sweep resolves providers
-# and reads INFO memory, which belongs on the control plane's short-timeout
-# registry, not the web pool.
+# Kept for a caller that reaches the control plane directly. The web tier no
+# longer forwards these: both read the graph store topology snapshot, which
+# each tier builds for itself, so a hop would only add a second cache.
 
 @app.get(
     "/aggregation/capacity",
@@ -662,7 +662,7 @@ async def get_capacity(
     session: AsyncSession = Depends(_get_session),
 ):
     from .capacity import assemble_fleet_capacity
-    return await assemble_fleet_capacity(session, svc._registry, fresh=fresh)
+    return await assemble_fleet_capacity(session, fresh=fresh)
 
 
 @app.get(
@@ -675,7 +675,7 @@ async def get_source_capacity(
     session: AsyncSession = Depends(_get_session),
 ):
     from .capacity import assemble_source_capacity
-    doc = await assemble_source_capacity(session, svc._registry, ds_id)
+    doc = await assemble_source_capacity(session, ds_id)
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Data source {ds_id} not found")
     return doc

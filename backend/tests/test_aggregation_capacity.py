@@ -2,10 +2,16 @@
 assembled for people.
 
 Pure helpers first (limits precedence, a shard row, the pre-flight verdicts),
-then the sweep with fakes for the four collaborators — sources, providers,
-owning-node lookup, the reading — so the tests pin what the sweep promises:
-one INFO per node, a coarse reason for everything it could not place, a
-deadline that leaves the rest unresolved, never an exception.
+then the assembly over a graph store topology snapshot.
+
+What that change fixed, and what these tests hold in place: the view used to
+resolve a PROVIDER per source and ask it who owned the graph, so a node only
+appeared if some source's provider could be built and dialled inside the
+deadline — and the same page, refreshed twice, showed different rows with
+"cannot be measured" appearing and disappearing. Placement is now arithmetic
+over one snapshot: every master is a row whether or not anything sits on it,
+a node that could not be read is a row with the reason, and the order never
+moves.
 """
 from __future__ import annotations
 
@@ -155,48 +161,73 @@ def _ds(id, *, provider="p1", graph="g", ws="ws", mode=None, status="ready", edg
     )
 
 
-class _Provider:
-    def __init__(self, graph, *, mode="cluster", fail=None):
-        self._graph_name = graph
-        self._projection_mode = "in_source"
-        self._db = object()
-        self._proj_db = None
-        self._conn_cfg = types.SimpleNamespace(mode=mode)
-        self._fail = fail
-        self.connects = 0
+def _node(endpoint, *, used=10 * GB, maxmemory=40 * GB, role="master", status="up",
+          error=None, cap=None, timeout_max=None, default=None, threads=None):
+    from backend.app.services.graph_store.schemas import (
+        GraphStoreNode, NodeLimits, NodeMemory,
+    )
 
-    async def _ensure_connected(self):
-        self.connects += 1
-        if self._fail:
-            raise self._fail
-
-
-class _Registry:
-    def __init__(self, providers):
-        self._providers = providers
-        self.calls = []
-
-    async def get_provider_for_workspace(self, ws, session, data_source_id=None):
-        self.calls.append(data_source_id)
-        return self._providers[data_source_id.split(":")[0]]
+    return GraphStoreNode(
+        endpoint=endpoint, role=role, status=status, error=error,
+        memory=NodeMemory(used=used, maxmemory=maxmemory, policy="noeviction"),
+        limits=NodeLimits(
+            queryMemCapacity=cap, timeoutMaxMs=timeout_max,
+            timeoutDefaultMs=default, threadCount=threads,
+        ),
+    )
 
 
-def _wire(monkeypatch, *, sources, owners, readings, states=None, stats=None, failures=None, stored=None,
-          reservations=None):
-    """Stub the collaborators around the sweep (the ledger holds nothing
-    unless ``reservations`` says otherwise)."""
-    reads = []
+def _snapshot(*instances, stale=False, last_error=None):
+    from backend.app.services.graph_store.schemas import GraphStoreTopologyResponse
+
+    return GraphStoreTopologyResponse(
+        instances=list(instances), measuredAt="2026-09-09T00:00:00Z",
+        stale=stale, lastError=last_error,
+    )
+
+
+def _instance(iid, *, providers=("p1",), mode="cluster", shards=(), reachable=True, error=None):
+    from backend.app.services.graph_store.schemas import GraphStoreInstance, ProviderRef
+
+    return GraphStoreInstance(
+        id=iid, mode=mode, reachable=reachable, error=error,
+        providers=[ProviderRef(id=pid, name=f"Falkor {pid}") for pid in providers],
+        shards=list(shards),
+    )
+
+
+def _shard(index, master, *, slots=(0, 16383), replicas=()):
+    from backend.app.services.graph_store.schemas import GraphStoreShard
+
+    return GraphStoreShard(
+        index=index, slotRanges=[[slots[0], slots[1]]],
+        slotCount=slots[1] - slots[0] + 1, master=master, replicas=list(replicas),
+    )
+
+
+def _three_shards(instance_id="i1", providers=("p1",), **node_kw):
+    """A 3-master cluster whose slot ranges are the real ones, so placement
+    by keyslot means something."""
+    ranges = [(0, 5460), (5461, 10922), (10923, 16383)]
+    return _instance(instance_id, providers=providers, shards=[
+        _shard(i, _node(f"10.0.0.{i + 1}:6379", **node_kw), slots=r)
+        for i, r in enumerate(ranges)
+    ])
+
+
+def _wire(monkeypatch, *, sources, snapshot, states=None, stats=None, failures=None,
+          stored=None, reservations=None):
+    """Everything the assembly reads, faked: the SQL maps, the stored
+    defaults, the ledger, and the one snapshot it places against."""
+    builds = []
 
     async def list_sources(session, *, ds_id=None):
         rows = [(s, "Falkor") for s in sources if ds_id is None or s.id == ds_id]
         return rows, len(rows), False
 
-    async def owner(db, *, mode, graph_key, timeout):
-        return owners.get(graph_key, "unknown")
-
-    async def read(db, *, mode, graph_key, timeout):
-        reads.append(graph_key)
-        return readings[owners[graph_key]]
+    async def get_snapshot(*, fresh=False):
+        builds.append(fresh)
+        return snapshot
 
     async def state_map(session, ids):
         return states or {}
@@ -213,110 +244,162 @@ def _wire(monkeypatch, *, sources, owners, readings, states=None, stats=None, fa
     async def reserved(endpoint):
         return (reservations or {}).get(endpoint, (0, 0))
 
+    import backend.app.services.graph_store.topology as topo
+
+    monkeypatch.setattr(topo, "get_topology_snapshot", get_snapshot)
     monkeypatch.setattr(cap, "reserved_on", reserved)
     monkeypatch.setattr(cap, "_list_sources", list_sources)
-    monkeypatch.setattr(cap, "owner_endpoint", owner)
-    monkeypatch.setattr(cap, "read_shard_memory", read)
     monkeypatch.setattr(cap, "latest_completed_stats_map", stats_map)
     monkeypatch.setattr(cap, "_stored_tuning", stored_tuning)
     import backend.app.services.aggregation.service as svc_mod
     monkeypatch.setattr(svc_mod, "_state_map", state_map)
     monkeypatch.setattr(svc_mod, "_latest_failure_map", failure_map)
     cap._cache = None
-    return reads
+    return builds
 
 
-def test_the_fleet_reads_each_node_once_and_groups_the_sources_on_it(monkeypatch):
-    p1, p2 = _Provider("g1"), _Provider("g2")
-    sources = [_ds("p1:a", graph="g1", edges=10), _ds("p1:b", graph="g1", edges=30), _ds("p2:c", provider="p2", graph="g2", mode="dedicated")]
-    owners = {"g1": "10.0.0.1:6379", "g2_proj": "10.0.0.2:6379"}
-    readings = {"10.0.0.1:6379": _reading("10.0.0.1:6379", used=30 * GB), "10.0.0.2:6379": _reading("10.0.0.2:6379", used=4 * GB)}
-    reads = _wire(monkeypatch, sources=sources, owners=owners, readings=readings,
-                  states={"p1:b": {"aggregation_edge_count": 30, "observed_bytes_per_edge": 1000}})
-    registry = _Registry({"p1": p1, "p2": p2})
+def test_every_master_is_a_row_even_the_ones_with_nothing_on_them(monkeypatch):
+    """The old sweep only ever read the nodes that owned a rollup graph, so
+    six of nine nodes — and any master without an aggregated source — were
+    simply absent from a page titled "every shard"."""
+    sources = [_ds("a", graph="g1", edges=10), _ds("b", graph="g1", edges=30)]
+    _wire(monkeypatch, sources=sources, snapshot=_snapshot(_three_shards()),
+          states={"b": {"aggregation_edge_count": 30, "observed_bytes_per_edge": 1000}})
 
-    res = _run(cap.assemble_fleet_capacity(object(), registry))
+    res = _run(cap.assemble_fleet_capacity(object()))
 
-    assert len(reads) == 2                                  # one INFO per node, not per graph
-    assert registry.calls == ["p1:a", "p2:c"]               # one resolution per provider/graph
-    assert [s.endpoint for s in res.shards] == ["10.0.0.1:6379", "10.0.0.2:6379"]   # fullest first
-    busy = res.shards[0]
-    assert [s.data_source_id for s in busy.sources] == ["p1:b", "p1:a"]             # biggest footprint first
-    assert busy.sources[0].footprint_bytes == 30 * 1000 and busy.sources[0].bytes_per_edge_source == "calibrated"
-    assert res.shards[1].sources[0].graph_key == "g2_proj"    # dedicated mode lands on the projection graph
-    assert res.unresolved == [] and res.sources_total == 3 and not res.truncated
+    assert [s.endpoint for s in res.shards] == [
+        "10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379",
+    ]
+    assert all(s.state == "measured" for s in res.shards)
+    with_sources = [s for s in res.shards if s.sources]
+    assert len(with_sources) == 1                       # g1 hashes to exactly one
+    assert [s.data_source_id for s in with_sources[0].sources] == ["b", "a"]
+    assert with_sources[0].sources[0].footprint_bytes == 30 * 1000
+    assert res.unresolved == [] and res.sources_total == 2
     assert res.measured_at and res.cache_age_ms >= 0
 
 
-def test_a_provider_that_cannot_be_resolved_is_reported_never_raised(monkeypatch):
-    broken = _Provider("g1", fail=ConnectionError("refused"))
-    sources = [_ds("p1:a", graph="g1"), _ds("p1:b", graph="g1")]
-    _wire(monkeypatch, sources=sources, owners={"g1": "10.0.0.1:6379"}, readings={"10.0.0.1:6379": _reading()})
-    registry = _Registry({"p1": broken})
+def test_the_rows_keep_the_snapshots_order_however_full_they_get(monkeypatch):
+    """Sorting by utilisation is why an operator's eye lost its place: the
+    rows re-ordered under the cursor every refresh as usage moved."""
+    instance = _three_shards()
+    instance.shards[2].master.memory.used = 39 * GB          # nearly full, still last
+    _wire(monkeypatch, sources=[], snapshot=_snapshot(instance))
+    res = _run(cap.assemble_fleet_capacity(object()))
+    assert [s.endpoint for s in res.shards] == [
+        "10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379",
+    ]
+    assert res.shards[2].used_pct == 97.5
 
-    res = _run(cap.assemble_fleet_capacity(object(), registry, fresh=True))
 
+def test_a_node_that_could_not_be_read_is_a_row_with_its_reason(monkeypatch):
+    instance = _instance("i1", shards=[
+        _shard(0, _node("10.0.0.1:6379"), slots=(0, 8191)),
+        _shard(1, _node("10.0.0.2:6379", used=None, maxmemory=None,
+                        status="unreachable", error="Connection refused"), slots=(8192, 16383)),
+    ])
+    _wire(monkeypatch, sources=[], snapshot=_snapshot(instance))
+    res = _run(cap.assemble_fleet_capacity(object()))
+    assert [(s.endpoint, s.state) for s in res.shards] == [
+        ("10.0.0.1:6379", "measured"), ("10.0.0.2:6379", "unreachable"),
+    ]
+    assert res.shards[1].why_not == (
+        "the shard's memory could not be measured (Connection refused)"
+    )
+    assert res.shards[1].allowed_growth_edges is None
+
+
+def test_a_node_without_maxmemory_is_ungoverned_not_unreachable(monkeypatch):
+    instance = _instance("i1", shards=[_shard(0, _node("n1", maxmemory=0))])
+    _wire(monkeypatch, sources=[], snapshot=_snapshot(instance))
+    row = _run(cap.assemble_fleet_capacity(object())).shards[0]
+    assert row.state == "ungoverned" and not row.measurable
+    assert row.used == 10 * GB and row.governed_by == "static"
+
+
+def test_a_projection_graph_can_land_on_a_different_shard_than_its_source(monkeypatch):
+    """Dedicated mode writes the rollups to ``<graph>_proj``, which hashes on
+    its own — the capacity that matters is the shard THAT lands on."""
+    sources = [_ds("a", graph="g1", mode="dedicated")]
+    _wire(monkeypatch, sources=sources, snapshot=_snapshot(_three_shards()))
+    res = _run(cap.assemble_fleet_capacity(object()))
+    placed = [s for s in res.shards if s.sources]
+    assert len(placed) == 1 and placed[0].sources[0].graph_key == "g1_proj"
+    from backend.app.services.graph_store.topology import key_slot
+    lo, hi = next(
+        (r[0], r[1]) for r in
+        [[0, 5460], [5461, 10922], [10923, 16383]]
+        if r[0] <= key_slot("g1_proj") <= r[1]
+    )
+    assert lo <= key_slot("g1_proj") <= hi
+
+
+def test_a_source_whose_provider_has_no_instance_is_reported_never_dropped(monkeypatch):
+    sources = [_ds("a", provider="p9", graph="g1")]
+    _wire(monkeypatch, sources=sources, snapshot=_snapshot(_three_shards()))
+    res = _run(cap.assemble_fleet_capacity(object()))
+    assert [u.data_source_id for u in res.unresolved] == ["a"]
+    assert "no graph store instance" in res.unresolved[0].why_not
+    assert len(res.shards) == 3                        # the nodes are still shown
+
+
+def test_a_store_that_could_not_be_reached_at_all_explains_itself(monkeypatch):
+    instance = _instance("i1", reachable=False, error="no seed answered", shards=[])
+    _wire(monkeypatch, sources=[_ds("a", graph="g1")], snapshot=_snapshot(instance))
+    res = _run(cap.assemble_fleet_capacity(object()))
     assert res.shards == []
-    assert [u.data_source_id for u in res.unresolved] == ["p1:a", "p1:b"]
-    assert all(u.why_not == "provider unavailable (ConnectionError)" for u in res.unresolved)
-    assert broken.connects == 1                             # the failure is remembered per group
+    assert res.unresolved[0].why_not == "no seed answered"
 
 
-def test_an_unknown_owner_is_reported_with_a_reason(monkeypatch):
-    sources = [_ds("p1:a", graph="g1")]
-    _wire(monkeypatch, sources=sources, owners={}, readings={})
-    res = _run(cap.assemble_fleet_capacity(object(), _Registry({"p1": _Provider("g1")}), fresh=True))
-    assert res.unresolved[0].why_not == "the shard owning this graph could not be determined"
+def test_a_slot_no_shard_owns_says_so(monkeypatch):
+    """Partial slot coverage is a real cluster state (a shard down, no
+    replica promoted) and it is not the same as "unmeasurable"."""
+    instance = _instance("i1", shards=[_shard(0, _node("n1"), slots=(0, 100))])
+    _wire(monkeypatch, sources=[_ds("a", graph="g1")], snapshot=_snapshot(instance))
+    res = _run(cap.assemble_fleet_capacity(object()))
+    assert "no shard of this graph store holds slot" in res.unresolved[0].why_not
 
 
-def test_the_deadline_leaves_the_rest_unresolved(monkeypatch):
-    sources = [_ds("p1:a", graph="g1"), _ds("p2:b", provider="p2", graph="g2")]
-    _wire(monkeypatch, sources=sources, owners={"g1": "n1", "g2": "n2"},
-          readings={"n1": _reading("n1"), "n2": _reading("n2")})
-
-    async def slow_owner(db, *, mode, graph_key, timeout):
-        if graph_key == "g2":
-            await asyncio.sleep(0.5)
-        return {"g1": "n1", "g2": "n2"}[graph_key]
-
-    monkeypatch.setattr(cap, "owner_endpoint", slow_owner)
-    monkeypatch.setenv("AGGREGATION_CAPACITY_DEADLINE_S", "0.1")
-    registry = _Registry({"p1": _Provider("g1"), "p2": _Provider("g2")})
-    res = _run(cap.assemble_fleet_capacity(object(), registry, fresh=True))
-    assert [s.endpoint for s in res.shards] == ["n1"]
-    assert [(u.data_source_id, u.why_not) for u in res.unresolved] == [("p2:b", "not measured before the deadline")]
+def test_the_view_keeps_serving_the_last_good_reading_and_says_so(monkeypatch):
+    """The refresh behind these figures failed. Blanking the card was the
+    old behaviour, and it is why the page flickered."""
+    _wire(monkeypatch, sources=[],
+          snapshot=_snapshot(_three_shards(), stale=True, last_error="no seed answered"))
+    res = _run(cap.assemble_fleet_capacity(object()))
+    assert res.stale is True and res.last_error == "no seed answered"
+    assert len(res.shards) == 3                        # rows stay
 
 
-def test_the_fleet_snapshot_is_cached_briefly_and_fresh_bypasses_it(monkeypatch):
-    sources = [_ds("p1:a", graph="g1")]
-    reads = _wire(monkeypatch, sources=sources, owners={"g1": "n1"}, readings={"n1": _reading("n1")})
-    registry = _Registry({"p1": _Provider("g1")})
-    _run(cap.assemble_fleet_capacity(object(), registry))
-    _run(cap.assemble_fleet_capacity(object(), registry))
-    assert len(reads) == 1
-    _run(cap.assemble_fleet_capacity(object(), registry, fresh=True))
-    assert len(reads) == 2
+def test_the_fleet_snapshot_is_cached_briefly_and_fresh_rebuilds_the_topology(monkeypatch):
+    builds = _wire(monkeypatch, sources=[], snapshot=_snapshot(_three_shards()))
+    _run(cap.assemble_fleet_capacity(object()))
+    _run(cap.assemble_fleet_capacity(object()))
+    assert builds == [False]
+    _run(cap.assemble_fleet_capacity(object(), fresh=True))
+    assert builds == [False, True]                     # fresh reaches the store
 
 
 def test_source_capacity_answers_with_the_preflight_and_none_for_an_unknown_source(monkeypatch):
-    sources = [_ds("p1:a", graph="g1", edges=100)]
-    _wire(monkeypatch, sources=sources, owners={"g1": "n1"}, readings={"n1": _reading("n1", used=39 * GB)},
-          stats={"p1:a": {"cube_estimate": 10_000_000, "regime": "cube"}}, stored={"shard_reserve_pct": 0})
-    registry = _Registry({"p1": _Provider("g1")})
+    sources = [_ds("a", graph="g1", edges=100)]
+    _wire(monkeypatch, sources=sources, snapshot=_snapshot(_three_shards(used=39 * GB)),
+          stats={"a": {"cube_estimate": 10_000_000, "regime": "cube"}},
+          stored={"shard_reserve_pct": 0})
 
-    doc = _run(cap.assemble_source_capacity(object(), registry, "p1:a"))
-    assert doc is not None and doc.shard.endpoint == "n1" and doc.source.last_regime == "cube"
+    doc = _run(cap.assemble_source_capacity(object(), "a"))
+    assert doc is not None and doc.source.last_regime == "cube"
+    assert doc.shard.endpoint.startswith("10.0.0.")
     assert doc.full_detail.verdict == "short" and doc.full_detail.estimate_source == "lastRun"
     assert doc.auto.never_refused and doc.auto.would_store_cube is False
-    assert _run(cap.assemble_source_capacity(object(), registry, "nope")) is None
+    assert _run(cap.assemble_source_capacity(object(), "nope")) is None
 
 
 def test_source_capacity_explains_an_unplaceable_source_instead_of_failing(monkeypatch):
-    sources = [_ds("p1:a", graph="g1")]
-    _wire(monkeypatch, sources=sources, owners={}, readings={})
-    doc = _run(cap.assemble_source_capacity(object(), _Registry({"p1": _Provider("g1")}), "p1:a"))
+    _wire(monkeypatch, sources=[_ds("a", provider="p9", graph="g1")],
+          snapshot=_snapshot(_three_shards()))
+    doc = _run(cap.assemble_source_capacity(object(), "a"))
     assert doc is not None and not doc.shard.measurable
-    assert doc.shard.why_not == "the shard owning this graph could not be determined"
+    assert "no graph store instance" in doc.shard.why_not
     assert doc.full_detail.verdict == "unknown"
 
 
@@ -347,75 +430,96 @@ def test_the_limits_carry_the_container_figure_only_when_the_deployment_states_i
     assert cap.effective_limits({}).container_memory_bytes is None
 
 
-class _NotingProvider(_Provider):
-    def __init__(self, graph, **kw):
-        super().__init__(graph, **kw)
+class _NotingProvider:
+    """A provider already built in this process, which the view may TELL
+    what its node allows — but must never build one to do it."""
+
+    def __init__(self):
         self.noted = []
 
     def note_server_limits(self, endpoint, **limits):
         self.noted.append((endpoint, limits))
 
 
-def test_the_sweep_tells_each_provider_what_its_node_allows_and_remembers_who_lives_where(monkeypatch):
-    """The sweep is the one place every node gets read, so it is where a
-    provider learns the cap its clamp must follow — once per node, however
-    many sources share the provider — and a limits change later finds the
-    providers on a node through the same record."""
-    p1, p2 = _NotingProvider("g1"), _Provider("g2")
-    sources = [_ds("p1:a", graph="g1"), _ds("p1:b", graph="g1"), _ds("p2:c", provider="p2", graph="g2")]
-    _wire(monkeypatch, sources=sources, owners={"g1": "n1", "g2": "n2"},
-          readings={"n1": _limited("n1", cap=2 ** 30, timeout_max=300_000, threads=6), "n2": _reading("n2")})
-    parts = _run(cap._assemble(object(), _Registry({"p1": p1, "p2": p2})))
-    assert p1.noted == [("n1", {
-        "timeout_max_ms": 300_000, "query_mem_capacity": 2 ** 30, "thread_count": 6, "timeout_default_ms": 30_000,
+def test_the_view_tells_the_providers_already_built_what_their_nodes_allow(monkeypatch):
+    """A provider's per-query clamp follows the node's real cap only if
+    something tells it. This is the one place every node is read — but a
+    page refresh must never DIAL a store to hand it a limit, so only the
+    proxies this process already holds are told."""
+    built = _NotingProvider()
+    instance = _instance("i1", providers=("p1",), shards=[
+        _shard(0, _node("n1", cap=2 ** 30, timeout_max=300_000, default=30_000, threads=6)),
+    ])
+    _wire(monkeypatch, sources=[], snapshot=_snapshot(instance))
+
+    from backend.app.providers.manager import provider_manager
+
+    asked = []
+    monkeypatch.setattr(
+        provider_manager, "instantiated",
+        lambda pid: asked.append(pid) or ([built] if pid == "p1" else []),
+    )
+    parts = _run(cap._assemble(object()))
+
+    assert asked == ["p1"]
+    assert built.noted == [("n1", {
+        "timeout_max_ms": 300_000, "query_mem_capacity": 2 ** 30,
+        "thread_count": 6, "timeout_default_ms": 30_000,
     })]
-    assert parts["providers_by_endpoint"]["n1"] == [(p1, "g1")]
-    assert parts["providers_by_endpoint"]["n2"] == [(p2, "g2")]
-    assert [(s.endpoint, s.timeout_max_ms, s.thread_count) for s in parts["shards"]] == [("n1", 300_000, 6), ("n2", None, None)]
+    assert [(s.endpoint, s.timeout_max_ms, s.thread_count) for s in parts["shards"]] == [
+        ("n1", 300_000, 6),
+    ]
 
 
-def test_invalidating_the_fleet_cache_forces_the_next_view_to_sweep(monkeypatch):
-    sources = [_ds("p1:a", graph="g1")]
-    reads = _wire(monkeypatch, sources=sources, owners={"g1": "n1"}, readings={"n1": _reading("n1")})
-    registry = _Registry({"p1": _Provider("g1")})
-    _run(cap.assemble_fleet_capacity(object(), registry))
+def test_invalidating_the_fleet_cache_also_drops_the_topology_under_it(monkeypatch):
+    """A limits change that left the topology cached showed the OLD ceiling
+    for a TTL — on the very page the change was made from."""
+    builds = _wire(monkeypatch, sources=[], snapshot=_snapshot(_three_shards()))
+    dropped = []
+    import backend.app.services.graph_store.topology as topo
+    monkeypatch.setattr(topo, "invalidate_topology_cache", lambda: dropped.append(1))
+
+    _run(cap.assemble_fleet_capacity(object()))
     cap.invalidate_fleet_cache()
-    _run(cap.assemble_fleet_capacity(object(), registry))
-    assert len(reads) == 2
+    _run(cap.assemble_fleet_capacity(object()))
+    assert len(builds) == 2 and dropped == [1]
 
 
-def test_the_sweep_reads_each_nodes_ledger_once_and_the_rows_take_it_off_the_free_memory(monkeypatch):
-    p1, p2 = _Provider("g1"), _Provider("g2")
-    sources = [_ds("p1:a", graph="g1"), _ds("p1:b", graph="g1"), _ds("p2:c", provider="p2", graph="g2")]
-    _wire(monkeypatch, sources=sources, owners={"g1": "n1", "g2": "n2"},
-          readings={"n1": _reading("n1"), "n2": _reading("n2")},
-          stats={"p1:a": {"cube_estimate": 55_000_000}})
+def test_each_nodes_ledger_is_read_once_and_the_rows_take_it_off_the_free_memory(monkeypatch):
+    instance = _instance("i1", shards=[
+        _shard(0, _node("n1"), slots=(0, 8191)),
+        _shard(1, _node("n2"), slots=(8192, 16383)),
+    ])
+    sources = [_ds("a", graph="g1", edges=100)]
+    _wire(monkeypatch, sources=sources, snapshot=_snapshot(instance),
+          stats={"a": {"cube_estimate": 55_000_000}})
     asks = []
 
     async def ledger(endpoint):
         asks.append(endpoint)
-        return {"n1": (2 * GB, 1)}.get(endpoint, (0, 0))
+        return {"n1": (2 * GB, 1), "n2": (2 * GB, 1)}.get(endpoint, (0, 0))
 
     monkeypatch.setattr(cap, "reserved_on", ledger)
-    registry = _Registry({"p1": p1, "p2": p2})
 
-    res = _run(cap.assemble_fleet_capacity(object(), registry, fresh=True))
+    res = _run(cap.assemble_fleet_capacity(object(), fresh=True))
 
-    assert asks == ["n1", "n2"]                                   # once per node, not per source
-    n1, n2 = res.shards
-    assert (n1.endpoint, n1.reserved_bytes, n1.reserved_by_jobs, n1.available_bytes) == ("n1", 2 * GB, 1, 20 * GB)
-    assert (n2.endpoint, n2.reserved_bytes, n2.reserved_by_jobs, n2.available_bytes) == ("n2", 0, 0, 22 * GB)
+    assert asks == ["n1", "n2"]                          # once per node, not per source
+    assert [(s.reserved_bytes, s.reserved_by_jobs, s.available_bytes) for s in res.shards] == [
+        (2 * GB, 1, 20 * GB), (2 * GB, 1, 20 * GB),
+    ]
     # The per-source view and its pre-flight take the same figure: 55M new
     # cells at 512 B need 26.2 GB — inside 22 GB with the 25% margin, not inside 20.
-    doc = _run(cap.assemble_source_capacity(object(), registry, "p1:a"))
+    doc = _run(cap.assemble_source_capacity(object(), "a"))
     assert (doc.shard.reserved_by_jobs, doc.shard.available_bytes) == (1, 20 * GB)
     assert doc.full_detail.verdict == "short" and doc.full_detail.blocked_by == "shard"
 
 
 def test_an_unreadable_ledger_shows_no_reservations_and_is_asked_only_once(monkeypatch):
-    sources = [_ds("p1:a", graph="g1"), _ds("p2:b", provider="p2", graph="g2")]
-    _wire(monkeypatch, sources=sources, owners={"g1": "n1", "g2": "n2"},
-          readings={"n1": _reading("n1"), "n2": _reading("n2")})
+    instance = _instance("i1", shards=[
+        _shard(0, _node("n1"), slots=(0, 8191)),
+        _shard(1, _node("n2"), slots=(8192, 16383)),
+    ])
+    _wire(monkeypatch, sources=[], snapshot=_snapshot(instance))
     asks = []
 
     async def down(endpoint):
@@ -423,7 +527,8 @@ def test_an_unreadable_ledger_shows_no_reservations_and_is_asked_only_once(monke
         raise ConnectionError("bus down")
 
     monkeypatch.setattr(cap, "reserved_on", down)
-    registry = _Registry({"p1": _Provider("g1"), "p2": _Provider("g2")})
-    res = _run(cap.assemble_fleet_capacity(object(), registry, fresh=True))
-    assert asks == ["n1"]
-    assert [(s.endpoint, s.reserved_by_jobs, s.available_bytes) for s in res.shards] == [("n1", 0, 22 * GB), ("n2", 0, 22 * GB)]
+    res = _run(cap.assemble_fleet_capacity(object(), fresh=True))
+    assert asks == ["n1"]                                # one connect timeout, not one per shard
+    assert [(s.endpoint, s.reserved_by_jobs, s.available_bytes) for s in res.shards] == [
+        ("n1", 0, 22 * GB), ("n2", 0, 22 * GB),
+    ]

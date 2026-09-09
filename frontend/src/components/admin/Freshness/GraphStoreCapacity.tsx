@@ -2,12 +2,17 @@
  * Graph store capacity — what the write budget measures before every
  * rebuild, on the page where rebuilds are decided.
  *
- * One row per shard: a meter of used memory with the fleet reserve marked on
+ * One row per master: a meter of used memory with the fleet reserve marked on
  * it, what is free after that reserve, how many more rollup edges that is at
  * the fleet bytes-per-edge, and the sources whose rollups live there (each a
- * way into its drawer). A shard the budget cannot govern says why and what
+ * way into its drawer). A node the budget cannot govern says why and what
  * rule applies instead. A source whose last rebuild was refused shows up as a
  * count that filters the table to exactly those.
+ *
+ * The rows come from the graph store topology reading, so every master is
+ * here whether or not a source sits on it, the order never moves, and a
+ * failed refresh leaves the figures on screen with a note rather than
+ * replacing the card with an error.
  */
 import { useState } from 'react'
 import { Database, HardDrive, Loader2, RefreshCw, SlidersHorizontal } from 'lucide-react'
@@ -59,16 +64,29 @@ function ShardRow({ shard, bytesPerEdge, onOpenSource }: {
     onOpenSource: (dsId: string) => void
 }) {
     if (!shard.measurable) {
+        // Two different things wear the same "not measurable": a node that
+        // answered but governs nothing, and a node that is not there. Sending
+        // an operator to set maxmemory on a pod that is down wasted a morning.
+        const unreachable = shard.state === 'unreachable'
         return (
             <li className="py-3">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                     <span className="text-[12px] font-mono text-ink-secondary">{shard.endpoint}</span>
-                    <span className="text-[11px] text-ink-muted">cannot be measured</span>
+                    <span className={cn(
+                        'text-[10px] font-semibold uppercase tracking-wide',
+                        unreachable ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400',
+                    )}>
+                        {unreachable ? 'Unreachable' : 'Cannot govern'}
+                    </span>
                 </div>
                 <p className="mt-1 text-[11px] text-ink-muted leading-snug">
                     {shard.whyNot ? `${shard.whyNot.charAt(0).toUpperCase()}${shard.whyNot.slice(1)}. ` : ''}
-                    Set <span className="font-mono">maxmemory</span> on this node to let the budget read its headroom; until then the static cap of{' '}
-                    <span className="tabular-nums">{shard.staticCap.toLocaleString()}</span> edges governs rebuilds landing here.
+                    {unreachable
+                        ? 'Rebuilds that land here wait for it and keep their checkpoint.'
+                        : <>
+                            Set <span className="font-mono">maxmemory</span> on this node to let the budget read its headroom; until then the static cap of{' '}
+                            <span className="tabular-nums">{shard.staticCap.toLocaleString()}</span> edges governs rebuilds landing here.
+                        </>}
                 </p>
                 {shard.sources.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-1.5">
@@ -206,16 +224,23 @@ export function GraphStoreCapacity({ onOpenSource, onFacetWouldNotFit, onAdjustL
             </header>
 
             <div className="px-4 pb-4">
-                {capacity.isLoading ? (
+                {!data && capacity.isLoading ? (
                     <div className="flex items-center gap-2 py-4 text-[12px] text-ink-muted">
                         <Loader2 className="w-4 h-4 animate-spin" /> Measuring the graph store…
                     </div>
-                ) : capacity.isError || !data ? (
+                ) : !data ? (
                     <p className="py-3 text-[12px] text-ink-muted">Capacity could not be measured right now. The write budget still measures the shard before every rebuild.</p>
                 ) : data.shards.length === 0 && data.unresolved.length === 0 ? (
                     <p className="py-3 text-[12px] text-ink-muted">No source has rollups yet. The first rebuild will measure its shard before it writes.</p>
                 ) : (
                     <>
+                        {(data.stale || capacity.isError) && (
+                            <p className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-1.5 text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
+                                Last refresh failed — showing the reading from{' '}
+                                {data.cacheAgeMs < 1000 ? 'a moment' : `${Math.round(data.cacheAgeMs / 1000)}s`} ago
+                                {data.lastError ? `: ${data.lastError}` : '.'}
+                            </p>
+                        )}
                         <ul className="divide-y divide-glass-border border-t border-glass-border">
                             {data.shards.map(s => (
                                 <ShardRow key={s.endpoint} shard={s} bytesPerEdge={bytesPerEdge} onOpenSource={onOpenSource} />
