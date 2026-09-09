@@ -72,6 +72,7 @@ the source's Rollup storage override → the fleet Defaults → the environment.
 | **Bytes per rollup edge** | What one stored edge is assumed to cost when free memory is turned into an edge count. Each successful rebuild **measures** the real figure for its graph and uses it next time; set this only to pin the estimate by hand. Default 512 B. | Defaults dialog, or per job |
 | **Edge ceiling** | An *optional* explicit cap on the total edges a graph may store, layered over the measured budget. Leave it empty — the shard governs. Set it only to hold a graph below what its shard could take. | Defaults dialog, or per job |
 | **Rollup storage** | **Auto** stores full detail while it fits and the depth-diagonal otherwise, deriving finer granularities on demand: slower drills on the largest graphs, but it never fails. **Full detail** pre-creates every combination and is refused, before anything is written, when it cannot fit. | Automation modal (fleet), a source's drawer (this source), Re-trigger (this run) |
+| **Memory flush** | The share of the rebuild worker's own memory limit at which the pipeline writes the pairs it holds to the graph early and frees them — however many there are — so a graph that produces more pairs than the worker can hold flushes instead of being OOM-killed. Default 60%. Needs the worker's cgroup limit to be readable and at least the deployment's minimum pairs in memory. | Defaults dialog (fleet) |
 | **Scan floor** | The narrowest scan slice a rebuild descends to under the graph store's per-query pressure before it concludes that one row is too large. Default 1 row: the rebuild narrows all the way. | Defaults dialog, or per job |
 | **Scan timeout / Write timeout** | How long one read scan, or one write or delete batch, may run before the store aborts it. Capped by the store's own `TIMEOUT_MAX`, read from the node — the editors say so, and an administrator can raise the cap from Infrastructure. | Defaults dialog, or per job; raisable on a running job |
 | **Graph store limits** | The store's own per-query time cap (`TIMEOUT_MAX`) and memory ceiling (`QUERY_MEM_CAPACITY`), set on the node at runtime and guarded by the container sizing rule. | Infrastructure → Memory headroom → *Adjust graph store limits* (system administrators) |
@@ -156,6 +157,14 @@ store* in Job History with the current width, concurrency and strategy; the
 Freshness badge reads *narrowing*. Every run's **Run settings** disclosure
 lists what it ran with — each value labelled *Job override*, *Fleet
 default*, *Learned from last run* or *Environment* — and what it adapted to.
+
+**Worker memory.** The worker holds pairs in its own memory while it
+computes. It flushes them to the graph early when the pair cap is reached
+— and, under a container memory limit, when its memory use crosses the
+*Memory flush* share of that limit, whatever the count — so a graph that
+produces more pairs than the worker can hold goes slower rather than being
+OOM-killed. A run that flushed on memory says so in its record: *Flushed 3×
+on worker memory (peak 2.9 GB of 4.0 GB)*.
 
 **It remembers.** What a rebuild had to do is stored per source and the next
 rebuild of that source starts there (never wider than its settings, so it can
@@ -256,10 +265,9 @@ check — the projector is not behind.
 
 ## Known limits
 
-- The rebuild **worker** has its own memory, bounded by the *max pending pairs*
-  cap rather than by measurement. A graph producing tens of millions of pairs
-  can exceed the worker's memory before that cap flushes; lower the cap or give
-  the worker more memory before aggregating a graph of that size.
+- The rebuild **worker**'s memory flush reads the worker's cgroup limit; on a
+  host without one (a bare process, or a container with no memory limit) only
+  the *max pending pairs* cap bounds worker memory, as before.
 - Two rebuilds landing on the same shard at the same time each measure the
   shard for themselves; the reserve and the re-measure during the apply bound
   the overlap, but no reservation is held between them.

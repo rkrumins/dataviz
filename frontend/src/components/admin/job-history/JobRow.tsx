@@ -191,6 +191,9 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
         if (snap.adapted_write_batch !== undefined) out.write_batch = snap.adapted_write_batch
         if (snap.adapted_delete_chunk !== undefined) out.delete_chunk = snap.adapted_delete_chunk
         if (snap.adapted_timeout_retries !== undefined) out.timeout_retries = snap.adapted_timeout_retries
+        if (snap.adapted_memory_flushes !== undefined) out.memory_flushes = snap.adapted_memory_flushes
+        if (snap.adapted_rss_high_water_mb !== undefined) out.rss_high_water_mb = snap.adapted_rss_high_water_mb
+        if (snap.adapted_mem_limit_mb !== undefined) out.mem_limit_mb = snap.adapted_mem_limit_mb
         const live: NonNullable<AdaptedRunState['live']> = {}
         if (snap.adapted_live_scan_timeout_s !== undefined) live.scan_timeout_s = snap.adapted_live_scan_timeout_s
         if (snap.adapted_live_write_timeout_s !== undefined) live.write_timeout_s = snap.adapted_live_write_timeout_s
@@ -201,7 +204,8 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
         return Object.keys(out).length > 0 ? out : null
     }, [isActive, liveOverlay.terminal, snap.adapted_scan_width, snap.adapted_scan_width_min, snap.adapted_scan_shrinks,
         snap.adapted_extract_concurrency, snap.adapted_reconcile_strategy, snap.adapted_write_batch,
-        snap.adapted_delete_chunk, snap.adapted_timeout_retries, snap.adapted_live_scan_timeout_s,
+        snap.adapted_delete_chunk, snap.adapted_timeout_retries, snap.adapted_memory_flushes,
+        snap.adapted_rss_high_water_mb, snap.adapted_mem_limit_mb, snap.adapted_live_scan_timeout_s,
         snap.adapted_live_write_timeout_s, snap.adapted_live_write_pacing_ratio,
         snap.adapted_live_extract_concurrency, snap.adapted_live_scan_width])
     const adaptedNow: Partial<AdaptedRunState> | null = liveAdapted ?? jobFromList.runStats?.adapted ?? null

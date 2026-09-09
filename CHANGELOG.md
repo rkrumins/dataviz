@@ -74,6 +74,16 @@ memory limit — showing what it could read after narrowing* with the way to the
 a system administrator, in place of the generic truncation advice, and never asks the projector
 about it. One pressure classifier now serves both ladders.
 
+**The rebuild worker flushes on real memory pressure.** The pipeline samples the worker's RSS
+against its cgroup memory limit (at most once a second, from the merge loops) and flushes its
+accumulator early — the same exact-weight flush the pair cap triggers — when RSS crosses
+`AGGREGATION_FLUSH_MEM_PCT` (60%) of the limit with at least `AGGREGATION_FLUSH_MIN_PAIRS`
+pending; the extract phase's base map rolls up early under the same pressure. Fail-open when
+either reading is unknown (the pair cap still bounds memory). *Memory flush* is a fleet knob in
+the Defaults dialog; a run that flushed on memory says so in its record and on the live row
+(*Flushed 3× on worker memory (peak 2.9 GB of 4.0 GB)*). The readers moved to
+`providers/process_memory.py` (`MemoryGauge`); the fleet's claim deferral shares them.
+
 **The graph store's own limits, from the UI.** `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` no longer
 live only in the deployment. Infrastructure → Memory headroom shows each node's per-query memory
 ceiling, query time cap and thread count (read with the capacity sweep), and system administrators
@@ -390,11 +400,8 @@ is required for correctness, but without it readers pay the aggregation on the r
   not on a running job; the time limits, pacing, read concurrency and the scan width are live.
 - The read-side ladder covers the aggregated-edges family; trace drills, children and
   top-level pages keep their current behaviour under the store's per-query limits.
-- **The rebuild worker's own memory is bounded by a pair count, not by measurement.**
-  `AGGREGATION_MAX_PENDING_PAIRS` (50,000,000, and its upper bound) is the only thing that
-  bounds worker RSS, and at 50M pairs it sits above the reference 4Gi pod limit — a graph
-  producing ~30M+ pairs can be OOM-killed before the early flush fires. Lower the cap or raise
-  the pod limit before aggregating a graph of that size; a memory-aware flush is the fix.
+- The memory-aware flush reads the worker's cgroup limit; on a host without one only the
+  pair cap (`AGGREGATION_MAX_PENDING_PAIRS`) bounds worker memory, as before.
 - Two rebuilds landing on the same shard at once each measure the shard for themselves: the
   reserve, the fresh per-wave reading and the mid-apply recheck bound the overlap, but no
   reservation is held between them.

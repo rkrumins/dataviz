@@ -15,6 +15,8 @@ export interface AggregationTuning {
   deleteChunk?: number | null;         // 100 .. 50,000
   writePacingRatio?: number | null;    // 0 .. 10
   extractConcurrency?: number | null;  // 1 .. 4
+  /** Share of the worker's memory limit at which the pipeline flushes early (fleet-wide). 30 .. 90 */
+  flushMemPct?: number | null;
   /** Narrowest scan slice the pressure ladder descends to (default 1 row). 1 .. 5,000,000 */
   scanShrinkFloor?: number | null;
   /** Per-query budget for read scans, seconds (capped by the store's TIMEOUT_MAX). 5 .. 600 */
@@ -214,6 +216,7 @@ export interface EffectiveTuningSnapshot {
   scan_shrink_floor?: number;
   scan_timeout_s?: number;
   write_timeout_s?: number;
+  flush_mem_pct?: number;
   ignore_observed?: boolean;
   stall_timeout_secs?: number;
   max_wall_secs?: number;
@@ -252,6 +255,11 @@ export interface AdaptedRunState {
   delete_shrinks?: number;
   timeout_retries?: number;
   budget_rechecks?: number;
+  /** The memory-aware flush: early flushes and base roll-ups on worker memory pressure, the peak RSS and the limit (MB). */
+  memory_flushes?: number;
+  memory_rollups?: number;
+  rss_high_water_mb?: number;
+  mem_limit_mb?: number;
   pressure?: PressureEvent[];
   by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
   /** What the previous run of this source taught it, applied at the start. */
@@ -415,6 +423,10 @@ export interface EnvTuningDefaults {
   reconcileKeysOnlyWidth?: number | null;
   /** Information only: the graph store's own per-query cap (TIMEOUT_MAX), milliseconds. */
   serverTimeoutMaxMs?: number | null;
+  /** The memory-aware flush: the share of the worker's memory limit it fires at (a fleet knob). */
+  flushMemPct?: number | null;
+  /** Information only: pairs the accumulator must hold before a memory-aware flush fires. */
+  flushMinPairs?: number | null;
 }
 
 export interface AggregationSettingsResponse {

@@ -18,6 +18,7 @@ const NUMERIC_TUNING_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk', 'writePacingRatio',
     'extractConcurrency', 'maxMaterializedEdges', 'shardReservePct', 'bytesPerEdge',
     'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS', 'stallTimeoutSecs', 'maxWallSecs',
+    'flushMemPct',
 ]
 
 describe('the knob catalogue', () => {
@@ -36,6 +37,9 @@ describe('the knob catalogue', () => {
         expect([KNOB_BY_KEY.maxWallSecs.min, KNOB_BY_KEY.maxWallSecs.max]).toEqual([3_600, 604_800])
         // The stall window is a fleet default only: the per-job form already has it as the Stall timeout.
         expect(KNOB_BY_KEY.stallTimeoutSecs.fleetOnly).toBe(true)
+        // The memory flush is a fleet default too, and bounded like the server.
+        expect([KNOB_BY_KEY.flushMemPct.min, KNOB_BY_KEY.flushMemPct.max]).toEqual([30, 90])
+        expect(KNOB_BY_KEY.flushMemPct.fleetOnly).toBe(true)
     })
 
     it('says when a per-query timeout is past the graph store’s own cap', () => {

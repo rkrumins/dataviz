@@ -315,6 +315,11 @@ export function DefaultsDialog({ open, onClose }: { open: boolean; onClose: () =
                                                     ))}
                                                 </div>
 
+                                                {group === 'reading' && env && (
+                                                    <p className="mt-3 text-[11px] text-ink-muted">
+                                                        Set by the deployment: the memory flush fires only once at least {compactEdges(env.flushMinPairs ?? 100_000)} pairs are in memory, and only when the worker’s memory limit can be read.
+                                                    </p>
+                                                )}
                                                 {group === 'timeouts' && env && (() => {
                                                     const capMs = shardCapMs ?? env.serverTimeoutMaxMs
                                                     const cap = typeof capMs === 'number' && capMs > 0 ? `${capMs / 1000} s` : 'no limit'

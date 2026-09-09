@@ -43,6 +43,10 @@ def test_adapted_scalars_are_the_live_subset():
         "adapted_reconcile_strategy": "keys_only",
     }
     assert _adapted_scalars(None) == {}
+    # The memory-aware flush's figures ride along too.
+    assert _adapted_scalars({"memory_flushes": 2, "rss_high_water_mb": 2970, "mem_limit_mb": 4096}) == {
+        "adapted_memory_flushes": 2, "adapted_rss_high_water_mb": 2970, "adapted_mem_limit_mb": 4096,
+    }
     # Live changes in force ride along, flattened, so the running row can show them.
     assert _adapted_scalars({"live": {"write_pacing_ratio": 2.0, "scan_width": 5_000, "junk": [1]}}) == {
         "adapted_live_write_pacing_ratio": 2.0, "adapted_live_scan_width": 5_000,

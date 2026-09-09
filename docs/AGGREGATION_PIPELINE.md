@@ -263,8 +263,10 @@ enumerating the unmapped subtree.
    dict walks over the extracted child→parent map; pair weights are
    aggregated bottom-up through the ancestor lattice. Deterministic —
    a crashed run just recomputes (minutes). Memory is bounded by
-   `AGGREGATION_MAX_PENDING_PAIRS`; overflow triggers an early flush
-   with first-touch-overwrite semantics that keeps weights exact.
+   `AGGREGATION_MAX_PENDING_PAIRS` and, under a cgroup limit, by the
+   memory-aware flush (`AGGREGATION_FLUSH_MEM_PCT` of the limit, once
+   `AGGREGATION_FLUSH_MIN_PAIRS` are pending); either triggers an early
+   flush with first-touch-overwrite semantics that keeps weights exact.
 3. **RECONCILE**: the current `:AGGREGATED` set is range-scanned once;
    stale edges are deleted precisely (guarded by `latestUpdate <
    run_start`, so edges written during the run — by overflow flushes, a
@@ -381,7 +383,9 @@ pipeline).
 | Env var | Default | Meaning |
 |---|---|---|
 | `AGGREGATION_SCAN_RANGE_WIDTH` | 200000 | Edge-ID range width per scan query. Cappable live on a running job (Job History → Adjust this run → Halve scans) |
-| `AGGREGATION_MAX_PENDING_PAIRS` | 50000000 | In-memory pair cap before overflow flush |
+| `AGGREGATION_MAX_PENDING_PAIRS` | 50000000 | In-memory pair cap before overflow flush — the flush-free ceiling, not the memory wall |
+| `AGGREGATION_FLUSH_MEM_PCT` | 60 | Memory-aware flush: share of the worker's cgroup memory limit at which the accumulator (and the extract base map) flushes early, whatever the count (30-90). Defaults as `flushMemPct`. Fail-open when RSS or the limit cannot be read |
+| `AGGREGATION_FLUSH_MIN_PAIRS` | 100000 | Pairs the accumulator must hold before a memory-aware flush fires (10k-50M) |
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing. Changeable live on a running job (Pace ×2 / ×4), from the next write |
@@ -441,8 +445,10 @@ ship with a 4Gi limit. This is WORKER memory, not graph memory — it is
 unaffected by FalkorDB's topology. Note the accumulator is bounded by the
 PAIRS a graph actually produces, not by `AGGREGATION_MAX_PENDING_PAIRS` —
 the cap is only the early-flush trigger. At the 50M default the cap is far
-above the 4Gi budget (~50M pairs is ~5GB packed), so it will not fire
-before the pod's memory limit does. That is deliberate for graphs in the
+above the 4Gi budget (~50M pairs is ~5GB packed), so on its own it would
+not fire before the pod's memory limit did; the memory-aware flush
+(`AGGREGATION_FLUSH_MEM_PCT`) is what fires first under a cgroup limit,
+at 60% of it by default. The high cap is deliberate for graphs in the
 low-millions of pairs, where flushing costs write round-trips and buys
 nothing; lower it (or raise the worker limit) before aggregating a graph
 expected to exceed ~30M pairs.

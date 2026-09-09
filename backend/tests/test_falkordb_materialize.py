@@ -1035,6 +1035,96 @@ def test_overflow_flush_keeps_exact_weights(monkeypatch):
     assert result["aggregated_edges_affected"] == n_pairs + 1
 
 
+def _four_thousand_pairs(fake, n_pairs=4097):
+    """The overflow test's graph: n column pairs under n table pairs under
+    one domain pair, every table pair weight 1, the domain pair n."""
+    fake.add_node(1, "urn:dom_a", "domain")
+    fake.add_node(2, "urn:dom_b", "domain")
+    nid, rid = 10, 0
+    for i in range(n_pairs):
+        ta, ca, tb, cb = nid, nid + 1, nid + 2, nid + 3
+        nid += 4
+        fake.add_node(ta, f"urn:ta{i}", "table")
+        fake.add_node(ca, f"urn:ca{i}", "column")
+        fake.add_node(tb, f"urn:tb{i}", "table")
+        fake.add_node(cb, f"urn:cb{i}", "column")
+        fake.add_edge("CONTAINS", rid, 1, ta); rid += 1
+        fake.add_edge("CONTAINS", rid, ta, ca); rid += 1
+        fake.add_edge("CONTAINS", rid, 2, tb); rid += 1
+        fake.add_edge("CONTAINS", rid, tb, cb); rid += 1
+        fake.add_edge("FLOWS", rid, ca, cb); rid += 1
+    return {"domain": 0, "table": 1, "column": 2}
+
+
+def _pressured_gauge(monkeypatch, rss, limit):
+    """Every pipeline built from here on sees the worker at ``rss`` MB of a
+    ``limit`` MB cgroup limit (None = unreadable)."""
+    monkeypatch.setattr(mat.MemoryGauge, "sample", lambda self: (rss, limit))
+
+
+def test_memory_pressure_flushes_early_with_exact_weights_and_reports_it(monkeypatch):
+    """A worker at 73% of its limit with 1,000+ pairs pending flushes on
+    memory long before the pair cap (50M) — the same exact-weight
+    flush the cap triggers — and the run says how often and how high."""
+    # The env floor is 10k pairs (a smaller flush is not worth its writes);
+    # the mechanism is exercised on a 4k-pair graph by lowering the bar.
+    monkeypatch.setattr(mat, "_flush_min_pairs", lambda: 1000)
+    _pressured_gauge(monkeypatch, 3000.0, 4096.0)
+    n_pairs = 4097
+    fake = _FakeFalkor()
+    levels = _four_thousand_pairs(fake, n_pairs)
+    rollups = {"n": 0}
+    real_rollup = mat.AggregationPipeline._rollup_base
+
+    async def counting_rollup(self, base):
+        rollups["n"] += 1
+        return await real_rollup(self, base)
+
+    monkeypatch.setattr(mat.AggregationPipeline, "_rollup_base", counting_rollup)
+    result = _run(_materialize(_make_provider(fake, levels)))
+
+    assert len(fake.agg) == n_pairs + 1
+    assert fake.agg[(1, 2)]["weight"] == n_pairs
+    assert all(edge["weight"] == 1 for key, edge in fake.agg.items() if key != (1, 2))
+    adapted = result["run_stats"]["adapted"]
+    assert adapted["memory_flushes"] >= 1
+    assert adapted["rss_high_water_mb"] == 3000 and adapted["mem_limit_mb"] == 4096
+    # The base map rolls up on pressure too, so the extract phase never
+    # holds more than it must: more than the single end-of-extract roll-up.
+    assert rollups["n"] >= 2 and adapted["memory_rollups"] >= 1
+
+
+def test_no_memory_flush_when_the_limit_is_unknown_or_the_pairs_are_few(monkeypatch):
+    fake = _FakeFalkor()
+    levels = _four_thousand_pairs(fake)
+    # Unknown limit: fail-open — the pair cap alone bounds memory.
+    monkeypatch.setattr(mat, "_flush_min_pairs", lambda: 1000)
+    _pressured_gauge(monkeypatch, 3000.0, None)
+    result = _run(_materialize(_make_provider(fake, levels)))
+    assert "memory_flushes" not in result["run_stats"].get("adapted", {})
+    # Pressure with too few pairs to make a flush worth its writes (the
+    # env floor, 10k, is already above this graph's 4k pairs).
+    fake2 = _FakeFalkor()
+    _four_thousand_pairs(fake2)
+    monkeypatch.setattr(mat, "_flush_min_pairs", lambda: 10_000)
+    _pressured_gauge(monkeypatch, 4000.0, 4096.0)
+    result = _run(_materialize(_make_provider(fake2, levels)))
+    assert "memory_flushes" not in result["run_stats"].get("adapted", {})
+    assert len(fake2.agg) == 4097 + 1
+
+
+def test_the_flush_share_is_a_fleet_knob_resolved_like_the_others(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_FLUSH_MEM_PCT", "70")
+    values, sources = mat.resolve_effective_tuning({"flush_mem_pct": 95}, None)
+    assert values["flush_mem_pct"] == 90 and sources["flush_mem_pct"] == "job"   # clamped to the bound
+    values, sources = mat.resolve_effective_tuning(None, None)
+    assert values["flush_mem_pct"] == 70 and sources["flush_mem_pct"] == "env"
+    pipe = _make_pipeline()
+    assert pipe._flush_pct == 70
+    assert mat.env_tuning_defaults()["flush_mem_pct"] == 70
+    assert mat.env_tuning_defaults()["flush_min_pairs"] == 100_000
+
+
 def test_write_budget_counts_flushed_and_pending_as_union(monkeypatch):
     """A key flushed earlier AND re-touched since sits in both the
     flushed set and the accumulator — the budget must count it once.

@@ -86,6 +86,7 @@ import random
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from backend.app.providers.process_memory import MemoryGauge
 from backend.app.providers.shard_capacity import (
     ShardMemory, WriteBudget, bytes_per_edge_default, calibrate_bytes_per_edge,
     compute_write_budget, estimate_margin_pct_default, format_refusal,
@@ -135,7 +136,7 @@ def _scan_range_width() -> int:
 
 
 def _max_pending_pairs() -> int:
-    """Memory cap on the in-worker pair accumulator AND the raw-pair base
+    """Count cap on the in-worker pair accumulator AND the raw-pair base
     map. Crossing it triggers a lattice roll-up (base) or an early flush
     to the graph (accumulator) — memory stays bounded on pathological
     graphs at the cost of extra writes.
@@ -143,12 +144,29 @@ def _max_pending_pairs() -> int:
     Default 50M keeps every graph up to that size on the flush-free diff
     path: overflow is exact but costs extra write round-trips, and the
     target scale (1M nodes / 2M edges → ~3-4M boundary pairs) never comes
-    close to the cap. NOTE the cap is what bounds WORKER RSS (not graph
-    memory — unaffected by FalkorDB topology): 50M pairs is ~5GB packed,
-    ABOVE the worker's 4Gi budget, so a graph that truly accumulates that
-    many pairs will OOM rather than flush. Lower this (or raise the worker
-    limit) before aggregating beyond ~30M pairs."""
+    close to the cap. The cap is the FLUSH-FREE ceiling, not the memory
+    wall: under a cgroup limit the memory-aware flush
+    (``AGGREGATION_FLUSH_MEM_PCT``, ``_memory_pressure``) flushes the
+    accumulator when the worker's RSS crosses that share of the limit,
+    however many pairs it holds, so a graph that produces more pairs than
+    the worker can hold flushes instead of OOM-killing the pod."""
     return _env_int("AGGREGATION_MAX_PENDING_PAIRS", 50_000_000, 50_000, 50_000_000)
+
+
+def _flush_mem_pct() -> int:
+    """Share of the worker's cgroup memory limit at which the pipeline
+    flushes its accumulator early — the memory-aware flush. Read only when
+    both the RSS and the limit are known (fail-open otherwise: the pair cap
+    still bounds memory). Fleet-wide as ``flushMemPct``."""
+    return _env_int("AGGREGATION_FLUSH_MEM_PCT", 60, 30, 90)
+
+
+def _flush_min_pairs() -> int:
+    """How many pairs the accumulator must hold before a memory-aware flush
+    may fire: a worker whose RSS is high for another reason (a large base
+    map, a neighbour job in the same process) must not flush a handful of
+    pairs over and over."""
+    return _env_int("AGGREGATION_FLUSH_MIN_PAIRS", 100_000, 10_000, 50_000_000)
 
 
 def _delete_chunk() -> int:
@@ -358,9 +376,9 @@ def env_tuning_defaults() -> Dict[str, Any]:
     ``tuning_json`` stores them — so the settings API can tell the editors
     what "empty" really means instead of each editor hard-coding a guess.
     ``estimate_margin_pct``, ``max_cube_edges``, ``budget_recheck_edges``,
-    ``scan_timeout_retries``, ``reconcile_keys_only_width`` and
-    ``server_timeout_max_ms`` are information only: env-only, shown, never
-    settable through ``AggregationTuning``."""
+    ``scan_timeout_retries``, ``reconcile_keys_only_width``,
+    ``server_timeout_max_ms`` and ``flush_min_pairs`` are information only:
+    env-only, shown, never settable through ``AggregationTuning``."""
     from backend.app.config import resilience
     return {
         "scan_range_width": _scan_range_width(),
@@ -386,6 +404,8 @@ def env_tuning_defaults() -> Dict[str, Any]:
         "scan_timeout_retries": _scan_timeout_retries(),
         "reconcile_keys_only_width": _reconcile_keys_only_width(),
         "server_timeout_max_ms": int(resilience.FALKORDB_SERVER_TIMEOUT_MAX_MS),
+        "flush_mem_pct": _flush_mem_pct(),
+        "flush_min_pairs": _flush_min_pairs(),
     }
 
 
@@ -424,6 +444,7 @@ def resolve_effective_tuning(
     _num("scan_shrink_floor", _scan_shrink_floor, 1, 5_000_000, int)
     _num("scan_timeout_s", _scan_timeout_s, 5.0, 600.0, float)
     _num("write_timeout_s", lambda: float(bulk_timeout_default), 5.0, 600.0, float)
+    _num("flush_mem_pct", _flush_mem_pct, 30, 90, int)
     values["scan_shrink_floor"] = min(values["scan_shrink_floor"], values["scan_range_width"])
 
     for name, env_default in (
@@ -830,6 +851,18 @@ class AggregationPipeline:
         self._by_scan: Dict[str, Dict[str, Any]] = {}   # per label, ≤ 12
         self._last_hb_mono = 0.0
         self._query_mem_capacity: Optional[int] = None
+        # The memory-aware flush: the worker's RSS against its cgroup limit,
+        # sampled at most once a second from the merge loops; the
+        # accumulator flushes early when RSS crosses ``flush_mem_pct`` of
+        # the limit and holds at least ``flush_min_pairs``. Fail-open when
+        # either reading is unknown — the pair cap still bounds memory.
+        self._mem = MemoryGauge()
+        self._flush_pct = self._knob_int("flush_mem_pct", _flush_mem_pct, 30, 90)
+        self._flush_min_pairs = _flush_min_pairs()
+        self._memory_flushes = 0
+        self._memory_rollups = 0
+        self._rss_high_water_mb: Optional[float] = None
+        self._mem_limit_mb: Optional[float] = None
         # Values an operator may raise on a RUNNING job (stall/wall windows
         # live in the worker; the per-query budgets are read here per
         # query). The worker owns the dict and refreshes it from the job
@@ -1331,6 +1364,7 @@ class AggregationPipeline:
                     if (
                         self._pressure_log or self._scan_min_width is not None
                         or self._hints_applied or self._live
+                        or self._memory_flushes or self._memory_rollups
                     ) else {}
                 ),
                 # The per-query ceiling the ladder narrows against, when the
@@ -1807,6 +1841,13 @@ class AggregationPipeline:
             out["by_scan"] = {k: dict(v) for k, v in self._by_scan.items()}
         if self._hints_applied:
             out["from_last_run"] = dict(self._hints_applied)
+        if self._memory_flushes or self._memory_rollups:
+            out["memory_flushes"] = self._memory_flushes
+            out["memory_rollups"] = self._memory_rollups
+            if self._rss_high_water_mb is not None:
+                out["rss_high_water_mb"] = round(self._rss_high_water_mb)
+            if self._mem_limit_mb is not None:
+                out["mem_limit_mb"] = round(self._mem_limit_mb)
         # What an operator changed on the running job, in force now.
         live = {
             k: v for k, v in self._live.items()
@@ -2047,10 +2088,15 @@ class AggregationPipeline:
                 await self._checkpoint(
                     PHASE_AGGREGATE, self._scanned, phase_label="extracting",
                 )
-                if len(base) >= cap:
+                if len(base) >= cap or (
+                    len(base) >= self._flush_min_pairs and self._memory_pressure()
+                ):
                     # Roll-ups are linear: rolling partial bases and summing
                     # equals rolling the whole base. Collapse now to bound
-                    # memory; the accumulator merges across partials.
+                    # memory; the accumulator merges across partials (and
+                    # flushes on memory pressure as it goes).
+                    if len(base) < cap:
+                        self._memory_rollups += 1
                     await self._rollup_base(base)
                     base = {}
 
@@ -2401,28 +2447,62 @@ class AggregationPipeline:
             if observed is not None else {"calibration": "skipped_small_growth"}
         )
 
+    def _memory_pressure(self) -> bool:
+        """True when the worker's RSS is at or over the flush share of its
+        cgroup limit. Fail-open: an unknown RSS or no limit reads as no
+        pressure, and the pair cap still bounds memory. Records the peak
+        RSS and the limit for the run's record."""
+        rss, limit = self._mem.sample()
+        if rss is None or limit is None:
+            return False
+        self._rss_high_water_mb = max(self._rss_high_water_mb or 0.0, rss)
+        self._mem_limit_mb = limit
+        return rss * 100.0 >= limit * self._flush_pct
+
+    def _should_flush(self, size: int) -> Tuple[bool, str]:
+        """Whether the accumulator (``size`` pairs) flushes now, and why:
+        ``"cap"`` at the pair cap, ``"memory"`` when the worker is under
+        memory pressure with enough pairs to make a flush worth its writes."""
+        if size >= self._pair_cap():
+            return True, "cap"
+        if size >= self._flush_min_pairs and self._memory_pressure():
+            return True, "memory"
+        return False, ""
+
     async def _maybe_overflow_flush(self) -> None:
-        """Early-apply the accumulator when it exceeds the memory cap.
+        """Early-apply the accumulator when it exceeds the pair cap, or when
+        the worker is under memory pressure (``_should_flush``).
 
         The first flush of a key this run OVERWRITES the stored weight
         (discarding any stale value or prior attempt's partial); repeat
         flushes ADD. Flushed edges carry ``latestUpdate >= run_start_ms``
         so the reconcile delete pass never removes them. Weights therefore
         stay EXACT across flushes and across restart-from-zero resumes."""
-        cap = self._pair_cap()
-        if len(self._acc) < cap:
+        flush, reason = self._should_flush(len(self._acc))
+        if not flush:
             return
+        if reason == "memory":
+            self._memory_flushes += 1
         flushed = self._flushed
         overwrite = [k for k in self._acc if k not in flushed]
         add = [k for k in self._acc if k in flushed]
         # This wave's growth is exactly its first-touch keys; the shard is
         # re-read, so the waves before it are already inside ``used``.
         await self._check_write_budget(wave=overwrite)
-        logger.info(
-            "aggregation pipeline on %s: accumulator hit cap %d — early "
-            "flush (%d first-touch overwrite, %d add).",
-            self.p._graph_name, cap, len(overwrite), len(add),
-        )
+        if reason == "memory":
+            logger.info(
+                "aggregation pipeline on %s: worker at %.0f MB of its %.0f MB limit "
+                "(flush at %d%%) with %d pending pairs — early flush on memory "
+                "(%d first-touch overwrite, %d add).",
+                self.p._graph_name, self._rss_high_water_mb or 0.0, self._mem_limit_mb or 0.0,
+                self._flush_pct, len(self._acc), len(overwrite), len(add),
+            )
+        else:
+            logger.info(
+                "aggregation pipeline on %s: accumulator hit cap %d — early "
+                "flush (%d first-touch overwrite, %d add).",
+                self.p._graph_name, self._pair_cap(), len(overwrite), len(add),
+            )
         snapshot = self._acc
         self._acc = {}
         await self._write_keys(snapshot, overwrite, weight_mode="overwrite")

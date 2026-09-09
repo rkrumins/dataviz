@@ -94,7 +94,8 @@ def _now() -> str:
 #: payload values must be str|int|float): what the ladder has changed so far.
 _ADAPTED_LIVE_KEYS = ("scan_width", "scan_width_min", "scan_shrinks",
                       "extract_concurrency", "reconcile_strategy", "write_batch",
-                      "delete_chunk", "timeout_retries")
+                      "delete_chunk", "timeout_retries", "memory_flushes",
+                      "rss_high_water_mb", "mem_limit_mb")
 
 #: The pipeline knobs an operator may change on the RUNNING job (PATCH
 #: …/limits): the worker's watchdog re-reads them from the row and hands

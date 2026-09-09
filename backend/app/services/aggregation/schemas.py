@@ -169,6 +169,13 @@ class AggregationTuning(BaseModel):
                     "figure the last successful rebuild measured on the shard "
                     "(and the 512 B default before any run has).",
     )
+    flush_mem_pct: Optional[int] = Field(
+        None, alias="flushMemPct", ge=30, le=90,
+        description="Share of the worker's cgroup memory limit at which the "
+                    "pipeline flushes its accumulator early (default 60). "
+                    "Fleet-wide; needs at least AGGREGATION_FLUSH_MIN_PAIRS "
+                    "pairs in memory to fire, and both readings to be known.",
+    )
     scan_shrink_floor: Optional[int] = Field(
         None, alias="scanShrinkFloor", ge=1, le=5_000_000,
         description="Narrowest scan slice the pressure ladder descends to "
@@ -1176,6 +1183,10 @@ class EnvTuningDefaults(BaseModel):
     scan_timeout_retries: Optional[int] = Field(None, alias="scanTimeoutRetries")
     reconcile_keys_only_width: Optional[int] = Field(None, alias="reconcileKeysOnlyWidth")
     server_timeout_max_ms: Optional[int] = Field(None, alias="serverTimeoutMaxMs")
+    # The memory-aware flush: the share of the worker's memory limit it
+    # fires at (a fleet knob) and the pairs it needs in memory first (env).
+    flush_mem_pct: Optional[int] = Field(None, alias="flushMemPct")
+    flush_min_pairs: Optional[int] = Field(None, alias="flushMinPairs")
 
     class Config:
         populate_by_name = True

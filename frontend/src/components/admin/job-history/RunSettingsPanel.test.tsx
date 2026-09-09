@@ -123,3 +123,12 @@ describe('adaptationSentences — changed while running', () => {
         expect(adaptationSentences({ live: {} })).toEqual([])
     })
 })
+
+describe('adaptationSentences — worker memory', () => {
+    it('says how often the run flushed on memory, with the peak against the limit', () => {
+        expect(adaptationSentences({ memory_flushes: 3, rss_high_water_mb: 2_970, mem_limit_mb: 4_096 }))
+            .toContain('Flushed 3× on worker memory (peak 2.9 GB of 4.0 GB)')
+        expect(adaptationSentences({ memory_rollups: 2, rss_high_water_mb: 512 }))
+            .toContain('Rolled up early 2× on worker memory (peak 512 MB)')
+    })
+})

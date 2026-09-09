@@ -22,6 +22,7 @@ export type TuningKnobKey =
     | 'writePacingRatio' | 'extractConcurrency' | 'scanShrinkFloor'
     | 'shardReservePct' | 'bytesPerEdge' | 'maxMaterializedEdges'
     | 'scanTimeoutS' | 'writeTimeoutS' | 'stallTimeoutSecs' | 'maxWallSecs'
+    | 'flushMemPct'
 
 export type KnobGroup = 'capacity' | 'reading' | 'writing' | 'timeouts'
 
@@ -115,6 +116,13 @@ export const TUNING_KNOBS: TuningKnob[] = [
         tip: 'Maximum aggregated pairs held in worker memory before the pipeline flushes early. Lower values reduce worker RSS at the cost of more flush cycles. This bounds the WORKER, not the graph store.',
         help: 'Pairs held in memory (50,000-50,000,000)',
         min: 50_000, max: 50_000_000, group: 'reading', fallback: 50_000_000,
+    },
+    {
+        key: 'flushMemPct',
+        label: 'Memory flush',
+        tip: 'The memory-aware flush: when the rebuild worker’s memory use crosses this share of its container limit, the pipeline writes the pairs it holds to the graph early and frees them, however many there are — so a graph that produces more pairs than the worker can hold flushes instead of being OOM-killed. Needs both readings (RSS and the cgroup limit) and at least the minimum pairs set by the deployment; the pair cap above still applies.',
+        help: 'Percent of the worker’s memory limit (30-90)',
+        min: 30, max: 90, group: 'reading', fallback: 60, fleetOnly: true,
     },
     {
         key: 'writePacingRatio',

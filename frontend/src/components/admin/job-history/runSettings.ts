@@ -47,6 +47,7 @@ const ROW_SPECS: Array<{ key: string; label: string; fmt: (v: unknown) => string
     { key: 'extract_concurrency', label: 'Read concurrency', fmt: n },
     { key: 'scan_shrink_floor', label: 'Scan floor', fmt: v => (typeof v === 'number' ? `${v.toLocaleString()} ${v === 1 ? 'row' : 'rows'}` : '—') },
     { key: 'max_pending_pairs', label: 'Max pending pairs', fmt: n },
+    { key: 'flush_mem_pct', label: 'Memory flush', fmt: v => (typeof v === 'number' ? `at ${v}% of the worker limit` : '—') },
     { key: 'write_pacing_ratio', label: 'Write pacing ratio', fmt: v => (typeof v === 'number' ? `×${v}` : '—') },
     { key: 'apply_chunk', label: 'Apply chunk', fmt: n },
     { key: 'delete_chunk', label: 'Delete chunk', fmt: n },
@@ -139,6 +140,10 @@ export function frozenTuningRows(tuning: Record<string, unknown> | null | undefi
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString()} ${count === 1 ? one : many}`
 
 /** Plain sentences for what the ladder changed, in the order it happens. */
+function mb(n: number): string {
+    return n >= 1024 ? `${(n / 1024).toFixed(1)} GB` : `${Math.round(n)} MB`
+}
+
 export function adaptationSentences(
     adapted: AdaptedRunState | null | undefined,
     extra?: { bytesPerEdgeObserved?: number | null },
@@ -178,6 +183,16 @@ export function adaptationSentences(
     }
     if (adapted?.budget_rechecks) {
         out.push(`Shard re-measured ${adapted.budget_rechecks}× during the apply`)
+    }
+    if (adapted?.memory_flushes || adapted?.memory_rollups) {
+        const parts: string[] = []
+        if (adapted.memory_flushes) parts.push(`Flushed ${adapted.memory_flushes}× on worker memory`)
+        else parts.push(`Rolled up early ${adapted.memory_rollups}× on worker memory`)
+        const peak = typeof adapted.rss_high_water_mb === 'number' ? mb(adapted.rss_high_water_mb) : null
+        const limit = typeof adapted.mem_limit_mb === 'number' ? mb(adapted.mem_limit_mb) : null
+        if (peak && limit) parts.push(`(peak ${peak} of ${limit})`)
+        else if (peak) parts.push(`(peak ${peak})`)
+        out.push(parts.join(' '))
     }
     if (adapted?.live && Object.keys(adapted.live).length > 0) {
         const l = adapted.live

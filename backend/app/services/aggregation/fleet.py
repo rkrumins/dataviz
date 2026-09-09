@@ -56,33 +56,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def read_rss_mb() -> Optional[float]:
-    """Current process RSS from /proc/self/status (Linux; None elsewhere)."""
-    try:
-        with open("/proc/self/status") as fh:
-            for line in fh:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) / 1024.0  # kB → MB
-    except Exception:
-        return None
-    return None
-
-
-def read_mem_limit_mb() -> Optional[float]:
-    """Cgroup memory limit (v2 then v1). None when unlimited/unknown."""
-    for path in ("/sys/fs/cgroup/memory.max",
-                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
-        try:
-            raw = open(path).read().strip()
-            if raw == "max":
-                return None
-            value = int(raw)
-            if value <= 0 or value >= 1 << 60:  # sentinel for "unlimited"
-                return None
-            return value / (1024.0 * 1024.0)
-        except Exception:
-            continue
-    return None
+# The readers live in ``providers.process_memory`` (the aggregation
+# pipeline's memory-aware flush shares them); bound here as module globals
+# so ``claim_decision``/``heartbeat`` resolve them at call time and a test
+# can substitute them on this module.
+from backend.app.providers.process_memory import read_mem_limit_mb, read_rss_mb  # noqa: E402,F401
 
 
 class WorkerFleetMember:
