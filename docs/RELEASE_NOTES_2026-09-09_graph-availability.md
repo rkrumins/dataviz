@@ -313,3 +313,124 @@ they are the fix.
   (`GRAPH_CACHE_MAX_PAYLOAD_BYTES`), so the largest views recompute on every open. The
   per-workspace fair-share limiter is off by default and does not yet cover the view-open
   endpoints.
+
+---
+
+## 9. Addendum, round four — one bad data source, and the shape of hundreds of users
+
+Two questions drove this round: can the stack serve hundreds of concurrent users, and
+can one or two unhealthy data sources out of five take the application down. The second
+had a concrete answer, and it was yes.
+
+### The mechanism: one shared pool, held across the provider call
+
+Every graph request checks out a `GRAPH_READ` database session in `get_context_engine`
+**before** the data source is resolved, and holds it across the whole outbound FalkorDB
+call. That pool is per process (10 + 10 by default) and **shared by every data source**.
+
+A data source that is merely slow is deliberately never gated — that was the fix for the
+false "graph is offline" in round one — so its requests keep arriving, and each one pins
+a session for up to its 20s query budget. Five sources configured and one slow: it fills
+all 20 sessions on a worker. Requests for the four healthy sources then wait
+`DB_POOL_TIMEOUT_SECS` (10s) for a session that never frees and fail with a generic
+"Database is temporarily unavailable" 503. One unhealthy source took the graph down for
+all of them, and the per-provider slot cap could not prevent it: it is applied inside 16
+of the 55 graph routes, always *after* the session is already held.
+
+**Admission now runs at the door.** A dependency declared before the session (FastAPI
+resolves sub-dependencies in declaration order, so a shed request never takes one) keeps
+a per-source count and applies three rules:
+
+| Rule | Effect |
+|---|---|
+| over `GRAPH_INFLIGHT_HARD_MAX` | shed — the invariant that keeps a checkout from ever waiting on the 10s pool timeout |
+| under `PROVIDER_SOURCE_RESERVED` | admit, whatever else is in flight — this is the guarantee |
+| otherwise | admit while there is still room for every other source's reserve |
+
+"Every other source" means every source this process has served within
+`GRAPH_SOURCE_RECENT_SECS` (60), not just the ones with a request in flight. That
+distinction is the point: the reported case is a source that has been slow for a while
+before anyone opens a view on another one, so the neighbour arrives cold and must still
+find room. Sizing the reserve from what the deployment actually uses also means a
+single-source install holds nothing back and uses the entire ceiling — a fixed
+mid-ceiling would have throttled it to protect neighbours that do not exist. Defaults
+derive from the pool (10+10 → ceiling 16, reserve 2) rather than being hard-coded, so
+resizing the pool moves the gate with it. A shed request is `ProviderBusy` (429 +
+`Retry-After`), which the canvas retries in place.
+
+Concretely, at the shipped defaults: one source alone reaches all 16 concurrent graph
+requests per worker; with five sources known, a saturated one is held at 8 and the other
+four each get their full reserve.
+
+### The other ways one provider reached the others
+
+- **A wedged `close()` froze the fleet's control plane.** `_close_and_forget` awaited
+  `provider.close()` with no ceiling, and it runs on two process-wide *serial* paths:
+  the warmup cycle's idle reap and the cross-process invalidation listener. Against a
+  blackholed host, the warmup cycle stopped — so every provider's verdict went stale and
+  the health endpoint reported the loop degraded — and no other provider's invalidation
+  was applied. Now bounded by `PROVIDER_CLOSE_TIMEOUT_S` (2s), like the probe path
+  already was.
+- **Cache writes serialized whole payloads on the event loop, twice.** The primary entry
+  and the last-known-good mirror each called `model_dump_json` inline, so every cache
+  fill blocked the worker for every other data source in proportion to the largest
+  response any one of them returned. Now serialized once, on a thread.
+- **The v2 graph dependency took a `WEB`-pool session** — the pool that serves auth and
+  navigation. That router is not mounted, so it was harmless; it now takes the same two
+  gates as v1 so enabling it cannot reintroduce the bug in its worst form.
+- **The frontend asserted zeros when a bulk read failed.** One request covers every
+  workspace, so one unhealthy source could fail it for all of them, and the workspaces
+  page and admin overview then rendered "0 entities" across a fleet whose other four
+  sources were fine. A failed refresh is now "we don't know" — the last known counts stay,
+  behind the page's existing degraded banner.
+- **Every unscoped envelope fetch shared one circuit breaker.** Three failures on a bulk
+  endpoint fast-failed unrelated endpoints for 15s, returning `null`, which callers
+  cannot tell apart from "no data". Unscoped calls are now keyed by endpoint path.
+
+The health surface itself was already clean: no health or status endpoint does
+per-provider I/O, so a hung provider cannot make its neighbours read "unknown".
+
+### Capacity
+
+| Knob | Was | Now | Why |
+|---|---|---|---|
+| FalkorDB `THREAD_COUNT` | 4 | 8 | The query threads are the read tier's real concurrency limit; a handful of heavy reads occupied all four while everyone else queued |
+| FalkorDB CPU limit | 4 | 8 | `THREAD_COUNT` must track it, or the threads throttle |
+| FalkorDB memory limit | 10Gi | 14Gi | Sized for the new concurrency: `maxmemory×1.25 + THREAD_COUNT × QUERY_MEM_CAPACITY×1.3 + 256Mi`. Raising threads without this would OOM-kill the pod under exactly the load it was raised for |
+| `MAX_QUEUED_QUERIES` | 64 | 256 | A burst now queues instead of being rejected; the rejection is a retried 429 either way since round three |
+| `GRAPH_CACHE_MAX_PAYLOAD_BYTES` | 1 MiB | 4 MiB | At 1 MiB the biggest views — the ones whose queries cost most — were never cached, so every concurrent open recomputed the same multi-second scan |
+
+Pool sizes are deliberately unchanged: the per-process ceiling is already
+85 connections against a Postgres configured for 400, and raising it needs a connection
+pooler first, not a bigger number.
+
+### Verification
+
+`/api/v1/health/deps` → `resilience.provider_manager` gains `graph_shed_over_share`,
+`graph_shed_process_full`, `graph_inflight_peak` and `provider_close_timeouts`. The
+healthy shape under load: `graph_inflight_peak` below the hard ceiling,
+`graph_shed_over_share` non-zero only for a source that is actually slow, and
+`graph_shed_process_full` at zero. A rising `graph_shed_over_share` on one source while
+the others keep serving is the fix working, not a regression.
+
+### Known limitations
+
+- The reserved share is per process, so a source's fleet-wide floor is
+  `reserved × workers × pods`, not a single number.
+- A source unused for longer than the recency window stops holding capacity, and a
+  process serving more sources than `ceiling ÷ reserve` cannot give them all a share —
+  at the defaults that is eight sources per worker.
+- Admission is keyed on the workspace and data source in the URL, so several workspaces
+  sharing one physical source are counted together. That errs safe: it can shed earlier
+  than necessary, never later.
+- The bulk stats endpoints still fail as one unit, so a cold start with an unhealthy
+  source shows unknown counts rather than partial ones. Making the backend return
+  per-source partial results is the real fix and is not in this change.
+- Two endpoints outside the graph router (`/freshness`, aggregation readiness) take a
+  graph-read session without passing the gate. That is what the four-connection gap
+  between the hard ceiling and the pool is reserved for; they are short Postgres reads,
+  so the gap holds, but the accounting is a reservation rather than a guarantee.
+- Two data sources pointing at the same host and port share one read-pressure signal.
+- Capacity is still one FalkorDB instance. Eight query threads is roughly double the
+  concurrent read throughput, not an order of magnitude; past that the answer is read
+  replicas.

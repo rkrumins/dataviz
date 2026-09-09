@@ -189,6 +189,20 @@ def _pool_kwargs(role: PoolRole) -> dict:
     }
 
 
+def graph_read_pool_capacity() -> int:
+    """Total GRAPH_READ sessions one process can hold at once (pool + overflow).
+
+    The graph endpoints hold one of these across the whole outbound provider
+    call, so this number IS the ceiling on concurrent graph requests per
+    worker — and it is shared by every data source. The admission gate in
+    ``providers/manager.py`` derives its per-source reservation from it so the
+    two can never drift into a state where one slow data source can occupy
+    the entire pool and 503 the others (see ``PROVIDER_SOURCE_RESERVED``).
+    """
+    kw = _pool_kwargs(PoolRole.GRAPH_READ)
+    return int(kw["pool_size"]) + int(kw["max_overflow"])
+
+
 def _pooler_disables_prepared_statements() -> bool:
     """True when the DB is fronted by a TRANSACTION- or STATEMENT-mode
     connection pooler (Cloud SQL Managed Connection Pooling / PgBouncer),

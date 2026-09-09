@@ -49,7 +49,7 @@ spec:
             - name: FALKORDB_QUERY_MEM_CAPACITY
               value: "536870912"                       # 512 MiB
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY $(FALKORDB_QUERY_MEM_CAPACITY) CACHE_SIZE 50"
+              value: "THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 256 QUERY_MEM_CAPACITY $(FALKORDB_QUERY_MEM_CAPACITY) CACHE_SIZE 50"
             # The dataset itself needs maxmemory or growth OOM-kills the pod.
             # noeviction = writes fail loudly at the ceiling.
             # save 3600 1 = hourly RDB floor alongside AOF: appendonly-yes with
@@ -75,15 +75,19 @@ spec:
               cpu: "1"
               memory: 2Gi
             limits:
-              cpu: "4"
-              # 10Gi, not 8Gi: maxmemory alone was booked at 75% of an 8Gi
-              # limit, which left the ENTIRE remainder for fragmentation and
-              # AOF-rewrite copy-on-write — and nothing for query memory,
-              # which is charged separately and concurrently (see the sizing
-              # note on FALKORDB_QUERY_MEM_CAPACITY above). 6gb*1.25 + 2
-              # concurrent queries at 512Mi*1.3 + 256Mi overhead ~= 9.1Gi.
+              # THREAD_COUNT tracks this number (docs/FALKORDB_DEPLOYMENT.md):
+              # the query threads are the read tier's real concurrency limit,
+              # and at 4 a handful of heavy reads occupied every one of them
+              # while hundreds of users queued behind. 8 threads on 8 CPUs.
+              cpu: "8"
+              # Sized for the concurrency above: maxmemory*1.25 +
+              # THREAD_COUNT concurrent queries at QUERY_MEM_CAPACITY*1.3 +
+              # 256Mi overhead. At 6gb / 8 threads / 512Mi that is
+              # 7.5 + 5.3 + 0.25 ~= 13.1Gi, so 14Gi. (It was 10Gi for 4
+              # threads; raising THREAD_COUNT without this would OOM-kill the
+              # pod under exactly the load it was raised to serve.)
               # requests stay at 2Gi, so scheduling density is unchanged.
-              memory: 10Gi
+              memory: 14Gi
           readinessProbe:
             exec:
               # grep PONG, not bare `redis-cli ping`: redis-cli exits 0 even on

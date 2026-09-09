@@ -311,6 +311,7 @@ pipeline).
 | `AGGREGATION_READ_PRESSURE_PACING_RATIO` | 4.0 | Sleep-after-write ratio used while the web tier reports interactive reads starving on the endpoint (≤ ~20% duty cycle); the larger of the two ratios wins. Env-only |
 | `AGGREGATION_READ_PRESSURE_TTL_S` | 30 | How long one starved-read signal keeps the writers yielding (5–600; every new signal refreshes it) |
 | `AGGREGATION_READ_PRESSURE_POLL_SECS` | 2 | How long a worker reuses its last read-pressure verdict before asking Redis again |
+| `PROVIDER_CLOSE_TIMEOUT_S` | 2.0 | Ceiling on one provider's `close()`. The warmup cycle's idle reap and the cross-process invalidation listener both walk providers serially, so an unbounded close against a blackholed host froze both for every provider |
 | `FALKORDB_SCAN_RANGE_TIMEOUT` | 30 | Per-scan-query timeout (s) |
 | `AGGREGATION_SCAN_SHRINK_FLOOR` | 10000 | Smallest range width the shrink ladder descends to. A floor-width TIMEOUT is an outage and fails the run; a floor-width per-query MEMORY refusal is a payload-size fact and fails the job terminally, no retries |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | false | Restore leaf↔leaf mirror pairs (legacy mode only) |

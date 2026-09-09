@@ -94,3 +94,28 @@ describe('cacheEnvelope — breaker signals', () => {
     expect(breaker.canRequest()).toBe(false)
   })
 })
+
+describe('cacheEnvelope — an unscoped call is keyed by endpoint', () => {
+  it('a failing bulk endpoint does not fast-fail a different unscoped endpoint', async () => {
+    // The bulk endpoints span every workspace and data source, so ONE
+    // unhealthy provider can fail them for everybody. When every unscoped
+    // call shared one breaker, three such failures also fast-failed unrelated
+    // endpoints for 15s — returning null, which callers cannot tell apart
+    // from "no data" and render as zeros.
+    const bulk = '/api/v1/admin/workspaces/datasources/cached-stats'
+    const other = '/api/v1/admin/ontologies'
+
+    fetchSpy.mockImplementation(async () => new Response('nope', { status: 503 }))
+    for (let i = 0; i < 3; i++) expect(await fetchEnveloped(bulk)).toBeNull()
+
+    fetchSpy.mockImplementation(async () => jsonResponse(200, { ok: true }))
+    expect(await fetchEnveloped(other)).toEqual({ ok: true })
+  })
+
+  it('paging the same endpoint shares one breaker rather than minting one per page', async () => {
+    fetchSpy.mockImplementation(async () => jsonResponse(200, { page: 1 }))
+    expect(await fetchEnveloped('/api/v1/admin/things?offset=0')).toEqual({ page: 1 })
+    expect(await fetchEnveloped('/api/v1/admin/things?offset=20')).toEqual({ page: 1 })
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+})

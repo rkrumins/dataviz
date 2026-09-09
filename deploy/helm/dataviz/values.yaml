@@ -157,17 +157,21 @@ stores:
     # query's whole result set before sending it). Raising QUERY_MEM_CAPACITY
     # without raising limits.memory trades a caught query error for an
     # OOM-killed pod. See docs/FALKORDB_DEPLOYMENT.md.
-    args: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
+    args: "THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 256 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
     # noeviction = writes fail loudly instead of the pod being OOM-killed
     # by data growth.
     redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction"
     storage: 10Gi
     resources:
       requests: { cpu: "1", memory: 2Gi }
-      # 10Gi: 6gb*1.25 + 2 concurrent queries at 512Mi*1.3 + 256Mi ~= 9.1Gi.
-      # The previous 8Gi booked the whole non-maxmemory remainder for
-      # fragmentation/COW and left nothing for query memory.
-      limits: { cpu: "4", memory: 10Gi }
+      # cpu 8 because THREAD_COUNT tracks it (see args above): the query
+      # threads are the read tier's real concurrency limit, and at 4 a
+      # handful of heavy reads occupied every one of them while everyone
+      # else queued. memory 14Gi is the same budget line as the comment
+      # above, evaluated at the new concurrency: 6gb*1.25 + 8 concurrent
+      # queries at 512Mi*1.3 + 256Mi ~= 13.1Gi. Raising THREAD_COUNT
+      # without this trades a caught query error for an OOM-killed pod.
+      limits: { cpu: "8", memory: 14Gi }
   redis:
     enabled: false
     image: redis:7-alpine

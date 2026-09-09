@@ -135,8 +135,15 @@ export interface FetchEnvelopedOptions {
      * already opened the circuit for graph queries also fails fast for
      * cache-envelope queries on the same scope, and vice versa.
      *
-     * Default: an unscoped global breaker (`workspaceId='', dataSourceId=''`).
-     * Pass an empty object `{}` to opt into the global breaker explicitly.
+     * Default (no scope given): a breaker keyed by the ENDPOINT, not one
+     * global breaker for the whole app. The bulk endpoints that span every
+     * workspace and data source (`/admin/workspaces/datasources/cached-stats`)
+     * used to share a single `'::default'` breaker with every other unscoped
+     * envelope call, so one failing bulk endpoint fast-failed unrelated ones
+     * for 15s — a fast-fail that returns `null`, which callers cannot tell
+     * apart from "no data". Per-endpoint keying keeps a bad endpoint's
+     * failures to that endpoint. Pass an empty object `{}` to opt into the
+     * app-wide breaker explicitly.
      */
     circuitScope?: { workspaceId?: string; dataSourceId?: string }
     /**
@@ -183,10 +190,15 @@ async function _runEnvelopeFetch(
 ): Promise<unknown | null> {
     const useCB = options?.useCircuitBreaker !== false
     const cb = useCB
-        ? getCircuitBreaker(
-              options?.circuitScope?.workspaceId,
-              options?.circuitScope?.dataSourceId,
-          )
+        ? (options?.circuitScope
+            ? getCircuitBreaker(
+                  options.circuitScope.workspaceId,
+                  options.circuitScope.dataSourceId,
+              )
+            // No scope: key on the endpoint's own path (query string stripped,
+            // so paging does not mint a breaker per page) rather than one
+            // global bucket shared with every other unscoped call.
+            : getCircuitBreaker('envelope', url.split('?')[0]))
         : null
 
     // Pre-flight: if the breaker is open, skip the network call entirely

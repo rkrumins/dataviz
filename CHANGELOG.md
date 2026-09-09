@@ -153,6 +153,41 @@ load runs its node batches four at a time, and the schema pill says "Schema unav
 (those endpoints read Postgres, never the graph) and stays quiet for a session that is
 merely being renewed.
 
+**One unhealthy data source no longer takes the graph down for the others.** Every graph
+request holds a database session across its outbound FalkorDB call, and that pool is per
+process and shared by every data source. A source that is merely slow is deliberately never
+gated — that is what stopped the false "graph is offline" — so its requests kept arriving
+and each pinned a session for up to its 20s query budget. With five sources configured and
+one slow, it filled every session on a worker, and requests for the four healthy sources
+waited ten seconds for a session that never freed and failed with a generic "database is
+temporarily unavailable". Admission now runs at the door, before a session is taken: each
+source keeps a reserved share it is never refused, one source may burst into the shared
+middle while the process is quiet, and nothing is admitted past a hard ceiling that sits
+under the pool. The gap between the burst ceiling and the hard one is sized to hold four
+neighbours' reserved shares, and all of it derives from the pool size rather than being
+hard-coded. A shed request is a 429 the canvas retries in place.
+
+Three more paths from one provider to the others are closed. A wedged `close()` used to
+run unbounded on two serial paths — the warmup cycle's idle reap and the cross-process
+invalidation listener — so one blackholed host stopped the warmup cycle, staled every
+provider's verdict, and blocked every other provider's invalidation; it is now bounded.
+Cache writes serialized whole payloads on the event loop twice per fill, once for the entry
+and once for the last-known-good mirror, stalling every other data source's requests in
+proportion to the largest response any one of them returned; they are now serialized once,
+on a thread. The v2 graph dependency took a session from the pool that serves auth and
+navigation, which would have been the worst version of the same bug the day that router was
+mounted. On the frontend, a failed bulk stats read asserted zero entities for every
+workspace — one unhealthy source could fail that single request for all of them — and every
+unscoped enveloped fetch shared one circuit breaker, so three failures on a bulk endpoint
+fast-failed unrelated ones. A failed refresh is now "we don't know", and unscoped calls are
+keyed by endpoint.
+
+Capacity for hundreds of concurrent users: FalkorDB runs eight query threads instead of
+four, on eight CPUs and 14Gi (sized for the extra concurrent query memory), with a queue of
+256 rather than 64; and the response cache now holds entries up to 4 MiB instead of 1 MiB,
+so the largest views — the ones whose queries cost the most — are cached rather than
+recomputed on every concurrent open.
+
 **The graph's own capacity replies, the last path to the outage card, and jobs that
 never yielded.** FalkorDB answers "Max pending queries exceeded" (its queue cap) and
 "Query timed out" (its kill of one query at the deadline the provider sent) as ordinary
