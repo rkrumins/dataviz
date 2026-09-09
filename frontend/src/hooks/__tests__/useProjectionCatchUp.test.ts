@@ -198,3 +198,15 @@ describe('what the hook asks, and what it is willing to claim', () => {
     expect(getReadiness).toHaveBeenCalledTimes(settled)
   })
 })
+
+describe('what is, and is not, worth asking the projector about', () => {
+  it('never treats the store refusing part of a read as the source being behind', () => {
+    // The read narrowed as far as it goes and the store still refused a page or
+    // a batch: the answer is the selection or the node's limits, and the canvas
+    // has its own banner for that. Polling readiness would only mislead.
+    expect(shouldAskProjector('query_memory')).toBe(false)
+    expect(shouldAskProjector('timeout')).toBe(false)
+    expect(shouldAskProjector('degraded')).toBe(true)
+    expect(shouldAskProjector('source_changed')).toBe(false)
+  })
+})

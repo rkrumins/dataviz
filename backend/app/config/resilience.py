@@ -87,6 +87,12 @@ AGGREGATED_EDGE_RESULT_CAP: int = int(os.getenv("AGGREGATED_EDGE_RESULT_CAP", "1
 # per-query server work and client memory churn; total rows returned are
 # unbounded by this value (the reader loops until a short page arrives).
 AGGREGATED_EDGE_PAGE_SIZE: int = int(os.getenv("AGGREGATED_EDGE_PAGE_SIZE", "50000"))
+# The narrowest page the materialized-cell read halves down to under the
+# store's per-query pressure (its memory ceiling or its time limit) before
+# it gives up on a batch — the read-side ladder. A page at the floor that is
+# still refused is a fact the result reports (stale_reason ``query_memory``
+# / ``timeout``, with the detail) rather than something to retry.
+AGGREGATED_EDGE_PAGE_FLOOR: int = int(os.getenv("AGGREGATED_EDGE_PAGE_FLOOR", "500"))
 # Max source URNs sent to a single aggregated-edge Cypher; oversized
 # requests are split and gathered. Hard upper bound at 100k is enforced
 # by the provider with a 413 response.

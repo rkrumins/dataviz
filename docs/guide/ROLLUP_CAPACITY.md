@@ -234,6 +234,26 @@ node.
 
 ---
 
+## When the canvas says the store refused part of a read
+
+The canvas reads rollups in pages and URN batches, and those queries are
+bounded by the same two limits as a rebuild's scans. A read that meets one
+no longer fails, and no longer drops what it could not fetch in silence: it
+**narrows**. A refused page is halved and re-read from the same position,
+down to a floor of 500 rows (`AGGREGATED_EDGE_PAGE_FLOOR`); a refused batch of
+URNs is split in halves, down to a single URN; a floor-width timeout is
+retried once, briefly. A read that completes after narrowing is a complete
+answer and leaves no mark. Only what is still refused at the narrowest page
+or batch is lost — and then the canvas says so: *The graph store refused part
+of this read at its per-query memory limit — showing what it could read after
+narrowing* (or *timed out on part of this read*), with *Narrow the selection,
+or raise the per-query limit on the store* and, for a system administrator,
+**Adjust graph store limits** straight to the node the read was bounded by.
+Such a result is never cached as complete, and it never prompts the catch-up
+check — the projector is not behind.
+
+---
+
 ## Known limits
 
 - The rebuild **worker** has its own memory, bounded by the *max pending pairs*
@@ -254,8 +274,10 @@ node.
   `FALKORDB_CONTAINER_MEMORY_BYTES`), since the application cannot read the
   container limit. `THREAD_COUNT`, `OMP_THREAD_COUNT` and `CACHE_SIZE` remain
   load-time settings.
-- The canvas's own reads have no pressure ladder: a per-query refusal on a
-  drill still surfaces as a read error rather than a narrower read.
+- The read-side ladder covers the aggregated-edges family (the canvas's
+  rollup reads, on-demand pair synthesis and the raw mirror); the other reads
+  — trace drills, children, top-level pages — keep their current behaviour
+  under the store's limits.
 
 Further reading: [the aggregation pipeline](/docs/aggregation-pipeline) for the
 mechanism and every environment variable, [automatic

@@ -472,6 +472,20 @@ def _is_query_timeout_error(exc: BaseException) -> bool:
     return False
 
 
+def _pressure_kind(exc: BaseException) -> Optional[str]:
+    """``"memory"`` when the store refused a query at its per-query memory
+    ceiling, ``"timeout"`` when it aborted one at its time limit — the
+    server's own refusal or the client deadline — else None. The two
+    signals a query can absorb by asking for less at a time: the aggregation
+    pipeline's scan ladder and the aggregated-edge read ladder both key on
+    this one classifier."""
+    if _is_query_memory_error(exc):
+        return "memory"
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or _is_query_timeout_error(exc):
+        return "timeout"
+    return None
+
+
 def _clamp_db_timeout_ms(seconds: float, cap_ms: int) -> int:
     """The server-side ``TIMEOUT`` for a query with a ``seconds`` client
     budget: 500 ms under the budget so the server cancels first, never below
@@ -488,6 +502,70 @@ def _clamp_db_timeout_ms(seconds: float, cap_ms: int) -> int:
 #: above it: the server's TIMEOUT_MAX can be raised to it at runtime, and a
 #: socket that times out under a legitimate query kills the query.
 _MAX_QUERY_BUDGET_S = 600.0
+
+
+#: The one short pause before the read ladder re-issues a floor-width page
+#: that timed out. A canvas read is a web request, not a job: it cannot
+#: back off the way the pipeline does, so it retries once, briefly.
+_READ_FLOOR_RETRY_S = 1.0
+#: How many times a TIMEOUT may narrow a page or split a batch before the
+#: read gives that part up. A memory refusal is instant, so it narrows all
+#: the way to the floor for free; every timed-out attempt costs up to the
+#: full query budget, and a web request cannot afford many of those.
+_READ_TIMEOUT_NARROWINGS = 2
+
+
+class _ReadPressure:
+    """What the read-side ladder did on one aggregated read — pages and URN
+    batches narrowed, batches given up at the floor, which pressure it met
+    — so the result can say WHY it is short and the canvas what to do."""
+
+    __slots__ = ("narrowed_pages", "narrowed_batches", "degraded_batches",
+                 "floor_retries", "kinds", "degraded_kinds")
+
+    def __init__(self) -> None:
+        self.narrowed_pages = 0
+        self.narrowed_batches = 0
+        self.degraded_batches = 0
+        self.floor_retries = 0
+        self.kinds: Set[str] = set()
+        self.degraded_kinds: Set[str] = set()
+
+    def note(self, kind: str) -> None:
+        self.kinds.add(kind)
+
+    def degrade(self, kind: str) -> None:
+        self.degraded_batches += 1
+        self.degraded_kinds.add(kind)
+
+    @property
+    def narrowed(self) -> bool:
+        return bool(self.narrowed_pages or self.narrowed_batches)
+
+    @property
+    def stale_reason(self) -> Optional[str]:
+        """The reason a loss under pressure gives the result — memory first
+        (the one an administrator can act on), else timeout; None when
+        nothing was lost: a read that completed after narrowing is a
+        complete answer."""
+        if not self.degraded_batches:
+            return None
+        return "query_memory" if "memory" in self.degraded_kinds else "timeout"
+
+    def as_detail(
+        self, *, endpoint: Optional[str], query_mem_capacity: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        if not self.degraded_batches:
+            return None
+        return {
+            "kind": self.stale_reason,
+            "narrowedPages": self.narrowed_pages,
+            "narrowedBatches": self.narrowed_batches,
+            "degradedBatches": self.degraded_batches,
+            "floorRetries": self.floor_retries,
+            "endpoint": endpoint,
+            "queryMemCapacity": query_mem_capacity,
+        }
 
 
 class _EmptyResult:
@@ -6077,6 +6155,7 @@ class FalkorDBProvider(GraphDataProvider):
         """
         from fastapi import HTTPException
         from ..config.resilience import (
+            AGGREGATED_EDGE_PAGE_FLOOR,
             AGGREGATED_EDGE_PAGE_SIZE,
             AGGREGATED_EDGE_RESULT_CAP,
             AGGREGATED_SOURCE_URN_BATCH_SIZE,
@@ -6109,7 +6188,7 @@ class FalkorDBProvider(GraphDataProvider):
         # membership — observed timing out (and returning an empty
         # canvas) at 595k stored cells × 600 visible urns. With the label
         # it is |batch| index seeks + local out-edge expansion.
-        def _cypher_for(label: str, *, resume: bool) -> str:
+        def _cypher_for(label: str, *, resume: bool, limit: int) -> str:
             anchor = f"(s:{label})" if label else "(s)"
             where = ["s.urn IN $sourceUrns"]
             if target_urns:
@@ -6140,10 +6219,15 @@ class FalkorDBProvider(GraphDataProvider):
                 # boundary lands mid-tie-group; (s.urn, t.urn) is what makes
                 # that boundary exact and repeatable across pages.
                 "ORDER BY weight DESC, sUrn, tUrn "
-                f"LIMIT {AGGREGATED_EDGE_PAGE_SIZE}"
+                f"LIMIT {limit}"
             )
 
         batch_failed = False
+        pressure = _ReadPressure()
+        floor = max(1, min(AGGREGATED_EDGE_PAGE_FLOOR, AGGREGATED_EDGE_PAGE_SIZE))
+        # One page size for the whole read: the store's refusal of a page is
+        # a fact about ITS size, so every batch of this read narrows with it.
+        page_limit = AGGREGATED_EDGE_PAGE_SIZE
 
         async def _run_batch(label: str, batch: List[str]) -> list:
             """Read every matching cell for this batch, paging as needed.
@@ -6151,11 +6235,20 @@ class FalkorDBProvider(GraphDataProvider):
             Stops only when the server returns a short page (match set
             exhausted), the read fails, or the runaway guard trips — never
             at a fixed row count that would silently drop the remainder.
+
+            Under the store's per-query pressure — its memory ceiling or its
+            time limit — the page is halved and re-issued at the SAME keyset
+            position, down to the floor; a floor-width timeout gets one short
+            retry; a floor-width refusal keeps the prefix and records why,
+            so the result can say what was lost and the canvas what to do.
             """
-            nonlocal batch_failed
+            nonlocal batch_failed, page_limit
             rows: list = []
             last: Optional[list] = None
+            floor_retried = False
+            timeouts = 0
             while True:
+                limit = max(floor, page_limit)
                 params: Dict[str, Any] = {"sourceUrns": batch}
                 if target_urns:
                     params["targetUrns"] = target_urns
@@ -6165,20 +6258,51 @@ class FalkorDBProvider(GraphDataProvider):
                     params["lastTargetUrn"] = last[1]
                 try:
                     result = await self._proj_ro_query(
-                        _cypher_for(label, resume=last is not None),
+                        _cypher_for(label, resume=last is not None, limit=limit),
                         params=params, timeout=timeout, op="agg.cells",
                     )
                     page = result.result_set or []
                 except Exception as e:
-                    # Keep the pages already read — they are a correct prefix
-                    # of the answer — and let batch_failed drive
-                    # degraded/stale so the partial is flagged, not cached
-                    # full-TTL as if it were complete.
-                    logger.warning(f"AGGREGATED edge read failed: {e}")
+                    kind = _pressure_kind(e)
+                    if kind is None:
+                        # Keep the pages already read — they are a correct
+                        # prefix of the answer — and let batch_failed drive
+                        # degraded/stale so the partial is flagged, not
+                        # cached full-TTL as if it were complete.
+                        logger.warning(f"AGGREGATED edge read failed: {e}")
+                        batch_failed = True
+                        return rows
+                    pressure.note(kind)
+                    what = (
+                        "exceeded the per-query memory ceiling" if kind == "memory"
+                        else "timed out"
+                    )
+                    if kind == "timeout":
+                        timeouts += 1
+                    if limit > floor and (kind == "memory" or timeouts <= _READ_TIMEOUT_NARROWINGS):
+                        page_limit = max(floor, limit // 2)
+                        pressure.narrowed_pages += 1
+                        logger.info(
+                            "AGGREGATED edge read on %s %s at %d rows per page — "
+                            "narrowing to %d and re-reading from the same position.",
+                            self._graph_name, what, limit, page_limit,
+                        )
+                        continue
+                    if kind == "timeout" and not floor_retried:
+                        floor_retried = True
+                        pressure.floor_retries += 1
+                        await asyncio.sleep(_READ_FLOOR_RETRY_S)
+                        continue
+                    pressure.degrade(kind)
+                    logger.warning(
+                        "AGGREGATED edge read on %s %s at %d rows per page, the narrowest "
+                        "this read goes — returning the %d rows read so far as a partial answer.",
+                        self._graph_name, what, limit, len(rows),
+                    )
                     batch_failed = True
                     return rows
                 rows.extend(page)
-                if len(page) < AGGREGATED_EDGE_PAGE_SIZE:
+                if len(page) < limit:
                     return rows
                 if len(rows) >= AGGREGATED_EDGE_RESULT_CAP:
                     # Not marked degraded: the data is fine, the request is
@@ -6236,7 +6360,7 @@ class FalkorDBProvider(GraphDataProvider):
         raw_rows, mixed_rows, synth_degraded, stale_reason = (
             await self._synthesize_ondemand_lineage_pairs(
                 source_urns, target_urns, containment_edges, lineage_edges,
-                meta=meta, timeout=timeout,
+                meta=meta, timeout=timeout, pressure=pressure,
             )
         )
         if raw_rows or mixed_rows:
@@ -6278,9 +6402,24 @@ class FalkorDBProvider(GraphDataProvider):
         # incomplete for this graph state" condition as an on-demand
         # sub-query failure — fold it into the same degraded/stale_reason
         # computation rather than a parallel flag.
-        degraded = synth_degraded or batch_failed
+        # A loss under the store's per-query pressure names its kind
+        # (``query_memory`` / ``timeout``) so the canvas can say what to do;
+        # a structural reason (unmaterialized, legacy cells) still wins, and
+        # the detail rides along either way. Narrowing that completed is a
+        # complete answer and leaves no mark.
+        degraded = synth_degraded or batch_failed or pressure.degraded_batches > 0
         if degraded and not stale_reason:
-            stale_reason = "degraded"
+            stale_reason = pressure.stale_reason or "degraded"
+        if pressure.narrowed and not pressure.degraded_batches:
+            logger.info(
+                "AGGREGATED edge read on %s completed after narrowing (%d page "
+                "halvings, %d batch splits).",
+                self._graph_name, pressure.narrowed_pages, pressure.narrowed_batches,
+            )
+        detail = pressure.as_detail(
+            endpoint=self._limits_endpoint(),
+            query_mem_capacity=self.server_query_mem_capacity(),
+        )
 
         # The legacy single-query read returned rows weight-descending;
         # preserve that contract now that synthesized rows are appended.
@@ -6292,6 +6431,7 @@ class FalkorDBProvider(GraphDataProvider):
             stale_reason=stale_reason,
             stamp_version=meta.stamp_version,
             regime=meta.regime,
+            degraded_detail=detail,
         )
 
     # ------------------------------------------------------------------
@@ -6307,10 +6447,13 @@ class FalkorDBProvider(GraphDataProvider):
         *,
         meta: Optional["AggRunMeta"] = None,
         timeout: Optional[float] = None,
+        pressure: Optional["_ReadPressure"] = None,
     ) -> Tuple[list, list, bool, Optional[str]]:
         """Complete the materialized cells for the requested (bounded) URN
         sets WITHOUT walking containment in Cypher. Returns
-        ``(leaf_rows, mixed_rows, degraded, stale_reason)``.
+        ``(leaf_rows, mixed_rows, degraded, stale_reason)``; a loss under
+        the store's per-query pressure is recorded on ``pressure`` (the
+        read's shared record) as well as in ``degraded``.
 
         The previous implementation ran, on EVERY read in boundary regime:
         a per-node inbound path enumeration (``*1..16`` — the depth
@@ -6354,10 +6497,12 @@ class FalkorDBProvider(GraphDataProvider):
             return [], [], False, None
         if meta is None:
             meta = await self._aggregation_run_meta()
+        if pressure is None:
+            pressure = _ReadPressure()
 
         if meta.regime != "boundary" or meta.stamp_version < 2:
             rows = await self._synthesize_raw_lineage_pairs(
-                source_urns, target_urns, lineage_edges, timeout=timeout,
+                source_urns, target_urns, lineage_edges, timeout=timeout, pressure=pressure,
             )
             reason = None
             if meta.regime == "unknown":
@@ -6378,32 +6523,51 @@ class FalkorDBProvider(GraphDataProvider):
             containment = []
         if not containment:
             rows = await self._synthesize_raw_lineage_pairs(
-                source_urns, target_urns, lineage_edges, timeout=timeout,
+                source_urns, target_urns, lineage_edges, timeout=timeout, pressure=pressure,
             )
-            return rows, [], False, None
+            return rows, [], pressure.degraded_batches > 0, None
         c_pattern = "|".join(_sanitize_label(t) for t in containment)
         l_pattern = "|".join(_sanitize_label(t) for t in ltypes)
         cap = AGGREGATED_EDGE_RESULT_CAP
         batch = AGGREGATED_SOURCE_URN_BATCH_SIZE
         degraded = {"v": False}
+        batch_keys = ("urns", "xs", "ys", "sourceUrns")
+
+        async def _ladder(runner, cypher: str, params: Dict[str, Any], *, op: str, what: str) -> list:
+            """One on-demand query, split by URN batch under the store's
+            per-query pressure (``_read_with_ladder``); any other failure
+            is swallowed as before and flagged degraded."""
+            key = next((k for k in batch_keys if isinstance(params.get(k), list)), None)
+
+            async def issue(sub: Optional[List[str]]) -> list:
+                p = {**params, key: sub} if key is not None else params
+                res = await runner(cypher, params=p, timeout=timeout, op=op)
+                return res.result_set or []
+
+            before = pressure.degraded_batches
+            try:
+                if key is None:
+                    return await issue(None)
+                return await self._read_with_ladder(issue, params[key], pressure=pressure)
+            except Exception as e:
+                degraded["v"] = True
+                logger.warning("%s failed: %s", what, e)
+                return []
+            finally:
+                if pressure.degraded_batches > before:
+                    degraded["v"] = True
 
         async def _run(cypher: str, params: Dict[str, Any]) -> list:
-            try:
-                res = await self._ro_query(cypher, params=params, timeout=timeout, op="agg.synth")
-                return res.result_set or []
-            except Exception as e:
-                degraded["v"] = True
-                logger.warning("On-demand lineage pair query failed: %s", e)
-                return []
+            return await _ladder(
+                self._ro_query, cypher, params, op="agg.synth",
+                what="On-demand lineage pair query",
+            )
 
         async def _run_proj(cypher: str, params: Dict[str, Any]) -> list:
-            try:
-                res = await self._proj_ro_query(cypher, params=params, timeout=timeout, op="agg.synth_anchor")
-                return res.result_set or []
-            except Exception as e:
-                degraded["v"] = True
-                logger.warning("On-demand aggregated anchor query failed: %s", e)
-                return []
+            return await _ladder(
+                self._proj_ro_query, cypher, params, op="agg.synth_anchor",
+                what="On-demand aggregated anchor query",
+            )
 
         async def _profile(urns: List[str]) -> Dict[str, Tuple[bool, int]]:
             """urn → (is_container, containment depth). Leaf detection is
@@ -6689,10 +6853,13 @@ class FalkorDBProvider(GraphDataProvider):
         lineage_edges: Optional[List[str]],
         *,
         timeout: Optional[float] = None,
+        pressure: Optional["_ReadPressure"] = None,
     ) -> list:
         """Aggregate raw lineage edges between the requested URN sets into
         the same row shape as the AGGREGATED read (sUrn, tUrn, weight,
         types) — one row per (s, t) pair, weight = parallel-edge count.
+        Under the store's per-query pressure a batch is split by URN
+        (``_read_with_ladder``) and a loss recorded on ``pressure``.
 
         This is the read-side replacement for the leaf↔leaf mirror pairs
         the pipeline stopped materializing. Runs on the SOURCE graph
@@ -6728,15 +6895,21 @@ class FalkorDBProvider(GraphDataProvider):
                 "count(r) AS weight, collect(DISTINCT type(r)) AS types"
             )
 
+        record = pressure if pressure is not None else _ReadPressure()
+
         async def _run_batch(label: str, batch: List[str]) -> list:
-            params: Dict[str, Any] = {"sourceUrns": batch, "ltypes": list(ltypes)}
+            base: Dict[str, Any] = {"ltypes": list(ltypes)}
             if target_urns:
-                params["targetUrns"] = target_urns
-            try:
+                base["targetUrns"] = target_urns
+
+            async def issue(sub: List[str]) -> list:
                 result = await self._ro_query(
-                    _cypher_for(label), params=params, timeout=timeout,
+                    _cypher_for(label), params={**base, "sourceUrns": sub}, timeout=timeout,
                 )
                 return result.result_set or []
+
+            try:
+                return await self._read_with_ladder(issue, batch, pressure=record)
             except Exception as e:
                 logger.warning(f"Raw lineage pair synthesis failed: {e}")
                 return []
@@ -6749,6 +6922,62 @@ class FalkorDBProvider(GraphDataProvider):
         batch_results = await asyncio.gather(*[_run_batch(l, b) for l, b in runs])
         return [row for rows in batch_results for row in rows]
 
+    async def _read_with_ladder(
+        self,
+        issue: Callable[[List[str]], Awaitable[list]],
+        urns: List[str],
+        *,
+        pressure: "_ReadPressure",
+        floor: int = 1,
+        timeout_splits: int = 0,
+    ) -> list:
+        """Issue one URN-batched read; under the store's per-query pressure
+        split the batch in halves and read each — down to ``floor`` URNs
+        for a memory refusal, at most ``_READ_TIMEOUT_NARROWINGS`` deep for
+        a timeout — where a batch still refused is given up: its rows lost,
+        the loss recorded on ``pressure`` so the result says why it is
+        short. ``issue`` runs the query for a batch and raises on failure; a
+        failure that is not pressure propagates unchanged."""
+        try:
+            return await issue(urns)
+        except Exception as exc:
+            kind = _pressure_kind(exc)
+            if kind is None:
+                raise
+            pressure.note(kind)
+            what = "exceeded the per-query memory ceiling" if kind == "memory" else "timed out"
+            exhausted = kind == "timeout" and timeout_splits >= _READ_TIMEOUT_NARROWINGS
+            if len(urns) <= floor or exhausted:
+                pressure.degrade(kind)
+                logger.warning(
+                    "Aggregated read on %s %s for a batch of %d URN%s — that part of "
+                    "the answer is missing.",
+                    self._graph_name, what, len(urns), "" if len(urns) == 1 else "s",
+                )
+                return []
+            pressure.narrowed_batches += 1
+            deeper = timeout_splits + (1 if kind == "timeout" else 0)
+            mid = len(urns) // 2
+            out = await self._read_with_ladder(
+                issue, urns[:mid], pressure=pressure, floor=floor, timeout_splits=deeper,
+            )
+            out.extend(await self._read_with_ladder(
+                issue, urns[mid:], pressure=pressure, floor=floor, timeout_splits=deeper,
+            ))
+            return out
+
+    def _limits_endpoint(self) -> str:
+        """The node whose limits a read is bounded by — for the canvas's way
+        to the limits dialog: the node with the lowest known per-query
+        ceiling, else the configured endpoint."""
+        known = {
+            ep: int(v["query_mem_capacity"]) for ep, v in self._server_limits.items()
+            if v.get("query_mem_capacity")
+        }
+        if known:
+            return min(known, key=known.__getitem__)
+        return self._endpoint_label()
+
     def _rows_to_aggregated_result(
         self,
         rows: list,
@@ -6759,6 +6988,7 @@ class FalkorDBProvider(GraphDataProvider):
         stale_reason: Optional[str] = None,
         stamp_version: Optional[int] = None,
         regime: Optional[str] = None,
+        degraded_detail: Optional[Dict[str, Any]] = None,
     ) -> AggregatedEdgeResult:
         """Convert raw Cypher result rows into AggregatedEdgeResult."""
         from ..config.resilience import AGGREGATED_EDGE_RESULT_CAP
@@ -6787,6 +7017,7 @@ class FalkorDBProvider(GraphDataProvider):
             staleReason=stale_reason,
             stampVersion=stamp_version,
             regime=regime,
+            degradedDetail=degraded_detail,
         )
 
     async def get_trace_lineage(

@@ -82,6 +82,8 @@ def _merge_aggregated(
             (p.stale_reason for p in present if getattr(p, "stale_reason", None)), None),
         stampVersion=base.stamp_version,
         regime=base.regime,
+        degradedDetail=next(
+            (p.degraded_detail for p in present if getattr(p, "degraded_detail", None)), None),
     )
 
 

@@ -103,7 +103,10 @@ answering — check it, then **Resume from cursor** (raise the store's query
 time cap the same way if scans need longer than it allows). Retry with the **Gentle**
 profile (pre-selected after either failure), or — on a running job — give it
 more time or go gentler (pace the writes, read serially, halve the scans)
-with **Adjust this run**, without cancelling it. See [Rollup capacity](/guide/rollup-capacity).
+with **Adjust this run**, without cancelling it. The canvas's own reads narrow
+the same way under those limits; when one still loses part of the answer, the
+canvas says which limit refused it and offers the same *Adjust graph store
+limits* control to a system administrator. See [Rollup capacity](/guide/rollup-capacity).
 
 ### I changed an ontology and many Views shifted
 - That's expected if a new version was assigned — check the **audit trail** to see

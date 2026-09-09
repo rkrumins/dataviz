@@ -61,6 +61,19 @@ this run* in Job History gains a **Go gentler** group — the shape in force, *P
 *Serial reads*, *Halve scans*, *Back to settings* — and the run's record and the live row show
 *Changed while running*.
 
+**The canvas narrows its reads instead of dropping them.** The aggregated-edge read — the
+canvas's rollup reads, on-demand pair synthesis and the raw mirror — gets the same treatment as
+a rebuild's scans under the store's per-query limits: a refused page is halved and re-read from
+the same keyset position down to a floor (`AGGREGATED_EDGE_PAGE_FLOOR`, 500 rows), a refused URN
+batch is split in halves down to a single URN, a floor-width timeout is retried once, briefly. A
+read that completes after narrowing is a complete answer. What is still refused at the narrowest
+page or batch is lost and SAID: `staleReason` `query_memory` or `timeout`, with a `degradedDetail`
+(kind, how far it narrowed, the node and its ceiling) on the result, the canvas bootstrap and
+expand freshness; the canvas shows *The graph store refused part of this read at its per-query
+memory limit — showing what it could read after narrowing* with the way to the node's limits for
+a system administrator, in place of the generic truncation advice, and never asks the projector
+about it. One pressure classifier now serves both ladders.
+
 **The graph store's own limits, from the UI.** `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` no longer
 live only in the deployment. Infrastructure → Memory headroom shows each node's per-query memory
 ceiling, query time cap and thread count (read with the capacity sweep), and system administrators
@@ -375,8 +388,8 @@ is required for correctness, but without it readers pay the aggregation on the r
   `THREAD_COUNT`, `OMP_THREAD_COUNT` and `CACHE_SIZE` remain load-time only.
 - The scan floor, the chunk sizes and rollup storage change on the next Resume or Re-trigger,
   not on a running job; the time limits, pacing, read concurrency and the scan width are live.
-- The canvas's own reads have no pressure ladder: a per-query refusal on a drill is a read
-  error, not a narrower read.
+- The read-side ladder covers the aggregated-edges family; trace drills, children and
+  top-level pages keep their current behaviour under the store's per-query limits.
 - **The rebuild worker's own memory is bounded by a pair count, not by measurement.**
   `AGGREGATION_MAX_PENDING_PAIRS` (50,000,000, and its upper bound) is the only thing that
   bounds worker RSS, and at 50M pairs it sits above the reference 4Gi pod limit — a graph

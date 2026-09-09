@@ -89,12 +89,15 @@ def _run(coro):
 
 def test_merge_dedupes_and_ors_stale():
     a = _agg([("x", "y", 2)], stale=False, regime="boundary", stampVersion=2)
-    b = _agg([("x", "y", 2), ("z", "y", 3)], stale=True, staleReason="unmaterialized")
+    b = _agg([("x", "y", 2), ("z", "y", 3)], stale=True, staleReason="unmaterialized",
+             degradedDetail={"kind": "query_memory", "endpoint": "10.0.0.1:6379"})
     merged = _merge_aggregated([a, b])
     pairs = {(e.source_urn, e.target_urn): e.edge_count for e in merged.aggregated_edges}
     assert pairs == {("x", "y"): 2, ("z", "y"): 3}  # deduped
     assert merged.stale is True and merged.stale_reason == "unmaterialized"
     assert merged.regime == "boundary"
+    # The first pressure detail rides along, so the canvas can say what to do.
+    assert merged.degraded_detail == {"kind": "query_memory", "endpoint": "10.0.0.1:6379"}
 
 
 def test_merge_all_none_returns_none():

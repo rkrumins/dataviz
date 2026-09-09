@@ -288,6 +288,23 @@ export interface AggregatedEdgeResult {
     stale?: boolean
     /** Why the result is stale (e.g. "source_changed"), or null when fresh. */
     staleReason?: string | null
+    /**
+     * Why part of the read was lost under the graph store's per-query
+     * pressure (staleReason "query_memory" / "timeout"): the kind, how far
+     * the read-side ladder narrowed, the node and its ceiling. Absent when
+     * nothing was lost — narrowing that completed is a complete answer.
+     */
+    degradedDetail?: AggregatedDegradedDetail | null
+}
+
+export interface AggregatedDegradedDetail {
+    kind: 'query_memory' | 'timeout' | string
+    narrowedPages?: number
+    narrowedBatches?: number
+    degradedBatches?: number
+    floorRetries?: number
+    endpoint?: string | null
+    queryMemCapacity?: number | null
 }
 
 // ============================================

@@ -44,6 +44,12 @@ import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
  * flight: it has its own banner, its own self-refresh, and it is serving the
  * PREVIOUS complete answer rather than a short one. Folding it in here would
  * make every ordinary rebuild accuse the source of being behind.
+ *
+ * `query_memory` and `timeout` are deliberately NOT here either: the graph
+ * store refused part of THIS read at its per-query ceiling or time limit,
+ * after the read narrowed as far as it goes. The projector is not behind;
+ * the answer is the selection, or the node's limits. They have their own
+ * banner on the canvas.
  */
 export const ROLLUP_INTEGRITY_REASONS: ReadonlySet<string> = new Set([
   // A rollup sub-query or a materialised-edge batch failed and was swallowed.

@@ -529,15 +529,9 @@ def _pressure_kind(exc: BaseException) -> Optional[str]:
     ``TimeoutError``) OR the server's own ``Query timed out`` refusal — the
     latter is what production actually produces, because every query goes
     out with ``TIMEOUT = budget − 500 ms`` and the server aborts first."""
-    from backend.app.providers.falkordb_provider import (
-        _is_query_memory_error, _is_query_timeout_error,
-    )
-    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-        return "timeout"
-    if _is_query_timeout_error(exc):
-        return "timeout"
-    if _is_query_memory_error(exc):
-        return "memory"
+    # One classifier, shared with the aggregated-edge read ladder.
+    from backend.app.providers.falkordb_provider import _pressure_kind as _kind
+    return _kind(exc)
     return None
 
 
