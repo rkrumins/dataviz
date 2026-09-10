@@ -268,10 +268,16 @@ an instance at once, so a promoted replica already carries the change. The Infra
 still answers its old `?limits=` deep link. The dialog gains the **effects threshold**, the
 setting that decides whether replicas apply a change log or re-run every write.
 
-**The production cluster manifests are sized by the rule the guide states.** `maxmemory` 32 GiB
-with a 1.5 GiB per-query ceiling needs 52.7 GiB inside the 56 GiB limit; the previous pairing
-(40 GiB and 2 GiB) needed 66.6 GiB, so a shard under load could be OOM-killed while every figure
-inside Redis looked healthy. Also: `EFFECTS_THRESHOLD 0` and `OMP_THREAD_COUNT 1` on every
+**The container sizing rule now counts replication, and the production manifests are sized by
+it.** The rule had three terms — dataset, query memory, overhead — and the replication buffers
+were charged to the same container without appearing in it. Raising those buffers (below) is a
+memory decision, and the pairing that looked right without them (32 GiB with a 1.5 GiB per-query
+ceiling, 52.7 GiB) needs **57.7 GiB** with them, over the 56 GiB limit. The shipped values are
+now 32 GiB and a 1 GiB ceiling: **53.8 GiB**, with the whole table in the manifest comment and
+the guide. For scale, the pairing before any of this (40 GiB and 2 GiB) needed 66.6 GiB, so a
+shard under load could be OOM-killed while every figure inside Redis looked healthy. Note the
+in-app *Adjust limits* guard computes dataset + query memory + overhead only: on a master with
+replicas, subtract the replication terms from the container figure you give it. Also: `EFFECTS_THRESHOLD 0` and `OMP_THREAD_COUNT 1` on every
 FalkorDB deployment, a 1 GB replication backlog and 2 GB replica output buffers (256 MB overflows
 in seconds under a rebuild and forces a full resync), `repl-timeout 300`,
 `cluster-node-timeout 15000`, and a liveness probe that allows 10s × 6 rather than 3s × 3 — a

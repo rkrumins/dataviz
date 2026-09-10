@@ -82,13 +82,21 @@ spec:
             # for Redis I/O + AOF rewrite + replication; QUERY_MEM_CAPACITY
             # 2 GiB bounds a runaway Cypher query.
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1610612736 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
-            # Sizing, by the deployment guide's own rule:
-            #   1.25 × maxmemory + THREAD_COUNT × 1.3 × QUERY_MEM_CAPACITY + 1 GiB
-            #   = 1.25 × 32 + 6 × 1.3 × 1.5 + 1 = 52.7 GiB ≤ the 56 GiB limit.
-            # It did NOT fit before: 40 GiB maxmemory with a 2 GiB per-query
-            # ceiling needs 66.6 GiB, so a shard under load could be OOM-killed
-            # by the kubelet while every figure inside Redis looked healthy.
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
+            # Sizing, by the deployment guide's own rule (§ "Sizing: the
+            # ceilings share ONE budget"). Every term is in the SAME container
+            # limit, replication included:
+            #   dataset        1.25 × 32 GiB                       = 40.0
+            #   query memory   6 threads × 1.3 × 1 GiB             =  7.8
+            #   repl backlog   repl-backlog-size 1gb               =  1.0
+            #   replica bufs   2 replicas × 2 GiB hard limit       =  4.0
+            #   overhead       instance ≥ 32 GiB                   =  1.0
+            #                                                  total 53.8 ≤ 56
+            # Two pairings that do NOT fit: 40 GiB maxmemory with a 2 GiB
+            # per-query ceiling needs 66.6 GiB (the shipped values before this
+            # was checked), and a 1.5 GiB ceiling needs 57.7 GiB once the
+            # replication buffers below are counted. Raising those buffers is a
+            # memory decision, not only a durability one.
             #
             # BEFORE APPLYING: check what each shard currently holds
             # (`redis-cli info memory | grep used_memory_human`, or Admin →
@@ -240,7 +248,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1610612736 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
@@ -362,7 +370,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1610612736 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1073741824 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes

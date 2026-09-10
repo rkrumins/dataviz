@@ -332,10 +332,21 @@ repl-timeout 300                      # a full resync of a large shard takes lon
 client-output-buffer-limit replica 2gb 1gb 300   # overflow drops the replica and forces a full resync under the same load
 ```
 
-FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1610612736  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0`.
+FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1073741824  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0`.
 
 - `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O, AOF rewrite and replication; `OMP_THREAD_COUNT 1` stops one query spawning a thread per core inside the engine.
-- **The memory numbers come from the sizing rule, not from a share of the node**: `1.25 × maxmemory + THREAD_COUNT × 1.3 × QUERY_MEM_CAPACITY + 1 GiB` must fit the container limit. At 32 GiB and a 1.5 GiB ceiling that is 52.7 GiB inside a 56 GiB limit. The previous pairing (40 GiB and 2 GiB) needed **66.6 GiB** — above the limit, so a shard under load could be OOM-killed while every figure inside Redis looked healthy. Check what each shard currently holds before lowering `maxmemory`.
+- **The memory numbers come from the sizing rule, not from a share of the node.** Every term below is charged inside the SAME 56 GiB container limit — replication included:
+
+  | Term | Figure | GiB |
+  | :--- | :--- | ---: |
+  | Dataset | `1.25 × 32gb` | 40.0 |
+  | Query memory | `6 × 1.3 × 1gb` | 7.8 |
+  | Replication backlog | `repl-backlog-size 1gb` | 1.0 |
+  | Replica output buffers | `2 replicas × 2gb hard` | 4.0 |
+  | Server overhead | instance ≥ 32 GiB | 1.0 |
+  | **Needed** | | **53.8** |
+
+  Two pairings that do **not** fit: `maxmemory 40gb` with a 2 GiB per-query ceiling needs **66.6 GiB** even ignoring replication (these were the shipped values before this was checked, so a shard under load could be OOM-killed while every figure inside Redis looked healthy); and a 1.5 GiB ceiling needs **57.7 GiB** once the replication buffers are counted. Raising replication buffers is a memory decision, not only a durability one. Check what each shard currently holds before lowering `maxmemory`. Full rule and worked examples: `FALKORDB_DEPLOYMENT.md` § *Sizing: the ceilings share ONE budget*.
 - `EFFECTS_THRESHOLD 0` makes writes replicate as a compact change log instead of being **re-run on each replica's main thread** — the mechanism that took whole shards down during rebuilds (`FALKORDB_DEPLOYMENT.md` §5aa).
 
 PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` with `timeoutSeconds: 10` and `failureThreshold: 6` — a node busy applying replication is not a dead process, and the readiness probe already takes it out of rotation.

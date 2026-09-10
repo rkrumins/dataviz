@@ -169,6 +169,7 @@ Three settings back that up:
 | `--repl-backlog-size 1gb` | was 256mb | The window a disconnected replica can catch up through without a full resync. A rebuild fills 256 MB in seconds. |
 | `--client-output-buffer-limit replica 2gb 1gb 300` | was the 256 MB default | When a replica's output buffer overflows, the master **drops it** and it comes back with a full resync — a fork and a whole-dataset transfer, under the same write load that caused it. |
 | `--repl-timeout 300` | was 60 | A full resync of a large shard takes longer than a minute; timing it out mid-transfer starts it over. |
+| `--cluster-node-timeout 15000` | was 5000 | How long a node may be silent before the cluster calls it failed and elects a replacement. A node busy applying replication is silent for seconds at a time, and a 5s window turned that into an election — a promotion no one needed, and a slot map churn every client had to follow. The cost of 15s is that a genuinely dead master is replaced three times slower; the application covers that window (reads fail fast with a retry hint and keep serving cached data, a rebuild waits and resumes), so the trade is worth it. |
 
 And the liveness probe gets room to be slow: `timeoutSeconds: 10`,
 `failureThreshold: 6`. A busy main thread is not a dead process, and the
@@ -197,14 +198,26 @@ shared with 8 other containers — the instance died repeatedly under
 load and each restart paid a multi-minute AOF replay, presenting as
 "the stack blew up and is not recovering for hours").
 
-Rule of thumb:
+> **There is ONE sizing rule, and it is the formula in
+> [*Sizing: the ceilings share ONE budget*](#sizing-the-ceilings-share-one-budget)
+> below.** `maxmemory` is only one of its terms; query memory and the
+> replication buffers are charged inside the same container limit. Do not size
+> on a flat share of the machine — that is how a pairing that looks
+> conservative (62% of the node) ends up needing 119% of the container.
 
-- `maxmemory ≤ host_memory − 4GB` (other services + OS + page cache);
-- expected dataset ≤ ~60% of `maxmemory` — BGSAVE/BGREWRITEAOF fork
-  copy-on-write can spike usage well above the resident dataset while
-  writes are in flight;
-- if the dataset legitimately needs more, grow the HOST first
-  (Docker Desktop → Settings → Resources → Memory), then `maxmemory`.
+The rest of this section is the reasoning behind the first term, and the
+recovery cost that belongs in the same decision:
+
+- the dataset should sit around **60% of `maxmemory`** in steady state —
+  BGSAVE/BGREWRITEAOF fork copy-on-write spikes usage well above the resident
+  dataset while writes are in flight, which is where the formula's `1.25 ×`
+  comes from;
+- if the dataset legitimately needs more, grow the CONTAINER first (on a
+  laptop: Docker Desktop → Settings → Resources → Memory), re-run the formula,
+  then raise `maxmemory`;
+- lowering `maxmemory` on a LIVE instance below its current usage denies every
+  write immediately under `noeviction`. Check what each node holds first —
+  Admin → Graph store shows used and `maxmemory` per node.
 
 Recovery time is part of sizing: an AOF *incremental* replays
 command-by-command (minutes per GB) while the *base* RDB bulk-loads
@@ -456,15 +469,18 @@ How the deployed `FALKORDB_ARGS` values are derived:
   formula below — **not** at a flat 75% of the pod limit, which double-books
   the same headroom that query memory needs.
 
-### Sizing: the three ceilings share ONE budget
+### Sizing: the ceilings share ONE budget
 
-`maxmemory` and `QUERY_MEM_CAPACITY` are not independent. Query memory is
-charged **per concurrent query, on top of the dataset**, inside the same
-container limit:
+`maxmemory`, `QUERY_MEM_CAPACITY` and the replication buffers are not
+independent. Query memory is charged **per concurrent query, on top of the
+dataset**, and replication buffers are charged on top of both — all inside
+the same container limit:
 
 ```
 container_limit  >=  1.25 x maxmemory                      # dataset + fragmentation + AOF-rewrite COW
                   +  concurrent x 1.3 x QUERY_MEM_CAPACITY # in-flight queries
+                  +  repl-backlog-size                     # allocated once replication is in use
+                  +  replicas x replica-output-buffer-hard # worst case before a replica is dropped
                   +  256Mi                                 # server overhead (1Gi for instances >= 32Gi)
 ```
 
@@ -478,11 +494,56 @@ container_limit  >=  1.25 x maxmemory                      # dataset + fragmenta
   the same rows into the client reply buffer — which is Redis-core memory and
   is **not** counted against `QUERY_MEM_CAPACITY`. Peak RSS per query therefore
   exceeds the ceiling you configured.
+- **The replication terms are what a MASTER with replicas costs.** The backlog
+  (`repl-backlog-size`) is allocated and stays; an output buffer is per replica
+  and grows only when that replica falls behind — but it may reach its **hard**
+  limit before the master drops the replica, and that is the case you must have
+  room for. Budgeting the soft limit instead inverts the protection: the point
+  of the buffer limit is to lose a replica rather than the master, and a
+  container that OOM-kills first loses the master anyway.
+  On a **replica** pod the buffers cost nothing until it is promoted, but plan
+  the same figure — every pod runs the same manifest, and a promoted replica
+  becomes a master with buffers under the same limit. Replicas also serve
+  read-only queries (see `AGGREGATION_PIPELINE.md`), so their query-memory term
+  is real, not spare.
+- **A shard with no replicas drops both replication terms.** Single-node and
+  dev deployments size on the first three lines only.
 
-Worked example, the k8s base / Helm defaults: `1.25 x 6gb + 2 x 1.3 x 512Mi +
-256Mi ~= 9.1Gi`, which is why `limits.memory` is **10Gi**. The previous 8Gi
-booked the entire non-`maxmemory` remainder for fragmentation and left nothing
-for query memory at all.
+**Worked example 1 — the k8s base / Helm defaults** (single node, no replicas):
+`1.25 x 6gb + 2 x 1.3 x 512Mi + 256Mi ~= 9.1Gi`, which is why `limits.memory`
+is **10Gi**. The previous 8Gi booked the entire non-`maxmemory` remainder for
+fragmentation and left nothing for query memory at all.
+
+**Worked example 2 — the production cluster overlay** (3 shards x 1 master +
+2 replicas, `n4-highmem-8`, `limits.memory` **56Gi**, `THREAD_COUNT 6`):
+
+| Term | Figure | GiB |
+| :--- | :--- | ---: |
+| Dataset | `1.25 x 32gb` | 40.0 |
+| Query memory | `6 x 1.3 x 1gb` | 7.8 |
+| Replication backlog | `repl-backlog-size 1gb` | 1.0 |
+| Replica buffers | `2 replicas x 2gb hard` | 4.0 |
+| Server overhead | instance >= 32Gi | 1.0 |
+| **Needed** | | **53.8** |
+| **Limit** | | **56.0** |
+
+Two pairings that do NOT fit, and why they are worth knowing:
+
+- `maxmemory 40gb` with `QUERY_MEM_CAPACITY 2gb` — the shipped values before
+  this was checked — needs **66.6 GiB** against a 56 GiB limit even ignoring
+  replication. A shard under load could be OOM-killed by the kubelet while
+  every figure inside Redis looked healthy.
+- `maxmemory 32gb` with `QUERY_MEM_CAPACITY 1.5gb` needs 52.7 GiB by the first
+  three lines and **57.7 GiB** once the replication buffers are counted. It is
+  the near miss this table exists to catch: raising replication buffers is a
+  memory decision, not just a durability one.
+
+> **The in-app guard does not know your replication.** *Adjust limits* on
+> Admin → Graph store refuses a `QUERY_MEM_CAPACITY` raise the container cannot
+> back, but it computes **dataset + query memory + overhead** only — it cannot
+> read the container limit, and the reading it works from carries no replica
+> count. On a master with replicas, subtract the two replication terms from the
+> container figure you type in, or size with the table above.
 
 **Raising `QUERY_MEM_CAPACITY` alone converts a caught query error into an
 OOM-killed pod.** Raise the container limit with it, and prefer lowering
