@@ -3214,15 +3214,22 @@ class FalkorDBProvider(GraphDataProvider):
         # the pipeline's pacing applied to any of it. Nothing ever drops a graph
         # index, so re-issuing the set can only ever be a no-op that costs a
         # parse and a lock on a graph other people are reading.
-        marker_key = f"{self._cache_ns}:indices_ensured"
+        # Building the key can itself fail on a half-built provider — this
+        # method runs during onboarding, before the graph name is settled —
+        # and its contract is that it never raises. No key means no memo:
+        # do the work, which is the safe side of the trade.
         digest = hashlib.sha256("\n".join(statements).encode()).hexdigest()[:16]
-        if not force:
+        try:
+            marker_key = f"{self._cache_ns}:indices_ensured"
+        except Exception:                 # noqa: BLE001 — by contract
+            marker_key = None
+        if marker_key and not force:
             try:
                 if await self._redis.get(marker_key) == digest:
                     logger.debug(
                         "ensure_indices on %s: %d statements already applied "
                         "(digest %s) — skipping",
-                        self._graph_name, total, digest,
+                        getattr(self, "_graph_name", "?"), total, digest,
                     )
                     return
             except Exception:
@@ -3243,10 +3250,11 @@ class FalkorDBProvider(GraphDataProvider):
             # retried, not remembered. The TTL is a floor under a graph that
             # was dropped and rebuilt behind our back — the indices would be
             # gone and no code path anywhere issues DROP INDEX to tell us.
-            try:
-                await self._redis.setex(marker_key, _INDEX_MARKER_TTL_S, digest)
-            except Exception:
-                pass
+            if marker_key:
+                try:
+                    await self._redis.setex(marker_key, _INDEX_MARKER_TTL_S, digest)
+                except Exception:
+                    pass
 
     @property
     def name(self) -> str:
