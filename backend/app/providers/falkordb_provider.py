@@ -46,6 +46,7 @@ from ..models.graph import (
 # The closure-walk models are not carried by the app-level re-export above.
 from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
+from .index_policy import edge_index_ddl
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.derived_artifacts import is_derived_label
 
@@ -1105,23 +1106,13 @@ class _ClosureWalk:
             )
 
 
-#: Edge-property indices on :AGGREGATED, powering the level-pair fast path used
-#: by ``_expand_aggregated_set``: ``WHERE r.sourceLevel = $L AND r.targetLevel =
-#: $L`` as a composite index seek rather than a per-edge property read after the
-#: rel-typed MATCH. The composite comes first — one seek on the pair, where the
-#: two single-column indices would be OR-merged by the planner. Best-effort:
-#: older FalkorDB releases lack edge-property indices, and the trace still works
-#: through the neighbour-label scan fallback. Depth stamps (stampVersion >= 2)
-#: are the PREFERRED read filters for the mixed-depth derivation and the trace
-#: structural drill; verified supported on FalkorDB v4.16.0.
-_AGGREGATED_EDGE_INDEXES: tuple = (
-    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel, r.targetLevel)",
-    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel)",
-    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetLevel)",
-    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
-    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
-    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
-)
+#: The declared :AGGREGATED edge indexes, from the one module that owns them
+#: together with the query shape each is entered by. Four single-column
+#: indexes that used to live here are retired — see RETIRED_EDGE_INDEXES —
+#: because no query in this codebase filters on one of those properties
+#: alone, so no plan could ever enter through them. They cost a document per
+#: aggregated edge in memory, on every write, and again on every load.
+_AGGREGATED_EDGE_INDEXES: tuple = tuple(edge_index_ddl())
 
 #: How long a "these indices are on this graph" marker stands. Nothing in this
 #: codebase ever issues DROP INDEX, so the set only grows and the marker could

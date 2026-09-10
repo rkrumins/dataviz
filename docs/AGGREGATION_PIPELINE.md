@@ -773,6 +773,49 @@ observable contract: exact cells/weights/level stamps under mixed
 casing, exact deltas on re-run, zero-touch no-op runs, and complete
 apply after resume.
 
+## Index policy, and cleaning up the retired ones
+
+`backend/app/providers/index_policy.py` is the single declaration of every index
+this product creates — node labels and properties, and the `:AGGREGATED` edge
+indexes. Each edge entry names **the query shape that enters through it**.
+
+That last part is the rule, not decoration. A FalkorDB edge index is reachable
+only when the relationship is the plan's ENTRY POINT — an unanchored
+`MATCH ()-[r:T]->() WHERE r.p = $v`. Anchor a node first, as every
+`:AGGREGATED` read here does (`WHERE f.urn IN $frontier`, then traverse), and
+the planner seeks the NODE index and reads the edge property off the edge it
+already holds. The edge index cannot apply, and costs a document per edge in
+memory, on every write, and again on every load — indexes are rebuilt from
+scratch when a graph is read back off disk.
+
+Four single-column edge indexes are **retired**: no query filters on
+`sourceLevel`, `targetLevel`, `sourceDepth` or `targetDepth` alone — every
+predicate on them is a pair — so nothing could ever enter through them. Two
+composites are declared **conditionally**: they are reachable only via the
+unlabelled frontier bucket in `_build`, where `f` carries no label and FalkorDB
+offers no label-less node index (see `ensure_projections`). Settle those with a
+PROFILE against a real cluster before touching them; better still, make the
+frontier reliably label-anchored and that bucket — and their justification —
+disappears, taking `:AGGREGATED` from seven indexes to one.
+
+**Nothing in this codebase drops an index**, so a graph keeps every index it was
+ever given. To remove the retired ones from an existing environment:
+
+```bash
+# Dry run — shows what is there and what would go. Changes nothing.
+python backend/scripts/cleanup_graph_indices.py --host <any-node> --all-shards
+
+# Then, once the dry run reads right:
+python backend/scripts/cleanup_graph_indices.py --host <any-node> --all-shards --apply
+```
+
+A graph is one key on one shard, so `--all-shards` is what reaches all of them;
+without it only the graphs owned by `--host` are seen. The script drops only the
+exact retired (relationship, property) pairs — node indexes, `aggKey`, the two
+composites and anything it does not recognise are left alone and reported. If a
+build rejects both DROP spellings the script says so: that build cannot shed an
+edge index at all, and the only way to lose them is a rebuild without them.
+
 ## Removed (release notes)
 
 * `AGGREGATION_BULK_REBUILD_ENABLED` / `AGGREGATION_STREAMING_REBUILD_ENABLED`

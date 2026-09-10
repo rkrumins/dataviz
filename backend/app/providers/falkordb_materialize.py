@@ -4157,12 +4157,13 @@ class AggregationPipeline:
         plus the depth-stamp indexes the depth-keyed readers (Q3, trace
         structural drill) seek on. A run that writes stampVersion=2 cells
         must leave the graph readable at index speed."""
-        for ddl in (
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.aggKey)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
-        ):
+        # The same declaration ``ensure_indices`` reads, so the projection graph
+        # and the source graph cannot drift apart — this list used to be a
+        # second copy, three of whose four entries duplicated that one and one
+        # of which (targetDepth alone) no query could ever enter through.
+        from backend.app.providers.index_policy import edge_index_ddl
+
+        for ddl in edge_index_ddl():
             try:
                 await self.p._proj_query(
                     ddl,

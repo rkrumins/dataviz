@@ -175,9 +175,53 @@ def test_a_marker_store_that_is_down_does_not_skip_the_work():
 
 
 def test_the_edge_index_set_is_declared_once():
-    """Three of these were also issued by the materializer's own ensure, from a
-    second copy of the list. Sharing the declaration is what lets the two be
-    compared rather than drift apart."""
-    assert len(_AGGREGATED_EDGE_INDEXES) == 6
+    """The provider and the materializer read ONE list. They used to keep two
+    copies, three of whose entries duplicated each other."""
+    from backend.app.providers.index_policy import edge_index_ddl
+
+    assert list(_AGGREGATED_EDGE_INDEXES) == edge_index_ddl()
     assert all(c.startswith("CREATE INDEX FOR ()-[r:AGGREGATED]-()")
                for c in _AGGREGATED_EDGE_INDEXES)
+
+
+def test_no_declared_edge_index_is_single_column_on_a_paired_property():
+    """The retirement, stated as a rule rather than a list.
+
+    Every predicate on these four properties anywhere in the product is a PAIR
+    — ``r.sourceDepth = $d AND r.targetDepth = $d``. Nothing filters on one
+    alone, so no plan can enter through a single-column index on it. Declaring
+    one again would cost a document per aggregated edge in memory, on every
+    write, and again on every load, to serve nothing.
+    """
+    from backend.app.providers.index_policy import declared_edge_indexes
+
+    paired = {"sourceLevel", "targetLevel", "sourceDepth", "targetDepth"}
+    for ix in declared_edge_indexes():
+        if len(ix.props) == 1 and ix.props[0] in paired:
+            raise AssertionError(
+                f"{ix.ddl} is single-column on a property only ever queried as "
+                f"a pair — no query can enter through it")
+
+
+def test_every_declared_index_names_the_query_that_enters_through_it():
+    """An index with no named entry point is how the retired four came to
+    exist: the DDL was accepted, and that was mistaken for the planner
+    choosing it."""
+    from backend.app.providers.index_policy import declared_edge_indexes
+
+    for ix in declared_edge_indexes():
+        assert ix.entered_by and "MATCH" in ix.entered_by, (
+            f"{ix.ddl} declares no query shape that enters through it")
+
+
+def test_the_retired_set_is_disjoint_from_the_declared_one():
+    """The cleanup script drops what is retired. If a property appeared in
+    both, it would be dropped and recreated on every run — a churn loop over
+    an index rebuild on a multi-gigabyte graph."""
+    from backend.app.providers.index_policy import (
+        RETIRED_EDGE_INDEXES, declared_edge_indexes,
+    )
+
+    declared = {(ix.rel, ix.props) for ix in declared_edge_indexes()}
+    retired = {(ix.rel, ix.props) for ix in RETIRED_EDGE_INDEXES}
+    assert not (declared & retired)

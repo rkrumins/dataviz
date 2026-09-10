@@ -290,6 +290,17 @@ per view open, lineage trace and graph search.
 
 ### Changed
 
+**Graph indexes are declared in one place, with the query that justifies each one.**
+`index_policy.py` already owned which node labels and properties get indexed; it now owns the
+`:AGGREGATED` edge indexes too, and every entry carries the query shape that ENTERS through it.
+The provider and the materializer read that one list — they used to keep two copies, three of
+whose entries duplicated each other. An index that cannot name a query it serves does not
+belong in the list, and tests enforce both halves of that: no declared index may be
+single-column on a property only ever queried as a pair, and every declared index must name
+its entry query. "The DDL was accepted" was mistaken for "the planner uses it" once already,
+and that is exactly how the retired four came to exist.
+
+
 **The capacity view is built on one reading of the whole graph store**, so it stopped
 churning. It used to resolve a provider per source and ask it who owned each graph, which meant
 a node appeared only if some source's provider could be built and dialled inside a deadline,
@@ -422,6 +433,19 @@ does not swing the trend, short enough that "what changed" is still about now.
   fingerprinted by the counters today. Where the scan still runs it is cached, and the
   caller's own wall clock is now a deadline shared by all three queries rather than an
   allowance granted to each.
+- **Four `:AGGREGATED` edge indexes existed that no query could ever enter through.** A
+  FalkorDB edge index is reachable only when the relationship is the plan's ENTRY POINT — an
+  unanchored `MATCH ()-[r:T]->() WHERE r.p = $v`. Every `:AGGREGATED` read this product issues
+  anchors a node first, and no query anywhere filters on `sourceLevel`, `targetLevel`,
+  `sourceDepth` or `targetDepth` ALONE — every predicate on them is a pair. The four
+  single-column indexes were added as a fallback "if the planner does not support composite
+  edge indexes", but no fallback was ever implemented: the composite and both singles were
+  created unconditionally, on every run, forever. They cost a document per aggregated edge
+  three times over — resident memory, an update on every edge write, and a rebuild from
+  scratch every time the graph is read back off disk, which is a large part of why restarting
+  a node holding a multi-gigabyte graph takes as long as it does. The application no longer
+  creates them, and `backend/scripts/cleanup_graph_indices.py` removes the ones already on a
+  graph (dry run by default, cluster-aware, and it only ever touches the exact retired pairs).
 - **A node loading its snapshot reported its whole shard's graphs as missing.** Kubernetes
   marks a FalkorDB pod NotReady while it replays its RDB into memory, which on a large shard
   is minutes. The node stays dialable and keeps gossiping — it answers PING, INFO and
