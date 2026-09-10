@@ -817,6 +817,9 @@ def _attach_graphs(
         shard.unregistered_count = sum(1 for g in rows if g.role == "unregistered")
         shard.graphs_truncated = len(rows) > MAX_GRAPH_ROWS_PER_SHARD
         shard.graphs = rows[:MAX_GRAPH_ROWS_PER_SHARD]
+        # The cap bounds what the PAGE renders, never what the snapshot
+        # knows: placement is looked up here.
+        shard.rows_by_key = {g.key: g for g in rows}
 
 
 def _totals(instance: GraphStoreInstance) -> InstanceTotals:
@@ -972,11 +975,23 @@ def instance_for_provider(
 
 def graph_row(instance: Optional[GraphStoreInstance],
               shard: Optional[GraphStoreShard], key: str) -> Optional[GraphOnShard]:
+    """One graph's row on its shard, from EVERY graph the shard holds.
+
+    Not from ``shard.graphs``, which is cut to the largest few thousand for
+    the page: a graph below that cut would come back as no row at all,
+    which the caller cannot tell apart from "registered, but the node does
+    not hold it" — and would then say so on the owner's own data source.
+    """
     if shard is None:
         return None
-    for row in shard.graphs:
-        if row.key == key:
-            return row
+    row = shard.rows_by_key.get(key)
+    if row is not None:
+        return row
+    # A shard assembled without the lookup map (a fixture, a snapshot
+    # rebuilt from JSON) still answers from what it does carry.
+    for listed in shard.graphs:
+        if listed.key == key:
+            return listed
     return None
 
 
@@ -989,6 +1004,10 @@ def placement_for_graph(
     shard, slot = place(instance, graph_key)
     row = graph_row(instance, shard, graph_key)
     siblings = [g for g in (shard.graphs if shard else []) if g.key != graph_key]
+    # Counted from the shard's total, not from the rows the page shows: on a
+    # shard past the display cap "sharing with 1,999 others" would be a
+    # ceiling rather than a fact.
+    siblings_total = max(0, (shard.graphs_total - 1) if row else (shard.graphs_total if shard else 0))
     return GraphPlacement(
         graph_key=graph_key,
         role="projection" if role == "projection" else "source",
@@ -997,7 +1016,7 @@ def placement_for_graph(
         present=bool(row.present) if row else False,
         master=shard.master if shard else None,
         replicas=shard.replicas if shard else [],
-        siblings=len(siblings),
+        siblings=siblings_total,
         siblings_sample=[
             {"key": g.key,
              "label": (g.data_sources[0].label if g.data_sources else None),

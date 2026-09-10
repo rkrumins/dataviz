@@ -22,6 +22,7 @@ from backend.app.services.graph_store import topology
 from backend.app.services.graph_store.schemas import (
     GraphPlacementResponse,
     GraphPlacementsResponse,
+    GraphStoreInstance,
     GraphStoreTopologyResponse,
     PlacementBrief,
     ProviderTopologyResponse,
@@ -92,11 +93,30 @@ async def get_provider_topology(
         )
     name = next((p.name for p in instance.providers if p.id == provider_id), None)
     return ProviderTopologyResponse(
-        provider_id=provider_id, provider_name=name, instance=instance,
+        provider_id=provider_id, provider_name=name,
+        instance=_nodes_only(instance),
         reads=_read_routing(provider_id),
         measured_at=snapshot.measured_at, cache_age_ms=snapshot.cache_age_ms,
         stale=snapshot.stale, last_error=snapshot.last_error,
     )
+
+
+def _nodes_only(instance: GraphStoreInstance) -> GraphStoreInstance:
+    """The instance's nodes and counts, without the graph inventory.
+
+    What reads this route is a provider's topology line and its node list —
+    counts, endpoints, health, replication. The inventory is up to
+    ``MAX_GRAPH_ROWS_PER_SHARD`` rows per shard and no pixel here renders
+    one, but the connections page draws a card per provider, so ten
+    providers on one cluster would each download the whole thing. The
+    totals it is summarised by are on the shard already.
+    """
+    return instance.model_copy(update={
+        "shards": [
+            shard.model_copy(update={"graphs": [], "rows_by_key": {}})
+            for shard in instance.shards
+        ],
+    })
 
 
 def _read_routing(provider_id: str) -> Optional[ReadRouting]:

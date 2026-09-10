@@ -343,6 +343,30 @@ def test_a_refused_set_names_what_already_landed(monkeypatch):
     assert "10.0.0.2:6379" in str(exc.value) and "Already applied on 10.0.0.1:6379" in str(exc.value)
 
 
+def test_a_partly_applied_change_still_drops_the_snapshot(monkeypatch):
+    """What DID land changed what a sweep would read. Invalidating only on
+    success leaves the page showing the old limits for the nodes that took
+    the change, so an operator re-reads, sees no effect, and applies it
+    again."""
+    from backend.app.services.aggregation import capacity
+
+    dropped = {"n": 0}
+    monkeypatch.setattr(capacity, "invalidate_fleet_cache",
+                        lambda: dropped.__setitem__("n", dropped["n"] + 1))
+
+    m1, m2 = _Conn(), _Conn()
+
+    async def refuse(*args, **kw):
+        raise RuntimeError("ERR read-only replica")
+
+    m2.execute_command = refuse
+    _wire(monkeypatch, {"10.0.0.1:6379": m1, "10.0.0.2:6379": m2})
+    with pytest.raises(gsl.GraphStoreLimitsError):
+        _apply("10.0.0.1:6379", _patch(timeoutMaxMs=300_000, applyToAllNodes=True))
+    assert len(m1.sets) == 1                          # the first node took it
+    assert dropped["n"] == 1                          # …so the snapshot went
+
+
 # ── the routes ───────────────────────────────────────────────────────
 
 

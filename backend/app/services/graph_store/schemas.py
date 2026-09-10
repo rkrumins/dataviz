@@ -172,6 +172,13 @@ class GraphStoreShard(_Base):
     master: GraphStoreNode
     replicas: List[GraphStoreNode] = Field(default_factory=list)
     graphs: List[GraphOnShard] = Field(default_factory=list)
+    #: Every graph on this shard by key — INCLUDING the ones below the
+    #: display cap on ``graphs`` above. Excluded from the response: it is
+    #: what a placement question is answered from, so a modest graph that
+    #: sorts below the cap is never reported as missing from the node it is
+    #: sitting on. That answer reaches an ordinary user, on their own data
+    #: source's profile, which is the last place to guess.
+    rows_by_key: Dict[str, GraphOnShard] = Field(default_factory=dict, exclude=True)
     graphs_total: int = Field(0, alias="graphsTotal")
     graphs_truncated: bool = Field(False, alias="graphsTruncated")
     unregistered_count: int = Field(0, alias="unregisteredCount")

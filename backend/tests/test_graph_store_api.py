@@ -207,6 +207,22 @@ def test_a_provider_the_snapshot_never_read_still_answers_with_the_reason(monkey
     assert out.placements and out.placements[0].master is None
 
 
+def test_the_provider_view_ships_its_nodes_and_not_the_graph_inventory(monkeypatch):
+    """A provider card renders counts and endpoints, never a graph row —
+    but the connections page draws one card per provider, and a shard
+    carries up to two thousand rows. Ten providers on one cluster would
+    each download the whole inventory to print six integers."""
+    _wire(monkeypatch, _snapshot(graphs=("g1", "g2", "g3")))
+    out = _run(gs.get_provider_topology("p1"))
+    shard = out.instance.shards[0]
+    assert shard.graphs == []
+    assert shard.graphs_total == 3                   # the count it is summarised by
+    assert shard.master.endpoint == "10.0.0.1:6379" and len(shard.replicas) == 1
+
+    # …and the shared snapshot still has them: this trims a copy.
+    assert len(_run(gs.get_topology()).instances[0].shards[0].graphs) == 3
+
+
 def test_the_provider_view_says_how_its_reads_were_served(monkeypatch):
     """A replica read and a master read look identical from the outside, so
     without this an operator has no way to tell whether the routing they

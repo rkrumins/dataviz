@@ -268,6 +268,12 @@ async def apply_graph_store_limits(
         try:
             await set_graph_config(client, None, validated.pairs)
         except Exception as exc:                          # noqa: BLE001 — reported, with what already landed
+            # Whatever DID land has changed what a sweep would read. Without
+            # this the snapshot keeps showing the old limits for the nodes
+            # that took the change, and an operator who re-reads sees no
+            # effect and applies it again.
+            if applied_to:
+                invalidate_fleet_cache()
             raise GraphStoreLimitsError(
                 f"GRAPH.CONFIG SET failed on {target_endpoint}: {exc}. "
                 + (f"Already applied on {', '.join(applied_to)}." if applied_to else "Nothing was changed.")

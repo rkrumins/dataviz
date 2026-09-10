@@ -536,6 +536,34 @@ def test_graphs_are_placed_by_keyslot_with_their_data_sources(monkeypatch):
     assert len(placement.replicas) == 2 and placement.siblings == 1
 
 
+def test_a_graph_below_the_display_cap_is_still_found_on_its_node(monkeypatch):
+    """The cap bounds what the PAGE renders. Answering placement from the
+    capped list turns every graph past the cut into "not found on the node"
+    — indistinguishable from a graph the node really does not hold, and
+    said to an ordinary user on their own data source's profile, about a
+    graph that is sitting there working."""
+    monkeypatch.setattr(topology, "MAX_GRAPH_ROWS_PER_SHARD", 1)
+    key, bigger = "z_modest", "a_large"
+    slot = topology.key_slot(key)
+    owner = next(i for i, (lo, hi) in enumerate(
+        [(0, 5460), (5461, 10922), (10923, 16383)]) if lo <= slot <= hi)
+    # Two graphs on the shard, and only one row fits: this one is below the
+    # cut, so it is not among the rows the page gets.
+    nodes = _cluster_nodes({"graphs": {MASTERS[owner]: [key, bigger]}})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()],
+          data_sources=[(_ds("ds1", graph=key, edges=10), "Workspace One"),
+                        (_ds("ds2", graph=bigger, edges=10_000_000), "Workspace One")])
+
+    snap = _run(topology.get_topology_snapshot())
+    shard = snap.instances[0].shards[owner]
+    assert shard.graphs_truncated and [g.key for g in shard.graphs] == [bigger]
+
+    placement = topology.placement_for_graph(snap, "p1", key)
+    assert placement.present                         # it IS on the node
+    assert placement.edge_count == 10
+    assert placement.siblings == 1                   # counted from the total
+
+
 def test_a_registered_graph_missing_from_its_node_is_shown_as_missing(monkeypatch):
     nodes = _cluster_nodes({})                     # no GRAPH.LIST entries at all
     _wire(monkeypatch, nodes=nodes, providers=[_provider()],
