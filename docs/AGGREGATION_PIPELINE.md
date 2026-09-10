@@ -773,6 +773,43 @@ observable contract: exact cells/weights/level stamps under mixed
 casing, exact deltas on re-run, zero-touch no-op runs, and complete
 apply after resume.
 
+## The cube estimate, and why it may not refuse on its own
+
+Before compute, the pipeline sums — over every raw lineage edge — the product of
+its endpoints' ancestor-chain lengths. That is an **upper bound on cells
+PRODUCED**. What the graph **stores** is cells **DISTINCT**: the write is
+`MERGE (s)-[r:AGGREGATED {aggKey}]->(t)`, so many raw edges between the same
+pair of containers collapse onto one cell and increment its weight.
+
+The two differ by roughly the **mean weight of an aggregated edge** — and
+aggregation exists to make that number large. A graph compressing 50:1 produces
+an estimate fifty times its real size. Refusing on that figure refuses graphs
+for being good at the thing they are doing.
+
+So the rule is:
+
+* **The bound fits → proceed.** Sound: an upper bound that fits guarantees the
+  real thing fits. This is the fast accept and it costs nothing.
+* **The bound does not fit, and the source has never been measured → proceed
+  anyway.** The bound can be fifty times too high; it supports no conclusion
+  here. `_check_write_budget` runs after compute, is exact, and refuses before
+  a single write reaches the shard. Under-estimating is the safe direction
+  *because* that gate is there.
+* **The bound does not fit, and the source HAS been measured → refuse**, with
+  both numbers in the message.
+
+`observed_cell_ratio` on the state row is what a complete run learned:
+`cells_exact / cube_estimate_upper`, clamped to (0, 1]. It is a property of the
+graph's SHAPE — how much lineage repeats between the same containers — so it is
+stable run to run in a way the absolute counts are not. NULL until a complete
+run has measured both, and a NULL ratio may never refuse anything.
+
+Three numbers ride on every run's `run_stats`, so the estimator can be held to
+account rather than trusted: `cube_estimate_upper` (what was counted),
+`cube_estimate` (after the correction) and `cells_exact` with
+`cell_ratio_observed` (what actually happened). If the first and last diverge,
+the ratio is drifting and the graph's shape has changed.
+
 ## Index policy, and cleaning up the retired ones
 
 `backend/app/providers/index_policy.py` is the single declaration of every index

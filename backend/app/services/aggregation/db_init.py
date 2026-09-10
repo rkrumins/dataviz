@@ -234,6 +234,10 @@ async def init_aggregation_db() -> None:
                 # budget's calibration point for the next rebuild.
                 f"ALTER TABLE {SCHEMA_NAME}.data_source_state "
                 "ADD COLUMN IF NOT EXISTS observed_bytes_per_edge INTEGER NULL",
+                # Distinct cells stored per cell the pre-compute estimate
+                # counts. NULL until a complete run has measured both, and a
+                # NULL ratio may never refuse a job.
+                "ADD COLUMN IF NOT EXISTS observed_cell_ratio DOUBLE PRECISION NULL",
                 # Per-source Rollup storage override (2026-09-08), mirrored in
                 # alembic 20260908_1000_rollup_storage: 'auto' | 'true' |
                 # 'false', NULL = inherit the fleet default.

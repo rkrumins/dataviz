@@ -2564,12 +2564,73 @@ def test_a_forced_cube_the_shard_cannot_take_is_refused_before_any_write(monkeyp
     p = _make_provider(fake, levels)
 
     with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
-        _run(_materialize(p, tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}))
+        _run(_materialize(
+            p, capacity_hints_override={"cell_ratio_observed": 1.0},
+            tuning={"materialize_fine_pairs": True, "shard_reserve_pct": 0}))
 
     msg = str(exc.value)
     assert msg.startswith("write budget:")
     assert "upper-bound estimate" in msg and "short by" in msg and "10.0.0.1:6379" in msg
     assert fake.agg == {}
+
+
+def test_an_uncalibrated_over_budget_estimate_does_not_refuse(monkeypatch):
+    """The bug from production, as a test.
+
+    The pre-compute estimate counts cells PRODUCED — for every raw lineage
+    edge, the product of its endpoints' ancestor-chain lengths. The graph
+    stores cells DISTINCT, because the write MERGEs on aggKey and many raw
+    edges collapse onto one cell. On a graph that aggregates 50:1 the estimate
+    is fifty times the truth, so refusing on it refused graphs for aggregating
+    WELL — a 700k-node graph estimated at 30M cells and failed in seconds.
+
+    An upper bound supports exactly one inference: if it FITS, the real thing
+    fits. "It does not fit" says nothing. So without a measured ratio for this
+    source the run proceeds, and the EXACT post-compute check — which is still
+    there, and still refuses before a single write reaches the shard — is what
+    decides.
+
+    Same graph and same shard as the refusal test above; the only difference
+    is that this source has never been measured.
+    """
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    shard = _ShardFake(fake, base_used=40 * 2 ** 30 - 2 * 512, maxmemory=40 * 2 ** 30)
+    monkeypatch.setattr(mat, "read_shard_memory", shard)
+    p = _make_provider(fake, levels)
+
+    # No cell_ratio_observed anywhere: this source has never completed a run.
+    with pytest.raises(mat.MaterializationBudgetExceeded) as exc:
+        _run(_materialize(p, tuning={
+            "materialize_fine_pairs": True, "shard_reserve_pct": 0}))
+
+    # It still refuses — but on the EXACT count, after compute, not on the
+    # estimate. That distinction is the whole fix: the numbers in the message
+    # are ones that were measured rather than multiplied.
+    assert "upper-bound estimate" not in str(exc.value)
+    assert fake.agg == {}
+
+
+def test_a_run_reports_the_bound_the_correction_and_the_truth(monkeypatch):
+    """Nothing compared the estimate to the outcome before, which is how an
+    overshoot of fifty times stayed invisible. All three numbers ride on the
+    run so the estimator can be held to account."""
+    monkeypatch.setenv("AGGREGATION_MATERIALIZE_FINE_PAIRS", "true")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    monkeypatch.setattr(mat, "read_shard_memory",
+                        _ShardFake(fake, base_used=0, maxmemory=40 * 2 ** 30))
+    result = _run(_materialize(_make_provider(fake, levels), tuning={
+        "materialize_fine_pairs": True, "shard_reserve_pct": 0}))
+
+    stats = result["run_stats"]
+    assert stats["cube_estimate_upper"] >= stats["cells_exact"] > 0, (
+        "the bound must actually bound")
+    assert 0 < stats["cell_ratio_observed"] <= 1.0
+    # And what it learned reproduces what it saw.
+    assert round(stats["cube_estimate_upper"] * stats["cell_ratio_observed"]) == \
+        pytest.approx(stats["cells_exact"], rel=0.02)
 
 
 class _Ledger:
@@ -2698,12 +2759,12 @@ def test_the_estimate_margin_is_a_fleet_knob_a_forced_cube_is_checked_with(monke
         if margin is not None:
             tuning["estimate_margin_pct"] = margin
         if expect_ok:
-            result = _run(_materialize(_make_provider(fake, levels), tuning=tuning))
+            result = _run(_materialize(_make_provider(fake, levels), capacity_hints_override={"cell_ratio_observed": 1.0}, tuning=tuning))
             assert result["run_stats"]["cube_estimate"] == 18 and len(fake.agg) == 8
             assert result["run_stats"]["effective_tuning"]["estimate_margin_pct"] == 25
         else:
             with pytest.raises(mat.MaterializationBudgetExceeded, match="0% margin"):
-                _run(_materialize(_make_provider(fake, levels), tuning=tuning))
+                _run(_materialize(_make_provider(fake, levels), capacity_hints_override={"cell_ratio_observed": 1.0}, tuning=tuning))
             assert fake.agg == {}
 
 
@@ -2722,7 +2783,7 @@ def test_auto_never_picks_a_cube_the_shard_would_refuse(monkeypatch):
     monkeypatch.setattr(mat, "read_shard_memory", shard)
     p = _make_provider(fake, levels)
 
-    result = _run(_materialize(p, tuning={
+    result = _run(_materialize(p, capacity_hints_override={"cell_ratio_observed": 1.0}, tuning={
         "materialize_fine_pairs": "auto", "shard_reserve_pct": 0,
         "max_materialized_edges": 50_000_000,
     }))

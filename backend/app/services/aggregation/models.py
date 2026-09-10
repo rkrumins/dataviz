@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, Index, Integer, Text, text,
+    Boolean, CheckConstraint, Column, Float, Index, Integer, Text, text,
 )
 from backend.app.db.engine import Base
 
@@ -239,6 +239,16 @@ class AggregationDataSourceStateORM(Base):
     # planning default (512 B). NULL until a fresh run with material growth
     # has calibrated it — see ``providers.shard_capacity``.
     observed_bytes_per_edge = Column(Integer, nullable=True)
+    # How many cells this graph ACTUALLY stores per cell the pre-compute
+    # estimate counts. The estimate sums, over every raw lineage edge, the
+    # product of its endpoints' ancestor-chain lengths — cells PRODUCED. The
+    # graph stores cells DISTINCT, because many raw edges collapse onto one
+    # aggregated cell and bump its weight. So the ratio is roughly 1 / mean
+    # weight, and the better a graph aggregates the smaller it gets: 0.02 on a
+    # graph compressing 50:1. Stable per source, because it is a property of
+    # the graph's SHAPE. NULL until a complete run has measured both numbers,
+    # and while it is NULL the estimate may not refuse anything.
+    observed_cell_ratio = Column(Float, nullable=True)
     # Per-source Rollup storage override: 'auto' | 'true' (full detail) |
     # 'false' (depth-diagonal). NULL = inherit the fleet default (the stored
     # Defaults row, then the env). Resolved at trigger time into the job's

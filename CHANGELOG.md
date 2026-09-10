@@ -433,6 +433,21 @@ does not swing the trend, short enough that "what changed" is still about now.
   fingerprinted by the counters today. Where the scan still runs it is cached, and the
   caller's own wall clock is now a deadline shared by all three queries rather than an
   allowance granted to each.
+- **The pre-compute estimate refused graphs for aggregating well.** It sums, over every raw
+  lineage edge, the product of its endpoints' ancestor-chain lengths — cells PRODUCED. The graph
+  stores cells DISTINCT: the write is a `MERGE` on `aggKey`, so many raw edges between the same
+  pair of containers collapse onto one cell and bump its weight. The two differ by roughly the
+  mean weight, and aggregation exists to make that number large — so a graph compressing 50:1
+  was estimated at fifty times its real size and refused before it started. A 700k-node graph
+  estimated at 30M cells and failed in seconds; the truth was nearer 600k. An upper bound
+  supports exactly one inference — *if it fits, the real thing fits* — and "it does not fit"
+  says nothing at all. So a source with no measured ratio now proceeds, and the exact
+  post-compute check (unchanged, and still refusing before a single write reaches the shard)
+  decides. Each complete run records how many cells it actually stored per cell the bound
+  counted; the next run corrects by it. The bound, the correction and the truth all ride on the
+  run now — nothing compared the first to the last before, which is how an overshoot of fifty
+  times stayed invisible. The same arithmetic also pushed Auto off full-cube mode onto the
+  degraded depth-diagonal, so graphs were losing detail to it as well as failing.
 - **Four `:AGGREGATED` edge indexes existed that no query could ever enter through.** A
   FalkorDB edge index is reachable only when the relationship is the plan's ENTRY POINT — an
   unanchored `MATCH ()-[r:T]->() WHERE r.p = $v`. Every `:AGGREGATED` read this product issues

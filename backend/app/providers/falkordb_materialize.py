@@ -871,6 +871,10 @@ class AggregationPipeline:
         # for run_stats so an over-budget fallback is never silent.
         self._cube_mode: Optional[bool] = None
         self._cube_estimate: Optional[int] = None
+        # The raw sum before the measured ratio is applied — reported so the
+        # estimator's accuracy is visible per run instead of only inferable
+        # from which jobs failed.
+        self._cube_estimate_upper: Optional[int] = None
         # Memoized ancestor closures ({ancestor_or_self: depth}) keyed by
         # CONTAINER id only — bounded by container count (every strict
         # ancestor is a containment parent); leaf closures are derived
@@ -1710,10 +1714,31 @@ class AggregationPipeline:
                     if self._last_budget is not None else {}
                 ),
                 **(self._calibration or {}),
+                # All three numbers, so the estimator can be held to account:
+                # what the upper bound counted, what the measured ratio
+                # corrected it to, and what the run actually stored. Nothing
+                # compared the first to the last before, which is how a
+                # systematic overshoot of fifty times stayed invisible.
                 **(
                     {"cube_estimate": self._cube_estimate}
                     if getattr(self, "_cube_estimate", None) is not None
                     else {}
+                ),
+                **(
+                    {"cube_estimate_upper": self._cube_estimate_upper}
+                    if getattr(self, "_cube_estimate_upper", None) is not None
+                    else {}
+                ),
+                **(
+                    {"cell_ratio_used": self._cell_ratio()}
+                    if self._cell_ratio() is not None else {}
+                ),
+                **(
+                    {
+                        "cells_exact": affected,
+                        "cell_ratio_observed": self._observed_cell_ratio(affected),
+                    }
+                    if self._observed_cell_ratio(affected) is not None else {}
                 ),
                 **(
                     {"pairs_by_level": self._pairs_by_level}
@@ -3012,6 +3037,65 @@ class AggregationPipeline:
             return False
         return not bool(self._cube_mode)
 
+    def _cell_ratio(self) -> Optional[float]:
+        """Distinct cells this source stores per cell the estimate counts.
+
+        Measured by the last complete run and carried on the state row. It is
+        a property of the graph's SHAPE — how much lineage repeats between the
+        same pair of containers — so it is stable run to run in a way the
+        absolute counts are not.
+
+        None means never measured, and a None ratio may not refuse anything.
+        Clamped to (0, 1]: the estimate is a sound upper bound, so a ratio
+        above 1 would mean one of the two numbers is not what it claims, and
+        the answer to that is to distrust the correction, not to act on it.
+        """
+        raw = self._capacity_hints.get("cell_ratio_observed")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not (0.0 < value <= 1.0):
+            logger.warning(
+                "aggregation pipeline on %s: stored cell ratio %r is outside "
+                "(0, 1] — ignoring it and treating this run as uncalibrated.",
+                self.p._graph_name, raw,
+            )
+            return None
+        return value
+
+    def _corrected_estimate(self, upper: int, ratio: Optional[float]) -> int:
+        """The upper bound scaled by what this source actually stores.
+
+        Uncalibrated, the upper bound stands as-is — it is still the honest
+        thing to REPORT, it simply may not be used to refuse.
+        """
+        if ratio is None:
+            return upper
+        return max(1, int(upper * ratio)) if upper > 0 else 0
+
+    def _observed_cell_ratio(self, exact_cells: int) -> Optional[float]:
+        """What this run just taught us, for the next one to start from.
+
+        Only from a run that computed BOTH numbers: no estimate pass (the
+        mode was decided without one) or no cells means nothing to learn, and
+        writing a ratio from half a measurement would be worse than none.
+        """
+        upper = getattr(self, "_cube_estimate_upper", None)
+        if not upper or upper <= 0 or exact_cells <= 0:
+            return None
+        ratio = exact_cells / upper
+        if not (0.0 < ratio <= 1.0):
+            # The "upper bound" was exceeded, so it is not one. Say so loudly
+            # rather than storing a correction that would inflate next time.
+            logger.warning(
+                "aggregation pipeline on %s: %d cells stored against an upper "
+                "bound of %d — the bound is not bounding. Not calibrating.",
+                self.p._graph_name, exact_cells, upper,
+            )
+            return None
+        return round(ratio, 6)
+
     async def _decide_materialization_mode(self) -> None:
         """Pick cube vs boundary for this run (see
         ``_materialize_fine_pairs_mode``). The auto estimator is one
@@ -3094,9 +3178,18 @@ class AggregationPipeline:
                     if sid is None or tid is None:
                         continue
                     estimate += (anc_count(int(sid))) * (anc_count(int(tid)))
+        # What was just summed is cells PRODUCED: for every raw lineage edge,
+        # the product of its endpoints' ancestor-chain lengths. What the graph
+        # STORES is cells DISTINCT — the write is a MERGE on aggKey, so many
+        # raw edges collapse onto one cell and bump its weight. The two differ
+        # by roughly the mean weight, and aggregation exists to make that
+        # number large: a graph compressing 50:1 estimates 50× its real size.
+        # Refusing on the raw figure refuses graphs for aggregating WELL.
+        self._cube_estimate_upper = estimate
+        ratio = self._cell_ratio()
+        estimate = self._corrected_estimate(estimate, ratio)
         self._cube_estimate = estimate
-        # The estimate is an UPPER bound on cells, so it is checked with a
-        # margin; the exact post-compute check stands behind it.
+
         budget = await self._budget()
         margin = self._knob_int("estimate_margin_pct", estimate_margin_pct_default, 0, 100)
         verdict = budget.verdict(
@@ -3105,16 +3198,39 @@ class AggregationPipeline:
         )
         if forced:
             self._cube_mode = True
-            if not verdict.ok:
+            # An UNCALIBRATED estimate may not refuse. The upper bound only
+            # ever supports one conclusion — if it fits, the real thing fits —
+            # and "it does not fit" proves nothing at all about a number that
+            # can be fifty times too high. Proceed and let the exact
+            # post-compute check refuse, which it does before a single write
+            # reaches the shard. Under-estimating is the safe direction
+            # precisely because that gate is there and is exact.
+            if not verdict.ok and ratio is not None:
                 raise MaterializationBudgetExceeded(format_refusal(
                     budget, verdict, graph=self.p._graph_name,
-                    composition="full cube, estimated before compute",
+                    composition=(
+                        f"full cube, estimated before compute "
+                        f"(upper bound {self._cube_estimate_upper:,} cells × "
+                        f"measured ratio {ratio:.4f})"
+                    ),
                     from_estimate=True, margin_pct=margin,
                 ))
+            if not verdict.ok:
+                logger.info(
+                    "aggregation pipeline on %s: forced full cube — the upper "
+                    "bound (~%d cells) does not fit, but this source has no "
+                    "measured cell ratio yet, and the bound counts cells "
+                    "PRODUCED rather than STORED. Proceeding; the exact check "
+                    "after compute refuses before any write if it must.",
+                    self.p._graph_name, self._cube_estimate_upper,
+                )
+                return
             logger.info(
                 "aggregation pipeline on %s: forced full cube — estimate ~%d "
-                "cells; the %s rule allows it.",
-                self.p._graph_name, estimate, budget.governed_by,
+                "cells (upper bound %d%s); the %s rule allows it.",
+                self.p._graph_name, estimate, self._cube_estimate_upper,
+                f", measured ratio {ratio:.4f}" if ratio is not None else ", uncalibrated",
+                budget.governed_by,
             )
             return
         # The cube ceiling is deliberately NOT the write budget: it is Auto's
@@ -3130,7 +3246,10 @@ class AggregationPipeline:
                 "pick could be refused by the budget; keep maxCubeEdges below it.",
                 self.p._graph_name, cap, ceiling,
             )
-        self._cube_mode = estimate <= cap and verdict.ok
+        # Uncalibrated, an over-large upper bound must not push Auto off the
+        # cube either: that trades a graph's full detail for the degraded
+        # depth-diagonal on the same inflated arithmetic.
+        self._cube_mode = estimate <= cap and (verdict.ok or ratio is None)
         logger.info(
             "aggregation pipeline on %s: auto mode — full-cube estimate "
             "~%d cells vs cube ceiling %d (%s rule: %s) → %s.",

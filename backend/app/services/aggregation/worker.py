@@ -757,6 +757,13 @@ class AggregationWorker:
                         (result.get("run_stats") or {}).get("bytes_per_edge_observed")
                         if isinstance(result.get("run_stats"), dict) else None
                     ),
+                    # Distinct cells stored per cell the pre-compute estimate
+                    # counted. None (this run measured only one of the two)
+                    # leaves the previous figure standing, exactly as above.
+                    observed_cell_ratio=(
+                        (result.get("run_stats") or {}).get("cell_ratio_observed")
+                        if isinstance(result.get("run_stats"), dict) else None
+                    ),
                     # What this run learned under per-query pressure, for
                     # the next run to start from. Always written: a clean
                     # run stores "{}", which clears the previous lesson
@@ -1088,6 +1095,9 @@ class AggregationWorker:
         observed = getattr(state, "observed_bytes_per_edge", None)
         if observed:
             hints["bytes_per_edge_observed"] = observed
+        ratio = getattr(state, "observed_cell_ratio", None)
+        if ratio:
+            hints["cell_ratio_observed"] = ratio
         learned = self._job_tuning(types.SimpleNamespace(
             tuning_json=getattr(state, "observed_tuning", None),
         ))
