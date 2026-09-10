@@ -510,6 +510,31 @@ describe('Admin → Graph store', () => {
         expect(screen.getByText('8/9')).toBeInTheDocument()
     })
 
+    it('says a node loading its snapshot has not spoken, rather than showing its graphs as gone', async () => {
+        // Kubernetes marks a FalkorDB pod NotReady while it replays its RDB
+        // into memory. The node answers PING and INFO and refuses every
+        // GRAPH.* command, so its graph list is UNKNOWN — not empty. Reading
+        // it as empty is how a routine restart of a large shard renders as
+        // data loss on the one page an operator opens to check.
+        const loading = instance()
+        loading.shards[0].master = node('10.0.0.1:6379', {
+            server: { uptimeS: 12, redisVersion: '8.6.3', loading: true },
+        })
+        loading.shards[0].inventoryRead = false
+        getTopology.mockResolvedValue(snapshot({ instances: [loading] }))
+        wrap('/admin/graph-store?view=shards')
+
+        const card = await screen.findByTestId('shard-card-0')
+        expect(within(card).getByTestId('inventory-unread-0')).toHaveTextContent(
+            /the list below is what the catalogue expects, not what was found/,
+        )
+        expect(within(card).getAllByText('loading snapshot').length).toBeGreaterThanOrEqual(1)
+
+        // The other two shards say nothing of the sort.
+        expect(screen.queryByTestId('inventory-unread-1')).not.toBeInTheDocument()
+        expect(screen.queryByTestId('inventory-unread-2')).not.toBeInTheDocument()
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?view=shards&shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')

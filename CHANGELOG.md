@@ -422,6 +422,17 @@ does not swing the trend, short enough that "what changed" is still about now.
   fingerprinted by the counters today. Where the scan still runs it is cached, and the
   caller's own wall clock is now a deadline shared by all three queries rather than an
   allowance granted to each.
+- **A node loading its snapshot reported its whole shard's graphs as missing.** Kubernetes
+  marks a FalkorDB pod NotReady while it replays its RDB into memory, which on a large shard
+  is minutes. The node stays dialable and keeps gossiping — it answers PING, INFO and
+  CLUSTER NODES — and refuses every `GRAPH.*` command with LOADING. The page read that empty
+  graph list as the node's answer rather than as no answer, so every graph the catalogue
+  expected on that shard flipped to "not on the node": a routine restart rendered as data
+  loss, on the one page an operator opens to check. An unread inventory is now distinguished
+  from an empty one, the shard says its list is the catalogue's word rather than the node's,
+  and the node carries a "loading snapshot" state of its own. The same mistake through a wider
+  door — a master that never answered at all — is fixed with it. A node that DOES answer "I
+  hold none" is still believed, so a genuinely missing graph is still reported.
 - **The index DDL was a per-run tax rather than a one-off.** `ensure_indices` issues
   `(5 + ontology types) × 5` node indices plus six `:AGGREGATED` edge indices — 131 statements
   for a twenty-type ontology, serially, on the write path — and it ran on every aggregation

@@ -1009,16 +1009,48 @@ def _attach_graphs(
     for shard in instance.shards:
         listed: List[str] = []
         measured: Dict[str, Any] = {}
+        # ``graphs`` is None when the master could not be ASKED and [] when it
+        # answered that it holds none. Collapsing the two is how a node
+        # replaying its RDB — dialable, gossiping, answering PING and INFO,
+        # and refusing every GRAPH.* command with LOADING — reports its whole
+        # shard as empty. Kubernetes marks that pod NotReady for exactly the
+        # few minutes an operator is most likely to be looking at this page.
+        answered = False
         for idx in idxs:
             read = reads.get((idx, _read_key(shard.master))) or {}
-            for key in read.get("graphs") or []:
-                if key not in listed:
-                    listed.append(key)
+            graphs = read.get("graphs")
+            if graphs is not None:
+                answered = True
+                for key in graphs:
+                    if key not in listed:
+                        listed.append(key)
             measured.update(read.get("measured") or {})
+        shard.inventory_read = answered
         for key in listed:
             _add(key, True, measured.get(key), on_shard=shard)
     for key in expected_here:
-        _add(key, False, None)
+        # A graph the catalogue expects on a shard whose contents were never
+        # read is not evidence of absence. The node has not contradicted the
+        # catalogue; it has not spoken. Take the catalogue's word and mark the
+        # shard unverified, rather than announcing a graph is gone.
+        shard, _slot = place(instance, key)
+        unread = shard is not None and not shard.inventory_read
+        _add(key, unread, None)
+
+    for shard in instance.shards:
+        if shard.inventory_read:
+            continue
+        why = ("it is loading its snapshot into memory"
+               if shard.master.server.loading
+               else "it did not answer")
+        shard.replication.findings.append(ReplicationFinding(
+            code="inventory_unread", severity="warn",
+            text=(f"{shard.master.endpoint} could not say which graphs it holds: "
+                  f"{why}. The graphs listed for this shard are the catalogue's."),
+            fix=("Nothing to do if the node is starting — it answers again once "
+                 "the snapshot is loaded. The figures return on the next reading."),
+            endpoint=shard.master.endpoint,
+        ))
 
     for shard in instance.shards:
         rows = sorted(

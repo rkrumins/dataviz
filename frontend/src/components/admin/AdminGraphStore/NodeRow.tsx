@@ -111,6 +111,14 @@ export function NodeRow({ node, reservePct, fitsEdges, heldNote, canAdjustLimits
                 </HoverTip>
                 <span className="text-[10px] uppercase tracking-wide text-ink-muted">{isReplica ? 'replica' : 'master'}</span>
                 <HealthChip node={node} />
+                {node.server?.loading && (
+                    <HoverTip
+                        label="Loading its snapshot"
+                        detail="The node is replaying its saved data back into memory. It answers that it is alive but cannot serve queries yet, and Kubernetes marks it NotReady meanwhile. It comes back on its own."
+                    >
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">loading snapshot</span>
+                    </HoverTip>
+                )}
                 {node.gossip && (
                     <HoverTip label={`Cluster bus: ${node.gossip}`} detail="What the other nodes think of this one. 'pfail' is one node's suspicion; 'fail' is the cluster's agreement.">
                         <span className="text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">{node.gossip}</span>

@@ -189,6 +189,11 @@ class GraphStoreShard(_Base):
     #: sitting on. That answer reaches an ordinary user, on their own data
     #: source's profile, which is the last place to guess.
     rows_by_key: Dict[str, GraphOnShard] = Field(default_factory=dict, exclude=True)
+    #: False when the master could not say what it holds — it was loading its
+    #: snapshot back off disk, or did not answer at all. The graphs listed
+    #: below are then the catalogue's word, not the node's, and a shard whose
+    #: contents were never read must not be reported as a shard with none.
+    inventory_read: bool = Field(True, alias="inventoryRead")
     graphs_total: int = Field(0, alias="graphsTotal")
     graphs_truncated: bool = Field(False, alias="graphsTruncated")
     unregistered_count: int = Field(0, alias="unregisteredCount")

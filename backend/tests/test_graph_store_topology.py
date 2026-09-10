@@ -124,7 +124,11 @@ class _FakeNode:
         return True
 
     async def info(self, *sections):
-        return dict(self._me().get("info") or {})
+        me = self._me()
+        out = dict(me.get("info") or {})
+        if me.get("loading"):
+            out["loading"] = 1
+        return out
 
     async def config_get(self, *names):
         me = self._me()
@@ -146,6 +150,13 @@ class _FakeNode:
             return self.state.get("cluster_info") or (
                 "cluster_state:ok\r\ncluster_known_nodes:9\r\ncluster_size:3\r\n"
             )
+        if me.get("loading"):
+            # Redis answers PING/INFO/CLUSTER while it replays its RDB, and
+            # refuses everything that touches data. A node K8s has marked
+            # NotReady for exactly this reason is still dialable and still
+            # gossiping — it just cannot say what it holds yet.
+            from redis.exceptions import BusyLoadingError
+            raise BusyLoadingError("LOADING Redis is loading the dataset in memory")
         if command == "GRAPH.LIST":
             return list(me.get("graphs") or [])
         if command == "GRAPH.CONFIG":
@@ -1346,6 +1357,121 @@ def test_a_whole_provider_that_is_gone_does_not_blank_the_one_beside_it(monkeypa
     assert by_name["Gone"].error, "an unreachable store must say why"
     # The healthy store's figures are its own, not the fleet's average.
     assert snap.summary.nodes_up == 9
+
+
+def test_a_node_replaying_its_snapshot_does_not_report_its_graphs_as_gone(monkeypatch):
+    """Kubernetes marks a FalkorDB pod NotReady while it replays its RDB into
+    memory. The node is still dialable and still gossiping — it answers PING,
+    INFO and CLUSTER NODES — but every GRAPH.* command comes back LOADING.
+
+    Reading that as "the node listed no graphs" is how a routine restart of a
+    large shard renders as data loss: every graph the catalogue expects there
+    flips to "not on the node" while the node is merely busy reading it back
+    off disk. The list is UNKNOWN, which is not the same as empty.
+    """
+    key = "g_alpha"
+    owner = next(i for i, (lo, hi) in enumerate(
+        [(0, 5460), (5461, 10922), (10923, 16383)])
+        if lo <= topology.key_slot(key) <= hi)
+    nodes = _cluster_nodes({"graphs": {MASTERS[owner]: [key]}})
+    nodes[MASTERS[owner]]["loading"] = True
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()],
+          data_sources=[(_ds("ds1", graph=key), "Workspace One")])
+
+    snap = _run(topology.get_topology_snapshot())
+    inst = snap.instances[0]
+    shard = inst.shards[owner]
+
+    # The node is up and says why it cannot answer for its contents.
+    assert shard.master.status == "up"
+    assert shard.master.server.loading is True
+
+    # And its graphs are NOT claimed to be missing.
+    row = next(g for g in shard.graphs if g.key == key)
+    assert row.present is not False, (
+        "a graph was reported absent from a node that was never able to answer")
+
+    # The shard says its list is the catalogue's word, not the node's…
+    assert shard.inventory_read is False
+    finding = next(f for f in shard.replication.findings
+                   if f.code == "inventory_unread")
+    assert "loading its snapshot into memory" in finding.text
+    assert "Nothing to do if the node is starting" in (finding.fix or "")
+
+    # The other shards are unaffected and still answer for themselves.
+    for other in (s for i, s in enumerate(inst.shards) if i != owner):
+        assert other.master.status == "up"
+        assert other.master.server.loading in (None, False)
+
+
+def test_a_master_that_never_answered_does_not_empty_its_shard_either(monkeypatch):
+    """The same mistake through a wider door: a master that is simply down
+    also produces no graph list, and its shard's graphs were flipped to
+    absent on exactly as little evidence."""
+    key = "g_alpha"
+    owner = next(i for i, (lo, hi) in enumerate(
+        [(0, 5460), (5461, 10922), (10923, 16383)])
+        if lo <= topology.key_slot(key) <= hi)
+    nodes = _cluster_nodes({"graphs": {MASTERS[owner]: [key]}})
+    nodes.pop(MASTERS[owner])
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()],
+          data_sources=[(_ds("ds1", graph=key), "Workspace One")])
+
+    snap = _run(topology.get_topology_snapshot())
+    shard = snap.instances[0].shards[owner]
+    assert shard.master.status == "unreachable"
+    assert shard.inventory_read is False
+    row = next(g for g in shard.graphs if g.key == key)
+    assert row.present is not False
+    finding = next(f for f in shard.replication.findings
+                   if f.code == "inventory_unread")
+    assert "did not answer" in finding.text
+
+
+def test_a_master_that_answers_with_no_graphs_is_still_believed(monkeypatch):
+    """The other half of the distinction: a node that ANSWERS "I hold none"
+    is evidence, and a graph the catalogue expects there really is missing.
+    Softening that would trade one lie for another."""
+    key = "g_alpha"
+    owner = next(i for i, (lo, hi) in enumerate(
+        [(0, 5460), (5461, 10922), (10923, 16383)])
+        if lo <= topology.key_slot(key) <= hi)
+    nodes = _cluster_nodes({})                       # every master lists []
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()],
+          data_sources=[(_ds("ds1", graph=key), "Workspace One")])
+
+    snap = _run(topology.get_topology_snapshot())
+    shard = snap.instances[0].shards[owner]
+    assert shard.inventory_read is True
+    row = next(g for g in shard.graphs if g.key == key)
+    assert row.present is False, "a genuinely missing graph stopped being reported"
+    assert not [f for f in shard.replication.findings
+                if f.code == "inventory_unread"]
+
+
+def test_the_store_is_still_discovered_when_the_seed_is_the_loading_node(monkeypatch):
+    """The provider's first seed is a master, and that master is the one
+    replaying its snapshot. Redis answers PING, INFO and CLUSTER NODES while
+    it loads — only the data commands refuse — so discovery has everything it
+    needs from the very node Kubernetes has marked NotReady.
+
+    This is the case that decides whether the page works at all during a
+    restart, rather than merely showing one row oddly."""
+    nodes = _cluster_nodes({})
+    nodes[MASTERS[0]]["loading"] = True           # MASTERS[0] is the seed
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    snap = _run(topology.get_topology_snapshot())
+    inst = snap.instances[0]
+
+    assert inst.reachable, "a loading seed made the whole store undiscoverable"
+    assert len(inst.shards) == 3
+    assert inst.totals.nodes_total == 9
+    assert inst.totals.nodes_up == 9, "a loading node is answering, so it is up"
+    assert inst.slots_covered == 16_384
+    # It is the shard whose contents are unknown, and only that shard.
+    assert inst.shards[0].inventory_read is False
+    assert all(s.inventory_read for s in inst.shards[1:])
 
 
 def test_the_sweep_deadline_scales_with_the_fleet():

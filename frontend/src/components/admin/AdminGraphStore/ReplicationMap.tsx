@@ -117,6 +117,11 @@ function ReplicaRow({ replica, master, last }: {
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span className="font-mono text-[12px] text-ink-secondary break-all">{replica.endpoint}</span>
                     <HealthPill health={health} />
+                    {replica.server?.loading && (
+                        <span className="text-[10px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                            loading snapshot
+                        </span>
+                    )}
                     {replica.gossip && (
                         <span className="text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">
                             {replica.gossip}
@@ -193,6 +198,16 @@ export function ShardReplication({ shard, reservePct }: {
                             {master.role === 'replica' ? 'master (stepping down)' : 'master'}
                         </span>
                         <HealthPill health={health} />
+                        {master.server?.loading && (
+                            <HoverTip
+                                label="Loading its snapshot"
+                                detail="The node is replaying its saved data back into memory. It answers that it is alive but cannot serve queries yet, and Kubernetes marks it NotReady meanwhile. It comes back on its own."
+                            >
+                                <span className="text-[10px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">
+                                    loading snapshot
+                                </span>
+                            </HoverTip>
+                        )}
                         {master.gossip && (
                             <span className="text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">
                                 {master.gossip}

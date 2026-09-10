@@ -152,6 +152,10 @@ export interface GraphStoreShard {
     master: GraphStoreNode
     replicas: GraphStoreNode[]
     graphs: GraphOnShard[]
+    /** False when the master could not say what it holds — loading its
+     *  snapshot, or silent. The graphs below are then the catalogue's word,
+     *  not the node's, and `present` on them is not evidence either way. */
+    inventoryRead?: boolean
     graphsTotal: number
     graphsTruncated: boolean
     unregisteredCount: number

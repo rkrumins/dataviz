@@ -128,7 +128,13 @@ function GraphsTable({ shard, onOpenSource }: {
     }, [shard.graphs, query])
 
     if (shard.graphs.length === 0) {
-        return <p className="mt-2 text-[11px] text-ink-muted">No graphs on this shard yet.</p>
+        return (
+            <p className="mt-2 text-[11px] text-ink-muted">
+                {shard.inventoryRead === false
+                    ? 'This node could not say what it holds yet, and the catalogue expects nothing here.'
+                    : 'No graphs on this shard yet.'}
+            </p>
+        )
     }
     // The collapse bounds the DOM; the search must not un-bound it. On a
     // shard at the row cap, one keystroke would otherwise mount two
@@ -137,6 +143,15 @@ function GraphsTable({ shard, onOpenSource }: {
 
     return (
         <div className="mt-2">
+            {shard.inventoryRead === false && (
+                <p
+                    data-testid={`inventory-unread-${shard.index}`}
+                    className="mb-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-1.5 text-[11px] text-amber-700 dark:text-amber-400"
+                >
+                    This node has not said which graphs it holds — the list below is what the
+                    catalogue expects, not what was found. Nothing here means a graph is missing.
+                </p>
+            )}
             <div className="flex flex-wrap items-center gap-2">
                 <label className="relative flex-1 min-w-[12rem]">
                     <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-ink-muted" aria-hidden="true" />
