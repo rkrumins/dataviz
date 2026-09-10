@@ -204,10 +204,16 @@ the fleet".
 
 A master that goes away is a pause, not an outage:
 
-- Reads for its shard keep being served by its replicas where they are in
-  step. Anything that must go to the master fails fast with a short retry
-  hint, and the canvas keeps showing what it already had behind a
-  *Reconnecting to the graph store* line. It retries by itself.
+- Reads for its shard keep being served by its replicas. The lag reading
+  normally comes from the master, so a master that cannot be asked would have
+  closed the gate on its own replicas; instead the ones it vouched for when it
+  last spoke keep answering, and a graph this pod wrote to seconds ago is no
+  longer pinned to a node that is not there. What comes back may be a little
+  behind; what would otherwise come back is nothing.
+- Anything that must go to the master — every write, and every read a rebuild
+  makes — fails fast with a short retry hint, and the canvas keeps showing
+  what it already had behind a *Reconnecting to the graph store* line. It
+  retries by itself.
 - The circuit breaker does **not** open for a node that is failing over, so a
   restart no longer answers every user with "Circuit open" for half a minute.
 - A rebuild waits for the node, reconnects to it (or to the replica promoted in

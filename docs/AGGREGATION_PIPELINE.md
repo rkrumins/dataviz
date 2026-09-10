@@ -428,7 +428,18 @@ seeing it as an outage when a node is replaced anyway.
   would fail the same way and double the load the routing exists to shed. A
   replica that lets the caller's deadline expire is benched like any other
   fault, but the read is not started again — a second full-length run would
-  make its timeout no bound on how long the caller waits. **Every read a rebuild makes is pinned to the master** for
+  make its timeout no bound on how long the caller waits.
+
+  **A master that stops answering does not close the gate.** The lag reading
+  comes from the master, so a master that is gone would otherwise leave no
+  replica qualified and send every read to the node that just failed — at the
+  one moment its replicas hold the only copies of the graph still standing.
+  The replicas it vouched for when it last spoke stand instead (and if it
+  never spoke, whichever the client still lists); it is asked once per sample
+  window rather than once per read; the settle window stops pinning a freshly
+  written graph to it; and the failing-over memo, a verdict about the master,
+  no longer fast-fails a read already addressed to a replica. Reads therefore
+  keep flowing through a pod rotation. **Every read a rebuild makes is pinned to the master** for
   the whole run — RECONCILE reads what APPLY just wrote — via a contextvar the
   pipeline sets, so replica reads can never make a run see a graph it has
   already changed.

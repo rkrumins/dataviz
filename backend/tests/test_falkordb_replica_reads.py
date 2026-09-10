@@ -28,6 +28,11 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _stale_sample() -> float:
+    """Long enough ago that the router will take a fresh reading."""
+    return fp._REPLICA_SAMPLE_S + 1
+
+
 class _Node:
     def __init__(self, host, port=6379):
         self.host, self.port = host, port
@@ -212,6 +217,99 @@ def test_a_replica_that_failed_a_read_is_skipped_for_a_while():
     assert fp._REPLICA_PENALTY_S >= 10
 
 
+# ── the master going away is when replicas matter most ───────────────────
+
+
+def _deaf_master(conn):
+    """A shard whose master answers nothing — the pods are rotating."""
+    async def _refuse(command, *args, target_nodes=None):
+        conn.calls.append((command, args, target_nodes))
+        if command == "INFO":
+            raise ConnectionError(
+                "Error 111 connecting to 10.0.0.1:6379. Connection refused.")
+        return "OK"
+
+    conn.execute_command = _refuse
+    return conn
+
+
+def test_reads_keep_coming_from_replicas_when_the_master_is_gone():
+    """The lag gate asks the MASTER how far behind its replicas are. A
+    master that cannot answer therefore closed the gate — and sent every
+    read to the node that was already down, at the one moment its replicas
+    were the only copies of the graph still standing."""
+    p = _provider(_deaf_master(_Conn()))
+    assert _run(p._replica_for("g1")) in (R1, R2)
+
+
+def test_a_master_that_answered_recently_hands_over_the_replicas_it_vouched_for():
+    """A reading seconds old is better evidence than none: the replicas
+    that were in step when the master last spoke are the ones to use."""
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 2,
+        "master_repl_offset": 100 * 1024 ** 2,
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online",
+                   "offset": 100 * 1024 ** 2, "lag": 0},
+        "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
+    })
+    p = _provider(conn)
+    assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"    # only this one is in step
+
+    _deaf_master(conn)
+    p._repl_sample["g1"] = (time.monotonic() - _stale_sample(), p._repl_sample["g1"][1])
+    for _ in range(4):
+        # …and the lagging sibling is still not handed the reads.
+        assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"
+
+
+def test_a_dead_master_is_not_asked_again_on_every_read():
+    conn = _deaf_master(_Conn())
+    p = _provider(conn)
+    for _ in range(20):
+        _run(p._replica_for("g1"))
+    assert sum(1 for c in conn.calls if c[0] == "INFO") == 1
+
+
+def test_a_graph_this_pod_just_wrote_still_reads_once_its_master_goes():
+    """Read-your-own-writes pins a freshly written graph to its master. When
+    that master is the node that went away, the choice is a slightly stale
+    answer from a replica or no answer at all — and the work that genuinely
+    cannot tolerate the first, a rebuild, is pinned for its whole run by its
+    own contextvar rather than by this window."""
+    conn = _Conn()
+    p = _provider(conn)
+    p._note_local_write("g1")
+    assert _run(p._replica_for("g1")) is None          # healthy master: pinned
+
+    _deaf_master(conn)
+    p._repl_sample.clear()                             # take a fresh reading
+    assert _run(p._replica_for("g1")) in (R1, R2)
+
+
+def test_a_provider_pinned_to_its_master_stays_pinned_even_then():
+    """"Master only" is a correctness choice an operator made; an outage is
+    not the moment to overrule it."""
+    p = _provider(_deaf_master(_Conn()), read_from_replicas="never")
+    assert _run(p._replica_for("g1")) is None
+
+
+def test_the_failover_memo_never_blocks_a_read_aimed_at_a_replica():
+    """The memo is a verdict about the MASTER — it exists so master-bound
+    work fails fast instead of piling up. Applying it to a read already
+    pinned to a healthy replica turns the one path that still works into
+    the error it was meant to avoid."""
+    conn = _Conn()
+    p = _reading_provider(conn)
+    p._failing_over_until = time.monotonic() + 10
+    p._failing_over_endpoint = "10.0.0.1:6379"
+
+    # The real guard, not a stub: the memo lives inside it.
+    _run(p._ro_query("MATCH (n) RETURN n", op="read"))
+    assert p._replica_reads == 1
+    # …and it went to a replica, not to the node that is failing over.
+    assert conn.calls[-1][2] in (R1, R2)
+
+
 def test_replication_is_sampled_not_asked_per_read():
     """One INFO per shard per window answers for every read of every graph
     on it — otherwise the routing costs more than it saves."""
@@ -270,10 +368,12 @@ def test_only_a_fault_the_replica_caused_sends_the_read_to_the_master():
     assert fp._replica_at_fault(asyncio.TimeoutError())
 
 
-def _reading_provider():
-    p = _provider(_Conn())
+def _reading_provider(conn=None):
+    p = _provider(conn if conn is not None else _Conn())
     p._READ_TIMEOUT = 5.0
     p._db_timeout_ms = lambda t: 1000
+    p._query_semaphore = asyncio.Semaphore(4)
+    p._inflight = 0
     return p
 
 

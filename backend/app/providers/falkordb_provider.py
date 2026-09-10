@@ -2292,6 +2292,15 @@ class FalkorDBProvider(GraphDataProvider):
             self._wrote_at = {}
         self._wrote_at[key] = time.monotonic()
 
+    def _note_master_silent(self, graph_key: str, silent: bool) -> None:
+        """Whether the last reading of this shard found its master mute."""
+        if not hasattr(self, "_master_silent"):
+            self._master_silent = {}
+        self._master_silent[graph_key] = silent
+
+    def _master_is_silent(self, graph_key: str) -> bool:
+        return bool(getattr(self, "_master_silent", {}).get(graph_key))
+
     def _in_settle_window(self, graph_key: str) -> bool:
         at = getattr(self, "_wrote_at", {}).get(graph_key)
         return at is not None and (time.monotonic() - at) < _REPLICA_READ_SETTLE_S
@@ -2306,8 +2315,6 @@ class FalkorDBProvider(GraphDataProvider):
         if not self._replica_reads_enabled():
             return None
         if _read_consistency.get() == "master":
-            return None
-        if self._in_settle_window(graph_key):
             return None
         # One cluster client resolves any key's slot, so the source client
         # answers for the projection graph too.
@@ -2325,6 +2332,14 @@ class FalkorDBProvider(GraphDataProvider):
         in_step = await self._replicas_in_step(
             graph_key, {f"{n.host}:{n.port}" for n in replicas},
         )
+        # Read-your-own-writes pins a graph this process just wrote to its
+        # master — unless that master is the node that has stopped
+        # answering. Then the choice is a slightly stale answer from a
+        # replica or no answer at all, and the work that genuinely cannot
+        # tolerate the first is already pinned by ``read_from_master_only``
+        # for its whole run, above.
+        if self._in_settle_window(graph_key) and not self._master_is_silent(graph_key):
+            return None
         replicas = [n for n in replicas if f"{n.host}:{n.port}" in in_step]
         if not replicas:
             return None
@@ -2364,7 +2379,9 @@ class FalkorDBProvider(GraphDataProvider):
         neighbour qualified for.
 
         One ``INFO replication`` per shard per sample window answers it for
-        every read of every graph on that shard.
+        every read of every graph on that shard — and when the master
+        cannot answer at all, the last set it vouched for stands rather
+        than the shard falling back to a node that is not there.
         """
         now = time.monotonic()
         cache = getattr(self, "_repl_sample", None)
@@ -2374,6 +2391,22 @@ class FalkorDBProvider(GraphDataProvider):
         if cached is not None and now - cached[0] < _REPLICA_SAMPLE_S:
             return cached[1] & endpoints
         state = await self.replication_state(graph_key, timeout_s=1.0)
+        if not state:
+            # The master could not be asked — which is the moment its
+            # replicas matter most: they are the only copies of this graph
+            # still standing, and the node that would otherwise take the
+            # read is the one that just failed to answer. Use the replicas
+            # it vouched for when it last spoke; if it never did, use the
+            # ones the client still lists. A reading a few seconds old
+            # beats no answer at all, and Redis serves stale data from a
+            # replica whose link is down by the same reasoning.
+            #
+            # Re-stamped so a master that is gone is asked once per window,
+            # not once per read.
+            vouched = cached[1] if cached is not None else set(endpoints)
+            cache[graph_key] = (now, vouched)
+            self._note_master_silent(graph_key, True)
+            return vouched & endpoints
         in_step = {
             str(r.get("endpoint"))
             for r in (state.get("replicas") or [])
@@ -2384,6 +2417,7 @@ class FalkorDBProvider(GraphDataProvider):
             and r["lagBytes"] <= _REPLICA_READ_MAX_LAG_BYTES
         }
         cache[graph_key] = (now, in_step)
+        self._note_master_silent(graph_key, False)
         return in_step & endpoints
 
     def _pinned_to(self, graph, node):
@@ -2414,7 +2448,8 @@ class FalkorDBProvider(GraphDataProvider):
         }
 
     async def _run_guarded(
-        self, call: Callable[[], Awaitable[Any]], *, read_only: bool = False,
+        self, call: Callable[[], Awaitable[Any]], *,
+        read_only: bool = False, pinned: bool = False,
     ) -> Any:
         """Execute a graph call with transparent retries for transient
         failures so the circuit breaker stays closed on blips.
@@ -2447,7 +2482,14 @@ class FalkorDBProvider(GraphDataProvider):
         schedule = _TRANSIENT_RETRY_BACKOFFS
         max_retries = len(schedule)
         memo = getattr(self, "_failing_over_until", 0.0)
-        if read_only and memo and time.monotonic() < memo:
+        # The memo is a verdict about the MASTER: it exists so master-bound
+        # work fails fast instead of piling up behind a node that is being
+        # replaced. A read already addressed to a replica the router chose
+        # is the one path that still works while that is true — answering it
+        # with the memo turns the fallback into the error it exists to
+        # avoid, at exactly the moment the replicas are the only copies of
+        # the graph still standing.
+        if read_only and not pinned and memo and time.monotonic() < memo:
             # A read that arrives while the node is known to be away is
             # answered now, from what the caller already has.
             from backend.common.adapters import ProviderFailingOver
@@ -2597,8 +2639,12 @@ class FalkorDBProvider(GraphDataProvider):
         cypher: str,
         op: Optional[str],
         budget: float,
+        pinned: bool = False,
     ):
         """Semaphore + guard + slow-query telemetry for every Cypher.
+
+        ``pinned`` marks a call already addressed to ONE node the caller
+        chose — a replica the read router picked. See ``_run_guarded``.
 
         Emits one WARNING line when DB execution OR semaphore-queue wait
         exceeds ``FALKORDB_SLOW_QUERY_MS``. The two durations are reported
@@ -2615,7 +2661,9 @@ class FalkorDBProvider(GraphDataProvider):
             rows: Optional[int] = None
             err: Optional[str] = None
             try:
-                result = await self._run_guarded(runner, read_only=kind.endswith("ro"))
+                result = await self._run_guarded(
+                    runner, read_only=kind.endswith("ro"), pinned=pinned,
+                )
                 rs = getattr(result, "result_set", None)
                 rows = len(rs) if rs is not None else 0
                 return result
@@ -2668,6 +2716,7 @@ class FalkorDBProvider(GraphDataProvider):
             try:
                 result = await self._guarded_timed(
                     lambda: _call_on(replica), kind=kind, cypher=cypher, op=op, budget=t,
+                    pinned=True,
                 )
                 self._replica_reads += 1
                 return result
