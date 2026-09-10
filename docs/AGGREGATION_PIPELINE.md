@@ -423,9 +423,12 @@ seeing it as an outage when a node is replaced anyway.
   reports — a replica acknowledges the stream about once a second whatever it
   has applied, so those seconds read 0 for one that is gigabytes behind. A
   connection fault, a `MOVED` or a replica still loading re-issues the read on
-  the master once; a query the store refused for its size or its deadline is
-  raised as it stands, because re-running it on the master would fail the same
-  way and double the load the routing exists to shed. **Every read a rebuild makes is pinned to the master** for
+  the master once; a query the store refused for its size, or aborted at its
+  own time limit, is raised as it stands, because re-running it on the master
+  would fail the same way and double the load the routing exists to shed. A
+  replica that lets the caller's deadline expire is benched like any other
+  fault, but the read is not started again — a second full-length run would
+  make its timeout no bound on how long the caller waits. **Every read a rebuild makes is pinned to the master** for
   the whole run — RECONCILE reads what APPLY just wrote — via a contextvar the
   pipeline sets, so replica reads can never make a run see a graph it has
   already changed.

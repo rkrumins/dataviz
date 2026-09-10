@@ -570,12 +570,17 @@ def _replica_at_fault(exc: BaseException) -> bool:
     """Whether a failed replica read failed BECAUSE it went to the replica.
 
     A refused connection, a reset, a ``MOVED``, a replica still loading its
-    dataset — those the master answers. A query the store refused at its
-    per-query memory ceiling, or one that ran past its deadline, would fail
-    identically on the master: re-running it there doubles the work and
-    benching a healthy replica for it takes a node out of rotation for a
-    reason it had nothing to do with. ``ProviderFailingOver`` is a verdict
-    about the MASTER, reached from the provider's own memo.
+    dataset, or a deadline it did not answer inside — all of those the
+    replica earns, and it is benched for them. A query the store refused at
+    its per-query memory ceiling, or one the SERVER aborted at its time
+    limit, would fail identically on the master: re-running it there doubles
+    the work, and benching a healthy replica for a query that is simply too
+    big takes a node out of rotation for something it had no part in.
+    ``ProviderFailingOver`` is a verdict about the MASTER, reached from the
+    provider's own memo.
+
+    Whether the master then re-runs the read is a separate question — see
+    the caller: a benched replica does not mean there is budget left.
     """
     from backend.common.adapters import ProviderFailingOver
 
@@ -583,8 +588,10 @@ def _replica_at_fault(exc: BaseException) -> bool:
         return False
     if _is_query_memory_error(exc) or _is_query_timeout_error(exc):
         return False
+    # A deadline the replica did not answer inside IS about the replica,
+    # even though the master must not then be given a second full budget.
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-        return False
+        return True
     return bool(
         _is_connection_refused_error(exc)
         or _is_transient_connection_error(exc)
@@ -2676,6 +2683,12 @@ class FalkorDBProvider(GraphDataProvider):
                 if not _replica_at_fault(exc):
                     raise
                 self._penalise_replica(replica, exc)
+                # The replica spent the caller's whole budget. Starting a
+                # second full-length run on the master would make the read's
+                # own timeout no bound at all on how long they wait — the
+                # replica is benched above, so the next read goes elsewhere.
+                if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                    raise
                 self._replica_fallbacks += 1
         result = await self._guarded_timed(
             lambda: _call_on(None), kind=kind, cypher=cypher, op=op, budget=t,

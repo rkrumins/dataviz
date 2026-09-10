@@ -261,9 +261,56 @@ def test_only_a_fault_the_replica_caused_sends_the_read_to_the_master():
     refused = ResponseError("Query's mem consumption exceeded capacity")
     assert not fp._replica_at_fault(refused)
     assert not fp._replica_at_fault(ProviderFailingOver("p", "restarting"))
-    assert not fp._replica_at_fault(asyncio.TimeoutError())
+    assert not fp._replica_at_fault(ResponseError("Query timed out"))
     # These the master genuinely answers.
     assert fp._replica_at_fault(ConnectionError("Error 111 connecting: Connection refused"))
+    # A deadline the replica did not answer inside is its fault — it is
+    # benched — but the caller's budget went with it, so the master is not
+    # handed a second full-length run of the same query.
+    assert fp._replica_at_fault(asyncio.TimeoutError())
+
+
+def _reading_provider():
+    p = _provider(_Conn())
+    p._READ_TIMEOUT = 5.0
+    p._db_timeout_ms = lambda t: 1000
+    return p
+
+
+def test_a_query_the_store_refuses_is_not_run_a_second_time_on_the_master():
+    """The master would refuse it for the same reason. Running it twice puts
+    the heaviest reads on the one node the routing exists to relieve."""
+    from redis.exceptions import ResponseError
+
+    p = _reading_provider()
+    calls = []
+
+    async def _guarded(call, **kw):
+        calls.append(1)
+        raise ResponseError("Query's mem consumption exceeded capacity")
+
+    p._guarded_timed = _guarded
+    with pytest.raises(ResponseError):
+        _run(p._ro_query("MATCH (n) RETURN n", op="read"))
+    assert len(calls) == 1                                # the replica, once
+    assert p._master_reads == 0 and p._replica_fallbacks == 0
+    assert p._replica_usable(R1) and p._replica_usable(R2)  # neither benched
+
+
+def test_a_replica_that_will_not_answer_sends_the_read_to_the_master():
+    p = _reading_provider()
+    calls = []
+
+    async def _guarded(call, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("Error 111 connecting. Connection refused.")
+        return "answered"
+
+    p._guarded_timed = _guarded
+    assert _run(p._ro_query("MATCH (n) RETURN n", op="read")) == "answered"
+    assert len(calls) == 2
+    assert p._replica_fallbacks == 1 and p._master_reads == 1
 
 
 def test_work_that_must_see_its_own_writes_pins_itself_to_the_master():

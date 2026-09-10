@@ -154,8 +154,10 @@ A rebuild is pinned to the master for its whole run: it reads what it has
 just written. A replica that fails a read for a reason of its own — a
 connection fault, a `MOVED`, a dataset still loading — sends that read to the
 master once and sits out the next half minute. A query the store refused for
-its size or its deadline is reported as it stands: it would fail the same way
-on the master, and running it twice is load the routing exists to shed.
+its size, or aborted at its own time limit, is reported as it stands: it would
+fail the same way on the master, and running it twice is load the routing
+exists to shed. A replica that lets the caller's deadline expire sits out the
+half minute too, but the read is not started again — the budget went with it.
 
 Each provider's topology line says what share of its reads replicas actually
 answered, once there have been enough reads for the figure to mean anything.
