@@ -1474,6 +1474,106 @@ def test_the_store_is_still_discovered_when_the_seed_is_the_loading_node(monkeyp
     assert all(s.inventory_read for s in inst.shards[1:])
 
 
+def test_a_whole_shard_gone_is_reported_not_hidden(monkeypatch):
+    """Three pods of nine, all of one shard — master and both replicas.
+
+    This is categorically different from a bad node: nothing can be promoted,
+    and that shard's slots are genuinely unserved. `cluster-require-full-
+    coverage no` means the OTHER two shards keep answering, so the honest
+    report is "six nodes fine, one third of the keyspace unreachable" — not a
+    timeout, and not a page that quietly shows two shards as if that were all
+    there were.
+    """
+    nodes = _cluster_nodes({})
+    gone = [MASTERS[1]] + REPLICAS_OF[MASTERS[1]]
+    for endpoint in gone:
+        nodes.pop(endpoint)
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    snap = _run(topology.get_topology_snapshot())
+    inst = snap.instances[0]
+
+    # The cluster still described nine nodes, so nine are still reported.
+    assert inst.totals.nodes_total == 9
+    assert inst.totals.nodes_up == 6
+    assert len(inst.shards) == 3, "the dead shard vanished from the page"
+
+    dead = next(s for s in inst.shards if s.master.endpoint == MASTERS[1])
+    assert dead.master.status == "unreachable"
+    assert all(r.status == "unreachable" for r in dead.replicas)
+    assert dead.replication.replicas_online == 0
+
+    # Its slots are still ATTRIBUTED to it — the page says which third of the
+    # keyspace is unserved, rather than reporting narrower coverage with no
+    # owner named.
+    assert dead.slot_count > 0
+
+    # And the two live shards are untouched and fully measured.
+    for ok in (s for s in inst.shards if s.master.endpoint != MASTERS[1]):
+        assert ok.master.status == "up" and ok.master.memory.used is not None
+        assert ok.replication.replicas_online == 2
+
+
+def test_every_master_gone_still_answers_rather_than_timing_out(monkeypatch):
+    """The worst case that is not a total outage: all three masters down,
+    every replica up, nothing promoted yet.
+
+    A replica knows the whole cluster — CLUSTER NODES is answered by any node
+    — so the reading survives entirely on the seed order: last-seen nodes
+    first, configured seeds after. The configured seeds are the three masters
+    as of the day the provider was written down, and all three are gone.
+    """
+    nodes = _cluster_nodes({})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+    # A reading already exists, as it would in any running deployment: the
+    # sweep has seen this cluster and knows every node's address.
+    _run(topology.get_topology_snapshot())
+    for master in MASTERS:
+        nodes.pop(master)
+
+    # `fresh=True` is how the page re-measures: it bypasses the TTL but the
+    # last good reading — and the addresses in it — are still in hand.
+    started = time.monotonic()
+    snap = _run(topology.get_topology_snapshot(fresh=True))
+    elapsed = time.monotonic() - started
+
+    inst = snap.instances[0]
+    assert elapsed < topology._SWEEP_DEADLINE_CAP_S
+    assert inst.totals.nodes_total == 9 and inst.totals.nodes_up == 6
+    assert len(inst.shards) == 3
+    assert all(s.master.status == "unreachable" for s in inst.shards)
+    # The replicas are the only copies left standing, and they are measured.
+    assert all(r.memory.used is not None
+               for s in inst.shards for r in s.replicas)
+
+
+def test_a_cold_pod_cannot_reach_a_cluster_whose_masters_are_all_down(monkeypatch):
+    """KNOWN LIMITATION, pinned so it is a decision rather than a surprise.
+
+    The test above survives because the process had already read the cluster
+    and remembers every node's address. A pod that starts COLD has only the
+    configured seeds — and those are masters. With all three down, six healthy
+    replicas that would each answer CLUSTER NODES perfectly well are never
+    asked, and the store reads unreachable.
+
+    Narrow (it needs a cold process AND every master down at once) but real:
+    during a cluster incident, a deploy or a pod eviction makes every process
+    cold. Closing it means the last-seen addresses have to outlive the
+    process — a shared marker rather than one in memory — or the configured
+    seed list has to include replicas.
+    """
+    nodes = _cluster_nodes({})
+    for master in MASTERS:
+        nodes.pop(master)
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])   # no prior reading
+
+    snap = _run(topology.get_topology_snapshot())
+    inst = snap.instances[0]
+    assert not inst.reachable
+    assert inst.error, "an unreachable store must still say why"
+    assert inst.totals.nodes_total == 0
+
+
 def test_the_sweep_deadline_scales_with_the_fleet():
     """Nodes are read a wave at a time. A fixed fleet-wide deadline lets the
     first waves spend it and leaves the later ones nothing — and since the
