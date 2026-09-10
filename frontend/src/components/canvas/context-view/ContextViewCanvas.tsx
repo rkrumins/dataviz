@@ -230,6 +230,7 @@ import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
 import { getView, updateViewLayout } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
+import { useFailoverRetry } from '@/hooks/useFailoverRetry'
 import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatchUp'
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import {
@@ -3037,11 +3038,7 @@ export function ContextViewCanvas({
   // happening, and asks again on its own — no Retry button, and none of the
   // 30s "Circuit open" wall this used to be.
   const reconnecting = aggregationStaleReason === 'failing_over'
-  useEffect(() => {
-    if (!reconnecting) return
-    const again = setTimeout(() => { invalidateAggregatedEdges() }, 3000)
-    return () => clearTimeout(again)
-  }, [reconnecting])
+  useFailoverRetry(aggregationStaleReason)
 
   // Connections-still-catching-up: when the rollup layer answers SHORT, ask
   // readiness whether this source is actually behind, and if it is, say so on

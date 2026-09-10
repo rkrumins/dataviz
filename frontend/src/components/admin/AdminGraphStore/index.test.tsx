@@ -228,6 +228,28 @@ describe('Admin → Graph store', () => {
         expect(within(first).getByText(/Nothing on this shard matches/)).toBeInTheDocument()
     })
 
+    it('keeps the search bounded — the collapse is not undone by typing', async () => {
+        // On a shard at the two-thousand-row cap, one keystroke that bypassed
+        // the collapse would mount two thousand rows — and again on the next.
+        const many = snapshot()
+        const shard = many.instances[0].shards[0]
+        shard.graphs = Array.from({ length: 40 }, (_, i) => ({
+            key: `graph_many_${i}`, slot: 1, present: true, role: 'source',
+            dataSources: [], edgeCount: 10, estimatedBytes: 5120, measuredBytes: null,
+        })) as never
+        shard.graphsTotal = 40
+        getTopology.mockResolvedValue(many)
+
+        wrap()
+        const card = await screen.findByTestId('shard-card-0')
+        const search = within(card).getByLabelText(/Search the graphs on shard 1/)
+        await userEvent.type(search, 'graph_many')
+
+        // Every one of the forty matches, and twelve of them are mounted.
+        expect(within(card).getAllByText(/^graph_many_/)).toHaveLength(12)
+        expect(within(card).getByText(/Show all 40 matches/)).toBeInTheDocument()
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')

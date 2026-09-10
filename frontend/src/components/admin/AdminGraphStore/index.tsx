@@ -57,7 +57,7 @@ function OverviewStrip({ summary }: { summary: FleetSummary }) {
                 <div key={i.label} className="border border-glass-border rounded-xl bg-canvas-elevated px-4 py-3">
                     <p className="text-xl font-bold text-ink tabular-nums">{i.value}</p>
                     <p className="text-[10px] text-ink-muted mt-0.5 uppercase tracking-wide">{i.label}</p>
-                    {i.sub && <p className="text-[10px] text-ink-muted/70 mt-0.5">{i.sub}</p>}
+                    {i.sub && <p className="text-[10px] text-ink-secondary mt-0.5">{i.sub}</p>}
                 </div>
             ))}
         </div>

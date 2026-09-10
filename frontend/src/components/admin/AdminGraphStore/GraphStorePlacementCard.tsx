@@ -54,7 +54,14 @@ function PlacementRow({ placement, instanceId }: { placement: GraphPlacement; in
                         )}
                     </p>
                     {pct != null && (
-                        <div className="mt-1 h-1.5 rounded-full overflow-hidden bg-black/5 dark:bg-white/10">
+                        <div
+                            role="meter"
+                            aria-valuenow={Math.round(pct)}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-label={`${Math.round(pct)}% of ${master.endpoint} used`}
+                            className="mt-1 h-1.5 rounded-full overflow-hidden bg-black/5 dark:bg-white/10"
+                        >
                             <div
                                 className={cn('h-full rounded-full', pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500')}
                                 style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}

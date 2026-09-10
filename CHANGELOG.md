@@ -49,14 +49,22 @@ AND answered every read, so on a cluster with two replicas per shard two thirds 
 sat idle while one master's query threads were the bottleneck for everyone opening a canvas.
 Reads are now offered to a replica under four gates, any of which sends the query to the master
 instead: the provider allows it (*Read queries* in its connection settings, default on), the
-replica is online and within the lag threshold, this process has not written to that graph
-recently, and the replica has not just failed a read. A rebuild reads only from the master for
-its whole run, because it reads back what it has just written. A replica that errors sends the
-same read to the master once.
+replica is online and owes the replication stream no more than 8 MiB, this process has not
+written to that graph recently, and the replica has not just failed a read. Lag is measured in
+bytes and never in the `lag` seconds `INFO` reports — a replica acknowledges the stream about
+once a second whatever it has actually applied, so those seconds sit near zero for one that is
+a gigabyte behind. A rebuild reads only from the master for its whole run, because it reads
+back what it has just written. A replica that refuses a read for a reason of its own — a
+connection fault, a `MOVED`, a dataset still loading — sends the same read to the master once;
+a query the store refused for its size is raised as it stands, since running it again on the
+master would fail the same way and double the load the routing exists to shed. Each provider's
+topology line says what share of its reads replicas actually answered.
 
 **A node restarting is a pause, not an outage.** A refused connection inside a rebuild is now a
 wait: the run heartbeats, re-resolves the owner (finding the promoted replica), and retries the
-same work at the same width from the same checkpoint, for up to fifteen minutes. If it does give
+same work at the same width from the same checkpoint, for up to fifteen minutes per outage —
+each one measured from when it began, so a rebuild running for hours rides out one rolling
+restart after another. If it does give
 up, the failure names the node, how long it waited, and what to check — where the circuit
 breaker's "Circuit open; will probe downstream again in ~28s" used to overwrite it. For readers,
 a node being replaced is its own signal that never opens the breaker: reads fail fast with a

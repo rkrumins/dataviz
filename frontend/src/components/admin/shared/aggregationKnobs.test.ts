@@ -159,4 +159,15 @@ describe('the graph store’s own limits', () => {
         // deep link for anything bookmarked before the page existed.
         expect(graphStoreLimitsPath('10.0.0.1:6379')).toBe('/admin/graph-store?limits=10.0.0.1%3A6379')
     })
+
+    it('keeps the page’s own state when the link comes from the page', () => {
+        // Closing the dialog only clears `limits`, so anything the link
+        // dropped on the way in is gone: an operator who deep-linked to a
+        // shard would land back on a bare page with the focus lost.
+        expect(graphStoreLimitsPath('10.0.0.1:6379', '?view=nodes&shard=i1%3A2'))
+            .toBe('/admin/graph-store?view=nodes&shard=i1%3A2&limits=10.0.0.1%3A6379')
+        // A second click replaces the endpoint rather than stacking one.
+        expect(graphStoreLimitsPath('10.0.0.2:6379', '?limits=10.0.0.1%3A6379'))
+            .toBe('/admin/graph-store?limits=10.0.0.2%3A6379')
+    })
 })

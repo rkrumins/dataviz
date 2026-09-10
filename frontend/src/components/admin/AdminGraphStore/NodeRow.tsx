@@ -45,7 +45,15 @@ function MemoryMeter({ node, reservePct }: { node: GraphStoreNode; reservePct?: 
         )
     }
     const pct = Math.min(100, Math.max(0, node.memory.usedPct ?? (used * 100) / max))
-    const fill = pct >= 90 ? 'bg-red-500' : pct >= 75 ? 'bg-amber-500' : 'bg-emerald-500'
+    // The server already reached a verdict on this node, against thresholds
+    // an operator can move; a second opinion computed here would disagree
+    // with it the moment they did. It is silent below the warn threshold
+    // and on a node that can evict, and then the percentage speaks.
+    const fill = node.memory.level === 'critical' || (!node.memory.level && pct >= 90)
+        ? 'bg-red-500'
+        : node.memory.level === 'warn' || (!node.memory.level && pct >= 75)
+            ? 'bg-amber-500'
+            : 'bg-emerald-500'
     const reserveAt = typeof reservePct === 'number' ? 100 - reservePct : null
     return (
         <>

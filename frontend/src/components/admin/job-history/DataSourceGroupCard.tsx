@@ -299,7 +299,7 @@ export const DataSourceGroupCard = memo(function DataSourceGroupCard({
                                 data-testid={`placement-chip-${group.dataSourceId}`}
                                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-black/[0.03] dark:bg-white/[0.04]"
                             >
-                                <HardDrive className="w-2.5 h-2.5 text-ink-muted/50" />
+                                <HardDrive className="w-2.5 h-2.5 text-ink-muted opacity-60" />
                                 <span className="font-mono truncate max-w-[160px]">
                                     {placement.shardIndex != null ? `Shard ${placement.shardIndex + 1} · ` : ''}
                                     {placement.master}

@@ -6,7 +6,8 @@
  * the slot belongs to a shard, and everything about that graph's memory,
  * latency and durability is decided by the three nodes on this card.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { ChevronDown, ChevronRight, Search } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -18,6 +19,7 @@ import { GRAPH_ROLE_LABEL, SEVERITY_CHIP, lagLabel, slotRangeLabel } from './met
 const GRAPHS_COLLAPSED = 12
 
 function Finding({ finding, canAdjustLimits }: { finding: ReplicationFinding; canAdjustLimits?: boolean }) {
+    const { search } = useLocation()
     return (
         <li className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1">
             <span className={cn(
@@ -29,12 +31,12 @@ function Finding({ finding, canAdjustLimits }: { finding: ReplicationFinding; ca
             <span className="text-[11px] text-ink-secondary leading-snug">{finding.text}</span>
             {finding.fix && <span className="text-[11px] text-ink-muted leading-snug">{finding.fix}</span>}
             {canAdjustLimits && finding.endpoint && (
-                <a
-                    href={graphStoreLimitsPath(finding.endpoint)}
+                <Link
+                    to={graphStoreLimitsPath(finding.endpoint, search)}
                     className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
                 >
                     Adjust limits on {finding.endpoint}
-                </a>
+                </Link>
             )}
         </li>
     )
@@ -128,7 +130,10 @@ function GraphsTable({ shard, onOpenSource }: {
     if (shard.graphs.length === 0) {
         return <p className="mt-2 text-[11px] text-ink-muted">No graphs on this shard yet.</p>
     }
-    const shown = expanded || query ? filtered : filtered.slice(0, GRAPHS_COLLAPSED)
+    // The collapse bounds the DOM; the search must not un-bound it. On a
+    // shard at the row cap, one keystroke would otherwise mount two
+    // thousand rows — and again on the next keystroke.
+    const shown = expanded ? filtered : filtered.slice(0, GRAPHS_COLLAPSED)
 
     return (
         <div className="mt-2">
@@ -167,7 +172,7 @@ function GraphsTable({ shard, onOpenSource }: {
                     </tbody>
                 </table>
             </div>
-            {!query && filtered.length > GRAPHS_COLLAPSED && (
+            {filtered.length > GRAPHS_COLLAPSED && (
                 <button
                     type="button"
                     onClick={() => setExpanded(v => !v)}
@@ -175,7 +180,7 @@ function GraphsTable({ shard, onOpenSource }: {
                 >
                     {expanded
                         ? <><ChevronDown className="w-3 h-3" /> Show fewer</>
-                        : <><ChevronRight className="w-3 h-3" /> Show all {filtered.length.toLocaleString()}</>}
+                        : <><ChevronRight className="w-3 h-3" /> Show all {filtered.length.toLocaleString()}{query ? ' matches' : ''}</>}
                 </button>
             )}
             {query && filtered.length === 0 && (
@@ -200,8 +205,21 @@ export function ShardCard({ shard, instanceId, reservePct, canAdjustLimits, focu
 }) {
     const slots = slotRangeLabel(shard)
     const capacity = shard.capacity
+    // Opening a node's limits from here must keep the view and the focused
+    // shard the operator navigated to; closing the dialog only clears
+    // ``limits``, so whatever the link dropped is gone for good.
+    const { search } = useLocation()
+    // "Open in Graph store" on a data source names one shard of what can be
+    // sixteen. A ring on a card the operator never scrolls to reads as a
+    // link that did nothing.
+    const card = useRef<HTMLElement | null>(null)
+    useEffect(() => {
+        if (!focused) return
+        card.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    }, [focused])
     return (
         <section
+            ref={card}
             id={`shard-${instanceId}:${shard.index}`}
             data-testid={`shard-card-${shard.index}`}
             className={cn(
@@ -227,7 +245,7 @@ export function ShardCard({ shard, instanceId, reservePct, canAdjustLimits, focu
                 fitsEdges={capacity?.allowedGrowthEdges ?? null}
                 heldNote={capacity ? heldByRebuilds(capacity) : null}
                 canAdjustLimits={canAdjustLimits}
-                limitsHref={graphStoreLimitsPath(shard.master.endpoint)}
+                limitsHref={graphStoreLimitsPath(shard.master.endpoint, search)}
             />
             {shard.replicas.map(r => (
                 <NodeRow key={r.endpoint} node={r} reservePct={reservePct} />

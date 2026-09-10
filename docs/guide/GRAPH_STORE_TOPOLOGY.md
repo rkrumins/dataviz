@@ -141,15 +141,26 @@ A replica answers only when all of this holds; otherwise the master does:
 
 - the provider allows it (*Read queries* in its connection settings, default
   *From in-sync replicas*);
-- the replica is online and within the lag threshold (2 seconds by default),
-  sampled once per shard every few seconds rather than per read;
+- the replica is online and owes the replication stream no more than 8 MiB,
+  sampled once per shard every few seconds rather than per read. Bytes, not
+  the `lag` seconds `INFO` prints: a replica acknowledges the stream about
+  once a second whatever it has actually applied, so those seconds read near
+  zero for one that is a gigabyte behind;
 - this process has not written to that graph in the last 30 seconds, so a
   caller always sees its own writes;
 - the replica has not just failed a read (it is skipped for a short while).
 
 A rebuild is pinned to the master for its whole run: it reads what it has
-just written. If a replica errors, the same read is re-issued on the master
-once.
+just written. A replica that fails a read for a reason of its own — a
+connection fault, a `MOVED`, a dataset still loading — sends that read to the
+master once and sits out the next half minute. A query the store refused for
+its size or its deadline is reported as it stands: it would fail the same way
+on the master, and running it twice is load the routing exists to shed.
+
+Each provider's topology line says what share of its reads replicas actually
+answered, once there have been enough reads for the figure to mean anything.
+It is per web process, so it says "the routing is working here", not "across
+the fleet".
 
 ## What users see while a node is being replaced
 

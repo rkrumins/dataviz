@@ -237,12 +237,22 @@ export function fleetTimeoutCapMs(capacity?: Pick<AggregationCapacityResponse, '
     return caps.length ? Math.min(...caps) : null
 }
 
-/** Where an administrator adjusts a node's own limits. */
-export function graphStoreLimitsPath(endpoint: string): string {
+/**
+ * Where an administrator adjusts a node's own limits.
+ *
+ * ``search`` is the caller's current query string, kept so that opening a
+ * node's limits from inside the Graph store page does not throw away the
+ * view and the focused shard the operator navigated to — closing the
+ * dialog would otherwise leave them on a bare page, back on the shard view
+ * with the focus gone.
+ */
+export function graphStoreLimitsPath(endpoint: string, search?: string): string {
     // Admin → Graph store is where a node is looked at, so it is where its
     // limits are changed. Infrastructure still answers the same ``?limits=``
     // deep link, so anything bookmarked before this keeps working.
-    return `/admin/graph-store?limits=${encodeURIComponent(endpoint)}`
+    const params = new URLSearchParams(search ?? '')
+    params.set('limits', endpoint)
+    return `/admin/graph-store?${params.toString()}`
 }
 
 const MIB = 2 ** 20
