@@ -32,44 +32,21 @@ def _run(coro):
 # ── fakes ────────────────────────────────────────────────────────────────
 
 
-CLUSTER_NODES_3x2 = {
-    "10.0.0.1:6379": {
-        "node_id": "m1", "hostname": "", "flags": "myself,master", "master_id": "-",
-        "slots": [["0", "5460"]], "migrations": [], "connected": True,
-    },
-    "10.0.0.2:6379": {
-        "node_id": "m2", "hostname": "", "flags": "master", "master_id": "-",
-        "slots": [["5461", "10922"]], "migrations": [], "connected": True,
-    },
-    "10.0.0.3:6379": {
-        "node_id": "m3", "hostname": "", "flags": "master", "master_id": "-",
-        "slots": [["10923", "16383"]], "migrations": [], "connected": True,
-    },
-    "10.0.0.4:6379": {
-        "node_id": "r1a", "hostname": "", "flags": "slave", "master_id": "m1",
-        "slots": [], "migrations": [], "connected": True,
-    },
-    "10.0.0.5:6379": {
-        "node_id": "r1b", "hostname": "", "flags": "slave", "master_id": "m1",
-        "slots": [], "migrations": [], "connected": True,
-    },
-    "10.0.0.6:6379": {
-        "node_id": "r2a", "hostname": "", "flags": "slave", "master_id": "m2",
-        "slots": [], "migrations": [], "connected": True,
-    },
-    "10.0.0.7:6379": {
-        "node_id": "r2b", "hostname": "", "flags": "slave", "master_id": "m2",
-        "slots": [], "migrations": [], "connected": True,
-    },
-    "10.0.0.8:6379": {
-        "node_id": "r3a", "hostname": "", "flags": "slave", "master_id": "m3",
-        "slots": [], "migrations": [], "connected": True,
-    },
-    "10.0.0.9:6379": {
-        "node_id": "r3b", "hostname": "", "flags": "slave", "master_id": "m3",
-        "slots": [], "migrations": [], "connected": True,
-    },
-}
+# Real `CLUSTER NODES` output, not a hand-made dict. Every field Redis
+# sends is here — bus port, config epoch, link state — because the bugs
+# this fixture is meant to catch live in the fields that used to be
+# discarded before this module could see them.
+CLUSTER_NODES_3x2 = "\n".join([
+    "m1 10.0.0.1:6379@16379 myself,master - 0 0 1 connected 0-5460",
+    "m2 10.0.0.2:6379@16379 master - 0 1 2 connected 5461-10922",
+    "m3 10.0.0.3:6379@16379 master - 0 1 3 connected 10923-16383",
+    "r1a 10.0.0.4:6379@16379 slave m1 0 1 1 connected",
+    "r1b 10.0.0.5:6379@16379 slave m1 0 1 1 connected",
+    "r2a 10.0.0.6:6379@16379 slave m2 0 1 2 connected",
+    "r2b 10.0.0.7:6379@16379 slave m2 0 1 2 connected",
+    "r3a 10.0.0.8:6379@16379 slave m3 0 1 3 connected",
+    "r3b 10.0.0.9:6379@16379 slave m3 0 1 3 connected",
+])
 
 MASTERS = ["10.0.0.1:6379", "10.0.0.2:6379", "10.0.0.3:6379"]
 REPLICAS_OF = {
@@ -141,6 +118,11 @@ class _FakeNode:
         me = self._me()
         return {k: v for k, v in (me.get("config") or {}).items() if k in names}
 
+    def set_response_callback(self, command, callback):
+        # The real client is told to hand back CLUSTER NODES as text rather
+        # than as redis-py's dict; this fake only ever spoke text.
+        self.state.setdefault("raw_callbacks", []).append(command)
+
     async def execute_command(self, command, *args):
         me = self._me()
         if command == "CLUSTER NODES":
@@ -148,6 +130,10 @@ class _FakeNode:
                 from redis.exceptions import ResponseError
                 raise ResponseError("unknown command 'CLUSTER'")
             return self.state["cluster_nodes"]
+        if command == "CLUSTER INFO":
+            return self.state.get("cluster_info") or (
+                "cluster_state:ok\r\ncluster_known_nodes:9\r\ncluster_size:3\r\n"
+            )
         if command == "GRAPH.LIST":
             return list(me.get("graphs") or [])
         if command == "GRAPH.CONFIG":
@@ -168,12 +154,14 @@ class _FakeNode:
 
 
 def _wire(monkeypatch, *, nodes, providers, data_sources=(), workspaces=None,
-          cluster_nodes=None, cluster_nodes_refused=False, tuning=None):
+          cluster_nodes=None, cluster_nodes_refused=False, tuning=None,
+          cluster_info=None):
     """Stub the two collaborators: the nodes and the database."""
     state = {
         "nodes": nodes,
         "cluster_nodes": cluster_nodes if cluster_nodes is not None else CLUSTER_NODES_3x2,
         "cluster_nodes_refused": cluster_nodes_refused,
+        "cluster_info": cluster_info,
     }
 
     def _client(cfg, host, port, *, socket_timeout):
@@ -271,61 +259,170 @@ def _cluster_nodes(state):
 # ── parsing ──────────────────────────────────────────────────────────────
 
 
-def test_cluster_nodes_parsing_keeps_every_node_dialable_or_not():
-    """The address a node announces can be a hostname, an ip, or ``?`` for
-    the node answering us. Each case resolves to something dialable, or to
-    a node explicitly marked undialable — never to a node that is gone."""
-    cfg = load_connection_config({"mode": "cluster"}, host="seed", port=6379,
-                                username=None, password=None)
-    parsed = {
-        "10.0.0.1:6379": {"node_id": "m1", "hostname": "shard-0.svc", "flags": "master",
-                          "master_id": "-", "slots": [["0", "5460"]]},
-        "?:6379": {"node_id": "m2", "hostname": "", "flags": "myself,master",
-                   "master_id": "-", "slots": [["5461", "16383"]]},
-        "10.0.0.9:6379": {"node_id": "r1", "hostname": "", "flags": "slave,fail?",
-                          "master_id": "m1", "slots": []},
-        "10.0.0.8:6379": {"node_id": "x", "hostname": "", "flags": "master,fail",
-                          "master_id": "-", "slots": [["9999"]]},
-    }
-    nodes = discovery.parse_cluster_nodes_reply(parsed, cfg, seed=("seed-host", 7000))
+def _cfg(**over):
+    conn = {"mode": "cluster"}
+    conn.update(over)
+    return load_connection_config(conn, host="seed-host", port=7000,
+                                  username=None, password=None)
+
+
+# A cluster in every state a real one gets into. Written as Redis writes it,
+# because every bug this block exists to catch lived in a field that used to
+# be discarded before the module could see it.
+MESSY_CLUSTER = "\n".join([
+    "aaaa1111 :6379@16379 myself,master - 0 0 7 connected 0-5460 [5461->-bbbb2222]",
+    "bbbb2222 10.0.0.2:6379@16379,node2.example.com master - 0 1 9 connected 5461-10922",
+    "cccc3333 10.0.0.3:6379@16379,,shard-id=ff00 master - 0 1 3 disconnected 10923-16383",
+    "dddd4444 10.0.0.4:6379@16379 slave,nofailover bbbb2222 0 1 2 connected",
+    "eeee5555 :0@0 master,noaddr - 0 1 0 disconnected",
+    "ffff6666 :0@0 slave,noaddr,fail bbbb2222 0 1 0 disconnected",
+    "9999aaaa 10.0.0.9:6379@16379 handshake - 0 1 0 disconnected",
+    "7777cccc 10.0.0.7:6379@16379 master - 0 1 9 connected",
+    "6666dddd 10.0.0.6:6379@16379 slave 7777cccc 0 1 9 connected",
+    "5555eeee 10.0.0.5:6379@16379 slave dddd4444 0 1 2 connected",
+    "8888ffff 10.0.0.8:6379@16379 slave deadbeef 0 1 1 connected",
+])
+
+
+def test_every_line_of_a_real_reply_becomes_exactly_one_node():
+    """The reply is parsed from its text, not from redis-py's dict: that
+    dict is keyed on `ip:port`, so every node the cluster has no address
+    for collapses onto `":0"` and all but one are lost. Two pods losing
+    their addresses at once is enough — a rolling restart will do it."""
+    nodes = discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))
+    assert len(nodes) == 11                          # eleven lines, eleven nodes
     by_id = {n.node_id: n for n in nodes}
-    # An announced hostname wins over the ip: the ip is a pod address.
-    assert by_id["m1"].endpoint == "shard-0.svc:6379"
-    # The node answering us announces "?" — the seed we are talking through is
-    # by definition reachable.
-    assert by_id["m2"].endpoint == "seed-host:7000" and by_id["m2"].dialable
-    assert by_id["r1"].role == "replica" and by_id["r1"].gossip == "pfail"
-    assert by_id["x"].gossip == "fail" and by_id["x"].slots == [[9999, 9999]]
-
-    shards = discovery.group_shards(nodes)
-    assert [m.node_id for m, _ in shards] == ["m1", "m2", "x"]      # by first slot
-    assert [r.node_id for r in shards[0][1]] == ["r1"]
+    assert "eeee5555" in by_id and "ffff6666" in by_id   # both no-address nodes
 
 
-def test_a_node_without_an_announced_address_is_reported_not_dropped():
-    cfg = load_connection_config({"mode": "cluster"}, host="seed", port=6379,
-                                username=None, password=None)
-    nodes = discovery.parse_cluster_nodes_reply(
-        {"?:6379": {"node_id": "lost", "hostname": "", "flags": "slave",
-                    "master_id": "m1", "slots": []}}, cfg,
-    )
-    assert len(nodes) == 1
-    assert not nodes[0].dialable
-    assert "no address" in (nodes[0].reason or "")
+def test_a_flag_is_a_token_not_a_substring():
+    """`"fail" in "slave,nofailover"` is true. That is how a replica held
+    out of failover — standard for a cross-AZ or restoring replica — came
+    to be rendered red, labelled FAIL, over a tooltip reading "the
+    cluster's agreement"."""
+    by_id = {n.node_id: n for n in discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))}
+    assert by_id["dddd4444"].gossip is None          # healthy, held out of failover
+    assert by_id["ffff6666"].gossip == "fail"        # genuinely failed
+    assert by_id["eeee5555"].gossip == "noaddr"
+    assert by_id["9999aaaa"].gossip == "handshake"
+
+
+def test_a_node_mid_meet_is_not_a_master():
+    """Treating "not a slave" as "a master" gave a node still shaking hands
+    a shard of its own, a place in the master count, and a full sweep of
+    GRAPH.LIST and GRAPH.MEMORY against a node not yet in the cluster."""
+    nodes = discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))
+    by_id = {n.node_id: n for n in nodes}
+    assert by_id["9999aaaa"].role == "joining"
+
+    shards, unplaced = discovery.group_shards(nodes)
+    assert "9999aaaa" not in [m.node_id for m, _ in shards]
+    assert "9999aaaa" in [n.node_id for n in unplaced]
+
+
+def test_the_link_state_and_the_epoch_are_read():
+    by_id = {n.node_id: n for n in discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))}
+    # A bus link can be down long before the cluster agrees on FAIL; the row
+    # used to be indistinguishable from a healthy one.
+    assert by_id["cccc3333"].link_state == "disconnected"
+    assert by_id["bbbb2222"].link_state == "connected"
+    assert (by_id["aaaa1111"].epoch, by_id["bbbb2222"].epoch) == (7, 9)
+
+
+def test_a_reshard_in_flight_is_recorded():
+    by_id = {n.node_id: n for n in discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))}
+    assert by_id["aaaa1111"].migrating == [(5461, "bbbb2222")]
+    # A migrating slot is still owned until the move completes, so it stays
+    # in the ranges and coverage does not dip while a reshard runs.
+    assert by_id["aaaa1111"].slots == [[0, 5460]]
+
+
+def test_the_announced_address_is_what_the_cluster_said():
+    by_id = {n.node_id: n for n in discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))}
+    # The answering node announces no ip. The seed stands in so it is
+    # dialable — but `announced` must still say what the cluster said, not
+    # the seed's port.
+    assert by_id["aaaa1111"].endpoint == "seed-host:7000"
+    assert by_id["aaaa1111"].announced == "?:6379" and by_id["aaaa1111"].dialable
+    # An announced hostname wins over the pod ip; the aux fields after it
+    # are not mistaken for one.
+    assert by_id["bbbb2222"].endpoint == "node2.example.com:6379"
+    assert by_id["cccc3333"].endpoint == "10.0.0.3:6379"
+    # A node with no address at all is a row with a reason, never a gap.
+    assert not by_id["eeee5555"].dialable
+    assert "no address" in (by_id["eeee5555"].reason or "")
+
+
+def test_a_replica_is_never_hung_off_a_master_it_does_not_follow():
+    """An unattributable replica used to be appended to the FIRST shard —
+    the master owning slot 0, which it has nothing to do with. That claimed
+    a replication relationship the cluster never described, filed its lag
+    and its findings under the wrong master, and inflated that shard's
+    replica count."""
+    nodes = discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))
+    shards, unplaced = discovery.group_shards(nodes)
+    by_master = {m.node_id: [r.node_id for r in reps] for m, reps in shards}
+
+    # A chain — 5555eeee follows dddd4444, itself a replica of bbbb2222 —
+    # resolves to the master at its head rather than to slot 0's master.
+    assert sorted(by_master["bbbb2222"]) == ["5555eeee", "dddd4444", "ffff6666"]
+    # A replica naming a master that is not in the reply at all is unplaced,
+    # not adopted by whoever happens to own slot 0.
+    assert "8888ffff" in [n.node_id for n in unplaced]
+    assert by_master["aaaa1111"] == []
+    # …while a replica whose master IS in view stays with it, failed or not.
+    assert "ffff6666" in by_master["bbbb2222"]
+
+
+def test_a_master_with_no_slots_is_shown_with_its_replicas_and_sorts_last():
+    """It is in the cluster and owns nothing — the state behind "clear FAIL
+    state for node without slots" in an operator's logs, and worth seeing
+    rather than hiding."""
+    nodes = discovery.parse_cluster_nodes_text(
+        MESSY_CLUSTER, _cfg(), seed=("seed-host", 7000))
+    shards, _unplaced = discovery.group_shards(nodes)
+    order = [m.node_id for m, _ in shards]
+    # The three slot owners first, in slot order; the slotless ones after.
+    assert order[:3] == ["aaaa1111", "bbbb2222", "cccc3333"]
+    assert set(order[3:]) == {"7777cccc", "eeee5555"}
+    by_master = {m.node_id: [r.node_id for r in reps] for m, reps in shards}
+    assert by_master["7777cccc"] == ["6666dddd"]
+
+
+def test_two_nodes_reaching_one_address_are_reported_not_merged():
+    """The endpoint is what every reading, cache entry and table row is
+    keyed by, so two nodes at one address become one row shown twice with
+    the same figures — and inflate every count on the page. The cross-pod
+    fan-out already refuses to run in this state; a view that refuses to
+    load helps nobody, so this one says so instead."""
+    cfg = _cfg(addressRemap={"10.0.0.3:6379": "gw:7000", "10.0.0.7:6379": "gw:7000"})
+    nodes = discovery.parse_cluster_nodes_text(MESSY_CLUSTER, cfg, seed=("seed-host", 7000))
+    collisions = discovery.endpoint_collisions(nodes)
+    assert sorted(collisions["gw:7000"]) == ["7777cccc", "cccc3333"]
+    # …and both nodes survive as themselves.
+    assert len([n for n in nodes if n.endpoint == "gw:7000"]) == 2
 
 
 def test_address_remap_applies_to_replicas_too():
     """Only masters were ever dialled before, so the remap was only ever
     exercised on them; a replica behind the same remap must be dialable."""
-    cfg = load_connection_config(
-        {"mode": "cluster", "addressRemap": {"10.0.0.4:6379": "gw:7004"}},
-        host="seed", port=6379, username=None, password=None,
-    )
-    nodes = discovery.parse_cluster_nodes_reply(
-        {"10.0.0.4:6379": {"node_id": "r", "hostname": "", "flags": "slave",
-                           "master_id": "m", "slots": []}}, cfg,
-    )
+    cfg = _cfg(addressRemap={"10.0.0.4:6379": "gw:7004"})
+    nodes = discovery.parse_cluster_nodes_text(
+        "r 10.0.0.4:6379@16379 slave m 0 1 1 connected", cfg)
     assert nodes[0].endpoint == "gw:7004" and nodes[0].announced == "10.0.0.4:6379"
+
+
+def test_a_bare_slot_and_a_range_both_parse():
+    nodes = discovery.parse_cluster_nodes_text(
+        "m 10.0.0.1:6379@16379 master - 0 1 1 connected 0-5460 7000", _cfg())
+    assert nodes[0].slots == [[0, 5460], [7000, 7000]]
 
 
 def test_info_replication_gives_lag_per_replica_and_on_the_replica():
@@ -388,6 +485,45 @@ def test_every_node_of_a_nine_node_cluster_is_reported_with_its_role(monkeypatch
     # The node's own ceilings ride along, so the limits dialog can reach it.
     assert instance.shards[0].master.limits.query_mem_capacity == 512 * 1024 ** 2
     assert instance.shards[0].master.limits.thread_count == 6
+
+
+def test_a_messy_cluster_is_reported_as_the_cluster_describes_it(monkeypatch):
+    """End to end over a reply with every state a real cluster gets into.
+    The count on the page has to equal the count in the cluster, and no node
+    may appear anywhere the cluster did not put it."""
+    # Only the seed answers; every other node is a row with a reason. That
+    # is the point — the shape of the cluster comes from what it says about
+    # itself, not from which of its nodes happen to be reachable.
+    seed_only = {"10.0.0.1:6379": _cluster_nodes({})["10.0.0.1:6379"]}
+    _wire(monkeypatch, nodes=seed_only, providers=[_provider()],
+          cluster_nodes=MESSY_CLUSTER,
+          # The cluster knows more nodes than this seed can see.
+          cluster_info="cluster_state:ok\r\ncluster_known_nodes:12\r\ncluster_size:3\r\n")
+    snap = _run(topology.get_topology_snapshot())
+    instance = snap.instances[0]
+
+    # Eleven lines, eleven nodes — none dropped, none invented.
+    assert instance.totals.nodes_total == 11
+    assert instance.known_nodes == 12 and instance.cluster_state == "ok"
+    # …and the cluster's own count disagreeing with ours is said out loud
+    # rather than left for someone to notice.
+    assert "nodes_missing_from_view" in [f.code for f in instance.findings]
+
+    # Five masters: three owning slots, two owning none. The node mid-MEET
+    # is not one of them.
+    masters = [s.master.node_id for s in instance.shards]
+    assert masters[:3] == ["aaaa1111", "bbbb2222", "cccc3333"]
+    assert set(masters[3:]) == {"7777cccc", "eeee5555"}
+    assert "9999aaaa" not in masters
+
+    # Every replica under the master the cluster gave it, and the two the
+    # cluster placed nowhere placed nowhere.
+    by_master = {s.master.node_id: sorted(r.node_id for r in s.replicas)
+                 for s in instance.shards}
+    assert by_master["aaaa1111"] == []
+    assert by_master["bbbb2222"] == ["5555eeee", "dddd4444", "ffff6666"]
+    assert by_master["7777cccc"] == ["6666dddd"]
+    assert sorted(n.node_id for n in instance.unplaced_nodes) == ["8888ffff", "9999aaaa"]
 
 
 def test_an_unreachable_node_is_a_row_with_a_reason_never_a_gap(monkeypatch):

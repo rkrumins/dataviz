@@ -99,7 +99,9 @@ class GraphStoreNode(_Base):
     # The address the cluster announced, before the operator's addressRemap.
     announced: Optional[str] = None
     node_id: Optional[str] = Field(None, alias="nodeId")
-    role: Literal["master", "replica"] = "master"
+    #: "joining" is a node mid-MEET: in the cluster, not yet part of it, and
+    #: not a master however much the absence of a `slave` flag suggests it.
+    role: Literal["master", "replica", "joining"] = "master"
     status: Literal["up", "unreachable"] = "up"
     error: Optional[str] = None
     latency_ms: Optional[float] = Field(None, alias="latencyMs")
@@ -226,6 +228,19 @@ class GraphStoreInstance(_Base):
     slots_covered: Optional[int] = Field(None, alias="slotsCovered")
     slots_missing: Optional[str] = Field(None, alias="slotsMissing")
     shards: List[GraphStoreShard] = Field(default_factory=list)
+    #: Nodes the cluster knows that belong to no shard: one mid-MEET, one
+    #: the cluster announces no address for, one following a master this
+    #: view cannot see. They used to be invented into a shard or attached
+    #: to whichever master owned slot 0 — both of which say something the
+    #: cluster never said.
+    unplaced_nodes: List[GraphStoreNode] = Field(
+        default_factory=list, alias="unplacedNodes")
+    #: ``cluster_known_nodes`` from ``CLUSTER INFO`` — the cluster's own
+    #: count of itself, to check the number on this page against.
+    known_nodes: Optional[int] = Field(None, alias="knownNodes")
+    cluster_state: Optional[str] = Field(None, alias="clusterState")
+    #: Whole-store problems, as opposed to one shard's replication.
+    findings: List[ReplicationFinding] = Field(default_factory=list)
     totals: InstanceTotals = Field(default_factory=InstanceTotals)
 
 

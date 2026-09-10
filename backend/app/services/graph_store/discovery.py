@@ -51,13 +51,26 @@ class RawNode:
     port: int
     endpoint: str                     # after addressRemap — what we dial
     announced: str                    # what the cluster said
-    role: str = "master"              # "master" | "replica"
+    role: str = "master"              # "master" | "replica" | "joining"
     node_id: Optional[str] = None
     master_id: Optional[str] = None
-    gossip: Optional[str] = None      # "fail" | "pfail" | "noaddr"
+    gossip: Optional[str] = None      # "fail" | "pfail" | "noaddr" | "handshake"
     slots: List[List[int]] = field(default_factory=list)
     dialable: bool = True
     reason: Optional[str] = None      # why not dialable
+    #: Every flag token the cluster gave, exactly as tokens. Substring tests
+    #: on the joined string are how ``nofailover`` came to be read as
+    #: ``fail`` and paint a healthy node red.
+    flags: frozenset = frozenset()
+    #: "connected" | "disconnected" — the cluster bus link, which is not the
+    #: same as the FAIL verdict and can be down long before one is reached.
+    link_state: Optional[str] = None
+    #: Settles which master owns a slot range when two of them claim it.
+    epoch: Optional[int] = None
+    #: (slot, peer node id) — only ever present on the answering node's own
+    #: line, so they say "a reshard is running", not "here is all of it".
+    migrating: List[Tuple[int, str]] = field(default_factory=list)
+    importing: List[Tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -70,6 +83,16 @@ class RawTopology:
     error: Optional[str] = None
     slots_covered: Optional[int] = None
     slots_missing: Optional[str] = None
+    #: Nodes the cluster knows that belong to no shard — mid-MEET, without
+    #: an announced address, or following a master this view cannot see.
+    #: They are the cluster's own truth and are reported rather than either
+    #: invented into a shard or dropped.
+    unplaced: List[RawNode] = field(default_factory=list)
+    #: endpoint → the node ids that resolve to it, when more than one does.
+    collisions: Dict[str, List[str]] = field(default_factory=dict)
+    #: ``CLUSTER INFO`` — the cluster's own count of itself, to check the
+    #: number this page prints against.
+    cluster_info: Dict[str, Any] = field(default_factory=dict)
 
 
 def node_client(cfg: FalkorDBConnConfig, host: str, port: int, *, socket_timeout: float):
@@ -98,15 +121,77 @@ async def _aclose(client: Any) -> None:
 # ── Cluster discovery ────────────────────────────────────────────────────
 
 
-def _gossip_of(flags: str) -> Optional[str]:
-    lowered = flags.lower()
-    if "fail?" in lowered:
+def _gossip_of(flags: frozenset) -> Optional[str]:
+    """What the cluster bus thinks of a node, from EXACT flag tokens.
+
+    ``"fail" in "slave,nofailover"`` is true, which is how a replica held
+    out of failover — standard for a cross-AZ or restoring replica — came
+    to be rendered red, labelled FAIL, over a tooltip reading "the
+    cluster's agreement".
+    """
+    if "fail?" in flags:
         return "pfail"
-    if "fail" in lowered:
+    if "fail" in flags:
         return "fail"
-    if "noaddr" in lowered:
+    if "noaddr" in flags:
         return "noaddr"
+    if "handshake" in flags:
+        return "handshake"
     return None
+
+
+def _as_int(text: Any) -> Optional[int]:
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_address(addr: str) -> Tuple[str, Optional[int], str]:
+    """``10.0.0.1:6379@16379,node2.example.com,shard-id=ff`` → ip, port, hostname.
+
+    The bus port and the Redis 7 auxiliary fields are read and discarded
+    here rather than never seen: an aux field is ``key=value``, a hostname
+    is not, which is how the two are told apart when only one is present.
+    """
+    parts = addr.split(",")
+    base, _, _bus_port = parts[0].partition("@")
+    ip, _, port_text = base.rpartition(":")
+    hostname = next((p.strip() for p in parts[1:] if p and "=" not in p), "")
+    return ip, _as_int(port_text), hostname
+
+
+def _slots_from_fields(fields: Sequence[str]) -> Tuple[
+    List[List[int]], List[Tuple[int, str]], List[Tuple[int, str]],
+]:
+    """The slot fields: owned ranges, plus migrating-out and importing-in.
+
+    A migrating slot is still OWNED by this node until the migration
+    finishes, so it stays in the ranges; an importing one is not owned yet
+    and does not. Both are also reported, because a reshard in progress is
+    the explanation for figures that otherwise look wrong.
+    """
+    owned: List[List[int]] = []
+    migrating: List[Tuple[int, str]] = []
+    importing: List[Tuple[int, str]] = []
+    for token in fields:
+        if token.startswith("[") and token.endswith("]"):
+            body = token[1:-1]
+            for marker, sink in (("->-", migrating), ("-<-", importing)):
+                slot_text, sep, peer = body.partition(marker)
+                if sep:
+                    slot = _as_int(slot_text)
+                    if slot is not None:
+                        sink.append((slot, peer))
+                    break
+            continue
+        lo_text, _, hi_text = token.partition("-")
+        lo = _as_int(lo_text)
+        if lo is None:
+            continue
+        hi = _as_int(hi_text) if hi_text else lo
+        owned.append([lo, hi if hi is not None else lo])
+    return sorted(owned), migrating, importing
 
 
 def _slot_ranges(raw: Any) -> List[List[int]]:
@@ -125,29 +210,49 @@ def _slot_ranges(raw: Any) -> List[List[int]]:
     return sorted(out)
 
 
-def parse_cluster_nodes_reply(
-    parsed: Dict[str, Dict[str, Any]], cfg: FalkorDBConnConfig, *,
-    seed: Optional[Tuple[str, int]] = None,
+def parse_cluster_nodes_text(
+    text: Any, cfg: FalkorDBConnConfig, *, seed: Optional[Tuple[str, int]] = None,
 ) -> List[RawNode]:
-    """redis-py's parsed ``CLUSTER NODES`` → the nodes we can dial.
+    """``CLUSTER NODES`` output → the nodes of the cluster.
+
+    Parsed from the reply text rather than from redis-py's dict, which is
+    keyed on ``ip:port``: every node the cluster has no address for is
+    written ``:0@0``, so they all share the key ``":0"`` and all but one
+    are lost. Two pods losing their addresses at once — a rolling restart,
+    a half-finished ``CLUSTER FORGET`` — is enough. The dict also drops the
+    config epoch, the link state, the migration markers and the Redis 7
+    auxiliary fields before this module can see them.
+
+    One line per node:
+
+        <id> <ip:port@cport[,hostname[,aux=val]]> <flags> <master>
+        <ping-sent> <pong-recv> <config-epoch> <link-state> <slot>...
 
     The address a node announces is the one the CLUSTER knows: a pod IP, a
     hostname when the deployment sets ``cluster-preferred-endpoint-type
-    hostname``, or ``?`` for the node answering us (it does not know its
-    own announced ip). Preference order: the announced hostname, then the
-    ip, then — for the ``?`` node only — the seed we are talking through,
-    which is by definition reachable. Everything else is reported as a node
-    we cannot dial rather than dropped.
+    hostname``, or nothing at all for a node with no known address.
+    Preference order: the announced hostname, then the ip, then — for the
+    answering node only — the seed we are talking through, which is
+    reachable by definition. Everything else is reported as a node we
+    cannot dial, never dropped.
     """
     nodes: List[RawNode] = []
-    for address, entry in (parsed or {}).items():
-        ip, _, port_text = str(address).rpartition(":")
-        try:
-            port = int(port_text)
-        except (TypeError, ValueError):
+    for line in str(text or "").splitlines():
+        fields = line.split()
+        if len(fields) < 8:
             continue
-        flags = str(entry.get("flags") or "")
-        hostname = (entry.get("hostname") or "").strip()
+        node_id, address, flag_text, master_id = fields[0], fields[1], fields[2], fields[3]
+        flags = frozenset(f for f in flag_text.split(",") if f)
+        ip, port, hostname = _parse_address(address)
+        if port is None:
+            logger.debug("graph store: unreadable node address %r", address)
+            continue
+
+        # What the CLUSTER said, captured before the seed can stand in for
+        # it — otherwise a node with no announced address is reported as
+        # announcing the seed's port, which it never said.
+        announced = f"{ip or '?'}:{port}"
+
         host = hostname or (ip if ip and ip != "?" else "")
         dialable, reason = True, None
         if not host:
@@ -157,56 +262,129 @@ def parse_cluster_nodes_reply(
                 host = ip or "?"
                 dialable = False
                 reason = "the cluster announces no address for this node"
-        announced = f"{ip or '?'}:{port}"
-        if dialable:
-            mapped_host, mapped_port = remap_address(cfg, host, port)
+        mapped_host, mapped_port = (
+            remap_address(cfg, host, port) if dialable else (host, port)
+        )
+        owned, migrating, importing = _slots_from_fields(fields[8:])
+
+        if "slave" in flags:
+            role = "replica"
+        elif "master" in flags:
+            role = "master"
         else:
-            mapped_host, mapped_port = host, port
-        master_id = entry.get("master_id")
+            # A node mid-MEET carries `handshake` and nothing else. Calling
+            # it a master because it is not a slave is how one came to hold
+            # a shard of its own, be counted, and be swept for graphs.
+            role = "joining"
+
         nodes.append(RawNode(
             host=mapped_host,
             port=int(mapped_port),
             endpoint=f"{mapped_host}:{mapped_port}",
             announced=announced,
-            role="replica" if "slave" in flags.lower() else "master",
-            node_id=entry.get("node_id"),
+            role=role,
+            node_id=node_id or None,
             master_id=master_id if master_id and master_id != "-" else None,
             gossip=_gossip_of(flags),
-            slots=_slot_ranges(entry.get("slots")),
+            slots=owned,
             dialable=dialable,
             reason=reason,
+            flags=flags,
+            link_state=fields[7] or None,
+            epoch=_as_int(fields[6]),
+            migrating=migrating,
+            importing=importing,
         ))
-    return nodes
+    return _deduped(nodes)
 
 
-def group_shards(nodes: Sequence[RawNode]) -> List[Tuple[RawNode, List[RawNode]]]:
-    """Masters (ordered by their first slot) each with their replicas.
+def _deduped(nodes: Sequence[RawNode]) -> List[RawNode]:
+    """One entry per node id. A cluster cannot list a node twice, but a
+    reply read through a stale or partial view can, and a duplicate becomes
+    a duplicated row and an inflated count on every figure downstream."""
+    seen: Dict[str, RawNode] = {}
+    out: List[RawNode] = []
+    for node in nodes:
+        key = node.node_id or f"@{node.endpoint}"
+        if key in seen:
+            continue
+        seen[key] = node
+        out.append(node)
+    return out
 
-    A master with no slots sorts last: it is in the cluster but owns
-    nothing — a state worth seeing rather than hiding.
+
+def endpoint_collisions(nodes: Sequence[RawNode]) -> Dict[str, List[str]]:
+    """Endpoints that more than one node id resolves to.
+
+    Two nodes reached at one address is not a topology this page can
+    describe: the endpoint is what every downstream reading, cache entry
+    and table row is keyed by, so the two become one row shown twice with
+    the same figures. It happens when an ``addressRemap`` points several
+    nodes at one gateway, or when ``cluster-announce-hostname`` is set to a
+    headless service name so every pod announces the same host. The
+    cross-pod fan-out already refuses to run in this state; here it is
+    reported, because a view that refuses to load helps nobody.
+    """
+    by_endpoint: Dict[str, List[str]] = {}
+    for node in nodes:
+        # Nodes the cluster gives no address share a placeholder rather than
+        # an address. They are already reported as undialable, each with its
+        # reason; calling that a collision would be a second, wrong alarm.
+        if node.node_id and node.dialable:
+            by_endpoint.setdefault(node.endpoint, []).append(node.node_id)
+    return {e: ids for e, ids in by_endpoint.items() if len(ids) > 1}
+
+
+def group_shards(
+    nodes: Sequence[RawNode],
+) -> Tuple[List[Tuple[RawNode, List[RawNode]]], List[RawNode]]:
+    """Masters (ordered by their first slot) each with their replicas, and
+    everything the cluster knows that belongs to no shard.
+
+    A master with no slots sorts last: it is in the cluster and owns
+    nothing — a state worth seeing rather than hiding. A node mid-MEET is
+    not a master at all and gets no shard.
+
+    A replica is placed under the master it names, following a chain to the
+    master at its head. One whose master this view cannot see is NOT
+    attached to the first shard: doing that asserted a replication
+    relationship the cluster never described, put its lag and its findings
+    under a master it has nothing to do with, and inflated that shard's
+    replica count. It goes to ``unplaced`` with the id it named.
     """
     masters = [n for n in nodes if n.role == "master"]
-    by_id = {n.node_id: n for n in masters if n.node_id}
+    by_id = {n.node_id: n for n in nodes if n.node_id}
+    master_ids = {n.node_id for n in masters if n.node_id}
+
+    def _head(node: RawNode) -> Optional[str]:
+        """The master at the head of this replica's chain, if it is in view."""
+        seen: set = set()
+        current = node.master_id
+        while current and current not in seen:
+            if current in master_ids:
+                return current
+            seen.add(current)
+            nxt = by_id.get(current)
+            current = nxt.master_id if nxt is not None else None
+        return None
+
     replicas: Dict[str, List[RawNode]] = {}
-    orphans: List[RawNode] = []
+    unplaced: List[RawNode] = [n for n in nodes if n.role == "joining"]
     for node in nodes:
         if node.role != "replica":
             continue
-        if node.master_id and node.master_id in by_id:
-            replicas.setdefault(node.master_id, []).append(node)
+        head = _head(node)
+        if head is None:
+            unplaced.append(node)
         else:
-            orphans.append(node)
+            replicas.setdefault(head, []).append(node)
+
     masters.sort(key=lambda n: (n.slots[0][0] if n.slots else 1 << 20, n.endpoint))
     shards = [
         (m, sorted(replicas.get(m.node_id or "", []), key=lambda r: r.endpoint))
         for m in masters
     ]
-    # A replica whose master is not in the reply (mid-failover, or a
-    # partial view) still belongs to the page: attach it to the first
-    # shard rather than losing it.
-    if orphans and shards:
-        shards[0][1].extend(sorted(orphans, key=lambda r: r.endpoint))
-    return shards
+    return shards, sorted(unplaced, key=lambda n: n.endpoint)
 
 
 def _coverage(shards: Sequence[Tuple[RawNode, List[RawNode]]]) -> Tuple[int, Optional[str]]:
@@ -234,30 +412,39 @@ async def discover_cluster(cfg: FalkorDBConnConfig, budget: float) -> RawTopolog
     for host, port in cfg.cluster_nodes or []:
         async def _attempt(c: FalkorDBConnConfig, _host=host, _port=port):
             client = node_client(c, _host, _port, socket_timeout=budget)
+            # The reply text, not redis-py's dict: its dict is keyed on
+            # ``ip:port``, so every node the cluster has no address for
+            # collapses onto the key ``":0"`` and all but one are lost.
+            client.set_response_callback("CLUSTER NODES", lambda reply: reply)
             try:
                 async with asyncio.timeout(budget):
-                    return await client.execute_command("CLUSTER NODES")
+                    text = await client.execute_command("CLUSTER NODES")
+                    try:
+                        info = await client.execute_command("CLUSTER INFO")
+                    except Exception:                 # noqa: BLE001 — optional
+                        info = None
+                    return text, info
             finally:
                 await _aclose(client)
 
         try:
-            parsed = await with_auth_negotiation(cfg, _attempt)
+            text, info = await with_auth_negotiation(cfg, _attempt)
         except Exception as exc:                      # noqa: BLE001 — try the next seed
             last_error = _err(exc)
             logger.debug("graph store: seed %s:%s did not answer CLUSTER NODES: %s",
                          host, port, last_error)
             continue
-        nodes = parse_cluster_nodes_reply(
-            parsed if isinstance(parsed, dict) else {}, cfg, seed=(host, port),
-        )
+        nodes = parse_cluster_nodes_text(_decode(text), cfg, seed=(host, port))
         if not nodes:
             last_error = "CLUSTER NODES returned no nodes"
             continue
-        shards = group_shards(nodes)
+        shards, unplaced = group_shards(nodes)
         covered, missing = _coverage(shards)
         return RawTopology(
-            shards=shards, discovered_via="clusterNodes",
+            shards=shards, unplaced=unplaced, discovered_via="clusterNodes",
             seed_used=f"{host}:{port}", slots_covered=covered, slots_missing=missing,
+            collisions=endpoint_collisions(nodes),
+            cluster_info=info_parse.parse_info_text(_decode(info)) if info else {},
         )
     fallback = await _shards_from_slot_map(cfg, budget)
     if fallback is not None:

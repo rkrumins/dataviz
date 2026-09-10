@@ -37,7 +37,7 @@ from backend.app.providers.falkordb_connection import (
     connect_verify_budget,
 )
 from backend.app.providers.shard_capacity import ShardMemory
-from . import discovery
+from . import discovery, info_parse
 from .discovery import RawNode, RawTopology
 from .schemas import (
     DataSourceRef,
@@ -370,7 +370,7 @@ def _node_from_read(raw: RawNode, read: Dict[str, Any],
     server = dict(read.get("server") or {})
     replication = dict(read.get("replication") or {})
     limits = dict(read.get("limits") or {})
-    prev = previous.get(read["endpoint"]) or {}
+    prev = previous.get(read.get("nodeId") or read["endpoint"]) or {}
     run_id = server.get("runId")
     restarted = None
     if run_id and prev.get("runId"):
@@ -507,7 +507,7 @@ def _shard_findings(
                 endpoint=replica.endpoint,
             ))
     for node in (master, *replicas):
-        prev = previous.get(node.endpoint) or {}
+        prev = previous.get(_read_key(node)) or {}
         before, now = prev.get("syncFull"), node.server.sync_full
         if before is not None and now is not None and now > before:
             findings.append(ReplicationFinding(
@@ -591,6 +591,19 @@ def _build_lock() -> asyncio.Lock:
     return _lock
 
 
+def _read_key(node: Any) -> str:
+    """What a node IS, for keying its reading and its history.
+
+    Its node id where the cluster gives one, and its address only as a
+    fallback. Two nodes at one address — an addressRemap onto a shared
+    gateway, a hostname announced per service rather than per pod, or two
+    nodes the cluster has no address for at all — otherwise share a reading
+    and a history: one row shown twice with the same figures, and a restart
+    finding that fires because the entry alternates between them.
+    """
+    return getattr(node, "node_id", None) or node.endpoint
+
+
 async def _read_all_nodes(
     pending: Sequence[Tuple[_Pending, RawTopology]],
     measure_by_instance: Dict[int, List[str]],
@@ -609,11 +622,15 @@ async def _read_all_nodes(
             jobs.append((idx, master, slot.cfg, True, measure_by_instance.get(idx, [])))
             for replica in replicas:
                 jobs.append((idx, replica, slot.cfg, False, []))
+        # A node in no shard is still a node of the cluster, and the count on
+        # the page has to match `kubectl get pods`.
+        for stray in raw.unplaced:
+            jobs.append((idx, stray, slot.cfg, False, []))
 
     async def _one(idx: int, node: RawNode, cfg: FalkorDBConnConfig,
                    want_graphs: bool, measure: List[str]) -> None:
         async with semaphore:
-            results[(idx, node.endpoint)] = await discovery.read_node(
+            results[(idx, _read_key(node))] = await discovery.read_node(
                 cfg, node, budget=connect_verify_budget(cfg, 1.5),
                 want_graphs=want_graphs, measure_keys=measure,
             )
@@ -626,7 +643,7 @@ async def _read_all_nodes(
         logger.info("graph store: topology sweep hit its %.1fs deadline after %d of %d nodes",
                     deadline, len(results), len(jobs))
     for idx, node, _cfg, _want, _measure in jobs:
-        results.setdefault((idx, node.endpoint), {
+        results.setdefault((idx, _read_key(node)), {
             "endpoint": node.endpoint, "announced": node.announced,
             "nodeId": node.node_id, "role": node.role, "gossip": node.gossip,
             "status": "unreachable", "error": "not read before the deadline",
@@ -717,7 +734,7 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     # slow one, so the two critical findings go quiet for cycles, during
     # exactly the instability that makes builds fail.
     _prev_nodes = {
-        node.endpoint: {"runId": node.server.run_id, "syncFull": node.server.sync_full}
+        _read_key(node): {"runId": node.server.run_id, "syncFull": node.server.sync_full}
         for instance in instances
         for shard in instance.shards
         for node in (shard.master, *shard.replicas)
@@ -742,9 +759,9 @@ def _assemble_nodes(
     graphs an instance is expected to hold follow from that list."""
     shards: List[GraphStoreShard] = []
     for index, (raw_master, raw_replicas) in enumerate(raw.shards):
-        master = _node_from_read(raw_master, reads[(idx, raw_master.endpoint)], previous)
+        master = _node_from_read(raw_master, reads[(idx, _read_key(raw_master))], previous)
         replicas = [
-            _node_from_read(r, reads[(idx, r.endpoint)], previous) for r in raw_replicas
+            _node_from_read(r, reads[(idx, _read_key(r))], previous) for r in raw_replicas
         ]
         shards.append(GraphStoreShard(
             index=index,
@@ -767,8 +784,50 @@ def _assemble_nodes(
         slots_covered=raw.slots_covered,
         slots_missing=raw.slots_missing,
         shards=shards,
+        unplaced_nodes=[
+            _node_from_read(n, reads[(idx, _read_key(n))], previous) for n in raw.unplaced
+        ],
+        known_nodes=info_parse.as_int(raw.cluster_info.get("cluster_known_nodes")),
+        cluster_state=raw.cluster_info.get("cluster_state"),
+        findings=_instance_findings(raw),
     )
     return instance
+
+
+def _instance_findings(raw: RawTopology) -> List[ReplicationFinding]:
+    """Problems with the store as a whole rather than with one shard."""
+    out: List[ReplicationFinding] = []
+    for endpoint, ids in sorted(raw.collisions.items()):
+        out.append(ReplicationFinding(
+            code="endpoint_collision",
+            severity="critical",
+            text=(f"{len(ids)} nodes are reached at {endpoint} "
+                  f"({', '.join(sorted(i[:8] for i in ids))}). Every figure keyed by "
+                  f"address counts them as one node measured twice."),
+            fix=("Give each node its own address: an addressRemap entry per node, or "
+                 "cluster-announce-hostname set per pod rather than to a headless "
+                 "service name."),
+            endpoint=endpoint,
+        ))
+    known = info_parse.as_int(raw.cluster_info.get("cluster_known_nodes"))
+    seen = sum(1 + len(reps) for _m, reps in raw.shards) + len(raw.unplaced)
+    if known is not None and known > seen:
+        out.append(ReplicationFinding(
+            code="nodes_missing_from_view",
+            severity="warn",
+            text=(f"The cluster says it knows {known} nodes; this reading found "
+                  f"{seen}. The seed that answered has an incomplete view."),
+            fix="Check the cluster bus between the nodes, and CLUSTER NODES on another node.",
+        ))
+    state = raw.cluster_info.get("cluster_state")
+    if state and str(state).lower() != "ok":
+        out.append(ReplicationFinding(
+            code="cluster_state_not_ok",
+            severity="critical",
+            text=f"The cluster reports its own state as {state}.",
+            fix="Slots are unserved until it recovers; check for a master with no replica promoted.",
+        ))
+    return out
 
 
 def _expected_here(
@@ -836,7 +895,7 @@ def _attach_graphs(
         listed: List[str] = []
         measured: Dict[str, Any] = {}
         for idx in idxs:
-            read = reads.get((idx, shard.master.endpoint)) or {}
+            read = reads.get((idx, _read_key(shard.master))) or {}
             for key in read.get("graphs") or []:
                 if key not in listed:
                     listed.append(key)
@@ -861,7 +920,11 @@ def _attach_graphs(
 
 
 def _totals(instance: GraphStoreInstance) -> InstanceTotals:
+    # Every node the cluster knows, so the figure matches `kubectl get pods`
+    # — and masters counted by ROLE, not by the column a node sits in, so a
+    # promoted replica is not counted as a master of itself.
     nodes = [n for s in instance.shards for n in (s.master, *s.replicas)]
+    nodes += list(instance.unplaced_nodes)
     masters = [s.master for s in instance.shards]
     used = [m.memory.used for m in masters if m.memory.used is not None]
     cap = [m.memory.maxmemory for m in masters if m.memory.maxmemory]
