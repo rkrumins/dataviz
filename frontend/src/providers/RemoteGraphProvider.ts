@@ -437,6 +437,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         return await this.fetch<GraphNode[]>('/nodes/query', {
             method: 'POST',
             body: JSON.stringify({ query }),
+            timeoutMs: TIMEOUTS.NODES_QUERY_MS,
         })
     }
 

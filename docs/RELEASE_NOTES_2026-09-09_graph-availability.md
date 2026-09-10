@@ -434,3 +434,126 @@ the others keep serving is the fix working, not a regression.
 - Capacity is still one FalkorDB instance. Eight query threads is roughly double the
   concurrent read throughput, not an order of magnitude; past that the answer is read
   replicas.
+
+---
+
+## 10. Addendum, round five — the numbers for 300 concurrent users
+
+Reviewing the stack against a concrete target — 300 users browsing, on one graph, one
+provider, or several — surfaced two deadline bugs, one sizing bug, and one change from
+round four that was **wrong and is reverted here**.
+
+### The queue depth was raised in the wrong direction
+
+Round four raised FalkorDB's `MAX_QUEUED_QUERIES` from 64 to 256 alongside doubling
+`THREAD_COUNT`. That reasoning was backwards. Queue wait is
+
+```
+wait ≈ (queue depth ÷ threads) × service time
+```
+
+so doubling the threads had **already halved** the wait for a given depth. Raising the
+depth on top of it gave:
+
+| Depth | Threads | Wait at 200 ms queries | Wait at 2 s queries |
+|---|---|---|---|
+| 64 | 4 (before) | 3.2 s | 32 s |
+| 64 | 8 (now) | 1.6 s | **16 s** |
+| 256 | 8 (round four) | 6.4 s | **64 s** |
+
+A 64-second queue wait is past every budget above it. Every request in that queue burns
+its full client deadline and then 504s, having occupied pending state the whole time —
+which converts a cheap, immediate 429 (retried in place with jitter, and very likely to
+land on a warm cache) into a slow, expensive failure. **Shedding early beats queueing
+long.** `MAX_QUEUED_QUERIES` is back to 64, which at 8 threads is strictly better than
+the 64 the system had at 4.
+
+This is also what makes the fleet safe without new machinery. Per-process admission does
+not compose across pods: at full HPA fan-out the fleet can offer far more concurrent
+work than 8 threads can take. The bound that *does* hold fleet-wide is FalkorDB's own
+queue, enforced by the resource that knows its own saturation — and since round three
+its overflow is a `Retry-After` 429 the canvas retries in place, not a 500. A shallow
+queue is what keeps that bound tight.
+
+### Three client deadlines tied the layer beneath them
+
+The layering rule this work established is that each outer deadline outlasts the one
+inside it, so the innermost layer that can explain a failure is always the one that
+fires:
+
+```
+FalkorDB query budget  <  ASGI tier  <  client timeout  <  proxy timeout
+```
+
+Three client budgets sat exactly *on* their ASGI tier — the same coin flip the proxy fix
+removed at the edge, one layer down. A tie means the browser may abort at the same
+instant the server was producing its structured answer, throwing away a scan that had
+already done the work and retrying it.
+
+| Endpoint | Server budget | ASGI tier | Client was | Client now |
+|---|---|---|---|---|
+| `POST /nodes/query` | 20s | 60s | **30s** (the shared default) | 45s |
+| `POST /edges/between` | 40s | 45s | 45s (tied) | 60s |
+| `POST /edges/aggregated` | 30s | 45s | 45s (tied) | 60s |
+| `POST /trace/v2` | 60s | 60s | 60s (tied both ways) | 75s |
+
+`/nodes/query` was the worst of them and the least visible: the canvas hydration hot
+path, fired four batches at a time on every view open, was the one hot graph read still
+inheriting the 30-second default. Ten seconds of margin over its own 20-second server
+budget had to cover slot wait, serializing a response that can reach the 4 MiB cache
+cap, and crossing a link shared with three sibling batches. It now has its own budget
+(`VITE_TIMEOUT_NODES_QUERY_MS`).
+
+`frontend/src/config/__tests__/timeouts.budgets.test.ts` pins the whole ladder: every
+hot graph read must clear its server budget by 10s, must never equal its ASGI tier, must
+stay under the proxy, and must set an explicit budget rather than inherit the default.
+The server half of the same invariant is already pinned in `test_timeout_middleware.py`.
+
+### Four async workers on two cores
+
+Production gave `viz-service` a 2 CPU limit while running `GUNICORN_WORKERS=4`. Four
+single-threaded event loops contending for two cores CFS-throttle under exactly the
+concurrent load they exist to absorb, and a throttled loop stalls every request on that
+worker — which reads downstream as provider slowness and is indistinguishable from it in
+the logs. Now one core per worker.
+
+### What actually bounds 300 concurrent users
+
+| Tier | Bound | At 300 users |
+|---|---|---|
+| Browser | 4 hydration batches per open | not binding |
+| Per worker | 16 admitted graph requests, 2 reserved per source | not binding — peak observed concurrency is single digits warm |
+| Per pod | 4 workers × 16 | not binding |
+| Fleet | HPA 3 → 12 pods on 70% CPU | scales with load |
+| Response cache | 15 min TTL on the hydration reads, in-pod singleflight, 24h stale fallback | **this is what makes it work** |
+| FalkorDB | 8 threads, 64 queued, then a retryable 429 | **the real ceiling** |
+
+Browsing traffic is overwhelmingly cache hits, which never reach the database: a hit is
+a Redis read of a few milliseconds, so 300 users generate single-digit concurrency at
+the provider. Misses are driven by distinct views and by write-generation bumps, not by
+user count, and in-pod singleflight collapses concurrent duplicates.
+
+The load that concentrates is a **generation bump** — an aggregation job completing
+invalidates a scope, and every user of it misses at once. In-pod singleflight collapses
+that to one query per key per pod, so the fleet can still issue up to one per key per
+pod. Those queue at the database, the excess sheds as 429 within milliseconds, the
+clients retry with jitter, and by then the leaders have warmed the cache. That is
+degradation, not collapse — but it is the moment to watch, and it is why the queue
+stays shallow.
+
+**Cross-pod singleflight is the next lever** and is deliberately not in this change. A
+Redis lease on cache-miss compute would cut a herd from one query per key per pod to one
+per key fleet-wide. It matters when pod count × distinct hot keys exceeds what 8 threads
+can absorb during a bump; at 12 pods and a few dozen hot views that is reachable. The
+existing in-process singleflight names it as the documented follow-up.
+
+### Honest answer on "are we sure"
+
+No, not from arithmetic alone. What is now true: no tier can lock up another (the
+admission gate bounds the DB pool, the shallow queue bounds the provider, the deadline
+ladder means the innermost layer always answers first), every overload path sheds with
+`Retry-After` and is retried in place rather than surfacing as an outage, and the
+counters on `/api/v1/health/deps` say which tier ran out. What is still unmeasured is
+the cache hit rate under real browsing, which is the single number the whole model rests
+on. `make stress-canvas` at 100 / 300 / 500 users against a production-sized graph is
+what settles it.
