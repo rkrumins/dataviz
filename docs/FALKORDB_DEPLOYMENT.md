@@ -111,7 +111,15 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 4. **Traffic Update:** Clients attempting to hit `fdp-3` receive a `MOVED` redirect and update their routing tables to hit `fdp-8`.
 5. **Restoration:** GKE automatically reschedules missing pods to a healthy node in Zone B, reattaches PVs, and instances perform a differential sync.
 
-*Downtime: < 1 second for Shard 2 writes. No data loss.*
+*No data loss. What the application sees is a HOLD, not a transparent
+switch:* the cluster does not begin an election until `cluster-node-timeout`
+(15s) has passed, so for those seconds the shard's keys have no master. Reads
+fail fast with a 3-second retry hint and the canvas keeps serving its last
+answer behind a "Reconnecting to the graph store" line; a running rebuild
+waits for the node and resumes from its checkpoint. The circuit breaker is
+NOT allowed to open for this — a failover is a pause, and treating it as an
+outage is what used to answer every user with "Circuit open" for 30s at a
+time, long after the promotion had finished.
 
 ### 5.2 Full Zonal Outage (e.g., Zone C Datacenter Drops)
 
@@ -123,6 +131,53 @@ Because this is a multi-tenant environment, entire tenant graphs are distributed
 4. **Read Preservation:** Because replicas still exist for every shard, the heavy read workload does not fallback onto the Masters, preventing a cluster-wide CPU bottleneck.
 
 *Downtime: < 1 second for Shard 3 writes. Slight read latency increase as capacity drops from 6 replicas to 3 across the cluster.*
+
+---
+
+## 5aa. Replication Under Heavy Writes (read this before a large rebuild)
+
+This is the mechanism behind the worst failure this deployment has had: a
+rebuild of a densely connected graph taking a whole shard down.
+
+**FalkorDB replicates a write query by RE-RUNNING it.** Below
+`EFFECTS_THRESHOLD` (µs per modification, default **300**), the master ships
+the Cypher itself and every replica executes the whole query again. A rollup
+apply batch is hundreds of cheap MERGEs, so it is always under the threshold
+and always replicated this way. Two properties make that dangerous:
+
+- a replicated command runs on the replica's **main thread**, not a worker;
+- it runs **without a timeout** — the server-side `TIMEOUT` is deliberately
+  not applied to replicated commands.
+
+So a replica re-running a batch over a dense graph answers no `PING`, no
+cluster-bus gossip and no reads for as long as the batch takes. With a 3s
+probe timeout and 3 failures, ~30 seconds of that is enough for the kubelet
+to restart it, the cluster to mark it FAIL, and the run to die on a refused
+connection to its shard.
+
+**Set `EFFECTS_THRESHOLD 0`** (in `FALKORDB_ARGS`, and on every node —
+masters decide how they replicate, and a promoted replica must already carry
+it). At `0`, every effects-capable write replicates as a compact change log
+the replica applies directly, which is orders of magnitude cheaper than
+re-running the query. Admin → Graph store flags any master that has replicas
+and a threshold above 0, and can set it at runtime.
+
+Three settings back that up:
+
+| Setting | Shipped | Why |
+| --- | --- | --- |
+| `--repl-backlog-size 1gb` | was 256mb | The window a disconnected replica can catch up through without a full resync. A rebuild fills 256 MB in seconds. |
+| `--client-output-buffer-limit replica 2gb 1gb 300` | was the 256 MB default | When a replica's output buffer overflows, the master **drops it** and it comes back with a full resync — a fork and a whole-dataset transfer, under the same write load that caused it. |
+| `--repl-timeout 300` | was 60 | A full resync of a large shard takes longer than a minute; timing it out mid-transfer starts it over. |
+
+And the liveness probe gets room to be slow: `timeoutSeconds: 10`,
+`failureThreshold: 6`. A busy main thread is not a dead process, and the
+readiness probe (strict, 3s) already takes a busy node out of rotation.
+
+Finally, the application does not rely on any of this alone: a rebuild asks
+the master how many replicas have acknowledged its writes (`WAIT`) and holds
+when they fall behind, so it can never write faster than its replicas absorb.
+See `AGGREGATION_PIPELINE.md`.
 
 ---
 

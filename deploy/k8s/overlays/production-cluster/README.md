@@ -77,10 +77,20 @@ reseed graphs from Cloud SQL after the cluster is green.
    `cluster nodes` output.
 2. Seed/reseed a few graphs; verify reads across all three shards.
 3. **One-shard rotation:** `kubectl -n synodic delete pod <current master of any shard>`
-   → replica promotes in <5s (`cluster-node-timeout 5000`), reads on that
-   shard's graphs blip once and self-heal (client re-resolves on retry 2),
-   other shards' graphs unaffected, app pods untouched.
-4. **Node drain:** `kubectl cordon <node> && kubectl drain <node>
+   → the cluster notices after `cluster-node-timeout` (15s) and promotes a
+   replica. The app holds through it rather than erroring: a read fails fast
+   with a 3s retry hint while the canvas keeps showing its last answer behind
+   a "Reconnecting to the graph store" line, and a running rebuild waits for
+   the node and carries on from its checkpoint. Other shards' graphs are
+   unaffected and app pods are untouched. Watch it on **Admin → Graph store**:
+   the node goes Unreachable, then Restarting, then Up.
+4. **Rebuild under replication:** trigger a rebuild of the largest, most
+   connected source and watch the same page. Replicas should stay Up with lag
+   returning to zero between batches, the run settings should show it waiting
+   for acknowledgement rather than a shard restarting, and
+   `kubectl get pod <replica> -o jsonpath='{.status.containerStatuses[0].lastState.terminated}'`
+   should stay empty through the run.
+5. **Node drain:** `kubectl cordon <node> && kubectl drain <node>
    --ignore-daemonsets --delete-emptydir-data` → PDB serializes the eviction,
    same observations as (3).
 

@@ -49,7 +49,7 @@ spec:
             - name: FALKORDB_QUERY_MEM_CAPACITY
               value: "536870912"                       # 512 MiB
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY $(FALKORDB_QUERY_MEM_CAPACITY) CACHE_SIZE 50"
+              value: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY $(FALKORDB_QUERY_MEM_CAPACITY) CACHE_SIZE 50 EFFECTS_THRESHOLD 0"
             # The dataset itself needs maxmemory or growth OOM-kills the pod.
             # noeviction = writes fail loudly at the ceiling.
             # save 3600 1 = hourly RDB floor alongside AOF: appendonly-yes with

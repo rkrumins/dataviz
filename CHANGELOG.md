@@ -13,6 +13,46 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**Admin → Graph store: every node of every graph store, and what lives on it.** On a
+nine-node cluster the app showed three. The Infrastructure probe counted masters from the
+environment's own topology and the capacity card read only the nodes that owned an aggregated
+graph, so every replica was absent — and a node missing from a list is indistinguishable from a
+node that does not exist. The new page reads one snapshot of the whole fleet: masters and
+replicas with their memory, health, uptime and limits; slot coverage with the missing ranges
+named; how memory and graphs are distributed across shards; replication as it actually is
+(replicas online, worst lag, full resyncs) with each finding written as a sentence carrying its
+fix; and every graph on each shard with the data source that owns it, searchable. Deep links
+focus a shard, open a node's limits, or switch to a flat all-nodes view; a "How to read this
+page" glossary defines every term on it. A guide (*The Graph Store: Shards, Replicas &
+Placement*) is one click away.
+
+**Where a data source lives, on the data source.** Its profile now says which node holds its
+graph, which shard and slot, that node's health and memory, its replicas and their lag, and how
+many other graphs share the shard — and, in dedicated projection mode, that the rollups have
+their own graph key which can land on a different shard. Provider cards say what the connection
+actually reaches (mode, master shards, replicas, nodes up, slot coverage) and list every node
+when expanded. Job history rows carry a shard chip, from one batched call per page.
+
+**A rebuild never writes faster than its replicas can absorb.** After every rollup batch the
+pipeline asks the master how many replicas have acknowledged it. Acknowledged, and the wait
+joins the write's latency so a replica-bound shard paces itself like a slow master; not
+acknowledged, and the run holds — heartbeating, re-reading replication state, retrying — until
+they catch up, releasable live by setting replica acknowledgement to 0. This exists because
+FalkorDB replicates a write below its effects threshold by RE-RUNNING the query on every
+replica, on the replica's main thread and with no timeout: a large rebuild could drive replicas
+past their health probes, get them restarted, and take the shard with them. The run also warns
+at the start when a master has replicas and an effects threshold above 0, which is the setting
+that decides this.
+
+**A node restarting is a pause, not an outage.** A refused connection inside a rebuild is now a
+wait: the run heartbeats, re-resolves the owner (finding the promoted replica), and retries the
+same work at the same width from the same checkpoint, for up to fifteen minutes. If it does give
+up, the failure names the node, how long it waited, and what to check — where the circuit
+breaker's "Circuit open; will probe downstream again in ~28s" used to overwrite it. For readers,
+a node being replaced is its own signal that never opens the breaker: reads fail fast with a
+three-second retry hint, the canvas keeps its last answer behind a *Reconnecting to the graph
+store* line and retries itself, and the node's restart is recorded as evidence on the run.
+
 **Rebuilds that always complete under the graph store's per-query limits.** A rebuild that
 meets the store's per-query memory ceiling (`QUERY_MEM_CAPACITY`) or a per-query timeout no
 longer fails — it goes slower until every query fits: the first refusal of a run drops read
@@ -201,6 +241,32 @@ to lie). The table had no horizon because its contents used to be rare; it now t
 per view open, lineage trace and graph search.
 
 ### Changed
+
+**The capacity view is built on one reading of the whole graph store**, so it stopped
+churning. It used to resolve a provider per source and ask it who owned each graph, which meant
+a node appeared only if some source's provider could be built and dialled inside a deadline,
+every failure was cached wholesale, and rows re-sorted by live utilisation. Placement is now
+arithmetic over the topology snapshot: every master is a row whether or not anything sits on it,
+a node that could not be read is a row with the reason, "cannot govern" is told apart from
+"unreachable", the order never moves, and a failed refresh keeps the figures on screen with a
+note instead of blanking the card. `AGGREGATION_CAPACITY_DEADLINE_S` is gone with the sweep, and
+both capacity routes are served in-process in every mode.
+
+**A graph store node's limits are adjusted from Admin → Graph store**, which is where the node
+is looked at. Any node can be targeted — including one holding no rollups yet, and every node of
+an instance at once, so a promoted replica already carries the change. The Infrastructure page
+still answers its old `?limits=` deep link. The dialog gains the **effects threshold**, the
+setting that decides whether replicas apply a change log or re-run every write.
+
+**The production cluster manifests are sized by the rule the guide states.** `maxmemory` 32 GiB
+with a 1.5 GiB per-query ceiling needs 52.7 GiB inside the 56 GiB limit; the previous pairing
+(40 GiB and 2 GiB) needed 66.6 GiB, so a shard under load could be OOM-killed while every figure
+inside Redis looked healthy. Also: `EFFECTS_THRESHOLD 0` and `OMP_THREAD_COUNT 1` on every
+FalkorDB deployment, a 1 GB replication backlog and 2 GB replica output buffers (256 MB overflows
+in seconds under a rebuild and forces a full resync), `repl-timeout 300`,
+`cluster-node-timeout 15000`, and a liveness probe that allows 10s × 6 rather than 3s × 3 — a
+node busy applying replication is not a dead process. **Check what each shard currently holds
+before applying the `maxmemory` change.**
 
 **Memory headroom on the Infrastructure page shows every measurable node, always**, with
 the rollup reserve marked and what still fits at the fleet bytes-per-edge. It used to appear
@@ -417,9 +483,19 @@ is required for correctness, but without it readers pay the aggregation on the r
   top-level pages keep their current behaviour under the store's per-query limits.
 - The memory-aware flush reads the worker's cgroup limit; on a host without one only the
   pair cap (`AGGREGATION_MAX_PENDING_PAIRS`) bounds worker memory, as before.
-- The status probe and the capacity sweep can name the same node differently under an address
-  remap (the probe reads the env topology, the sweep the provider's own client); the
-  Infrastructure page unions the two by endpoint rather than joining them.
+- The status probe and the topology reading can name the same node differently under an address
+  remap (the probe reads the env topology, the reading dials each node from the provider's own
+  settings); the Infrastructure page unions the two by endpoint rather than joining them, and
+  Admin → Graph store shows the announced address beside the dialled one when they differ.
+- Replication backpressure protects the replicas of the shard a run writes to. A replica that is
+  detached (the master reports none attached) is not waited for — it is flagged on the Graph
+  store page instead.
+- A node restart is detected from its run id and uptime when it answers again. Why it restarted
+  comes from the orchestrator, which the application cannot read; the guide gives the command.
+- Per-graph sizes are sampled and refreshed with the topology reading, not live, and are capped
+  per node so one snapshot cannot become a load generator.
+- Reads are still served by masters only. A restarting master therefore pauses reads for its
+  shard rather than falling back to its replicas.
 - The Full-detail pre-flight is *unknown* until a source has one successful rebuild: the cube
   estimate it needs is recorded on success only.
 - A custom role granted **only** `system:analytics:read` gets no nav item: the catalogue spec

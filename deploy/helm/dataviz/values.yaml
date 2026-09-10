@@ -154,7 +154,7 @@ stores:
     # query's whole result set before sending it). Raising QUERY_MEM_CAPACITY
     # without raising limits.memory trades a caught query error for an
     # OOM-killed pod. See docs/FALKORDB_DEPLOYMENT.md.
-    args: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50"
+    args: "THREAD_COUNT 4 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50 EFFECTS_THRESHOLD 0"
     # noeviction = writes fail loudly instead of the pod being OOM-killed
     # by data growth.
     redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction"

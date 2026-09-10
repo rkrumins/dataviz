@@ -204,21 +204,28 @@ came from (`rollupStorageOverride` / `resolvedRollupStorage` /
 ### The capacity API
 
 What the budget measures, for people: `GET /api/v1/admin/aggregation/capacity`
-maps every aggregated source to the node its rollups land on (the projection
-graph in dedicated mode) and reads each node ONCE — used, `maxmemory`, the
-reserve, what running rebuilds hold in its ledger, what is free after both,
-how many more rollup edges that is at the fleet bytes-per-edge, and the
-sources on each shard with their footprint and
-what their last run learned. `GET /api/v1/admin/data-sources/{id}/capacity`
+lists EVERY master of every graph store — with or without sources on it — and
+places each aggregated source on one by hashing its rollup key (the projection
+graph in dedicated mode). Per node: used, `maxmemory`, the reserve, what
+running rebuilds hold in its ledger, what is free after both, how many more
+rollup edges that is at the fleet bytes-per-edge, and the sources on the
+shard with their footprint and what their last run learned. `GET /api/v1/admin/data-sources/{id}/capacity`
 adds the pre-flight: the pipeline's own verdict on the last run's cube
 estimate against the live reading (Full detail fits / short by / unknown
 until a first run; Auto is never refused). Both are ingestion-read like the
-settings GET and proxy to the control plane in proxy mode; the fleet sweep
-runs under `AGGREGATION_CAPACITY_DEADLINE_S`, reports anything it could not
-place with a coarse reason, never raises, and is cached for
-`AGGREGATION_CAPACITY_CACHE_TTL_S`. The Freshness page's capacity card, the
-drawer's Capacity block, the re-trigger fit check, the Defaults dialog's
-what-if and the Infrastructure page's memory headroom all read it. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
+settings GET and are served in-process in every mode — they read the graph
+store topology snapshot the web tier builds for itself
+(`services/graph_store`, `GRAPH_STORE_TOPOLOGY_*`), so capacity dials nothing
+of its own. Placement is arithmetic over that snapshot rather than a
+per-source provider resolution, which is why every master now appears, the
+row order never moves, and a failed refresh keeps the last good figures with
+`stale`/`lastError` set instead of blanking the card. Anything that cannot be
+placed is reported with a coarse reason; nothing raises; the assembly is
+cached for `AGGREGATION_CAPACITY_CACHE_TTL_S`. The Freshness page's capacity
+card, the drawer's Capacity block, the re-trigger fit check, the Defaults
+dialog's what-if and the Infrastructure page's memory headroom all read it —
+and **Admin → Graph store** is the full view behind them, with the replicas
+and the graphs per shard the capacity rows do not carry. `AGGREGATION_MATERIALIZE_FINE_PAIRS=
 true` restores the legacy full cube (budget-guarded); jobs without an
 ontology level map — or with a SINGLE-LEVEL map (no container types) —
 fall back to it automatically. An empty graph completes as a clean
@@ -375,6 +382,43 @@ the **first checkpoint**, before any graph work. Resume rules:
   (`data_source_state.observed_tuning`) and seeds the next run's ladder
   where it is stricter than the knobs (`ignoreObserved` opts out).
 
+### Replication backpressure, outage holds, and failing-over reads
+
+Three behaviours keep a rebuild from taking a shard down, and keep users from
+seeing it as an outage when a node is replaced anyway.
+
+- **The replica gate.** After every apply/delete batch the pipeline asks the
+  master how many replicas have acknowledged (`WAIT replicaAckMin
+  replicaAckTimeoutMs`). Acknowledged: the wait time joins the write's latency,
+  so a replica-bound shard shrinks batches and paces itself exactly like a slow
+  master. Not acknowledged: the run HOLDS — heartbeating, re-reading
+  replication state, retrying — bounded only by the job's stall window, and
+  releasable live by setting `replicaAckMin` to 0. A master with no replicas
+  attached never waits. The run records `replica_waits`, `replica_wait_s`,
+  `replica_holds` and `replica_max_lag_bytes`, and warns at the start when a
+  master has replicas and an `EFFECTS_THRESHOLD` above 0 (see
+  `FALKORDB_DEPLOYMENT.md` §5aa — that is the setting that decides whether a
+  replica applies a change log or re-runs your whole batch).
+- **The outage hold.** A refused connection is not pressure: narrowing a query
+  does not help a node that is not there. Any connection fault inside the
+  ladder becomes a wait — heartbeat, backoff, re-resolve the owner (which finds
+  a promoted replica), then the SAME operation at the SAME width from the same
+  checkpoint — bounded by `AGGREGATION_STORE_OUTAGE_HOLD_S`. Past that the run
+  fails with `MaterializationStoreUnreachable`, whose message names the node,
+  how long it waited and what to check; the worker reports it as
+  `reason: "connection"` and the job resumes from its checkpoint.
+- **Failing-over reads.** When a cluster node stops answering, the provider
+  reports `ProviderFailingOver` — a logical exception the circuit breaker never
+  counts, so a routine pod rotation can no longer answer every user with
+  "Circuit open" for a reset window. A read gives up after one topology
+  re-resolve (and for the next couple of seconds is answered from a short memo
+  without dialling the dead address, so a hundred concurrent readers cost one
+  socket); the API maps it to 503 `PROVIDER_FAILING_OVER` with `Retry-After: 3`
+  and the endpoint; the canvas serves its last good document with
+  `staleReason: "failing_over"` behind a "Reconnecting" line and retries
+  itself. Writes still spend the whole failover window, because the rebuild is
+  the one caller that should keep trying.
+
 ## Tuning
 
 Resolution order per knob: **job `tuning` (frozen at trigger) → the
@@ -412,7 +456,11 @@ pipeline).
 | `AGGREGATION_MAX_CUBE_EDGES` | 8000000 | Ceiling on the AUTO-mode full-cube estimate (10k-50M). Deliberately separate from the write budget: sharing them meant raising the backstop silently turned `auto` into full-cube. Fleet-wide from Defaults as `maxCubeEdges` (the run warns when it sits above an explicit edge ceiling); not per-job |
 | `AGGREGATION_BUDGET_RECHECK_EDGES` | 1000000 | Write budget: how many first-touch edges APPLY writes between re-reads of the owning shard. A shard that fills up mid-run (another graph landing on it) is refused loudly after a checkpoint — resumable from the cursor — instead of at its cap (100k-100M) |
 | `AGGREGATION_CAPACITY_CACHE_TTL_S` | 10 | Capacity API: how long one fleet sweep is served to every viewer before the next |
-| `AGGREGATION_CAPACITY_DEADLINE_S` | 8 | Capacity API: the fleet sweep's deadline; sources not reached are reported as unresolved |
+| `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | 30 | How long one reading of every node is served to every viewer (and to the capacity API) before the next |
+| `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | 8 | Deadline for reading all nodes concurrently; a node not read in time is reported as unreachable with that reason, never dropped |
+| `AGGREGATION_REPLICA_ACK_MIN` | 1 | Replicas of the write node that must acknowledge each rollup batch before the next is sent (0-5). 0 disables the gate. Per-job / Defaults as `replicaAckMin`, and raisable or clearable on a RUNNING job |
+| `AGGREGATION_REPLICA_ACK_TIMEOUT_MS` | 5000 | How long one acknowledgement wait may block before the run holds, re-reads replication state and retries (500-60000). Per-job / Defaults as `replicaAckTimeoutMs` |
+| `AGGREGATION_STORE_OUTAGE_HOLD_S` | 900 | How long one run waits out a graph store node that is not answering before giving up and keeping its checkpoint (30-7200) |
 | `AGGREGATION_CAPACITY_MAX_SOURCES` | 500 | Capacity API: sources per sweep, largest first; the response says when it was truncated |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves). Cappable live on a running job (Serial reads), from the next wave |

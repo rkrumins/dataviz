@@ -318,19 +318,27 @@ Node `n4-highmem-8` (8 vCPU / 64 GB), requests ≈ limits (the pod owns the node
 
 ```conf
 cluster-enabled yes
-cluster-node-timeout 5000
+cluster-node-timeout 15000            # a busy node is not a dead node; 5s started elections during heavy rebuilds
 cluster-require-full-coverage no      # a dead shard must not take down reads on the other two
 cluster-migration-barrier 1
-maxmemory 40gb                        # ~62% of the 64 GB node; the rest covers fork COW, replica buffers, query memory
+maxmemory 32gb                        # sized by the rule below, not by a share of the node
 maxmemory-policy noeviction           # Redis must never silently evict a graph key; eviction is the app's job (budgets below)
 appendonly yes
 appendfsync everysec
 save 3600 1                           # hourly RDB floor; the DR CronJob triggers explicit BGSAVE
-repl-backlog-size 256mb
+repl-backlog-size 1gb                 # the catch-up window; a rebuild fills 256mb in seconds and forces full resyncs
 repl-diskless-sync yes
+repl-timeout 300                      # a full resync of a large shard takes longer than a minute
+client-output-buffer-limit replica 2gb 1gb 300   # overflow drops the replica and forces a full resync under the same load
 ```
 
-FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  CACHE_SIZE 40  QUERY_MEM_CAPACITY 2147483648  TIMEOUT_MAX 120000  MAX_QUEUED_QUERIES 150` — `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O + AOF rewrite + replication; `QUERY_MEM_CAPACITY` 2 GiB bounds a runaway Cypher query. PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 6× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` (RDB load of a full shard is minutes).
+FalkorDB module args (env `FALKORDB_ARGS`): `THREAD_COUNT 6  OMP_THREAD_COUNT 1  CACHE_SIZE 40  QUERY_MEM_CAPACITY 1610612736  TIMEOUT_MAX 120000  TIMEOUT_DEFAULT 30000  MAX_QUEUED_QUERIES 150  EFFECTS_THRESHOLD 0`.
+
+- `THREAD_COUNT 6` (of 8) reserves cores for Redis I/O, AOF rewrite and replication; `OMP_THREAD_COUNT 1` stops one query spawning a thread per core inside the engine.
+- **The memory numbers come from the sizing rule, not from a share of the node**: `1.25 × maxmemory + THREAD_COUNT × 1.3 × QUERY_MEM_CAPACITY + 1 GiB` must fit the container limit. At 32 GiB and a 1.5 GiB ceiling that is 52.7 GiB inside a 56 GiB limit. The previous pairing (40 GiB and 2 GiB) needed **66.6 GiB** — above the limit, so a shard under load could be OOM-killed while every figure inside Redis looked healthy. Check what each shard currently holds before lowering `maxmemory`.
+- `EFFECTS_THRESHOLD 0` makes writes replicate as a compact change log instead of being **re-run on each replica's main thread** — the mechanism that took whole shards down during rebuilds (`FALKORDB_DEPLOYMENT.md` §5aa).
+
+PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB growth between rewrites. `terminationGracePeriodSeconds: 120` for final AOF fsync + failover handoff. Liveness `initialDelaySeconds: 60` with `timeoutSeconds: 10` and `failureThreshold: 6` — a node busy applying replication is not a dead process, and the readiness probe already takes it out of rotation.
 
 ### 7.3 Mandatory application settings in cluster mode
 

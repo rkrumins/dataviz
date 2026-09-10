@@ -95,8 +95,8 @@ shows *Going slower to fit the graph store* while it happens, and every
 run's **Run settings** disclosure lists what it ran with and what it adapted
 to. It remembers per source, so the next rebuild starts there. If a run does
 fail: a *single row* larger than the per-query memory ceiling means the
-ceiling (`QUERY_MEM_CAPACITY`) must be raised — **Infrastructure → Memory
-headroom → Adjust graph store limits** does it at runtime and checks the
+ceiling (`QUERY_MEM_CAPACITY`) must be raised — **Admin → Graph store →
+Adjust limits** does it at runtime and checks the
 container memory limit first, and the failed source's guidance links straight
 to it; a narrowest scan that kept timing out means the store stopped
 answering — check it, then **Resume from cursor** (raise the store's query
@@ -107,6 +107,45 @@ with **Adjust this run**, without cancelling it. The canvas's own reads narrow
 the same way under those limits; when one still loses part of the answer, the
 canvas says which limit refused it and offers the same *Adjust graph store
 limits* control to a system administrator. See [Rollup capacity](/guide/rollup-capacity).
+
+### A rebuild failed with "connection refused" or "error 111"
+
+A graph store node stopped answering during the run. This is almost always a
+node being **restarted or replaced** rather than a store that is gone, and the
+rebuild is built for it: it waits for the node, reconnects to it (or to the
+replica the cluster promotes in its place), and carries on from its checkpoint
+at the same width. You only see a failure when the node stayed away longer
+than the run's wait (`AGGREGATION_STORE_OUTAGE_HOLD_S`, 15 minutes by
+default) — and then the message names the node and how long it waited.
+
+1. Open **Admin → Graph store**. The node will be *Unreachable*, or *Up* with
+   "restarted N min ago". The page also shows whether its replicas kept up.
+2. Ask the cluster why it went:
+
+   ```
+   kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'
+   ```
+
+   `OOMKilled` means the container limit is too small for the node's
+   `maxmemory` plus its per-query ceilings — see the sizing rule in the
+   FalkorDB deployment guide. Anything else usually means a health probe gave
+   up while the node was busy.
+3. If it happened **during a rebuild**, look at that shard's replication on
+   the same page. A replica that is behind, a climbing full-resync count, or
+   an effects threshold above 0 all point at the same cause: replicas
+   re-running every write batch on their main thread until they miss their
+   probes. Set the effects threshold to 0 from **Adjust limits** (apply to all
+   nodes) and add `EFFECTS_THRESHOLD 0` to the deployment's `FALKORDB_ARGS`.
+4. Resume the run from the failed source's guidance. Nothing already written
+   is repeated.
+
+**"Provider X unavailable: Circuit open; will probe downstream again in ~28s"**
+is the old shape of this: the breaker treating a node being replaced as a
+broken store and answering every user that way for a reset window. That no
+longer happens — a failover is reported as its own signal, users see
+"Reconnecting to the graph store" over their existing data, and reads retry
+themselves. If you do see it, the store is genuinely not answering: check the
+nodes on Admin → Graph store.
 
 ### I changed an ontology and many Views shifted
 - That's expected if a new version was assigned — check the **audit trail** to see

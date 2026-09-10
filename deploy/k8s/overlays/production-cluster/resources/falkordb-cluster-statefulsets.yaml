@@ -82,28 +82,48 @@ spec:
             # for Redis I/O + AOF rewrite + replication; QUERY_MEM_CAPACITY
             # 2 GiB bounds a runaway Cypher query.
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 CACHE_SIZE 40 QUERY_MEM_CAPACITY 2147483648 TIMEOUT_MAX 120000 MAX_QUEUED_QUERIES 150"
-            # maxmemory 40gb ≈ 62% of the 64 GB node; the rest covers fork
-            # COW, replica buffers, query memory. noeviction: Redis must
-            # never silently evict a graph key — eviction is the app's job
-            # (GRAPHVER_FALKOR_BUDGETS, doc §7.3).
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1610612736 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
+            # Sizing, by the deployment guide's own rule:
+            #   1.25 × maxmemory + THREAD_COUNT × 1.3 × QUERY_MEM_CAPACITY + 1 GiB
+            #   = 1.25 × 32 + 6 × 1.3 × 1.5 + 1 = 52.7 GiB ≤ the 56 GiB limit.
+            # It did NOT fit before: 40 GiB maxmemory with a 2 GiB per-query
+            # ceiling needs 66.6 GiB, so a shard under load could be OOM-killed
+            # by the kubelet while every figure inside Redis looked healthy.
+            #
+            # BEFORE APPLYING: check what each shard currently holds
+            # (`redis-cli info memory | grep used_memory_human`, or Admin →
+            # Graph store). A shard already above 32 GiB will refuse writes
+            # the moment this lands. If one is, lower QUERY_MEM_CAPACITY or
+            # THREAD_COUNT to buy the headroom back instead, or move to a
+            # larger machine type — do not raise maxmemory past the formula.
+            #
+            # noeviction: Redis must never silently evict a graph key —
+            # eviction is the app's job (GRAPHVER_FALKOR_BUDGETS, doc §7.3).
+            #
+            # OMP_THREAD_COUNT 1 keeps one query from spawning a thread per
+            # core inside the engine; EFFECTS_THRESHOLD 0 makes every write
+            # replicate as a compact change log instead of being RE-RUN on
+            # each replica's main thread, which is what stopped replicas
+            # answering their health probes during a large rebuild.
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
                 --cluster-config-file /data/nodes.conf
-                --cluster-node-timeout 5000
+                --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
                 --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
                 --cluster-preferred-endpoint-type hostname
-                --maxmemory 40gb
+                --maxmemory 32gb
                 --maxmemory-policy noeviction
                 --appendonly yes
                 --appendfsync everysec
                 --aof-load-truncated yes
                 --save 3600 1
-                --repl-backlog-size 256mb
+                --repl-backlog-size 1gb
                 --repl-diskless-sync yes
+                --repl-timeout 300
+                --client-output-buffer-limit replica 2gb 1gb 300
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -137,10 +157,15 @@ spec:
               # LOADING = alive and replaying — killing it restarts the
               # replay from scratch (see the base StatefulSet's history).
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
-            # RDB load of a full 40 GB shard takes minutes (doc §7.2).
+            # RDB load of a full shard takes minutes (doc §7.2).
             initialDelaySeconds: 60
             periodSeconds: 10
-            timeoutSeconds: 3
+            # A busy main thread is not a dead process. At 3s × 3 failures a
+            # replica replaying a heavy write was restarted after ~30s, which
+            # took its shard's availability with it. 10s × 6 gives a busy node
+            # a minute to answer before the kubelet gives up on it.
+            timeoutSeconds: 10
+            failureThreshold: 6
           volumeMounts:
             - name: falkordb-data
               mountPath: /data
@@ -215,24 +240,26 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 CACHE_SIZE 40 QUERY_MEM_CAPACITY 2147483648 TIMEOUT_MAX 120000 MAX_QUEUED_QUERIES 150"
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1610612736 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
                 --cluster-config-file /data/nodes.conf
-                --cluster-node-timeout 5000
+                --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
                 --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
                 --cluster-preferred-endpoint-type hostname
-                --maxmemory 40gb
+                --maxmemory 32gb
                 --maxmemory-policy noeviction
                 --appendonly yes
                 --appendfsync everysec
                 --aof-load-truncated yes
                 --save 3600 1
-                --repl-backlog-size 256mb
+                --repl-backlog-size 1gb
                 --repl-diskless-sync yes
+                --repl-timeout 300
+                --client-output-buffer-limit replica 2gb 1gb 300
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -261,7 +288,8 @@ spec:
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
             initialDelaySeconds: 60
             periodSeconds: 10
-            timeoutSeconds: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
           volumeMounts:
             - name: falkordb-data
               mountPath: /data
@@ -334,24 +362,26 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: FALKORDB_ARGS
-              value: "THREAD_COUNT 6 CACHE_SIZE 40 QUERY_MEM_CAPACITY 2147483648 TIMEOUT_MAX 120000 MAX_QUEUED_QUERIES 150"
+              value: "THREAD_COUNT 6 OMP_THREAD_COUNT 1 CACHE_SIZE 40 QUERY_MEM_CAPACITY 1610612736 TIMEOUT_MAX 120000 TIMEOUT_DEFAULT 30000 MAX_QUEUED_QUERIES 150 EFFECTS_THRESHOLD 0"
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
                 --cluster-config-file /data/nodes.conf
-                --cluster-node-timeout 5000
+                --cluster-node-timeout 15000
                 --cluster-require-full-coverage no
                 --cluster-migration-barrier 1
                 --cluster-announce-hostname $(POD_NAME).falkordb-cluster.synodic.svc.cluster.local
                 --cluster-preferred-endpoint-type hostname
-                --maxmemory 40gb
+                --maxmemory 32gb
                 --maxmemory-policy noeviction
                 --appendonly yes
                 --appendfsync everysec
                 --aof-load-truncated yes
                 --save 3600 1
-                --repl-backlog-size 256mb
+                --repl-backlog-size 1gb
                 --repl-diskless-sync yes
+                --repl-timeout 300
+                --client-output-buffer-limit replica 2gb 1gb 300
             # Probe auth: redis-cli reads REDISCLI_AUTH natively. optional +
             # empty-guarded so unauthenticated shards are unchanged; set
             # FALKORDB_PASSWORD in app-secrets when REDIS_ARGS gains
@@ -380,7 +410,8 @@ spec:
               command: ["sh", "-c", "[ -n \"$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping 2>/dev/null | grep -qE 'PONG|LOADING'"]
             initialDelaySeconds: 60
             periodSeconds: 10
-            timeoutSeconds: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
           volumeMounts:
             - name: falkordb-data
               mountPath: /data

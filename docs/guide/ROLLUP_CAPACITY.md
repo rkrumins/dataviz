@@ -46,25 +46,41 @@ the node to let the budget read real headroom.
 
 ## Where to see it
 
-**Ingestion → Freshness → Graph store capacity.** One row per shard: a meter of
-memory in use with the reserve marked on it, what is free after the reserve
+**Admin → Graph store** is the whole picture: every node of every graph store,
+masters and replicas, with what each holds, how far its replicas are behind,
+the graphs on each shard and which data source owns them. Start there when a
+figure below looks wrong — the pages here are summaries of that one reading.
+
+**Ingestion → Freshness → Graph store capacity.** One row per master: a meter
+of memory in use with the reserve marked on it, what is free after the reserve
 (and what running rebuilds already hold), how many more rollup edges that is,
-and the sources whose rollups live there.
-Click a source to open its drawer. A shard that cannot be measured says why. A
-red **would not fit** count filters the table to the sources whose last rebuild
-was refused. **Re-measure** takes a fresh reading.
+and the sources whose rollups live there. Every master appears, with or without
+sources on it; a node that answered but has no `maxmemory` says *Cannot govern*
+and a node that did not answer says *Unreachable*, with the reason. The rows
+keep the snapshot's order, so they do not move under you as memory does. Click
+a source to open its drawer. A red **would not fit** count filters the table to
+the sources whose last rebuild was refused. **Re-measure** takes a fresh
+reading.
+
+**A source's profile → Where this lives.** Which node holds this source's
+graph, its shard and slot, that node's health and memory, its replicas and
+their lag, and how many other graphs share the shard. In dedicated projection
+mode the rollups have their own graph key, which can hash to a different shard
+— the card shows both and says so.
 
 **A source's drawer → Capacity.** This source's footprint (edges × bytes per
 edge, measured by its last rebuild or the planning figure until then), its
-shard's headroom, what the last rebuild decided to store, and a pre-flight:
+placement, its shard's headroom, what the last rebuild decided to store, and a
+pre-flight:
 whether **Full detail** would fit today, and what **Auto** would store.
 
 **Job History → Re-trigger.** The same pre-flight at the top of the dialog,
 re-decided as you change Rollup storage, the reserve, bytes per edge or the
 ceiling in the form — so you know before the job is queued.
 
-**Admin → Infrastructure → Memory headroom.** Every measurable node, always,
-with the rollup reserve marked and what still fits.
+**Admin → Infrastructure → Memory headroom.** The masters this deployment's
+health probe reached, with the rollup reserve marked and what still fits. It
+links to Admin → Graph store for the replicas and lag it cannot see.
 
 ---
 
@@ -84,7 +100,7 @@ the source's Rollup storage override → the fleet Defaults → the environment.
 | **Memory flush** | The share of the rebuild worker's own memory limit at which the pipeline writes the pairs it holds to the graph early and frees them — however many there are — so a graph that produces more pairs than the worker can hold flushes instead of being OOM-killed. Default 60%. Needs the worker's cgroup limit to be readable and at least the deployment's minimum pairs in memory. | Defaults dialog (fleet) |
 | **Scan floor** | The narrowest scan slice a rebuild descends to under the graph store's per-query pressure before it concludes that one row is too large. Default 1 row: the rebuild narrows all the way. | Defaults dialog, or per job |
 | **Scan timeout / Write timeout** | How long one read scan, or one write or delete batch, may run before the store aborts it. Capped by the store's own `TIMEOUT_MAX`, read from the node — the editors say so, and an administrator can raise the cap from Infrastructure. | Defaults dialog, or per job; raisable on a running job |
-| **Graph store limits** | The store's own per-query time cap (`TIMEOUT_MAX`) and memory ceiling (`QUERY_MEM_CAPACITY`), set on the node at runtime and guarded by the container sizing rule. | Infrastructure → Memory headroom → *Adjust graph store limits* (system administrators) |
+| **Graph store limits** | The store's own per-query time cap (`TIMEOUT_MAX`), memory ceiling (`QUERY_MEM_CAPACITY`) and effects threshold (`EFFECTS_THRESHOLD` — whether replicas apply a change log or re-run every write), set on the node at runtime and guarded by the container sizing rule. | Admin → Graph store → *Adjust limits* (system administrators) |
 | **Stall window** | How long a job may make no forward progress before the watchdog kills it. The per-job *Stall timeout* wins over the fleet default; narrowed scans and backoff retries count as progress. | Defaults dialog (fleet), per job as Stall timeout; raisable on a running job |
 | **Wall clock** | The longest a job may run in total, never lower than its stall window. | Defaults dialog, or per job; raisable on a running job |
 
@@ -211,9 +227,10 @@ Two limits belong to the graph store itself, not to a rebuild: the
 clamped to it) and the **per-query memory ceiling** (`QUERY_MEM_CAPACITY` —
 the one thing a rebuild cannot narrow its way past when a single row exceeds
 it). Both accept a runtime change, so a system administrator can adjust them
-without a redeploy: **Infrastructure → Memory headroom**, where every node
-the capacity sweep placed shows its limits (*per-query memory 512 MB · query
-time cap 180 s · 4 threads*) and an **Adjust graph store limits** control. The
+without a redeploy: **Admin → Graph store**, where every node shows its
+limits (*per-query limit 512 MB · query time cap 180 s · 4 query threads*) and
+an **Adjust limits** control — including a node holding no rollups yet, and
+every node of the instance at once when a change must survive a failover. The
 same dialog is one click from a failed source's guidance (*Raise the
 per-query limit on …*) and from the Gentle pre-selection in the re-trigger
 dialog.
