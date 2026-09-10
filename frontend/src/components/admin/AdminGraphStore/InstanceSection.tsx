@@ -1,7 +1,7 @@
 /**
  * One graph store instance: which providers point at it, how it was
- * discovered, how the load is spread across its shards, and then either the
- * shard cards or a flat list of every node.
+ * discovered, how the load is spread across its shards, and then the
+ * replication picture, the shard cards, or a flat list of every node.
  *
  * The distribution bar answers the question a list of cards cannot: is this
  * cluster balanced? Three shards that each hold a third of the memory is a
@@ -9,11 +9,13 @@
  * refusing on one node while the others look empty.
  */
 import { Link } from 'react-router-dom'
+import { Server } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { GraphStoreInstance } from '@/services/graphStoreService'
 import { compactBytes } from '../shared/aggregationKnobs'
 import { ShardCard } from './ShardCard'
 import { NodesTable } from './NodesTable'
+import { ReplicationMap } from './ReplicationMap'
 
 const SHARD_TONES = [
     'bg-indigo-500', 'bg-emerald-500', 'bg-amber-500', 'bg-sky-500',
@@ -63,7 +65,7 @@ function DistributionBar({ instance, by }: { instance: GraphStoreInstance; by: '
 
 export function InstanceSection({ instance, view, reservePct, canAdjustLimits, focusedShard, onOpenSource }: {
     instance: GraphStoreInstance
-    view: 'shards' | 'nodes'
+    view: 'replication' | 'shards' | 'nodes'
     reservePct?: number | null
     canAdjustLimits?: boolean
     /** `${instanceId}:${index}` of the shard to ring, from ``?shard=``. */
@@ -78,6 +80,9 @@ export function InstanceSection({ instance, view, reservePct, canAdjustLimits, f
         <section className="rounded-2xl border border-glass-border bg-canvas-elevated overflow-hidden">
             <header className="px-4 pt-3.5 pb-3 border-b border-glass-border">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/15 to-violet-600/10">
+                        <Server className="h-4 w-4 text-indigo-500" />
+                    </span>
                     <h3 className="text-[13px] font-semibold text-ink">
                         {/* A store is named by the provider rows that point
                             at it — several rows on one cluster share a card,
@@ -141,6 +146,8 @@ export function InstanceSection({ instance, view, reservePct, canAdjustLimits, f
                     <p className="py-2 text-[11px] text-ink-muted">No nodes were discovered for this store.</p>
                 ) : view === 'nodes' ? (
                     <NodesTable instance={instance} />
+                ) : view === 'replication' ? (
+                    <ReplicationMap instance={instance} reservePct={reservePct} />
                 ) : (
                     <div className="space-y-3">
                         {instance.shards.map(shard => (

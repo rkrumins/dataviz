@@ -63,10 +63,24 @@ its graphs, how full its fullest master is, and how many replication findings
 it has. That is the level to compare stores on and to notice which one needs
 attention.
 
-Opening a store is the second level: its shard cards, every node on them, the
-capacity arithmetic and the graphs that live there. A deployment with a single
-store opens it straight away, and "Open in Graph store" from a data source or
-a provider lands directly on the store that holds it.
+Opening a store is the second level, in three views:
+
+- **Replication** (what you land on): every master this store owns, and the
+  replicas standing behind each one. Each master sits on a tile coloured by
+  its health with its slot range, its memory against its ceiling and how many
+  more rollup edges it fits; its replicas hang off a line beneath it, each
+  naming the master it follows, its link status and how far behind it is. A
+  master with *no* replica says so in amber — if it goes away, nothing can be
+  promoted in its place. A master that is not answering says that its replicas
+  are carrying the reads.
+- **By shard**: the same nodes, plus the capacity arithmetic and every graph
+  that lives on the shard, searchable.
+- **All nodes**: one flat row per node — the answer to "are all nine up?" that
+  a stack of cards makes you count.
+
+A deployment with a single store opens it straight away, and "Open in Graph
+store" from a data source or a provider lands directly on the store that holds
+it.
 
 ### The strip at the top
 

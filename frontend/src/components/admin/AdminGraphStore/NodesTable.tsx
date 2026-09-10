@@ -24,6 +24,11 @@ function rowsOf(instance: GraphStoreInstance): Row[] {
 
 export function NodesTable({ instance, compact }: { instance: GraphStoreInstance; compact?: boolean }) {
     const rows = rowsOf(instance)
+    // The shard a replica was discovered under, for the rare node whose own
+    // INFO could not be read: the topology still knows whose it is.
+    const masterOf = new Map<string, string>(
+        instance.shards.flatMap(s => s.replicas.map(r => [r.endpoint, s.master.endpoint] as const)),
+    )
     if (rows.length === 0) return null
     return (
         <div className="overflow-x-auto" data-testid="graph-store-nodes-table">
@@ -55,8 +60,11 @@ export function NodesTable({ instance, compact }: { instance: GraphStoreInstance
                                     {used == null ? '—' : max ? `${compactBytes(used)} / ${compactBytes(max)}` : compactBytes(used)}
                                 </td>
                                 <td className="py-1.5 pr-3 text-[11px] text-ink-muted whitespace-nowrap">
+                                    {/* A replica names the master it follows: link status and
+                                        lag say how it is going, not which node it is going with,
+                                        and on nine rows that is the question. */}
                                     {node.role === 'replica'
-                                        ? `${node.replication?.masterLinkStatus ?? 'link unknown'} · ${lagLabel(node.replication?.lagBytes)}`
+                                        ? `replica of ${node.replication?.masterEndpoint ?? masterOf.get(node.endpoint) ?? 'unknown'} · ${node.replication?.masterLinkStatus ?? 'link unknown'} · ${lagLabel(node.replication?.lagBytes)}`
                                         : `${node.replication?.connectedReplicas ?? 0} replica${(node.replication?.connectedReplicas ?? 0) === 1 ? '' : 's'} attached`}
                                 </td>
                                 {!compact && (

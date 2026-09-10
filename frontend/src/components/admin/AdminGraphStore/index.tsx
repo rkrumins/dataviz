@@ -107,7 +107,12 @@ export function AdminGraphStore() {
     const [remeasuring, setRemeasuring] = useState(false)
 
     const data = topology.data
-    const view = searchParams.get('view') === 'nodes' ? 'nodes' : 'shards'
+    // Replication is what an operator opens a store to see: which masters
+    // there are and what is standing behind each. The other two answer
+    // narrower questions and stay one click away.
+    const viewParam = searchParams.get('view')
+    const view: 'replication' | 'shards' | 'nodes' =
+        viewParam === 'nodes' ? 'nodes' : viewParam === 'shards' ? 'shards' : 'replication'
     const focusedShard = searchParams.get('shard')
     const limitsFor = searchParams.get('limits')
 
@@ -230,11 +235,11 @@ export function AdminGraphStore() {
 
                     <div className="flex items-center gap-2">
                         <div className="inline-flex rounded-lg border border-glass-border overflow-hidden">
-                            {(['shards', 'nodes'] as const).map(v => (
+                            {(['replication', 'shards', 'nodes'] as const).map(v => (
                                 <button
                                     key={v}
                                     type="button"
-                                    onClick={() => setParam('view', v === 'shards' ? null : v)}
+                                    onClick={() => setParam('view', v === 'replication' ? null : v)}
                                     aria-pressed={view === v}
                                     className={cn(
                                         'h-7 px-2.5 text-[11px] font-semibold transition-colors',
@@ -243,7 +248,7 @@ export function AdminGraphStore() {
                                             : 'text-ink-muted hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03]',
                                     )}
                                 >
-                                    {v === 'shards' ? 'By shard' : 'All nodes'}
+                                    {v === 'replication' ? 'Replication' : v === 'shards' ? 'By shard' : 'All nodes'}
                                 </button>
                             ))}
                         </div>

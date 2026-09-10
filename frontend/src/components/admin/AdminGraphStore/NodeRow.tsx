@@ -129,6 +129,12 @@ export function NodeRow({ node, reservePct, fitsEdges, heldNote, canAdjustLimits
                 )}
                 {isReplica && (
                     <span className="text-[10px] text-ink-muted">
+                        {/* Which master, not just how it is going: on a shard
+                            card the pairing is positional, and positional is
+                            what nine nodes make unreadable. */}
+                        {node.replication?.masterEndpoint && (
+                            <>replica of <span className="font-mono">{node.replication.masterEndpoint}</span> · </>
+                        )}
                         link {node.replication?.masterLinkStatus ?? 'unknown'} · {lagLabel(node.replication?.lagBytes)}
                     </span>
                 )}

@@ -168,7 +168,7 @@ describe('Admin → Graph store', () => {
     })
 
     it('lays out each shard with its slots, its replicas and how far behind they are', async () => {
-        wrap()
+        wrap('/admin/graph-store?view=shards')
         expect(await screen.findByTestId('shard-card-0')).toBeInTheDocument()
         expect(screen.getByTestId('shard-card-1')).toBeInTheDocument()
         expect(screen.getByTestId('shard-card-2')).toBeInTheDocument()
@@ -183,7 +183,7 @@ describe('Admin → Graph store', () => {
     })
 
     it('names the replication finding and offers the fix on the node it applies to', async () => {
-        wrap()
+        wrap('/admin/graph-store?view=shards')
         const first = await screen.findByTestId('shard-card-0')
         expect(within(first).getByText(/Replicas re-run every rollup batch/)).toBeInTheDocument()
         expect(within(first).getByText(/Set the effects threshold to 0/)).toBeInTheDocument()
@@ -217,7 +217,7 @@ describe('Admin → Graph store', () => {
     })
 
     it('finds a graph and the source that owns it', async () => {
-        wrap()
+        wrap('/admin/graph-store?view=shards')
         const first = await screen.findByTestId('shard-card-0')
         expect(within(first).getByText('graph_0')).toBeInTheDocument()
         expect(within(first).getByText('Warehouse 0')).toBeInTheDocument()
@@ -239,7 +239,7 @@ describe('Admin → Graph store', () => {
         shard.graphsTotal = 40
         getTopology.mockResolvedValue(many)
 
-        wrap()
+        wrap('/admin/graph-store?view=shards')
         const card = await screen.findByTestId('shard-card-0')
         const search = within(card).getByLabelText(/Search the graphs on shard 1/)
         await userEvent.type(search, 'graph_many')
@@ -301,7 +301,7 @@ describe('Admin → Graph store', () => {
         expect(screen.queryByTestId('shard-card-0')).not.toBeInTheDocument()
 
         await userEvent.click(screen.getByTestId('store-row-i2'))
-        expect(await screen.findByTestId('shard-card-0')).toBeInTheDocument()
+        expect(await screen.findByTestId('replication-map')).toBeInTheDocument()
         expect(screen.queryByTestId('stores-overview')).not.toBeInTheDocument()
 
         await userEvent.click(screen.getByTestId('back-to-stores'))
@@ -312,30 +312,94 @@ describe('Admin → Graph store', () => {
         const second = instance({ id: 'i2', providers: [{ id: 'p2', name: 'Secondary graph', isActive: true }] })
         getTopology.mockResolvedValue(snapshot({ instances: [instance(), second] }))
         wrap('/admin/graph-store?shard=i2:1')
-        expect(await screen.findByTestId('shard-card-1')).toBeInTheDocument()
+        expect(await screen.findByTestId('replication-map')).toBeInTheDocument()
         expect(screen.queryByTestId('stores-overview')).not.toBeInTheDocument()
     })
 
     it('does not make you pick when there is only one store', async () => {
         wrap()
-        expect(await screen.findByTestId('shard-card-0')).toBeInTheDocument()
+        expect(await screen.findByTestId('replication-map')).toBeInTheDocument()
         expect(screen.queryByTestId('stores-overview')).not.toBeInTheDocument()
         expect(screen.queryByTestId('back-to-stores')).not.toBeInTheDocument()
     })
 
+    it('draws every master with the replicas standing behind it', async () => {
+        // The question a stack of sibling rows could not answer: which of
+        // these six replicas is following WHICH of these three masters.
+        wrap()
+        const map = await screen.findByTestId('replication-map')
+        for (let i = 0; i < 3; i += 1) {
+            const shard = within(map).getByTestId(`shard-replication-${i}`)
+            expect(within(shard).getByRole('heading', { name: `Shard ${i + 1}` })).toBeInTheDocument()
+            expect(within(shard).getByText(/Replicated to 2 nodes/)).toBeInTheDocument()
+            // Each replica names the master it follows, not just its lag —
+            // the master's own address, repeated once per replica, is what
+            // makes the pairing readable rather than positional.
+            // The address sits in its own <span> so it can be monospaced, so
+            // match on the line rather than on a single text node.
+            const follows = within(shard).getAllByText(
+                (_t, el) => el?.tagName === 'P'
+                    && (el.textContent ?? '').includes(`replica of 10.0.0.${i + 1}:6379`),
+            )
+            expect(follows).toHaveLength(2)
+        }
+        expect(within(map).getAllByText(/1\.2 GB behind/).length).toBeGreaterThanOrEqual(1)
+    })
+
+    it('says plainly when a master has nothing standing behind it', async () => {
+        const lonely = snapshot()
+        lonely.instances[0].shards[1].replicas = []
+        getTopology.mockResolvedValue(lonely)
+        wrap()
+        const shard = await screen.findByTestId('shard-replication-1')
+        expect(within(shard).getByText(/No replica is following this master/)).toBeInTheDocument()
+        expect(within(shard).getByText(/cannot be read or written meanwhile/)).toBeInTheDocument()
+    })
+
+    it('says the replicas are carrying the reads when their master is not answering', async () => {
+        const down = snapshot()
+        down.instances[0].shards[2].master = {
+            ...down.instances[0].shards[2].master, status: 'unreachable', error: 'connection refused',
+        }
+        getTopology.mockResolvedValue(down)
+        wrap()
+        const note = await screen.findByTestId('served-by-replicas-2')
+        expect(note.textContent).toMatch(/reads for its graphs are being served by the replicas/)
+        // …and a healthy shard says nothing of the kind.
+        expect(screen.queryByTestId('served-by-replicas-0')).not.toBeInTheDocument()
+    })
+
+    it('keeps the shard and node views one click away', async () => {
+        wrap()
+        expect(await screen.findByTestId('replication-map')).toBeInTheDocument()
+
+        await userEvent.click(screen.getByRole('button', { name: 'By shard' }))
+        expect(await screen.findByTestId('shard-card-0')).toBeInTheDocument()
+        expect(screen.queryByTestId('replication-map')).not.toBeInTheDocument()
+
+        await userEvent.click(screen.getByRole('button', { name: 'All nodes' }))
+        expect(await screen.findByTestId('graph-store-nodes-table')).toBeInTheDocument()
+    })
+
+    it('names each replica’s master in the flat node table too', async () => {
+        wrap('/admin/graph-store?view=nodes')
+        const table = await screen.findByTestId('graph-store-nodes-table')
+        expect(within(table).getAllByText(/replica of 10\.0\.0\.1:6379/)).toHaveLength(2)
+    })
+
     it('rings the shard a deep link points at', async () => {
-        wrap('/admin/graph-store?shard=i1:1')
+        wrap('/admin/graph-store?view=shards&shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')
         expect(focused.className).toMatch(/ring-2/)
         expect(screen.getByTestId('shard-card-0').className).not.toMatch(/ring-2/)
     })
 
     it('offers the limits link only to a system administrator', async () => {
-        wrap()
+        wrap('/admin/graph-store?view=shards')
         expect(await screen.findByTestId('adjust-limits-10.0.0.1:6379')).toBeInTheDocument()
 
         useAuthStore.setState({ permissions: { global: [], ws: {} } } as never)
-        wrap()
+        wrap('/admin/graph-store?view=shards')
         expect(screen.queryByTestId('adjust-limits-10.0.0.2:6379')).not.toBeInTheDocument()
     })
 
@@ -345,7 +409,7 @@ describe('Admin → Graph store', () => {
         }))
         wrap()
         expect(await screen.findByTestId('graph-store-stale-note')).toHaveTextContent(/no seed answered/)
-        expect(screen.getByTestId('shard-card-0')).toBeInTheDocument()
+        expect(screen.getByTestId('shard-replication-0')).toBeInTheDocument()
     })
 
     it('explains every term on the page for someone who did not build the cluster', async () => {

@@ -24,6 +24,15 @@ source's provider is required, so every graph the page accounts for belongs to a
 store, and the connection named by `FALKORDB_HOST` is no longer swept, counted into the fleet
 totals, or presented as a store an operator has no way to act on.
 
+**The replication picture, drawn.** Opening a graph store now lands on a Replication view:
+every master it owns on a tile coloured by its health — slot range, memory against its ceiling,
+room left for rollups — with its replicas on a line beneath it, each naming the master it
+follows, its link status and how far behind it is. A master with no replica standing behind it
+says so, because that is the shard that cannot be promoted out of trouble; a master that is not
+answering says its replicas are carrying the reads. The shard and node views are one click away,
+and every surface that lists a replica — the shard cards, the flat node table — now names the
+master it follows rather than leaving the pairing to the order of the rows.
+
 **Admin → Graph store: every node of every graph store, and what lives on it.** On a
 nine-node cluster the app showed three. The Infrastructure probe counted masters from the
 environment's own topology and the capacity card read only the nodes that owned an aggregated
@@ -70,6 +79,16 @@ connection fault, a `MOVED`, a dataset still loading — sends the same read to 
 a query the store refused for its size is raised as it stands, since running it again on the
 master would fail the same way and double the load the routing exists to shed. Each provider's
 topology line says what share of its reads replicas actually answered.
+
+**Reads outlive a master.** The lag gate asks the master how far behind its replicas are, so a
+master that could not answer produced an empty reading, no replica qualified, and every read was
+sent to the node that had just failed — while its replicas held the only copies of the graph.
+Three gates pointed the same way, and all three now yield: the lag reading falls back to the
+replicas the master vouched for when it last spoke; the failing-over memo, a verdict about the
+master, no longer fast-fails a read already addressed to a replica; and the settle window that
+pins a freshly written graph to its master gives way when that master is the node that went
+away. What comes back may be a little behind, and what would otherwise come back is nothing.
+Rebuilds are untouched — they pin themselves to the master for the whole run.
 
 **A node restarting is a pause, not an outage.** A refused connection inside a rebuild is now a
 wait: the run heartbeats, re-resolves the owner (finding the promoted replica), and retries the
