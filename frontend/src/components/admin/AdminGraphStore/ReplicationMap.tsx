@@ -113,11 +113,21 @@ function ReplicaRow({ replica, master, last }: {
                         </span>
                     )}
                 </div>
-                <p className="mt-0.5 text-[11px] text-ink-muted">
-                    replica of <span className="font-mono text-ink-secondary">{follows}</span>
-                    {' · '}link {link ?? 'unknown'}
-                    {' · '}{lagLabel(replica.replication?.lagBytes)}
-                </p>
+                {replica.role === 'master' ? (
+                    // Promoted, and the cluster has not caught up: reading the
+                    // line below off a node in this state said "replica of …,
+                    // link unknown, in step" about a node replicating nothing.
+                    <p className="mt-0.5 text-[11px] text-amber-700 dark:text-amber-400">
+                        This node now calls itself the master; the cluster still lists it under{' '}
+                        <span className="font-mono">{master.endpoint}</span>. A failover is in flight.
+                    </p>
+                ) : (
+                    <p className="mt-0.5 text-[11px] text-ink-muted">
+                        replica of <span className="font-mono text-ink-secondary">{follows}</span>
+                        {' · '}link {link ?? 'unknown'}
+                        {' · '}{lagLabel(replica.replication?.lagBytes)}
+                    </p>
+                )}
                 <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
                     <MemoryLine node={replica} />
                     {uptime && (
@@ -169,7 +179,9 @@ export function ShardReplication({ shard, reservePct }: {
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                         <h4 className="text-[12px] font-semibold text-ink">Shard {shard.index + 1}</h4>
                         <span className="font-mono text-[12px] text-ink-secondary break-all">{master.endpoint}</span>
-                        <span className="text-[10px] uppercase tracking-wide text-ink-muted">master</span>
+                        <span className="text-[10px] uppercase tracking-wide text-ink-muted">
+                            {master.role === 'replica' ? 'master (stepping down)' : 'master'}
+                        </span>
                         <HealthPill health={health} />
                         {master.gossip && (
                             <span className="text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-400">

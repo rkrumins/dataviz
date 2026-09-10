@@ -453,6 +453,39 @@ describe('Admin → Graph store', () => {
         )).toBeInTheDocument()
     })
 
+    it('says which node stepped down and which took over, mid-failover', async () => {
+        // The seconds a failover takes: the cluster still lists the old
+        // master over its slots, the node itself already says replica, and
+        // the replica that took over says master. Read positionally, the
+        // page said "replica of 10.0.0.1:6379 · link unknown · in step"
+        // about a node that was replicating nothing at all.
+        const failing = instance()
+        failing.shards[0].master = node('10.0.0.1:6379', { role: 'replica', announcedRole: 'master' })
+        failing.shards[0].replicas[0] = node('10.0.1.1:6379', {
+            role: 'master', announcedRole: 'replica', replication: { replicas: [] },
+        })
+        failing.shards[0].replication = {
+            ...failing.shards[0].replication,
+            replicasOnline: 1,
+            findings: [{
+                code: 'role_disagreement', severity: 'warn',
+                text: 'The cluster calls 10.0.1.1:6379 a replica; the node calls itself a master.',
+                fix: 'A failover is in flight.', endpoint: '10.0.1.1:6379',
+            }],
+        }
+        getTopology.mockResolvedValue(snapshot({ instances: [failing] }))
+        wrap()
+        const shard = await screen.findByTestId('shard-replication-0')
+        expect(within(shard).getByText('master (stepping down)')).toBeInTheDocument()
+        expect(within(shard).getByText(/This node now calls itself the master/)).toBeInTheDocument()
+        expect(within(shard).queryByText(/replica of 10\.0\.0\.1:6379/)).not.toBeInTheDocument()
+
+        // And the finding itself, where this store's findings are listed.
+        await userEvent.click(screen.getByRole('button', { name: 'By shard' }))
+        const card = await screen.findByTestId('shard-card-0')
+        expect(within(card).getByText(/the node calls itself a master/)).toBeInTheDocument()
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?view=shards&shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')

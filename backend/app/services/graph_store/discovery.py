@@ -660,6 +660,7 @@ async def read_node(
         "announced": node.announced,
         "nodeId": node.node_id,
         "role": node.role,
+        "announcedRole": node.role,
         "gossip": node.gossip,
         "status": "up",
         "error": None,
@@ -700,7 +701,10 @@ async def read_node(
         out["memory"] = info_parse.memory_stats(info)
         out["server"] = info_parse.server_stats(info)
         out["replication"] = info_parse.replication_stats(info)
-        # The announced role can lag a failover; INFO is authoritative.
+        # What the node says about itself, where the cluster has not caught
+        # up yet. Both are kept: the cluster's word decides where the node is
+        # drawn, the node's word decides what is said about it, and the two
+        # disagreeing is exactly what a failover in flight looks like.
         live_role = out["replication"].get("role")
         if live_role in ("master", "replica"):
             out["role"] = live_role
@@ -722,7 +726,13 @@ async def read_node(
                 cfg_pairs.get("cluster-node-timeout")),
         })
 
-        if want_graphs and out["role"] == "master":
+        # `want_graphs` is the shard's master POSITION, decided from CLUSTER
+        # NODES by the caller. Re-testing the live role here meant a master
+        # mid-failover — announced master, INFO already saying replica — was
+        # skipped, and every graph on that shard flipped to "not on the node"
+        # while the counts insisted nothing had happened. The shard's slots
+        # are read wherever the cluster says they are.
+        if want_graphs:
             from backend.app.providers.shard_capacity import _read_server_limits
 
             try:

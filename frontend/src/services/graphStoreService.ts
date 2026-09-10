@@ -82,6 +82,9 @@ export interface GraphStoreNode {
     announced?: string | null
     nodeId?: string | null
     role: 'master' | 'replica' | 'joining'
+    /** What CLUSTER NODES calls it, where `role` is what the node calls
+     *  itself. They disagree for the seconds a failover takes. */
+    announcedRole?: string | null
     status: 'up' | 'unreachable'
     error?: string | null
     latencyMs?: number | null

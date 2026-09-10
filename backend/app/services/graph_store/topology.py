@@ -380,6 +380,7 @@ def _node_from_read(raw: RawNode, read: Dict[str, Any],
         announced=read.get("announced"),
         node_id=read.get("nodeId"),
         role=read.get("role") or raw.role,
+        announced_role=read.get("announcedRole") or raw.role,
         status=read.get("status") or "up",
         error=read.get("error"),
         latency_ms=read.get("latencyMs"),
@@ -465,8 +466,12 @@ def _shard_findings(
     findings: List[ReplicationFinding] = []
     lags = [r.replication.lag_bytes for r in replicas
             if r.replication.lag_bytes is not None]
+    # A replica whose own INFO says "master" has been promoted and is no
+    # longer replicating anything: counting it online said "2 replicas · all
+    # online" for a shard that had, at that moment, none.
     online = sum(1 for r in replicas
-                 if r.status == "up" and r.replication.master_link_status in (None, "up"))
+                 if r.status == "up" and r.role == "replica"
+                 and r.replication.master_link_status in (None, "up"))
     threshold = master.limits.effects_threshold_us
 
     if replicas and threshold is not None and threshold > 0:
@@ -506,6 +511,18 @@ def _shard_findings(
                      "writes are arriving faster than this replica applies them."),
                 endpoint=replica.endpoint,
             ))
+    for node in (master, *replicas):
+        if node.status != "up" or node.announced_role in (None, node.role):
+            continue
+        findings.append(ReplicationFinding(
+            code="role_disagreement", severity="warn",
+            text=(f"The cluster calls {node.endpoint} a {node.announced_role}; "
+                  f"the node calls itself a {node.role}."),
+            fix=("A failover is in flight. The slots are read where the cluster "
+                 "puts them until it agrees; if this persists past a few seconds, "
+                 "check the cluster bus between this node and the others."),
+            endpoint=node.endpoint,
+        ))
     for node in (master, *replicas):
         prev = previous.get(_read_key(node)) or {}
         before, now = prev.get("syncFull"), node.server.sync_full
@@ -645,7 +662,8 @@ async def _read_all_nodes(
     for idx, node, _cfg, _want, _measure in jobs:
         results.setdefault((idx, _read_key(node)), {
             "endpoint": node.endpoint, "announced": node.announced,
-            "nodeId": node.node_id, "role": node.role, "gossip": node.gossip,
+            "nodeId": node.node_id, "role": node.role,
+            "announcedRole": node.role, "gossip": node.gossip,
             "status": "unreachable", "error": "not read before the deadline",
             "memory": {}, "replication": {}, "server": {}, "limits": {},
             "graphs": None, "graphMemory": None, "measured": {},
@@ -948,9 +966,11 @@ def _attach_graphs(
 
 
 def _totals(instance: GraphStoreInstance) -> InstanceTotals:
-    # Every node the cluster knows, so the figure matches `kubectl get pods`
-    # — and masters counted by ROLE, not by the column a node sits in, so a
-    # promoted replica is not counted as a master of itself.
+    # Every node the cluster knows, so the figure matches `kubectl get pods`.
+    # `masters` is one per shard — the page labels it "Master shards", and a
+    # shard has exactly one master position however a failover has left the
+    # roles inside it. Which node is filling that position, and whether it
+    # agrees, is the `role_disagreement` finding's job, not this count's.
     nodes = [n for s in instance.shards for n in (s.master, *s.replicas)]
     nodes += list(instance.unplaced_nodes)
     masters = [s.master for s in instance.shards]
@@ -970,6 +990,7 @@ def _totals(instance: GraphStoreInstance) -> InstanceTotals:
 
 def _summarize(instances: Sequence[GraphStoreInstance]) -> FleetSummary:
     nodes = [n for i in instances for s in i.shards for n in (s.master, *s.replicas)]
+    nodes += [n for i in instances for n in i.unplaced_nodes]
     used = [t for t in (i.totals.used_memory for i in instances) if t is not None]
     cap = [t for t in (i.totals.maxmemory for i in instances) if t is not None]
     return FleetSummary(
@@ -984,7 +1005,8 @@ def _summarize(instances: Sequence[GraphStoreInstance]) -> FleetSummary:
         used_memory=sum(used) if used else None,
         maxmemory=sum(cap) if cap else None,
         unreachable_nodes=sum(1 for n in nodes if n.status != "up"),
-        findings=sum(len(s.replication.findings) for i in instances for s in i.shards),
+        findings=(sum(len(s.replication.findings) for i in instances for s in i.shards)
+                  + sum(len(i.findings) for i in instances)),
     )
 
 

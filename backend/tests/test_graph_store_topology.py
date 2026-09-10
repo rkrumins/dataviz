@@ -817,6 +817,55 @@ def test_a_lagging_or_disconnected_replica_is_named(monkeypatch):
     assert "10.0.0.4:6379" in behind.text and "200.0 MB" in behind.text
 
 
+def test_a_failover_in_flight_keeps_the_shard_and_says_what_disagrees(monkeypatch):
+    """The moment a master hands over: the cluster still calls it the master
+    of its slots, its own INFO already says replica, and the replica that
+    took over says master.
+
+    Reading that node as a replica used to mean GRAPH.LIST was never sent to
+    it, so every graph on the shard flipped to "not found on the node" — a
+    page announcing data loss for a cluster that had merely failed over.
+    """
+    key = "g_alpha"
+    owner = next(i for i, (lo, hi) in enumerate(
+        [(0, 5460), (5461, 10922), (10923, 16383)])
+        if lo <= topology.key_slot(key) <= hi)
+    nodes = _cluster_nodes({"graphs": {MASTERS[owner]: [key]}})
+    nodes[MASTERS[owner]]["info"] = _replica_info(MASTERS[owner], REPLICAS_OF[MASTERS[owner]][0])
+    nodes[REPLICAS_OF[MASTERS[owner]][0]]["info"] = _master_info(
+        REPLICAS_OF[MASTERS[owner]][0], replicas=[])
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()],
+          data_sources=[(_ds("ds1", graph=key), "Workspace One")])
+
+    snap = _run(topology.get_topology_snapshot())
+    shard = snap.instances[0].shards[owner]
+    promoted = REPLICAS_OF[MASTERS[owner]][0]
+
+    # The slots are read where the cluster puts them, so the graph is there.
+    assert [g.key for g in shard.graphs if g.present] == [key]
+
+    # Both halves of the disagreement are named, on the nodes they are about.
+    disagreements = {f.endpoint: f for f in shard.replication.findings
+                     if f.code == "role_disagreement"}
+    assert set(disagreements) == {MASTERS[owner], promoted}
+    assert "calls itself a replica" in disagreements[MASTERS[owner]].text
+    assert "calls itself a master" in disagreements[promoted].text
+
+    # And the promoted node is not counted as an online replica of itself:
+    # one of the two is replicating, not both.
+    assert shard.replication.replicas_online == 1
+    assert shard.replication.replicas_total == 2
+
+
+def test_a_settled_cluster_reports_no_disagreement(monkeypatch):
+    nodes = _cluster_nodes({})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+    snap = _run(topology.get_topology_snapshot())
+    codes = {f.code for s in snap.instances[0].shards for f in s.replication.findings}
+    assert "role_disagreement" not in codes
+    assert all(s.replication.replicas_online == 2 for s in snap.instances[0].shards)
+
+
 def test_a_restart_and_a_resync_between_two_readings_are_reported(monkeypatch):
     """The evidence a restarted shard leaves: a new run id, and a resync
     count that grew. Nothing else in the product could say this happened."""

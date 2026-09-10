@@ -102,6 +102,10 @@ class GraphStoreNode(_Base):
     #: "joining" is a node mid-MEET: in the cluster, not yet part of it, and
     #: not a master however much the absence of a `slave` flag suggests it.
     role: Literal["master", "replica", "joining"] = "master"
+    #: What CLUSTER NODES calls this node, where `role` is what the node's own
+    #: INFO calls it. They disagree for the seconds a failover takes, and the
+    #: disagreement is the only signal that one is in flight.
+    announced_role: Optional[str] = Field(None, alias="announcedRole")
     status: Literal["up", "unreachable"] = "up"
     error: Optional[str] = None
     latency_ms: Optional[float] = Field(None, alias="latencyMs")
