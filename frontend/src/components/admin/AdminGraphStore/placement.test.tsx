@@ -159,7 +159,7 @@ describe('a provider’s own nodes', () => {
         expect(within(block).getByText('10.0.0.1:6379')).toBeInTheDocument()
         expect(within(block).getByText('10.0.1.1:6379')).toBeInTheDocument()
         expect(within(block).getByRole('link', { name: 'Open in Graph store' }))
-            .toHaveAttribute('href', '/admin/graph-store')
+            .toHaveAttribute('href', '/admin/graph-store?store=i1')
     })
 
     it('says what share of its reads replicas actually answered', async () => {

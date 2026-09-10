@@ -57,6 +57,17 @@ and the page does not show it — there is no "default graph store" to explain.
 
 ## Reading the page
 
+The page has two levels. The first is everything at once: the strip of fleet
+totals, then one line per store — its nodes, its slot coverage, its memory,
+its graphs, how full its fullest master is, and how many replication findings
+it has. That is the level to compare stores on and to notice which one needs
+attention.
+
+Opening a store is the second level: its shard cards, every node on them, the
+capacity arithmetic and the graphs that live there. A deployment with a single
+store opens it straight away, and "Open in Graph store" from a data source or
+a provider lands directly on the store that holds it.
+
 ### The strip at the top
 
 | Figure | What it means |

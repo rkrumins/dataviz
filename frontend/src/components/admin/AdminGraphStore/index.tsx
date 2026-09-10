@@ -16,8 +16,8 @@
  * per TTL, so a page full of viewers costs one pass over the nodes.
  */
 import { useCallback, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
-import { ChevronDown, ChevronRight, HardDrive, Loader2, RefreshCw } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { ChevronDown, ChevronLeft, ChevronRight, HardDrive, Loader2, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -28,6 +28,7 @@ import { useGraphStoreTopology, useRemeasureGraphStore } from '../shared/useGrap
 import type { FleetSummary } from '@/services/graphStoreService'
 import { InstanceSection } from './InstanceSection'
 import { UnreachableNodes } from './NodesTable'
+import { StoresOverview } from './StoresOverview'
 import { GLOSSARY } from './meta'
 
 function OverviewStrip({ summary }: { summary: FleetSummary }) {
@@ -110,6 +111,15 @@ export function AdminGraphStore() {
     const focusedShard = searchParams.get('shard')
     const limitsFor = searchParams.get('limits')
 
+    // Which store is open. A ``?shard=`` deep link names its store in the
+    // first half of its value, so arriving from a data source lands on that
+    // store rather than on a list the operator then has to search. With one
+    // store there is nothing to choose between, so it opens itself.
+    const stores = data?.instances ?? []
+    const requested = searchParams.get('store') ?? focusedShard?.split(':')[0] ?? null
+    const openStore = stores.find(i => i.id === requested)
+        ?? (stores.length === 1 ? stores[0] : null)
+
     const setParam = useCallback((key: string, value: string | null) => {
         setSearchParams(prev => {
             const p = new URLSearchParams(prev)
@@ -148,8 +158,9 @@ export function AdminGraphStore() {
                             <DocsLink slug="graph-store-topology" variant="icon" />
                         </h1>
                         <p className="text-sm text-ink-muted mt-1 max-w-3xl">
-                            Every node of every graph store this deployment talks to — masters and replicas — with what each
-                            one holds, how far its replicas have fallen behind, and which data source owns each graph.
+                            Every graph store this deployment talks to, totalled across all of them — then open one for
+                            its shards: every node, masters and replicas, what each holds, how far its replicas have
+                            fallen behind, how much room is left for rollups, and which data source owns each graph.
                         </p>
                     </div>
                 </div>
@@ -192,9 +203,30 @@ export function AdminGraphStore() {
                 </p>
             ) : (
                 <div className="space-y-4">
+                    {/* Across every provider first: the totals, then a line per
+                        store to compare them by. Opening one is the deep dive
+                        — its shards, its memory, its capacity. */}
                     <OverviewStrip summary={data.summary} />
                     <HowToRead />
                     <UnreachableNodes instances={data.instances} />
+
+                    {!openStore ? (
+                        <StoresOverview
+                            instances={data.instances}
+                            onOpen={id => setParam('store', id)}
+                        />
+                    ) : (
+                    <>
+                    {stores.length > 1 && (
+                        <button
+                            type="button"
+                            onClick={() => { setParam('shard', null); setParam('store', null) }}
+                            data-testid="back-to-stores"
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-ink-muted hover:text-ink"
+                        >
+                            <ChevronLeft className="w-3.5 h-3.5" /> All graph stores
+                        </button>
+                    )}
 
                     <div className="flex items-center gap-2">
                         <div className="inline-flex rounded-lg border border-glass-border overflow-hidden">
@@ -222,24 +254,14 @@ export function AdminGraphStore() {
                         )}
                     </div>
 
-                    {data.instances.length === 0 ? (
-                        <p className="py-6 text-[12px] text-ink-muted">
-                            No graph store is configured yet. Add a provider under{' '}
-                            <Link to="/ingestion?tab=providers" className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
-                                Ingestion → Providers
-                            </Link>.
-                        </p>
-                    ) : (
-                        data.instances.map(instance => (
-                            <InstanceSection
-                                key={instance.id}
-                                instance={instance}
-                                view={view}
-                                reservePct={reservePct}
-                                canAdjustLimits={isSystemAdmin}
-                                focusedShard={focusedShard}
-                            />
-                        ))
+                    <InstanceSection
+                        instance={openStore}
+                        view={view}
+                        reservePct={reservePct}
+                        canAdjustLimits={isSystemAdmin}
+                        focusedShard={focusedShard}
+                    />
+                    </>
                     )}
                 </div>
             )}

@@ -64,7 +64,10 @@ export function ProviderTopologyBlock({ providerId }: { providerId: string }) {
             <div className="flex items-center justify-between gap-2 mb-1">
                 <h4 className="text-[11px] font-semibold uppercase tracking-wide text-ink-muted">Nodes</h4>
                 <Link
-                    to="/admin/graph-store"
+                    /* Straight to THIS provider's store: with more than one,
+                       a bare link lands on the picker and asks the operator
+                       to find again what they were already looking at. */
+                    to={`/admin/graph-store?store=${encodeURIComponent(instance.id)}`}
                     className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
                 >
                     Open in Graph store

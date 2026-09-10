@@ -277,6 +277,49 @@ describe('Admin → Graph store', () => {
         expect(document.body.textContent ?? '').not.toContain('Default graph store')
     })
 
+    it('shows every store before any of them, then opens the one asked for', async () => {
+        // Stacking every store's shard cards meant a deployment with more
+        // than one had to be read end to end to answer "which of them is in
+        // trouble". A store is what an operator compares first.
+        const second = instance({
+            id: 'i2', providers: [{ id: 'p2', name: 'Secondary graph', isActive: true }],
+            totals: { masters: 1, replicas: 2, nodesUp: 2, nodesTotal: 3, graphs: 4,
+                      unregisteredGraphs: 1, usedMemory: 8 * GB, maxmemory: 40 * GB },
+        })
+        getTopology.mockResolvedValue(snapshot({ instances: [instance(), second] }))
+
+        wrap()
+        const list = await screen.findByTestId('stores-overview')
+        expect(within(list).getByText('Primary graph')).toBeInTheDocument()
+        expect(within(list).getByText('Secondary graph')).toBeInTheDocument()
+        expect(within(list).getByText(/2\/3 answering/)).toBeInTheDocument()
+        expect(within(list).getByText(/4 graphs \(1 unregistered\)/)).toBeInTheDocument()
+        // …and nothing is deep-dived into yet.
+        expect(screen.queryByTestId('shard-card-0')).not.toBeInTheDocument()
+
+        await userEvent.click(screen.getByTestId('store-row-i2'))
+        expect(await screen.findByTestId('shard-card-0')).toBeInTheDocument()
+        expect(screen.queryByTestId('stores-overview')).not.toBeInTheDocument()
+
+        await userEvent.click(screen.getByTestId('back-to-stores'))
+        expect(await screen.findByTestId('stores-overview')).toBeInTheDocument()
+    })
+
+    it('opens the store a data source’s deep link names, not a list to search', async () => {
+        const second = instance({ id: 'i2', providers: [{ id: 'p2', name: 'Secondary graph', isActive: true }] })
+        getTopology.mockResolvedValue(snapshot({ instances: [instance(), second] }))
+        wrap('/admin/graph-store?shard=i2:1')
+        expect(await screen.findByTestId('shard-card-1')).toBeInTheDocument()
+        expect(screen.queryByTestId('stores-overview')).not.toBeInTheDocument()
+    })
+
+    it('does not make you pick when there is only one store', async () => {
+        wrap()
+        expect(await screen.findByTestId('shard-card-0')).toBeInTheDocument()
+        expect(screen.queryByTestId('stores-overview')).not.toBeInTheDocument()
+        expect(screen.queryByTestId('back-to-stores')).not.toBeInTheDocument()
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')
