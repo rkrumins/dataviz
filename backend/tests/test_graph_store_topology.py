@@ -612,6 +612,27 @@ def test_the_slot_map_is_the_fallback_when_cluster_nodes_is_refused(monkeypatch)
     assert instance.shards[0].slot_ranges == [[0, 5460]]
 
 
+def test_discovery_asks_the_nodes_it_last_saw_before_the_configured_seeds(monkeypatch):
+    """A provider's seeds are its masters as they were on the day it was set
+    up, and masters move. When all three of those pods are gone the store
+    reads as unreachable while the cluster is perfectly healthy."""
+    asked: list = []
+
+    def _client(cfg, host, port, *, socket_timeout):
+        asked.append(f"{host}:{port}")
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(discovery, "node_client", _client)
+    cfg = load_connection_config(
+        {"mode": "cluster", "cluster": {"startupNodes": ["10.0.0.1:6379"]}},
+        host="10.0.0.1", port=6379, username=None, password=None,
+    )
+    _run(discovery.discover_cluster(cfg, 0.2, [("10.0.9.9", 6379)]))
+    # The node that answered last time first; the configured seed after it,
+    # and neither is asked twice.
+    assert asked[:2] == ["10.0.9.9:6379", "10.0.0.1:6379"]
+
+
 def test_a_store_that_cannot_be_reached_at_all_says_so(monkeypatch):
     _wire(monkeypatch, nodes={}, providers=[_provider()])
     snap = _run(topology.get_topology_snapshot())

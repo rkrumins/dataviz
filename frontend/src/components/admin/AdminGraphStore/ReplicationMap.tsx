@@ -235,7 +235,7 @@ export function ShardReplication({ shard, reservePct }: {
                     <ul className="mt-1.5">
                         {shard.replicas.map((replica, i) => (
                             <ReplicaRow
-                                key={replica.endpoint}
+                                key={replica.nodeId ?? replica.endpoint}
                                 replica={replica}
                                 master={master}
                                 last={i === shard.replicas.length - 1}
@@ -248,11 +248,48 @@ export function ShardReplication({ shard, reservePct }: {
     )
 }
 
+/** Why a node the cluster knows belongs to no shard. */
+function unplacedReason(node: GraphStoreNode): string {
+    if (node.role === 'joining') return 'still joining the cluster (mid-MEET)'
+    if (node.gossip === 'noaddr') return 'the cluster announces no address for it'
+    if (node.role === 'replica') return 'it follows a master this reading cannot see'
+    return 'the cluster places it in no shard'
+}
+
+function UnplacedNodes({ nodes }: { nodes: GraphStoreNode[] }) {
+    if (nodes.length === 0) return null
+    return (
+        <section
+            data-testid="unplaced-nodes"
+            className="rounded-xl border border-amber-500/25 bg-amber-500/[0.04] px-4 py-3"
+        >
+            <h4 className="text-[12px] font-semibold text-ink">
+                {nodes.length} node{nodes.length === 1 ? '' : 's'} in no shard
+            </h4>
+            <p className="mt-0.5 text-[11px] text-ink-muted">
+                The cluster knows these nodes but gives them no slots and no master. They used to be
+                either invented into a shard of their own or hung off whichever master owned slot 0 —
+                both of which say something the cluster never said.
+            </p>
+            <ul className="mt-2 space-y-1">
+                {nodes.map(node => (
+                    <li key={node.nodeId ?? node.endpoint} className="text-[11px] text-ink-muted">
+                        <span className="font-mono text-ink-secondary">{node.endpoint}</span>
+                        {' · '}{unplacedReason(node)}
+                        {node.error && ` · ${node.error}`}
+                    </li>
+                ))}
+            </ul>
+        </section>
+    )
+}
+
 export function ReplicationMap({ instance, reservePct }: {
     instance: GraphStoreInstance
     reservePct?: number | null
 }) {
-    if (instance.shards.length === 0) return null
+    const unplaced = instance.unplacedNodes ?? []
+    if (instance.shards.length === 0 && unplaced.length === 0) return null
     return (
         <div className="space-y-3" data-testid="replication-map">
             <p className="text-[11px] text-ink-muted">
@@ -263,6 +300,7 @@ export function ReplicationMap({ instance, reservePct }: {
             {instance.shards.map(shard => (
                 <ShardReplication key={shard.index} shard={shard} reservePct={reservePct} />
             ))}
+            <UnplacedNodes nodes={unplaced} />
         </div>
     )
 }

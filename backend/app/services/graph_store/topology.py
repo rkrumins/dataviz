@@ -673,7 +673,8 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         limits = effective_limits(await _stored_tuning(session))
 
     discovered = await asyncio.gather(*(
-        discovery.discover(slot.cfg) for slot in pending
+        discovery.discover(slot.cfg, extra_seeds=_seeds_last_seen(slot))
+        for slot in pending
     ), return_exceptions=True)
 
     paired: List[Tuple[_Pending, RawTopology]] = []
@@ -792,6 +793,33 @@ def _assemble_nodes(
         findings=_instance_findings(raw),
     )
     return instance
+
+
+def _seeds_last_seen(slot: "_Pending") -> List[Tuple[str, int]]:
+    """Nodes of this store the last good reading found, masters first.
+
+    A provider's configured seeds are the masters as they were the day it
+    was set up, and masters change: pods are replaced, roles move. When all
+    of them are gone the store reads as unreachable while the cluster is
+    perfectly healthy. The cluster's own last-known addresses are better
+    seeds than a list written months ago — and on a cold start there is
+    nothing but the configuration, which still works.
+    """
+    snapshot = _cache[1] if _cache is not None else None
+    if snapshot is None:
+        return []
+    wanted = {p.id for p in slot.providers}
+    out: List[Tuple[str, int]] = []
+    for instance in snapshot.instances:
+        if wanted and not wanted & {p.id for p in instance.providers}:
+            continue
+        ordered = [s.master for s in instance.shards]
+        ordered += [r for s in instance.shards for r in s.replicas]
+        for node in ordered:
+            host, _, port = node.endpoint.rpartition(":")
+            if host and port.isdigit() and node.status == "up":
+                out.append((host, int(port)))
+    return out
 
 
 def _instance_findings(raw: RawTopology) -> List[ReplicationFinding]:

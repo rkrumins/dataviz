@@ -407,6 +407,52 @@ describe('Admin → Graph store', () => {
         expect(document.body.textContent ?? '').not.toContain('No graph store is configured yet')
     })
 
+    it('lists a node the cluster knows but places in no shard, and says why', async () => {
+        // Before this, such a node was either given a shard of its own (a
+        // handshake counted as a master) or hung off whichever master owned
+        // slot 0 — both of which say something the cluster never said.
+        const drifting = instance({
+            unplacedNodes: [
+                node('10.0.3.1:6379', { nodeId: 'aaaa1111', role: 'joining', memory: {} }),
+                node(':0', { nodeId: 'bbbb2222', role: 'replica', gossip: 'noaddr', memory: {} }),
+                node('10.0.3.3:6379', { nodeId: 'cccc3333', role: 'replica', memory: {} }),
+            ],
+        })
+        getTopology.mockResolvedValue(snapshot({ instances: [drifting] }))
+        wrap()
+        const block = await screen.findByTestId('unplaced-nodes')
+        expect(within(block).getByText('3 nodes in no shard')).toBeInTheDocument()
+        expect(within(block).getByText(/still joining the cluster/)).toBeInTheDocument()
+        expect(within(block).getByText(/announces no address for it/)).toBeInTheDocument()
+        expect(within(block).getByText(/follows a master this reading cannot see/)).toBeInTheDocument()
+        // And they are nobody's replicas: the shards are untouched.
+        const first = within(screen.getByTestId('replication-map')).getByTestId('shard-replication-0')
+        expect(within(first).getByText(/Replicated to 2 nodes/)).toBeInTheDocument()
+    })
+
+    it('says when two nodes reach one address, and what the cluster counts', async () => {
+        const colliding = instance({
+            knownNodes: 11,
+            clusterState: 'ok',
+            findings: [{
+                code: 'endpoint_collision', severity: 'critical',
+                text: 'Two nodes answer at 10.0.0.1:6379: aaaa1111, dddd4444.',
+                fix: 'Give each pod its own announced address.',
+            }],
+        })
+        getTopology.mockResolvedValue(snapshot({ instances: [colliding] }))
+        wrap()
+        const findings = await screen.findByTestId('instance-findings')
+        expect(within(findings).getByText(/Two nodes answer at 10\.0\.0\.1:6379/)).toBeInTheDocument()
+        expect(within(findings).getByText(/Give each pod its own announced address/)).toBeInTheDocument()
+        // The cluster's own count, next to the nine rows the page drew.
+        expect(screen.getByText(
+            (_t, el) => el?.tagName === 'P'
+                && (el.textContent ?? '').includes('The cluster reports 11 known nodes')
+                && (el.textContent ?? '').includes('cluster state ok'),
+        )).toBeInTheDocument()
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?view=shards&shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')

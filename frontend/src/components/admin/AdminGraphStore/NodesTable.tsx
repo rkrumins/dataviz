@@ -19,6 +19,9 @@ function rowsOf(instance: GraphStoreInstance): Row[] {
         out.push({ node: shard.master, shard: shard.index })
         for (const replica of shard.replicas) out.push({ node: replica, shard: shard.index })
     }
+    // A node in no shard is still a node: the count here has to match the
+    // cluster's, not just the part of it that owns slots.
+    for (const stray of instance.unplacedNodes ?? []) out.push({ node: stray, shard: -1 })
     return out
 }
 
@@ -51,9 +54,9 @@ export function NodesTable({ instance, compact }: { instance: GraphStoreInstance
                         const max = node.memory?.maxmemory
                         const uptime = uptimeLabel(node)
                         return (
-                            <tr key={node.endpoint} className="border-t border-glass-border">
+                            <tr key={node.nodeId ?? node.endpoint} className="border-t border-glass-border">
                                 <td className="py-1.5 pr-3 font-mono text-[11px] text-ink-secondary whitespace-nowrap">{node.endpoint}</td>
-                                <td className="py-1.5 pr-3 text-[11px] text-ink-muted tabular-nums">{shard + 1}</td>
+                                <td className="py-1.5 pr-3 text-[11px] text-ink-muted tabular-nums">{shard < 0 ? '—' : shard + 1}</td>
                                 <td className="py-1.5 pr-3 text-[11px] text-ink-muted">{node.role}</td>
                                 <td className="py-1.5 pr-3"><HealthChip node={node} /></td>
                                 <td className="py-1.5 pr-3 text-[11px] text-ink-muted tabular-nums text-right whitespace-nowrap">

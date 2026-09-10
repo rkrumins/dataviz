@@ -76,10 +76,12 @@ export interface NodeLimits {
 
 export interface GraphStoreNode {
     endpoint: string
+    /** What the cluster calls this node. Its identity — two nodes can share
+     *  an address, and then every figure keyed by one counts them as one. */
     /** The address the cluster announced, before the operator's remap. */
     announced?: string | null
     nodeId?: string | null
-    role: 'master' | 'replica'
+    role: 'master' | 'replica' | 'joining'
     status: 'up' | 'unreachable'
     error?: string | null
     latencyMs?: number | null
@@ -179,6 +181,15 @@ export interface GraphStoreInstance {
     slotsCovered?: number | null
     slotsMissing?: string | null
     shards: GraphStoreShard[]
+    /** Nodes the cluster knows that belong to no shard: one mid-MEET, one
+     *  the cluster announces no address for, one following a master this
+     *  view cannot see. Reported rather than invented into a shard. */
+    unplacedNodes?: GraphStoreNode[]
+    /** `cluster_known_nodes` — the cluster's own count of itself. */
+    knownNodes?: number | null
+    clusterState?: string | null
+    /** Whole-store problems, as opposed to one shard's replication. */
+    findings?: ReplicationFinding[]
     totals: InstanceTotals
 }
 

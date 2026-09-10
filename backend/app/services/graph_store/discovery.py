@@ -399,7 +399,28 @@ def _coverage(shards: Sequence[Tuple[RawNode, List[RawNode]]]) -> Tuple[int, Opt
     return len(covered), _missing_slot_ranges(covered)
 
 
-async def discover_cluster(cfg: FalkorDBConnConfig, budget: float) -> RawTopology:
+def _seed_order(
+    cfg: FalkorDBConnConfig, extra: Sequence[Tuple[str, int]],
+) -> List[Tuple[str, int]]:
+    """Nodes to ask, best first, without repeats.
+
+    Whatever answered last time comes first: a provider's configured seeds
+    are its masters as they were on the day it was set up, and masters move.
+    """
+    out: List[Tuple[str, int]] = []
+    seen: set = set()
+    for host, port in list(extra or []) + list(cfg.cluster_nodes or []):
+        key = f"{host}:{port}"
+        if key not in seen:
+            seen.add(key)
+            out.append((host, int(port)))
+    return out
+
+
+async def discover_cluster(
+    cfg: FalkorDBConnConfig, budget: float,
+    extra_seeds: Sequence[Tuple[str, int]] = (),
+) -> RawTopology:
     """Every node of a cluster, from the first seed that answers.
 
     ``CLUSTER NODES`` is the primary source: it names every node, its role,
@@ -409,7 +430,7 @@ async def discover_cluster(cfg: FalkorDBConnConfig, budget: float) -> RawTopolog
     only case that leaves the instance unreachable.
     """
     last_error: Optional[str] = None
-    for host, port in cfg.cluster_nodes or []:
+    for host, port in _seed_order(cfg, extra_seeds):
         async def _attempt(c: FalkorDBConnConfig, _host=host, _port=port):
             client = node_client(c, _host, _port, socket_timeout=budget)
             # The reply text, not redis-py's dict: its dict is keyed on
@@ -448,6 +469,10 @@ async def discover_cluster(cfg: FalkorDBConnConfig, budget: float) -> RawTopolog
         )
     fallback = await _shards_from_slot_map(cfg, budget)
     if fallback is not None:
+        # Why CLUSTER NODES was refused is the whole reason this path ran —
+        # without it the page shows a healthy store and never says that an
+        # ACL is hiding half of what it could tell you.
+        fallback.error = last_error
         return fallback
     return RawTopology(
         reachable=False,
@@ -578,11 +603,14 @@ async def discover_standalone(cfg: FalkorDBConnConfig, budget: float) -> RawTopo
     return RawTopology(shards=[(master, replicas)], discovered_via="info")
 
 
-async def discover(cfg: FalkorDBConnConfig, *, budget: Optional[float] = None) -> RawTopology:
+async def discover(
+    cfg: FalkorDBConnConfig, *, budget: Optional[float] = None,
+    extra_seeds: Sequence[Tuple[str, int]] = (),
+) -> RawTopology:
     """Every node of one instance, whatever its topology."""
     b = budget if budget is not None else connect_verify_budget(cfg, 1.5)
     if cfg.mode == "cluster":
-        return await discover_cluster(cfg, b)
+        return await discover_cluster(cfg, b, extra_seeds)
     if cfg.mode == "sentinel":
         return await discover_sentinel(cfg, b)
     return await discover_standalone(cfg, b)

@@ -128,6 +128,28 @@ export function InstanceSection({ instance, view, reservePct, canAdjustLimits, f
                     {instance.seedUsed && ` · answered by ${instance.seedUsed}`}
                     {instance.discoveredVia && ` · discovered via ${instance.discoveredVia}`}
                 </p>
+                {(instance.findings ?? []).length > 0 && (
+                    <ul className="mt-2 space-y-1" data-testid="instance-findings">
+                        {(instance.findings ?? []).map(f => (
+                            <li key={f.code + (f.endpoint ?? '')} className={cn(
+                                'rounded-lg border px-2.5 py-1.5 text-[11px]',
+                                f.severity === 'critical'
+                                    ? 'border-red-500/25 bg-red-500/[0.06] text-red-700 dark:text-red-400'
+                                    : 'border-amber-500/25 bg-amber-500/[0.06] text-amber-700 dark:text-amber-400',
+                            )}>
+                                {f.text}
+                                {f.fix && <span className="text-ink-muted"> {f.fix}</span>}
+                            </li>
+                        ))}
+                    </ul>
+                )}
+                {typeof instance.knownNodes === 'number' && (
+                    <p className="mt-1 text-[10px] text-ink-muted tabular-nums">
+                        The cluster reports {instance.knownNodes} known node
+                        {instance.knownNodes === 1 ? '' : 's'}
+                        {instance.clusterState && ` · cluster state ${instance.clusterState}`}
+                    </p>
+                )}
                 {!instance.reachable && (
                     <p className="mt-1.5 rounded-lg border border-red-500/30 bg-red-500/[0.06] px-2.5 py-1.5 text-[11px] text-red-600 dark:text-red-400">
                         This graph store could not be reached: {instance.error ?? 'no seed answered'}.
