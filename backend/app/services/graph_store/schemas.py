@@ -213,9 +213,9 @@ class GraphStoreInstance(_Base):
     would double every figure on the page.
     """
     id: str
+    #: Never empty: an instance exists because a provider row reached it, and
+    #: rows that turn out to share a store share this list.
     providers: List[ProviderRef] = Field(default_factory=list)
-    # True for the environment-configured default instance (no provider row).
-    env_default: bool = Field(False, alias="envDefault")
     mode: str = "standalone"
     seeds: List[str] = Field(default_factory=list)
     seed_used: Optional[str] = Field(None, alias="seedUsed")

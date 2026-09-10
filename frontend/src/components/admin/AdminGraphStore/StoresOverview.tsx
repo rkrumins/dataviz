@@ -57,9 +57,8 @@ export function StoreRow({ instance, onOpen }: {
         >
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span className="text-[13px] font-semibold text-ink">
-                    {instance.providers.length > 0
-                        ? instance.providers.map(p => p.name ?? p.id).join(', ')
-                        : 'Store with no provider'}
+                    {instance.providers.map(p => p.name ?? p.id).join(', ')
+                        || instance.seeds[0] || instance.id}
                 </span>
                 <span className="text-[11px] text-ink-muted">{instance.mode}</span>
                 {instance.providers.length > 1 && (

@@ -100,7 +100,6 @@ function instance(over: Partial<GraphStoreInstance> = {}): GraphStoreInstance {
     return {
         id: 'i1',
         providers: [{ id: 'p1', name: 'Primary graph', isActive: true }],
-        envDefault: false,
         mode: 'cluster',
         seeds: ['10.0.0.1:6379'],
         seedUsed: '10.0.0.1:6379',
@@ -267,14 +266,18 @@ describe('Admin → Graph store', () => {
         expect(screen.getByText(/Falkor A, Falkor B/)).toBeInTheDocument()
     })
 
-    it('never calls a store a default nobody configured', async () => {
+    it('never names a store after a default nobody configured', async () => {
+        // A data source's provider is required, so every store on this page
+        // belongs to a provider row. A card with none of its own is not a
+        // "default graph store" — it is a bug, and it names the address it
+        // reached rather than inventing a concept to explain itself.
         const orphan = snapshot()
         orphan.instances[0].providers = []
-        orphan.instances[0].envDefault = true
         getTopology.mockResolvedValue(orphan)
         wrap()
-        expect(await screen.findByText('Store with no provider')).toBeInTheDocument()
+        expect(await screen.findByRole('heading', { name: '10.0.0.1:6379' })).toBeInTheDocument()
         expect(document.body.textContent ?? '').not.toContain('Default graph store')
+        expect(document.body.textContent ?? '').not.toContain('Store with no provider')
     })
 
     it('shows every store before any of them, then opens the one asked for', async () => {

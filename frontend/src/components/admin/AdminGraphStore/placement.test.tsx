@@ -71,7 +71,7 @@ const TOPOLOGY: ProviderTopologyResponse = {
     providerName: 'Primary graph',
     instance: {
         id: 'i1', providers: [{ id: 'p1', name: 'Primary graph', isActive: true }],
-        envDefault: false, mode: 'cluster', seeds: ['10.0.0.1:6379'], reachable: true,
+        mode: 'cluster', seeds: ['10.0.0.1:6379'], reachable: true,
         slotsCovered: 16_384,
         shards: [{
             index: 0, slotRanges: [[0, 16_383]], slotCount: 16_384,

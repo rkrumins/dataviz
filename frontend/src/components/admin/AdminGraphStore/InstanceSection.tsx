@@ -10,7 +10,6 @@
  */
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
-import { HoverTip } from '@/components/ui/HoverTip'
 import type { GraphStoreInstance } from '@/services/graphStoreService'
 import { compactBytes } from '../shared/aggregationKnobs'
 import { ShardCard } from './ShardCard'
@@ -82,20 +81,13 @@ export function InstanceSection({ instance, view, reservePct, canAdjustLimits, f
                     <h3 className="text-[13px] font-semibold text-ink">
                         {/* A store is named by the provider rows that point
                             at it — several rows on one cluster share a card,
-                            and the fleet strip above totals them all. The
-                            environment's own connection is a store here only
-                            when sources with no provider row still run on it,
-                            so it is named for that rather than for being a
-                            "default" nobody configured. */}
-                        {instance.providers.length > 0
-                            ? instance.providers.map(p => p.name ?? p.id).join(', ')
-                            : 'Store with no provider'}
+                            and the fleet strip above totals them all. There
+                            is no store here without a row: a data source's
+                            provider is required, so every graph this page
+                            accounts for belongs to one. */}
+                        {instance.providers.map(p => p.name ?? p.id).join(', ')
+                            || instance.seeds[0] || instance.id}
                     </h3>
-                    {instance.envDefault && (
-                        <HoverTip label="No provider row points here" detail="This store comes from the application's own environment settings. It appears because data sources that were never given a provider still run on it; once every source has a provider, it is not part of this deployment's graph stores.">
-                            <span className="rounded-full border border-glass-border px-1.5 py-0.5 text-[10px] text-ink-muted">no provider row</span>
-                        </HoverTip>
-                    )}
                     <span className="text-[11px] text-ink-muted">{instance.mode}</span>
                     {instance.providers.length > 0 && (
                         <Link

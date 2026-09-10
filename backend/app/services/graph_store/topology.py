@@ -35,7 +35,6 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 from backend.app.providers.falkordb_connection import (
     FalkorDBConnConfig,
     connect_verify_budget,
-    env_conn_config,
 )
 from backend.app.providers.shard_capacity import ShardMemory
 from . import discovery
@@ -139,7 +138,6 @@ class _Pending:
     key: Tuple
     cfg: FalkorDBConnConfig
     providers: List[ProviderRef] = field(default_factory=list)
-    env_default: bool = False
 
 
 def _identity(cfg: FalkorDBConnConfig) -> Tuple:
@@ -163,20 +161,21 @@ def _instance_id(key: Tuple) -> str:
     return hashlib.sha1("|".join(str(k) for k in key).encode()).hexdigest()[:12]
 
 
-def _pending_instances(rows: Sequence[Any], *, env_in_use: bool) -> List[_Pending]:
+def _pending_instances(rows: Sequence[Any]) -> List[_Pending]:
     """Every active FalkorDB provider row → the instances to sweep.
 
-    The store named by the environment joins the list only when something
-    actually depends on it: a deployment with no FalkorDB provider rows at
-    all, or sources that never got one (``env_in_use``). Otherwise
+    Provider rows are the whole list. A data source's ``provider_id`` is NOT
+    NULL, so every graph this page accounts for belongs to a provider's
+    store; there is no default one to fall back to, and the store named by
     ``FALKORDB_HOST`` is the connection this application was bootstrapped
-    with, not a store anybody reads — and a card for it invents a "default
-    graph store" the operator does not have, adds a phantom node's memory
-    to the fleet totals, and reports an outage on an address nothing uses
-    when it is left over from another environment.
+    with rather than somewhere anybody's lineage lives. Sweeping it anyway
+    invented a "default graph store" the operator has no way to act on,
+    added a phantom node's memory to the fleet totals, and reported an
+    outage on an address nothing reads when it was left over from another
+    environment.
 
-    Where it IS used, graphs that were never routed to a provider still
-    live somewhere, and a page that omits that store is lying by omission.
+    With no provider rows there is nothing to show, and the page says so
+    with the one thing that would help: add a provider.
     """
     from backend.app.db.repositories import provider_repo
     from backend.app.providers.falkor_graph_registry import conn_config_from_row
@@ -198,19 +197,6 @@ def _pending_instances(rows: Sequence[Any], *, env_in_use: bool) -> List[_Pendin
         slot.providers.append(ProviderRef(
             id=row.id, name=row.name, is_active=bool(row.is_active),
         ))
-    try:
-        env_cfg = env_conn_config()
-    except Exception as exc:                          # noqa: BLE001 — reported, not raised
-        logger.info("graph store: environment default instance unusable: %s", _err(exc))
-        return list(pending.values())
-    configured = (
-        env_cfg.mode in ("cluster", "sentinel")
-        or bool(os.getenv("FALKORDB_HOST"))
-    )
-    depended_on = env_in_use or not pending
-    env_key = _identity(env_cfg)
-    if configured and depended_on and env_key not in pending:
-        pending[env_key] = _Pending(key=env_key, cfg=env_cfg, env_default=True)
     return list(pending.values())
 
 
@@ -265,43 +251,14 @@ def _merge_by_node_ids(
         known = {p.id for p in target.providers}
         target.providers.extend(p for p in instance.providers if p.id not in known)
         target.seeds = sorted(set(target.seeds) | set(instance.seeds))
-        # A store with a provider row is that provider's, whatever else also
-        # points at it: keeping the flag here would put "env default" on a
-        # card the operator manages as a provider.
-        target.env_default = bool(target.env_default and instance.env_default)
     return out
 
 
 # ── The data-source join ─────────────────────────────────────────────────
 
 
-async def _env_store_in_use(session: Any) -> bool:
-    """Whether any live data source still routes through the environment's
-    store rather than a provider row.
-
-    One existence check, not a scan: it only decides whether that store is
-    part of this deployment at all.
-    """
-    from sqlalchemy import select
-
-    from backend.app.db.models import WorkspaceDataSourceORM
-
-    try:
-        row = (await session.execute(
-            select(WorkspaceDataSourceORM.id).where(
-                WorkspaceDataSourceORM.deleted_at.is_(None),
-                WorkspaceDataSourceORM.provider_id.is_(None),
-            ).limit(1)
-        )).first()
-    except Exception as exc:                          # noqa: BLE001 — a sweep is not a migration
-        logger.info("graph store: could not tell whether the environment store "
-                    "is in use (%s) — assuming it is.", _err(exc))
-        return True
-    return row is not None
-
-
 async def _expected_graphs(
-    session: Any, provider_ids: Sequence[str], *, include_unrouted: bool = False,
+    session: Any, provider_ids: Sequence[str],
 ) -> Dict[Tuple[str, str], List[Tuple[str, DataSourceRef]]]:
     """``(provider_id, graph_key)`` → the data sources that own that key.
 
@@ -310,25 +267,22 @@ async def _expected_graphs(
     on a different shard than the source graph. That surprise is exactly
     what the placement views exist to show, so both keys are registered.
     """
-    from sqlalchemy import or_, select
+    from sqlalchemy import select
 
     from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
     from ..aggregation.capacity import graph_key_of
 
     out: Dict[Tuple[str, str], List[Tuple[str, DataSourceRef]]] = {}
-    if not provider_ids and not include_unrouted:
+    if not provider_ids:
         return out
-    # A source with no provider row runs on the environment's store, and its
-    # graphs are as real as any other: leaving it out of the query reported
-    # every one of them as an orphan nobody claims.
-    routed = WorkspaceDataSourceORM.provider_id.in_(list(provider_ids))
-    owned = or_(routed, WorkspaceDataSourceORM.provider_id.is_(None)) \
-        if include_unrouted else routed
     rows = (await session.execute(
         select(WorkspaceDataSourceORM, WorkspaceORM.name)
         .join(WorkspaceORM, WorkspaceORM.id == WorkspaceDataSourceORM.workspace_id,
               isouter=True)
-        .where(WorkspaceDataSourceORM.deleted_at.is_(None), owned)
+        .where(
+            WorkspaceDataSourceORM.deleted_at.is_(None),
+            WorkspaceDataSourceORM.provider_id.in_(list(provider_ids)),
+        )
     )).all()
     for ds, workspace_name in rows:
         ref = DataSourceRef(
@@ -692,12 +646,9 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         rows = (await session.execute(
             select(ProviderORM).order_by(ProviderORM.created_at)
         )).scalars().all()
-        pending = _pending_instances(rows, env_in_use=await _env_store_in_use(session))
+        pending = _pending_instances(rows)
         provider_ids = [p.id for slot in pending for p in slot.providers]
-        expected = await _expected_graphs(
-            session, provider_ids,
-            include_unrouted=any(slot.env_default for slot in pending),
-        )
+        expected = await _expected_graphs(session, provider_ids)
         limits = effective_limits(await _stored_tuning(session))
 
     discovered = await asyncio.gather(*(
@@ -803,7 +754,6 @@ def _assemble_nodes(
     instance = GraphStoreInstance(
         id=_instance_id(slot.key),
         providers=slot.providers,
-        env_default=slot.env_default,
         mode=slot.cfg.mode,
         seeds=_seeds_of(slot.cfg),
         seed_used=raw.seed_used,
@@ -826,12 +776,8 @@ def _expected_here(
     vanishing — and so a graph belonging to the second row on a shared
     store is not reported as an orphan nobody claims.
 
-    Sources that never got a provider row are keyed by the empty string and
-    belong to the environment's store, the only instance that has no rows.
     """
     ids = {p.id for p in instance.providers}
-    if instance.env_default:
-        ids.add("")
     return {key: owners for (pid, key), owners in expected.items() if pid in ids}
 
 
@@ -1057,12 +1003,7 @@ def instance_for_provider(
 ) -> Optional[GraphStoreInstance]:
     wanted = str(provider_id or "")
     if not wanted:
-        # A source with no provider row runs on the store the environment
-        # names — the one instance that has no rows. Without this the
-        # capacity and placement views tell its owner "no graph store is
-        # configured for this source's provider", about a graph the page
-        # two clicks away is listing.
-        return next((i for i in snapshot.instances if i.env_default), None)
+        return None
     for instance in snapshot.instances:
         if any(p.id == wanted for p in instance.providers):
             return instance

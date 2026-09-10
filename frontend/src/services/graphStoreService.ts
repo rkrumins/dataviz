@@ -170,7 +170,6 @@ export interface InstanceTotals {
 export interface GraphStoreInstance {
     id: string
     providers: ProviderRef[]
-    envDefault: boolean
     mode: string
     seeds: string[]
     seedUsed?: string | null

@@ -46,12 +46,12 @@ What *is* per provider is the graph inventory: each row on a shard card names
 the data source that owns it, so on a shared store you can still see which of
 the providers a graph belongs to.
 
-A card titled **Store with no provider** is the store named by this
-application's own environment settings. It appears only when data sources that
-were never given a provider still run on it, or when there are no provider
-rows at all. Where every source routes through a provider, that connection is
-what the application was bootstrapped with rather than a store anyone reads,
-and the page does not show it — there is no "default graph store" to explain.
+There is no default graph store, and this page has no card for one. A data
+source's provider is required, so every graph accounted for here belongs to a
+provider's store; the connection named by `FALKORDB_HOST` is what the
+application was bootstrapped with, not somewhere anybody's lineage lives. With
+no provider rows the page shows nothing but the one thing that helps: add a
+provider.
 
 ---
 
