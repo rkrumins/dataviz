@@ -128,7 +128,7 @@ time, long after the promotion had finished.
 1. **Quorum:** Zones A and B survive. Masters 1 and 2 retain quorum. 
 2. **Detection & Failover:** Shard 3's Master is dead. Its surviving replicas are in Zone A and Zone B. One is promoted to Master.
 3. **Cluster State:** After failover, **every single Shard (1, 2, and 3) still has exactly 1 Master and 1 Replica active in the surviving zones.**
-4. **Read Preservation:** Because replicas still exist for every shard, the heavy read workload does not fallback onto the Masters, preventing a cluster-wide CPU bottleneck.
+4. **Read Preservation:** Because replicas still exist for every shard, read-only queries keep being spread across them and do not all fall back onto the Masters. (Read-only Cypher is offered to a replica that is in step with its master, within a lag threshold, and never inside the window after this process's own write to that graph — see `AGGREGATION_PIPELINE.md`. A provider can be pinned to master-only reads.)
 
 *Downtime: < 1 second for Shard 3 writes. Slight read latency increase as capacity drops from 6 replicas to 3 across the cluster.*
 

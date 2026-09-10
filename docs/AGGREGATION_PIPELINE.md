@@ -407,6 +407,22 @@ seeing it as an outage when a node is replaced anyway.
   fails with `MaterializationStoreUnreachable`, whose message names the node,
   how long it waited and what to check; the worker reports it as
   `reason: "connection"` and the job resumes from its checkpoint.
+- **Reads from in-sync replicas.** A shard's master took every write AND
+  answered every read, so on a cluster with two replicas per shard two thirds
+  of the hardware sat idle while the master's query threads were the
+  bottleneck for a hundred people opening canvases. Read-only Cypher is now
+  offered to a replica, under four gates, any of which sends it to the master:
+  the provider allows it (`readFromReplicas`, default `auto`, per provider in
+  the wizard or fleet-wide via `FALKORDB_READ_FROM_REPLICAS`); the replica is
+  online and within `FALKORDB_REPLICA_READ_MAX_LAG_S` (2s), sampled once per
+  shard per few seconds rather than per read; this process has not written to
+  that graph inside `FALKORDB_REPLICA_READ_SETTLE_S` (30s), so a caller always
+  sees its own writes; and the replica is not in the short penalty box a
+  failed read puts it in. Any error from a replica re-issues the same read on
+  the master once. **Every read a rebuild makes is pinned to the master** for
+  the whole run — RECONCILE reads what APPLY just wrote — via a contextvar the
+  pipeline sets, so replica reads can never make a run see a graph it has
+  already changed.
 - **Failing-over reads.** When a cluster node stops answering, the provider
   reports `ProviderFailingOver` — a logical exception the circuit breaker never
   counts, so a routine pod rotation can no longer answer every user with
@@ -461,6 +477,9 @@ pipeline).
 | `AGGREGATION_REPLICA_ACK_MIN` | 1 | Replicas of the write node that must acknowledge each rollup batch before the next is sent (0-5). 0 disables the gate. Per-job / Defaults as `replicaAckMin`, and raisable or clearable on a RUNNING job |
 | `AGGREGATION_REPLICA_ACK_TIMEOUT_MS` | 5000 | How long one acknowledgement wait may block before the run holds, re-reads replication state and retries (500-60000). Per-job / Defaults as `replicaAckTimeoutMs` |
 | `AGGREGATION_STORE_OUTAGE_HOLD_S` | 900 | How long one run waits out a graph store node that is not answering before giving up and keeping its checkpoint (30-7200) |
+| `FALKORDB_READ_FROM_REPLICAS` | auto | Whether read-only Cypher may be served by a shard's in-sync replicas. `never` pins every read to the master; per provider as `readFromReplicas` in the connection settings |
+| `FALKORDB_REPLICA_READ_MAX_LAG_S` | 2 | How far behind a replica may be and still answer a read |
+| `FALKORDB_REPLICA_READ_SETTLE_S` | 30 | How long this process's own write to a graph pins that graph's reads to its master |
 | `AGGREGATION_CAPACITY_MAX_SOURCES` | 500 | Capacity API: sources per sweep, largest first; the response says when it was truncated |
 | `FALKORDB_ENDPOINT_WRITE_SLOTS` | 2 | Cross-pod write budget per endpoint |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | 1 | Concurrent read-only range scans (waves). Cappable live on a running job (Serial reads), from the next wave |

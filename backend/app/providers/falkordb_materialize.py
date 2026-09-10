@@ -1378,6 +1378,16 @@ class AggregationPipeline:
     # -- public entry ------------------------------------------------------
 
     async def run(self) -> Dict[str, Any]:
+        # Every read this run makes goes to the MASTER. The pipeline reads
+        # what it has just written — RECONCILE over the cells APPLY wrote,
+        # the estimate scans, the budget reads — and a replica that is a
+        # second behind would show it a graph it has already changed.
+        from backend.app.providers.falkordb_provider import read_from_master_only
+
+        with read_from_master_only():
+            return await self._run()
+
+    async def _run(self) -> Dict[str, Any]:
         resume = parse_cursor(self._last_cursor)
         self._fresh_run = resume is None
         if resume is not None:

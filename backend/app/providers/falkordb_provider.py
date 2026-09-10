@@ -6,6 +6,7 @@ Implements GraphDataProvider interface using FalkorDB async client and Cypher qu
 import asyncio
 import base64
 import json
+import contextvars
 import logging
 import os
 import re
@@ -305,6 +306,37 @@ _REFUSED_RETRY_BACKOFFS: tuple = (0.5, 2.0, 5.0, 10.0)
 # especially with a hundred of them at once. One re-resolve (the promoted
 # replica may already be there), then hand back ProviderFailingOver.
 _READ_REFUSED_RETRIES = 1
+
+#: How far behind a replica may be and still answer a read (seconds).
+_REPLICA_READ_MAX_LAG_S = float(os.getenv("FALKORDB_REPLICA_READ_MAX_LAG_S", "2"))
+#: How long this process's own writes pin a graph's reads to its master.
+_REPLICA_READ_SETTLE_S = float(os.getenv("FALKORDB_REPLICA_READ_SETTLE_S", "30"))
+#: How often one shard's replication state is sampled for the router.
+_REPLICA_SAMPLE_S = 5.0
+#: How long a replica that failed a read is skipped.
+_REPLICA_PENALTY_S = 30.0
+
+#: Set to "master" for work that must see its own writes — the aggregation
+#: pipeline sets it for the whole run, so RECONCILE never reads a replica
+#: that has not applied the APPLY chunk before it.
+_read_consistency: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "falkordb_read_consistency", default="auto",
+)
+
+
+def read_from_master_only():
+    """Context manager: every read in this task goes to the master."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _pin():
+        token = _read_consistency.set("master")
+        try:
+            yield
+        finally:
+            _read_consistency.reset(token)
+
+    return _pin()
 
 # ...and for the next few seconds every other read of this graph gets the
 # same answer without dialling the dead address at all. Without this, a
@@ -2186,6 +2218,147 @@ class FalkorDBProvider(GraphDataProvider):
             endpoint=endpoint,
         )
 
+    # ── Reads from in-sync replicas ──────────────────────────────────────
+    #
+    # A shard's master takes every write AND, until now, served every read.
+    # On a cluster with two replicas per shard that left two thirds of the
+    # hardware idle while the master's query threads were the bottleneck for
+    # a hundred people opening canvases. A read-only Cypher can be answered
+    # by a replica that is in step with its master, which is what makes
+    # interactive load scale with the replica count instead of with the
+    # master's threads — and it keeps working while a master restarts.
+    #
+    # Four gates, because a stale answer is worse than a slow one:
+    #   1. the provider allows it (``readFromReplicas``, default auto);
+    #   2. the replica is online and within the lag threshold, sampled at
+    #      most every few seconds per shard;
+    #   3. this process has not written to the graph recently (the settle
+    #      window) — a run must always see its own writes;
+    #   4. the replica has not just failed us (a short penalty box).
+    # Any error from a replica re-issues the same read on the master once.
+
+    _replica_reads: int = 0
+    _master_reads: int = 0
+    _replica_fallbacks: int = 0
+
+    def _replica_reads_enabled(self) -> bool:
+        cfg = self._conn_cfg
+        if cfg is None or cfg.mode != "cluster":
+            return False
+        return getattr(cfg, "read_from_replicas", "auto") != "never"
+
+    def _note_local_write(self, graph_key: Optional[str] = None) -> None:
+        """This process just wrote to a graph: its reads stay on the master
+        until the settle window passes, so a caller always sees its own
+        writes however fast it reads them back."""
+        key = graph_key or self._graph_name
+        if not hasattr(self, "_wrote_at"):
+            self._wrote_at = {}
+        self._wrote_at[key] = time.monotonic()
+
+    def _in_settle_window(self, graph_key: str) -> bool:
+        at = getattr(self, "_wrote_at", {}).get(graph_key)
+        return at is not None and (time.monotonic() - at) < _REPLICA_READ_SETTLE_S
+
+    async def _replica_for(self, graph_key: str):
+        """A replica that may answer a read of ``graph_key``, or None.
+
+        Never raises and never blocks on a store that is unwell: everything
+        it needs is either in the client's own slot map or in a cached
+        ``INFO replication`` reading a few seconds old.
+        """
+        if not self._replica_reads_enabled():
+            return None
+        if _read_consistency.get() == "master":
+            return None
+        if self._in_settle_window(graph_key):
+            return None
+        # One cluster client resolves any key's slot, so the source client
+        # answers for the projection graph too.
+        conn = getattr(self._db, "connection", None)
+        if conn is None:
+            return None
+        try:
+            slot = conn.keyslot(graph_key)
+            nodes = list(conn.nodes_manager.slots_cache.get(slot) or [])
+        except Exception:                                 # noqa: BLE001 — never fail a read
+            return None
+        replicas = [n for n in nodes[1:] if self._replica_usable(n)]
+        if not replicas:
+            return None
+        if not await self._replicas_in_step(graph_key, {f"{n.host}:{n.port}" for n in replicas}):
+            return None
+        # Round-robin so one replica does not take every read of a shard.
+        self._replica_turn = (getattr(self, "_replica_turn", -1) + 1) % len(replicas)
+        return replicas[self._replica_turn]
+
+    def _replica_usable(self, node) -> bool:
+        until = getattr(self, "_replica_penalty", {}).get(f"{node.host}:{node.port}", 0.0)
+        return time.monotonic() >= until
+
+    def _penalise_replica(self, node, exc: BaseException) -> None:
+        """A replica that errored is skipped for a while. One bad node must
+        not be re-tried by every request that arrives."""
+        if not hasattr(self, "_replica_penalty"):
+            self._replica_penalty = {}
+        endpoint = f"{node.host}:{node.port}"
+        self._replica_penalty[endpoint] = time.monotonic() + _REPLICA_PENALTY_S
+        logger.info(
+            "FalkorDB %s: replica %s failed a read (%s) — master-only for %.0fs.",
+            self._graph_name, endpoint, type(exc).__name__, _REPLICA_PENALTY_S,
+        )
+
+    async def _replicas_in_step(self, graph_key: str, endpoints: Set[str]) -> bool:
+        """Whether this shard's replicas are close enough to serve a read.
+
+        One ``INFO replication`` per shard per sample window answers it for
+        every read of every graph on that shard.
+        """
+        now = time.monotonic()
+        cache = getattr(self, "_repl_sample", None)
+        if cache is None:
+            cache = self._repl_sample = {}
+        cached = cache.get(graph_key)
+        if cached is not None and now - cached[0] < _REPLICA_SAMPLE_S:
+            return cached[1]
+        state = await self.replication_state(graph_key, timeout_s=1.0)
+        links = state.get("replicas") or []
+        in_step = any(
+            (r.get("endpoint") in endpoints)
+            and r.get("state") == "online"
+            and (r.get("lagS") is None or r["lagS"] <= _REPLICA_READ_MAX_LAG_S)
+            for r in links
+        ) if links else False
+        cache[graph_key] = (now, in_step)
+        return in_step
+
+    def _pinned_to(self, graph, node):
+        """The same graph, with its commands addressed to ONE node.
+
+        The FalkorDB graph object binds its client's ``execute_command`` at
+        construction; a shallow copy with that one attribute rebound keeps the
+        schema and the result parsing exactly as they are.
+        """
+        import copy
+
+        pinned = copy.copy(graph)
+        base = graph.client.execute_command
+
+        def _send(*args, **kwargs):
+            kwargs.setdefault("target_nodes", node)
+            return base(*args, **kwargs)
+
+        pinned.execute_command = _send
+        return pinned
+
+    def read_routing_counters(self) -> Dict[str, int]:
+        """How this provider's reads were served, since it was built."""
+        return {
+            "replicaReads": self._replica_reads,
+            "masterReads": self._master_reads,
+            "replicaFallbacks": self._replica_fallbacks,
+        }
+
     async def _run_guarded(
         self, call: Callable[[], Awaitable[Any]], *, read_only: bool = False,
     ) -> Any:
@@ -2412,16 +2585,48 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _ro_query(self, cypher: str, params: dict = None, *, timeout: float = None,
                         op: Optional[str] = None):
-        """Timeout-guarded read-only query on the source graph."""
+        """Timeout-guarded read-only query on the source graph, served by an
+        in-sync replica when one may answer (see the read router above)."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
+        return await self._read_query(
+            lambda: self._graph, self._graph_name, cypher, params, t, op, kind="ro",
+        )
 
-        async def _call():
+    async def _read_query(self, graph_of, graph_key: str, cypher: str, params, t: float,
+                          op: Optional[str], *, kind: str):
+        """One read: on a replica when the router allows it, otherwise on the
+        master — and on the master once more if the replica let us down."""
+        replica = None
+        try:
+            replica = await self._replica_for(graph_key)
+        except Exception:                                 # noqa: BLE001 — routing never fails a read
+            replica = None
+
+        async def _call_on(node):
+            graph = graph_of()
+            target = self._pinned_to(graph, node) if node is not None else graph
             return await asyncio.wait_for(
-                self._graph.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
+                target.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
                 timeout=t,
             )
 
-        return await self._guarded_timed(_call, kind="ro", cypher=cypher, op=op, budget=t)
+        if replica is not None:
+            try:
+                result = await self._guarded_timed(
+                    lambda: _call_on(replica), kind=kind, cypher=cypher, op=op, budget=t,
+                )
+                self._replica_reads += 1
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                      # noqa: BLE001 — the master answers
+                self._penalise_replica(replica, exc)
+                self._replica_fallbacks += 1
+        result = await self._guarded_timed(
+            lambda: _call_on(None), kind=kind, cypher=cypher, op=op, budget=t,
+        )
+        self._master_reads += 1
+        return result
 
     async def _empty_key_is_genuine(self) -> bool:
         """Whether an "Invalid graph operation on empty key" really means the
@@ -2514,16 +2719,20 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _proj_ro_query(self, cypher: str, params: dict = None, *, timeout: float = None,
                              op: Optional[str] = None):
-        """Timeout-guarded read-only query on the projection graph."""
+        """Timeout-guarded read-only query on the projection graph — the
+        aggregated-edge reads the canvas lives on, and the ones a replica
+        relieves the master of first."""
         t = timeout if timeout is not None else self._READ_TIMEOUT
+        return await self._read_query(
+            lambda: self._proj, self._projection_graph_key(), cypher, params, t, op,
+            kind="proj-ro",
+        )
 
-        async def _call():
-            return await asyncio.wait_for(
-                self._proj.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
-                timeout=t,
-            )
-
-        return await self._guarded_timed(_call, kind="proj-ro", cypher=cypher, op=op, budget=t)
+    def _projection_graph_key(self) -> str:
+        """The key the projection graph is stored under — its own name in
+        dedicated mode, which hashes to its own shard."""
+        proj = getattr(self._proj, "name", None)
+        return str(proj or self._graph_name)
 
     def _quiesce_p95(self) -> float:
         """p95 of the rolling write-latency window (seconds). 0 if window empty."""
@@ -2630,7 +2839,11 @@ class FalkorDBProvider(GraphDataProvider):
 
         async with self._write_semaphore:
             async with self._query_semaphore:
-                return await self._run_guarded(_call)
+                result = await self._run_guarded(_call)
+                # This process wrote: pin this graph's reads to the master for
+                # the settle window so a caller always sees its own writes.
+                self._note_local_write()
+                return result
 
     async def _seed_from_file(self):
         """Load graph from seed JSON file if graph is empty."""

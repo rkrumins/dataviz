@@ -106,6 +106,8 @@ interface FalkorDBConnectionState {
   // unauthenticated and any stored credential is dropped on save.
   authEnabled: boolean
   clusterStartupNodes: HostPort[]
+  /** Whether read-only queries may be served by a shard's in-sync replicas. */
+  readFromReplicas: 'auto' | 'never'
   sentinelMasterName: string
   sentinelNodes: HostPort[]
   // Dedicated cache for this provider — structured panel (see CacheConnectionState).
@@ -260,6 +262,7 @@ const DEFAULT_FALKORDB_CONNECTION: FalkorDBConnectionState = {
   mode: 'standalone',
   authEnabled: true,
   clusterStartupNodes: [],
+  readFromReplicas: 'auto',
   sentinelMasterName: '',
   sentinelNodes: [],
   cache: { ...DEFAULT_CACHE_CONNECTION },
@@ -410,6 +413,7 @@ export function buildInitialFormData(provider?: ProviderResponse | null): Provid
           // false was stored to connect unauthenticated.
           authEnabled: fdbConn.authEnabled ?? true,
           clusterStartupNodes: hydrateNodes(fdbConn.cluster?.startupNodes),
+          readFromReplicas: fdbConn.readFromReplicas === 'never' ? 'never' : 'auto',
           sentinelMasterName: fdbConn.sentinel?.masterName ?? '',
           sentinelNodes: hydrateNodes(fdbConn.sentinel?.nodes),
           // Non-secret topology hydrates from extra_config.cacheConnection;
@@ -573,6 +577,8 @@ export function buildExtraConfig(formData: ProviderOnboardingFormData) {
     } else if (fc.mode === 'cluster') {
       conn.mode = 'cluster'
       conn.cluster = { startupNodes: cleanNodes(fc.clusterStartupNodes) }
+      // Only the non-default is written: "auto" is the backend's own default.
+      if (fc.readFromReplicas === 'never') conn.readFromReplicas = 'never'
     }
     // Auth on/off. Only emit the explicit `false` (the meaningful case that tells
     // the backend to connect unauthenticated and ignore any stored credential);
@@ -1653,12 +1659,36 @@ export function ProviderOnboardingWizard({
                   )}
 
                   {formData.falkordbConnection?.mode === 'cluster' && (
-                    <div>
-                      <label className="mb-1.5 block text-xs font-medium text-ink">
-                        Cluster startup nodes
-                      </label>
-                      {renderNodeRows('clusterStartupNodes', 6379)}
-                    </div>
+                    <>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-ink">
+                          Cluster startup nodes
+                        </label>
+                        {renderNodeRows('clusterStartupNodes', 6379)}
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-medium text-ink" htmlFor="read-from-replicas">
+                          Read queries
+                        </label>
+                        <select
+                          id="read-from-replicas"
+                          value={formData.falkordbConnection?.readFromReplicas ?? 'auto'}
+                          onChange={(event) =>
+                            updateFalkorConn({ readFromReplicas: event.target.value === 'never' ? 'never' : 'auto' })
+                          }
+                          className="w-full rounded-lg border border-glass-border bg-black/5 px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-indigo-500/50 dark:bg-white/5"
+                        >
+                          <option value="auto">From in-sync replicas (recommended)</option>
+                          <option value="never">From masters only</option>
+                        </select>
+                        <p className="mt-1 text-[11px] text-ink-muted">
+                          A read-only query answered by a replica that is in step leaves the master's threads to writes,
+                          so interactive load scales with the replica count — and reads keep flowing while a master
+                          restarts. A replica that has fallen behind is never used, and this process's own writes are
+                          always read back from the master.
+                        </p>
+                      </div>
+                    </>
                   )}
 
                   {formData.falkordbConnection?.mode === 'sentinel' && (

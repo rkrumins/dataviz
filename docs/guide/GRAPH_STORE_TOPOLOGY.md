@@ -130,13 +130,35 @@ belongs to a shard. Two consequences worth knowing:
 
 ---
 
+## Who answers a read
+
+A shard's master takes every write. Read-only queries are offered to its
+**in-sync replicas** — that is what makes interactive load scale with the
+replica count rather than with one master's query threads, and it is why
+reads keep flowing while a master restarts.
+
+A replica answers only when all of this holds; otherwise the master does:
+
+- the provider allows it (*Read queries* in its connection settings, default
+  *From in-sync replicas*);
+- the replica is online and within the lag threshold (2 seconds by default),
+  sampled once per shard every few seconds rather than per read;
+- this process has not written to that graph in the last 30 seconds, so a
+  caller always sees its own writes;
+- the replica has not just failed a read (it is skipped for a short while).
+
+A rebuild is pinned to the master for its whole run: it reads what it has
+just written. If a replica errors, the same read is re-issued on the master
+once.
+
 ## What users see while a node is being replaced
 
 A master that goes away is a pause, not an outage:
 
-- Reads for its shard fail fast with a short retry hint, and the canvas keeps
-  showing what it already had behind a *Reconnecting to the graph store* line.
-  It retries by itself.
+- Reads for its shard keep being served by its replicas where they are in
+  step. Anything that must go to the master fails fast with a short retry
+  hint, and the canvas keeps showing what it already had behind a
+  *Reconnecting to the graph store* line. It retries by itself.
 - The circuit breaker does **not** open for a node that is failing over, so a
   restart no longer answers every user with "Circuit open" for half a minute.
 - A rebuild waits for the node, reconnects to it (or to the replica promoted in

@@ -109,6 +109,12 @@ class FalkorDBConnConfig:
     socket_timeout: Optional[float] = None
     graph_pool_size: Optional[int] = None
     socket_connect_timeout: Optional[float] = None
+    # "auto" (the default) lets read-only Cypher be served by a shard's
+    # in-sync replicas — the master's query threads are then left to writes
+    # and interactive load scales with the replica count. "never" pins every
+    # read to the master for a provider where the eventual consistency inside
+    # the lag threshold is not acceptable.
+    read_from_replicas: str = "auto"
     # probeDeadlineS EXTENDS (never shrinks) every fixed probe/verify budget —
     # the warmup preflight deadline, the connect verify-ping wall clock, and
     # the manual test-endpoint deadline — for one slow cross-cluster provider.
@@ -458,6 +464,9 @@ def load_connection_config(
         graph_pool_size=_coerce_int(cfg.get("graphPoolSize")),
         socket_connect_timeout=_coerce_float(cfg.get("connectTimeout"), "connectTimeout"),
         probe_deadline_s=_coerce_float(cfg.get("probeDeadlineS"), "probeDeadlineS"),
+        read_from_replicas=_read_from_replicas(
+            cfg.get("readFromReplicas") or os.getenv("FALKORDB_READ_FROM_REPLICAS")
+        ),
         tls_enabled=tls_on,
         tls_ca_certs=tls_ca,
         tls_certfile=tls_cert,
@@ -465,6 +474,13 @@ def load_connection_config(
         tls_cert_reqs=tls_reqs,
         tls_check_hostname=tls_check,
     )
+
+
+def _read_from_replicas(raw: Any) -> str:
+    """``"auto"`` or ``"never"``. Anything unrecognised reads as ``"auto"``:
+    a typo must not silently pin a fleet to its masters."""
+    value = str(raw or "").strip().lower()
+    return "never" if value in {"never", "false", "0", "master", "off"} else "auto"
 
 
 async def verify_not_cluster_node(
@@ -1254,6 +1270,22 @@ def falkordb_over(conn: Any) -> Any:
     return db
 
 
+def _round_robin_strategy() -> Any:
+    """redis-py's round-robin load-balancing value, or the literal it wraps.
+
+    It is a str enum, and the only thing this value does here is make the
+    client perform the READONLY handshake on its connections — so a redis-py
+    without the symbol (or a test double standing in for it) must not stop a
+    cluster client being built.
+    """
+    try:
+        from redis.cluster import LoadBalancingStrategy
+
+        return LoadBalancingStrategy.ROUND_ROBIN
+    except ImportError:                                   # pragma: no cover - old client
+        return "round_robin"
+
+
 def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwargs: dict) -> Any:
     """A ``RedisCluster`` over ``cfg``'s topology, honouring OUR pool kwargs.
 
@@ -1273,6 +1305,12 @@ def build_cluster_conn(cfg: FalkorDBConnConfig, host: str, port: int, pool_kwarg
                if (h, p) != (host, port)]
     return RedisCluster(
         host=host, port=port, startup_nodes=startup or None,
+        # NOT a routing change: redis-py only auto-routes commands in its own
+        # read table, and no GRAPH.* command is in it, so writes and untargeted
+        # reads still go to the primary. What this buys is the READONLY
+        # handshake on every connection — without it a replica answers MOVED
+        # to the reads the provider targets at one deliberately.
+        load_balancing_strategy=_round_robin_strategy(),
         # See _resolve_cluster_node_once: the async client defaults this to
         # True, the server runs --cluster-require-full-coverage no. A dead
         # shard must not fail client construction for graphs that live on

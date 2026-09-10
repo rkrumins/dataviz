@@ -44,6 +44,16 @@ past their health probes, get them restarted, and take the shard with them. The 
 at the start when a master has replicas and an effects threshold above 0, which is the setting
 that decides this.
 
+**Read-only queries are served by a shard's in-sync replicas.** The master took every write
+AND answered every read, so on a cluster with two replicas per shard two thirds of the hardware
+sat idle while one master's query threads were the bottleneck for everyone opening a canvas.
+Reads are now offered to a replica under four gates, any of which sends the query to the master
+instead: the provider allows it (*Read queries* in its connection settings, default on), the
+replica is online and within the lag threshold, this process has not written to that graph
+recently, and the replica has not just failed a read. A rebuild reads only from the master for
+its whole run, because it reads back what it has just written. A replica that errors sends the
+same read to the master once.
+
 **A node restarting is a pause, not an outage.** A refused connection inside a rebuild is now a
 wait: the run heartbeats, re-resolves the owner (finding the promoted replica), and retries the
 same work at the same width from the same checkpoint, for up to fifteen minutes. If it does give
@@ -494,8 +504,10 @@ is required for correctness, but without it readers pay the aggregation on the r
   comes from the orchestrator, which the application cannot read; the guide gives the command.
 - Per-graph sizes are sampled and refreshed with the topology reading, not live, and are capped
   per node so one snapshot cannot become a load generator.
-- Reads are still served by masters only. A restarting master therefore pauses reads for its
-  shard rather than falling back to its replicas.
+- Replica reads are eventually consistent within the lag threshold and the settle window. A
+  provider whose readers cannot accept that can be pinned to master-only reads. The window
+  covers this process's own writes; a write from ANOTHER pod is only bounded by the lag
+  threshold.
 - The Full-detail pre-flight is *unknown* until a source has one successful rebuild: the cube
   estimate it needs is recorded on success only.
 - A custom role granted **only** `system:analytics:read` gets no nav item: the catalogue spec
