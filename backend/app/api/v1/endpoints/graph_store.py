@@ -41,25 +41,35 @@ _REQUIRE_SYSTEM_ADMIN = requires("system:admin")
 _MAX_BATCH = 200
 
 
+#: How long Re-measure may hold for the sweep it just asked for. Under any
+#: sane gateway timeout: the point of this is that the request returns.
+_REMEASURE_WAIT_S = 3.0
+
+
 async def _snapshot(fresh: bool = False) -> GraphStoreTopologyResponse:
-    """The snapshot, or a 503 when there has never been one.
+    """The snapshot as it stands — never a sweep run inside the request.
+
+    Reading every node of every store takes as long as the slowest node
+    allows, which on a cluster mid-rotation is tens of seconds. No gateway
+    holds a connection that long, so building here means the request dies
+    with a 504 having done all of the work and kept none of it. Instead:
+    take what is cached, ask for a refresh in the background, and say that
+    one is running. The page polls every 30s and fills in.
 
     A stale reading is served happily — it says so — because figures from a
-    minute ago tell an operator more than an empty page. Only the case with
-    nothing at all to show is an error.
+    minute ago tell an operator more than an empty page. Having nothing at
+    all yet is not an error either: it is the first sweep, and saying so is
+    more use than a 503.
     """
-    try:
-        return await topology.get_topology_snapshot(fresh=fresh)
-    except Exception as exc:                          # noqa: BLE001 — reported as 503
-        logger.warning("graph store: no topology to serve: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "code": "GRAPH_STORE_TOPOLOGY_UNAVAILABLE",
-                "message": "The graph store topology could not be read.",
-                "reason": (str(exc) or exc.__class__.__name__)[:200],
-            },
-        ) from exc
+    snapshot, refreshing = await topology.snapshot_for_request(
+        fresh=fresh, wait_s=_REMEASURE_WAIT_S if fresh else 0.0,
+    )
+    if snapshot is None:
+        return GraphStoreTopologyResponse(
+            measured_at=None, ttl_s=topology._ttl_s(), refreshing=True,
+            last_error=topology.last_error(),
+        )
+    return snapshot.model_copy(update={"refreshing": refreshing})
 
 
 @router.get(

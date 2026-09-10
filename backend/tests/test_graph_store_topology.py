@@ -217,6 +217,7 @@ def _wire(monkeypatch, *, nodes, providers, data_sources=(), workspaces=None,
     topology._prev_nodes = {}
     topology._last_error = None
     topology._retry_not_before = 0.0
+    topology._refresh_task = None
     return state
 
 
@@ -810,6 +811,86 @@ def test_with_no_snapshot_at_all_the_failure_is_raised(monkeypatch):
     monkeypatch.setattr(topology, "build_snapshot", _boom)
     with pytest.raises(RuntimeError, match="nothing to serve"):
         _run(topology.get_topology_snapshot())
+
+
+def test_a_request_never_waits_for_a_sweep(monkeypatch):
+    """A sweep reads every node of every store behind a lock — on a cluster
+    mid-rotation, longer than any gateway holds a connection. The request
+    that triggers one must not be the one that pays for it, or it dies with
+    a 504 having done all the work and kept none of it."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    real = topology.build_snapshot
+
+    async def _slow():
+        await asyncio.sleep(5)
+        return await real()
+
+    monkeypatch.setattr(topology, "build_snapshot", _slow)
+
+    async def scenario():
+        began = time.monotonic()
+        snap, refreshing = await topology.snapshot_for_request()
+        elapsed = time.monotonic() - began
+        task = topology._refresh_task
+        if task is not None:
+            task.cancel()
+        return snap, refreshing, elapsed
+
+    snap, refreshing, elapsed = _run(scenario())
+    assert snap is None                              # nothing cached yet
+    assert refreshing                                # …and a sweep is on its way
+    assert elapsed < 1.0                             # the sweep takes five
+
+
+def test_a_second_request_joins_the_sweep_rather_than_starting_another(monkeypatch):
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    calls = {"n": 0}
+    real = topology.build_snapshot
+
+    async def _counting():
+        calls["n"] += 1
+        await asyncio.sleep(0.05)
+        return await real()
+
+    monkeypatch.setattr(topology, "build_snapshot", _counting)
+
+    async def scenario():
+        out = await asyncio.gather(*(
+            topology.snapshot_for_request() for _ in range(10)
+        ))
+        task = topology._refresh_task
+        if task is not None:
+            await task
+        return out
+
+    results = _run(scenario())
+    assert calls["n"] == 1
+    assert all(refreshing for _snap, refreshing in results)
+
+
+def test_re_measure_holds_briefly_and_then_answers_anyway(monkeypatch):
+    """The button asked for the sweep, so it may wait for it — but not past
+    the gateway. Whatever is cached comes back either way."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    real = topology.build_snapshot
+
+    async def _slow():
+        await asyncio.sleep(5)
+        return await real()
+
+    monkeypatch.setattr(topology, "build_snapshot", _slow)
+
+    async def scenario():
+        began = time.monotonic()
+        snap, refreshing = await topology.snapshot_for_request(fresh=True, wait_s=0.05)
+        task = topology._refresh_task
+        if task is not None:
+            task.cancel()
+        return snap, refreshing, time.monotonic() - began
+
+    snap, refreshing, elapsed = _run(scenario())
+    assert snap is None and refreshing
+    assert elapsed < 1.0
 
 
 def test_a_failed_sweep_is_not_re_run_by_every_viewer(monkeypatch):

@@ -64,13 +64,27 @@ def _snapshot(*, graphs=("g1",), reachable=True):
     return GraphStoreTopologyResponse(instances=[instance], measured_at="2026-09-09T00:00:00Z")
 
 
-def _wire(monkeypatch, snapshot=None, *, data_sources=(), boom=None):
+def _wire(monkeypatch, snapshot=None, *, data_sources=(), boom=None, refreshing=False):
+    """The reads a route makes: the cached snapshot, and the sweep behind it.
+
+    ``boom`` models the sweep having failed with nothing cached — the route
+    must still answer, saying a reading is on its way and why the last one
+    did not arrive.
+    """
     async def _get(*, fresh=False):
         if boom is not None:
             raise boom
         return snapshot if snapshot is not None else _snapshot()
 
+    async def _for_request(*, fresh=False, wait_s=0.0):
+        if boom is not None:
+            return None, True
+        return (snapshot if snapshot is not None else _snapshot()), refreshing
+
     monkeypatch.setattr(topology, "get_topology_snapshot", _get)
+    monkeypatch.setattr(topology, "snapshot_for_request", _for_request)
+    monkeypatch.setattr(topology, "last_error",
+                        lambda: str(boom) if boom is not None else None)
 
     class _Result:
         def __init__(self, rows):
@@ -134,13 +148,17 @@ def test_a_provider_with_no_store_in_the_snapshot_is_a_404(monkeypatch):
     assert exc.value.status_code == 404
 
 
-def test_no_snapshot_at_all_is_a_503_that_says_why(monkeypatch):
+def test_the_first_reading_answers_at_once_rather_than_holding_the_request(monkeypatch):
+    """Reading every node of every store takes as long as the slowest node
+    allows — tens of seconds on a cluster mid-rotation, and no gateway
+    holds a connection that long. Building inside the request meant it died
+    with a 504 having done all the work and kept none of it."""
     _wire(monkeypatch, boom=RuntimeError("database unavailable"))
-    with pytest.raises(HTTPException) as exc:
-        _run(gs.get_topology())
-    assert exc.value.status_code == 503
-    assert exc.value.detail["code"] == "GRAPH_STORE_TOPOLOGY_UNAVAILABLE"
-    assert "database unavailable" in exc.value.detail["reason"]
+    out = _run(gs.get_topology())
+    assert out.refreshing and out.instances == []
+    # …and it says why the last attempt did not land, rather than only
+    # being empty.
+    assert "database unavailable" in (out.last_error or "")
 
 
 def test_a_stale_snapshot_is_served_rather_than_refused(monkeypatch):
@@ -151,6 +169,13 @@ def test_a_stale_snapshot_is_served_rather_than_refused(monkeypatch):
     out = _run(gs.get_topology())
     assert out.stale and out.last_error == "bus down"
     assert out.instances[0].shards[0].master.endpoint == "10.0.0.1:6379"
+
+
+def test_a_refresh_behind_figures_already_on_screen_says_so(monkeypatch):
+    _wire(monkeypatch, refreshing=True)
+    out = _run(gs.get_topology())
+    assert out.refreshing and out.instances          # both: old figures, new sweep
+    assert not _run(gs.get_topology(fresh=False)).instances[0].shards[0].graphs is None
 
 
 def test_placement_answers_for_a_data_source_including_its_projection(monkeypatch):

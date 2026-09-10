@@ -246,7 +246,13 @@ def _wire(monkeypatch, *, sources, snapshot, states=None, stats=None, failures=N
 
     import backend.app.services.graph_store.topology as topo
 
+    async def for_request(*, fresh=False, wait_s=0.0):
+        # The capacity view reads the cache like every other request: the
+        # sweep runs behind it, never inside it.
+        return await get_snapshot(fresh=fresh), False
+
     monkeypatch.setattr(topo, "get_topology_snapshot", get_snapshot)
+    monkeypatch.setattr(topo, "snapshot_for_request", for_request)
     monkeypatch.setattr(cap, "reserved_on", reserved)
     monkeypatch.setattr(cap, "_list_sources", list_sources)
     monkeypatch.setattr(cap, "latest_completed_stats_map", stats_map)

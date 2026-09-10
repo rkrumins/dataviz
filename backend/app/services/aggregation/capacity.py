@@ -491,8 +491,9 @@ async def _assemble(
     session: AsyncSession, *, ds_id: Optional[str] = None, fresh: bool = False,
 ) -> Optional[Dict[str, Any]]:
     from backend.app.services.graph_store.topology import (
-        get_topology_snapshot, instance_for_provider, place, reading_of,
+        instance_for_provider, place, reading_of, snapshot_for_request,
     )
+    from backend.app.services.graph_store.schemas import GraphStoreTopologyResponse
 
     sources, total, truncated = await _list_sources(session, ds_id=ds_id)
     if ds_id is not None and not sources:
@@ -507,7 +508,12 @@ async def _assemble(
     stats = await latest_completed_stats_map(session, ds_ids)
     limits = effective_limits(await _stored_tuning(session))
 
-    snapshot = await get_topology_snapshot(fresh=fresh)
+    # The same rule the topology route follows: a request never runs the
+    # sweep. This one held a graph-read session across it, and that pool is
+    # sized on the premise that graph reads fast-fail.
+    snapshot, refreshing = await snapshot_for_request(fresh=fresh)
+    if snapshot is None:
+        snapshot = GraphStoreTopologyResponse(refreshing=True)
 
     # Placement first — arithmetic over the snapshot, no I/O at all.
     placed: Dict[str, Tuple[str, str]] = {}               # ds_id → (endpoint, graph_key)
@@ -515,8 +521,12 @@ async def _assemble(
     for ds, _name in sources:
         instance = instance_for_provider(snapshot, str(getattr(ds, "provider_id", "") or ""))
         if instance is None:
+            # "Not read yet" and "not configured" look the same from here and
+            # mean opposite things to whoever reads the row.
             unresolved_why[ds.id] = (
-                "no graph store instance is configured for this source's provider"
+                "the graph store has not been read yet — a reading is on its way"
+                if refreshing and not snapshot.instances
+                else "no graph store instance is configured for this source's provider"
             )
             continue
         if not instance.reachable and not instance.shards:

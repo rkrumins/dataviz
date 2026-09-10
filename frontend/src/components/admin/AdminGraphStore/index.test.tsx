@@ -387,6 +387,26 @@ describe('Admin → Graph store', () => {
         expect(within(table).getAllByText(/replica of 10\.0\.0\.1:6379/)).toHaveLength(2)
     })
 
+    it('says a first reading is on its way rather than "nothing configured"', async () => {
+        // The sweep does not run inside the request — it outlasts any
+        // gateway — so a cold start answers empty with `refreshing`. Reading
+        // that as "no graph store is configured" sends the operator to add a
+        // provider they already have.
+        getTopology.mockResolvedValue(snapshot({
+            instances: [], refreshing: true, lastError: 'no seed answered',
+        }))
+        wrap()
+        // Awaited on the reason, not on the spinner: the spinner is also the
+        // pre-data state, so asserting on it alone passes before the answer
+        // has arrived.
+        expect(await screen.findByText(
+            (_t, el) => el?.tagName === 'SPAN'
+                && (el.textContent ?? '').includes('The last attempt did not finish: no seed answered'),
+        )).toBeInTheDocument()
+        expect(screen.getByText(/Reading every node of every graph store/)).toBeInTheDocument()
+        expect(document.body.textContent ?? '').not.toContain('No graph store is configured yet')
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?view=shards&shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')

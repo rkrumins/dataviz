@@ -66,7 +66,11 @@ logger = logging.getLogger(__name__)
 #: page rather than a download.
 MAX_GRAPH_ROWS_PER_SHARD = 2000
 #: How many nodes are read at once across the whole fleet.
-_NODE_CONCURRENCY = 8
+#: Nodes read at once. A sweep is I/O against short-lived connections, so
+#: the ceiling is the store's patience rather than ours — and a wave costs
+#: a whole node budget, so a 9-node cluster read 8 at a time takes TWO of
+#: them and blows through any ordinary gateway timeout before it starts.
+_NODE_CONCURRENCY = 24
 #: However large the fleet, one sweep may not hold the build lock longer.
 _SWEEP_DEADLINE_CAP_S = 60.0
 #: How long a failed sweep is remembered before another is attempted. Without
@@ -950,6 +954,71 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
         _retry_not_before = 0.0
         _cache = (time.monotonic(), snapshot)
         return _with_age(snapshot, _cache[0])
+
+
+#: The sweep running in the background, if any. Held so it is not garbage
+#: collected mid-flight, and so a second request joins it rather than
+#: starting a second one.
+_refresh_task: Optional["asyncio.Task"] = None
+
+
+async def _refresh_quietly(fresh: bool) -> None:
+    try:
+        await get_topology_snapshot(fresh=fresh)
+    except Exception as exc:                          # noqa: BLE001 — already logged
+        logger.debug("graph store: background refresh ended: %s", _err(exc))
+
+
+def last_error() -> Optional[str]:
+    """Why the last sweep failed, if it did — so a page with nothing on it
+    can say what is wrong rather than only that it is empty."""
+    return _last_error
+
+
+def request_refresh(*, fresh: bool = False) -> "asyncio.Task":
+    """Start a sweep unless one is already running; return it either way."""
+    global _refresh_task
+    task = _refresh_task
+    if task is None or task.done():
+        task = _refresh_task = asyncio.create_task(_refresh_quietly(fresh))
+    return task
+
+
+async def snapshot_for_request(
+    *, fresh: bool = False, wait_s: float = 0.0,
+) -> Tuple[Optional[GraphStoreTopologyResponse], bool]:
+    """What an HTTP request may have — which is never a full sweep.
+
+    A sweep reads every node of every store behind a lock. On a cluster
+    mid-rotation that is tens of seconds, and no gateway holds a connection
+    that long: the request dies with a 504 having done all the work. So a
+    request takes what is cached, asks for a refresh in the background, and
+    says whether one is running; the page polls and fills in.
+
+    ``wait_s`` is for Re-measure, which asked for the sweep and can hold
+    briefly for it — but not past the gateway.
+
+    Returns ``(snapshot or None, refreshing)``.
+    """
+    now = time.monotonic()
+    if not fresh and _cache is not None and now - _cache[0] < _ttl_s():
+        return _with_age(_cache[1], _cache[0]), False
+
+    task = request_refresh(fresh=fresh)
+    if wait_s > 0 and not task.done():
+        try:
+            async with asyncio.timeout(wait_s):
+                await asyncio.shield(task)
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
+        except Exception:                             # noqa: BLE001 — the cache answers
+            pass
+
+    refreshing = not task.done()
+    if _cache is None:
+        return None, refreshing
+    stale = time.monotonic() - _cache[0] >= _ttl_s()
+    return _with_age(_cache[1], _cache[0], stale=stale and _last_error is not None), refreshing
 
 
 def invalidate_topology_cache() -> None:

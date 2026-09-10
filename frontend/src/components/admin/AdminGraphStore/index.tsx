@@ -197,9 +197,18 @@ export function AdminGraphStore() {
                 </p>
             )}
 
-            {!data && topology.isLoading ? (
-                <div className="flex items-center gap-2 py-8 text-[12px] text-ink-muted">
-                    <Loader2 className="w-4 h-4 animate-spin" /> Reading every node…
+            {/* The first sweep does not run inside the request — it would
+                outlast any gateway — so an empty answer saying a reading is
+                on its way is the normal cold start, not a failure. */}
+            {(!data && topology.isLoading) || (data?.refreshing && stores.length === 0) ? (
+                <div className="flex flex-wrap items-center gap-2 py-8 text-[12px] text-ink-muted">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Reading every node of every graph store…
+                    {data?.lastError && (
+                        <span className="text-amber-600 dark:text-amber-400">
+                            The last attempt did not finish: {data.lastError}
+                        </span>
+                    )}
                 </div>
             ) : !data ? (
                 <p className="py-8 text-[12px] text-ink-muted">

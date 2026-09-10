@@ -255,6 +255,10 @@ class GraphStoreTopologyResponse(_Base):
     # failed — the page shows the figures it has instead of going blank.
     stale: bool = False
     last_error: Optional[str] = Field(None, alias="lastError")
+    #: A sweep is running now. With no instances alongside it, this is the
+    #: first reading of a store the page has never seen; with instances, it
+    #: is a refresh behind figures that are already on screen.
+    refreshing: bool = False
 
 
 class ReadRouting(_Base):

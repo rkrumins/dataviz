@@ -207,6 +207,10 @@ export interface GraphStoreTopologyResponse {
     /** The reading is the last good one; the refresh behind it failed. */
     stale: boolean
     lastError?: string | null
+    /** A sweep is running now. With no instances alongside it this is the
+     *  first reading of a store the page has never seen; with instances it
+     *  is a refresh behind figures already on screen. */
+    refreshing?: boolean
 }
 
 export interface ReadRouting {
