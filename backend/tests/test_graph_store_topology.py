@@ -94,7 +94,14 @@ def _replica_info(endpoint, master, *, lag=0, link="up", used=9 * GB, run_id=Non
 
 
 class _FakeNode:
-    """One node's answers. Absent from ``state['nodes']`` = refuses to connect."""
+    """One node's answers.
+
+    Absent from ``state['nodes']`` = refuses to connect, which is the EASY
+    failure — it comes back in microseconds. A node carrying ``"hang": True``
+    accepts the connection and then never answers, which is the failure that
+    actually hurts: it spends the caller's whole budget, and if the sweep waits
+    on it serially, one such node is enough to time the whole reading out.
+    """
 
     def __init__(self, state, endpoint):
         self.state = state
@@ -107,8 +114,13 @@ class _FakeNode:
                 f"Error 111 connecting to {self.endpoint}. Connection refused.")
         return node
 
+    async def _maybe_hang(self):
+        if self._me().get("hang"):
+            await asyncio.sleep(3600)
+
     async def ping(self):
         self._me()
+        await self._maybe_hang()
         return True
 
     async def info(self, *sections):
@@ -1243,6 +1255,97 @@ def test_figures_older_than_the_carry_forward_window_are_not_shown(monkeypatch):
     assert stale_node.status == "unreachable"
     assert stale_node.figures_age_s is None
     assert stale_node.memory.used is None
+
+
+# ── one bad node in nine ─────────────────────────────────────────────────
+#
+# The operator's standard: a single sick node must never make the page
+# useless. Each of these kills exactly ONE of the nine and asserts the other
+# eight are still reported, with the fleet counts honest about the loss.
+
+
+def test_one_refusing_replica_costs_one_row_and_nothing_else(monkeypatch):
+    nodes = _cluster_nodes({})
+    dead = REPLICAS_OF[MASTERS[0]][0]
+    nodes.pop(dead)
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    snap = _run(topology.get_topology_snapshot())
+    inst = snap.instances[0]
+    assert inst.totals.nodes_total == 9 and inst.totals.nodes_up == 8
+    assert len(inst.shards) == 3                       # every shard still drawn
+    assert all(s.master.status == "up" for s in inst.shards)
+    row = next(r for s in inst.shards for r in s.replicas if r.endpoint == dead)
+    assert row.status == "unreachable" and "refused" in (row.error or "").lower()
+    # Its shard still reports the other replica as online, not zero.
+    assert inst.shards[0].replication.replicas_online == 1
+
+
+def test_a_dead_master_does_not_take_the_other_two_shards_with_it(monkeypatch):
+    """The failure the page exists for. One master of three is gone: its own
+    shard degrades, and the other six nodes must read exactly as before."""
+    nodes = _cluster_nodes({})
+    nodes.pop(MASTERS[1])
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    snap = _run(topology.get_topology_snapshot())
+    inst = snap.instances[0]
+    assert inst.totals.nodes_total == 9 and inst.totals.nodes_up == 8
+    assert len(inst.shards) == 3
+
+    hurt = next(s for s in inst.shards if s.master.endpoint == MASTERS[1])
+    assert hurt.master.status == "unreachable"
+    # Its replicas are still there to be promoted, and still measured.
+    assert len(hurt.replicas) == 2
+    assert all(r.status == "up" and r.memory.used is not None for r in hurt.replicas)
+
+    for healthy in (s for s in inst.shards if s.master.endpoint != MASTERS[1]):
+        assert healthy.master.status == "up"
+        assert healthy.master.memory.used is not None
+        assert healthy.replication.replicas_online == 2
+        assert healthy.capacity is not None, "a dead peer nulled a healthy shard's budget"
+
+
+def test_a_hanging_node_does_not_hold_the_other_eight(monkeypatch):
+    """A node that ACCEPTS the connection and then never answers is the
+    failure that actually hurts — it spends the caller's whole budget rather
+    than failing fast. Read serially, one of these times the whole reading
+    out; the other eight must still arrive."""
+    nodes = _cluster_nodes({})
+    nodes[REPLICAS_OF[MASTERS[2]][1]]["hang"] = True
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+
+    started = time.monotonic()
+    snap = _run(topology.get_topology_snapshot())
+    elapsed = time.monotonic() - started
+
+    inst = snap.instances[0]
+    assert inst.totals.nodes_total == 9
+    assert inst.totals.nodes_up == 8, "the hanging node was counted as up"
+    assert elapsed < topology._SWEEP_DEADLINE_CAP_S, (
+        f"one hanging node held the sweep for {elapsed:.1f}s")
+    # Everything else is fully measured, not merely listed.
+    up = [n for s in inst.shards for n in (s.master, *s.replicas) if n.status == "up"]
+    assert len(up) == 8 and all(n.memory.used is not None for n in up)
+
+
+def test_a_whole_provider_that_is_gone_does_not_blank_the_one_beside_it(monkeypatch):
+    """Two stores, one unreachable. The fleet view is the surface an operator
+    opens DURING an incident; it cannot be all-or-nothing."""
+    nodes = _cluster_nodes({})
+    _wire(monkeypatch, nodes=nodes, providers=[
+        _provider("p1", "Alive"),
+        _provider("p2", "Gone", seeds=("10.9.9.9:6379",), host="10.9.9.9"),
+    ])
+
+    snap = _run(topology.get_topology_snapshot())
+    by_name = {i.providers[0].name: i for i in snap.instances}
+    assert set(by_name) == {"Alive", "Gone"}
+    assert by_name["Alive"].reachable and by_name["Alive"].totals.nodes_up == 9
+    assert not by_name["Gone"].reachable
+    assert by_name["Gone"].error, "an unreachable store must say why"
+    # The healthy store's figures are its own, not the fleet's average.
+    assert snap.summary.nodes_up == 9
 
 
 def test_the_sweep_deadline_scales_with_the_fleet():

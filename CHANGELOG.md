@@ -406,6 +406,36 @@ does not swing the trend, short enough that "what changed" is still about now.
 
 ### Fixed
 
+- **The drift check scanned every graph three times a minute, and the scans outlived the
+  caller.** The aggregation scheduler fingerprints every scheduled source on a 60-second sweep,
+  and that fingerprint was three unbounded passes over the whole graph — labels with
+  `displayName` samples, relationship types, and every node's tags. Each carried a 30-second
+  server-side budget while the sweep waited 5 seconds, so past five seconds the sweep walked
+  away and the node kept scanning for a result nobody would read. FalkorDB serves queries from
+  a small fixed thread count; enough abandoned scans and it stops answering anything at all,
+  which is what took whole environments down during aggregation. The digest reads only
+  per-label node counts and per-type edge counts — it has never looked at a sample name or a
+  tag — so it now reads them from FalkorDB's label/relation counters instead, measured at
+  ~1.3 ms against ~514 ms of scanning on a 500k-node graph, falling back to the scan when the
+  counters cannot be trusted. **The fingerprint value is unchanged**: both paths share one
+  digest body, because a source fingerprinted by a scan yesterday is compared against one
+  fingerprinted by the counters today. Where the scan still runs it is cached, and the
+  caller's own wall clock is now a deadline shared by all three queries rather than an
+  allowance granted to each.
+- **The index DDL was a per-run tax rather than a one-off.** `ensure_indices` issues
+  `(5 + ontology types) × 5` node indices plus six `:AGGREGATED` edge indices — 131 statements
+  for a twenty-type ontology, serially, on the write path — and it ran on every aggregation
+  job, every skip, every ontology-cache miss and every provider connect. It ran *before* the
+  write lease is taken and before the admission controller is attached, so none of the
+  pipeline's pacing applied to any of it. Nothing in the product ever drops a graph index, so
+  re-issuing the set could only ever be a no-op costing a parse, a plan and a write-path lock
+  per statement, on a graph other people are reading. The set is now recorded per graph
+  against a digest of its own statements: a changed ontology re-applies it, a partial failure
+  is retried rather than remembered, and a marker store that is down means "do the work".
+- **Index DDL for per-label URN indexes went around the guarded query path.** It used the raw
+  client, so it carried no write semaphore, no quiesce gate and no server-side deadline —
+  firing at a node the rest of the pipeline had already been told to back off from, and
+  leaving abandoned statements running with nothing waiting on them.
 - **A slow scan escaped the pressure ladder and restarted the run.** Every query goes out with
   a server `TIMEOUT` 500 ms under the client budget, so a slow scan is aborted by the store and
   arrives as its own *Query timed out* error — which the ladder, listening for the client

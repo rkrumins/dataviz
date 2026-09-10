@@ -5,6 +5,7 @@ Implements GraphDataProvider interface using FalkorDB async client and Cypher qu
 
 import asyncio
 import base64
+import hashlib
 import json
 import contextvars
 import logging
@@ -1102,6 +1103,31 @@ class _ClosureWalk:
                 edgeType=rec["edgeType"],
                 properties={},
             )
+
+
+#: Edge-property indices on :AGGREGATED, powering the level-pair fast path used
+#: by ``_expand_aggregated_set``: ``WHERE r.sourceLevel = $L AND r.targetLevel =
+#: $L`` as a composite index seek rather than a per-edge property read after the
+#: rel-typed MATCH. The composite comes first — one seek on the pair, where the
+#: two single-column indices would be OR-merged by the planner. Best-effort:
+#: older FalkorDB releases lack edge-property indices, and the trace still works
+#: through the neighbour-label scan fallback. Depth stamps (stampVersion >= 2)
+#: are the PREFERRED read filters for the mixed-depth derivation and the trace
+#: structural drill; verified supported on FalkorDB v4.16.0.
+_AGGREGATED_EDGE_INDEXES: tuple = (
+    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel, r.targetLevel)",
+    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel)",
+    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetLevel)",
+    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
+    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
+    "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
+)
+
+#: How long a "these indices are on this graph" marker stands. Nothing in this
+#: codebase ever issues DROP INDEX, so the set only grows and the marker could
+#: in principle be permanent — the TTL is the floor under a graph dropped and
+#: rebuilt behind our back, where the indices are gone and nothing says so.
+_INDEX_MARKER_TTL_S = int(os.getenv("FALKORDB_INDEX_MARKER_TTL_S", str(24 * 3600)))
 
 
 class FalkorDBProvider(GraphDataProvider):
@@ -3110,8 +3136,15 @@ class FalkorDBProvider(GraphDataProvider):
             )
         return stamped
 
-    async def ensure_indices(self, entity_type_ids: Optional[List[str]] = None):
+    async def ensure_indices(
+        self, entity_type_ids: Optional[List[str]] = None, *, force: bool = False,
+    ):
         """Create indices for node labels and properties.
+
+        Skipped outright when this exact statement set is already recorded as
+        applied to this graph — see the digest below. ``force=True`` re-applies
+        it regardless, for a caller that has reason to believe the graph was
+        rebuilt underneath the marker.
 
         When *entity_type_ids* is provided (e.g. from the resolved ontology),
         those labels are indexed in addition to the hardcoded defaults.
@@ -3161,40 +3194,42 @@ class FalkorDBProvider(GraphDataProvider):
                     return
                 failures.append(f"{cypher}: {type(exc).__name__}: {exc}")
 
-        total = 0
-        for label in labels:
-            for prop in properties:
-                total += 1
-                await _create_index(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+        statements = [
+            f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"
+            for label in labels for prop in properties
+        ] + list(_AGGREGATED_EDGE_INDEXES)
+        total = len(statements)
 
-        # Edge-property indices on :AGGREGATED powering the level-pair
-        # fast path used by ``_expand_aggregated_set``. With these in
-        # place, ``WHERE r.sourceLevel = $L AND r.targetLevel = $L``
-        # becomes a composite index seek instead of a per-edge property
-        # read after the rel-typed MATCH. Idempotent CREATE INDEX, best-
-        # effort: older FalkorDB releases may not support edge-property
-        # indices, in which case the trace continues to work via the
-        # legacy neighbour-label scan fallback.
-        # Composite index attempt first — when supported by the FalkorDB
-        # version this is a single index seek on (sourceLevel, targetLevel)
-        # rather than two single-column lookups OR-merged by the planner.
-        # Idempotent; falls back to two single-column indices below if the
-        # planner does not support composite edge indices.
-        aggregated_edge_indices = [
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel, r.targetLevel)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceLevel)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetLevel)",
-            # Depth stamps (stampVersion>=2) are the PREFERRED read filters
-            # (Q3 mixed-depth derivation, trace structural drill) — without
-            # these they run as Conditional Traverse property reads.
-            # Verified supported on FalkorDB v4.16.0 (WS0 D1 spike).
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth, r.targetDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.sourceDepth)",
-            "CREATE INDEX FOR ()-[r:AGGREGATED]-() ON (r.targetDepth)",
-        ]
-        for index_cypher in aggregated_edge_indices:
-            total += 1
-            await _create_index(index_cypher)
+        # Already applied to THIS graph, for THIS exact statement set? Then
+        # nothing here has anything to do. The set is a pure function of the
+        # ontology's entity types and the indexed property list, so a digest of
+        # it is the whole cache key — a changed ontology yields a different
+        # digest and re-runs on its own.
+        #
+        # This ran unconditionally on every aggregation job, every skip, every
+        # ontology-cache miss and every provider connect: (5 + N_types) × 5 + 6
+        # statements, serially, which for a twenty-type ontology is 131 round
+        # trips of write-path DDL per job — issued before the write lease is
+        # taken and before the admission controller is even attached, so none of
+        # the pipeline's pacing applied to any of it. Nothing ever drops a graph
+        # index, so re-issuing the set can only ever be a no-op that costs a
+        # parse and a lock on a graph other people are reading.
+        marker_key = f"{self._cache_ns}:indices_ensured"
+        digest = hashlib.sha256("\n".join(statements).encode()).hexdigest()[:16]
+        if not force:
+            try:
+                if await self._redis.get(marker_key) == digest:
+                    logger.debug(
+                        "ensure_indices on %s: %d statements already applied "
+                        "(digest %s) — skipping",
+                        self._graph_name, total, digest,
+                    )
+                    return
+            except Exception:
+                pass                      # no marker ⇒ do the work
+
+        for cypher in statements:
+            await _create_index(cypher)
 
         if failures:
             logger.warning(
@@ -3204,6 +3239,14 @@ class FalkorDBProvider(GraphDataProvider):
             )
         else:
             logger.debug("ensure_indices: %d index statements ensured", total)
+            # Marked only on a clean sweep: a partial application must be
+            # retried, not remembered. The TTL is a floor under a graph that
+            # was dropped and rebuilt behind our back — the indices would be
+            # gone and no code path anywhere issues DROP INDEX to tell us.
+            try:
+                await self._redis.setex(marker_key, _INDEX_MARKER_TTL_S, digest)
+            except Exception:
+                pass
 
     @property
     def name(self) -> str:
@@ -5794,10 +5837,15 @@ class FalkorDBProvider(GraphDataProvider):
         _init_timeout = float(os.getenv("FALKORDB_INIT_TIMEOUT", "3"))
         for label in labels:
             try:
-                await asyncio.wait_for(
-                    self._proj.query(
-                        f"CREATE INDEX FOR (n:{label}) ON (n.urn)",
-                    ),
+                # Through ``_proj_query``, not the raw client: that wrapper is
+                # where the write semaphore, the quiesce gate and the
+                # server-side timeout live. Going around it meant this DDL
+                # kept firing at a node the rest of the pipeline had already
+                # been told to back off from, and with no server-side deadline
+                # at all — an abandoned statement burned FalkorDB CPU with
+                # nothing left waiting on it.
+                await self._proj_query(
+                    f"CREATE INDEX FOR (n:{_sanitize_label(label)}) ON (n.urn)",
                     timeout=_init_timeout,
                 )
             except Exception:
