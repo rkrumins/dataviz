@@ -154,7 +154,7 @@ def _build(
     from backend.app.db.repositories import refresh_events_repo as refresh_events_repo_mod
     monkeypatch.setattr(refresh_events_repo_mod, "emit_refresh_event", _fake_emit)
 
-    async def _fake_fp(prov):
+    async def _fake_fp(prov, *, budget_s=None):
         if fp_timeout:
             raise asyncio.TimeoutError()
         return current_fp
@@ -360,7 +360,7 @@ def test_signal_marker_reads_back_as_source_changed_via_overlay(monkeypatch):
         session_factory=None,
     )
 
-    async def _fake_fp(prov):
+    async def _fake_fp(prov, *, budget_s=None):
         return "NEW"
 
     monkeypatch.setattr(svc_mod, "compute_graph_fingerprint", _fake_fp)
@@ -882,7 +882,7 @@ class _FakeSchedSvc:
 def _no_drift(monkeypatch):
     """compute_graph_fingerprint always matches the stored "OLD" value —
     nothing drifts this tick."""
-    async def _fp(provider):
+    async def _fp(provider, *, budget_s=None):
         return "OLD"
     monkeypatch.setattr(fingerprint_mod, "compute_graph_fingerprint", _fp)
 
@@ -890,7 +890,7 @@ def _no_drift(monkeypatch):
 def _all_drift(monkeypatch, current="NEW"):
     """compute_graph_fingerprint always returns a value that mismatches
     the stored "OLD" fingerprint — every swept source drifts."""
-    async def _fp(provider):
+    async def _fp(provider, *, budget_s=None):
         return current
     monkeypatch.setattr(fingerprint_mod, "compute_graph_fingerprint", _fp)
 

@@ -214,7 +214,7 @@ class AggregationScheduler:
                         timeout=_DRIFT_TIMEOUT,
                     )
                     current_fp = await asyncio.wait_for(
-                        compute_graph_fingerprint(provider),
+                        compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                         timeout=_DRIFT_TIMEOUT,
                     )
 

@@ -903,7 +903,7 @@ class AggregationService:
                         pass
                 if state.graph_fingerprint:
                     current_fp = await asyncio.wait_for(
-                        compute_graph_fingerprint(provider),
+                        compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                         timeout=_DRIFT_TIMEOUT,
                     )
                     drift = not fingerprints_match(state.graph_fingerprint, current_fp)
@@ -2040,7 +2040,7 @@ class AggregationService:
                 timeout=_DRIFT_TIMEOUT,
             )
             current_fp = await asyncio.wait_for(
-                compute_graph_fingerprint(provider),
+                compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                 timeout=_DRIFT_TIMEOUT,
             )
         except Exception as e:
@@ -2146,7 +2146,7 @@ class AggregationService:
         if provider is not None:
             try:
                 current_fp = await asyncio.wait_for(
-                    compute_graph_fingerprint(provider),
+                    compute_graph_fingerprint(provider, budget_s=_DRIFT_TIMEOUT),
                     timeout=_DRIFT_TIMEOUT,
                 )
             except Exception:

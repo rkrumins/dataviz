@@ -11404,15 +11404,54 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:
             pass
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None, bypass_cache: bool = False,
+    ) -> GraphSchemaStats:
+        """Label/type/tag breakdowns for the whole graph — THREE full scans.
+
+        ``budget_s`` is the caller's own wall clock, and it is a DEADLINE
+        shared by all three scans, not a per-query allowance. Without it each
+        scan carried the full ``FALKORDB_STATS_QUERY_TIMEOUT_SECS`` (30s) while
+        every caller waited only ``SCHEDULER_DRIFT_CHECK_TIMEOUT`` (5s): past
+        five seconds the caller walked away and the node kept burning a query
+        thread for up to ninety seconds more, on a graph nobody was reading the
+        answer for. FalkorDB serves from a small fixed thread count, so enough
+        abandoned scans and the node answers nothing at all.
+
+        Cached in Redis for the same TTL as the other schema reads. ``get_stats``
+        has had this cache since the scans were measured at "O(nodes)+O(edges)";
+        this method makes the same three scans and had none, while being the one
+        the 60-second drift sweep calls for every source.
+        """
         await self._ensure_connected()
-        
+
+        cache_key = f"{self._cache_ns}:schema_stats_cache"
+        if self._SCHEMA_CACHE_TTL > 0 and not bypass_cache:
+            try:
+                cached = await self._redis.get(cache_key)
+                if cached:
+                    return GraphSchemaStats(**json.loads(cached))
+            except Exception:
+                pass
+
         entity_stats = []
         total_nodes = 0
         edge_stats = []
         total_edges = 0
         # Empty / never-created graph → valid empty schema, not an outage.
-        _stats_q_timeout = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
+        _env_stats_timeout = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
+        _deadline = (
+            time.monotonic() + budget_s if budget_s is not None else None
+        )
+
+        def _stats_budget() -> float:
+            """What is left of the caller's wall clock, never more than the
+            env ceiling. No caller deadline ⇒ the env ceiling, as before."""
+            if _deadline is None:
+                return _env_stats_timeout
+            return max(0.1, min(_env_stats_timeout, _deadline - time.monotonic()))
+
+        _stats_q_timeout = _stats_budget()
         try:
             # Single query: counts + samples per label using collect() with slicing
             type_res = await self._ro_query(
@@ -11439,7 +11478,7 @@ class FalkorDBProvider(GraphDataProvider):
 
             edge_type_res = await self._ro_query(
                 "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c",
-                timeout=_stats_q_timeout,
+                timeout=_stats_budget(),
             )
             for row in (edge_type_res.result_set or []):
                 t = row[0] or "UNKNOWN"
@@ -11464,7 +11503,7 @@ class FalkorDBProvider(GraphDataProvider):
         try:
             tag_res = await self._ro_query(
                 "MATCH (n) WHERE n.tags IS NOT NULL AND n.tags <> '[]' RETURN n.tags",
-                timeout=_stats_q_timeout,
+                timeout=_stats_budget(),
             )
             tag_counts: Dict[str, int] = {}
             tag_types: Dict[str, Set[str]] = {}
@@ -11484,13 +11523,22 @@ class FalkorDBProvider(GraphDataProvider):
             logger.warning(f"Failed to fetch tag stats: {e}")
             tag_stats = []
 
-        return GraphSchemaStats(
+        stats = GraphSchemaStats(
             totalNodes=total_nodes,
             totalEdges=total_edges,
             entityTypeStats=entity_stats,
             edgeTypeStats=edge_stats,
             tagStats=tag_stats,
         )
+        if self._SCHEMA_CACHE_TTL > 0:
+            try:
+                await self._redis.setex(
+                    cache_key, self._SCHEMA_CACHE_TTL,
+                    json.dumps(stats.model_dump(by_alias=True)),
+                )
+            except Exception:
+                pass
+        return stats
 
     async def get_ontology_metadata(self) -> OntologyMetadata:
         """

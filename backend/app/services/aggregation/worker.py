@@ -148,6 +148,12 @@ def _merge_run_doc(existing: Any, incoming: Any) -> dict:
 #: Learned-state keys the worker persists per source and hands back as
 #: capacity hints (``<key>_observed``). Every one only ever makes the next
 #: run STRICTER; the pipeline ignores a hint looser than the knob in force.
+#: One wall clock for the whole before/after fingerprint, not one per scan.
+#: The fingerprint is three full graph scans; each used to carry the 30s env
+#: ceiling on its own, so a job could spend a minute and a half measuring a
+#: graph it was about to measure again.
+_FINGERPRINT_BUDGET_S = float(os.getenv("FALKORDB_STATS_QUERY_TIMEOUT_SECS", "30"))
+
 _LEARNED_KEYS = ("scan_width", "extract_concurrency", "reconcile_strategy",
                  "write_batch", "delete_chunk")
 
@@ -555,7 +561,8 @@ class AggregationWorker:
                         )
 
                 # Compute fingerprint before aggregation
-                job.graph_fingerprint_before = await compute_graph_fingerprint(provider)
+                job.graph_fingerprint_before = await compute_graph_fingerprint(
+                    provider, budget_s=_FINGERPRINT_BUDGET_S)
                 await session.commit()
 
                 # Run materialization with retries under a progress-aware
@@ -732,7 +739,8 @@ class AggregationWorker:
                         )
                     except (TypeError, ValueError):
                         pass
-                job.graph_fingerprint_after = await compute_graph_fingerprint(provider)
+                job.graph_fingerprint_after = await compute_graph_fingerprint(
+                    provider, budget_s=_FINGERPRINT_BUDGET_S)
 
                 # Update aggregation-owned data source state
                 await self._update_ds_state(

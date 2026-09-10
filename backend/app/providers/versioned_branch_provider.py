@@ -540,7 +540,9 @@ class VersionedBranchProvider:
             "edgeTypeCounts": edge_type_counts,
         }
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         """One composed-state pass → the same ``GraphSchemaStats`` shape FalkorDB builds (per-label
         counts + up-to-3 sample displayNames, per-edge-type counts, tag counts). Serves the insights
         deep facet + graph-schema build for a branch / stale-main, which have no projection to scan."""

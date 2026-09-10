@@ -674,7 +674,9 @@ class ContextEngine:
     async def get_stats(self) -> Dict[str, Any]:
         return await self.provider.get_stats()
 
-    async def get_schema_stats(self) -> GraphSchemaStats:
+    async def get_schema_stats(
+        self, *, budget_s: Optional[float] = None,
+    ) -> GraphSchemaStats:
         return await self.provider.get_schema_stats()
     
     async def _ensure_containment_edge_types(self, edge_types: Optional[List[str]]) -> List[str]:
