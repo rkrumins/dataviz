@@ -177,7 +177,7 @@ async def test_signal_stamps_the_endpoint_key_with_a_ttl_and_coalesces() -> None
 
 
 async def test_signal_fails_open_when_redis_is_down() -> None:
-    signal = rp.ReadPressureSignal(lambda: _DownRedis())
+    signal = rp.ReadPressureSignal(_DownRedis)
     before = rp.read_pressure_stats()["signal_errors"]
 
     signal.on_capacity("server_timeout", _Provider())   # must not raise
@@ -219,13 +219,11 @@ class _Admission:
         self.pressure = pressure
 
     def write_slot(self, provider):
-        admission = self
-
         class _Slot:
-            async def __aenter__(self_inner):
-                return self_inner
+            async def __aenter__(self):
+                return self
 
-            async def __aexit__(self_inner, *exc):
+            async def __aexit__(self, *exc):
                 return False
 
         return _Slot()

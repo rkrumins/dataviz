@@ -151,10 +151,7 @@ async def test_deps_reports_resilience_counters(test_client: AsyncClient, monkey
     rejected queries (not counted) versus real connection failures, and how
     the request-path preflight and slot queue decided. Always present, with
     every counter an integer, so a dashboard can plot them from boot."""
-    monkeypatch.setattr(
-        "backend.app.db.engine.get_engine",
-        lambda: _HealthyEngine(),
-    )
+    monkeypatch.setattr("backend.app.db.engine.get_engine", _HealthyEngine)
 
     resp = await test_client.get("/api/v1/health/deps")
     assert resp.status_code == 200
