@@ -242,6 +242,11 @@ export function friendlyError(raw: string): string {
         return FRIENDLY_BY_CODE.auth_failed
     if (lower.includes('noauth') || lower.includes('authentication required') || lower.includes('authentication is required'))
         return FRIENDLY_BY_CODE.auth_required
+    // The CALLER's session, not the graph's credentials: a 401 body ("Not
+    // authenticated" / "Session revoked") contains "auth" and used to be
+    // reported as the provider rejecting its username/password.
+    if (lower.includes('not authenticated') || lower.includes('session revoked') || lower.includes('session expired'))
+        return 'Your session needs renewing — this is not a provider problem. Reload the page, or sign in again if that does not help.'
     if (lower.includes('authentication') || lower.includes('auth'))
         return FRIENDLY_BY_CODE.auth_failed
     if (lower.includes('ssl') || lower.includes('tls') || lower.includes('certificate'))

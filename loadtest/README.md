@@ -25,7 +25,8 @@ loadtest/
 │   ├── graph_schema.py      # HttpUser wrapper around GraphSchemaTasks (heavy)
 │   ├── graph_lineage.py     # HttpUser wrapper around GraphLineageTasks (Tier-1 stress)
 │   ├── graph_walks.py       # HttpUser wrapper around GraphWalksTasks (Tier-1 stress)
-│   └── graph_children.py    # HttpUser wrapper around GraphChildrenTasks (Tier-1 stress)
+│   ├── graph_children.py    # HttpUser wrapper around GraphChildrenTasks (Tier-1 stress)
+│   └── canvas_open.py       # HttpUser wrapper around CanvasOpenTasks (the view open)
 └── scenarios/
     ├── views.py             # GET /views/ + /views/popular
     ├── workspaces.py        # GET /admin/workspaces/.../cached-stats
@@ -35,8 +36,9 @@ loadtest/
     ├── graph_lineage.py     # POST /{ws}/graph/trace/v2                (Tier-1 stress)
     ├── graph_walks.py       # GET /{ws}/graph/nodes/{urn}/ancestors    (Tier-1 stress)
     │                        # GET /{ws}/graph/nodes/{urn}/descendants
-    └── graph_children.py    # GET /{ws}/graph/nodes/{urn}/children     (Tier-1 stress)
-                             # GET /{ws}/graph/nodes/{urn}/children-with-edges
+    ├── graph_children.py    # GET /{ws}/graph/nodes/{urn}/children     (Tier-1 stress)
+    │                        # GET /{ws}/graph/nodes/{urn}/children-with-edges
+    └── canvas_open.py       # POST /{ws}/graph/nodes/query ×N + /edges/between (the view open)
 ```
 
 ## Install
@@ -133,6 +135,7 @@ make smoke-views
 make smoke-cached-stats        # will surface as failed SLO if no workspaces are seeded
 make smoke-aggregation-jobs    # Tier-2 heavy: admin jobs list (full-table scan)
 make smoke-graph-schema        # Tier-2 heavy: workspace schema introspection
+make smoke-canvas-open         # the view open: nodes/query batches + edges/between
 make smoke-mixed
 ```
 
@@ -185,8 +188,29 @@ python -m lib.slo --tier 500 results/sweep/tier_500/run_stats.csv
 | `GraphLineageTasks` | 1 | `POST /{ws}/graph/trace/v2` | **Tier-1 stress** — multi-hop traversal |
 | `GraphWalksTasks` | 1 | `GET /{ws}/graph/nodes/{urn}/ancestors` and `/descendants` | **Tier-1 stress** |
 | `GraphChildrenTasks` | 1 | `GET /{ws}/graph/nodes/{urn}/children` and `/children-with-edges` | **Tier-1 stress** |
+| `CanvasOpenTasks` | 2 | `POST /{ws}/graph/nodes/query` (100 URNs per request, 4 in flight) then `POST /{ws}/graph/edges/between` | **the view open** — the hydration path every canvas session starts with |
 
 The graph scenarios pick from a per-process pool of `(workspace, urn)` pairs discovered via `POST /{ws}/graph/nodes/query` (tunable via `SYNODIC_URN_POOL_WORKSPACES` and `SYNODIC_URNS_PER_WORKSPACE`). When the pool is empty — i.e. no graph data is seeded for any workspace — the scenarios emit a single `graph-*:no-node` stat row per call instead of 404-storming the backend, so a `make sweep` against an empty cluster still completes (and `lib.slo --tier N` will flag the missing graph rows under non-smoke gating).
+
+### The view open
+
+`CanvasOpenTasks` reproduces what the frontend does when a user opens a curated
+view (`useGraphHydration`): the assigned entities are fetched by URN, 100 per
+`POST /nodes/query` with four requests in flight, then one `POST /edges/between`
+asks for the edges among everything that loaded. Two stat rows: `canvas-open:nodes`
+(per batch) and `canvas-open:edges` (per open). The "view" is the pool's URN sample
+for the workspace, so its size is `SYNODIC_URNS_PER_WORKSPACE` — the default 20 is
+one batch; set 500 to emulate a 500-entity view (five batches plus the edge scan).
+
+A 429 counts as a failure here on purpose. The real canvas retries a shed request
+in place, but under load the shed *is* the signal: it means the pod's per-data-source
+slots (`PROVIDER_MAX_CONCURRENCY`, 8 per worker process) or FalkorDB's own queue
+(`MAX_QUEUED_QUERIES`) ran out. After a run, read `GET /api/v1/health/deps` on the
+backend: its `resilience` block carries process counters that say *where* capacity
+ran out — `breaker_opens` must stay at 0 (load never counts as an outage),
+`queue_full_not_counted` is FalkorDB rejecting at its queue cap, `slots_shed_*` is
+the pod shedding before the database, and `deadline_timeouts_not_counted` is
+queries exceeding their budgets.
 
 ## Per-graph-endpoint stress
 
@@ -196,7 +220,8 @@ When the mixed sweep shows a graph regression, isolate it with `make stress-*`. 
 make stress-trace         # POST /graph/trace/v2 only, at 10 → 1000 users
 make stress-walks         # ancestors + descendants only
 make stress-children      # children + children-with-edges only
-make stress               # all three sequentially
+make stress-canvas        # the view open (nodes/query batches + edges/between) only
+make stress               # all four sequentially
 ```
 
 Stress runs reuse `SWEEP_TIERS` / `SWEEP_RUN_TIME` / `SWEEP_SPAWN_RATE` by default; override with `STRESS_*` to vary independently of the mixed sweep:
@@ -205,7 +230,7 @@ Stress runs reuse `SWEEP_TIERS` / `SWEEP_RUN_TIME` / `SWEEP_SPAWN_RATE` by defau
 STRESS_TIERS='100 500' STRESS_RUN_TIME=2m make stress-trace
 ```
 
-CSVs land under `results/stress/<endpoint>/tier_<N>/`. Each tier is gated by the same `TIER_SLOS` table as the mixed sweep — the per-endpoint p95 entries (`graph-trace:v2`, `graph-ancestors:get`, `graph-descendants:get`, `graph-children:get`, `graph-children-edges:get`) carry deliberately loose ceilings at the 500 / 1000 tiers (these endpoints are FalkorDB-bound and high tail variance is expected). Re-tune the per-tier thresholds in [lib/slo.py](lib/slo.py) once you have a real baseline.
+CSVs land under `results/stress/<endpoint>/tier_<N>/`. Each tier is gated by the same `TIER_SLOS` table as the mixed sweep — the per-endpoint p95 entries (`graph-trace:v2`, `graph-ancestors:get`, `graph-descendants:get`, `graph-children:get`, `graph-children-edges:get`) carry deliberately loose ceilings at the 500 / 1000 tiers (these endpoints are FalkorDB-bound and high tail variance is expected), and so do `canvas-open:nodes` / `canvas-open:edges`. Re-tune the per-tier thresholds in [lib/slo.py](lib/slo.py) once you have a real baseline.
 
 `make stress-clean` removes `results/stress/`.
 

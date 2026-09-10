@@ -1613,6 +1613,7 @@ class FalkorDBProvider(GraphDataProvider):
     _READ_TIMEOUT = _resilience.FALKORDB_QUERY_TIMEOUT_SECS
     _WRITE_TIMEOUT = _resilience.FALKORDB_WRITE_TIMEOUT_SECS
     _EDGES_BETWEEN_TIMEOUT = _resilience.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS
+    _NODES_QUERY_TIMEOUT = _resilience.FALKORDB_NODES_QUERY_TIMEOUT_SECS
     del _resilience
 
     # FalkorDB engine cancels the query 500ms before the asyncio deadline so
@@ -3165,9 +3166,16 @@ class FalkorDBProvider(GraphDataProvider):
                     res = await self._ro_query(
                         _urn_cypher(label),
                         params={**params, "urnList": bucket},
+                        timeout=self._NODES_QUERY_TIMEOUT,
                         op="nodes.query",
                     )
                     return res.result_set or []
+                except asyncio.TimeoutError:
+                    # A deadline miss must surface (ProviderTimeout → 504 +
+                    # Retry-After), never turn into "these entities don't
+                    # exist": swallowing it here rendered a canvas with a
+                    # silently missing bucket of assigned entities.
+                    raise
                 except Exception as e:
                     if await self._is_verified_missing_graph(e):
                         return []
@@ -3257,7 +3265,9 @@ class FalkorDBProvider(GraphDataProvider):
             cypher = " ".join(clauses)
 
         try:
-            result = await self._ro_query(cypher, params=params)
+            result = await self._ro_query(
+                cypher, params=params, timeout=self._NODES_QUERY_TIMEOUT, op="nodes.query",
+            )
         except Exception as e:
             if await self._is_verified_missing_graph(e):
                 return []  # never-created / empty key = legitimately no data
@@ -3445,6 +3455,10 @@ class FalkorDBProvider(GraphDataProvider):
                         timeout=timeout, op=op,
                     )
                     return res.result_set or []
+                except asyncio.TimeoutError:
+                    # Surface the deadline miss (ProviderTimeout) rather than
+                    # returning a silently incomplete edge set as if complete.
+                    raise
                 except Exception as exc:
                     logger.warning("get_edges bucket query failed: %s", exc)
                     return []

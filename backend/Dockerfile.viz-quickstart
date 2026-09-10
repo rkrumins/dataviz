@@ -42,4 +42,5 @@ CMD ["gunicorn", "backend.app.main:app", \
      "--bind", "0.0.0.0:8000", \
      "--timeout", "120", \
      "--graceful-timeout", "30", \
+     "--keep-alive", "75", \
      "--access-logfile", "-"]
