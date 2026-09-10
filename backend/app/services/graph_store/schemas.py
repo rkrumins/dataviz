@@ -250,10 +250,27 @@ class GraphStoreTopologyResponse(_Base):
     last_error: Optional[str] = Field(None, alias="lastError")
 
 
+class ReadRouting(_Base):
+    """How this provider's reads were actually served, IN THIS PROCESS.
+
+    Per web pod, since a provider proxy is per process — so the figures say
+    "replica routing is working here", not "across the fleet". That is still
+    the question an operator needs answered after turning it on, and nothing
+    else answers it: a replica read and a master read look identical from the
+    outside.
+    """
+    replica_reads: int = Field(0, alias="replicaReads")
+    master_reads: int = Field(0, alias="masterReads")
+    # A read a replica failed, re-issued on the master. Steady growth here
+    # means a replica is unwell, not that routing is wrong.
+    replica_fallbacks: int = Field(0, alias="replicaFallbacks")
+
+
 class ProviderTopologyResponse(_Base):
     provider_id: str = Field(alias="providerId")
     provider_name: Optional[str] = Field(None, alias="providerName")
     instance: Optional[GraphStoreInstance] = None
+    reads: Optional[ReadRouting] = None
     measured_at: Optional[str] = Field(None, alias="measuredAt")
     cache_age_ms: int = Field(0, alias="cacheAgeMs")
     stale: bool = False

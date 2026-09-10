@@ -7,6 +7,7 @@
  */
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
+import type { ProviderTopologyResponse } from '@/services/graphStoreService'
 import { useProviderTopology } from '../shared/useGraphStoreTopology'
 import { NodesTable } from './NodesTable'
 
@@ -36,8 +37,22 @@ export function ProviderTopologyLine({ providerId, className }: { providerId: st
             {instance.mode === 'cluster' && instance.slotsCovered != null
                 && ` · ${instance.slotsCovered.toLocaleString()}/16,384 slots`}
             {!instance.reachable && ` · unreachable: ${instance.error ?? 'no seed answered'}`}
+            {readsLabel(data.reads) && ` · ${readsLabel(data.reads)}`}
         </p>
     )
+}
+
+/** "62% of reads from replicas" — the one thing that says whether replica
+ *  routing is actually happening. A replica read and a master read look
+ *  identical from the outside, so without this an operator cannot tell. */
+function readsLabel(reads: ProviderTopologyResponse['reads']): string | null {
+    if (!reads) return null
+    const total = reads.replicaReads + reads.masterReads
+    if (total < 20) return null                      // too few to mean anything
+    const pct = Math.round((reads.replicaReads * 100) / total)
+    const fallbacks = reads.replicaFallbacks > 0
+        ? `, ${reads.replicaFallbacks} fell back` : ''
+    return `${pct}% of reads from replicas${fallbacks}`
 }
 
 export function ProviderTopologyBlock({ providerId }: { providerId: string }) {

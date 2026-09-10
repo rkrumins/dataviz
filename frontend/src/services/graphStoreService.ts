@@ -210,10 +210,23 @@ export interface GraphStoreTopologyResponse {
     lastError?: string | null
 }
 
+export interface ReadRouting {
+    /** How this provider's reads were served IN THE POD that answered — a
+     *  provider proxy is per process, so this says "replica routing is
+     *  working here", not "across the fleet". */
+    replicaReads: number
+    masterReads: number
+    /** A read a replica failed, re-issued on the master. Steady growth means
+     *  a replica is unwell, not that the routing is wrong. */
+    replicaFallbacks: number
+}
+
 export interface ProviderTopologyResponse {
     providerId: string
     providerName?: string | null
     instance?: GraphStoreInstance | null
+    /** Absent when no provider for this connection is built in this pod yet. */
+    reads?: ReadRouting | null
     measuredAt?: string | null
     cacheAgeMs: number
     stale: boolean

@@ -162,6 +162,24 @@ describe('a provider’s own nodes', () => {
             .toHaveAttribute('href', '/admin/graph-store')
     })
 
+    it('says what share of its reads replicas actually answered', async () => {
+        getProviderTopology.mockResolvedValue({
+            ...TOPOLOGY, reads: { replicaReads: 62, masterReads: 38, replicaFallbacks: 0 },
+        })
+        wrap(<ProviderTopologyLine providerId="p1" />)
+        expect(await screen.findByTestId('provider-topology-line'))
+            .toHaveTextContent('62% of reads from replicas')
+    })
+
+    it('says nothing about routing until there are enough reads to mean anything', async () => {
+        getProviderTopology.mockResolvedValue({
+            ...TOPOLOGY, reads: { replicaReads: 2, masterReads: 1, replicaFallbacks: 0 },
+        })
+        wrap(<ProviderTopologyLine providerId="p1" />)
+        expect(await screen.findByTestId('provider-topology-line'))
+            .not.toHaveTextContent('reads from replicas')
+    })
+
     it('stays quiet rather than guessing when the provider has no instance', async () => {
         getProviderTopology.mockResolvedValue({ ...TOPOLOGY, instance: null, lastError: 'no seed answered' })
         wrap(<><ProviderTopologyLine providerId="p1" /><ProviderTopologyBlock providerId="p1" /></>)

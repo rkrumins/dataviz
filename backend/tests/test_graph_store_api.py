@@ -205,3 +205,24 @@ def test_a_provider_the_snapshot_never_read_still_answers_with_the_reason(monkey
     assert not out.reachable
     assert "has not been read" in (out.error or "")
     assert out.placements and out.placements[0].master is None
+
+
+def test_the_provider_view_says_how_its_reads_were_served(monkeypatch):
+    """A replica read and a master read look identical from the outside, so
+    without this an operator has no way to tell whether the routing they
+    turned on is doing anything."""
+    from backend.app.api.v1.endpoints import graph_store as mod
+    from backend.app.providers.manager import provider_manager
+
+    class _Proxy:
+        def read_routing_counters(self):
+            return {"replicaReads": 40, "masterReads": 10, "replicaFallbacks": 2}
+
+    monkeypatch.setattr(provider_manager, "instantiated", lambda pid: [_Proxy(), _Proxy()])
+    reads = mod._read_routing("p1")
+    # Summed across the proxies this pod holds for the provider.
+    assert (reads.replica_reads, reads.master_reads, reads.replica_fallbacks) == (80, 20, 4)
+
+    # Nothing built here yet: absent, never a misleading zero.
+    monkeypatch.setattr(provider_manager, "instantiated", lambda pid: [])
+    assert mod._read_routing("p1") is None

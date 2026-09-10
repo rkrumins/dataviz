@@ -25,6 +25,7 @@ from backend.app.services.graph_store.schemas import (
     GraphStoreTopologyResponse,
     PlacementBrief,
     ProviderTopologyResponse,
+    ReadRouting,
 )
 from .aggregation import _require_ingestion_read
 
@@ -92,8 +93,32 @@ async def get_provider_topology(
     name = next((p.name for p in instance.providers if p.id == provider_id), None)
     return ProviderTopologyResponse(
         provider_id=provider_id, provider_name=name, instance=instance,
+        reads=_read_routing(provider_id),
         measured_at=snapshot.measured_at, cache_age_ms=snapshot.cache_age_ms,
         stale=snapshot.stale, last_error=snapshot.last_error,
+    )
+
+
+def _read_routing(provider_id: str) -> Optional[ReadRouting]:
+    """How this pod's reads for ``provider_id`` were served — summed over the
+    proxies already built here. A dict lookup: never builds a provider."""
+    from backend.app.providers.manager import provider_manager
+
+    totals = {"replicaReads": 0, "masterReads": 0, "replicaFallbacks": 0}
+    seen = False
+    for proxy in provider_manager.instantiated(provider_id):
+        counters = getattr(proxy, "read_routing_counters", None)
+        if counters is None:
+            continue
+        seen = True
+        for key, value in counters().items():
+            totals[key] = totals.get(key, 0) + int(value)
+    if not seen:
+        return None
+    return ReadRouting(
+        replica_reads=totals["replicaReads"],
+        master_reads=totals["masterReads"],
+        replica_fallbacks=totals["replicaFallbacks"],
     )
 
 
