@@ -566,7 +566,23 @@ class MaterializationQueryMemoryExceeded(ValueError):
     a sick provider."""
 
 
-class MaterializationScanTimedOut(TimeoutError):
+class TerminalStoreFailure(Exception):
+    """A verdict the run has already reached — no ladder may narrow its way
+    out of it.
+
+    Both terminal failures below quote the underlying redis error in their
+    message so a failed run names the node. Classification is by text, so
+    without this marker ``MaterializationStoreUnreachable`` reads back as
+    ordinary ``"connection"`` pressure and lands in the ladder that called
+    it: the ladder would halve a page it cannot deliver to a node that is
+    not there, re-enter the spent outage budget on each half, and — because
+    the narrowing is sticky — leave the run limping at the floor width long
+    after the node came back. The classifier tests this marker first, so a
+    terminal failure propagates whatever its message happens to say.
+    """
+
+
+class MaterializationScanTimedOut(TerminalStoreFailure, TimeoutError):
     """A floor-width scan (or a minimum-size write/delete) kept timing out
     through every backoff retry the ladder allows.
 
@@ -581,7 +597,7 @@ class MaterializationScanTimedOut(TimeoutError):
     kill."""
 
 
-class MaterializationStoreUnreachable(ConnectionError):
+class MaterializationStoreUnreachable(TerminalStoreFailure, ConnectionError):
     """The graph store node the run writes to stopped answering and did not
     come back inside the run's outage budget.
 
@@ -610,6 +626,10 @@ def _pressure_kind(exc: BaseException) -> Optional[str]:
     ``TimeoutError``) OR the server's own ``Query timed out`` refusal — the
     latter is what production actually produces, because every query goes
     out with ``TIMEOUT = budget − 500 ms`` and the server aborts first."""
+    # A verdict the run already reached is not a signal to react to: it is
+    # the end of reacting. Tested first, before any text matching.
+    if isinstance(exc, TerminalStoreFailure):
+        return None
     # One classifier, shared with the aggregated-edge read ladder.
     from backend.app.providers.falkordb_provider import _pressure_kind as _kind
     return _kind(exc)
@@ -951,6 +971,13 @@ class AggregationPipeline:
         self._outage_hold_s = _store_outage_hold_s()
         self._outage_holds = 0
         self._outage_s = 0.0
+        #: When the CURRENT outage began, or None while the store answers.
+        #: Separate from the run totals above because the budget is spent
+        #: per outage: a rebuild running for hours meets several rolling
+        #: restarts, and timing the second from the first one's blip would
+        #: fail it instantly with a wait it never made.
+        self._outage_since: Optional[float] = None
+        self._outage_holds_now = 0
         self._node_restarts: List[Dict[str, Any]] = []
         self._node_identity: Dict[str, Tuple[Optional[str], Optional[int]]] = {}
         self._rss_high_water_mb: Optional[float] = None
@@ -1265,19 +1292,30 @@ class AggregationPipeline:
         """
         while True:
             try:
-                return await attempt()
+                result = await attempt()
             except Exception as exc:
                 if _pressure_kind(exc) != "connection":
                     raise
                 await self._hold_for_store(exc, op)
+            else:
+                if self._outage_since is not None:
+                    logger.info(
+                        "aggregation pipeline on %s: the graph store answered "
+                        "again after %.0fs during %s — carrying on from the "
+                        "checkpoint.", self.p._graph_name,
+                        time.monotonic() - self._outage_since, op,
+                    )
+                    self._outage_since = None
+                    self._outage_holds_now = 0
+                return result
 
     async def _hold_for_store(self, exc: Exception, op: str) -> None:
         """One wait for a node that is not answering. Raises
         :class:`MaterializationStoreUnreachable` once the run has waited
         longer than it is allowed to."""
         endpoint = self._store_endpoint()
-        if self._outage_holds == 0:
-            self._outage_started = time.monotonic()
+        if self._outage_since is None:
+            self._outage_since = time.monotonic()
             await self._note_node_identity(endpoint)
             logger.warning(
                 "aggregation pipeline on %s: the graph store node %s is not "
@@ -1285,7 +1323,7 @@ class AggregationPipeline:
                 "checkpoint.", self.p._graph_name, endpoint, type(exc).__name__, op,
             )
             self._on_pressure(op, "connection", 0, 0, size=0)
-        waited = time.monotonic() - self._outage_started
+        waited = time.monotonic() - self._outage_since
         if waited >= self._outage_hold_s:
             raise MaterializationStoreUnreachable(
                 f"the graph store node {endpoint} did not answer for "
@@ -1295,9 +1333,11 @@ class AggregationPipeline:
                 f"killed for memory or by its health probe."
             )
         self._outage_holds += 1
+        self._outage_holds_now += 1
         await self._ladder_heartbeat()
         self._cancel_check()
-        delay = _backoff_s(min(self._outage_holds, 4))
+        # Widens within THIS outage; a later one starts patient again.
+        delay = _backoff_s(min(self._outage_holds_now, 4))
         await asyncio.sleep(delay)
         self._outage_s += delay
         # A restarted pod comes back at a new address and a failover moves

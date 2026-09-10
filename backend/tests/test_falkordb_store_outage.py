@@ -186,6 +186,54 @@ def test_a_cancelled_job_stops_waiting(monkeypatch):
         _run(pipe._through_outage(_attempt, op="apply"))
 
 
+def test_each_outage_gets_the_whole_budget(monkeypatch):
+    """The budget is per outage, not per run. A rebuild that runs for hours
+    meets several rolling restarts; timing the second one's wait from the
+    first one's two-second blip would fail it instantly, having waited for
+    nothing, and report a wait it never made."""
+    provider = _Recovering(down=0)
+    pipe = _pipeline(provider, monkeypatch)
+    pipe._outage_hold_s = 60.0
+    calls = []
+
+    async def _attempt():
+        calls.append(1)
+        # Down for the 1st call, up for the 2nd, down again much later.
+        if len(calls) in (1, 3):
+            raise REFUSED
+        return "ok"
+
+    _run(pipe._through_outage(_attempt, op="extract"))     # first outage, ridden out
+    assert pipe._outage_since is None                      # …and declared over
+
+    # Hours pass, then the pod rotates again.
+    _run(pipe._through_outage(_attempt, op="extract"))
+    assert pipe._outage_holds == 2                         # both waits happened
+    assert calls == [1, 1, 1, 1]                           # the second one waited too
+
+
+def test_a_spent_budget_is_terminal_and_never_read_back_as_pressure(monkeypatch):
+    """The message quotes the redis error so a failed run names the node —
+    and classification is by text, so without the terminal marker the
+    enclosing ladder reads it back as `connection` pressure, halves a page
+    it cannot deliver to a node that is not there, and leaves the run
+    limping at the floor width long after the node came back."""
+    provider = _Recovering(down=99)
+    pipe = _pipeline(provider, monkeypatch)
+    pipe._outage_hold_s = 0.0
+
+    async def _attempt():
+        raise REFUSED
+
+    with pytest.raises(mat.MaterializationStoreUnreachable) as exc:
+        _run(pipe._through_outage(_attempt, op="apply"))
+    assert "Connection refused" in str(exc.value)           # the text that fooled it
+    assert mat._pressure_kind(exc.value) is None            # …and no longer does
+
+    # The floor-width scan verdict is terminal for the same reason.
+    assert mat._pressure_kind(mat.MaterializationScanTimedOut("timed out at width 1")) is None
+
+
 def test_the_outage_budget_is_a_knob(monkeypatch):
     monkeypatch.setenv("AGGREGATION_STORE_OUTAGE_HOLD_S", "120")
     assert mat._store_outage_hold_s() == 120

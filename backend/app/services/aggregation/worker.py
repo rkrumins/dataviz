@@ -1468,6 +1468,14 @@ class AggregationWorker:
                 # So no attempt is consumed — a rebuild must not burn its
                 # retry budget on a routine pod rotation. Bounded, because
                 # "failing over" that never ends IS a failure.
+                # Progress since the last park means the store came back and
+                # the run used it — a NEW rotation, not the same one dragging
+                # on. A rebuild running for hours rides out several routine
+                # rotations, and must not fail on the eleventh having
+                # successfully waited out the first ten.
+                if (job.processed_edges or 0) > last_progress:
+                    failover_parks = 0
+                    last_progress = job.processed_edges or 0
                 failover_parks += 1
                 if failover_parks > _FAILOVER_PARKS_MAX:
                     job.error_message = (
@@ -1555,6 +1563,11 @@ class AggregationWorker:
                     # steady forward progress never exhausts retries.
                     attempt = 0
                     provider_unavailable_count = 0
+                    # …and the evidence with it: a node named hours ago, from
+                    # a fault the run has long since worked past, would point
+                    # the operator at a node that has been healthy since.
+                    failover_parks = 0
+                    first_provider_error = None
                     last_progress = job.processed_edges or 0
                 provider_unavailable_count += 1
                 job.retry_count = attempt + 1
@@ -1629,6 +1642,8 @@ class AggregationWorker:
                     # resets indefinitely.
                     attempt = 0
                     provider_unavailable_count = 0
+                    failover_parks = 0
+                    first_provider_error = None
                     last_progress = job.processed_edges or 0
                 job.retry_count = attempt + 1
 
