@@ -308,7 +308,9 @@ _REFUSED_RETRY_BACKOFFS: tuple = (0.5, 2.0, 5.0, 10.0)
 _READ_REFUSED_RETRIES = 1
 
 #: How far behind a replica may be and still answer a read (seconds).
-_REPLICA_READ_MAX_LAG_S = float(os.getenv("FALKORDB_REPLICA_READ_MAX_LAG_S", "2"))
+_REPLICA_READ_MAX_LAG_BYTES = int(
+    os.getenv("FALKORDB_REPLICA_READ_MAX_LAG_BYTES", str(8 * 1024 * 1024))
+)
 #: How long this process's own writes pin a graph's reads to its master.
 _REPLICA_READ_SETTLE_S = float(os.getenv("FALKORDB_REPLICA_READ_SETTLE_S", "30"))
 #: How often one shard's replication state is sampled for the router.
@@ -562,6 +564,33 @@ def _is_connection_refused_error(exc: BaseException) -> bool:
             return True
         seen = seen.__cause__ or seen.__context__
     return False
+
+
+def _replica_at_fault(exc: BaseException) -> bool:
+    """Whether a failed replica read failed BECAUSE it went to the replica.
+
+    A refused connection, a reset, a ``MOVED``, a replica still loading its
+    dataset — those the master answers. A query the store refused at its
+    per-query memory ceiling, or one that ran past its deadline, would fail
+    identically on the master: re-running it there doubles the work and
+    benching a healthy replica for it takes a node out of rotation for a
+    reason it had nothing to do with. ``ProviderFailingOver`` is a verdict
+    about the MASTER, reached from the provider's own memo.
+    """
+    from backend.common.adapters import ProviderFailingOver
+
+    if isinstance(exc, ProviderFailingOver):
+        return False
+    if _is_query_memory_error(exc) or _is_query_timeout_error(exc):
+        return False
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return False
+    return bool(
+        _is_connection_refused_error(exc)
+        or _is_transient_connection_error(exc)
+        or _is_cluster_routing_error(exc)
+        or _is_loading_error(exc)
+    )
 
 
 def _pressure_kind(exc: BaseException) -> Optional[str]:
@@ -2286,7 +2315,11 @@ class FalkorDBProvider(GraphDataProvider):
         replicas = [n for n in nodes[1:] if self._replica_usable(n)]
         if not replicas:
             return None
-        if not await self._replicas_in_step(graph_key, {f"{n.host}:{n.port}" for n in replicas}):
+        in_step = await self._replicas_in_step(
+            graph_key, {f"{n.host}:{n.port}" for n in replicas},
+        )
+        replicas = [n for n in replicas if f"{n.host}:{n.port}" in in_step]
+        if not replicas:
             return None
         # Round-robin so one replica does not take every read of a shard.
         self._replica_turn = (getattr(self, "_replica_turn", -1) + 1) % len(replicas)
@@ -2308,8 +2341,20 @@ class FalkorDBProvider(GraphDataProvider):
             self._graph_name, endpoint, type(exc).__name__, _REPLICA_PENALTY_S,
         )
 
-    async def _replicas_in_step(self, graph_key: str, endpoints: Set[str]) -> bool:
-        """Whether this shard's replicas are close enough to serve a read.
+    async def _replicas_in_step(self, graph_key: str, endpoints: Set[str]) -> Set[str]:
+        """WHICH of this shard's replicas are close enough to serve a read.
+
+        Closeness is measured in the bytes a replica still owes the stream,
+        never in the ``lag`` seconds ``INFO`` reports: a replica acknowledges
+        the stream about once a second whatever it has actually applied, so
+        ``lag`` reads 0 for one that is gigabytes behind. Under the workload
+        this router exists to relieve — a rebuild writing hard to the master
+        — that is precisely when it would wave a badly stale replica through.
+
+        A per-replica answer, not one verdict for the shard: one replica
+        keeping up says nothing about its sibling, and a set means a lagging
+        replica is skipped instead of being handed the reads its healthy
+        neighbour qualified for.
 
         One ``INFO replication`` per shard per sample window answers it for
         every read of every graph on that shard.
@@ -2320,17 +2365,19 @@ class FalkorDBProvider(GraphDataProvider):
             cache = self._repl_sample = {}
         cached = cache.get(graph_key)
         if cached is not None and now - cached[0] < _REPLICA_SAMPLE_S:
-            return cached[1]
+            return cached[1] & endpoints
         state = await self.replication_state(graph_key, timeout_s=1.0)
-        links = state.get("replicas") or []
-        in_step = any(
-            (r.get("endpoint") in endpoints)
-            and r.get("state") == "online"
-            and (r.get("lagS") is None or r["lagS"] <= _REPLICA_READ_MAX_LAG_S)
-            for r in links
-        ) if links else False
+        in_step = {
+            str(r.get("endpoint"))
+            for r in (state.get("replicas") or [])
+            if r.get("state") == "online"
+            # No offset reported means no way to tell how far behind it is,
+            # and the master answers whatever the router is unsure of.
+            and isinstance(r.get("lagBytes"), int)
+            and r["lagBytes"] <= _REPLICA_READ_MAX_LAG_BYTES
+        }
         cache[graph_key] = (now, in_step)
-        return in_step
+        return in_step & endpoints
 
     def _pinned_to(self, graph, node):
         """The same graph, with its commands addressed to ONE node.
@@ -2620,6 +2667,14 @@ class FalkorDBProvider(GraphDataProvider):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:                      # noqa: BLE001 — the master answers
+                # Only a fault the REPLICA caused earns the master a second
+                # run of the same query. A store that refused the query for
+                # its size, or a deadline that expired, would fail the same
+                # way on the master — running it twice would put MORE load on
+                # the node this routing exists to relieve, and make the read's
+                # own timeout no bound at all on how long a caller waits.
+                if not _replica_at_fault(exc):
+                    raise
                 self._penalise_replica(replica, exc)
                 self._replica_fallbacks += 1
         result = await self._guarded_timed(
@@ -2715,7 +2770,9 @@ class FalkorDBProvider(GraphDataProvider):
                 timeout=t,
             )
 
-        return await self._guarded_timed(_call, kind="write", cypher=cypher, op=op, budget=t)
+        result = await self._guarded_timed(_call, kind="write", cypher=cypher, op=op, budget=t)
+        self._note_local_write(self._graph_name)
+        return result
 
     async def _proj_ro_query(self, cypher: str, params: dict = None, *, timeout: float = None,
                              op: Optional[str] = None):
@@ -2840,9 +2897,14 @@ class FalkorDBProvider(GraphDataProvider):
         async with self._write_semaphore:
             async with self._query_semaphore:
                 result = await self._run_guarded(_call)
-                # This process wrote: pin this graph's reads to the master for
-                # the settle window so a caller always sees its own writes.
-                self._note_local_write()
+                # This process wrote: pin THIS graph's reads to the master for
+                # the settle window so a caller always sees its own writes. In
+                # dedicated mode the projection graph is a different key on a
+                # possibly different shard, so naming it is not a formality —
+                # stamping the source key instead would pin the one graph the
+                # write never touched and leave the rewritten one free to be
+                # served from a replica that has not applied it.
+                self._note_local_write(self._projection_graph_key())
                 return result
 
     async def _seed_from_file(self):

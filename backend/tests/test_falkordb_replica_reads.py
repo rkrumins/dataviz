@@ -50,7 +50,7 @@ class _Conn:
             get_node_from_slot=lambda slot: MASTER,
         )
         self._info = info if info is not None else {
-            "role": "master", "connected_slaves": 2,
+            "role": "master", "connected_slaves": 2, "master_repl_offset": 100,
             "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "offset": 100, "lag": 0},
             "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 100, "lag": 0},
         }
@@ -77,6 +77,10 @@ class _Graph:
         self.name = name
         self.client = client
         self.execute_command = client.execute_command
+
+    async def query(self, cypher, params=None, timeout=None):
+        await self.execute_command("GRAPH.QUERY", self.name, cypher)
+        return types.SimpleNamespace(result_set=[])
 
     async def ro_query(self, cypher, params=None, timeout=None):
         # Where a read LANDED is what these tests are about, and the client
@@ -130,18 +134,49 @@ def test_standalone_and_sentinel_never_route():
 
 
 def test_a_replica_that_is_behind_does_not_answer():
+    """Behind is measured in BYTES OWED, not in the `lag` seconds INFO
+    reports. A replica acknowledges the stream about once a second whatever
+    it has actually applied, so `lag` reads 0 for one that is a gigabyte
+    behind — under a rebuild, exactly when a stale answer would be served."""
+    behind = 200 * 1024 * 1024
     conn = _Conn(info={
         "role": "master", "connected_slaves": 2,
-        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "offset": 100, "lag": 30},
-        "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 100, "lag": 30},
+        "master_repl_offset": behind,
+        # Promptly acknowledged (lag 0) and hopelessly behind, both at once.
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
+        "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
     })
     p = _provider(conn)
     assert _run(p._replica_for("g1")) is None
 
 
-def test_a_replica_that_is_not_online_does_not_answer():
+def test_one_replica_keeping_up_does_not_speak_for_its_sibling():
+    """A verdict for the whole shard would hand the lagging replica the
+    reads the healthy one qualified for."""
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 2,
+        "master_repl_offset": 100 * 1024 * 1024,
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online",
+                   "offset": 100 * 1024 * 1024, "lag": 0},
+        "slave1": {"ip": "10.0.2.1", "port": "6379", "state": "online", "offset": 0, "lag": 0},
+    })
+    p = _provider(conn)
+    for _ in range(6):
+        assert str(_run(p._replica_for("g1"))) == "10.0.1.1:6379"
+
+
+def test_a_replica_whose_offset_is_unknown_does_not_answer():
+    """Nothing to measure means nothing to trust; the master answers."""
     conn = _Conn(info={
         "role": "master", "connected_slaves": 1,
+        "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "lag": 0},
+    })
+    assert _run(_provider(conn)._replica_for("g1")) is None
+
+
+def test_a_replica_that_is_not_online_does_not_answer():
+    conn = _Conn(info={
+        "role": "master", "connected_slaves": 1, "master_repl_offset": 0,
         "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "wait_bgsave", "offset": 0, "lag": 0},
     })
     p = _provider(conn)
@@ -185,6 +220,50 @@ def test_replication_is_sampled_not_asked_per_read():
     for _ in range(20):
         _run(p._replica_for("g1"))
     assert sum(1 for c in conn.calls if c[0] == "INFO") == 1
+
+
+def test_a_write_pins_the_graph_it_actually_wrote():
+    """The projection graph is its OWN key on its own shard in dedicated
+    mode. Stamping the source key instead pins the one graph the write never
+    touched and leaves the just-rewritten one free to be served by a replica
+    that has not applied it — a half-built overlay that reads as a caching
+    bug."""
+    p = _provider(_Conn())
+    p._projection_mode = "dedicated"
+    p._proj_graph = _Graph(_Conn(), name="g1_proj")
+    p._WRITE_TIMEOUT = 5.0
+    p._write_semaphore = asyncio.Semaphore(1)
+    p._query_semaphore = asyncio.Semaphore(1)
+    p._check_quiesce_gate = lambda: None
+    p._db_timeout_ms = lambda t: 1000
+    p._record_write_latency = lambda s: None
+    p._run_guarded = lambda call: call()
+
+    _run(p._proj_query("CREATE ()"))
+    assert p._in_settle_window("g1_proj")
+    assert not p._in_settle_window("g1")
+
+    # …and a write to the source graph pins the source graph.
+    p._guarded_timed = lambda call, **kw: call()
+    _run(p._query("CREATE ()"))
+    assert p._in_settle_window("g1")
+
+
+def test_only_a_fault_the_replica_caused_sends_the_read_to_the_master():
+    """A query the store refused for its size fails the same way on the
+    master. Re-running it there doubles the load the routing exists to shed,
+    and benching the replica takes a healthy node out of rotation for
+    something it had nothing to do with."""
+    from redis.exceptions import ResponseError
+
+    from backend.common.adapters import ProviderFailingOver
+
+    refused = ResponseError("Query's mem consumption exceeded capacity")
+    assert not fp._replica_at_fault(refused)
+    assert not fp._replica_at_fault(ProviderFailingOver("p", "restarting"))
+    assert not fp._replica_at_fault(asyncio.TimeoutError())
+    # These the master genuinely answers.
+    assert fp._replica_at_fault(ConnectionError("Error 111 connecting: Connection refused"))
 
 
 def test_work_that_must_see_its_own_writes_pins_itself_to_the_master():
