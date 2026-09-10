@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { GraphStoreInstance, GraphStoreNode, GraphStoreShard } from '@/services/graphStoreService'
 import { compactBytes, heldByRebuilds } from '../shared/aggregationKnobs'
-import { HEALTH_META, lagLabel, nodeHealth, slotRangeLabel, uptimeLabel } from './meta'
+import { HEALTH_META, carriedLabel, lagLabel, nodeHealth, slotRangeLabel, uptimeLabel } from './meta'
 import type { NodeHealth } from './meta'
 
 /** One saturation across the family, as the spine rows elsewhere do it. */
@@ -46,8 +46,17 @@ function HealthPill({ health }: { health: NodeHealth }) {
 function MemoryLine({ node }: { node: GraphStoreNode }) {
     const used = node.memory?.used
     const max = node.memory?.maxmemory
+    // Figures kept from the sweep before this one, because the node is not
+    // answering now. Said next to the numbers, or they read as current.
+    const carried = carriedLabel(node)
     if (used == null) return <span className="text-[10px] text-ink-muted">memory not read</span>
-    if (!max) return <span className="text-[10px] text-ink-muted tabular-nums">{compactBytes(used)} used</span>
+    if (!max) {
+        return (
+            <span className="text-[10px] text-ink-muted tabular-nums">
+                {compactBytes(used)} used{carried && ` · ${carried}`}
+            </span>
+        )
+    }
     const pct = Math.min(100, Math.max(0, node.memory.usedPct ?? (used * 100) / max))
     const fill = node.memory.level === 'critical' || (!node.memory.level && pct >= 90)
         ? 'bg-red-500'
@@ -69,6 +78,7 @@ function MemoryLine({ node }: { node: GraphStoreNode }) {
             <span className="text-[10px] text-ink-muted tabular-nums">
                 {compactBytes(used)} of {compactBytes(max)}
             </span>
+            {carried && <span className="text-[10px] text-amber-700 dark:text-amber-400">{carried}</span>}
         </span>
     )
 }

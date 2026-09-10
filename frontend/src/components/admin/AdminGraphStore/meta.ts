@@ -31,6 +31,16 @@ export function recentlyRestarted(node: Pick<GraphStoreNode, 'server'>): boolean
     return (typeof s === 'number' && s < 900) || node.server?.restartedSinceLast === true
 }
 
+/** "from a reading 2 min ago" — what a node that is not answering is being
+ *  described by. A blank where its memory used to be reads as an outage;
+ *  its last figures with their age read as what a rolling restart is. */
+export function carriedLabel(node: Pick<GraphStoreNode, 'figuresAgeS'>): string | null {
+    const s = node.figuresAgeS
+    if (typeof s !== 'number') return null
+    if (s < 90) return `from a reading ${Math.max(1, Math.round(s))}s ago`
+    return `from a reading ${Math.round(s / 60)} min ago`
+}
+
 export function lagLabel(bytes: number | null | undefined): string {
     if (bytes == null) return 'lag unknown'
     if (bytes <= 0) return 'in step'

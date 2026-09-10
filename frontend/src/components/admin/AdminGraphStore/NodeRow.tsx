@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { GraphStoreNode } from '@/services/graphStoreService'
 import { compactBytes, compactEdges } from '../shared/aggregationKnobs'
-import { HEALTH_META, effectsLabel, lagLabel, nodeHealth, uptimeLabel } from './meta'
+import { HEALTH_META, carriedLabel, effectsLabel, lagLabel, nodeHealth, uptimeLabel } from './meta'
 
 export function HealthChip({ node }: { node: GraphStoreNode }) {
     const health = nodeHealth(node)
@@ -155,7 +155,14 @@ export function NodeRow({ node, reservePct, fitsEdges, heldNote, canAdjustLimits
             <MemoryMeter node={node} reservePct={reservePct} />
 
             {node.status === 'unreachable' && node.error && (
-                <p className="mt-1 text-[11px] text-red-600 dark:text-red-400 leading-snug">{node.error}</p>
+                <p className="mt-1 text-[11px] text-red-600 dark:text-red-400 leading-snug">
+                    {node.error}
+                    {/* Whatever is shown above came from before it stopped
+                        answering — a rolling restart, not a blank node. */}
+                    {carriedLabel(node) && (
+                        <span className="text-amber-700 dark:text-amber-400"> The figures above are {carriedLabel(node)}.</span>
+                    )}
+                </p>
             )}
 
             {!isReplica && (

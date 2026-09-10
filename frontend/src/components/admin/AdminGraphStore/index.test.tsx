@@ -486,6 +486,30 @@ describe('Admin → Graph store', () => {
         expect(within(card).getByText(/the node calls itself a master/)).toBeInTheDocument()
     })
 
+    it('keeps a rolling node’s last figures on screen, with their age', async () => {
+        // Three of nine pods away at once is `kubectl rollout restart`.
+        // Blanking their memory the moment they stop answering is how a
+        // routine restart reads as a fleet falling over.
+        const rolling = instance()
+        rolling.shards[0].replicas[0] = node('10.0.1.1:6379', {
+            role: 'replica', status: 'unreachable', figuresAgeS: 124,
+            error: 'Connection refused', replication: { replicas: [] },
+        })
+        rolling.totals = { ...rolling.totals, nodesUp: 8 }
+        getTopology.mockResolvedValue(snapshot({
+            instances: [rolling],
+            summary: { ...snapshot().summary, nodesUp: 8, unreachableNodes: 1 },
+        }))
+        wrap()
+        const shard = await screen.findByTestId('shard-replication-0')
+        // The numbers stand — all three nodes of the shard still show theirs…
+        expect(within(shard).getAllByText(/10\.0 GB of 40\.0 GB/)).toHaveLength(3)
+        // …and the one that is not answering never passes for current.
+        expect(within(shard).getByText('from a reading 2 min ago')).toBeInTheDocument()
+        // The count does not pretend the node came back.
+        expect(screen.getByText('8/9')).toBeInTheDocument()
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?view=shards&shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')

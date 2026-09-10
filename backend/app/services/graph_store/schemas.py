@@ -107,6 +107,10 @@ class GraphStoreNode(_Base):
     #: disagreement is the only signal that one is in flight.
     announced_role: Optional[str] = Field(None, alias="announcedRole")
     status: Literal["up", "unreachable"] = "up"
+    #: Seconds since these figures were read, when they come from an earlier
+    #: sweep because this node did not answer the last one. `status` stays
+    #: "unreachable" — carried-forward numbers are not a node that is up.
+    figures_age_s: Optional[float] = Field(None, alias="figuresAgeS")
     error: Optional[str] = None
     latency_ms: Optional[float] = Field(None, alias="latencyMs")
     # What the cluster bus thinks: "fail" / "pfail" / "noaddr", else None.

@@ -364,13 +364,45 @@ def place(
     return None, slot
 
 
+#: How long a node's last good figures stand in for a node that is not
+#: answering. A rolling restart of a whole cluster is minutes; past this a
+#: node has been away long enough that its numbers say nothing useful.
+_CARRY_FORWARD_MAX_S = 300.0
+
+
+def _carried_forward(
+    read: Dict[str, Any], prev: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Optional[float]]:
+    """A reading for a node that did not answer, from when it last did.
+
+    During a rolling restart several pods are away at once, and blanking
+    their memory, their limits and their replication the moment they stop
+    answering is how a routine `kubectl rollout restart` reads as a fleet
+    falling over. The figures stand with their age attached; `status` is
+    untouched, so a carried-forward node is never counted as up.
+    """
+    reading = prev.get("reading")
+    at = prev.get("readingAt")
+    if read.get("status") == "up" or not reading or at is None:
+        return read, None
+    age = time.monotonic() - at
+    if age > _CARRY_FORWARD_MAX_S:
+        return read, None
+    merged = dict(read)
+    for field in ("memory", "server", "replication", "limits"):
+        merged[field] = reading.get(field) or {}
+    return merged, round(age, 1)
+
+
 def _node_from_read(raw: RawNode, read: Dict[str, Any],
                     previous: Dict[str, Dict[str, Any]]) -> GraphStoreNode:
+    prev_all = previous.get(read.get("nodeId") or read["endpoint"]) or {}
+    read, figures_age_s = _carried_forward(read, prev_all)
     memory = dict(read.get("memory") or {})
     server = dict(read.get("server") or {})
     replication = dict(read.get("replication") or {})
     limits = dict(read.get("limits") or {})
-    prev = previous.get(read.get("nodeId") or read["endpoint"]) or {}
+    prev = prev_all
     run_id = server.get("runId")
     restarted = None
     if run_id and prev.get("runId"):
@@ -382,6 +414,7 @@ def _node_from_read(raw: RawNode, read: Dict[str, Any],
         role=read.get("role") or raw.role,
         announced_role=read.get("announcedRole") or raw.role,
         status=read.get("status") or "up",
+        figures_age_s=figures_age_s,
         error=read.get("error"),
         latency_ms=read.get("latencyMs"),
         gossip=read.get("gossip"),
@@ -621,9 +654,17 @@ def _read_key(node: Any) -> str:
     return getattr(node, "node_id", None) or node.endpoint
 
 
+#: What a node that did not answer the last sweep gets this time. A pod
+#: that is back answers a PING in well under this; one that is still gone
+#: costs a fraction of a full budget, so N dead pods no longer make the
+#: sweep slowest exactly when someone is watching a rolling restart.
+_DOWN_NODE_BUDGET_S = 0.6
+
+
 async def _read_all_nodes(
     pending: Sequence[Tuple[_Pending, RawTopology]],
     measure_by_instance: Dict[int, List[str]],
+    previous: Dict[str, Dict[str, Any]],
 ) -> Dict[Tuple[int, str], Dict[str, Any]]:
     """Read every node of every instance, concurrently and bounded.
 
@@ -646,9 +687,12 @@ async def _read_all_nodes(
 
     async def _one(idx: int, node: RawNode, cfg: FalkorDBConnConfig,
                    want_graphs: bool, measure: List[str]) -> None:
+        full = connect_verify_budget(cfg, 1.5)
+        was_down = (previous.get(_read_key(node)) or {}).get("status") == "unreachable"
         async with semaphore:
             results[(idx, _read_key(node))] = await discovery.read_node(
-                cfg, node, budget=connect_verify_budget(cfg, 1.5),
+                cfg, node,
+                budget=min(full, _DOWN_NODE_BUDGET_S) if was_down else full,
                 want_graphs=want_graphs, measure_keys=measure,
             )
 
@@ -716,8 +760,8 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
 
     global _configs, _prev_nodes
 
-    reads = await _read_all_nodes(paired, measure_by_instance)
     previous = dict(_prev_nodes)
+    reads = await _read_all_nodes(paired, measure_by_instance, previous)
 
     bytes_per_edge = int(limits.bytes_per_edge.value or 512)
     assembled: List[Tuple[int, GraphStoreInstance]] = [
@@ -753,10 +797,10 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     # slow one, so the two critical findings go quiet for cycles, during
     # exactly the instability that makes builds fail.
     _prev_nodes = {
-        _read_key(node): {"runId": node.server.run_id, "syncFull": node.server.sync_full}
+        _read_key(node): _remember(node, previous.get(_read_key(node)) or {})
         for instance in instances
-        for shard in instance.shards
-        for node in (shard.master, *shard.replicas)
+        for node in (*(n for s in instance.shards for n in (s.master, *s.replicas)),
+                     *instance.unplaced_nodes)
     }
 
     return GraphStoreTopologyResponse(
@@ -766,6 +810,31 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         measured_at=_now_iso(),
         ttl_s=_ttl_s(),
     )
+
+
+def _remember(node: GraphStoreNode, prev: Dict[str, Any]) -> Dict[str, Any]:
+    """What the next sweep needs about this node.
+
+    A node that did not answer keeps everything the last good sweep knew:
+    the run id and resync count a restart is detected against, and the
+    reading being carried forward WITH the time it was actually taken.
+    Re-stamping that here would reset its age every sweep, so a node away
+    for an hour would read as freshly measured.
+    """
+    if node.status != "up":
+        return {**prev, "status": "unreachable"}
+    return {
+        "runId": node.server.run_id,
+        "syncFull": node.server.sync_full,
+        "status": "up",
+        "reading": {
+            "memory": node.memory.model_dump(by_alias=True),
+            "server": node.server.model_dump(by_alias=True),
+            "replication": node.replication.model_dump(by_alias=True),
+            "limits": node.limits.model_dump(by_alias=True),
+        },
+        "readingAt": time.monotonic(),
+    }
 
 
 def _assemble_nodes(

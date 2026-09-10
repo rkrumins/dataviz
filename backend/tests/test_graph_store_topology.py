@@ -1154,6 +1154,97 @@ def test_a_room_of_re_measures_costs_one_sweep(monkeypatch):
     assert all(s.summary.nodes_total == 9 for s in snaps)
 
 
+def test_a_rolling_restart_shows_the_last_reading_rather_than_blanks(monkeypatch):
+    """Three of nine pods away at once is `kubectl rollout restart`, not an
+    outage. Blanking their memory, their limits and their replication the
+    moment they stop answering is how a routine restart reads as a fleet
+    falling over — and it is exactly when someone is watching the page."""
+    nodes = _cluster_nodes({})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+    _run(topology.get_topology_snapshot())
+
+    rolling = REPLICAS_OF[MASTERS[0]] + [MASTERS[1]]
+    for endpoint in rolling:
+        nodes.pop(endpoint)
+    topology._cache = None
+    snap = _run(topology.get_topology_snapshot())
+
+    by_endpoint = {n.endpoint: n for i in snap.instances for s in i.shards
+                   for n in (s.master, *s.replicas)}
+    for endpoint in rolling:
+        node = by_endpoint[endpoint]
+        # The figures stand, with their age attached…
+        assert node.memory.used is not None, endpoint
+        assert node.figures_age_s is not None and node.figures_age_s >= 0
+        # …and the node is still, plainly, not answering.
+        assert node.status == "unreachable"
+        assert "refused" in (node.error or "").lower()
+
+    # So the counts stay honest: carried-forward is not up.
+    assert snap.summary.nodes_total == 9
+    assert snap.summary.nodes_up == 6
+    assert snap.summary.unreachable_nodes == 3
+
+    # And when the pods come back, the figures are theirs again.
+    for endpoint in rolling:
+        nodes[endpoint] = _cluster_nodes({})[endpoint]
+    topology._cache = None
+    back = _run(topology.get_topology_snapshot())
+    assert back.summary.nodes_up == 9
+    assert all(n.figures_age_s is None for i in back.instances for s in i.shards
+               for n in (s.master, *s.replicas))
+
+
+def test_a_node_that_was_down_last_sweep_is_not_waited_on_again(monkeypatch):
+    """Nine pods rolling means several dead dials per sweep, each spending a
+    full connect budget — so the sweep is slowest exactly when the cluster
+    is changing. A node that did not answer last time gets a short retry:
+    one that is back answers a PING well inside it."""
+    nodes = _cluster_nodes({})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+    budgets: list = []
+    real = discovery.read_node
+
+    async def _record(cfg, node, *, budget, **kw):
+        budgets.append((node.endpoint, budget))
+        return await real(cfg, node, budget=budget, **kw)
+
+    monkeypatch.setattr(discovery, "read_node", _record)
+
+    nodes.pop(MASTERS[1])
+    _run(topology.get_topology_snapshot())
+    first = dict(budgets)
+    assert first[MASTERS[1]] == first[MASTERS[0]]      # unknown: full budget
+
+    budgets.clear()
+    topology._cache = None
+    _run(topology.get_topology_snapshot())
+    second = dict(budgets)
+    assert second[MASTERS[1]] == topology._DOWN_NODE_BUDGET_S
+    assert second[MASTERS[0]] == first[MASTERS[0]]     # the live ones, unchanged
+
+
+def test_figures_older_than_the_carry_forward_window_are_not_shown(monkeypatch):
+    """Past a few minutes a node's last numbers say nothing useful about
+    what it holds now, so they stop standing in for it."""
+    nodes = _cluster_nodes({})
+    _wire(monkeypatch, nodes=nodes, providers=[_provider()])
+    _run(topology.get_topology_snapshot())
+
+    for key in topology._prev_nodes.values():
+        if key.get("readingAt") is not None:
+            key["readingAt"] -= topology._CARRY_FORWARD_MAX_S + 1
+    nodes.pop(MASTERS[1])
+    topology._cache = None
+    snap = _run(topology.get_topology_snapshot())
+
+    stale_node = next(s.master for i in snap.instances for s in i.shards
+                      if s.master.endpoint == MASTERS[1])
+    assert stale_node.status == "unreachable"
+    assert stale_node.figures_age_s is None
+    assert stale_node.memory.used is None
+
+
 def test_the_sweep_deadline_scales_with_the_fleet():
     """Nodes are read a wave at a time. A fixed fleet-wide deadline lets the
     first waves spend it and leaves the later ones nothing — and since the

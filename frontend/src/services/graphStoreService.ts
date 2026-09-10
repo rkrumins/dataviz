@@ -86,6 +86,10 @@ export interface GraphStoreNode {
      *  itself. They disagree for the seconds a failover takes. */
     announcedRole?: string | null
     status: 'up' | 'unreachable'
+    /** These figures are from an earlier sweep, this many seconds ago: the
+     *  node did not answer the last one. `status` is still 'unreachable' —
+     *  carried-forward numbers are not a node that is up. */
+    figuresAgeS?: number | null
     error?: string | null
     latencyMs?: number | null
     /** What the cluster bus thinks: 'fail' | 'pfail' | 'noaddr'. */
