@@ -37,7 +37,7 @@ from backend.app.providers.falkordb_connection import (
     connect_verify_budget,
 )
 from backend.app.providers.shard_capacity import ShardMemory
-from . import discovery, info_parse
+from . import discovery, info_parse, seed_memory
 from .discovery import RawNode, RawTopology
 from .schemas import (
     DataSourceRef,
@@ -734,9 +734,21 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         expected = await _expected_graphs(session, provider_ids)
         limits = effective_limits(await _stored_tuning(session))
 
+    # Seeds, best first: what THIS process saw last, then what ANY process
+    # last saw (the memory outside the process, which is the only thing a
+    # cold start has), then the configured list. A process that has been up
+    # is unaffected; one that has just started stops depending on a list of
+    # masters written down months ago.
+    # Resolved BEFORE the gather: an `await` inside the generator expression
+    # would make it an async generator, which `gather(*...)` cannot unpack.
+    seeds_for: List[List[Tuple[str, int]]] = []
+    for slot in pending:
+        remembered = await seed_memory.recall(_instance_id(slot.key))
+        seeds_for.append(_seeds_last_seen(slot) + remembered)
+
     discovered = await asyncio.gather(*(
-        discovery.discover(slot.cfg, extra_seeds=_seeds_last_seen(slot))
-        for slot in pending
+        discovery.discover(slot.cfg, extra_seeds=seeds)
+        for slot, seeds in zip(pending, seeds_for)
     ), return_exceptions=True)
 
     paired: List[Tuple[_Pending, RawTopology]] = []
@@ -790,6 +802,24 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     # provider happened to be instantiated.
     by_id = {_instance_id(slot.key): slot.cfg for slot, _raw in paired}
     _configs = {i.id: cfg for i in instances if (cfg := by_id.get(i.id)) is not None}
+
+    # Where this cluster's nodes are, for whichever process looks next — very
+    # possibly a cold one that has only the configured seeds otherwise. Every
+    # node the CLUSTER listed, not only the ones that answered: an address the
+    # cluster vouches for is real, and a node that is down now is one that
+    # comes back. Best-effort throughout; a bus that is down costs the memory
+    # and never the reading.
+    for instance in instances:
+        if not instance.reachable:
+            continue                    # nothing was learned; keep what stands
+        await seed_memory.remember(instance.id, [
+            (n.endpoint, n.role, n.status == "up")
+            for shard in instance.shards
+            for n in (shard.master, *shard.replicas)
+        ] + [
+            (n.endpoint, n.role, n.status == "up")
+            for n in instance.unplaced_nodes
+        ])
 
     # Replaced only once a build has got this far. Emptying it up front and
     # refilling it here would mean any error in between left it empty — and

@@ -773,6 +773,39 @@ observable contract: exact cells/weights/level stamps under mixed
 casing, exact deltas on re-run, zero-touch no-op runs, and complete
 apply after resume.
 
+## Finding the cluster from a cold start
+
+Seeds are tried in this order, first that answers wins:
+
+1. **Nodes this process saw last sweep** — in memory, masters first.
+2. **Nodes ANY process last saw** — `graphstore:seeds:{instance}` on the bus
+   Redis, capped at nine, ordered by which answered most recently and then
+   masters before replicas.
+3. **The provider's configured `startupNodes`.**
+
+Only (3) existed before, and it is a list of masters as of the day someone
+wrote the connection down. Masters move, and the list does not follow — which
+is invisible while a process is warm, because (1) covers it, and total the
+moment a deploy or an eviction makes every process cold.
+
+Three rules the memory follows, and each is load-bearing:
+
+* **Role orders, never filters.** Any node answers `CLUSTER NODES`, so a
+  promoted replica is as good a seed as the master it replaced. Keeping only
+  the nodes that were masters would rebuild the original bug.
+* **A node is never forgotten for failing to answer.** With static allocation
+  an address survives its outage; a node that is down sorts below the ones
+  that spoke and returns to the front the moment it answers again. An address
+  ages out only when the cluster itself stops mentioning it.
+* **The memory may never slow a sweep.** It is an optimisation — discovery
+  works without it — so every read and write is bounded, and a bus that is
+  unreachable arms a cooldown rather than costing a connect timeout per
+  instance per sweep.
+
+The store is the bus Redis, deliberately NOT the FalkorDB being described:
+memory kept inside the thing it describes is unreadable in exactly the outage
+it exists for.
+
 ## The cube estimate, and why it may not refuse on its own
 
 Before compute, the pipeline sums — over every raw lineage edge — the product of

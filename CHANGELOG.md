@@ -433,6 +433,16 @@ does not swing the trend, short enough that "what changed" is still about now.
   fingerprinted by the counters today. Where the scan still runs it is cached, and the
   caller's own wall clock is now a deadline shared by all three queries rather than an
   allowance granted to each.
+- **A cold process can find a cluster whose masters have all moved.** Seeds are now tried
+  last-seen-first: the nodes this process saw, then the nodes ANY process last saw (kept on the
+  bus Redis — deliberately not the FalkorDB being described, which would be unreadable in
+  exactly the outage it exists for), then the configured `startupNodes`. Role orders that list
+  and never filters it, because any node answers `CLUSTER NODES` and a promoted replica is as
+  good a seed as the master it replaced. A node that fails to answer is not forgotten — with
+  static allocation the address survives its outage, so it sorts below the ones that spoke and
+  returns to the front when it answers again. The memory is bounded and self-disarming: it is
+  an optimisation, so an unreachable bus arms a cooldown rather than adding a connect timeout
+  to every instance of every sweep.
 - **The page now says whether the configured startup nodes still describe the cluster.** A
   provider's startup nodes are the masters as they were the day someone wrote the connection
   down, and masters move: a failover promotes a replica, and with it the address a cold client
