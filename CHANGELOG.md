@@ -522,6 +522,22 @@ is required for correctness, but without it readers pay the aggregation on the r
   provider whose readers cannot accept that can be pinned to master-only reads. The window
   covers this process's own writes; a write from ANOTHER pod is only bounded by the lag
   threshold.
+- The read router reaches past the public API of both redis-py and the FalkorDB client (a
+  shard's replicas come from the client's slot map, the READONLY handshake from the load-
+  balancing strategy, and a pinned read from rebinding the graph object's own
+  `execute_command`). Both are ceilinged below their next major for that reason, and the
+  provider's topology line reports the replica share, which is what would show a silent
+  regression.
+- The topology reading enumerates every data source of every provider each time it is built,
+  capped only in what it renders. On a very large catalogue that is work thrown away; capping
+  the query instead would make a source past the cap indistinguishable from one whose graph is
+  missing, so it is left uncapped until it can be paged.
+- A snapshot that fails part way replaces the previous one as a whole or not at all: there is
+  no per-node carry-forward, so a node that misses one sweep loses its last good figures until
+  the next one reaches it.
+- The failing-over memo that makes a restarting node fail fast is per provider, not per shard.
+  For the two seconds it holds, a read of this provider's other graph — on a healthy node — is
+  told the endpoint that is failing over rather than its own.
 - The Full-detail pre-flight is *unknown* until a source has one successful rebuild: the cube
   estimate it needs is recorded on success only.
 - A custom role granted **only** `system:analytics:read` gets no nav item: the catalogue spec
