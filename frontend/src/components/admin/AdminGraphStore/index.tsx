@@ -41,9 +41,15 @@ function OverviewStrip({ summary }: { summary: FleetSummary }) {
             sub: summary.unreachableNodes > 0 ? `${summary.unreachableNodes} did not answer` : 'all of them',
         },
         {
-            label: 'Memory held',
+            // Masters only: the size of the data, not of the deployment. Each
+            // replica holds its own copy, so calling this "the fleet" would
+            // understate what the cluster needs by the replica count — and
+            // container sizing is what this page is read for.
+            label: 'Data on masters',
             value: summary.usedMemory != null ? compactBytes(summary.usedMemory) : '—',
-            sub: summary.maxmemory != null ? `of ${compactBytes(summary.maxmemory)}` : 'no ceiling reported',
+            sub: summary.maxmemory != null
+                ? `of ${compactBytes(summary.maxmemory)} · replicas hold a copy each`
+                : 'no ceiling reported',
         },
         {
             label: 'Graphs',

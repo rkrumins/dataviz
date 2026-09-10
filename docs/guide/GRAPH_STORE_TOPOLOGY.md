@@ -65,7 +65,7 @@ and the page does not show it — there is no "default graph store" to explain.
 | Master shards | Slot-range owners across all stores. |
 | Replicas | Copies standing by. Zero means a node failure loses that shard's availability until it comes back. |
 | Nodes answering | How many nodes replied to this reading. Anything below the total is listed in red near the top. |
-| Memory held | Used memory across the fleet, against the ceilings the nodes report. |
+| Data on masters | Used memory summed over the MASTERS — the size of the data itself — against the ceilings those nodes report. Each replica holds its own copy, so what the deployment needs is this figure multiplied by one plus the replicas per shard. |
 | Graphs | Graph keys found, and how many no data source claims. |
 
 ### A shard card

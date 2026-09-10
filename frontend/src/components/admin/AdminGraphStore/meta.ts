@@ -98,7 +98,7 @@ export const GRAPH_ROLE_LABEL: Record<string, string> = {
 export const GLOSSARY: { term: string; text: string }[] = [
     {
         term: 'Instance',
-        text: 'One graph store. Providers that point at the same cluster share an instance, so its nodes and memory are counted once.',
+        text: 'One graph store. Provider rows that turn out to point at the same store — disjoint seeds of one cluster, or one node named by its service name and by its address — share a card, so its nodes and memory are counted once rather than once per row. Which store a row reaches is settled by asking the nodes what they call themselves, not by comparing connection settings.',
     },
     {
         term: 'Shard and slot range',
@@ -114,7 +114,7 @@ export const GLOSSARY: { term: string; text: string }[] = [
     },
     {
         term: 'Used, maxmemory and the reserve',
-        text: 'Used is what the node holds now; maxmemory is the ceiling it was given. The fleet reserve is the slice a rebuild will not write into, so a node stays responsive rather than filling to the brim.',
+        text: 'Used is what the node holds now; maxmemory is the ceiling it was given. The fleet reserve is the slice a rebuild will not write into, so a node stays responsive rather than filling to the brim. The figure at the top of the page adds up the MASTERS — the size of the data itself. Each replica holds its own copy, so the memory the deployment actually needs is that figure multiplied by one plus the replicas per shard.',
     },
     {
         term: '"Fits ~N more rollup edges"',
