@@ -594,7 +594,26 @@ async def _assemble(
 
 
 _cache: Optional[Tuple[float, AggregationCapacityResponse]] = None
-_lock = asyncio.Lock()
+_lock: Optional[asyncio.Lock] = None
+_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _build_lock() -> asyncio.Lock:
+    """The build lock, bound to the loop that is actually running.
+
+    A module-level ``asyncio.Lock`` binds itself to the first event loop
+    that CONTENDS it, and raises ``RuntimeError`` for every loop after
+    that. A server is one loop per process, so it never shows there —
+    anywhere a second loop runs (a management command, a test that sweeps
+    concurrently) it is a hard failure with nothing to do with what the
+    caller asked for.
+    """
+    global _lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not loop:
+        _lock = asyncio.Lock()
+        _lock_loop = loop
+    return _lock
 
 
 def invalidate_fleet_cache() -> None:
@@ -622,7 +641,7 @@ async def assemble_fleet_capacity(
     global _cache
     if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
         return _with_age(_cache[1], _cache[0])
-    async with _lock:
+    async with _build_lock():
         if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
             return _with_age(_cache[1], _cache[0])
         parts = await _assemble(session, fresh=fresh) or {}

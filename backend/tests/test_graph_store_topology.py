@@ -14,6 +14,7 @@ all — each one is a row with a reason, never a gap.
 from __future__ import annotations
 
 import asyncio
+import time
 import types
 
 import pytest
@@ -212,6 +213,7 @@ def _wire(monkeypatch, *, nodes, providers, data_sources=(), workspaces=None,
     topology._cache = None
     topology._prev_nodes = {}
     topology._last_error = None
+    topology._retry_not_before = 0.0
     return state
 
 
@@ -757,6 +759,94 @@ def test_with_no_snapshot_at_all_the_failure_is_raised(monkeypatch):
     monkeypatch.setattr(topology, "build_snapshot", _boom)
     with pytest.raises(RuntimeError, match="nothing to serve"):
         _run(topology.get_topology_snapshot())
+
+
+def test_a_failed_sweep_is_not_re_run_by_every_viewer(monkeypatch):
+    """The lock alone does not prevent a stampede — it queues one. With the
+    TTL still expired after a failure, every arriving caller waits out
+    everybody ahead of it and then runs its own full sweep, and a failing
+    sweep is the slow kind: a cluster mid-failover spends its whole
+    deadline. The thirtieth viewer would wait minutes."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    good = _run(topology.get_topology_snapshot())
+    assert good.summary.nodes_total == 9
+    topology._cache = (time.monotonic() - 999, topology._cache[1])   # aged out
+
+    calls = {"n": 0}
+
+    async def _failing():
+        calls["n"] += 1
+        await asyncio.sleep(0.01)
+        raise RuntimeError("the store is down")
+
+    monkeypatch.setattr(topology, "build_snapshot", _failing)
+
+    async def scenario():
+        return await asyncio.gather(*(
+            topology.get_topology_snapshot() for _ in range(25)
+        ))
+
+    snaps = _run(scenario())
+    assert calls["n"] == 1
+    # …and every one of them gets the last good reading, marked for what it is.
+    assert all(s.stale and "the store is down" in (s.last_error or "") for s in snaps)
+    assert all(s.summary.nodes_total == 9 for s in snaps)
+
+
+def test_a_room_of_re_measures_costs_one_sweep(monkeypatch):
+    """``fresh`` skips the TTL, not a sweep somebody else just finished."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    calls = {"n": 0}
+    real = topology.build_snapshot
+
+    async def _counting():
+        calls["n"] += 1
+        await asyncio.sleep(0.02)
+        return await real()
+
+    monkeypatch.setattr(topology, "build_snapshot", _counting)
+
+    async def scenario():
+        return await asyncio.gather(*(
+            topology.get_topology_snapshot(fresh=True) for _ in range(10)
+        ))
+
+    snaps = _run(scenario())
+    assert calls["n"] == 1
+    assert all(s.summary.nodes_total == 9 for s in snaps)
+
+
+def test_the_sweep_deadline_scales_with_the_fleet():
+    """Nodes are read a wave at a time. A fixed fleet-wide deadline lets the
+    first waves spend it and leaves the later ones nothing — and since the
+    order is fixed, it is the SAME tail nodes every sweep that come back
+    unread, so a healthy node reads as permanently unreachable."""
+    one_wave = topology._sweep_deadline_s(topology._NODE_CONCURRENCY)
+    assert topology._sweep_deadline_s(topology._NODE_CONCURRENCY + 1) > one_wave
+    assert topology._sweep_deadline_s(50) > topology._sweep_deadline_s(20)
+    # …but one sweep may never hold the build lock indefinitely.
+    assert topology._sweep_deadline_s(10_000) == topology._SWEEP_DEADLINE_CAP_S
+
+
+def test_restart_evidence_survives_a_sweep_that_fails_half_way(monkeypatch):
+    """The previous sweep's run ids are the only thing that tells a
+    restarted node from a slow one. Emptying them up front means any error
+    before they are refilled leaves nothing to compare against, and the two
+    critical findings go quiet for cycles — during exactly the instability
+    that makes sweeps fail."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    _run(topology.get_topology_snapshot())
+    remembered = dict(topology._prev_nodes)
+    assert remembered
+
+    def _boom(*a, **kw):
+        raise RuntimeError("a node vanished mid-assembly")
+
+    monkeypatch.setattr(topology, "_assemble_instance", _boom)
+    topology._cache = None
+    with pytest.raises(RuntimeError, match="mid-assembly"):
+        _run(topology.get_topology_snapshot())
+    assert topology._prev_nodes == remembered
 
 
 def test_one_sweep_serves_concurrent_viewers(monkeypatch):

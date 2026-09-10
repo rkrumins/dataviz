@@ -479,7 +479,7 @@ pipeline).
 | `AGGREGATION_BUDGET_RECHECK_EDGES` | 1000000 | Write budget: how many first-touch edges APPLY writes between re-reads of the owning shard. A shard that fills up mid-run (another graph landing on it) is refused loudly after a checkpoint — resumable from the cursor — instead of at its cap (100k-100M) |
 | `AGGREGATION_CAPACITY_CACHE_TTL_S` | 10 | Capacity API: how long one fleet sweep is served to every viewer before the next |
 | `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | 30 | How long one reading of every node is served to every viewer (and to the capacity API) before the next |
-| `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | 8 | Deadline for reading all nodes concurrently; a node not read in time is reported as unreachable with that reason, never dropped |
+| `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | 8 | Deadline for one wave of nodes (8 are read at a time), so the whole sweep scales with the fleet instead of starving the same tail nodes every time; capped at 60s. A node not read in time is reported as unreachable with that reason, never dropped |
 | `AGGREGATION_REPLICA_ACK_MIN` | 1 | Replicas of the write node that must acknowledge each rollup batch before the next is sent (0-5). 0 disables the gate. Per-job / Defaults as `replicaAckMin`, and raisable or clearable on a RUNNING job |
 | `AGGREGATION_REPLICA_ACK_TIMEOUT_MS` | 5000 | How long one acknowledgement wait may block before the run holds, re-reads replication state and retries (500-60000). Per-job / Defaults as `replicaAckTimeoutMs` |
 | `AGGREGATION_STORE_OUTAGE_HOLD_S` | 900 | How long one run waits out a graph store node that is not answering before giving up and keeping its checkpoint (30-7200) |

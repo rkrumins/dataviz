@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -67,6 +68,12 @@ logger = logging.getLogger(__name__)
 MAX_GRAPH_ROWS_PER_SHARD = 2000
 #: How many nodes are read at once across the whole fleet.
 _NODE_CONCURRENCY = 8
+#: However large the fleet, one sweep may not hold the build lock longer.
+_SWEEP_DEADLINE_CAP_S = 60.0
+#: How long a failed sweep is remembered before another is attempted. Without
+#: it a store that is down turns every arriving request into its own full
+#: sweep, and the build lock queues them rather than sharing one.
+_FAILURE_BACKOFF_S = 5.0
 #: A replica this far behind is called out: one apply batch is orders of
 #: magnitude smaller, so this much backlog means it is not keeping up.
 _LAG_WARN_BYTES = 64 * 1024 ** 2
@@ -83,10 +90,30 @@ def _ttl_s() -> float:
 
 
 def _deadline_s() -> float:
+    """The budget for ONE wave of nodes — see :func:`_sweep_deadline_s`."""
     try:
         return max(1.0, float(os.getenv("GRAPH_STORE_TOPOLOGY_DEADLINE_S", "8")))
     except (TypeError, ValueError):
         return 8.0
+
+
+def _sweep_deadline_s(jobs: int) -> float:
+    """How long the whole sweep may take to read ``jobs`` nodes.
+
+    A fixed fleet-wide deadline reads as generous on a 9-node cluster and
+    starves a large one: nodes are read ``_NODE_CONCURRENCY`` at a time, so
+    past that many the later waves share what the earlier ones left. The
+    order is fixed, so it would be the SAME tail nodes every sweep that came
+    back "not read before the deadline" — reported honestly, and wrong: a
+    node that answers perfectly well reads as permanently unreachable, and
+    its last good memory figures are dropped with it.
+
+    Scaling by waves keeps the per-node budget constant whatever the fleet
+    size. The cap is what stops a fleet large enough to matter from turning
+    one sweep into a minutes-long hold on the build lock.
+    """
+    waves = max(1, math.ceil(max(1, jobs) / _NODE_CONCURRENCY))
+    return min(_deadline_s() * waves, _SWEEP_DEADLINE_CAP_S)
 
 
 def _now_iso() -> str:
@@ -514,10 +541,31 @@ def _human_bytes(n: Optional[int]) -> str:
 
 _cache: Optional[Tuple[float, GraphStoreTopologyResponse]] = None
 _last_error: Optional[str] = None
+#: Monotonic time before which a failed sweep is not worth re-attempting.
+_retry_not_before: float = 0.0
 _prev_nodes: Dict[str, Dict[str, Any]] = {}
-_lock = asyncio.Lock()
+_lock: Optional[asyncio.Lock] = None
+_lock_loop: Optional[asyncio.AbstractEventLoop] = None
 #: instance id → the connection settings that reached it, from the last build.
 _configs: Dict[str, FalkorDBConnConfig] = {}
+
+
+def _build_lock() -> asyncio.Lock:
+    """The build lock, bound to the loop that is actually running.
+
+    A module-level ``asyncio.Lock`` binds itself to the first event loop
+    that CONTENDS it, and raises ``RuntimeError`` for every loop after
+    that. A server is one loop per process, so it never shows there —
+    anywhere a second loop runs (a management command, a test that sweeps
+    concurrently) it is a hard failure with nothing to do with what the
+    caller asked for.
+    """
+    global _lock, _lock_loop
+    loop = asyncio.get_running_loop()
+    if _lock is None or _lock_loop is not loop:
+        _lock = asyncio.Lock()
+        _lock_loop = loop
+    return _lock
 
 
 async def _read_all_nodes(
@@ -547,12 +595,13 @@ async def _read_all_nodes(
                 want_graphs=want_graphs, measure_keys=measure,
             )
 
+    deadline = _sweep_deadline_s(len(jobs))
     try:
-        async with asyncio.timeout(_deadline_s()):
+        async with asyncio.timeout(deadline):
             await asyncio.gather(*(_one(*job) for job in jobs))
     except (TimeoutError, asyncio.TimeoutError):
         logger.info("graph store: topology sweep hit its %.1fs deadline after %d of %d nodes",
-                    _deadline_s(), len(results), len(jobs))
+                    deadline, len(results), len(jobs))
     for idx, node, _cfg, _want, _measure in jobs:
         results.setdefault((idx, node.endpoint), {
             "endpoint": node.endpoint, "announced": node.announced,
@@ -606,8 +655,10 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
             k for _edges, k in sorted(keys, key=lambda t: (-t[0], t[1]))
         ][: discovery.MAX_GRAPH_MEASURES_PER_NODE]
 
+    global _configs, _prev_nodes
+
     reads = await _read_all_nodes(paired, measure_by_instance)
-    previous, _prev_nodes = _prev_nodes, {}
+    previous = dict(_prev_nodes)
 
     bytes_per_edge = int(limits.bytes_per_edge.value or 512)
     instances: List[GraphStoreInstance] = []
@@ -625,16 +676,20 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     # (a limits change on one node) can open its own short-lived client with
     # the instance's own auth and TLS, instead of borrowing whichever
     # provider happened to be instantiated.
-    global _configs
     by_id = {_instance_id(slot.key): slot.cfg for slot, _raw in paired}
     _configs = {i.id: cfg for i in instances if (cfg := by_id.get(i.id)) is not None}
 
-    for instance in instances:
-        for shard in instance.shards:
-            for node in (shard.master, *shard.replicas):
-                _prev_nodes[node.endpoint] = {
-                    "runId": node.server.run_id, "syncFull": node.server.sync_full,
-                }
+    # Replaced only once a build has got this far. Emptying it up front and
+    # refilling it here would mean any error in between left it empty — and
+    # a build with no previous run ids cannot tell a restarted node from a
+    # slow one, so the two critical findings go quiet for cycles, during
+    # exactly the instability that makes builds fail.
+    _prev_nodes = {
+        node.endpoint: {"runId": node.server.run_id, "syncFull": node.server.sync_full}
+        for instance in instances
+        for shard in instance.shards
+        for node in (shard.master, *shard.replicas)
+    }
 
     return GraphStoreTopologyResponse(
         instances=instances,
@@ -820,23 +875,42 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
     the figures it has, marked stale with the reason, because a blank page
     tells the operator less than a slightly old one. ``fresh`` skips the
     TTL but obeys the same rule.
-    """
-    global _cache, _last_error
 
-    if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
+    A FAILURE is remembered too, for a few seconds. Without that the TTL
+    stays expired through an outage and the lock stops preventing a
+    stampede and starts queueing one: a hundred people on Freshness each
+    wait out everybody ahead of them and then run their own full sweep. And
+    a caller that waited for the lock takes whatever the holder built
+    rather than building the same thing again — ``fresh`` included, which
+    is what a room full of admins pressing Re-measure looks like.
+    """
+    global _cache, _last_error, _retry_not_before
+
+    now = time.monotonic()
+    if not fresh and _cache is not None and now - _cache[0] < _ttl_s():
         return _with_age(_cache[1], _cache[0])
-    async with _lock:
+    if _cache is not None and now < _retry_not_before:
+        return _with_age(_cache[1], _cache[0], stale=True)
+    entered = time.monotonic()
+    async with _build_lock():
         if not fresh and _cache is not None and time.monotonic() - _cache[0] < _ttl_s():
             return _with_age(_cache[1], _cache[0])
+        if _cache is not None and _cache[0] >= entered:
+            # Someone swept while we waited; theirs is as fresh as ours.
+            return _with_age(_cache[1], _cache[0])
+        if _cache is not None and time.monotonic() < _retry_not_before:
+            return _with_age(_cache[1], _cache[0], stale=True)
         try:
             snapshot = await build_snapshot()
         except Exception as exc:                      # noqa: BLE001 — serve what we have
             _last_error = _err(exc)
+            _retry_not_before = time.monotonic() + _FAILURE_BACKOFF_S
             logger.warning("graph store: topology refresh failed: %s", _last_error)
             if _cache is not None:
                 return _with_age(_cache[1], _cache[0], stale=True)
             raise
         _last_error = None
+        _retry_not_before = 0.0
         _cache = (time.monotonic(), snapshot)
         return _with_age(snapshot, _cache[0])
 
@@ -844,8 +918,11 @@ async def get_topology_snapshot(*, fresh: bool = False) -> GraphStoreTopologyRes
 def invalidate_topology_cache() -> None:
     """Drop the snapshot so the next view sweeps again — called after a
     change that alters what the sweep would read (a limits change)."""
-    global _cache
+    global _cache, _retry_not_before
     _cache = None
+    # An operator who just changed something is owed a read, not the tail of
+    # a backoff a failure minutes ago started.
+    _retry_not_before = 0.0
 
 
 def cached_snapshot() -> Optional[GraphStoreTopologyResponse]:

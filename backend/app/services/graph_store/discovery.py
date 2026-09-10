@@ -462,7 +462,17 @@ async def read_node(
         out["error"] = node.reason or "no dialable address"
         return out
 
-    client = node_client(cfg, node.host, node.port, socket_timeout=budget)
+    # Building the client can itself fail (a TLS bundle that will not load,
+    # an address the URL parser rejects). This function's contract is that a
+    # node fault never raises — the sweep gathers every node without
+    # ``return_exceptions``, so one that did would take the whole snapshot
+    # down rather than costing one row.
+    try:
+        client = node_client(cfg, node.host, node.port, socket_timeout=budget)
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        out["status"] = "unreachable"
+        out["error"] = _err(exc)
+        return out
     deadline = time.monotonic() + budget
     try:
         started = time.monotonic()
