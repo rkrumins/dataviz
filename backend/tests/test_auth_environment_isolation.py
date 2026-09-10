@@ -220,6 +220,20 @@ def test_the_csrf_cookie_is_scoped_so_one_logout_cannot_disarm_the_other(
     assert "nx_csrf_uat" not in dev_targets
 
 
+def test_the_healed_csrf_cookie_uses_the_scoped_name(monkeypatch):
+    """The /auth/me heal writes through ``set_csrf_cookie``, which must
+    inherit the environment scoping — an unscoped heal would recreate
+    the very cross-deployment clobbering the scoping exists to stop."""
+    _tokens, dev = _reload_for_env(monkeypatch, "dev")
+    response = Response()
+    dev.set_csrf_cookie(response, "tok", max_age_seconds=60)
+
+    headers = response.headers.getlist("set-cookie")
+    assert len(headers) == 1
+    assert headers[0].startswith("nx_csrf_dev=")
+    assert not headers[0].startswith("nx_csrf=")
+
+
 def test_foreign_token_fails_as_issuer_not_signature(monkeypatch):
     """The diagnosis users actually need.
 

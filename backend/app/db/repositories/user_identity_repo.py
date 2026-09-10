@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,6 +94,30 @@ async def list_for_user(
         .order_by(UserIdentityORM.created_at.asc())
     )
     return list(result.scalars().all())
+
+
+async def list_for_users(
+    session: AsyncSession, user_ids: Sequence[str],
+) -> dict[str, list[UserIdentityORM]]:
+    """Linked identities for MANY users in one query, ``.provider``
+    populated, keyed by user id (absent key = no identities).
+
+    Exists for the admin user list: fifty rows resolved one user at a
+    time is fifty queries on a page whose whole payload is one. Covered
+    by ``idx_user_identities_user``.
+    """
+    if not user_ids:
+        return {}
+    result = await session.execute(
+        select(UserIdentityORM)
+        .where(UserIdentityORM.user_id.in_(list(user_ids)))
+        .options(selectinload(UserIdentityORM.provider))
+        .order_by(UserIdentityORM.created_at.asc())
+    )
+    grouped: dict[str, list[UserIdentityORM]] = {}
+    for row in result.scalars().all():
+        grouped.setdefault(row.user_id, []).append(row)
+    return grouped
 
 
 # ── Lifecycle ───────────────────────────────────────────────────────

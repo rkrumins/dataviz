@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { MOTION } from '@/lib/motion'
 
 export interface ImpactSection {
     /** "Views", "Data sources" — plural, it's a count line. */
@@ -121,7 +122,7 @@ export function DangerConfirmDialog({
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0, y: 8 }}
                     animate={{ scale: 1, opacity: 1, y: 0 }}
-                    transition={{ type: 'spring', damping: 25, stiffness: 350 }}
+                    transition={MOTION.modalSpring}
                     onClick={e => e.stopPropagation()}
                     className="pointer-events-auto w-full max-w-lg max-h-[85vh] flex flex-col bg-canvas rounded-2xl shadow-2xl shadow-black/30 overflow-hidden border border-glass-border"
                 >

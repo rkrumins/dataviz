@@ -74,6 +74,7 @@ from .base import ProviderCredentials, ProviderIdentity
 from .claim_mapper import (
     apply_claim_mapping,
     ClaimMappingError,
+    hoist_nested,
     resolve_path,
     resolved_sources,
 )
@@ -131,43 +132,28 @@ _JWKS_TTL_SECONDS = 300.0
 _UNSIGNED_REPLAY_FLOOR_SECONDS = 900
 _UNSIGNED_REPLAY_CAP_SECONDS = 86_400
 
-#: One level of nesting hoisted so an operator maps ``firstName`` rather
-#: than ``user.firstName``. An API JSON body is exactly the shape that
-#: benefits. Mirrors ``custom_profile._NESTED_CONTAINERS``.
+#: Hoisted FIRST, in this order, so precedence between the well-known
+#: container names stays exactly what it always was. Every OTHER
+#: object-valued key hoists after these — the container can be called
+#: anything. Mirrors ``custom_profile._NESTED_CONTAINERS``.
 _NESTED_CONTAINERS = ("claims", "profile", "user", "userProfile",
-                      "data", "result", "attributes")
-
-#: Top-level values a populated nested one may overwrite during the
-#: hoist. Membership is by equality, so ``0`` and ``False`` — values a
-#: gateway can mean — are NOT emptyish.
-_EMPTYISH = (None, "", [], {})
-
+                      "data", "result", "attributes", "entitlements")
 
 def hoist_nested_containers(claims: dict) -> dict:
-    """One level of container nesting flattened, so mappings can say
-    ``firstName`` instead of ``profile.firstName``.
+    """One level of container nesting flattened — whatever the
+    container is called — so mappings can say ``firstName`` instead of
+    ``profile.firstName``, and ``groups`` even when the gateway nests
+    membership under a name nobody predicted.
 
-    A top-level key wins over a hoisted one — except when its value is
-    emptyish (``None``, ``""``, ``[]``, ``{}``) and the nested one is
-    not. Real gateways emit exactly that shape: a vestigial top-level
-    ``groups: []`` beside ``profile.groups`` carrying the real list,
-    and "present but empty shadows populated" silently turned group
-    mapping off.
+    The merge rules (top-level wins unless emptyish; the well-known
+    names above hoist first, everything else in payload order) live in
+    :func:`claim_mapper.hoist_nested`, shared with the portal kind.
 
     Exported because the admin preview must run the very same hoist —
     a preview that skipped it disagreed with the sign-in it was
     supposed to predict.
     """
-    flat = {**claims}
-    for container in _NESTED_CONTAINERS:
-        nested = claims.get(container)
-        if isinstance(nested, dict):
-            for k, v in nested.items():
-                if k not in flat:
-                    flat[k] = v
-                elif flat[k] in _EMPTYISH and v not in _EMPTYISH:
-                    flat[k] = v
-    return flat
+    return hoist_nested(claims, priority=_NESTED_CONTAINERS)
 
 #: Async callable returning the ``host:port`` entries an operator has
 #: permitted. Injected rather than imported so ``auth_service`` keeps
@@ -361,6 +347,15 @@ class BackchannelSettings:
 
     timeout_seconds: float = 5.0
     max_response_bytes: int = MAX_JSON_BYTES
+    #: Verify the TLS identity of every server-side call this row makes
+    #: — gateway, exchange, liveness, JWKS, and the avatar fetches its
+    #: sign-ins trigger. Off is the warned escape hatch for endpoints
+    #: signed by a corporate CA that cannot be mounted; the supported
+    #: path is ``SSO_OUTBOUND_TLS_CA_CERTS``.
+    #: With verification off the transport vouches for nothing, so the
+    #: row rates Unverified unless its claims are signed against PASTED
+    #: material (see ``assurance.py``).
+    tls_verify: bool = True
     require_auth_time: bool = True
     #: Whether the connection's mapped avatar claim participates at all.
     #: Off — the default — strips ``avatar_url`` from the identity, so
@@ -476,6 +471,7 @@ def settings_from_snapshot(snap: ProviderConfigSnapshot) -> BackchannelSettings:
         jwt_audience=str(s.get("jwt_audience") or "").strip(),
         timeout_seconds=_as_float(s.get("timeout_seconds"), 5.0),
         max_response_bytes=_as_int(s.get("max_response_bytes"), MAX_JSON_BYTES),
+        tls_verify=_as_bool(s.get("tls_verify", True)),
         require_auth_time=_as_bool(s.get("require_auth_time", True)),
         map_avatar=_as_bool(s.get("map_avatar")),
         trust_gateway_email=_as_bool(s.get("trust_gateway_email", True)),
@@ -835,6 +831,9 @@ class BackchannelProvider:
                 max_bytes=self._s.max_response_bytes,
                 allow_hosts=await self._allow_hosts(),
                 accept_jwt=accept_jwt,
+                # None defers to the deployment CA bundle; False is
+                # this row's explicit opt-out.
+                verify=None if self._s.tls_verify else False,
             )
         except OutboundStatusError as exc:
             if exc.status_code in _AUTHORITATIVE_REJECTIONS:
@@ -1050,6 +1049,9 @@ class BackchannelProvider:
                 self._s.jwks_url, timeout=self._s.timeout_seconds,
                 max_bytes=self._s.max_response_bytes,
                 allow_hosts=await self._allow_hosts(),
+                # None defers to the deployment CA bundle; False is
+                # this row's explicit opt-out.
+                verify=None if self._s.tls_verify else False,
             )
         except OutboundError as exc:
             # The key set not answering is an outage, same as the IdP

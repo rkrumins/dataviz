@@ -6,7 +6,7 @@
  * Architecture mirrors ViewWizard.tsx: centralized formData, canProceed via useMemo,
  * spring animations, AnimatePresence step transitions, previousSteps stack.
  *
- * Enhancements: keyboard navigation, step summary pills, toast micro-feedback,
+ * Enhancements: keyboard navigation, step summary pills, notification micro-feedback,
  * unsaved changes warning, structured error recovery, live aggregation tracking.
  */
 import { useState, useMemo, useCallback, useEffect, useRef, startTransition } from 'react'
@@ -19,7 +19,7 @@ import { workspaceService } from '@/services/workspaceService'
 import { catalogService, type CatalogItemResponse } from '@/services/catalogService'
 import type { ProviderResponse } from '@/services/providerService'
 import { useWorkspacesStore } from '@/store/workspaces'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 
 import { WorkspaceStep } from './steps/WorkspaceStep'
 import { AggregationStep } from './steps/AggregationStep'
@@ -91,7 +91,7 @@ export function AssetOnboardingWizard({
 }: AssetOnboardingWizardProps) {
     const navigate = useNavigate()
     const { setActiveWorkspace, setActiveDataSource } = useWorkspacesStore()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const modalRef = useRef<HTMLDivElement>(null)
 
     // ─── Form State ───────────────────────────────────────────────────────────
@@ -280,18 +280,18 @@ export function AssetOnboardingWizard({
         if (!canProceed) return
         const nextIndex = currentStepIndex + 1
         if (nextIndex < STEPS.length) {
-            // Toast micro-feedback for completed step
+            // Notification micro-feedback for completed step
             const stepId = currentStep
             if (stepId === 'workspace') {
-                showToast('success', 'Workspace allocation saved')
+                notify('success', 'Workspace allocation saved')
             } else if (stepId === 'aggregation') {
-                showToast('success', `Aggregation: ${formData.projectionMode === 'in_source' ? 'In-source' : formData.projectionMode === 'dedicated' ? 'Dedicated' : 'Skipped'} selected`)
+                notify('success', `Aggregation: ${formData.projectionMode === 'in_source' ? 'In-source' : formData.projectionMode === 'dedicated' ? 'Dedicated' : 'Skipped'} selected`)
             } else if (stepId === 'semantic') {
                 const count = Object.values(formData.ontologySelections).filter(s => s.ontologyId !== '').length
-                showToast('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
+                notify('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
             } else if (stepId === 'schemaReview') {
                 const required = catalogItems.filter(c => formData.ontologySelections[c.id]?.ontologyId).length
-                showToast('success', `Schema review passed for ${required} source${required !== 1 ? 's' : ''}`)
+                notify('success', `Schema review passed for ${required} source${required !== 1 ? 's' : ''}`)
             }
 
             // startTransition keeps the click responsive while the next step
@@ -303,7 +303,7 @@ export function AssetOnboardingWizard({
                 setCurrentStep(STEPS[nextIndex].id)
             })
         }
-    }, [canProceed, currentStepIndex, currentStep, formData, showToast, catalogItems])
+    }, [canProceed, currentStepIndex, currentStep, formData, notify, catalogItems])
 
     const goBack = useCallback(() => {
         if (previousSteps.length > 0) {

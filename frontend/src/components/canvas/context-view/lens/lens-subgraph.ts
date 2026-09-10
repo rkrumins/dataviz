@@ -524,6 +524,11 @@ export interface ProjectedLensEdge {
     isLeafEdge: boolean
     /** The bundle's one shared edge type, or '' when it bundles more than one. */
     edgeTypeNorm: string
+    /** Every distinct type the bundle carries, first-seen order. A hop that
+     *  names none contributes nothing, so an untyped bundle reads as []
+     *  rather than ['']. `edgeTypeNorm` stays the lossy single-type field
+     *  the layout draws by; this is what the Connections panel lists. */
+    edgeTypes: string[]
     /** A rollup cell contributed: the weight is a summary, not a count of
      *  hops the board holds — it draws coarse and reads "≈". */
     coarse: boolean
@@ -609,6 +614,7 @@ export function projectLensEdges<N extends LensNodeLike>(
             existing.isLeafEdge = false     // more than one hop ⇒ it's a bundle
             existing.coarse = existing.coarse || coarse
             if (existing.edgeTypeNorm !== hopType) existing.edgeTypeNorm = ''
+            if (hopType && !existing.edgeTypes.includes(hopType)) existing.edgeTypes.push(hopType)
         } else {
             bundles.set(key, {
                 sourceUrn: s,
@@ -616,6 +622,7 @@ export function projectLensEdges<N extends LensNodeLike>(
                 weight: hopWeight(hop),
                 isLeafEdge: !coarse && s === hop.sourceUrn && t === hop.targetUrn,
                 edgeTypeNorm: hopType,
+                edgeTypes: hopType ? [hopType] : [],
                 coarse,
             })
         }

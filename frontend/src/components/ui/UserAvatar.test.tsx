@@ -7,10 +7,14 @@
  * row of every list, which is what the per-page-load miss cache is for.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { UserAvatar } from './UserAvatar'
-import { resetAvatarImageCacheForTests } from '@/lib/avatarImage'
+import {
+    bumpAvatarCache,
+    rememberAvatarImage,
+    resetAvatarImageCacheForTests,
+} from '@/lib/avatarImage'
 
 beforeEach(() => { resetAvatarImageCacheForTests() })
 
@@ -72,5 +76,51 @@ describe('UserAvatar', () => {
             <UserAvatar name="Ada Lovelace" shape="palette" />,
         )
         expect(container.innerHTML).not.toContain('bg-gradient-to-br')
+    })
+})
+
+describe('appearing without a hard refresh', () => {
+    afterEach(() => { vi.useRealTimers() })
+
+    it('a sign-in bump forgets the miss and versions the URL', () => {
+        // The exact case that used to need a hard refresh: the picture
+        // was stored at sign-in, but the SPA remembered the earlier 404
+        // for the rest of the page load.
+        rememberAvatarImage('usr_5', 'none')
+        const first = render(<UserAvatar userId="usr_5" name="Ada L" />)
+        expect(first.container.querySelector('img')).toBeNull()
+
+        bumpAvatarCache()
+        const second = render(<UserAvatar userId="usr_5" name="Ada L" />)
+        const img = second.container.querySelector('img')
+        expect(img).not.toBeNull()
+        // The version is what gets past the browser's cached 404 too.
+        expect(img!.getAttribute('src')).toBe('/api/v1/users/usr_5/avatar?v=1')
+    })
+
+    it('a bump retries a failed image in the same mounted component', () => {
+        const { container, rerender } = render(
+            <UserAvatar userId="usr_6" name="Ada L" />,
+        )
+        fireEvent.error(container.querySelector('img')!)
+        expect(container.querySelector('img')).toBeNull()
+
+        bumpAvatarCache()
+        rerender(<UserAvatar userId="usr_6" name="Ada L" />)
+        expect(container.querySelector('img')).not.toBeNull()
+    })
+
+    it('a remembered miss expires on its own', () => {
+        // Freshly mounted surfaces retry after the endpoint's own 404
+        // cache window, so a mid-session picture is at most a minute
+        // from appearing even with no sign-in event.
+        vi.useFakeTimers()
+        rememberAvatarImage('usr_7', 'none')
+        const before = render(<UserAvatar userId="usr_7" name="Ada L" />)
+        expect(before.container.querySelector('img')).toBeNull()
+
+        vi.advanceTimersByTime(61_000)
+        const after = render(<UserAvatar userId="usr_7" name="Ada L" />)
+        expect(after.container.querySelector('img')).not.toBeNull()
     })
 })

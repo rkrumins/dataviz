@@ -163,7 +163,7 @@ change them.
 | Switch | On | Off |
 |---|---|---|
 | **Single sign-on** | Connections appear on the sign-in page | No company buttons at all. Nothing is deleted; turning it back on restores every connection as it was. People already signed in through a connection stay signed in until their sessions expire — the confirm offers to sign them out now, with the count, and the same action stands alone on the page once the switch is off |
-| **Passwords** | Email and password still work | SSO is the only way in. Refused if it would lock out an admin who has no SSO identity |
+| **Passwords** | Email and password still work | SSO is the only way in — see *Enforcing single sign-on* below. Refused if it would lock out an admin who has no SSO identity and is not a system account |
 | **Create accounts automatically** | An account appears the first time somebody signs in through a connection | They must already exist here. An unknown person is turned away with `jit_disabled` |
 | **Ask for an email first** | One field, routed to the connection owning that domain | A button per connection |
 
@@ -176,6 +176,43 @@ flip both in one save or one at a time. Should a deployment reach that state
 anyway (a seeded database, a direct edit), the posture sentence at the top of
 the page turns red and says nobody can sign in; existing sessions keep working
 until they expire, so there is a window to put one back.
+
+### Enforcing single sign-on
+
+Turning **Passwords** off makes SSO the only way in. Three things make that
+safe to actually do:
+
+1. **The lockout guard.** The switch is refused while any active admin has
+   neither a linked SSO identity nor the system-account mark — the 409 lists
+   who. Fix it by having each listed admin sign in once through a connection
+   (linking their identity), or by marking the operational account as a
+   **system account** in Admin → Users.
+
+2. **The system account (break-glass).** A system account is out of scope for
+   enforcement: it keeps password sign-in even while passwords are off, and
+   forced sign-outs skip it. The sign-in page hides the password form under
+   enforcement, so the system account signs in at `/login?password=1` — the
+   page does not advertise that address, and revealing the form grants
+   nothing, because the server refuses every account that is not marked (an
+   unknown email gets the identical refusal). A fresh deployment's seeded
+   administrator is marked automatically; existing deployments mark theirs in
+   Admin → Users. Reserve the mark for operational accounts — it is the door
+   that survives an IdP outage.
+
+3. **Requiring everyone to sign in again.** Flipping the switch changes what
+   the *next* sign-in must be; the sessions already out there stay valid under
+   the old policy until they expire — up to a day. The confirm offers to end
+   them in the same breath, with the counts, and the same act stands alone on
+   the page as **Require everyone to sign in again** for the admin who reaches
+   for it later. It ends every session, password and SSO alike, except system
+   accounts — including your own, unless your account is one; you are walked
+   to the sign-in page and come back in through a connection like everyone
+   else.
+
+Password **sign-up** is refused under enforcement too, invited or not — an
+account created with a password it can never use is a dead end discovered at
+first sign-in. Invites are redeemed by signing in through a connection
+instead.
 
 ### Create accounts automatically
 
@@ -264,7 +301,7 @@ specifics (which URL, which path, which status).
 |---|---|---|
 | `backchannel_no_session` | The request arrived without your portal's session cookie (or header) | Usually correct — they are not signed in to the portal. If they say they are, the cookie is not reaching us: check its domain and `SameSite` |
 | `backchannel_idp_rejected:401` / `:403` | Your gateway said the session is not valid | Also usually correct. It is what makes signing out of the portal sign them out here |
-| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. Existing sessions ride out a short outage; see below |
+| `backchannel_unavailable` | We could not get an answer. The audit summary says which way: `idp_blocked:…` means we refused to make the call — almost always the host allowlist (Settings → *Internal gateways SSO may call*; check the host **and the port**); `idp_unreachable:…` means it did not answer in time; `idp_status:5xx` means it answered with an error | Allowlist problems are yours; outages and 5xx are theirs — quote them the summary. An `idp_unreachable` whose summary mentions *certificate verify failed* means this deployment does not trust the gateway's TLS: mount your corporate CA bundle (`SSO_OUTBOUND_TLS_CA_CERTS`) rather than switching verification off. Existing sessions ride out a short outage; see below |
 | `backchannel_token_absent` | Their reply did not contain a token where we were told to look | The path in the connection's settings does not match what they actually send. Rehearse and read the reply |
 | `backchannel_claims_absent` | Same, for the user details | Same fix |
 | `backchannel_claims_unmappable` | The details arrived, but the claim mapping could not produce an identity from them | Open the connection's **Claim mapping**, load the last assertion, and see which required field (subject, email) has no source |
@@ -437,4 +474,6 @@ should usually be zero.
 **Rehearse after changes.** The rehearsal from setup is available on every
 connection's card at any time, not just during setup. It writes nothing and
 creates no session, so there is no reason not to use it after editing a
-connection.
+connection. Its verdict also tells the avatar story — whether the mapped
+picture would arrive (type and size), or which rule refused it and, when the
+host is the problem, which host to add to the avatar image hosts list.

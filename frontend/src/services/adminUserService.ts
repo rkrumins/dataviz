@@ -5,6 +5,15 @@ import { authFetch } from './apiClient'
 
 const ADMIN_USERS_API = '/api/v1/admin/users'
 
+/** One linked SSO identity as the admin list carries it. */
+export interface AdminUserIdentityRef {
+    providerId: string
+    slug: string
+    displayName: string
+    kind: string
+    lastLoginAt: string | null
+}
+
 export interface AdminUserResponse {
     id: string
     email: string
@@ -19,6 +28,17 @@ export interface AdminUserResponse {
     /** Still holding a shipped default password, and required to
      *  change it before it can do anything else. */
     mustChangePassword: boolean
+    /** How the account signs in: a usable password (the disabled
+     *  sentinel counts as none)… */
+    hasPassword: boolean
+    /** …where the account came from (local_signup | sso_jit | invite |
+     *  admin_created | admin_linked)… */
+    signupSource: string | null
+    /** …and the SSO identities linked to it, with which IdP each is. */
+    identities: AdminUserIdentityRef[]
+    /** Break-glass: keeps password sign-in under SSO enforcement, and
+     *  forced sign-out sweeps skip it. */
+    isSystemAccount: boolean
 }
 
 export interface ResetTokenResponse {
@@ -165,6 +185,19 @@ export const adminUserService = {
         return authFetch<{ detail: string }>(`${ADMIN_USERS_API}/${userId}/suspend`, {
             method: 'POST',
         })
+    },
+
+    /** Mark or unmark the break-glass flag. */
+    setSystemAccount(
+        userId: string, isSystemAccount: boolean,
+    ): Promise<AdminUserResponse> {
+        return authFetch<AdminUserResponse>(
+            `${ADMIN_USERS_API}/${userId}/system-account`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ isSystemAccount }),
+            },
+        )
     },
 
     reactivateUser(userId: string): Promise<{ detail: string }> {

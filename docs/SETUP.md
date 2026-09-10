@@ -249,6 +249,7 @@ All environment variables with their defaults. Set these in `.env.dev` (dev work
 | `JWT_EXPIRY_MINUTES` | `15` | Access-token lifetime, and therefore the revocation latency — permission claims ride in the token, so a role change or forced sign-out reaches a live session only at its next rotation. Startup refuses anything above 15 in prod |
 | `ADMIN_EMAIL` | `admin@nexuslineage.local` | Bootstrap admin email |
 | `ADMIN_PASSWORD` | `admin123` | Bootstrap admin password (from `.env.example`) |
+| `SSO_OUTBOUND_TLS_CA_CERTS` | *(none — system trust store)* | PEM CA bundle every outbound SSO call verifies against (gateway legs, OIDC discovery/token/JWKS, SAML metadata, avatar fetches). Set it when your IdP or gateway serves TLS from a corporate CA; `file:` URIs accepted. |
 
 ### Security
 

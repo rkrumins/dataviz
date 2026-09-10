@@ -1,0 +1,459 @@
+/**
+ * useEdgeProjection — connection visibility and the roll-up (ghost) rule.
+ *
+ * 1. `isGhost` means "this line stands for something other than the raw
+ *    relationship between the two cards it touches": an AGGREGATED edge, a
+ *    browse-meta-bundle, or an edge whose endpoint was resolved up to an
+ *    ancestor. The old rule compared `originalSourceId`/`originalTargetId`,
+ *    fields nothing ever assigns, so EVERY bundle came back a ghost and every
+ *    line on the board drew dashed.
+ * 2. `hiddenEdgeTypes` is applied per GROUP MEMBER: a bundle whose members all
+ *    carry only hidden types disappears; a mixed bundle keeps a reduced
+ *    `edgeCount` and loses the hidden type from `types`. Grouping itself is
+ *    untouched, and hiding never moves `unresolvedEdgeCount`.
+ */
+import { renderHook } from '@testing-library/react'
+import { describe, it, expect } from 'vitest'
+import { useEdgeProjection } from '../useEdgeProjection'
+import type { HierarchyNode } from '@/types/hierarchy'
+
+const hNode = (id: string, children: HierarchyNode[] = [], data: Record<string, unknown> = {}): HierarchyNode => ({
+  id,
+  typeId: 'entity',
+  name: id,
+  data: { urn: id, type: 'entity', label: id, ...data },
+  children,
+  depth: 0,
+  urn: id,
+  entityTypeOption: 'entity',
+  tags: [],
+})
+
+const edge = (id: string, source: string, target: string, type = 'FLOWS_TO', edgeTypes?: string[]) => ({
+  id, source, target,
+  data: edgeTypes === undefined
+    ? { edgeType: type }
+    : { edgeType: type, edgeTypes },
+})
+
+type DetailedEdge = { id: string; sourceUrn: string; targetUrn: string; edgeType: string }
+/** One entry of `aggregatedEdges`, as a Map tuple — typed so the fixtures
+ *  build the map without a cast. */
+type AggregatedEntry = [string, {
+  state: 'collapsed' | 'expanded'
+  detailedEdges: DetailedEdge[]
+  aggregated: {
+    id: string
+    sourceUrn: string
+    targetUrn: string
+    edgeCount: number
+    edgeTypes: string[]
+    confidence: number
+  }
+}]
+
+/** One collapsed AGGREGATED entry as `aggregatedEdges` holds them. */
+const aggEntry = (id: string, sourceUrn: string, targetUrn: string, edgeTypes: string[] = ['FLOWS_TO']): AggregatedEntry => ([
+  id,
+  {
+    state: 'collapsed',
+    detailedEdges: [],
+    aggregated: { id, sourceUrn, targetUrn, edgeCount: 7, edgeTypes, confidence: 1 },
+  },
+])
+
+/** One EXPANDED entry — its `detailedEdges` take the urn-keyed case-C path. */
+const expandedEntry = (id: string, detailedEdges: DetailedEdge[]): AggregatedEntry => ([
+  id,
+  {
+    state: 'expanded',
+    detailedEdges,
+    aggregated: { id, sourceUrn: detailedEdges[0].sourceUrn, targetUrn: detailedEdges[0].targetUrn, edgeCount: detailedEdges.length, edgeTypes: [], confidence: 1 },
+  },
+])
+
+function run(opts: {
+  edges?: ReturnType<typeof edge>[]
+  roots: HierarchyNode[]
+  aggregatedEdges?: Map<string, AggregatedEntry[1]>
+  expandedNodes?: Set<string>
+  parentMap?: Map<string, string>
+  browseBundleEnabled?: boolean
+  hiddenEdgeTypes?: ReadonlySet<string>
+  hoveredNodeId?: string | null
+}) {
+  const flat: HierarchyNode[] = []
+  const stack = [...opts.roots]
+  while (stack.length > 0) {
+    const n = stack.pop()!
+    flat.push(n)
+    stack.push(...n.children)
+  }
+  const displayMap = new Map(flat.map(n => [n.id, n]))
+  const urnToIdMap = new Map(flat.map(n => [n.urn!, n.id]))
+  const { result } = renderHook(() =>
+    useEdgeProjection({
+      edges: opts.edges ?? [],
+      aggregatedEdges: opts.aggregatedEdges ?? new Map(),
+      nodesByLayer: new Map([['L1', opts.roots]]),
+      expandedNodes: opts.expandedNodes ?? new Set(),
+      displayFlat: flat,
+      displayMap,
+      urnToIdMap,
+      showLineageFlow: true,
+      isTracing: false,
+      traceContextSet: new Set(),
+      isContainmentEdge: () => false,
+      hoveredNodeId: opts.hoveredNodeId ?? null,
+      browseBundleEnabled: opts.browseBundleEnabled,
+      browseBundleParentMap: opts.parentMap,
+      hiddenEdgeTypes: opts.hiddenEdgeTypes,
+    }),
+  )
+  return result.current
+}
+
+type Projected = {
+  source: string
+  target: string
+  isGhost: boolean
+  isBrowseBundle: boolean
+  isAggregated: boolean
+  isBidirectional: boolean
+  edgeCount: number
+  types: string[]
+}
+
+const bundles = (res: ReturnType<typeof run>) => res.visibleLineageEdges as Projected[]
+
+describe('useEdgeProjection — the roll-up (isGhost) rule', () => {
+  it('a direct edge between two visible cards is not a roll-up', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b')],
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].isGhost).toBe(false)
+  })
+
+  it('an edge whose endpoint rolls up to a collapsed ancestor is a roll-up', () => {
+    const c1 = hNode('c1')
+    c1.depth = 1
+    const res = run({
+      roots: [hNode('p', [c1]), hNode('b')],   // p collapsed → c1 resolves to p
+      edges: [edge('e1', 'c1', 'b')],
+    })
+    const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
+    expect(pb).toBeDefined()
+    expect(pb!.isGhost).toBe(true)
+  })
+
+  it('an AGGREGATED edge is a roll-up even when both endpoints are visible', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].isAggregated).toBe(true)
+    expect(bundles(res)[0].isGhost).toBe(true)
+  })
+
+  it('a browse-meta-bundled group is a roll-up', () => {
+    const res = run({
+      roots: [hNode('s1'), hNode('s2'), hNode('t')],
+      edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
+      browseBundleEnabled: true,
+      parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
+    })
+    const sp = bundles(res).find(e => e.source === 'sp' && e.target === 't')
+    expect(sp).toBeDefined()
+    expect(sp!.isBrowseBundle).toBe(true)
+    expect(sp!.isGhost).toBe(true)
+  })
+
+  it('a bidirectional pair is a roll-up when either direction is', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b')],                                   // forward: raw
+      aggregatedEdges: new Map([aggEntry('agg1', 'b', 'a')]),          // reverse: AGGREGATED
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].isBidirectional).toBe(true)
+    expect(bundles(res)[0].isGhost).toBe(true)
+  })
+
+  it('a detailed edge whose endpoint is a collapsed child is a roll-up', () => {
+    const c1 = hNode('c1')
+    c1.depth = 1
+    const res = run({
+      roots: [hNode('p', [c1]), hNode('b')],   // p collapsed → c1 resolves to p
+      aggregatedEdges: new Map([expandedEntry('agg1', [
+        { id: 'd1', sourceUrn: 'c1', targetUrn: 'b', edgeType: 'FLOWS_TO' },
+      ])]),
+    })
+    const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
+    expect(pb).toBeDefined()
+    expect(pb!.isGhost).toBe(true)
+  })
+
+  it('a detailed edge whose endpoint urn is unknown is not marked lifted', () => {
+    // c1 owns the urn `urn:c1`, so the edge's `c1` endpoint is absent from
+    // urnToIdMap — the projection must not claim a lift it cannot prove.
+    const c1: HierarchyNode = { ...hNode('c1'), urn: 'urn:c1', depth: 1 }
+    const res = run({
+      roots: [hNode('p', [c1]), hNode('b')],
+      aggregatedEdges: new Map([expandedEntry('agg1', [
+        { id: 'd1', sourceUrn: 'c1', targetUrn: 'b', edgeType: 'FLOWS_TO' },
+      ])]),
+    })
+    const pb = bundles(res).find(e => e.source === 'p' && e.target === 'b')
+    expect(pb).toBeDefined()
+    expect(pb!.isGhost).toBe(false)
+  })
+})
+
+describe('useEdgeProjection — hidden connection types', () => {
+  it('hiding a type drops bundles whose members all carry it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b'), hNode('c'), hNode('d')],
+      edges: [
+        edge('e1', 'a', 'b', 'FLOWS_TO'),
+        // lowercase on the wire — the hidden set is UPPERCASE keys
+        edge('e2', 'c', 'd', 'DERIVES_FROM', ['derives_from']),
+      ],
+      hiddenEdgeTypes: new Set(['DERIVES_FROM']),
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].source).toBe('a')
+    expect(bundles(res)[0].types).toEqual(['FLOWS_TO'])
+  })
+
+  it('a mixed bundle survives with a reduced edgeCount and the hidden type gone from types', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [
+        edge('e1', 'a', 'b', 'FLOWS_TO'),
+        edge('e2', 'a', 'b', 'FLOWS_TO'),
+        edge('e3', 'a', 'b', 'DERIVES_FROM'),
+      ],
+      hiddenEdgeTypes: new Set(['DERIVES_FROM']),
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].edgeCount).toBe(2)
+    expect(bundles(res)[0].types).toEqual(['FLOWS_TO'])
+  })
+
+  it('a member whose data.edgeTypes is an empty array still contributes its originalType', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b', 'FLOWS_TO', [])],
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].types).toEqual(['FLOWS_TO'])
+  })
+
+  it('hiding a type does not change unresolvedEdgeCount', () => {
+    const edges = [
+      edge('e1', 'a', 'b', 'FLOWS_TO'),
+      edge('e2', 'a', 'ghost', 'DERIVES_FROM'),  // target unresolved → counted
+    ]
+    const before = run({ roots: [hNode('a'), hNode('b')], edges })
+    const after = run({
+      roots: [hNode('a'), hNode('b')],
+      edges,
+      hiddenEdgeTypes: new Set(['FLOWS_TO', 'DERIVES_FROM']),
+    })
+    expect(before.unresolvedEdgeCount).toBe(1)
+    expect(after.unresolvedEdgeCount).toBe(1)
+    expect(after.visibleLineageEdges).toHaveLength(0)
+  })
+
+  it('an empty hidden set is a no-op', () => {
+    const edges = [
+      edge('e1', 'a', 'b', 'FLOWS_TO'),
+      edge('e2', 'a', 'b', 'FLOWS_TO'),
+      edge('e3', 'a', 'b', 'DERIVES_FROM'),
+    ]
+    const none = run({ roots: [hNode('a'), hNode('b')], edges })
+    const empty = run({ roots: [hNode('a'), hNode('b')], edges, hiddenEdgeTypes: new Set<string>() })
+    expect(bundles(empty)).toHaveLength(bundles(none).length)
+    expect(bundles(empty)[0].edgeCount).toBe(bundles(none)[0].edgeCount)
+    expect(bundles(empty)[0].types).toEqual(bundles(none)[0].types)
+    expect(bundles(empty)[0].edgeCount).toBe(3)
+  })
+})
+
+/**
+ * A bundle's `edgeCount` is the WEIGHT it summarises, not how many member
+ * objects happened to land in its group. An AGGREGATED member arrives with
+ * the real number of underlying relationships on `data.edgeCount`; counting
+ * members threw it away, so the single most significant flow on the board
+ * reported `1` and sorted below any pair carrying two raw edges — first out
+ * when the adaptive budget culls (`bySignificance` in ContextViewCanvas
+ * ranks on exactly this field).
+ */
+describe('useEdgeProjection — a bundle carries the weight it summarises', () => {
+  it("an AGGREGATED bundle keeps the aggregate's own count, not its member count", () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),   // edgeCount: 7
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].edgeCount).toBe(7)
+  })
+
+  it('the weight reaches data.edgeCount too — that is where the renderers read it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),
+    })
+    const withData = res.visibleLineageEdges as unknown as { data: { edgeCount: number } }[]
+    expect(withData[0].data.edgeCount).toBe(7)
+  })
+
+  it('a rollup standing for many relationships IS a bundle', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),
+    })
+    expect((res.visibleLineageEdges as unknown as { isBundled: boolean }[])[0].isBundled).toBe(true)
+  })
+
+  it('a bidirectional pair sums the two directions at their real weights', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b')],                            // raw → 1
+      aggregatedEdges: new Map([aggEntry('agg1', 'b', 'a')]),   // rollup → 7
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].isBidirectional).toBe(true)
+    expect(bundles(res)[0].edgeCount).toBe(8)
+  })
+
+  it('a heavy rollup outranks a two-edge pair — the culling sort keeps it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b'), hNode('c'), hNode('d')],
+      edges: [edge('e1', 'c', 'd'), edge('e2', 'c', 'd')],      // 2 raw edges
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b')]),   // stands for 7
+    })
+    const rollup = bundles(res).find(e => e.source === 'a')!
+    const pair = bundles(res).find(e => e.source === 'c')!
+    expect(rollup.edgeCount).toBe(7)
+    expect(pair.edgeCount).toBe(2)
+    // Descending edgeCount is the canvas's significance rank; before the fix
+    // the rollup came last at 1 and was the first thing dropped.
+    expect(rollup.edgeCount).toBeGreaterThan(pair.edgeCount)
+  })
+
+  it('raw members still weigh one apiece — a browse-meta-bundle counts its members', () => {
+    const res = run({
+      roots: [hNode('s1'), hNode('s2'), hNode('t')],
+      edges: [edge('e1', 's1', 't'), edge('e2', 's2', 't')],
+      browseBundleEnabled: true,
+      parentMap: new Map([['s1', 'sp'], ['s2', 'sp']]),
+    })
+    const sp = bundles(res).find(e => e.source === 'sp' && e.target === 't')!
+    expect(sp.edgeCount).toBe(2)
+  })
+})
+
+/**
+ * A roll-up reaches the store in TWO shapes, and both must weigh the same.
+ *
+ * The collapsed aggregate built in section A carries `data.edgeCount`. A
+ * MATERIALIZED `:AGGREGATED` graph edge — written by the aggregation worker
+ * with `r.weight` — arrives through ordinary hydration instead, and
+ * `toCanvasEdge` maps that weight onto `data.sourceEdgeCount`. Reading only
+ * the first weighed the second as 1, so the drawer (`edgeWeight` in
+ * lib/lineage-neighbors.ts, which reads BOTH keys) said 4,300 about the very
+ * same line the Flows panel said 1 about — and the panel's copy sorted it at
+ * the floor, first out when the adaptive budget culls.
+ *
+ * And a roll-up is evidence ABOUT flows, not flows in addition to them: when
+ * the raw members it summarises land in the same group, its weight is taken
+ * with `max`, the rule `collapseRecords` already states.
+ */
+describe('useEdgeProjection — both shapes of a roll-up carry their weight', () => {
+  /** A materialized `:AGGREGATED` graph edge, as `toCanvasEdge` maps it. */
+  const materialized = (id: string, source: string, target: string, sourceEdgeCount: number) => ({
+    id, source, target,
+    data: { edgeType: 'AGGREGATED', isAggregated: true, sourceEdgeCount },
+  })
+
+  it('a materialized AGGREGATED store edge weighs its sourceEdgeCount, not 1', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [materialized('m1', 'a', 'b', 4300)],
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].edgeCount).toBe(4300)
+    expect((res.visibleLineageEdges as unknown as { isBundled: boolean }[])[0].isBundled).toBe(true)
+  })
+
+  it('a roll-up does not add to the raw members it summarises — max, not sum', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [edge('e1', 'a', 'b', 'PRODUCES')],                            // one raw member
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b', ['PRODUCES'])]), // stands for 7
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].edgeCount).toBe(7)
+  })
+
+  it('raw members still out-weigh a roll-up that understates them', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      edges: [materialized('m1', 'a', 'b', 2), edge('e1', 'a', 'b', 'PRODUCES'), edge('e2', 'a', 'b', 'PRODUCES'), edge('e3', 'a', 'b', 'PRODUCES')],
+    })
+    expect(bundles(res)[0].edgeCount).toBe(3)
+  })
+})
+
+/**
+ * A multi-type roll-up gets ONE row, under its own type.
+ *
+ * The server builds a rollup as one `count(r)` beside a
+ * `collect(DISTINCT type(r))`, so it carries no per-type split to hand out.
+ * Filing its whole weight under every type it names read PRODUCES 4,300 and
+ * TRANSFORMS 4,300 beneath a 4,300 header, and hiding either one changed
+ * nothing — the member still carried the other, so it stayed on the board at
+ * full weight while its row claimed to have been subtracted.
+ */
+describe('useEdgeProjection — a multi-type roll-up is one combined flow', () => {
+  it('is filed under its own type, not under each type it names', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b', ['PRODUCES', 'TRANSFORMS'])]),
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].types).toEqual(['AGGREGATED'])
+    expect(bundles(res)[0].edgeCount).toBe(7)
+  })
+
+  it('a single-type roll-up keeps that type — nothing to split, nothing to hide', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b', ['PRODUCES'])]),
+    })
+    expect(bundles(res)[0].types).toEqual(['PRODUCES'])
+  })
+
+  it('hiding the combined-flow type really removes it', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b', ['PRODUCES', 'TRANSFORMS'])]),
+      hiddenEdgeTypes: new Set(['AGGREGATED']),
+    })
+    expect(bundles(res)).toHaveLength(0)
+  })
+
+  it('hiding one of the types it summarises leaves it alone — it is not that row', () => {
+    const res = run({
+      roots: [hNode('a'), hNode('b')],
+      aggregatedEdges: new Map([aggEntry('agg1', 'a', 'b', ['PRODUCES', 'TRANSFORMS'])]),
+      hiddenEdgeTypes: new Set(['PRODUCES']),
+    })
+    expect(bundles(res)).toHaveLength(1)
+    expect(bundles(res)[0].types).toEqual(['AGGREGATED'])
+  })
+})

@@ -6,13 +6,19 @@
  * old toggle flipped silently and left that second decision unmade — and
  * invisible. Now disabling asks first, says how many people are signed
  * in through the connection, and offers to sign them out in the same
- * breath. Enabling stays ceremony-free: it strands nobody.
+ * breath. Enabling stays ceremony-free: it strands nobody — but it does
+ * not stay silent, and neither does anything else here: every outcome
+ * lands in the app's ONE notification stack rather than a green block
+ * of this tab's own, which had no timer and sat under the next click.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProvidersTab } from '../ProvidersTab'
+import {
+    NotificationStack, useNotificationStore,
+} from '@/components/ui/notifications'
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
 
 vi.mock('@/services/ssoAdminService', () => ({
@@ -56,8 +62,12 @@ function provider(over: Partial<IdpProvider> = {}): IdpProvider {
     } as IdpProvider
 }
 
+/** What the app's one notification stack is holding. */
+const raised = () => useNotificationStore.getState().notifications
+
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     svc.listProviders.mockResolvedValue([provider()])
     svc.providerStatus.mockResolvedValue({ providers: [] })
     svc.updateProvider.mockResolvedValue(provider({ enabled: false }))
@@ -67,7 +77,7 @@ beforeEach(() => {
 })
 
 async function openTab() {
-    render(<ProvidersTab />)
+    render(<><ProvidersTab /><NotificationStack /></>)
     return await screen.findByRole('button', { name: 'power corp' })
 }
 
@@ -83,6 +93,30 @@ describe('enabling', () => {
         })
         expect(svc.endProviderSessions).not.toHaveBeenCalled()
         expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    })
+
+    it('still says it happened — silence is not ceremony-free, it is silent', async () => {
+        svc.listProviders.mockResolvedValue([provider({ enabled: false })])
+        const user = userEvent.setup()
+        await user.click(await openTab())
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('success')
+        expect(raised()[0].message)
+            .toBe('Corp Gateway is on — it can sign people in again.')
+    })
+
+    it('names the connection when the flip is refused', async () => {
+        svc.listProviders.mockResolvedValue([provider({ enabled: false })])
+        // An error carrying no message at all — the case that rendered an
+        // empty red box.
+        svc.updateProvider.mockRejectedValueOnce(new Error(''))
+        const user = userEvent.setup()
+        await user.click(await openTab())
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('error')
+        expect(raised()[0].message).toBe('Could not turn Corp Gateway on.')
     })
 })
 
@@ -127,6 +161,9 @@ describe('disabling', () => {
         expect(await screen.findByText(
             /keep their sessions until those expire/i,
         )).toBeInTheDocument()
+        // And it said so in the one stack, not in a block of its own.
+        expect(raised()).toHaveLength(1)
+        expect(raised()[0].type).toBe('success')
     })
 
     it('signs them out too when asked, and reports the real number', async () => {

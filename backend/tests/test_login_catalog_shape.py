@@ -89,3 +89,39 @@ async def test_a_real_rename_still_goes_through(db_session):
         db_session, row.id, display_name="  New Name  ",
     )
     assert updated.display_name == "New Name"
+
+
+@pytest.mark.asyncio
+async def test_the_button_label_lifecycle_omit_keeps_and_blank_clears(
+    test_client, db_session, registry,
+):
+    """The label wins over the display name on the button, so its
+    lifecycle has to be operable end to end: set it, edit OTHER fields
+    without losing it, and — the part that was broken — clear it.
+
+    The editor used to send a blanked label as JSON null, which the
+    PATCH model cannot tell from "not sent", so the repo never cleared
+    the column: the operator blanked the box, saved, and the old label
+    outlived every edit. An empty string is the clear signal now.
+    """
+    row = await _live_provider(
+        db_session, slug="labeled", display_name="Corp SSO",
+        button_label="Sign in via DSP",
+    )
+    admin = f"/api/v1/admin/idp-providers/{row.id}"
+
+    async def catalog_label():
+        resp = await test_client.get("/api/v1/auth/providers")
+        return next(p for p in resp.json() if p["slug"] == "labeled")["buttonLabel"]
+
+    assert await catalog_label() == "Sign in via DSP"
+
+    # A PATCH that says nothing about the label leaves it alone.
+    renamed = await test_client.patch(admin, json={"displayName": "Renamed"})
+    assert renamed.status_code == 200, renamed.text
+    assert await catalog_label() == "Sign in via DSP"
+
+    # A blanked label clears — the button falls back to the display name.
+    cleared = await test_client.patch(admin, json={"buttonLabel": ""})
+    assert cleared.status_code == 200, cleared.text
+    assert await catalog_label() is None

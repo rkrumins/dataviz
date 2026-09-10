@@ -31,8 +31,14 @@
     
     /* Accent Palette */
     --nx-accent-lineage: #6366f1;
+    /* Raw channels so Tailwind can apply alpha — `accent-lineage/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-lineage-rgb: 99 102 241;
     --nx-accent-lineage-soft: rgba(99, 102, 241, 0.12);
     --nx-accent-business: #10b981;
+    /* Raw channels so Tailwind can apply alpha — `accent-business/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-business-rgb: 16 185 129;
     --nx-accent-business-soft: rgba(16, 185, 129, 0.12);
     /* Sits between business (emerald) and lineage (indigo) on the wheel, which is
        how every call site uses it: as the middle of a business→lineage ramp.
@@ -40,12 +46,24 @@
        resolved to nothing and those gradients silently lost a stop — text using
        bg-clip-text faded out mid-word. */
     --nx-accent-explore: #06b6d4;
+    /* Raw channels so Tailwind can apply alpha — `accent-explore/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-explore-rgb: 6 182 212;
     --nx-accent-explore-soft: rgba(6, 182, 212, 0.12);
     --nx-accent-technical: #f59e0b;
+    /* Raw channels so Tailwind can apply alpha — `accent-technical/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-technical-rgb: 245 158 11;
     --nx-accent-technical-soft: rgba(245, 158, 11, 0.12);
     --nx-accent-warning: #ef4444;
+    /* Raw channels so Tailwind can apply alpha — `accent-warning/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-warning-rgb: 239 68 68;
     --nx-accent-warning-soft: rgba(239, 68, 68, 0.12);
     --nx-accent-muted: #64748b;
+    /* Raw channels so Tailwind can apply alpha — `accent-muted/15`
+       emits nothing against a bare `var()`. */
+    --nx-accent-muted-rgb: 100 116 139;
     
     /* Glassmorphism */
     --nx-glass-blur: 16px;
@@ -157,9 +175,9 @@
     opacity: 1;
   }
 
-  /* Toast auto-dismiss bar. Driven by the compositor rather than a 30ms
+  /* Notification auto-dismiss bar. Driven by the compositor rather than a 30ms
    * setInterval + setState, which re-rendered a `<motion.div layout>` ~33 times
-   * a second for the life of every toast. `width` is set inline to where the bar
+   * a second for the life of every notification. `width` is set inline to where the bar
    * should START (a remount mid-life resumes correctly); this runs it to zero
    * over whatever time is left. */
   @keyframes nx-toast-progress {

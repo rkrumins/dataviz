@@ -44,6 +44,7 @@ from ..models.graph import (
 from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.common.derived_artifacts import is_derived_label
 
 logger = logging.getLogger(__name__)
 
@@ -410,6 +411,34 @@ def _is_loading_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_query_memory_error(exc: BaseException) -> bool:
+    """True when *exc* is FalkorDB refusing a query that exceeded the
+    server's per-query memory ceiling (``QUERY_MEM_CAPACITY``):
+    ``Query's mem consumption exceeded capacity``.
+
+    This is NOT an outage and NOT the instance-level ``maxmemory`` OOM. The
+    engine tracks live module-heap bytes per query thread and aborts the
+    single offending query; the server, the dataset and every other query
+    are unaffected. It is also DETERMINISTIC for a given query and payload
+    size — re-running it unchanged fails identically — so the only useful
+    reaction is to re-issue the query over a SMALLER slice, which is what
+    the aggregation pipeline's scan ladder does.
+
+    Matched by message, like :func:`_is_missing_graph_error`, because
+    FalkorDB surfaces it as a generic ``ResponseError`` rather than a
+    distinct class; the ``__cause__``/``__context__`` chain is walked like
+    the siblings above since the signal can arrive wrapped.
+    """
+    seen = exc
+    for _ in range(4):
+        if seen is None:
+            break
+        if "mem consumption exceeded" in str(seen).lower():
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 class _EmptyResult:
     """Stand-in for a FalkorDB query result with no rows — returned by the
     tolerant read path when the graph key doesn't exist yet."""
@@ -468,14 +497,21 @@ def _compute_searchable_text(
     qualified_name: Optional[str],
     description: Optional[str],
     user_properties: Optional[Dict[str, Any]],
+    tags: Optional[List[str]] = None,
 ) -> str:
     """Build a lowercased, space-joined searchable string for n.searchableText.
 
-    Includes displayName, qualifiedName, description, and every
+    Includes displayName, qualifiedName, description, tags, and every
     string-valued user property value. Capped at
     ``DeepSearchSettings.searchable_text_cap_bytes`` (env
     ``DEEP_SEARCH_SEARCHABLE_TEXT_CAP``, default 8192) so a node with
     very large string properties can't bloat the denormalised field.
+
+    ``tags`` is normally a list of strings, but some call sites only
+    have the node's JSON-encoded ``n.tags`` string on hand (that's how
+    tags are stored on the FalkorDB node) — a str is parsed via
+    ``json.loads`` and used if it decodes to a list; any other type is
+    ignored.
 
     Truncated at a word boundary when the cap fires so the tail
     doesn't end mid-token (a partial token would defeat
@@ -492,6 +528,14 @@ def _compute_searchable_text(
         for value in user_properties.values():
             if isinstance(value, str):
                 parts.append(value)
+    if isinstance(tags, str):
+        try:
+            parsed_tags = json.loads(tags)
+        except (TypeError, ValueError):
+            parsed_tags = None
+        tags = parsed_tags if isinstance(parsed_tags, list) else None
+    if isinstance(tags, list):
+        parts.extend(t for t in tags if isinstance(t, str) and t)
     result = " ".join(parts).lower()
     # Lazy import to avoid pulling settings into module import time
     # (this helper is hot — called on every write).
@@ -1569,6 +1613,7 @@ class FalkorDBProvider(GraphDataProvider):
     _READ_TIMEOUT = _resilience.FALKORDB_QUERY_TIMEOUT_SECS
     _WRITE_TIMEOUT = _resilience.FALKORDB_WRITE_TIMEOUT_SECS
     _EDGES_BETWEEN_TIMEOUT = _resilience.FALKORDB_EDGES_BETWEEN_TIMEOUT_SECS
+    _NODES_QUERY_TIMEOUT = _resilience.FALKORDB_NODES_QUERY_TIMEOUT_SECS
     del _resilience
 
     # FalkorDB engine cancels the query 500ms before the asyncio deadline so
@@ -3121,9 +3166,16 @@ class FalkorDBProvider(GraphDataProvider):
                     res = await self._ro_query(
                         _urn_cypher(label),
                         params={**params, "urnList": bucket},
+                        timeout=self._NODES_QUERY_TIMEOUT,
                         op="nodes.query",
                     )
                     return res.result_set or []
+                except asyncio.TimeoutError:
+                    # A deadline miss must surface (ProviderTimeout → 504 +
+                    # Retry-After), never turn into "these entities don't
+                    # exist": swallowing it here rendered a canvas with a
+                    # silently missing bucket of assigned entities.
+                    raise
                 except Exception as e:
                     if await self._is_verified_missing_graph(e):
                         return []
@@ -3213,7 +3265,9 @@ class FalkorDBProvider(GraphDataProvider):
             cypher = " ".join(clauses)
 
         try:
-            result = await self._ro_query(cypher, params=params)
+            result = await self._ro_query(
+                cypher, params=params, timeout=self._NODES_QUERY_TIMEOUT, op="nodes.query",
+            )
         except Exception as e:
             if await self._is_verified_missing_graph(e):
                 return []  # never-created / empty key = legitimately no data
@@ -3401,6 +3455,10 @@ class FalkorDBProvider(GraphDataProvider):
                         timeout=timeout, op=op,
                     )
                     return res.result_set or []
+                except asyncio.TimeoutError:
+                    # Surface the deadline miss (ProviderTimeout) rather than
+                    # returning a silently incomplete edge set as if complete.
+                    raise
                 except Exception as exc:
                     logger.warning("get_edges bucket query failed: %s", exc)
                     return []
@@ -10149,6 +10207,17 @@ class FalkorDBProvider(GraphDataProvider):
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
                 cnt = row[1]
+                if is_derived_label(lbl):
+                    # Platform-written bookkeeping (_AggMeta run stamp,
+                    # _Projection scaffolding, _GVRollupMeta watermark) — not
+                    # user entities. Skipped BEFORE node_count, exactly as
+                    # get_schema_stats already does, so the two agree and the
+                    # counts-parity check stops reporting an off-by-one on
+                    # every aggregated graph. Leaving them in put a phantom
+                    # type in profiling that toggles as rebuilds stamp and
+                    # seeds wipe it, raising a severe "type is gone" finding
+                    # each time.
+                    continue
                 entity_type_counts[lbl] = cnt
                 node_count += cnt
 
@@ -10244,6 +10313,18 @@ class FalkorDBProvider(GraphDataProvider):
         for label in labels:
             safe = str(label).replace("`", "")
             count = await _count(f"MATCH (n:`{safe}`) RETURN count(n)")
+            if is_derived_label(label):
+                # Same exclusion as get_stats — but here it MUST also come off
+                # node_count (an unfiltered `MATCH (n)` total). The remainder
+                # branch below attributes `node_count - label_sum` to
+                # "unknown"; dropping the label alone would simply re-add these
+                # nodes under that bucket, trading one phantom type for a worse
+                # one that raises the identical finding when it moves. That is
+                # why the count above is still issued for a label we discard —
+                # it is a constant-time matrix read, and there are at most
+                # three such labels.
+                node_count -= count
+                continue
             if count:
                 entity_type_counts[label] = count
 
@@ -10330,11 +10411,13 @@ class FalkorDBProvider(GraphDataProvider):
             )
             for row in (type_res.result_set or []):
                 lbl = row[0] or "unknown"
-                if str(lbl).startswith("_"):
-                    # System-internal labels (_AggMeta run metadata,
-                    # _Projection scaffolding) — not user entity types;
+                if is_derived_label(lbl):
+                    # Platform-written bookkeeping — not user entity types;
                     # surfacing them puts phantom types in the ontology
-                    # wizard.
+                    # wizard. Matched against the shared list rather than a
+                    # bare "_" prefix: these are OUR writes with known
+                    # spellings, while a customer's own `_`-prefixed label is
+                    # their data and must keep showing up as theirs.
                     continue
                 cnt = row[1]
                 samples = [s for s in (row[2] or []) if s]
@@ -10947,7 +11030,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "level": self._get_node_level(node.entity_type),
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props,
+                    node.description, native_props, tags=node.tags,
                 ),
             })
 
@@ -11110,7 +11193,7 @@ class FalkorDBProvider(GraphDataProvider):
                 "lastSyncedAt": node.last_synced_at or "",
                 "searchableText": _compute_searchable_text(
                     node.display_name, node.qualified_name,
-                    node.description, native_props,
+                    node.description, native_props, tags=node.tags,
                 ),
             }
             if node.child_count is not None:

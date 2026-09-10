@@ -232,20 +232,6 @@ interface SearchStoreState {
      * localStorage so they survive page reloads.
      */
     recentQueries: ReadonlyArray<RecentQueryEntry>
-    /**
-     * One-shot seed for the SearchMapPanel's empty-hero quick-search
-     * input (W2.7). When a caller (typically the ContextViewHeader
-     * escalation flow) opens the Advanced Search panel WITH a typed
-     * quick-search query, the empty hero reads + atomically clears
-     * this on mount so the visible input opens pre-filled with the
-     * user's text instead of being bypassed by a silent
-     * draft-predicate seed.
-     *
-     * ``null`` means "nothing pending — render the hero empty as
-     * usual". Always cleared on consume so a subsequent re-open of
-     * the panel doesn't replay the same seed.
-     */
-    pendingSearchSeed: string | null
 
     /**
      * A predicate handed to the Advanced Search panel from OUTSIDE it
@@ -340,6 +326,18 @@ export interface AncestorPathInfo {
     leafEntityType: string
 }
 
+/**
+ * One bucket of the server's ``ancestor`` aggregation: an exact match
+ * count for a single ancestor URN, with an optional per-entityType
+ * breakdown (from ``bucket.typeCounts``). Passed to ``setResult`` on top
+ * of the page-derived ``ancestorPaths`` rollup.
+ */
+export interface AncestorCountInfo {
+    urn: string
+    count: number
+    breakdown?: ReadonlyMap<string, number>
+}
+
 interface SearchStoreActions {
     setResult: (input: {
         viewId: string
@@ -347,8 +345,17 @@ interface SearchStoreActions {
         /** Per-hit ancestor info (path + the entityType of the hit at the
          *  end of that path). Used to derive both ``ancestorMatchCounts``
          *  and ``ancestorMatchTypeBreakdowns`` so the canvas can surface
-         *  roll-up counts AND a per-type breakdown on collapsed nodes. */
+         *  roll-up counts AND a per-type breakdown on collapsed nodes.
+         *  Ancestors ``ancestorCounts`` doesn't cover keep these values. */
         ancestorPaths?: Iterable<AncestorPathInfo>
+        /** Exact per-ancestor match counts from the server's ``ancestor``
+         *  aggregation. When provided, each entry OVERRIDES that URN's
+         *  page-derived rollup — the aggregation covers every match in
+         *  the view, not just the hits on the current page, so it stays
+         *  correct across ``loadMore``. An entry with no ``breakdown``
+         *  clears that URN's, rather than leaving a page-derived
+         *  composition under a whole-view count. */
+        ancestorCounts?: Iterable<AncestorCountInfo>
         queryHash: string
     }) => void
     /** Replace the draft with a value from outside the builder (template /
@@ -396,13 +403,6 @@ interface SearchStoreActions {
      *  to undo back to their previous draft. */
     clearSearchResults: () => void
     clear: () => void
-    /** Stash a quick-search query for the empty hero to pick up on
-     *  mount. Pass ``null`` to clear without consuming. */
-    setPendingSearchSeed: (seed: string | null) => void
-    /** Atomic read-and-clear. Returns the previously-stashed seed
-     *  (or ``null``) and resets the field in the same set so the
-     *  seed cannot be replayed by a second consumer. */
-    consumePendingSearchSeed: () => string | null
     /** Load a predicate into the builder AND request the panel run it —
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
@@ -488,6 +488,41 @@ function deriveAncestorRollups(infos: Iterable<AncestorPathInfo>): {
         }
     }
     return { counts, breakdowns }
+}
+
+/**
+ * Overlays the server's exact ``ancestor`` aggregation onto the
+ * page-derived rollup, in place. A bucket wins outright for its own URN —
+ * it counts the whole candidate set, not just this page's hits, and no
+ * summing is needed because each bucket already IS that ancestor's total.
+ *
+ * Ancestors the server sent no bucket for keep their rollup value rather
+ * than disappearing: the aggregation is capped at ``maxBuckets`` and is
+ * computed over the candidate set, so a container the current page proves
+ * has matches under it can still be missing from the response, and
+ * dropping it would make Isolate/Hide swallow a container the user can
+ * see a match inside.
+ *
+ * A bucket carrying no breakdown DELETES the rollup's. The count and the
+ * breakdown are rendered together — SearchMatchBadge puts "42 matches
+ * inside this subtree" straight above a type list whose bars are
+ * proportioned to that list's own sum — so leaving the page's `{column: 1}`
+ * beside the server's 42 would state a composition the count contradicts.
+ * A count on its own is the honest answer. Most buckets now arrive WITH a
+ * breakdown — the ``ancestor`` facet ships ``typeCounts`` per bucket — so
+ * this path is the exception rather than the rule it once was.
+ */
+function overlayServerAncestorCounts(
+    counts: Map<string, number>,
+    breakdowns: Map<string, Map<string, number>>,
+    infos: Iterable<AncestorCountInfo>,
+): void {
+    for (const { urn, count, breakdown } of infos) {
+        if (!urn) continue
+        counts.set(urn, count)
+        if (breakdown) breakdowns.set(urn, new Map(breakdown))
+        else breakdowns.delete(urn)
+    }
 }
 
 const EMPTY_ISSUES: ReadonlyArray<BuilderValidationIssue> = Object.freeze([])
@@ -604,7 +639,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyPast: EMPTY_HISTORY,
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
-    pendingSearchSeed: null,
     pendingRunPredicate: null,
     // Default to 'view' — searches the full descendant set of the
     // view's top-level containers, including subtrees that haven't
@@ -626,7 +660,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
 
-    setResult: ({ viewId, matchUrns, ancestorPaths, queryHash }) => {
+    setResult: ({ viewId, matchUrns, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
         // Build the ordered list and the set in one pass so iteration
         // order from the caller (backend hit order) is preserved for
@@ -641,10 +675,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 ordered.push(urn)
             }
         }
+        // The page-derived rollup is the floor; the server's exact
+        // per-ancestor counts (when this query asked for them) win for
+        // every URN they cover.
         const { counts, breakdowns } = ancestorPaths
             ? deriveAncestorRollups(ancestorPaths)
             : { counts: new Map<string, number>(),
                 breakdowns: new Map<string, Map<string, number>>() }
+        if (ancestorCounts) {
+            overlayServerAncestorCounts(counts, breakdowns, ancestorCounts)
+        }
         set({
             viewId,
             matchUrnSet: next,
@@ -814,16 +854,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
         })
-    },
-
-    setPendingSearchSeed: (seed) => {
-        set({ pendingSearchSeed: seed && seed.trim() ? seed : null })
-    },
-
-    consumePendingSearchSeed: () => {
-        const current = get().pendingSearchSeed
-        if (current !== null) set({ pendingSearchSeed: null })
-        return current
     },
 
     requestSearchRun: (predicate) => {

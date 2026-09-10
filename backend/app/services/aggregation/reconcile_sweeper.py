@@ -134,7 +134,34 @@ _TERMINAL_SKIPS = frozenset({"in_sync", "platform_mastered"})
 # Unresolved findings stay due every tick until an action or in_sync —
 # this clause, not a frozen checked_at stamp, is what keeps a held or
 # deferred finding due while the fairness clock advances.
-_UNRESOLVED_DRIFT = frozenset({"drifting", "overlayMissing", "neverBuilt"})
+# ``projectionStalled`` belongs here even though the sweep will never act on
+# it: the condition means aggregated lineage is missing from the product
+# RIGHT NOW, so it must be re-looked-at every tick — both so it is noticed
+# within a minute instead of an hour, and so it CLEARS within a minute of
+# the projector catching up. It costs one row of the batched read; the
+# fairness clock still advances on every pass, so it rotates through the
+# oldest-first window rather than camping in it.
+_UNRESOLVED_DRIFT = frozenset({
+    "drifting", "overlayMissing", "neverBuilt", "projectionStalled",
+})
+
+
+def _projection_ctx(health) -> Dict:
+    """Flatten one :class:`ProjectorHealth` into the observation's fields.
+
+    An unpinned graph yields all-None: nothing is projected into FalkorDB for
+    it, so reads coming from Postgres are the plan, not a wedge. Mirrors the
+    same rule the ``PROJECTION_STALE`` finding uses, so the two surfaces can
+    never disagree about the same graph.
+    """
+    if health is None or not health.falkor_graph_pinned:
+        return {}
+    return {
+        "projection_commits_behind": health.commits_behind,
+        "projection_last_error": health.last_error,
+        "projection_checked_at": health.checked_at,
+        "projection_in_progress": health.in_progress,
+    }
 
 
 def _is_terminal_skip(verdict: Verdict) -> bool:
@@ -304,7 +331,9 @@ class ReconciliationSweeper:
         — the lock is held by another replica, or the versioned-source lookup
         below is cold and unavailable."""
         from backend.app.services.versioned_sources import (
+            ProjectorHealthUnavailable,
             VersionedLookupUnavailable,
+            projector_health,
             versioned_data_source_ids,
         )
 
@@ -346,6 +375,22 @@ class ReconciliationSweeper:
             result.by_skip["versioned_lookup_unavailable"] = 1
             return None
 
+        # And whether that mastering is currently WORKING. Same store, same
+        # pre-lock placement, same deferral discipline — and for the same
+        # reason, only sharper: the one answer we must never invent here is
+        # "the fleet's projectors are fine". Assuming that is what let a wedged
+        # projection read as 'managed' for fourteen hours.
+        try:
+            health = await projector_health()
+        except ProjectorHealthUnavailable as exc:
+            logger.warning(
+                "reconcile sweep deferred: cannot read projection health for "
+                "the versioned fleet (%s) — retrying on the next tick", exc,
+            )
+            result.errors = 1
+            result.by_skip["projector_health_unavailable"] = 1
+            return None
+
         async with self._session_factory() as session:
             if not await self._claim_lock(session):
                 return None
@@ -373,7 +418,7 @@ class ReconciliationSweeper:
                 return actions, nudges
 
             ds_ids = [s.data_source_id for s in states]
-            ctx = await self._batch_context(session, ds_ids, versioned)
+            ctx = await self._batch_context(session, ds_ids, versioned, health)
             # Drop the lock before any live graph call. Operator modes refresh
             # counts; auto ticks evaluate against the SQL snapshot alone.
             await session.commit()
@@ -489,6 +534,29 @@ class ReconciliationSweeper:
                         # source so that one later taken back out of versioning
                         # does not read as drifted on its first sweep after.
                         self._adopt(state, obs)
+                    elif verdict.skip == "projection_stalled":
+                        # DELIBERATELY NO ADOPT. The baseline is only moved
+                        # when we believe the numbers: while the projection is
+                        # behind, the stats scan is measuring whichever backend
+                        # happened to answer, and freezing a wedged reading as
+                        # "the new normal" is how the fault gets forgotten. The
+                        # last known-good baseline stands until the projector
+                        # is current again and the 'managed' branch above
+                        # resumes advancing it.
+                        #
+                        # And DELIBERATELY NO DISPATCH: recovery is an operator
+                        # action on the projector. An automatic retry against a
+                        # deterministically-failing verify is what burned CPU
+                        # for fourteen hours without recovering anything.
+                        logger.warning(
+                            "reconcile sweep: %s is versioned but its "
+                            "projection is not current (%s commit(s) behind%s)"
+                            " — rolled-up connections are not being served",
+                            state.data_source_id,
+                            obs.projection_commits_behind,
+                            f", last error: {obs.projection_last_error}"
+                            if obs.projection_last_error else "",
+                        )
                     elif verdict.skip in ("stats_stale", "stats_unhealthy"):
                         if len(nudges) < _NUDGE_CAP:
                             nudges.append((state.data_source_id, state.workspace_id))
@@ -842,15 +910,18 @@ class ReconciliationSweeper:
             )
         return list((await session.execute(stmt)).scalars().all())
 
-    async def _batch_context(self, session, ds_ids, versioned) -> Dict[str, Dict]:
+    async def _batch_context(
+        self, session, ds_ids, versioned, health=None,
+    ) -> Dict[str, Dict]:
         """Four batched reads, joined in memory.
 
         Batched rather than one wide JOIN because these tables live in three
         different domains (``DOMAIN_OWNERSHIP.md``) — the same shape
         ``_rebuild_override_map`` uses.
 
-        ``versioned`` is the set of platform-mastered data source ids, resolved
-        by the caller before the lock (see :meth:`_phase_a`).
+        ``versioned`` is the set of platform-mastered data source ids and
+        ``health`` the per-data-source projection watermark, both resolved by
+        the caller before the lock (see :meth:`_phase_a`).
         """
         from backend.app.db.models import (
             DataSourcePollingConfigORM,
@@ -900,6 +971,11 @@ class ReconciliationSweeper:
                 # measuring the wrong backend half the time. See
                 # reconcile._guard.
                 platform_mastered=ds_id in versioned,
+                # …and whether that projector is currently keeping up. Only
+                # carried for a source the health read actually covers; an
+                # unpinned or never-projected graph reports current, because
+                # nothing is projected there BY DESIGN.
+                **_projection_ctx((health or {}).get(ds_id)),
                 # A dedicated projection writes AGGREGATED to ANOTHER graph,
                 # which get_stats() never scans — so the observed count is
                 # permanently 0 and means nothing. See reconcile._overlay_missing.
@@ -1057,6 +1133,10 @@ class ReconciliationSweeper:
             deleted=c.get("deleted", False),
             ontology_id=c.get("ontology_id"),
             platform_mastered=c.get("platform_mastered", False),
+            projection_commits_behind=c.get("projection_commits_behind"),
+            projection_last_error=c.get("projection_last_error"),
+            projection_checked_at=c.get("projection_checked_at"),
+            projection_in_progress=c.get("projection_in_progress", False),
             has_stats=c.get("has_stats", False),
             stats_age_secs=stats_age,
             stats_as_of=c.get("stats_as_of"),

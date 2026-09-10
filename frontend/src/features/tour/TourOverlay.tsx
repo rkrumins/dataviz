@@ -4,6 +4,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, ArrowRight, ArrowLeft, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Backdrop } from '@/components/ui/Backdrop'
 import { useTourStore } from './tourStore'
 import { getTour } from './tours'
 import type { TourPlacement } from './types'
@@ -156,106 +157,121 @@ export function TourOverlay() {
   }
 
   return createPortal(
-    // Above EVERYTHING, including the Lineage Lens portal (z-[9990]) —
-    // a spotlight tour that renders under the surface it's explaining
-    // is invisible.
-    <div className="fixed inset-0 z-[9999]" role="dialog" aria-modal="true" aria-label={`${tour.title} tour`}>
-      {/* Click-catcher — blocks interaction with the app while the tour runs. */}
-      <div className="absolute inset-0" onClick={(e) => e.stopPropagation()} />
+    <>
+      {/* The one layer that blocks the app while the tour runs: a plain CSS
+          <Backdrop>, never a motion element and a SIBLING of the wrapper below
+          rather than its child. It also carries the dim for a step with no
+          element to spotlight — a spotlit step dims through the ring's
+          9999px shadow instead. */}
+      <Backdrop
+        open
+        zClassName="z-[9999]"
+        className={box ? 'bg-transparent' : 'bg-[rgba(2,6,23,0.62)]'}
+      />
 
-      {/* Spotlight (or full dim for element-less steps) */}
-      {box ? (
-        <>
+      {/* Above EVERYTHING, including the Lineage Lens portal (z-[9990]) —
+          a spotlight tour that renders under the surface it's explaining
+          is invisible. The full-viewport wrapper is INERT and sits outside the
+          coach-mark's presence tree, so nothing here can become a whole-screen
+          click-eater; only the card itself takes clicks. */}
+      <div
+        className="fixed inset-0 z-[9999] pointer-events-none"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${tour.title} tour`}
+      >
+        {/* Spotlight — the dim for element-less steps rides on the Backdrop. */}
+        {box && (
+          <>
+            <motion.div
+              className="pointer-events-none absolute rounded-xl"
+              initial={false}
+              animate={{ top: box.top, left: box.left, width: box.width, height: box.height }}
+              transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+              style={{ boxShadow: '0 0 0 9999px rgba(2, 6, 23, 0.62)' }}
+            />
+            <motion.div
+              className="pointer-events-none absolute rounded-xl ring-2 ring-accent-lineage/80 shadow-[0_0_0_4px_rgba(99,102,241,0.18)]"
+              initial={false}
+              animate={{ top: box.top, left: box.left, width: box.width, height: box.height }}
+              transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+            />
+          </>
+        )}
+
+        {/* Coach-mark card */}
+        <AnimatePresence mode="wait">
           <motion.div
-            className="pointer-events-none absolute rounded-xl"
-            initial={false}
-            animate={{ top: box.top, left: box.left, width: box.width, height: box.height }}
-            transition={{ type: 'spring', stiffness: 320, damping: 32 }}
-            style={{ boxShadow: '0 0 0 9999px rgba(2, 6, 23, 0.62)' }}
-          />
-          <motion.div
-            className="pointer-events-none absolute rounded-xl ring-2 ring-accent-lineage/80 shadow-[0_0_0_4px_rgba(99,102,241,0.18)]"
-            initial={false}
-            animate={{ top: box.top, left: box.left, width: box.width, height: box.height }}
-            transition={{ type: 'spring', stiffness: 320, damping: 32 }}
-          />
-        </>
-      ) : (
-        <div className="absolute inset-0 bg-[rgba(2,6,23,0.62)]" />
-      )}
+            key={stepIndex}
+            initial={{ opacity: 0, y: 6, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -6, scale: 0.98 }}
+            transition={{ duration: 0.18, ease: 'easeOut' }}
+            className="glass-panel pointer-events-auto absolute w-[360px] max-w-[calc(100vw-2rem)] rounded-2xl border border-glass-border p-5 shadow-2xl"
+            style={cardStyle}
+          >
+            {caret && <Caret placement={caret} />}
 
-      {/* Coach-mark card */}
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={stepIndex}
-          initial={{ opacity: 0, y: 6, scale: 0.98 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: -6, scale: 0.98 }}
-          transition={{ duration: 0.18, ease: 'easeOut' }}
-          className="glass-panel pointer-events-auto absolute w-[360px] max-w-[calc(100vw-2rem)] rounded-2xl border border-glass-border p-5 shadow-2xl"
-          style={cardStyle}
-        >
-          {caret && <Caret placement={caret} />}
-
-          <div className="flex items-start justify-between gap-3">
-            <span className="inline-flex items-center gap-2 rounded-full bg-accent-lineage/10 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-accent-lineage">
-              <tour.icon className="h-3.5 w-3.5" />
-              {tour.title}
-            </span>
-            <button
-              onClick={stop}
-              aria-label="End tour"
-              className="rounded-lg p-1 text-ink-muted transition-colors hover:bg-black/5 hover:text-ink dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-
-          <h3 className="mt-3 text-base font-bold text-ink">{step.title}</h3>
-          <p className="mt-1.5 text-sm leading-relaxed text-ink-secondary">{renderBody(step.body)}</p>
-
-          {/* Progress dots */}
-          <div className="mt-4 flex items-center gap-1.5">
-            {tour.steps.map((_, i) => (
+            <div className="flex items-start justify-between gap-3">
+              <span className="inline-flex items-center gap-2 rounded-full bg-accent-lineage/10 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide text-accent-lineage">
+                <tour.icon className="h-3.5 w-3.5" />
+                {tour.title}
+              </span>
               <button
-                key={i}
-                onClick={() => goTo(i)}
-                aria-label={`Go to step ${i + 1}`}
-                className={cn(
-                  'h-1.5 rounded-full transition-all',
-                  i === stepIndex ? 'w-5 bg-accent-lineage' : 'w-1.5 bg-ink-muted/30 hover:bg-ink-muted/60',
-                )}
-              />
-            ))}
-          </div>
-
-          {/* Controls */}
-          <div className="mt-4 flex items-center justify-between">
-            <span className="text-xs text-ink-muted">
-              {stepIndex + 1} of {tour.steps.length}
-            </span>
-            <div className="flex items-center gap-2">
-              {!isFirst && (
-                <button onClick={prev} className="btn btn-ghost btn-sm">
-                  <ArrowLeft className="h-3.5 w-3.5" /> Back
-                </button>
-              )}
-              <button onClick={next} className="btn btn-primary btn-sm">
-                {isLast ? (
-                  <>
-                    <Check className="h-3.5 w-3.5" /> Done
-                  </>
-                ) : (
-                  <>
-                    Next <ArrowRight className="h-3.5 w-3.5" />
-                  </>
-                )}
+                onClick={stop}
+                aria-label="End tour"
+                className="rounded-lg p-1 text-ink-muted transition-colors hover:bg-black/5 hover:text-ink dark:hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+              >
+                <X className="h-4 w-4" />
               </button>
             </div>
-          </div>
-        </motion.div>
-      </AnimatePresence>
-    </div>,
+
+            <h3 className="mt-3 text-base font-bold text-ink">{step.title}</h3>
+            <p className="mt-1.5 text-sm leading-relaxed text-ink-secondary">{renderBody(step.body)}</p>
+
+            {/* Progress dots */}
+            <div className="mt-4 flex items-center gap-1.5">
+              {tour.steps.map((_, i) => (
+                <button
+                  key={i}
+                  onClick={() => goTo(i)}
+                  aria-label={`Go to step ${i + 1}`}
+                  className={cn(
+                    'h-1.5 rounded-full transition-all',
+                    i === stepIndex ? 'w-5 bg-accent-lineage' : 'w-1.5 bg-ink-muted/30 hover:bg-ink-muted/60',
+                  )}
+                />
+              ))}
+            </div>
+
+            {/* Controls */}
+            <div className="mt-4 flex items-center justify-between">
+              <span className="text-xs text-ink-muted">
+                {stepIndex + 1} of {tour.steps.length}
+              </span>
+              <div className="flex items-center gap-2">
+                {!isFirst && (
+                  <button onClick={prev} className="btn btn-ghost btn-sm">
+                    <ArrowLeft className="h-3.5 w-3.5" /> Back
+                  </button>
+                )}
+                <button onClick={next} className="btn btn-primary btn-sm">
+                  {isLast ? (
+                    <>
+                      <Check className="h-3.5 w-3.5" /> Done
+                    </>
+                  ) : (
+                    <>
+                      Next <ArrowRight className="h-3.5 w-3.5" />
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </AnimatePresence>
+      </div>
+    </>,
     document.body,
   )
 }

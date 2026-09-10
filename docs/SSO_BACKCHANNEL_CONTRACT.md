@@ -324,8 +324,10 @@ content hash, a version) when the photo changes.
 
 Of your endpoints:
 
-- **TLS**, with a certificate that validates. Plain HTTP is refused
-  outright in production.
+- **TLS**, with an answer that validates — against a public CA, or a
+  CA bundle this deployment has been given (`SSO_OUTBOUND_TLS_CA_CERTS`,
+  a PEM path; see the deployment guide for mounting it). Plain HTTP is
+  refused outright in production.
 - **No redirects.** A `3xx` from either endpoint is treated as an error,
   not followed. Redirecting a credentialed back-channel call is the
   standard way around a destination check, so it is refused rather than

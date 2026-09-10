@@ -47,7 +47,7 @@ import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useViewEditorModal } from '@/components/layout/AppLayout'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { timeAgo } from '@/lib/timeAgo'
@@ -94,7 +94,7 @@ export default function WorkspaceViewsSection({
 }: WorkspaceViewsSectionProps) {
     const currentUser = useAuthStore(s => s.user)
     const { openViewEditor } = useViewEditorModal()
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const { appName } = useBrand()
     const { resolve: resolveProvider } = useDataSourceProviderMap()
     const canAnswerPublishRequests = usePermission('workspace:view:publish', wsId)
@@ -202,16 +202,16 @@ export default function WorkspaceViewsSection({
         setDeleteView(null)
         removeView(id)
         setSelectedIds(prev => { const n = new Set(prev); n.delete(id); return n })
-        showToast('success', `"${name}" has been deleted`)
+        notify('success', `"${name}" has been deleted`)
     }
 
     const handleRestore = async (view: View) => {
         try {
             await restoreViewApi(view.id)
             refetch()
-            showToast('success', `"${view.name}" has been restored`)
+            notify('success', `"${view.name}" has been restored`)
         } catch {
-            showToast('error', `Failed to restore "${view.name}"`)
+            notify('error', `Failed to restore "${view.name}"`)
         }
     }
 
@@ -232,9 +232,9 @@ export default function WorkspaceViewsSection({
             await Promise.all(ids.map(id => updateViewVisibility(id, visibility)))
             setSelectedIds(new Set())
             refetch()
-            showToast('success', `Set ${ids.length} view${ids.length !== 1 ? 's' : ''} to "${visibility}"`)
+            notify('success', `Set ${ids.length} view${ids.length !== 1 ? 's' : ''} to "${visibility}"`)
         } catch {
-            showToast('error', 'Some views could not be updated')
+            notify('error', 'Some views could not be updated')
         }
     }
 
@@ -271,9 +271,9 @@ export default function WorkspaceViewsSection({
             setConfirmingId(null)
             refetch()
             onWorkspaceChanged?.()
-            showToast('success', successMessage)
+            notify('success', successMessage)
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Could not answer the request')
+            notify('error', err instanceof Error ? err.message : 'Could not answer the request')
         } finally {
             setBusyRequestId(null)
         }
@@ -285,11 +285,11 @@ export default function WorkspaceViewsSection({
         try {
             await workspaceService.update(wsId, { publishPolicy: policy })
             onWorkspaceChanged?.()
-            showToast('success', policy === 'open'
+            notify('success', policy === 'open'
                 ? 'Members can now publish views directly'
                 : 'Members must request approval to publish')
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Could not change the policy')
+            notify('error', err instanceof Error ? err.message : 'Could not change the policy')
         } finally {
             setPolicySaving(false)
         }
@@ -300,11 +300,11 @@ export default function WorkspaceViewsSection({
         try {
             await workspaceService.updateDataSource(wsId, dsId, { isRestricted })
             onWorkspaceChanged?.()
-            showToast('success', isRestricted
+            notify('success', isRestricted
                 ? 'Views over this source now need a publisher\u2019s approval'
                 : 'Members can publish views over this source directly')
         } catch (err) {
-            showToast('error', err instanceof Error ? err.message : 'Could not change the source')
+            notify('error', err instanceof Error ? err.message : 'Could not change the source')
         } finally {
             setRestrictingDsId(null)
         }
@@ -315,7 +315,7 @@ export default function WorkspaceViewsSection({
         ids.forEach(id => removeView(id))
         setSelectedIds(new Set())
         setShowBulkDelete(false)
-        showToast('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+        notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     }
 
     const hasActiveFilters = !!search || dsFilter !== 'all' || visFilter !== 'all' || ownerFilter !== 'all' || attentionOnly
@@ -758,7 +758,6 @@ export default function WorkspaceViewsSection({
                     ? () => setDeleteView({ id: previewView!.id, name: previewView!.name, favouriteCount: previewView!.favouriteCount })
                     : undefined}
                 healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
-                providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
                 initialEditMode={previewEditMode}
                 onSaved={() => refetch()}
             />

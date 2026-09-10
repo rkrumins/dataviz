@@ -179,13 +179,20 @@ _LKG_TTL_RAW = _clamped_int_env("GRAPH_CACHE_LKG_TTL_S", 86400, lo=0, hi=2_592_0
 _LKG_TTL = _LKG_TTL_RAW if _LKG_TTL_RAW == 0 else max(_LKG_TTL_RAW, 60)
 
 # Per-payload size cap. A single response larger than this is logged
-# and dropped rather than cached — a 5 MB aggregated-edge dump shouldn't
-# crowd out a thousand normal 5 KB entries. Applies to both primary and
-# LKG writes. Set to 0 to disable the cap (do not recommend in prod).
+# and dropped rather than cached — one huge dump shouldn't crowd out a
+# thousand normal 5 KB entries. Applies to both primary and LKG writes.
+# Set to 0 to disable the cap (do not recommend in prod).
 # Bounds: 0 (disabled) or [4 KB, 64 MB]. The 64 MB ceiling matches
 # Redis's default string-value soft limit.
+#
+# 4 MiB, not the original 1 MiB: at 1 MiB the biggest views — precisely
+# the ones whose queries cost the most and whose users wait longest —
+# were never cached, so every concurrent open recomputed the same
+# multi-second scan on FalkorDB's query threads. The eviction policy is
+# volatile-lru and every entry carries a TTL, so an oversized entry that
+# does crowd the cache is evicted rather than pinning memory.
 _MAX_PAYLOAD_BYTES_RAW = _clamped_int_env(
-    "GRAPH_CACHE_MAX_PAYLOAD_BYTES", 1_048_576, lo=0, hi=67_108_864,
+    "GRAPH_CACHE_MAX_PAYLOAD_BYTES", 4_194_304, lo=0, hi=67_108_864,
 )
 _MAX_PAYLOAD_BYTES = (
     _MAX_PAYLOAD_BYTES_RAW if _MAX_PAYLOAD_BYTES_RAW == 0
@@ -385,8 +392,14 @@ class GraphCache:
         self._inflight[cache_key] = fut
         try:
             result = await compute()
-            await self._set(cache_key, result, ttl_seconds, endpoint)
-            await self._set_lkg(scope, endpoint, params, result)
+            # Serialize ONCE, and off the loop. These two writes each used to
+            # call ``model_dump_json`` on the full payload inline, so every
+            # cache fill blocked the worker's event loop twice — stalling every
+            # other request on it, for every other data source, in proportion
+            # to the biggest response any one of them returned.
+            payload = await asyncio.to_thread(result.model_dump_json, by_alias=True)
+            await self._set(cache_key, result, ttl_seconds, endpoint, payload=payload)
+            await self._set_lkg(scope, endpoint, params, result, payload=payload)
             if not fut.done():
                 fut.set_result(_SingleflightOutcome(value=result, served_stale=False))
             return result
@@ -582,17 +595,20 @@ class GraphCache:
         result: BaseModel,
         ttl_seconds: Optional[int],
         endpoint: str,
+        payload: Optional[str] = None,
     ) -> None:
-        """Serialize and persist `result`. Failures are swallowed — the
-        compute already succeeded, so failing the response on a write
-        error would be a self-inflicted regression."""
+        """Persist `result`, serializing it only if the caller has not already
+        (see the single off-loop serialization in ``get_or_compute``). Failures
+        are swallowed — the compute already succeeded, so failing the response
+        on a write error would be a self-inflicted regression."""
         ttl = _resolve_ttl(ttl_seconds, endpoint)
         if _is_empty_result(result):
             ttl = _NEGATIVE_TTL
         elif _is_incomplete_result(result):
             ttl = _NEGATIVE_TTL
         try:
-            payload = result.model_dump_json(by_alias=True)
+            if payload is None:
+                payload = result.model_dump_json(by_alias=True)
             if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
                 logger.warning(
                     "graph_cache: payload_too_large endpoint=%s key=%s size=%d cap=%d (dropping stale entry + skipping cache write)",
@@ -610,6 +626,7 @@ class GraphCache:
         endpoint: str,
         params: dict[str, Any],
         result: BaseModel,
+        payload: Optional[str] = None,
     ) -> None:
         """Mirror a successful compute into the gen-less LKG snapshot.
 
@@ -627,7 +644,8 @@ class GraphCache:
         if _is_incomplete_result(result):
             return
         try:
-            payload = result.model_dump_json(by_alias=True)
+            if payload is None:
+                payload = result.model_dump_json(by_alias=True)
             if _MAX_PAYLOAD_BYTES > 0 and len(payload) > _MAX_PAYLOAD_BYTES:
                 # Already logged at WARNING in _set for the primary key;
                 # the stale mirror is dropped here deliberately (log-silent

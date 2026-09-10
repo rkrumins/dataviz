@@ -11,7 +11,8 @@
  * tab rather than rendering in the narrow drawer.
  *
  * Overlay model mirrors ExplorerPreviewDrawer: a portal to <body>, a plain-CSS
- * <Backdrop> (never inside AnimatePresence), and a framer-motion panel.
+ * <Backdrop> (never inside AnimatePresence) as a SIBLING of an inert
+ * full-viewport wrapper, and a framer-motion panel inside it.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -119,42 +120,49 @@ export function HelpPanel() {
     <>
       <Backdrop open={open} onClick={close} zClassName="z-[60]" />
 
-      <AnimatePresence>
-        {open && (
-          <motion.aside
-            key="help-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Help"
-            className={cn(
-              'fixed right-0 top-0 h-full w-[440px] max-w-[92vw] z-[61]',
-              'bg-canvas border-l border-glass-border',
-              'flex flex-col overflow-hidden',
-              'shadow-lg',
-            )}
-            initial={{ x: 440 }}
-            animate={{ x: 0 }}
-            exit={{ x: 440 }}
-            transition={MOTION.drawerSlide}
-          >
-            {view === 'article' && articleSlug ? (
-              <ArticleView
-                slug={articleSlug}
-                onBack={() => setView('home')}
-                onClose={close}
-              />
-            ) : view === 'getting-started' ? (
-              <GettingStartedView onBack={() => setView('home')} onClose={close} />
-            ) : (
-              <HomeView
-                onSelectGuide={openArticle}
-                onOpenGettingStarted={() => setView('getting-started')}
-                onClose={close}
-              />
-            )}
-          </motion.aside>
-        )}
-      </AnimatePresence>
+      {/* The full-viewport wrapper is INERT and lives OUTSIDE the presence tree:
+          the drawer genuinely animates out on close, and an interrupted exit
+          (StrictMode, a rapid toggle, a parent re-render mid-flight) must never
+          be able to leave a click-eating node in the body. Only the drawer
+          itself is interactive. */}
+      <div className="fixed inset-0 z-[61] pointer-events-none">
+        <AnimatePresence>
+          {open && (
+            <motion.aside
+              key="help-panel"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Help"
+              className={cn(
+                'pointer-events-auto absolute right-0 top-0 h-full w-[440px] max-w-[92vw]',
+                'bg-canvas border-l border-glass-border',
+                'flex flex-col overflow-hidden',
+                'shadow-lg',
+              )}
+              initial={{ x: 440 }}
+              animate={{ x: 0 }}
+              exit={{ x: 440 }}
+              transition={MOTION.drawerSlide}
+            >
+              {view === 'article' && articleSlug ? (
+                <ArticleView
+                  slug={articleSlug}
+                  onBack={() => setView('home')}
+                  onClose={close}
+                />
+              ) : view === 'getting-started' ? (
+                <GettingStartedView onBack={() => setView('home')} onClose={close} />
+              ) : (
+                <HomeView
+                  onSelectGuide={openArticle}
+                  onOpenGettingStarted={() => setView('getting-started')}
+                  onClose={close}
+                />
+              )}
+            </motion.aside>
+          )}
+        </AnimatePresence>
+      </div>
     </>
   )
 

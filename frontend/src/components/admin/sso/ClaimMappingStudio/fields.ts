@@ -61,7 +61,7 @@ export const FIELDS: MappingField[] = [
     },
     {
         key: 'groups', label: 'Groups',
-        hint: 'Feeds the IdP-group → role / internal-group mappings. Accepts a list, or a comma-separated string.',
+        hint: 'Feeds the IdP-group → role / internal-group mappings on the Access mapping tab. Accepts a list, or a comma-separated string. Nested keys use dots — entitlements.groups is already a default.',
     },
     {
         key: 'auth_time', label: 'Auth time',

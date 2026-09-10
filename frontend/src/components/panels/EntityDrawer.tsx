@@ -44,6 +44,7 @@ import {
 } from '@/store/schema'
 import { allowedChildTypeIds, setHasId, deriveContainmentEdges } from '@/services/ontologyPreflightService'
 import { relationshipLabel, parentPlacementPhrase } from '@/lib/relationshipLabel'
+import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
 import { useReparentNode } from '@/components/canvas/context-view/useReparentNode'
 import { usePersonaStore } from '@/store/persona'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
@@ -202,7 +203,6 @@ export function EntityDrawer({
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [hasChanges, setHasChanges] = useState(false)
   const [showSaved, setShowSaved] = useState(false)
-  const [isPinned, setIsPinned] = useState(false)
   const [copiedUrn, setCopiedUrn] = useState(false)
   const drawerRef = useRef<HTMLElement>(null)
   // Unsaved-changes guard: confirm before closing or switching nodes.
@@ -242,14 +242,17 @@ export function EntityDrawer({
   // Colors based on entity type (resolved from schema with hash-based fallback)
   const colors = useEntityColorSet((selectedNode?.data.type as string) ?? '')
 
-  // Get display label based on persona mode
-  const displayLabel = useMemo(() => {
-    if (!selectedNode) return ''
-    const data = selectedNode.data as Record<string, any>
-    return mode === 'business'
-      ? (data.businessLabel || data.label || data.name || selectedNode.id)
-      : (data.technicalLabel || data.label || data.name || selectedNode.id)
-  }, [selectedNode, mode])
+  // Name + (in Technical mode) the technical identity revealed beneath it —
+  // both from the shared resolver, so the drawer and the canvas row it was
+  // opened from can never disagree about what this entity is called.
+  const displayLabel = useMemo(
+    () => (selectedNode ? resolveEntityName(selectedNode.data, mode, selectedNode.id) : ''),
+    [selectedNode, mode],
+  )
+  const technicalLine = useMemo(
+    () => (selectedNode ? technicalSubtitle(selectedNode.data, mode) : undefined),
+    [selectedNode, mode],
+  )
 
   // Handle form field changes
   const handleChange = useCallback((key: string, value: any) => {
@@ -407,12 +410,15 @@ export function EntityDrawer({
   // Close drawer — the X button is the only close path. The drawer is
   // sticky: clicking other entities or the canvas background never closes
   // it, it only swaps the data shown inside.
+  // Close always closes. It used to return early while the drawer was
+  // "pinned" — the X became a dead control with no tooltip, no disabled state
+  // and no way back except reloading the page. That flag was local state and
+  // nothing else in the app ever read it, so the pin did nothing but this.
   const handleClose = useCallback(() => {
-    if (isPinned) return
     if (hasChanges) { setConfirmClose(true); return }
     closeNodeDrawer()
     clearSelection()
-  }, [closeNodeDrawer, clearSelection, isPinned, hasChanges])
+  }, [closeNodeDrawer, clearSelection, hasChanges])
 
   // Resolve the unsaved-changes prompt (shared by close + node-switch).
   const discardAndProceed = useCallback(() => {
@@ -528,10 +534,22 @@ export function EntityDrawer({
             </button>
           </div>
 
-          {/* Entity Name */}
-          <h2 className="text-xl font-display font-semibold text-ink leading-tight mb-4">
+          {/* Entity Name — Technical mode adds the fully-qualified identity
+              underneath, and only when it says something the name does not. */}
+          <h2 className={cn(
+            'text-xl font-display font-semibold text-ink leading-tight',
+            technicalLine ? 'mb-1' : 'mb-4',
+          )}>
             {displayLabel}
           </h2>
+          {technicalLine && (
+            <p
+              className="text-xs font-mono text-ink-muted break-all mb-4"
+              title={technicalLine}
+            >
+              {technicalLine}
+            </p>
+          )}
 
           {/* Committed-deletion ghost → a Restore banner takes the place of the trace/edit actions. */}
           {isGhost && (
@@ -608,12 +626,6 @@ export function EntityDrawer({
                 onClick={() => onFocusConnections(selectedNode.id)}
               />
             )}
-            <ActionButton
-              icon={LucideIcons.Pin}
-              label={isPinned ? "Unpin" : "Pin"}
-              active={isPinned}
-              onClick={() => setIsPinned(!isPinned)}
-            />
             <ActionButton
               icon={LucideIcons.Copy}
               label={copiedUrn ? "Copied!" : "Copy URN"}

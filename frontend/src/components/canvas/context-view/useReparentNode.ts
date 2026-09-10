@@ -6,7 +6,7 @@
  * edit is: remove the current containment edge and add a new ontology-typed one,
  * reviewed-before-save.
  *
- * Guards (fail with a clear toast, never a silent illegal move):
+ * Guards (fail with a clear notification, never a silent illegal move):
  *   • no self-drop, and no dropping a node into one of its own descendants (cycle);
  *   • the new parent's type must be allowed to contain the child's type (ontology);
  *   • a containment relationship must exist for parent→child (forward orientation, since
@@ -15,13 +15,13 @@
  *     staged create — so we ask the user to save first.
  *   • re-typing/moving REMOVES an existing parent edge, which only persists inside a
  *     draft (main-mode applyAll drops the hookless delete → double parent), so we
- *     gate those on an active draft with an 'info' toast.
+ *     gate those on an active draft with an 'info' notification.
  */
 import { useCallback } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { generateId } from '@/lib/utils'
 import {
   useEntityTypes,
@@ -35,7 +35,7 @@ import {
 import { allowedChildTypeIds, setHasId, isContainmentRelType, deriveContainmentEdges, endpointOk } from '@/services/ontologyPreflightService'
 
 export function useReparentNode() {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const entityTypes = useEntityTypes()
   const rootEntityTypes = useRootEntityTypes()
   const hierarchyMap = useEntityTypeHierarchyMap()
@@ -121,7 +121,7 @@ export function useReparentNode() {
     if (childKey === parentKey) return
 
     if (dragged.data?.isPending === 'create') {
-      showToast('info', 'Save this new entity before moving it to a different parent.')
+      notify('info', 'Save this new entity before moving it to a different parent.')
       return
     }
 
@@ -146,7 +146,7 @@ export function useReparentNode() {
       }
     }
     if (descendants.has(parentKey)) {
-      showToast('error', "Can't move an entity inside one of its own descendants.")
+      notify('error', "Can't move an entity inside one of its own descendants.")
       return
     }
     if (parentOf.get(childKey) === parentKey) return  // already there — no-op
@@ -154,7 +154,7 @@ export function useReparentNode() {
     const childType = dragged.data?.type as string
     const parentType = newParent.data?.type as string
     if (!setHasId(allowedChildTypeIds(parentType, entityTypes, rootEntityTypes, hierarchyMap), childType)) {
-      showToast('error', `A ${parentType} can't contain a ${childType}.`)
+      notify('error', `A ${parentType} can't contain a ${childType}.`)
       return
     }
 
@@ -168,7 +168,7 @@ export function useReparentNode() {
     )
     const containmentType = fwd?.id
     if (!containmentType) {
-      showToast('error', 'No containment relationship is allowed between these entities.')
+      notify('error', 'No containment relationship is allowed between these entities.')
       return
     }
 
@@ -177,13 +177,13 @@ export function useReparentNode() {
     // the server (old edge kept + new edge added). Require a draft for such a move.
     const oldEdge = edges.find((e) => e.target === childKey && isContainment(e))
     if (oldEdge && !useBranchStore.getState().currentBranchId) {
-      showToast('info', 'Switch to a draft to move an entity to a different parent.')
+      notify('info', 'Switch to a draft to move an entity to a different parent.')
       return
     }
 
     restageContainment(childKey, parentKey, (newParent.data?.label as string) || parentKey, containmentType)
-    showToast('success', `Moved under ${(newParent.data?.label as string) || parentKey}.`)
-  }, [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, showToast, isContainment, restageContainment])
+    notify('success', `Moved under ${(newParent.data?.label as string) || parentKey}.`)
+  }, [entityTypes, rootEntityTypes, hierarchyMap, relationshipTypes, containmentEdgeTypes, notify, isContainment, restageContainment])
 
   // retypeContainment — keep the SAME parent, switch the containment relationship
   // TYPE. The backend edge_type is immutable, so this is a delete-old + create-new
@@ -196,13 +196,13 @@ export function useReparentNode() {
     const childKey = child.id
 
     if (child.data?.isPending === 'create') {
-      showToast('info', 'Save this new entity before changing how it relates to its parent.')
+      notify('info', 'Save this new entity before changing how it relates to its parent.')
       return
     }
 
     const oldEdge = edges.find((e) => e.target === childKey && isContainment(e))
     if (!oldEdge) {
-      showToast('info', "This entity has no parent yet, so there's no relationship to change.")
+      notify('info', "This entity has no parent yet, so there's no relationship to change.")
       return
     }
     if (normalizeEdgeType(oldEdge) === newEdgeType.toUpperCase()) return  // unchanged — no-op
@@ -216,19 +216,19 @@ export function useReparentNode() {
     const allowed = deriveContainmentEdges(parentType, childType, relationshipTypes, containmentEdgeTypes)
       .filter((o) => o.allowed)
     if (!allowed.some((o) => o.edgeType === newEdgeType)) {
-      showToast('error', "That relationship isn't allowed between these entities.")
+      notify('error', "That relationship isn't allowed between these entities.")
       return
     }
 
     // Switching the type removes the old edge, which only persists inside a draft.
     if (!useBranchStore.getState().currentBranchId) {
-      showToast('info', 'Switch to a draft to change how this entity relates to its parent.')
+      notify('info', 'Switch to a draft to change how this entity relates to its parent.')
       return
     }
 
     restageContainment(childKey, parentKey, (parent?.data?.label as string) || parentKey, newEdgeType)
-    showToast('success', 'Relationship updated.')
-  }, [relationshipTypes, containmentEdgeTypes, showToast, isContainment, restageContainment])
+    notify('success', 'Relationship updated.')
+  }, [relationshipTypes, containmentEdgeTypes, notify, isContainment, restageContainment])
 
   return { reparent, retypeContainment }
 }

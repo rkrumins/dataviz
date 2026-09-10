@@ -109,7 +109,14 @@ export function Sparkline({
                 className={t.dot}
             />
             {/* Hit targets, deliberately wider than the marks. Rendered last
-                so they sit above the line; invisible but pointer-active. */}
+                so they sit above the line; invisible but pointer-active.
+
+                The per-point <title> is the NATIVE tooltip and it is tied to
+                `label`, exactly like the accessible name above: a caller that
+                names its series has opted into OS chrome, and one that does
+                not is either decorative (`aria-hidden`) or — as in
+                ViewUsageBadge — already wrapped in a HoverTip, where a second
+                pill would paint a bare number over the card. */}
             {points.map((v, i) => (
                 <rect
                     key={i}
@@ -118,7 +125,7 @@ export function Sparkline({
                     fill="transparent"
                     onMouseEnter={() => setHover(i)}
                 >
-                    <title>{label ? `${label}: ${fmt(v)}` : fmt(v)}</title>
+                    {label && <title>{`${label}: ${fmt(v)}`}</title>}
                 </rect>
             ))}
         </svg>

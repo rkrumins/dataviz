@@ -12,6 +12,9 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProvidersTab } from '../ProvidersTab'
+import {
+    NotificationStack, useNotificationStore,
+} from '@/components/ui/notifications'
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
 
 vi.mock('@/services/ssoAdminService', () => ({
@@ -55,8 +58,11 @@ function draft(over: Partial<IdpProvider> = {}): IdpProvider {
     } as IdpProvider
 }
 
+const raised = () => useNotificationStore.getState().notifications
+
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     svc.listProviders.mockResolvedValue([draft()])
     svc.providerStatus.mockResolvedValue({ providers: [] })
     svc.publishProvider.mockResolvedValue(draft({ lifecycle: 'live' }))
@@ -64,7 +70,7 @@ beforeEach(() => {
 
 async function askToPublish() {
     const user = userEvent.setup()
-    render(<ProvidersTab />)
+    render(<><ProvidersTab /><NotificationStack /></>)
     await user.click(await screen.findByRole('button', { name: 'publish corp' }))
     return user
 }
@@ -116,5 +122,33 @@ describe('publishing a draft', () => {
             expect(svc.publishProvider).toHaveBeenCalledWith('idp_1')
         })
         expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    })
+
+    // The click with an audience has to say it landed. The dialog closing
+    // is the same thing "Not yet" does, so on its own it confirms nothing.
+    it('says it went live, and to whom', async () => {
+        const user = await askToPublish()
+        await screen.findByRole('alertdialog')
+
+        await user.click(screen.getByRole('button', { name: /publish it/i }))
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('success')
+        expect(raised()[0].message).toBe(
+            'Corp Gateway is published — everyone sees it on the sign-in '
+            + 'screen now.',
+        )
+    })
+
+    it('names the connection when publishing is refused', async () => {
+        svc.publishProvider.mockRejectedValueOnce(new Error(''))
+        const user = await askToPublish()
+        await screen.findByRole('alertdialog')
+
+        await user.click(screen.getByRole('button', { name: /publish it/i }))
+
+        await waitFor(() => expect(raised()).toHaveLength(1))
+        expect(raised()[0].type).toBe('error')
+        expect(raised()[0].message).toBe('Could not publish Corp Gateway.')
     })
 })

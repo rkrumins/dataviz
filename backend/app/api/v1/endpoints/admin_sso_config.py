@@ -130,7 +130,13 @@ async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
     """Return the (id, email) of every active super-admin who has no SSO
     identity. Used to refuse the toggle ``allow_local_login=false`` when
     it would produce a lockout (once local login is off, an admin MUST
-    have at least one SSO identity to get back in)."""
+    have at least one SSO identity to get back in).
+
+    System accounts are not counted: the enforcement carves them out
+    (they keep password sign-in while the switch is off), so they cannot
+    be locked out by it — and without this exemption a deployment whose
+    only local admin is the seeded bootstrap account could never turn
+    enforcement on at all."""
     user_ids = await _super_admin_user_ids(session)
     if not user_ids:
         return []
@@ -139,6 +145,7 @@ async def _admins_without_sso_identity(session: AsyncSession) -> list[dict]:
             UserORM.id.in_(user_ids),
             UserORM.status == "active",
             UserORM.deleted_at.is_(None),
+            UserORM.is_system_account.is_(False),
         )
     )
     offending: list[dict] = []
@@ -310,4 +317,83 @@ async def end_sso_sessions(
     return EndSsoSessionsResponse(
         users_affected=outcome["users"], tokens_revoked=outcome["tokens"],
         dry_run=False,
+    )
+
+
+class EndAllSessionsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    dry_run: bool = Field(default=False, alias="dryRun")
+
+
+class EndAllSessionsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    users_affected: int = Field(alias="usersAffected")
+    tokens_revoked: int = Field(alias="tokensRevoked")
+    system_accounts_skipped: int = Field(alias="systemAccountsSkipped")
+    dry_run: bool = Field(alias="dryRun")
+
+
+@router.post("/end-all-sessions", response_model=EndAllSessionsResponse,
+             response_model_by_alias=True)
+async def end_all_sessions(
+    body: Optional[EndAllSessionsRequest] = None,
+    admin: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Require everyone to sign in again — password and SSO sessions
+    alike, except system accounts.
+
+    The companion the enforcement switch needs: turning
+    ``allowLocalLogin`` off changes what the next sign-in must be, but
+    the sessions already out there keep rotating until their ceilings
+    fire — up to 24 hours of people still signed in under the old
+    policy. This ends them now, gracefully: the next refresh is
+    refused, live access tokens are tombstoned within seconds, and
+    everyone lands on the login page to come back in under whatever
+    the posture now allows. System accounts (break-glass) are skipped,
+    so the door that must survive an IdP outage stays open.
+
+    The caller's own session is ended too unless it is a system
+    account — the confirm dialog says so before this is reached.
+    Deliberately callable whatever the posture currently is;
+    ``dryRun`` answers the confirm dialog's counts.
+    """
+    body = body or EndAllSessionsRequest()
+
+    from backend.app.db.repositories import refresh_token_repo
+    from backend.app.services.revocation_service import (
+        revoke_platform_sessions,
+    )
+
+    system_ids = await user_repo.system_account_ids(session)
+    total = await refresh_token_repo.count_active_users(session)
+    affected = await refresh_token_repo.count_active_users(
+        session, exclude_user_ids=system_ids,
+    )
+    skipped = total - affected
+
+    if body.dry_run:
+        return EndAllSessionsResponse(
+            users_affected=affected, tokens_revoked=0,
+            system_accounts_skipped=skipped, dry_run=True,
+        )
+
+    outcome = await revoke_platform_sessions(
+        session=session, reason="admin_forced_relogin",
+    )
+    try:
+        await user_repo.create_outbox_event(
+            session, event_type="auth.config.all_sessions_ended",
+            payload={
+                "actor_id": admin.id,
+                "users_affected": outcome["users"],
+                "tokens_revoked": outcome["tokens"],
+                "system_accounts_skipped": skipped,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return EndAllSessionsResponse(
+        users_affected=outcome["users"], tokens_revoked=outcome["tokens"],
+        system_accounts_skipped=skipped, dry_run=False,
     )

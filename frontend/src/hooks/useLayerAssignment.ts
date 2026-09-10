@@ -19,6 +19,7 @@ import type { HierarchyNode } from '@/types/hierarchy'
 import { compareOrderKeys } from '@/utils/orderKeys'
 import { useBranchCreatedDelta } from './useBranchCreatedDelta'
 import { buildLayerRules, resolveRootLayer } from './lib/resolveRootLayer'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 
 // ============================================
 // Types
@@ -350,7 +351,12 @@ export function useLayerAssignment({
         const hNode: HierarchyNode = {
           id: node.id,
           typeId: node.data.type,
-          name: node.data.label ?? node.data.businessLabel ?? node.id,
+          // The business-facing name (drag payloads, search haystacks, exports read
+          // this). Precedence via the shared resolver — it used to try `label` first
+          // here and `businessLabel` first in the drawer, so one entity could show
+          // two different names on one screen. The rendered row applies the live
+          // persona mode on top of this (FlatTreeItem).
+          name: resolveEntityName(node.data, 'business', node.id),
           data: node.data as Record<string, unknown>,
           children,
           depth,

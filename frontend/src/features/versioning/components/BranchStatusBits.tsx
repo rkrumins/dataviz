@@ -4,6 +4,7 @@
  */
 import { cn } from '@/lib/utils'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { ownerInitials, ownerName, type DraftStatus, type StatusTone } from '../model/branchVocab'
 
 const PILL_TONE: Record<StatusTone, string> = {
@@ -19,16 +20,26 @@ const DOT_TONE: Record<StatusTone, string> = {
 
 export function DraftStatusPill({ status, className }: { status: DraftStatus; className?: string }) {
   return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap',
-        PILL_TONE[status.tone],
-        className,
-      )}
+    // "Updates available" / "Up to date" with no statement of what either one
+    // means for the person about to publish.
+    <HoverTip
+      className="inline-flex"
+      label={status.behind
+        ? 'The published version has moved on since this draft started'
+        : 'This draft already has everything from the published version'}
+      detail={status.behind ? 'Get the latest before publishing' : undefined}
     >
-      <span className={cn('w-1.5 h-1.5 rounded-full', DOT_TONE[status.tone])} />
-      {status.label}
-    </span>
+      <span
+        className={cn(
+          'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap',
+          PILL_TONE[status.tone],
+          className,
+        )}
+      >
+        <span className={cn('w-1.5 h-1.5 rounded-full', DOT_TONE[status.tone])} />
+        {status.label}
+      </span>
+    </HoverTip>
   )
 }
 
@@ -66,23 +77,26 @@ export function OwnerAvatar({
   className?: string
 }) {
   return (
-    <span
-      title={ownerName(owner, userNames)}
-      className={cn('inline-flex shrink-0 rounded-full', className)}
-    >
-      <UserAvatar
-        userId={owner}
-        name={ownerName(owner, userNames)}
-        className={cn(AVATAR_SIZE[size], 'font-semibold shadow-sm ring-1 ring-white/15')}
-        fallback={(
-          <span className={cn(
-            'flex h-full w-full items-center justify-center rounded-full text-white',
-            avatarTone(owner),
-          )}>
-            {ownerInitials(owner, userNames)}
-          </span>
-        )}
-      />
-    </span>
+    // An avatar's only text is its owner's name, so the tip IS the value —
+    // the one case where a `title` would have been defensible. It speaks the
+    // app's tooltip language anyway, because these sit inside portaled menus
+    // where a native pill lands behind the menu it belongs to.
+    <HoverTip className={cn('inline-flex shrink-0', className)} label={ownerName(owner, userNames)}>
+      <span aria-label={ownerName(owner, userNames)} className="inline-flex rounded-full">
+        <UserAvatar
+          userId={owner}
+          name={ownerName(owner, userNames)}
+          className={cn(AVATAR_SIZE[size], 'font-semibold shadow-sm ring-1 ring-white/15')}
+          fallback={(
+            <span className={cn(
+              'flex h-full w-full items-center justify-center rounded-full text-white',
+              avatarTone(owner),
+            )}>
+              {ownerInitials(owner, userNames)}
+            </span>
+          )}
+        />
+      </span>
+    </HoverTip>
   )
 }

@@ -21,7 +21,7 @@ import { useFeature } from '@/store/features'
 import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { useLoadingToast } from '@/components/ui/toast'
+import { useLoadingNotification } from '@/components/ui/notifications'
 
 // UX-first interaction components (shared across canvases)
 import { CanvasContextMenu, type ContextMenuTarget } from './CanvasContextMenu'
@@ -54,6 +54,7 @@ import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
+import { resolveEntityName } from '@/lib/entityDisplayName'
 
 interface HierarchyCanvasProps {
   className?: string
@@ -90,7 +91,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const containmentEdgeTypes = useViewContainmentEdgeTypes()
   const lineageEdgeTypes = useViewLineageEdgeTypes()
   const { loadChildren, cancelChildLoad, loadingNodes, isLoading: isLoadingChildren } = useGraphHydration()
-  useLoadingToast('hier-children', isLoadingChildren, 'Expanding hierarchy')
+  useLoadingNotification('hier-children', isLoadingChildren, 'Expanding hierarchy')
   const relationshipTypes = useViewRelationshipTypes()
   // Legacy inline quick-filter (substring over visible nodes) — left
   // in place as a complementary quick-filter alongside the new
@@ -110,7 +111,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Property Manager display-rule engine — publishes match sets so the
   // HierarchyContainer rows render tag chips.
   useDisplayRuleEngine(activeView?.id ?? null)
-  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, loadChildren, provider })
+  const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
   // 400px rail from the wider Build Mode panel — only one mounts at a time.
@@ -233,7 +234,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       return {
         id: node.id,
         typeId: node.data.type as string,
-        name: (node.data.label as string) ?? (node.data.businessLabel as string) ?? node.id,
+        name: resolveEntityName(node.data, 'business', node.id),
         data: node.data as Record<string, unknown>,
         children,
         depth,
@@ -359,7 +360,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // Keyboard shortcut for search
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'f') {
         e.preventDefault()
         searchInputRef.current?.focus()
       }
@@ -580,7 +581,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       </AnimatePresence>
 
       {/* Advanced search — same SearchMapPanel surface mounted on every
-          canvas. Trigger handles ⌘K globally; panel is a flex-sibling
+          canvas. Trigger handles ⌘⇧F globally; panel is a flex-sibling
           drawer alongside EntityDrawer. */}
       <CanvasSearchTrigger
         open={advancedSearchOpen}
@@ -653,7 +654,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
         onCancel={interactions.cancelInlineEdit}
       />
 
-      {/* Command Palette - Press Cmd+K */}
+      {/* Command Palette - Press Cmd+Shift+P */}
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}

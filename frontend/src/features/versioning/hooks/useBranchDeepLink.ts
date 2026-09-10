@@ -5,13 +5,13 @@
  *
  *   • URL → store: on load, if `?branch=<id>` names an OPEN draft the viewer may access (it appears
  *     in the permission-gated branches list), switch to it. If it's missing / not accessible, drop
- *     the param, stay on main, and toast — so a shared link only works for permitted users.
+ *     the param, stay on main, and notify — so a shared link only works for permitted users.
  *   • store → URL: reflect the active branch as `?branch=<id>` (replace, no history spam); main
  *     clears the param. So switching branches updates the link, and "Copy link" is always current.
  */
 import { useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { Branch } from '@/services/versioningApiService'
 
 export function useBranchDeepLink({
@@ -40,7 +40,7 @@ export function useBranchDeepLink({
   switchToDraft: (branchId: string, originatingViewId?: string | null) => void
 }) {
   const [searchParams, setSearchParams] = useSearchParams()
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const urlBranch = searchParams.get('branch')
   const handledRef = useRef<string | null>(null) // a branch param we've already resolved (apply/reject)
   const wasActiveRef = useRef(false) // have we ever held a non-null branch? distinguishes "left a branch" from a fresh deep-link still mid-apply
@@ -64,10 +64,10 @@ export function useBranchDeepLink({
       // Not accessible / not found on a SETTLED list → drop the param and stay on main.
       handledRef.current = urlBranch
       setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('branch'); return n }, { replace: true })
-      showToast('error', "That branch isn't available — you may not have access, or it was merged/discarded.")
+      notify('error', "That branch isn't available — you may not have access, or it was merged/discarded.")
     }
     // else: mid-refresh — leave unhandled so the effect re-decides on fresh data.
-  }, [enabled, branches, listRefreshing, urlBranch, currentBranchId, viewResolved, switchToDraft, setSearchParams, showToast])
+  }, [enabled, branches, listRefreshing, urlBranch, currentBranchId, viewResolved, switchToDraft, setSearchParams, notify])
 
   // store → URL: keep the param in step with the active branch (idempotent; guarded against loops).
   useEffect(() => {

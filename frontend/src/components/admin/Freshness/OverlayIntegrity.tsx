@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { Clock, RefreshCw, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { FreshnessSummary, ReconcileRun } from '@/services/freshnessService'
 import type { StatusFacet } from './freshnessTriage'
 import { IntegrityPulse } from './IntegrityPulse'
@@ -20,7 +20,7 @@ import {
 } from './useFreshness'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-    ACTIVITY_HORIZON, DRIFT_WINDOWS, checkNowToast, itemsInWindow, lastDriftAt,
+    ACTIVITY_HORIZON, DRIFT_WINDOWS, checkNowMessage, itemsInWindow, lastDriftAt,
     parseDriftWindow, pickLastPassRun, pickLatestRun, rankRepeatOffenders,
     windowDriftCounts, windowPhrase,
     type DriftWindow,
@@ -42,7 +42,7 @@ export function OverlayIntegrity({
     onWindowChange?: (w: DriftWindow) => void
 }) {
     const isAdmin = usePermission('system:admin')
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const qc = useQueryClient()
     const recon = useReconciliation()
     const driftWindow = parseDriftWindow(windowProp)
@@ -66,9 +66,9 @@ export function OverlayIntegrity({
                 void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.activityPrefix })
                 void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.fleetPrefix })
                 void qc.invalidateQueries({ queryKey: FRESHNESS_KEYS.reconciliation })
-                showToast('success', checkNowToast(res, summary?.total))
+                notify('success', checkNowMessage(res, summary?.total))
             },
-            onError: (e) => showToast('error', e.message || 'Could not run reconciliation.'),
+            onError: (e) => notify('error', e.message || 'Could not run reconciliation.'),
         })
     }
 

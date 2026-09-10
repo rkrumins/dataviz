@@ -1,8 +1,16 @@
 /**
- * Interpretation card that appears below the "No matches in this scope"
- * empty state. Reads the response's `scopeDiagnostics` block + the
- * query that was run, then surfaces concrete likely causes with the
- * action the user can take to fix each.
+ * What the panel says when a search comes back empty.
+ *
+ * It LEADS with the search itself, in the user's own words — "Nothing in
+ * this view contains 'custmer'" — and offers the other three ways to
+ * match that word as one click each. That is the answer for almost every
+ * empty result: a typo, or a word that is the start of a name rather
+ * than the whole of it.
+ *
+ * The engine-level reading of the same response — edge-type flags the
+ * ontology never set, a scope clamp, the resolved scope, what actually
+ * exists in the data — is all still here, under "Technical details".
+ * True, occasionally decisive, and not what to open on.
  *
  * Causes we detect:
  *   - lineageEdgeTypes is empty AND the query references a lineage-aware
@@ -33,7 +41,7 @@ import {
     Info,
     Loader2,
 } from 'lucide-react'
-import { type FC, useMemo, useState } from 'react'
+import { type FC, type ReactNode, useMemo, useState } from 'react'
 
 import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
@@ -45,9 +53,12 @@ import type {
     SearchQuery,
     SearchResultPage,
     ScopeDiagnostics,
+    TextPredicate,
 } from '@/types/search'
 
+import { CypherDisclosure } from './panel/CypherDisclosure'
 import { findScopeCondition } from './panel/predicateComposition'
+import type { QuickMatch } from './session/quickPredicate'
 
 
 export interface ZeroResultsDiagnosticProps {
@@ -55,6 +66,12 @@ export interface ZeroResultsDiagnosticProps {
     result: SearchResultPage
     /** The query that was executed (so we can inspect predicates). */
     query: SearchQuery
+    /** The view the search ran in — the compiled Cypher is per-view. */
+    viewId: string
+    /** Re-run the same word a different way. Absent on the surfaces with
+     *  no quick query to switch — the lead then states the miss without
+     *  offering the one-click fixes. */
+    onSwitchMatch?: (match: QuickMatch) => void
 }
 
 
@@ -67,28 +84,148 @@ interface Cause {
 
 
 export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
-    result, query,
+    result, query, viewId, onSwitchMatch,
 }) => {
     const causes = useMemo(() => diagnose(result, query), [result, query])
+    const text = useMemo(() => firstTextLeaf(query.predicate), [query.predicate])
 
     return (
         <div className="flex flex-col gap-2">
-            {causes.map((c, i) => (
-                <CauseCard key={i} cause={c} highlighted={i === 0} />
-            ))}
+            <MissLead text={text} onSwitchMatch={onSwitchMatch} />
 
-            {/* Always-on: resolved scope summary. Lets the user verify
-                what the engine ACTUALLY used to match against. */}
-            {result.scopeDiagnostics && (
-                <ResolvedScopeCard
-                    diag={result.scopeDiagnostics}
-                    candidateCount={result.candidateCount}
-                />
+            <TechnicalDetails>
+                {causes.map((c, i) => (
+                    <CauseCard key={i} cause={c} highlighted={i === 0} />
+                ))}
+
+                {/* Resolved scope summary. Lets the user verify what the
+                    engine ACTUALLY used to match against. */}
+                {result.scopeDiagnostics && (
+                    <ResolvedScopeCard
+                        diag={result.scopeDiagnostics}
+                        candidateCount={result.candidateCount}
+                    />
+                )}
+
+                {/* Inline graph-contents probe — for "did the entity type
+                    I queried even exist?" investigations. */}
+                <DiscoverProbe query={query} />
+
+                {/* The compiled query, which cause 5 sends the user here
+                    to read. */}
+                <CypherDisclosure viewId={viewId} />
+            </TechnicalDetails>
+        </div>
+    )
+}
+
+
+// ---------------------------------------------------------------------------
+// The lead — the search, in the user's words, with the way out
+// ---------------------------------------------------------------------------
+
+/** The four ways to match a word, in the builder's own labels so the
+ *  chip here and the row in Refine name the same thing. */
+const MATCH_MODES: ReadonlyArray<{ value: QuickMatch; label: string; verb: string }> = [
+    { value: 'substring', label: 'Contains', verb: 'contains' },
+    { value: 'prefix', label: 'Starts with', verb: 'starts with' },
+    { value: 'suffix', label: 'Ends with', verb: 'ends with' },
+    { value: 'exact', label: 'Is exactly', verb: 'is exactly' },
+]
+
+
+function MissLead({
+    text, onSwitchMatch,
+}: {
+    text: TextPredicate | null
+    onSwitchMatch?: (match: QuickMatch) => void
+}) {
+    const mode = MATCH_MODES.find((m) => m.value === text?.match)
+    // A query with no text leaf — a builder query about tags, types or
+    // lineage — has no word to re-match, so it gets the statement
+    // without the chips.
+    const others = mode && onSwitchMatch
+        ? MATCH_MODES.filter((m) => m.value !== mode.value)
+        : []
+
+    return (
+        <div className={cn(
+            "rounded-xl px-3.5 py-3",
+            "border-l-4 border-l-cyan-400 border border-cyan-400/45",
+            "bg-cyan-500/[0.14] dark:bg-cyan-500/[0.10]",
+        )}>
+            <p className="text-[13px] font-display font-semibold leading-snug text-cyan-900 dark:text-cyan-100">
+                {text && mode
+                    ? <>Nothing in this view {mode.verb} “<span className="font-mono font-medium">{text.value}</span>”.</>
+                    : <>Nothing in this view matched what you asked for.</>}
+            </p>
+            {others.length > 0 && (
+                <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[11.5px] text-cyan-900/85 dark:text-cyan-100/90">
+                        Try
+                    </span>
+                    {others.map((m) => (
+                        <button
+                            key={m.value}
+                            type="button"
+                            onClick={() => onSwitchMatch?.(m.value)}
+                            className={cn(
+                                "inline-flex items-center px-2 h-6 rounded-full",
+                                "text-[11px] font-medium",
+                                "bg-canvas-base/40 text-ink",
+                                "border border-glass-border hover:bg-canvas-base/70",
+                                "transition-colors",
+                            )}
+                        >
+                            {m.label}
+                        </button>
+                    ))}
+                </div>
             )}
+        </div>
+    )
+}
 
-            {/* Inline graph-contents probe — for "did the entity type
-                I queried even exist?" investigations. */}
-            <DiscoverProbe query={query} />
+
+/** First text leaf, depth-first — the word the user is looking for. */
+function firstTextLeaf(p: Predicate): TextPredicate | null {
+    if (p.kind === 'text') return p
+    if (p.kind === 'group') {
+        for (const child of p.children) {
+            const found = firstTextLeaf(child)
+            if (found) return found
+        }
+    }
+    return null
+}
+
+
+/** Everything the engine can say about the miss, folded away. */
+function TechnicalDetails({ children }: { children: ReactNode }) {
+    const [open, setOpen] = useState(false)
+    return (
+        <div className="rounded-xl border border-glass-border/60 bg-glass/20 overflow-hidden">
+            <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                aria-expanded={open}
+                className={cn(
+                    "w-full flex items-center gap-2 px-3.5 py-2.5",
+                    "text-left text-[11.5px] font-medium",
+                    "text-ink-muted hover:text-ink hover:bg-glass/30 transition-colors",
+                )}
+            >
+                {open
+                    ? <ChevronDown className="w-3 h-3 shrink-0" strokeWidth={2.5} />
+                    : <ChevronRight className="w-3 h-3 shrink-0" strokeWidth={2.5} />
+                }
+                <span className="flex-1 text-ink">Technical details</span>
+            </button>
+            {open && (
+                <div className="border-t border-glass-border/40 p-3 flex flex-col gap-2 bg-canvas-elevated/30">
+                    {children}
+                </div>
+            )}
         </div>
     )
 }
@@ -245,11 +382,11 @@ function diagnose(result: SearchResultPage, query: SearchQuery): Cause[] {
     if (diag && diag.effectiveRootUrns.length === 0 && diag.droppedRootUrns.length === 0) {
         causes.push({
             severity: 'info',
-            title: 'Search ran across the whole data source.',
-            body: 'This view has no rootUrns configured, so the engine didn\'t apply '
-                + 'a scope clamp. That\'s fine — but if you wanted results scoped to a '
-                + 'particular subtree, configure the view\'s rootUrns or supply them on '
-                + 'the request.',
+            title: 'The search covered this whole view.',
+            body: 'Nothing narrowed it to one part of the hierarchy, so an '
+                + 'empty result is not a scope problem — the word really '
+                + 'isn\'t here. To look inside one container instead, use '
+                + 'the search box on its row.',
         })
     }
 

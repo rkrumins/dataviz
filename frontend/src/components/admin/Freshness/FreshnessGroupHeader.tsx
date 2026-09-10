@@ -15,10 +15,11 @@
  * changes a number. "Attention" is the server-aligned marker-OR-failed set;
  * a rebuilding source is healthy in-progress, counted on its own.
  */
-import { ChevronDown, ChevronRight, Waves, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, Unplug, Waves, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { FreshnessRow, ProviderFreshnessSummary } from '@/services/freshnessService'
-import { isDrifting, isNeverBuilt, isRebuilding, needsAttention } from './freshnessTriage'
+import { isDrifting, isNeverBuilt, isProjectionStalled, isRebuilding, needsAttention } from './freshnessTriage'
+import { DRIFT_SPEC } from './DriftStateBadge'
 
 interface Props {
     providerId: string
@@ -53,6 +54,7 @@ export function FreshnessGroupHeader({
             notBuilt: summary.notBuilt,
             attention: summary.needsAttention,
             drifting: summary.drifting ?? rows.filter(isDrifting).length,
+            stalled: summary.projectionStalled ?? rows.filter(isProjectionStalled).length,
         }
         : {
             total,
@@ -62,15 +64,20 @@ export function FreshnessGroupHeader({
             notBuilt: rows.filter(isNeverBuilt).length,
             attention: rows.filter(needsAttention).length,
             drifting: rows.filter(isDrifting).length,
+            stalled: rows.filter(isProjectionStalled).length,
         }
     const coverage = cov.total > 0 ? Math.round((cov.cached / cov.total) * 100) : 0
 
     return (
         <tr className={cn(
             'border-t border-glass-border',
-            cov.attention > 0
-                ? 'bg-amber-500/[0.04]'
-                : 'bg-black/[0.02] dark:bg-white/[0.02]',
+            // Red outranks the amber attention wash: one source in this
+            // group is serving no rolled-up connections at all.
+            cov.stalled > 0
+                ? 'bg-red-500/[0.06]'
+                : cov.attention > 0
+                    ? 'bg-amber-500/[0.04]'
+                    : 'bg-black/[0.02] dark:bg-white/[0.02]',
         )}>
             <td colSpan={colSpan} className="px-2 py-1.5">
                 <div className="flex items-center gap-2">
@@ -103,6 +110,16 @@ export function FreshnessGroupHeader({
                             group must not hide the one source whose rollups no
                             longer match its data. Icon + word, never colour
                             alone — this sits right beside the amber count. */}
+                        {/* Called out ahead of drifting and separately from
+                            it: these sources are serving NO rolled-up
+                            connections, and the rebuild that answers drifting
+                            does not answer this. */}
+                        {cov.stalled > 0 && (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-600 dark:text-red-400">
+                                <Unplug className="w-3 h-3 shrink-0" />
+                                {cov.stalled} with {DRIFT_SPEC.projectionStalled.label.toLowerCase()}
+                            </span>
+                        )}
                         {cov.drifting > 0 && (
                             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-rose-600 dark:text-rose-400">
                                 <Waves className="w-3 h-3 shrink-0" />

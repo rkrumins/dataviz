@@ -30,7 +30,7 @@ import {
 } from '@/services/ontologyResolutionService'
 import type { CatalogItemResponse } from '@/services/catalogService'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import { CoverageRing, MiniBar, coverageColor, coverageBarClass, MergedVariantsAdvisory } from './CoverageVisuals'
 import { NodeIdentityField } from '@/components/dataSource/NodeIdentity'
@@ -125,7 +125,7 @@ export function SemanticStep({
     workspaceNames = {},
     onOntologiesLoaded,
 }: SemanticStepProps) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     // Direct service mutations below (createDraft) bypass useOntologyMutations'
     // onSuccess hooks, so invalidate the react-query ontology + schema caches
     // explicitly — otherwise lists and open canvases serve stale data.
@@ -579,7 +579,7 @@ export function SemanticStep({
                         setExpandedItems(new Set())
                         setShowBulkSummary(false)
                         const count = Object.values(formData.ontologySelections).filter(s => s.ontologyId).length
-                        showToast('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
+                        notify('success', `Semantic layer configured for ${count} source${count !== 1 ? 's' : ''}`)
                     }}
                     onChangeSource={(itemId) => {
                         setExpandedItems(prev => new Set(prev).add(itemId))

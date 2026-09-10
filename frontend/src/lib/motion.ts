@@ -11,7 +11,9 @@
  * Durations follow the OntologySchemaPage / ExplorerPreviewDrawer precedent:
  *   tab swaps   → 0.12 s
  *   cards/fades  → 0.16 s
- *   drawers      → spring (damping 30–32, stiffness 380)
+ *   drawers      → 0.18 s decelerating curve (a spring has no fixed end;
+ *                  it keeps emitting frames after it looks finished, and a
+ *                  drawer that pushes the canvas relayouts on every one)
  */
 
 export const MOTION = {
@@ -31,7 +33,7 @@ export const MOTION = {
   modalSpring: { type: 'spring' as const, damping: 30, stiffness: 380 },
 
   /** Side drawers (slide / width-reveal) — tight and snappy, minimal overshoot */
-  drawerSlide: { type: 'spring' as const, damping: 34, stiffness: 420 },
+  drawerSlide: { duration: 0.18, ease: [0.32, 0.72, 0, 1] as const },
 
   /** Expand/collapse (data sources, accordions) */
   collapse: { duration: 0.16, ease: 'easeInOut' as const },

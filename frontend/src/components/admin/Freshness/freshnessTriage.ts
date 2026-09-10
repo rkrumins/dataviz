@@ -16,7 +16,7 @@ import { asFailureCategory } from './failureGuidance'
 // ── Status facets (tile ⇄ filter) ────────────────────────────────────
 
 /** The status facet carried in the URL (``?fstatus=``). Empty string = all. */
-export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended'
+export type StatusFacet = '' | 'ready' | 'pending' | 'needsAttention' | 'notBuilt' | 'cacheStamped' | 'drifting' | 'suspended' | 'projectionStalled'
 
 /** Failure-cause facet (``?ffail=``). Empty = any cause. */
 export type FailureFacet = '' | FailureCategory
@@ -38,12 +38,51 @@ export function isReconcileSuspended(row: FreshnessRow): boolean {
     return row.driftState === 'suspended'
 }
 
+/** Version control owns this source's rollups. Both verdicts mean "mastered
+ *  here"; they differ only in whether the projector maintaining those rollups
+ *  is actually current. Mirrors the widened ``platform_mastered`` fallback in
+ *  service.py — a wedged source keeps its "mastered here" badge at exactly the
+ *  moment an operator most needs to know who owns it. */
+const VERSION_CONTROLLED_STATES = new Set(['managed', 'projectionStalled'])
+
+/** The two fields a projection verdict is read from. Both the fleet row and
+ *  the drawer's doc satisfy it, so one predicate serves every surface. */
+type ProjectionReading = Pick<FreshnessRow, 'driftState' | 'projectorCurrent'>
+
+/** Mastered here, but the projector that maintains its rolled-up connections
+ *  is behind the published head. Main reads fall back to the version log,
+ *  which carries no rollups, so aggregated lineage is missing from the
+ *  product right now.
+ *
+ *  BOTH CLOCKS, because one row carries both and they are allowed to
+ *  disagree. ``driftState`` is the verdict the reconciliation SWEEP stamped —
+ *  durable, and written at most once per check interval (shipped default
+ *  3600s). ``projectorCurrent`` is the LIVE watermark, read on the very
+ *  request that produced this row. Reading only the stamp left an onset
+ *  window a whole interval wide in which the same payload said
+ *  ``projectorCurrent: false`` and ``driftState: managed`` — and the surfaces
+ *  split along that seam: Insights rendered red and said "open Freshness for
+ *  what to do" while Freshness rendered the source green "Up to date". That is
+ *  the outage this feature exists to remove, relocated one surface over.
+ *
+ *  ``=== false`` and not ``!== true``: ``null`` is UNKNOWN (an unversioned
+ *  source, a graph pinned to no target, an unreadable store) and must render
+ *  as neither verdict.
+ *
+ *  Deliberately NOT part of ``isDrifting``: that tile means "the rollup no
+ *  longer matches the data, rebuild it", and a rebuild does not restart a
+ *  projector. Mirrors ``_stalled_ids`` in service.py, which ORs the same two
+ *  readings so a tile's number equals the rows its facet reveals. */
+export function isProjectionStalled(row: ProjectionReading): boolean {
+    return row.projectorCurrent === false || row.driftState === 'projectionStalled'
+}
+
 /** Mastered here (live versioned graph), not an external provider graph.
  *  Prefer the fleet ``platformMastered`` bit; fall back to the sweep stamp. */
 export function isPlatformMastered(row: FreshnessRow): boolean {
     if (row.platformMastered === true) return true
     if (row.platformMastered === false) return false
-    return row.driftState === 'managed'
+    return VERSION_CONTROLLED_STATES.has(row.driftState ?? '')
 }
 
 /** A source that has never produced an aggregation: no state row, or an
@@ -74,6 +113,11 @@ export function needsAttention(row: FreshnessRow): boolean {
         || row.aggregationStatus === 'failed'
         || isDrifting(row)
         || isReconcileSuspended(row)
+        // A wedged projection is otherwise in NO bucket at all — not failed,
+        // not marked, not drifting, not suspended — so a whole wedged fleet
+        // read as needing nothing. Mirrors the same OR in
+        // ``_summarize_freshness``.
+        || isProjectionStalled(row)
 }
 
 /** A cooldown is holding the next rebuild off (``cooldownUntil`` in the future). */
@@ -105,6 +149,8 @@ export function matchesFacet(row: FreshnessRow, facet: StatusFacet): boolean {
             return isDrifting(row)
         case 'suspended':
             return isReconcileSuspended(row)
+        case 'projectionStalled':
+            return isProjectionStalled(row)
         case '':
         default:
             return true
@@ -158,22 +204,27 @@ export function freshnessState(row: FreshnessRow): FreshnessState {
  * Where a row sits in the triage queue — lower is more urgent. The cascade
  * is first-match-wins, so a row that is both failed and stale ranks as failed:
  *
- *   0 failed → 1 drifting → 2 recomputing (stale marker)
- *   → 3 pending (rebuild in flight) → 4 cooldown-active → 5 ready
- *   → 6 not built / other.
+ *   0 failed → 1 connections not up to date → 2 drifting
+ *   → 3 recomputing (stale marker) → 4 pending (rebuild in flight)
+ *   → 5 cooldown-active → 6 ready → 7 not built / other.
  *
  * Drifting outranks recomputing because a recomputing source is already on
  * its way to correct, while a drifting one is serving a picture that no
- * longer matches its data and nothing is yet in flight for it.
+ * longer matches its data and nothing is yet in flight for it. A stalled
+ * projection outranks drifting in turn: a drifting source is still serving
+ * rolled-up connections, just stale ones, while a stalled one is serving none
+ * at all — and no rebuild will change that, so it will not clear on its own
+ * the way a drifting row does.
  */
 export function severityRank(row: FreshnessRow): number {
     if (row.aggregationStatus === 'failed') return 0
-    if (isDrifting(row) || isReconcileSuspended(row)) return 1
-    if (hasStaleMarker(row)) return 2
-    if (isRebuilding(row)) return 3
-    if (isCooldownActive(row)) return 4
-    if (row.aggregationStatus === 'ready') return 5
-    return 6
+    if (isProjectionStalled(row)) return 1
+    if (isDrifting(row) || isReconcileSuspended(row)) return 2
+    if (hasStaleMarker(row)) return 3
+    if (isRebuilding(row)) return 4
+    if (isCooldownActive(row)) return 5
+    if (row.aggregationStatus === 'ready') return 6
+    return 7
 }
 
 function lastAggregatedMs(row: FreshnessRow): number {
@@ -204,4 +255,5 @@ export function isGroupAttention(row: FreshnessRow): boolean {
         || isRebuilding(row)
         || isDrifting(row)
         || isReconcileSuspended(row)
+        || isProjectionStalled(row)
 }

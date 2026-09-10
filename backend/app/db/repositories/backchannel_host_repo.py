@@ -15,6 +15,11 @@ security argument for letting operators edit this at all:
 * **The port is never implicit.** Permitting a gateway on 443 must not
   also permit whatever answers on 6379 on the same box.
 
+Since the avatar allowlist arrived the table holds two lists, told
+apart by ``purpose``: ``gateway`` rows (the original exception list)
+and ``avatar`` rows, the external image hosts in-app avatars may be
+fetched from. Same rules, same normalisation, filtered reads.
+
 What this list cannot do is unlock loopback or link-local. Those are
 refused in ``auth_service.providers.outbound`` regardless of what is
 stored here, so no row — however it was created — reaches the cloud
@@ -51,6 +56,23 @@ _HOSTNAME_RE = re.compile(
 
 class BackchannelHostError(ValueError):
     """A host entry the admin layer should turn into a 400."""
+
+
+#: The flows an entry can serve. ``gateway`` relaxes the private-address
+#: refusal for the back-channel legs; ``avatar`` names the external image
+#: hosts in-app avatars may be fetched from. Distinct lists on one table:
+#: same normalisation, attribution and next-request revocation.
+HOST_PURPOSES = ("gateway", "avatar")
+
+
+def normalise_purpose(raw: str) -> str:
+    purpose = (raw or "").strip().lower()
+    if purpose not in HOST_PURPOSES:
+        raise BackchannelHostError(
+            f"'{raw}' is not a host-list purpose; expected one of "
+            f"{', '.join(HOST_PURPOSES)}."
+        )
+    return purpose
 
 
 def _now() -> str:
@@ -108,25 +130,33 @@ def entry_key(row: SsoBackchannelHostORM) -> str:
     return f"{row.host}:{row.port}"
 
 
-async def list_hosts(session: AsyncSession) -> list[SsoBackchannelHostORM]:
+async def list_hosts(
+    session: AsyncSession, *, purpose: str = "gateway",
+) -> list[SsoBackchannelHostORM]:
+    clean_purpose = normalise_purpose(purpose)
     rows = await session.execute(
-        select(SsoBackchannelHostORM).order_by(
-            SsoBackchannelHostORM.host, SsoBackchannelHostORM.port,
-        )
+        select(SsoBackchannelHostORM)
+        .where(SsoBackchannelHostORM.purpose == clean_purpose)
+        .order_by(SsoBackchannelHostORM.host, SsoBackchannelHostORM.port)
     )
     return list(rows.scalars().all())
 
 
-async def allowed_host_keys(session: AsyncSession) -> frozenset[str]:
+async def allowed_host_keys(
+    session: AsyncSession, *, purpose: str = "gateway",
+) -> frozenset[str]:
     """The set to hand :func:`assert_fetchable` as ``allow_hosts``."""
-    return frozenset(entry_key(row) for row in await list_hosts(session))
+    return frozenset(
+        entry_key(row) for row in await list_hosts(session, purpose=purpose)
+    )
 
 
 async def add_host(
     session: AsyncSession, *, host: str, port: object = 443,
+    purpose: str = "gateway",
     note: Optional[str] = None, created_by: Optional[str] = None,
 ) -> SsoBackchannelHostORM:
-    """Add one entry. Idempotent on ``(host, port)``.
+    """Add one entry. Idempotent on ``(purpose, host, port)``.
 
     Returns the existing row rather than raising on a duplicate: two
     operators adding the same gateway is not an error, and the
@@ -134,9 +164,11 @@ async def add_host(
     """
     clean_host = normalise_host(host)
     clean_port = normalise_port(port)
+    clean_purpose = normalise_purpose(purpose)
 
     existing = await session.execute(
         select(SsoBackchannelHostORM).where(
+            SsoBackchannelHostORM.purpose == clean_purpose,
             SsoBackchannelHostORM.host == clean_host,
             SsoBackchannelHostORM.port == clean_port,
         )
@@ -147,6 +179,7 @@ async def add_host(
 
     row = SsoBackchannelHostORM(
         id=f"bch_{uuid.uuid4().hex[:12]}",
+        purpose=clean_purpose,
         host=clean_host,
         port=clean_port,
         note=(note or "").strip() or None,
@@ -156,10 +189,22 @@ async def add_host(
     session.add(row)
     await session.flush()
     logger.info(
-        "SSO back-channel host allowed: %s:%s (by=%s)",
-        clean_host, clean_port, created_by,
+        "SSO outbound host allowed (%s): %s:%s (by=%s)",
+        clean_purpose, clean_host, clean_port, created_by,
     )
     return row
+
+
+async def get_host(
+    session: AsyncSession, host_id: str,
+) -> Optional[SsoBackchannelHostORM]:
+    """One entry by id, whichever list it is on."""
+    row = await session.execute(
+        select(SsoBackchannelHostORM).where(
+            SsoBackchannelHostORM.id == host_id,
+        )
+    )
+    return row.scalar_one_or_none()
 
 
 async def delete_host(session: AsyncSession, host_id: str) -> bool:

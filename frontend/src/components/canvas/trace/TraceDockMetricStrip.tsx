@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { ArrowUp, ArrowDown, GitBranch, Network, Hash, Copy, Check, EyeOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import type { TraceResult } from '@/hooks/useUnifiedTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
 import { useCountUp } from './useCountUp'
@@ -153,7 +154,7 @@ export function TraceDockMetricStrip({
                     style={{ backgroundColor: color, boxShadow: `0 0 6px ${color}` }}
                     aria-hidden
                   />
-                  <span className="text-ink uppercase tracking-wide font-bold">{edgeType}</span>
+                  <span className="text-ink uppercase tracking-wide font-bold">{edgeTypeCopy(edgeType)?.label ?? edgeType}</span>
                   <span className="text-ink tabular-nums font-bold">{count}</span>
                 </span>
               )

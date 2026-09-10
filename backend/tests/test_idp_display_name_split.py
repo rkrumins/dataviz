@@ -47,6 +47,12 @@ from backend.common.identity_provenance import asserted_fields
     # Particles belong with the family name, which falls out of splitting
     # once rather than on every space.
     ("Maria del Carmen García", "Maria", "del Carmen García"),
+    ("John Doe", "John", "Doe"),
+    # A middle name lands in the family half — a guess, which is why the
+    # halves are never IdP-locked and every surface displays the stored
+    # verbatim string ("James May Meadows"), not a re-join of the halves.
+    ("James May Meadows", "James", "May Meadows"),
+    ("Juan De La Hoya", "Juan", "De La Hoya"),
     # Nothing to divide. Inventing a division would be worse than one
     # empty field.
     ("Prince", "Prince", ""),

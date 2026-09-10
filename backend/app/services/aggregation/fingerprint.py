@@ -9,6 +9,8 @@ import json
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+from backend.common.derived_artifacts import strip_derived_counts
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,15 +37,26 @@ def raw_fingerprint_from_counts(
     like fresh drift and re-trigger itself forever.
 
     The invariant this function exists to guarantee: **a rebuild changes only
-    the AGGREGATED count, which is excluded, so the raw fingerprint is
-    invariant across rebuilds by construction.** It therefore never needs
-    re-seeding when a job completes.
+    the AGGREGATED count and the derived bookkeeping nodes, both excluded, so
+    the raw fingerprint is invariant across rebuilds by construction.** It
+    therefore never needs re-seeding when a job completes.
+
+    The derived-node half of that was missing and the invariant was simply
+    false: ``_stamp_run_meta`` MERGEs an ``_AggMeta`` singleton at the end of
+    every run, so the FIRST aggregation of a source added a node key here and
+    moved the very baseline the next sweep compared against — ``_raw_drift``
+    then reported drift and queued a rebuild that had nothing to fix, which
+    stamped it again. Excluding the labels restores the stated property rather
+    than adding a new rule.
 
     The AGGREGATED key is matched case-insensitively — the count comes from
     ``type(r)`` in the provider's stats scan, and a graph loaded by an
     external system may not match our casing.
     """
-    nodes = {str(k): _as_int(v) for k, v in (entity_type_counts or {}).items()}
+    nodes = {
+        str(k): _as_int(v)
+        for k, v in strip_derived_counts(entity_type_counts or {}).items()
+    }
     raw_edges: Dict[str, int] = {}
     observed_aggregated = 0
     for key, value in (edge_type_counts or {}).items():
@@ -86,6 +99,11 @@ def counts_digest_from_counts(
     if and only if some count changed since the previous evaluation. Excluding
     AGGREGATED here would blind the tripwire to a wiped overlay with unchanged
     raw data — precisely the failure this whole mechanism exists to catch.
+
+    The derived bookkeeping labels stay here for exactly the same reason, even
+    though :func:`raw_fingerprint_from_counts` strips them: ``_AggMeta``
+    disappearing IS the signal that the overlay was wiped or reseeded. Do not
+    "align" the two functions — the asymmetry is the point.
     """
     nodes = {str(k): _as_int(v) for k, v in (entity_type_counts or {}).items()}
     edges = {str(k): _as_int(v) for k, v in (edge_type_counts or {}).items()}

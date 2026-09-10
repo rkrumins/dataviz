@@ -84,3 +84,62 @@ describe('FreshnessRow — quiet activity + automation chip', () => {
         expect(screen.queryByRole('button', { name: /Automation off/i })).not.toBeInTheDocument()
     })
 })
+
+describe('FreshnessRow — a wedged projection is never a healthy row', () => {
+    it('never reads "Up to date" while the rolled-up connections are missing', () => {
+        // The source's last aggregation job succeeded and no marker is set, so
+        // every existing signal says healthy. It is not: main reads are
+        // falling back to the version log, which carries no rolled-up
+        // connections at all.
+        renderRow({
+            dataSourceId: 'ds-wedged', name: 'Wedged Source',
+            aggregationStatus: 'ready', driftState: 'projectionStalled',
+            platformMastered: true,
+        })
+        expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Connections not up to date')).toBeInTheDocument()
+    })
+
+    it('says automation will not rescue it, rather than staying silent', () => {
+        const chip = automationChip({ driftState: 'projectionStalled' })
+        expect(chip?.label).toBe("Rebuild won't fix this")
+        expect(chip?.facet).toBe('projectionStalled')
+        expect(chip?.title).toMatch(/version control/i)
+    })
+
+    it('reads the live projector, not only the sweep stamp', () => {
+        // One row, two clocks. ``driftState`` is written by the reconciliation
+        // sweep at most once per check interval (shipped default 3600s);
+        // ``projectorCurrent`` on the SAME row is read live on every request.
+        // For up to a whole interval after a wedge starts the payload says
+        // ``managed`` and ``projectorCurrent: false`` at once — and this row
+        // rendered the green badge over a live wedge, while Insights (which
+        // reads the live bit) rendered red and said "open Freshness".
+        renderRow({
+            dataSourceId: 'ds-onset', name: 'Onset Source',
+            aggregationStatus: 'ready', driftState: 'managed',
+            platformMastered: true, projectorCurrent: false,
+        })
+        expect(screen.queryByText('Up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Connections not up to date')).toBeInTheDocument()
+    })
+
+    it('leaves an unknown projector reading as unknown, never as a wedge', () => {
+        // ``null`` is UNKNOWN — an unversioned source, a graph pinned to no
+        // target, an unreadable store. It must render as neither verdict.
+        renderRow({
+            dataSourceId: 'ds-unknown', name: 'Unknown Source',
+            aggregationStatus: 'ready', driftState: 'inSync',
+            projectorCurrent: null,
+        })
+        expect(screen.queryByText('Connections not up to date')).not.toBeInTheDocument()
+        expect(screen.getByText('Up to date')).toBeInTheDocument()
+    })
+
+    it('warns automation off a live wedge the stamp has not caught up with', () => {
+        expect(automationChip({ driftState: 'managed', projectorCurrent: false })?.label)
+            .toBe("Rebuild won't fix this")
+        // ...and still says nothing when the live reading is unknown.
+        expect(automationChip({ driftState: 'managed', projectorCurrent: null })).toBeNull()
+    })
+})

@@ -44,6 +44,12 @@ class ApproveRejectRequest(BaseModel):
     rejection_reason: Optional[str] = Field(None, alias="rejectionReason", max_length=500)
 
 
+class SetSystemAccountRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    is_system_account: bool = Field(alias="isSystemAccount")
+
+
 class ChangeRoleRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -191,6 +197,17 @@ class AccountActivityItem(BaseModel):
     by_admin: bool = Field(False, alias="byAdmin")
 
 
+class AdminUserIdentityRef(BaseModel):
+    """One linked SSO identity, as the admin user list carries it."""
+    model_config = ConfigDict(populate_by_name=True)
+
+    provider_id: str = Field(alias="providerId")
+    slug: str
+    display_name: str = Field(alias="displayName")
+    kind: str
+    last_login_at: Optional[str] = Field(default=None, alias="lastLoginAt")
+
+
 class AdminUserResponse(BaseModel):
     """Extended user info for admin views."""
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
@@ -208,6 +225,16 @@ class AdminUserResponse(BaseModel):
     # Surfaced so an admin can see at a glance which accounts are still
     # holding a shipped default credential.
     must_change_password: bool = Field(False, alias="mustChangePassword")
+    # How this account signs in: a usable password, linked SSO
+    # identities (with which IdP each is), and where the account came
+    # from in the first place — so the user table can say who is local,
+    # who is SSO, and from which provider.
+    has_password: bool = Field(False, alias="hasPassword")
+    signup_source: Optional[str] = Field(default=None, alias="signupSource")
+    identities: list[AdminUserIdentityRef] = Field(default_factory=list)
+    # Break-glass: keeps password sign-in under SSO enforcement, and
+    # forced sign-out sweeps skip it.
+    is_system_account: bool = Field(False, alias="isSystemAccount")
 
 
 class LoginResponse(BaseModel):

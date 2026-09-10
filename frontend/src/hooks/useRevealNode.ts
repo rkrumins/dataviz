@@ -32,7 +32,9 @@ export interface UseRevealNodeOptions {
   /** Setter for the canvas's local `expandedNodes` state. */
   setExpandedNodes: React.Dispatch<React.SetStateAction<Set<string>>>
   /** Fetch a single parent's children + containment edges into the store. */
-  loadChildren: (parentId: string) => Promise<void>
+  /** Resolves when the page has landed; its summary (ContextViewCanvas's
+   *  announced variant returns one) is not this walk's to report. */
+  loadChildren: (parentId: string) => Promise<unknown>
   /** Canvas-specific pan/scroll adapter. */
   focus: (nodeId: string) => void
   /** Backend lookup for the deep-hidden case. */

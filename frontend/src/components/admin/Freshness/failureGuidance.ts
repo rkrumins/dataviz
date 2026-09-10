@@ -8,6 +8,7 @@ import type { FailureCategory, FreshnessRow } from '@/services/freshnessService'
 
 export const FAILURE_CATEGORY_LABEL: Record<FailureCategory, string> = {
     out_of_memory: 'Out of memory',
+    query_memory: 'Query too large',
     provider_unavailable: 'Graph store offline',
     ontology: 'No ontology',
     timeout: 'Timed out',
@@ -18,6 +19,8 @@ export const FAILURE_CATEGORY_LABEL: Record<FailureCategory, string> = {
 export const FAILURE_CATEGORY_WHY: Record<FailureCategory, string> = {
     out_of_memory:
         'The graph store ran out of memory while building aggregated lineage for this large source.',
+    query_memory:
+        'One rebuild query asked the graph store for more rows than a single query is allowed to hold.',
     provider_unavailable:
         'The graph store was unreachable during the rebuild.',
     ontology:

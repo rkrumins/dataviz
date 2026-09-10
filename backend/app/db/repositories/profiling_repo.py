@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.common.derived_artifacts import strip_derived_counts
 from backend.app.db.models import (
     DataSourceCountRollupORM,
     DataSourceCountSnapshotORM,
@@ -1381,8 +1382,13 @@ async def observations_for_source(
             "edge_count": int(r.edge_count or 0),
             "node_delta": r.node_delta,
             "edge_delta": r.edge_delta,
-            "entity_type_counts": loads_counts(r.entity_type_counts),
-            "edge_type_counts": loads_counts(r.edge_type_counts),
+            # Derived artifacts stripped on READ so snapshots captured before
+            # the providers stopped recording them stop showing the platform's
+            # own bookkeeping as a type that appears and disappears.
+            "entity_type_counts": strip_derived_counts(
+                loads_counts(r.entity_type_counts)),
+            "edge_type_counts": strip_derived_counts(
+                loads_counts(r.edge_type_counts), edges=True),
             "type_deltas": r.type_deltas,
             "significance": significance,
         })

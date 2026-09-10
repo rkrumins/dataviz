@@ -132,10 +132,7 @@ _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
 # own its own cache.                                                            #
 # --------------------------------------------------------------------------- #
 _DERIVED_LABELS = config.DERIVED_LABELS
-
-
-def _not_derived(var: str) -> str:
-    return " AND ".join(f"NOT '{lab}' IN labels({var})" for lab in _DERIVED_LABELS)
+_not_derived = config.not_derived_clause
 
 
 # EVERYTHING is anchored on a NODE id range — including the edges.

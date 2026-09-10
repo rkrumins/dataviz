@@ -448,6 +448,43 @@ class DraftOverlayProvider:
                 edges.append(e)
         return base.model_copy(update={"nodes": nodes, "edges": edges})
 
+    # ---- deep search: the base answers, the draft's delta does not ------ #
+    #: Read by ``AdvancedSearchService._build_scope_diagnostics`` to note
+    #: that the results are the base's, not the draft's. A marker rather
+    #: than an ``isinstance`` keeps the provider classes out of the
+    #: service layer.
+    is_overlay = True
+
+    async def deep_search(self, query, *, deadline_ms=None):
+        """Search the base graph — the draft's own edits are NOT included.
+
+        The overlay patches reads it composes itself; the deep-search
+        predicate tree compiles to Cypher inside the base provider, and
+        there is no seam to overlay a sparse Postgres patch set onto a
+        result page without re-implementing the whole compiler over it.
+        So a draft searches what it is a draft OF, and the response says
+        so — ``is_overlay`` drives the scope-diagnostics note, so the gap
+        is disclosed rather than silently narrowing someone's results.
+
+        Pure delegation also means the provider's match-set cache entry
+        may legitimately be SHARED with a main-graph search: identical
+        query against identical data is identical work.
+        """
+        return await self._base.deep_search(query, deadline_ms=deadline_ms)
+
+    async def deep_search_explain(self, query):
+        """Compile-only path. Delegated for the same reason as
+        :meth:`deep_search` — the Cypher explained is the one that would
+        actually run, i.e. the base's."""
+        return await self._base.deep_search_explain(query)
+
+    async def deep_search_discover(self, *, sample_per_label: int = 200):
+        """Schema discovery. Delegated like :meth:`deep_search`: what is
+        queryable is a property of the base graph's storage."""
+        return await self._base.deep_search_discover(
+            sample_per_label=sample_per_label,
+        )
+
     # ---- writes: commit to the draft (reused from the branch provider) -- #
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         self._delta = None

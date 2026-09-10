@@ -55,10 +55,12 @@ logger = logging.getLogger(__name__)
 
 try:
     from redis.exceptions import ConnectionError as _RedisConnectionError
+    from redis.exceptions import ResponseError as _RedisResponseError
     from redis.exceptions import TimeoutError as _RedisTimeoutError
 except Exception:  # pragma: no cover - redis is part of runtime deps
     _RedisConnectionError = ConnectionError
     _RedisTimeoutError = TimeoutError
+    _RedisResponseError = None
 
 
 # ------------------------------------------------------------------ #
@@ -403,6 +405,20 @@ def saml_builder_with_replay_cache(base_builder, replay_cache, is_prod: bool):
     return _build
 
 
+def _avatar_tls_override(settings: dict) -> bool | None:
+    """The per-connection half of the avatar fetch's TLS choice.
+
+    ``None`` defers to the deployment default (the CA bundle, else the
+    system trust store); ``False`` is the row's explicit ``tls_verify``
+    opt-out — the same wiring its own gateway legs use in
+    ``backchannel.py``. Module-level so it is testable; the closure that
+    calls it cannot be.
+    """
+    from backend.auth_service.providers.backchannel import _as_bool
+
+    return None if _as_bool(settings.get("tls_verify", True)) else False
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup / shutdown lifecycle.
@@ -417,6 +433,19 @@ async def lifespan(_app: FastAPI):
     """
     configure_json_logging()
     _log_auth_fingerprint()
+
+    # Interactive reads first: when the breaker proxy sees FalkorDB starve a
+    # read (queue full, server-side or client deadline), stamp the shared
+    # read-pressure key so aggregation writers in other pods yield their
+    # write duty cycle. Best-effort, and never on a request's critical path.
+    try:
+        from backend.app.services.aggregation.read_pressure import ReadPressureSignal
+        from backend.app.services.aggregation.redis_client import get_redis
+        from backend.common.adapters.circuit import register_capacity_listener
+
+        register_capacity_listener(ReadPressureSignal(get_redis).on_capacity)
+    except Exception as exc:  # noqa: BLE001 — a missing signal is not a failed start
+        logger.warning("read-pressure signal not registered: %s", exc)
 
     _app.state.degraded = False
     _app.state.degraded_reason = None
@@ -548,6 +577,15 @@ async def lifespan(_app: FastAPI):
                         await user_repo.set_must_change_password(
                             session, user.id, True,
                         )
+                    # The seeded admin is the deployment's break-glass
+                    # account: it keeps password sign-in even when the
+                    # platform enforces SSO, and forced sign-out sweeps
+                    # skip it. Marked here because this is the one
+                    # account that exists before any operator can mark
+                    # anything.
+                    await user_repo.set_system_account(
+                        session, user.id, True,
+                    )
                     # Phase 6: ``set_global_role`` writes both
                     # ``user_roles`` (legacy display) and
                     # ``role_bindings`` (canonical claims) so the
@@ -984,18 +1022,63 @@ async def lifespan(_app: FastAPI):
 
     _auth_config_provider = CachedAuthConfigProvider(_load_auth_config)
 
-    async def _fetch_avatar_image(url: str) -> tuple[bytes, str]:
+    async def _fetch_avatar_image(
+        url: str, *, provider_id: str | None = None,
+    ) -> tuple[bytes, str]:
         """Download a provider-asserted profile picture, guarded.
 
-        Same allowlist the back-channel legs use: a private image host
-        needs an operator's entry, and the outbound module supplies the
-        redirect ban, the streaming size cap and the image-type check.
+        The destination must be listed: an external image host needs an
+        entry on the avatar image hosts list (Settings tab), a private
+        one an entry on the internal-gateways list — either list admits
+        it, and with both silent on a host the fetch is refused by name.
+        The outbound module supplies the bounded, re-checked redirect
+        follow, the streaming size cap and the raster-type check.
+
+        ``provider_id`` names the connection whose sign-in asked for the
+        image, so its own TLS posture applies: a row whose
+        ``tls_verify`` opt-out is on has its avatar fetched the same way
+        its gateway legs are called. Everything else — no id, an
+        unresolvable row, the flag absent — verifies as the deployment
+        does (the CA bundle, else the system store).
         """
         from backend.auth_service.providers.outbound import fetch_image
 
+        verify: bool | None = None
+        if provider_id:
+            try:
+                snap = await _registry.get_snapshot(
+                    provider_id, allow_draft=True,
+                )
+                verify = _avatar_tls_override(snap.settings)
+            except Exception as exc:  # noqa: BLE001
+                # Fails to VERIFYING: an unresolvable row must not turn
+                # verification off.
+                logger.debug(
+                    "Avatar fetch could not resolve provider %s (%s); "
+                    "verifying TLS as the deployment does.",
+                    provider_id, exc,
+                )
+
+        gateway_keys = await _allowed_backchannel_hosts()
+        try:
+            async with get_async_session() as session:
+                avatar_keys = await backchannel_host_repo.allowed_host_keys(
+                    session, purpose="avatar",
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Fails closed, like the gateway list: an unreadable list
+            # refuses external hosts rather than opening the door.
+            logger.warning(
+                "Avatar host allowlist unreadable (%s); refusing external "
+                "avatar hosts until it can be read.", exc,
+            )
+            avatar_keys = frozenset()
+        permitted = gateway_keys | avatar_keys
         return await fetch_image(
             url, timeout=5.0,
-            allow_hosts=await _allowed_backchannel_hosts(),
+            allow_hosts=permitted,
+            require_hosts=permitted,
+            verify=verify,
         )
 
     _app.state.identity_service = LocalIdentityService(
@@ -1942,6 +2025,7 @@ async def _provider_error_handler(request, exc):
 from backend.common.adapters import (
     ProviderBusy as _ProviderBusy,
     ProviderLoading as _ProviderLoading,
+    ProviderTimeout as _ProviderTimeout,
     ProviderUnavailable as _ProviderUnavailable,
 )
 
@@ -1990,6 +2074,33 @@ async def _provider_loading_handler(request, exc: _ProviderLoading):
         content={
             "detail": {
                 "code": "PROVIDER_LOADING",
+                "providerName": exc.provider_name,
+                "reason": exc.reason,
+                "retryAfterSeconds": exc.retry_after_seconds,
+            }
+        },
+    )
+
+
+# ProviderTimeout is a subclass of ProviderUnavailable but semantically "one
+# operation was too slow for its deadline" — the provider is reachable and
+# the breaker did NOT count it. Map to 504 + Retry-After with a distinct
+# PROVIDER_TIMEOUT code so the frontend retries the request (the stale-
+# fallback cache or a warm cache often answers the retry) instead of
+# declaring the graph provider offline. Registered BEFORE the parent
+# handler so FastAPI's MRO match picks this one.
+@app.exception_handler(_ProviderTimeout)
+async def _provider_timeout_handler(request, exc: _ProviderTimeout):
+    logger.info(
+        "Provider timeout on %s: provider=%s reason=%s retry_after=%ds",
+        request.url.path, exc.provider_name, exc.reason, exc.retry_after_seconds,
+    )
+    return JSONResponse(
+        status_code=504,
+        headers={"Retry-After": str(exc.retry_after_seconds)},
+        content={
+            "detail": {
+                "code": "PROVIDER_TIMEOUT",
                 "providerName": exc.provider_name,
                 "reason": exc.reason,
                 "retryAfterSeconds": exc.retry_after_seconds,
@@ -2093,6 +2204,34 @@ app.add_exception_handler(OSError, _provider_error_handler)
 app.add_exception_handler(asyncio.TimeoutError, _provider_error_handler)
 app.add_exception_handler(_RedisConnectionError, _provider_error_handler)
 app.add_exception_handler(_RedisTimeoutError, _provider_error_handler)
+
+
+# A graph server error REPLY (bad Cypher, a query over the per-query memory
+# ceiling, an ACL refusal). The breaker proxy no longer relabels these as
+# ProviderUnavailable — the server answered, so the provider is reachable —
+# which means they would otherwise fall to the generic 500 with no code. Keep
+# the 500 (the request failed) but say what happened so the frontend can tell
+# a rejected query apart from an outage and never feeds it to its breaker.
+async def _graph_response_error_handler(request, exc):
+    path = request.url.path
+    # Only a graph-bound path can attribute the reply to the graph store;
+    # elsewhere (the revocation store, the job bus) the same exception class
+    # means a Redis command was refused, and naming the graph would mislead.
+    code = "GRAPH_QUERY_ERROR" if _is_provider_bound_path(path) else "REDIS_COMMAND_ERROR"
+    logger.warning("%s on %s: %s", code, path, exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": code,
+                "reason": str(exc)[:200],
+            }
+        },
+    )
+
+
+if _RedisResponseError is not None:
+    app.add_exception_handler(_RedisResponseError, _graph_response_error_handler)
 
 # ------------------------------------------------------------------ #
 # Timeout middleware (raw ASGI — avoids BaseHTTPMiddleware streaming   #
@@ -2431,10 +2570,24 @@ class _TimeoutMiddleware:
                 # T-3: race — inner finished cleanly just before the deadline.
                 return
             if not state["started"]:
-                # T-2 (clean case): we own the wire. Send a fresh 504.
+                # T-2 (clean case): we own the wire. Send a fresh 504. The
+                # body carries a code + Retry-After so the frontend treats
+                # it as "this request was too slow, retry" — a per-request
+                # signal — rather than as evidence the graph provider is
+                # down (reachability is reported by the 503 handlers).
                 response = JSONResponse(
-                    {"detail": f"Request timed out after {timeout:.0f}s — the graph provider may be unreachable."},
+                    {
+                        "detail": {
+                            "code": "REQUEST_TIMEOUT",
+                            "reason": (
+                                f"Request timed out after {timeout:.0f}s. "
+                                "The graph service is still available — retry shortly."
+                            ),
+                            "retryAfterSeconds": 2,
+                        }
+                    },
                     status_code=504,
+                    headers={"Retry-After": "2"},
                 )
                 await response(scope, receive, original_send)
                 state["terminal"] = True
@@ -2685,6 +2838,24 @@ async def dependency_health():
         result["providers"] = provider_manager.report_provider_states()
     except Exception as exc:
         result["providers"] = {"_error": str(exc)[:200]}
+
+    # Resilience counters (per process, monotonic since boot). How often the
+    # breaker was asked to judge a slow or rejected query and correctly did
+    # NOT count it, how often it counted a real connection failure and
+    # opened, and how the request-path preflight and the provider slot
+    # queue decided. Read these to verify a release ("timeouts are rising
+    # but breaker_opens is flat" is the healthy shape), not to page on.
+    try:
+        from backend.app.services.aggregation.read_pressure import read_pressure_stats
+        from backend.common.adapters.circuit import breaker_stats
+
+        result["resilience"] = {
+            "breaker": breaker_stats(),
+            "provider_manager": dict(provider_manager.stats),
+            "read_pressure": read_pressure_stats(),
+        }
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["resilience"] = {"_error": str(exc)[:200]}
 
     # P3.1 — event-loop lag surface. p99 lag > 500ms implies the loop
     # is wedged; > 50ms implies coroutines are queueing.

@@ -6,6 +6,8 @@ import type { EdgeTypeSummary } from '@/providers/GraphDataProvider'
 import type { MergedVariantSpelling } from '@/services/ontologyDefinitionService'
 import { MergedVariantsChip } from '@/components/admin/AssetOnboardingWizard/steps/CoverageVisuals'
 
+import { appOwnedStrokeStyle } from '@/utils/edgeTypeUtils'
+
 import { EmptyState } from '../EmptyState'
 import { formatCount } from '../../lib/ontology-parsers'
 import type { RelTypeWithClassifications, EditorPanel } from '../../lib/ontology-types'
@@ -36,6 +38,11 @@ export function RelTypeRow({
   onEdit: () => void
   onDelete: () => void
 }) {
+  // A sample of the edge has to be a sample of the edge the CANVAS draws. A system
+  // type whose stroke this app owns (the AGGREGATED roll-up, which the canvas dashes
+  // on geometry) would otherwise preview as the seeded `solid` it can never be.
+  const strokeStyle = appOwnedStrokeStyle(rt.id) ?? rt.visual.strokeStyle
+
   return (
     <button
       onClick={onEdit}
@@ -55,8 +62,8 @@ export function RelTypeRow({
               stroke={rt.visual.strokeColor}
               strokeWidth={Math.min(rt.visual.strokeWidth, 3)}
               strokeDasharray={
-                rt.visual.strokeStyle === 'dashed' ? '6,4' :
-                rt.visual.strokeStyle === 'dotted' ? '2,3' : undefined
+                strokeStyle === 'dashed' ? '6,4' :
+                strokeStyle === 'dotted' ? '2,3' : undefined
               }
               strokeLinecap="round"
             />

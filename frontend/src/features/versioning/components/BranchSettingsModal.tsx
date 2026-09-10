@@ -10,7 +10,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, GitBranch, Link2, Check, Loader2, Lock, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { Branch } from '@/services/versioningApiService'
 import { useUpdateBranch } from '../hooks/useVersioning'
 
@@ -27,7 +27,7 @@ export function BranchSettingsModal({
   branch: Branch
   onClose: () => void
 }) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
   const update = useUpdateBranch(wsId, graphId)
   const [name, setName] = useState(branch.name ?? '')
   const [description, setDescription] = useState(branch.description ?? '')
@@ -53,7 +53,7 @@ export function BranchSettingsModal({
       setCopied(true)
       setTimeout(() => setCopied(false), 1800)
     } catch {
-      showToast('error', 'Could not copy the link.')
+      notify('error', 'Could not copy the link.')
     }
   }
 
@@ -61,8 +61,8 @@ export function BranchSettingsModal({
     update.mutate(
       { branchId: branch.branchId, name: name.trim(), description: description.trim(), isShared },
       {
-        onSuccess: () => { showToast('success', 'Draft updated.'); onClose() },
-        onError: (e) => showToast('error', (e as Error).message),
+        onSuccess: () => { notify('success', 'Draft updated.'); onClose() },
+        onError: (e) => notify('error', (e as Error).message),
       },
     )
   }

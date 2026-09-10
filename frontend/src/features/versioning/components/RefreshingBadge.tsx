@@ -13,6 +13,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useProjectionWatermark } from '../hooks/useVersioning'
 
 // Only these projection states mean the cache is genuinely catching up right now.
@@ -40,26 +41,32 @@ export function RefreshingBadge({ workspaceId, graphId, className }: {
 
   if (syncing) {
     return (
-      <span
-        className={cn('flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium',
-          'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20', className)}
-        title="Your committed changes are being applied to the fast read layer in the background — reads stay correct meanwhile"
+      <HoverTip
+        className="inline-flex"
+        label="Applying your saved changes to the fast read layer"
+        detail="Reads stay correct the whole time — nothing is waiting on this"
       >
-        <Loader2 className="w-3 h-3 animate-spin" />
-        Syncing changes…
-      </span>
+        <span
+          className={cn('flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium',
+            'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20', className)}
+        >
+          <Loader2 className="w-3 h-3 animate-spin" />
+          Syncing changes…
+        </span>
+      </HoverTip>
     )
   }
   if (justSynced) {
     return (
-      <span
-        className={cn('flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium animate-in fade-in',
-          'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20', className)}
-        title="Your changes are now live across every view"
-      >
-        <Check className="w-3 h-3" />
-        Synced
-      </span>
+      <HoverTip className="inline-flex" label="Your changes are now live across every view">
+        <span
+          className={cn('flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium animate-in fade-in',
+            'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20', className)}
+        >
+          <Check className="w-3 h-3" />
+          Synced
+        </span>
+      </HoverTip>
     )
   }
   return null

@@ -362,7 +362,10 @@ async def _run_holdback_on_count_shortfall() -> None:
     wm = await svc.projection_watermark(gid)
     assert wm["fresh"] is False and wm["last_error"], wm
 
-    # The poll loop must NOT resurrect a deterministic-fail seed (projected==target ⇒ not selected).
+    # The poll loop DOES re-select this graph now — `project_pending` selects on
+    # `projected < main_head_commit_seq` as well as `projected < target`, because pinning
+    # target down used to make the retry unreachable forever (the 14-hour wedge). What must
+    # still hold is that the retry cannot ADVANCE a seed that deterministically fails verify.
     await proj.project_pending()
     assert (await _status(gid))[1] == 0, "project_pending must not advance a held-back seed"
 

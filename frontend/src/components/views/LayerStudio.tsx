@@ -60,7 +60,7 @@ import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useCanvasStore } from '@/store/canvas'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useContainmentEdgeTypes, normalizeEdgeType, isContainmentEdgeType } from '@/store/schema'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { ChildReassignConfirmDialog, type ChildReassignInfo } from '../dialogs/ChildReassignConfirmDialog'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -528,7 +528,7 @@ export function LayerStudio({
         (urn: string) => entityIndex.resolve(urn)?.name ?? fallbackNameFromUrn(urn),
         [entityIndex],
     )
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     // ── Confirmation dialog for child reassignment ────────────────────────────
     const [pendingReassign, setPendingReassign] = useState<{
@@ -656,14 +656,14 @@ export function LayerStudio({
             )
             const layerName = layers.find(l => l.id === layerId)?.name ?? 'layer'
             const what = entityIds.length === 1 ? nameOf(entityIds[0]) : `${entityIds.length} entities`
-            showToast(
+            notify(
                 'success',
                 inherited > 0
                     ? `${what} → ${layerName} · ${inherited.toLocaleString()} ${inherited === 1 ? 'child follows' : 'children follow'} automatically`
                     : `${what} → ${layerName}`,
             )
         },
-        [layers, assignments, commitLayout, entityIndex, nameOf, showToast]
+        [layers, assignments, commitLayout, entityIndex, nameOf, notify]
     )
 
     /**
@@ -881,8 +881,8 @@ export function LayerStudio({
         })
         commitLayout(working)
         setMagicSuggestions(prev => (prev ?? []).filter(s => !accepted.some(a => a.urn === s.urn)))
-        showToast('success', `Placed ${accepted.length} ${accepted.length === 1 ? 'entity' : 'entities'} — their children follow automatically`)
-    }, [layers, assignments, commitLayout, getRedundantDescendants, showToast])
+        notify('success', `Placed ${accepted.length} ${accepted.length === 1 ? 'entity' : 'entities'} — their children follow automatically`)
+    }, [layers, assignments, commitLayout, getRedundantDescendants, notify])
 
     /** Empty a layer in one go — the panel offered no way back out of a bulk place. */
     const handleClearLayer = useCallback((layerId: string) => {
@@ -892,8 +892,8 @@ export function LayerStudio({
         if (urns.length === 0) return
         commitLayout(unassignEntities({ layers, assignments }, urns))
         const layerName = layers.find(l => l.id === layerId)?.name ?? 'layer'
-        showToast('success', `Cleared ${urns.length} ${urns.length === 1 ? 'placement' : 'placements'} from ${layerName}`)
-    }, [layers, assignments, commitLayout, showToast])
+        notify('success', `Cleared ${urns.length} ${urns.length === 1 ? 'placement' : 'placements'} from ${layerName}`)
+    }, [layers, assignments, commitLayout, notify])
 
     // ── Preview pane toggle ─────────────────────────────────────────────────────
     const [showPreview, setShowPreview] = useState(false)

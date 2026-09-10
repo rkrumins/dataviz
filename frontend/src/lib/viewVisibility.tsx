@@ -34,6 +34,21 @@ const LABEL: Record<ViewVisibility, string> = {
     enterprise: 'Enterprise',
 }
 
+/** The tiers this app knows how to describe.
+ *
+ * The DATABASE is wider than this union: `ck_views_visibility` permits
+ * 'public' as well, a value no current code path writes but that live rows
+ * still carry (one, created 2026-07-11). Anything indexing a per-tier map by
+ * a view's STORED visibility must go through this guard first — the maps have
+ * three keys, and a miss yields `undefined`, which is how the Details panel
+ * came to crash on `accent.chipBg`.
+ */
+export const KNOWN_VISIBILITIES: readonly ViewVisibility[] = ['private', 'workspace', 'enterprise']
+
+export function isKnownVisibility(v: string | null | undefined): v is ViewVisibility {
+    return v != null && (KNOWN_VISIBILITIES as readonly string[]).includes(v)
+}
+
 export function visibilityLabel(visibility: ViewVisibility): string {
     return LABEL[visibility]
 }

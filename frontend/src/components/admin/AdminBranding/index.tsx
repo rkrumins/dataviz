@@ -43,6 +43,7 @@ import {
     type Branding, type BrandingPatch,
 } from '@/services/brandingService'
 import { useBrandingStore } from '@/store/branding'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { cn } from '@/lib/utils'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -78,6 +79,7 @@ function formFrom(b: Branding): FormState {
 
 export function AdminBranding() {
     const setBranding = useBrandingStore((s) => s.setBranding)
+    const { notify } = useAppNotifications()
 
     const { data, isLoading, error, refetch } = useQuery({
         queryKey: BRANDING_QUERY_KEY,
@@ -93,7 +95,6 @@ export function AdminBranding() {
     const [resolvedFavicon, setResolvedFavicon] = useState('')
     const [saving, setSaving] = useState(false)
     const [saved, setSaved] = useState(false)
-    const [saveError, setSaveError] = useState<string | null>(null)
     const [conflict, setConflict] = useState(false)
     const [showReset, setShowReset] = useState(false)
     const [resetting, setResetting] = useState(false)
@@ -131,18 +132,21 @@ export function AdminBranding() {
     async function handleSave() {
         if (!form) return
         setSaving(true)
-        setSaveError(null)
         setConflict(false)
         const patch: BrandingPatch = { ...form, expectedVersion: version }
         try {
             absorb(await updateBranding(patch))
             setSaved(true)
+            notify('success', 'Branding saved — the new name and logo are live everywhere.')
         } catch (e) {
             const msg = errMsg(e)
+            // A 409 is not a failure to report and forget: it is a standing
+            // instruction ("someone else changed this, reload and re-apply"),
+            // and it stays on the page until the user acts on it.
             if (/version mismatch|conflict/i.test(msg)) {
                 setConflict(true)
             } else {
-                setSaveError(msg)
+                notify('error', msg || 'Could not save the branding changes.')
             }
         } finally {
             setSaving(false)
@@ -151,12 +155,14 @@ export function AdminBranding() {
 
     async function handleUpload(kind: 'logo' | 'favicon', file: File) {
         setSaving(true)
-        setSaveError(null)
         try {
             absorb(await uploadBrandingImage(kind, file))
             setSaved(true)
+            notify('success', kind === 'logo'
+                ? 'New logo uploaded — it is live everywhere now.'
+                : 'New favicon uploaded — it is live in the browser tab now.')
         } catch (e) {
-            setSaveError(errMsg(e))
+            notify('error', errMsg(e) || `Could not upload the new ${kind}.`)
         } finally {
             setSaving(false)
         }
@@ -165,13 +171,18 @@ export function AdminBranding() {
     /** Reset every field back to the deployment (env) defaults. */
     async function handleReset() {
         setResetting(true)
-        setSaveError(null)
         try {
             absorb(await resetBranding())
-            setShowReset(false)
+            notify('success', 'Branding reset — every override is gone and the deployment defaults are back.')
         } catch (e) {
-            setSaveError(errMsg(e))
+            notify('error', errMsg(e) || 'Could not reset branding. Nothing was changed.')
         } finally {
+            // Closed either way. The confirmation asked its question and got an
+            // answer; a dialog left standing over a failure is both an invitation
+            // to click the same button again and — before this page spoke through
+            // the notification stack — the thing that hid the failure completely,
+            // because the modal sits on top of the page it was reported on.
+            setShowReset(false)
             setResetting(false)
         }
     }
@@ -181,7 +192,6 @@ export function AdminBranding() {
      *  (uploads otherwise take precedence). Persists immediately, like upload. */
     async function applyBuiltInMark(mark: (typeof BUILTIN_MARKS)[number]) {
         setSaving(true)
-        setSaveError(null)
         try {
             absorb(await updateBranding({
                 logoUrl: mark.logoUrl,
@@ -191,8 +201,9 @@ export function AdminBranding() {
                 expectedVersion: version,
             }))
             setSaved(true)
+            notify('success', `“${mark.name}” applied as the logo and favicon.`)
         } catch (e) {
-            setSaveError(errMsg(e))
+            notify('error', errMsg(e) || `Could not apply “${mark.name}”.`)
         } finally {
             setSaving(false)
         }
@@ -201,14 +212,17 @@ export function AdminBranding() {
     /** Clear an uploaded image so the URL field / default mark takes over. */
     async function handleClearImage(kind: 'logo' | 'favicon') {
         setSaving(true)
-        setSaveError(null)
         const patch: BrandingPatch = kind === 'logo'
             ? { logoData: '', logoMime: '', expectedVersion: version }
             : { faviconData: '', faviconMime: '', expectedVersion: version }
         try {
             absorb(await updateBranding(patch))
+            setSaved(true)
+            notify('success', kind === 'logo'
+                ? 'Uploaded logo removed — the URL field, or the default mark, takes over.'
+                : 'Uploaded favicon removed — the URL field, or the default mark, takes over.')
         } catch (e) {
-            setSaveError(errMsg(e))
+            notify('error', errMsg(e) || `Could not remove the uploaded ${kind}.`)
         } finally {
             setSaving(false)
         }
@@ -416,7 +430,11 @@ export function AdminBranding() {
                         />
                     </Section>
 
-                    {/* Conflict / error banners */}
+                    {/* The one thing that stays on the page: a 409 is not a report of
+                        something that happened, it is state that is still true while
+                        you read it, and it carries the next step. Failures go to the
+                        notification stack — including the reset's, which used to be
+                        rendered here, underneath the modal that caused it. */}
                     {conflict && (
                         <Banner tone="warning">
                             Someone else updated branding while you were editing. {' '}
@@ -428,10 +446,9 @@ export function AdminBranding() {
                             </button>{' '}and re-apply your changes.
                         </Banner>
                     )}
-                    {saveError && <Banner tone="error">{saveError}</Banner>}
 
                     {/* Action bar */}
-                    <div className="flex items-center gap-3 sticky bottom-4 bg-canvas-elevated/80 backdrop-blur border border-glass-border rounded-2xl px-4 py-3 shadow-lg">
+                    <div className="flex items-center gap-3 sticky bottom-4 bg-canvas-elevated border border-glass-border rounded-2xl px-4 py-3 shadow-lg">
                         <button
                             onClick={handleSave}
                             disabled={!dirty || saving}

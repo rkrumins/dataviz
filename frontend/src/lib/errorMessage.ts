@@ -13,7 +13,7 @@
  *   ``detail = body.detail || JSON.stringify(body)`` pattern collapses
  *   the structured object into the falsy check (an object is truthy),
  *   then ``new Error(object)`` coerces via ``Object.prototype.toString``
- *   and the user sees ``"[object Object]"`` in their toast.
+ *   and the user sees ``"[object Object]"`` in their notification.
  *
  *   Centralising the extraction here means every service uses the same
  *   correct shape and any future ``detail`` schema gets one place to

@@ -56,11 +56,9 @@ from .models import (
 )
 
 # Derived in-graph bookkeeping, excluded from every cache-vs-committed-main
-# comparison. Built from the ONE definition in ``config`` — see the note there
-# on why a second copy of this list was a bug.
-_NOT_DERIVED = " AND ".join(
-    f"NOT '{label}' IN labels(n)" for label in config.DERIVED_LABELS
-)
+# comparison. Built from the ONE definition in ``common.derived_artifacts`` —
+# see the note there on the two separate ways a second copy of this list broke.
+_NOT_DERIVED = config.not_derived_clause("n")
 
 # Reuse the reader/projector's label sanitiser so the deep check compares against the SAME
 # label the projector wrote (``_sanitize_label(entityType)``), not the raw ontology type.
@@ -130,6 +128,20 @@ async def pg_live_counts_projectable(session, graph_id: str, branch_id: str) -> 
         ).where(
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
             EntityHeadORM.entity_kind == "edge", EntityHeadORM.is_tombstone.is_(False),
+            # EXCLUDE THE ROLLUP LAYER, exactly as `falkor_counts` does.
+            #
+            # Reconciliation is about RAW committed lineage; `:AGGREGATED` edges are a
+            # derived cache the aggregation worker maintains. FalkorDB's side has always
+            # excluded them (`type(r) <> 'AGGREGATED'`) on the assumption that they are
+            # never committed to main. On a graph where they ARE — publishing a draft can
+            # commit materialised rollups into the version log — the two sides counted
+            # different things and the verify became PERMANENTLY unsatisfiable:
+            # Postgres 4,959 against FalkorDB 2,267, a difference of exactly the 2,692
+            # rollups. Every heal wrote all 4,959 edges correctly, then failed a comparison
+            # it could not satisfy, held the watermark back, and routed every read to
+            # Postgres — which serves no rollups at all. One publish silently cost a data
+            # source its entire aggregated-lineage layer, with no way to recover.
+            EdgeVersionORM.edge_type != "AGGREGATED",
         ))).scalar_one()
     return int(pg_nodes), int(triples)
 

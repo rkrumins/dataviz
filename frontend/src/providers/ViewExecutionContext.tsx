@@ -405,10 +405,16 @@ function ViewSchemaGate({ workspaceId, dataSourceId, viewId, children }: ViewSch
   // nothing to clear — it is replaced as soon as the new scope resolves.
   const lastGood = resolved ?? lastGoodSchema.forScope(scopeKey)
 
-  if (isLoading || (!resolved && !isError)) {
-    // Already showing this scope — keep the canvas mounted and let the refetch
-    // land underneath it.
-    if (lastGood) return <>{children(lastGood)}</>
+  // A schema we already have for THIS scope always wins — over the spinner
+  // and over the error card. A refetch that fails (a 504 from a slow
+  // backend, a 502 during a deploy, a refresh rate-limited for a moment)
+  // used to unmount the canvas behind "Unable to load view schema" even
+  // though the ontology on screen was perfectly good; React Query retries
+  // in the background and the recovery hook re-fetches when the backend is
+  // back, so the failure needs no card of its own here.
+  if (lastGood) return <>{children(lastGood)}</>
+
+  if (isLoading || !isError) {
     return (
       <div className="absolute inset-0 flex items-center justify-center bg-canvas/60 backdrop-blur-sm z-10">
         <div className="flex flex-col items-center gap-3">
@@ -419,33 +425,30 @@ function ViewSchemaGate({ workspaceId, dataSourceId, viewId, children }: ViewSch
     )
   }
 
-  if (isError || !resolved) {
-    return (
-      <div className="absolute inset-0 flex items-center justify-center bg-canvas">
-        <div className="flex max-w-md flex-col items-center gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
-          <AlertCircle className="h-6 w-6 text-destructive" />
-          <h3 className="text-sm font-semibold text-foreground">
-            Unable to load view schema
-          </h3>
-          <p className="text-xs text-muted-foreground">
-            {error instanceof Error
-              ? error.message
-              : 'The ontology for this data source could not be resolved. This usually means the data source has no active ontology configured.'}
-          </p>
-          <button
-            type="button"
-            onClick={() => refetch()}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted"
-          >
-            <RefreshCw className="h-3 w-3" />
-            Retry
-          </button>
-        </div>
+  // Nothing known for this scope and the fetch has failed its retries.
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-canvas">
+      <div className="flex max-w-md flex-col items-center gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-center">
+        <AlertCircle className="h-6 w-6 text-destructive" />
+        <h3 className="text-sm font-semibold text-foreground">
+          Unable to load view schema
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          {error instanceof Error
+            ? error.message
+            : 'The ontology for this data source could not be resolved. This usually means the data source has no active ontology configured.'}
+        </p>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted"
+        >
+          <RefreshCw className="h-3 w-3" />
+          Retry
+        </button>
       </div>
-    )
-  }
-
-  return <>{children(resolved)}</>
+    </div>
+  )
 }
 
 export default ViewExecutionProvider

@@ -41,6 +41,7 @@ from backend.common.adapters import ProviderUnavailable, ProviderBusy
 from backend.app.providers.falkordb_materialize import (
     MaterializationBudgetExceeded,
     MaterializationPreconditionFailed,
+    MaterializationQueryMemoryExceeded,
 )
 
 from backend.app.jobs import (
@@ -994,15 +995,23 @@ class AggregationWorker:
                 # outer run() handler, which marks the job 'cancelled' and
                 # emits the terminal event with last_cursor preserved.
                 raise
-            except (MaterializationBudgetExceeded, MaterializationPreconditionFailed) as e:
-                # Both are deterministic — every retry recomputes the same
-                # outcome and burns another full EXTRACT+COMPUTE pass. Fail
-                # terminally with the guidance message intact, and stamp the
-                # terminal-backoff key so the read path's widened self-heal
-                # trigger doesn't re-enqueue the identical doomed job every
-                # damping window. TTL 6h; a manual trigger clears it (the
-                # user is explicitly asking for a retry, e.g. after raising
-                # the budget in the tuning dialog).
+            except (
+                MaterializationBudgetExceeded,
+                MaterializationPreconditionFailed,
+                MaterializationQueryMemoryExceeded,
+            ) as e:
+                # All three are deterministic — every retry recomputes the
+                # same outcome and burns another full EXTRACT+COMPUTE pass.
+                # (The query-memory case additionally used to arrive here as
+                # a breaker-counted ProviderUnavailable, so its three retries
+                # were exactly enough to open the breaker on every reader of
+                # this provider.) Fail terminally with the guidance message
+                # intact, and stamp the terminal-backoff key so the read
+                # path's widened self-heal trigger doesn't re-enqueue the
+                # identical doomed job every damping window. TTL 6h; a
+                # manual trigger clears it (the user is explicitly asking
+                # for a retry, e.g. after raising the budget in the tuning
+                # dialog, or switching the source to Auto rollup storage).
                 try:
                     redis = getattr(provider, "_redis", None)
                     if redis is not None and getattr(job, "data_source_id", None):

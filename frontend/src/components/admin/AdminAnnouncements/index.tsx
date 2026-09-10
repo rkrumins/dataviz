@@ -17,6 +17,7 @@ import {
 } from '@/services/announcementService'
 import { useAnnouncementStore } from '@/store/announcements'
 import { useAuthStore } from '@/store/auth'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { PageContainer } from '@/components/layout/PageContainer'
 
@@ -69,6 +70,17 @@ function formFromAnnouncement(ann: AnnouncementResponse): FormState {
   }
 }
 
+/**
+ * What to say when the server's own words are missing.
+ *
+ * Every failure here used to render `err.message` straight into a pop-up: an
+ * Error carrying an empty message painted an empty red box, which says less
+ * than nothing. The fallback names the action that failed.
+ */
+function errMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback
+}
+
 /** Trigger the global banner store to re-fetch so changes appear instantly. */
 function refreshBanner() {
   useAnnouncementStore.getState().fetchActive()
@@ -77,6 +89,7 @@ function refreshBanner() {
 export function AdminAnnouncements() {
   const queryClient = useQueryClient()
   const isAuthenticated = useAuthStore(s => s.isAuthenticated)
+  const { notify } = useAppNotifications()
 
   // Admin listing — React Query dedupes so HMR / concurrent mounts don't
   // barrage the server with duplicate requests, and retry is disabled so
@@ -113,9 +126,6 @@ export function AdminAnnouncements() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
 
-  // Toast
-  const [toast, setToast] = useState<{ message: string; variant: 'success' | 'error' } | null>(null)
-
   // Global config state — form values derived from the config query.
   const [configOpen, setConfigOpen] = useState(false)
   const [configPoll, setConfigPoll] = useState(15)
@@ -134,13 +144,6 @@ export function AdminAnnouncements() {
   const load = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: ANN_LIST_QUERY_KEY })
   }, [queryClient])
-
-  // Auto-dismiss toast
-  useEffect(() => {
-    if (!toast) return
-    const t = setTimeout(() => setToast(null), toast.variant === 'error' ? 4000 : 3000)
-    return () => clearTimeout(t)
-  }, [toast])
 
   const openCreate = () => {
     setEditingId(null)
@@ -174,16 +177,18 @@ export function AdminAnnouncements() {
       }
       if (editingId) {
         await announcementService.update(editingId, payload as AnnouncementUpdateRequest)
-        setToast({ message: 'Announcement updated', variant: 'success' })
+        notify('success', `“${payload.title}” updated.`)
       } else {
         await announcementService.create(payload as AnnouncementCreateRequest)
-        setToast({ message: 'Announcement created', variant: 'success' })
+        notify('success', payload.isActive
+          ? `“${payload.title}” is live — everyone sees the banner now.`
+          : `“${payload.title}” saved. It is inactive, so nobody sees it yet.`)
       }
       closeForm()
       await load()
       refreshBanner()
     } catch (err: any) {
-      setToast({ message: err.message, variant: 'error' })
+      notify('error', errMessage(err, `Could not save “${form.title.trim()}”.`))
     } finally {
       setSaving(false)
     }
@@ -194,23 +199,32 @@ export function AdminAnnouncements() {
       await announcementService.update(ann.id, { isActive: !ann.isActive })
       await load()
       refreshBanner()
-      setToast({ message: ann.isActive ? 'Announcement deactivated' : 'Announcement activated', variant: 'success' })
+      notify('success', ann.isActive
+        ? `“${ann.title}” is paused — nobody sees the banner now.`
+        : `“${ann.title}” is live — everyone sees the banner now.`)
     } catch (err: any) {
-      setToast({ message: err.message, variant: 'error' })
+      notify('error', errMessage(err, ann.isActive
+        ? `Could not pause “${ann.title}”.`
+        : `Could not publish “${ann.title}”.`))
     }
   }
 
   const handleDelete = async () => {
     if (!deletingId) return
+    const title = announcements.find(a => a.id === deletingId)?.title
     setDeleteLoading(true)
     try {
       await announcementService.remove(deletingId)
       setDeletingId(null)
-      setToast({ message: 'Announcement deleted', variant: 'success' })
+      notify('success', title
+        ? `“${title}” deleted — the banner is gone for everyone.`
+        : 'Announcement deleted — the banner is gone for everyone.')
       await load()
       refreshBanner()
     } catch (err: any) {
-      setToast({ message: err.message, variant: 'error' })
+      notify('error', errMessage(err, title
+        ? `Could not delete “${title}”.`
+        : 'Could not delete that announcement.'))
     } finally {
       setDeleteLoading(false)
     }
@@ -228,10 +242,10 @@ export function AdminAnnouncements() {
       queryClient.setQueryData(ANN_CONFIG_QUERY_KEY, updated)
       // Refresh the banner store so it picks up the new polling interval.
       useAnnouncementStore.getState().fetchConfig()
-      setToast({ message: 'Banner settings saved', variant: 'success' })
+      notify('success', 'Banner settings saved — every browser picks them up on its next check.')
       setConfigOpen(false)
     } catch (err: any) {
-      setToast({ message: err.message, variant: 'error' })
+      notify('error', errMessage(err, 'Could not save the banner settings.'))
     } finally {
       setConfigSaving(false)
     }
@@ -786,31 +800,6 @@ export function AdminAnnouncements() {
           )}
         </AnimatePresence>
       </div>
-
-      {/* Toast */}
-      <AnimatePresence>
-        {toast && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 10 }}
-            className={`fixed bottom-6 right-6 z-[200] flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-medium shadow-lg border ${
-              toast.variant === 'error'
-                ? 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400'
-                : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400'
-            }`}
-          >
-            {toast.variant === 'error' ? <AlertCircle className="w-4 h-4" /> : <Check className="w-4 h-4" />}
-            {toast.message}
-            <button
-              onClick={() => setToast(null)}
-              className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </PageContainer>
   )
 }

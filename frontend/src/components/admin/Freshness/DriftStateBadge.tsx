@@ -18,7 +18,7 @@
  */
 import {
     AlertTriangle, Ban, CheckCircle2, CircleDashed, EyeOff, GitBranch,
-    PauseCircle, ShieldAlert, Waves,
+    PauseCircle, ShieldAlert, Unplug, Waves,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -27,6 +27,7 @@ export type DriftState =
     | 'inSync'
     | 'drifting'
     | 'overlayMissing'
+    | 'projectionStalled'
     | 'neverBuilt'
     | 'blocked'
     | 'unobservable'
@@ -58,6 +59,23 @@ export const DRIFT_SPEC: Record<DriftState, Spec> = {
         label: 'Rollups missing',
         tone: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
         title: 'This source has data but no rolled-up lineage — most likely wiped by a reload.',
+    },
+    // Red tier, deliberately sharing "Rollups missing"'s tone: both mean the
+    // rolled-up lineage is not reaching the product, and an operator scanning
+    // the table should read them at the same urgency. What separates them is
+    // the icon and the label — Unplug (a severed connection) against
+    // ShieldAlert, and two sentences that name different remedies. That is the
+    // contract at the top of this file, and it is doing real work here:
+    // colour alone would say these are the same problem, and they are not.
+    projectionStalled: {
+        Icon: Unplug,
+        label: 'Connections not up to date',
+        tone: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
+        title:
+            'This graph is mastered here, but the rolled-up connections it ' +
+            'serves are not being kept current, so lineage can look ' +
+            'incomplete right now. Rebuilding does not fix this — open the ' +
+            'source and check version control for it.',
     },
     neverBuilt: {
         Icon: CircleDashed,

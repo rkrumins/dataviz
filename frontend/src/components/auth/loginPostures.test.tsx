@@ -148,6 +148,21 @@ describe('SSO-only', () => {
         expect(screen.queryByText(/or sign in with/i)).not.toBeInTheDocument()
         expect(emailField()).not.toBeInTheDocument()
     })
+
+    it('?password=1 reveals the form for the system account (break-glass)', async () => {
+        // Nothing on the page advertises it; the server still refuses
+        // every account not marked as a system account, so revealing
+        // the form grants nothing.
+        posture({ allowLocalLogin: false, providers: [ENTRA] })
+        render(
+            <MemoryRouter initialEntries={['/login?password=1']}>
+                <LoginPage />
+            </MemoryRouter>,
+        )
+
+        expect(await screen.findByLabelText(/^password$/i)).toBeInTheDocument()
+        expect(screen.getByText(/enter workspace/i)).toBeInTheDocument()
+    })
 })
 
 

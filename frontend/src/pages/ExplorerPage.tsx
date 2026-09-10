@@ -46,7 +46,7 @@ import { updateViewVisibility, restoreView as restoreViewApi, type View } from '
 import { useViewEditorModal } from '@/components/layout/AppLayout'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useCopyViewLink } from '@/lib/viewShareLink'
 import { AggregationProgressBanner } from '@/components/explorer/AggregationProgressBanner'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
@@ -383,7 +383,7 @@ export function ExplorerPage() {
 
   // ─── Handlers ───────────────────────────────────────────────────────
 
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
 
   const copyViewLink = useCopyViewLink()
   const handleShare = useCallback((view: View) => {
@@ -396,7 +396,7 @@ export function ExplorerPage() {
 
   /**
    * The card menu changed a view's tier. Patch it in place rather than
-   * refetching: the menu has already confirmed with a toast naming the
+   * refetching: the menu has already confirmed with a notification naming the
    * new audience, and a round trip during which the card still shows the
    * OLD badge is exactly what made this feel like nothing happened.
    */
@@ -410,7 +410,7 @@ export function ExplorerPage() {
   // BE rule (views.py: can_delete_view): creator OR
   // workspace:view:delete on the view's workspace. Mirror that
   // here so the row/grid/preview Delete affordance disappears for
-  // users who'd just get a 403 toast on click.
+  // users who'd just get a 403 notification on click.
   const canDeleteView = useCallback((view: View): boolean => {
     if (currentUser?.id && view.createdBy === currentUser.id) return true
     return useAuthStore.getState().can('workspace:view:delete', view.workspaceId)
@@ -443,9 +443,9 @@ export function ExplorerPage() {
       next.delete(deletedId)
       return next
     })
-    // Toast
-    showToast('success', `"${deletedName}" has been deleted`)
-  }, [deleteView, removeViewFromList, showToast])
+    // Notification
+    notify('success', `"${deletedName}" has been deleted`)
+  }, [deleteView, removeViewFromList, notify])
 
   const handleBulkDelete = useCallback(() => {
     if (selectedIds.size === 0) return
@@ -470,8 +470,8 @@ export function ExplorerPage() {
     setPreviewView(prev => prev && ids.includes(prev.id) ? null : prev)
     setSelectedIds(new Set())
     setShowBulkDelete(false)
-    showToast('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
-  }, [selectedIds, removeViewFromList, showToast])
+    notify('success', `Deleted ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+  }, [selectedIds, removeViewFromList, notify])
 
   const handleBulkVisibility = useCallback(async (visibility: 'private' | 'workspace' | 'enterprise') => {
     const ids = Array.from(selectedIds)
@@ -483,7 +483,7 @@ export function ExplorerPage() {
     setSelectedIds(new Set())
     refetch()
     if (failed.length === 0) {
-      showToast('success', `Updated visibility to "${visibility}" for ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
+      notify('success', `Updated visibility to "${visibility}" for ${ids.length} view${ids.length !== 1 ? 's' : ''}`)
     } else {
       const reason = failed[0].reason
       const detail = reason instanceof Error ? reason.message : 'unknown error'
@@ -497,12 +497,12 @@ export function ExplorerPage() {
           : detail.includes('workspace:view:publish')
             ? 'publishing those needs approval — open each view to ask'
             : detail
-      showToast(
+      notify(
         'error',
         `Updated ${ids.length - failed.length} of ${ids.length} views — ${failed.length} failed: ${cause}`,
       )
     }
-  }, [selectedIds, showToast, refetch])
+  }, [selectedIds, notify, refetch])
 
   /**
    * Clicking a tag chip on a card toggles that tag in the tag filter —
@@ -522,11 +522,11 @@ export function ExplorerPage() {
     try {
       await restoreViewApi(view.id)
       refetch()
-      showToast('success', `"${view.name}" has been restored`)
+      notify('success', `"${view.name}" has been restored`)
     } catch {
-      showToast('error', `Failed to restore "${view.name}"`)
+      notify('error', `Failed to restore "${view.name}"`)
     }
-  }, [refetch, showToast])
+  }, [refetch, notify])
 
   // ─── Render ─────────────────────────────────────────────────────────
 
@@ -789,7 +789,7 @@ export function ExplorerPage() {
               transition={{ duration: 0.15 }}
             >
               {layout === 'grid' ? (
-                <div className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
+                <div className={cn('grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
                   {Array.from({ length: 8 }).map((_, i) => <ExplorerCardSkeleton key={i} />)}
                 </div>
               ) : (
@@ -823,7 +823,7 @@ export function ExplorerPage() {
               exit={{ opacity: 0 }}
               transition={{ duration: 0.18 }}
             >
-              <div ref={gridRef} className={cn('grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
+              <div ref={gridRef} className={cn('grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 wide:grid-cols-5', gridGapClass)}>
                 {views.map((v, i) => (
                   <div
                     key={v.id}
@@ -920,7 +920,6 @@ export function ExplorerPage() {
           ? () => handleDeleteRequest(previewView)
           : undefined}
         healthStatus={previewView ? healthMap.get(previewView.id)?.status : undefined}
-        providerInfo={previewView ? resolveProvider(previewView.dataSourceId) : undefined}
         initialEditMode={previewEditMode}
         onSaved={() => refetch()}
       />

@@ -14,7 +14,8 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import (
-    APIRouter, Body, Depends, HTTPException, Path, Request, Response, status,
+    APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response,
+    status,
 )
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -298,6 +299,7 @@ class BackchannelHostDTO(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
+    purpose: str = "gateway"
     host: str
     port: int
     note: Optional[str] = None
@@ -311,9 +313,17 @@ class BackchannelHostCreate(BaseModel):
     note: Optional[str] = None
 
 
+#: Both host lists live on these routes, told apart by ``?purpose=``:
+#: ``gateway`` (default — the internal destinations the back-channel
+#: legs may call) and ``avatar`` (the external image hosts in-app
+#: avatars may be fetched from).
+_PURPOSE_QUERY = Query("gateway", pattern="^(gateway|avatar)$")
+
+
 def _host_dto(row) -> BackchannelHostDTO:
     return BackchannelHostDTO(
-        id=row.id, host=row.host, port=row.port, note=row.note,
+        id=row.id, purpose=row.purpose, host=row.host, port=row.port,
+        note=row.note,
         created_at=row.created_at, created_by=row.created_by,
     )
 
@@ -321,11 +331,12 @@ def _host_dto(row) -> BackchannelHostDTO:
 @router.get("/backchannel-hosts", response_model=list[BackchannelHostDTO],
             response_model_by_alias=True)
 async def list_backchannel_hosts(
+    purpose: str = _PURPOSE_QUERY,
     session: AsyncSession = Depends(get_db_session),
     _admin: User = Depends(requires("system:sso:hosts:manage")),
 ):
-    """Every internal destination a back-channel provider may call."""
-    rows = await backchannel_host_repo.list_hosts(session)
+    """One host list: internal gateway destinations, or avatar hosts."""
+    rows = await backchannel_host_repo.list_hosts(session, purpose=purpose)
     return [_host_dto(r) for r in rows]
 
 
@@ -334,10 +345,11 @@ async def list_backchannel_hosts(
              status_code=status.HTTP_201_CREATED)
 async def add_backchannel_host(
     body: BackchannelHostCreate,
+    purpose: str = _PURPOSE_QUERY,
     session: AsyncSession = Depends(get_db_session),
     admin: User = Depends(requires("system:sso:hosts:manage")),
 ):
-    """Permit one ``host:port``.
+    """Permit one ``host:port`` on the named list.
 
     Idempotent: adding an entry that already exists returns it rather
     than 409-ing. Two operators allowing the same gateway is not a
@@ -345,7 +357,8 @@ async def add_backchannel_host(
     """
     try:
         row = await backchannel_host_repo.add_host(
-            session, host=body.host, port=body.port, note=body.note,
+            session, host=body.host, port=body.port, purpose=purpose,
+            note=body.note,
             created_by=admin.id,
         )
     except backchannel_host_repo.BackchannelHostError as exc:
@@ -355,6 +368,7 @@ async def add_backchannel_host(
         session, event_type="sso.backchannel_host_allowed",
         payload={
             "host": row.host, "port": row.port, "note": row.note,
+            "purpose": row.purpose,
             "actor_id": admin.id,
         },
     )
@@ -375,16 +389,18 @@ async def delete_backchannel_host(
     allowlist is read per request precisely so that revoking a
     destination is immediate.
     """
-    rows = await backchannel_host_repo.list_hosts(session)
-    row = next((r for r in rows if r.id == host_id), None)
+    row = await backchannel_host_repo.get_host(session, host_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such host entry")
 
-    host, port = row.host, row.port
+    host, port, purpose = row.host, row.port, row.purpose
     await backchannel_host_repo.delete_host(session, host_id)
     await user_repo.create_outbox_event(
         session, event_type="sso.backchannel_host_withdrawn",
-        payload={"host": host, "port": port, "actor_id": admin.id},
+        payload={
+            "host": host, "port": port, "purpose": purpose,
+            "actor_id": admin.id,
+        },
     )
     await session.commit()
     return None

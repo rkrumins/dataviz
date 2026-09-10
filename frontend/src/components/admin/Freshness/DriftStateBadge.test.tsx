@@ -96,3 +96,33 @@ describe('reason labels', () => {
         }
     })
 })
+
+describe('projectionStalled — version controlled, but the rollups are not being served', () => {
+    it('is mapped at all: an unmapped verdict renders undefined and throws', () => {
+        // DRIFT_SPEC is a total Record<DriftState, Spec>. The backend can now
+        // stamp this verdict, so the map has to carry it or the fleet row,
+        // the drawer, the group header and the profile all blow up on it.
+        expect(DRIFT_SPEC.projectionStalled).toBeDefined()
+        render(<DriftStateBadge state="projectionStalled" />)
+        expect(screen.getByText('Connections not up to date')).toBeInTheDocument()
+    })
+
+    it('reads red, and never as the amber "just rebuild it" verdict', () => {
+        const spec = DRIFT_SPEC.projectionStalled
+        expect(spec.tone).toContain('red-500')
+        expect(spec.tone).not.toContain('amber')
+        // Red tier is shared with "Rollups missing", so the icon and the
+        // label are what carry the distinction — the whole reason this
+        // component exists.
+        expect(spec.Icon).not.toBe(DRIFT_SPEC.overlayMissing.Icon)
+        expect(spec.Icon).not.toBe(DRIFT_SPEC.drifting.Icon)
+        expect(spec.Icon).not.toBe(DRIFT_SPEC.managed.Icon)
+        expect(spec.label).not.toBe(DRIFT_SPEC.overlayMissing.label)
+    })
+
+    it('says a rebuild is the wrong remedy, because it is', () => {
+        // The one thing an operator will reach for first is the one thing
+        // that does not help here. The tooltip has to say so.
+        expect(DRIFT_SPEC.projectionStalled.title).toMatch(/rebuild/i)
+    })
+})

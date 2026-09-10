@@ -19,7 +19,7 @@
  *   - an Error whose .message is the unwrapped detail (object stringified)
  *   - an Error whose .message is just the human "Missing permission: X"
  *   - a structured object passed straight in (rare, but cheap to support)
- *   - a string (toast handler, generic catch-all)
+ *   - a string (notification handler, generic catch-all)
  *
  * The parser canonicalises all of these into a single shape — or
  * returns null when the input isn't a permission denial, letting

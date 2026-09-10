@@ -48,8 +48,8 @@ vi.mock('@/services/authService', () => ({
     authService: { listMyIdentities: vi.fn(), forgotPassword: vi.fn() },
 }))
 
-const showToast = vi.fn()
-vi.mock('@/components/ui/toast', () => ({ useToast: () => ({ showToast }) }))
+const notify = vi.fn()
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 
 const applyProfile = vi.fn()
 vi.mock('@/store/auth', () => ({

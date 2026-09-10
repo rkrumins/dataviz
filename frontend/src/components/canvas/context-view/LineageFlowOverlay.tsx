@@ -2,6 +2,8 @@ import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { AnchorProxyGroup, ColumnGeometryApi, ComputedEdge, OverflowBadge, OverflowDirection } from './types'
 import { sameRows } from './rowEquality'
+import { edgeDashArray } from './edgeDash'
+import { useDrawnEdgesStore } from '@/store/drawnEdges'
 
 /**
  * Keep the previous viewport object when neither number moved.
@@ -60,6 +62,7 @@ export function LineageFlowOverlay({
   highlightedEdges,
   isHighlightActive = false,
   resolveEdgeColor,
+  resolveEdgeStrokeStyle,
   onEdgeDoubleClick,
   showDirection = true,
   expandingEdgeIds,
@@ -81,6 +84,10 @@ export function LineageFlowOverlay({
   highlightedEdges?: Set<string>,
   isHighlightActive?: boolean,
   resolveEdgeColor?: (edgeType: string) => string,
+  /** Sibling of `resolveEdgeColor` — the ontology's stroke style for the
+   *  edge's primary type, honoured by `edgeDashArray` when the edge is not
+   *  a roll-up. */
+  resolveEdgeStrokeStyle?: (edgeType: string) => 'solid' | 'dashed' | 'dotted',
   /** Double-click handler — used for AGGREGATED-edge drill-down. */
   onEdgeDoubleClick?: (edgeId: string) => void,
   /** When true, render arrowheads + animated mid-edge chevron flow. */
@@ -433,6 +440,7 @@ export function LineageFlowOverlay({
 
           const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
           const typeColor = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
+          const dashArray = edgeDashArray(edge.isGhost || false, resolveEdgeStrokeStyle?.(primaryType))
 
           let color = typeColor
           let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
@@ -529,6 +537,7 @@ export function LineageFlowOverlay({
             isGhost: edge.isGhost || false,
             isBundled: edge.isBundled || false,
             edgeCount: edge.edgeCount || 0,
+            dashArray,
             sx, sy, tx, ty,
             types: Array.isArray(edge.types) && edge.types.length > 0
               ? edge.types
@@ -874,7 +883,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, hoveredEdgeId, geometryRegistry, flowRibbons])
+  }, [edgeIndex, selectEdge, isEdgePanelOpen, toggleEdgePanel, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -1202,6 +1211,17 @@ export function LineageFlowOverlay({
     return true
   }), [computedEdges, viewport])
 
+  // Publish how many edges are actually PAINTED — `visibleEdges`, the
+  // viewport-culled subset the `<g data-edge-id>` elements are rendered from,
+  // not the wider `computedEdges` set it is culled out of — for
+  // ConnectionsPanel's "N drawn". Zeroed on unmount, which is also when
+  // Lineage is off.
+  const setDrawn = useDrawnEdgesStore(s => s.setDrawn)
+  useEffect(() => {
+    setDrawn(visibleEdges.length)
+    return () => setDrawn(0)
+  }, [visibleEdges.length, setDrawn])
+
   // ── Density-adaptive render tier ───────────────────────────────────────
   //
   // Premium  (≤ 200 visible)    — full treatment: per-edge gradient,
@@ -1469,7 +1489,7 @@ export function LineageFlowOverlay({
           const isTargetHovered = hoveredEdgeId === edge.target
           // Highlight on hover OR when connected to the selected node
           const isHighlighted = isHovered || isSourceHovered || isTargetHovered || (isHighlightActive && highlightedEdges?.has(edge.id))
-          const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, isBundled, sx, sy, tx, ty } = edge
+          const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, isBundled, dashArray, sx, sy, tx, ty } = edge
           // Staged-change marker — colored halo around the edge if there's a pending change.
           const stagedEdgeColor: string | undefined = stagedEdgeColorByEdgeId.get(edge.id)
 
@@ -1583,7 +1603,7 @@ export function LineageFlowOverlay({
                   strokeWidth: dynamicStrokeWidth,
                   fill: 'none',
                   strokeOpacity: isPremiumLook ? 1 : coreOpacity,
-                  strokeDasharray: isGhost ? '6 4' : 'none',
+                  strokeDasharray: dashArray,
                   strokeLinecap: 'round',
                   transition: 'stroke-width 0.2s ease',
                 }}
@@ -1664,7 +1684,7 @@ export function LineageFlowOverlay({
                   wires bare (the cards say "N on this lineage"). Only when
                   the line stands for MORE than one hop: a re-anchored single
                   hop is still one flow, and a "1" on it reads as noise. */}
-              {!isTracing && isBundled && !isGhost && edge.edgeCount > 1 && (
+              {!isTracing && isBundled && edge.edgeCount > 1 && (
                 <g data-edge-badge={edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
                   <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
                   <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">

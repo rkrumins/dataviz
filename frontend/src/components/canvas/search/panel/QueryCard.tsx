@@ -67,6 +67,7 @@ import type { Predicate, SearchQuery } from '@/types/search'
 import type { RunState } from '@/hooks/useAdvancedSearch'
 
 import { useDiscovery } from '../builder/useDiscovery'
+import { SEARCH_OPTIONS } from '../searchOptions'
 
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
@@ -93,47 +94,6 @@ export interface QueryCardProps {
     onRun: (predicate: Predicate, options?: SearchQuery['options']) => void
     /** Open Advanced drawer (for OR/NOT/path authoring). */
     onOpenAdvanced: () => void
-}
-
-
-/**
- * Search page size. Also the point at which we stop claiming the canvas
- * spotlight is complete and start telling the user to refine.
- *
- * Was 5000 (the backend's CANDIDATE_CAP) on the theory that the panel wanted
- * every match URN in one round-trip. In practice a broad query ("name")
- * matches thousands of nodes, and shipping all of them — each with a full
- * ancestor spine — into a Set plus two rollup maps on every debounced
- * keystroke is itself what makes the panel feel like it's grinding. A result
- * set that large wants refining, not painting.
- */
-const SEARCH_PAGE_SIZE = 1000
-
-/**
- * Ask for hits AND aggregates in one round-trip.
- *
- * `results: 'both'` costs one extra MATCH + GROUP BY over the candidate set
- * the backend has already capped — it is the cheapest response mode it has —
- * and it buys the thing that makes a 600-match result comprehensible: an exact
- * per-container match count. "612 matches in 4 groups" is an answer the user
- * can act on; 612 rows is a pile.
- *
- * Crucially the bucket counts are computed server-side over the FULL candidate
- * set, so they stay exact even when the hit list itself is capped at
- * SEARCH_PAGE_SIZE. Further hits are pulled on demand via the cursor
- * (useAdvancedSearch.loadMore).
- *
- * NOTE on `by: 'parent'`: buckets group by IMMEDIATE parent, so a match that is
- * itself a root has no bucket. The buckets therefore need not sum to
- * candidateCount — don't render them as a partition of the total.
- */
-const SEARCH_OPTIONS: SearchQuery['options'] = {
-    results: 'both',
-    pageSize: SEARCH_PAGE_SIZE,
-    // 3 sample hits per bucket: AggregateBucketCard previews them as chips, which
-    // is what makes a group card worth reading ("what's actually in here?").
-    aggregations: [{ by: 'parent', maxBuckets: 200, sampleHitsPerBucket: 3 }],
-    includeAncestorPath: true,
 }
 
 
@@ -319,24 +279,6 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (!complete) setFreshRowKind(predicate.kind ?? null)
     }, [commitDraft])
 
-    // Text escalated from the canvas header's quick search. That path
-    // stashes the typed string and calls "open the panel" — which is a
-    // no-op when the panel is already open, so the old consumer (a
-    // mount-only effect on the empty hero) never ran: the second
-    // escalation appeared to do nothing, and the stale seed resurfaced
-    // later when the hero next mounted. Subscribing to the store means
-    // a seed is taken whenever one arrives, open or not. The nonce
-    // remounts the omnibox so a repeat escalation actually lands.
-    const pendingSeed = useSearchStore((s) => s.pendingSearchSeed)
-    const [seed, setSeed] = useState<{ text: string; nonce: number }>(
-        { text: '', nonce: 0 },
-    )
-    useEffect(() => {
-        if (!pendingSeed) return
-        const taken = useSearchStore.getState().consumePendingSearchSeed()
-        if (taken) setSeed((prev) => ({ text: taken, nonce: prev.nonce + 1 }))
-    }, [pendingSeed])
-
     // Property-value samples, flattened across every discovered key so
     // the omnibox can match a bare token against values as well as
     // names. The corpus is bounded server-side (20 values per key, 64
@@ -382,7 +324,6 @@ export const QueryCard: FC<QueryCardProps> = ({
 
     const omnibox = (
         <SearchOmnibox
-            key={`omnibox-${seed.nonce}`}
             variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
             onBrowseAll={onOpenAdvanced}
@@ -391,7 +332,6 @@ export const QueryCard: FC<QueryCardProps> = ({
             propertyKeys={discovery.allKeys}
             valueSamples={valueSamples}
             layers={discoveredLayers}
-            initialQuery={seed.text}
             discoveryLoading={discovery.isInitialLoading}
             disabled={isRunning}
         />

@@ -5,6 +5,7 @@
  */
 
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { extractErrorMessageFromText } from '@/lib/errorMessage'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
@@ -237,7 +238,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     })
     if (!res.ok) {
         const text = await res.text()
-        throw new Error(`Workspace API ${res.status}: ${text || res.statusText}`)
+        // Same extractor, same shape as ``authFetch`` (apiClient.ts): the raw
+        // body here is a structured error envelope, and pasting it into an
+        // Error message put the JSON itself in the user's notification card.
+        // Empty in, empty out — that is what lets the pages prefer their own
+        // sentence naming the action that failed.
+        throw new Error(extractErrorMessageFromText(text, res.statusText))
     }
     if (res.status === 204) return undefined as T
     return res.json()

@@ -17,7 +17,7 @@ import {
 import { useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { usePropertyUsage } from '@/hooks/usePropertyUsage'
 import { useCatalogOverview, useValueDistribution } from '@/hooks/usePropertyInsights'
 import {
@@ -55,15 +55,15 @@ type SortMode = 'name' | 'coverage'
 export function PropertyBrowser({
     viewId, knownEntityTypes, knownLayers, onCreateRuleFromPredicate, onSearchPredicate,
 }: PropertyBrowserProps) {
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     // Open + run a constructed predicate in the real Advanced Search panel.
     const search: SearchHandler | undefined = useMemo(() => {
         if (!onSearchPredicate) return undefined
         return (predicate, label) => {
             onSearchPredicate(predicate)
-            showToast('info', `Searching ${label} in Advanced Search`)
+            notify('info', `Searching ${label} in Advanced Search`)
         }
-    }, [onSearchPredicate, showToast])
+    }, [onSearchPredicate, notify])
 
     const disc = useDiscovery(viewId)
     const { allKeys, keysByEntityType, tagValues, getValueSamples, isInitialLoading, error } = disc

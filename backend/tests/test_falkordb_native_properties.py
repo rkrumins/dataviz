@@ -282,6 +282,38 @@ class TestComputeSearchableText:
         assert _compute_searchable_text(None, None, None, None) == ""
         assert _compute_searchable_text("", "", "", {}) == ""
 
+    def test_four_arg_calls_unchanged(self):
+        """Existing 4-positional-arg call sites (no tags) must compile
+        and behave exactly as before — ``tags`` is a new trailing
+        keyword with default ``None``."""
+        text = _compute_searchable_text(
+            "Orders", "warehouse.public.orders", "Customer order events",
+            {"sourceSystem": "snowflake"},
+        )
+        assert "orders" in text
+        assert "snowflake" in text
+
+    def test_tags_are_folded_in_lower_cased(self):
+        text = _compute_searchable_text(
+            "Orders", None, None, None, tags=["PII", "GDPR"],
+        )
+        assert "pii" in text
+        assert "gdpr" in text
+
+    def test_tags_as_json_string_are_parsed(self):
+        """Tags stored on a node are a JSON-encoded string at some call
+        sites (e.g. the migration backfill reading ``n.tags`` back off
+        a FalkorDB node) — parse it the same as a native list."""
+        text = _compute_searchable_text(
+            None, None, None, None, tags=json.dumps(["PII", "GDPR"]),
+        )
+        assert "pii" in text
+        assert "gdpr" in text
+
+    def test_tags_ignored_when_not_list_or_str(self):
+        text = _compute_searchable_text("X", None, None, None, tags=123)
+        assert text == "x"
+
     def test_truncates_at_word_boundary_below_cap(self, monkeypatch):
         """When the result exceeds the cap, the helper trims to the
         last word boundary so the tail never ends mid-token (a

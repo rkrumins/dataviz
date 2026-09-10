@@ -42,11 +42,20 @@ export default {
           // always meant; migrating them to `bg-canvas` would be a
           // larger, riskier sweep for the same pixels.
           //
-          // Note the opacity modifier is inert on this whole family:
-          // the variables hold complete colors, not channel triples, so
-          // Tailwind drops the alpha and `bg-canvas-base/60` paints the
-          // same as `bg-canvas-base`. That is already true of
-          // `canvas-elevated/95` etc. throughout the app.
+          // AN OPACITY MODIFIER ON THIS WHOLE FAMILY EMITS NO RULE AT
+          // ALL. The variables hold complete colors, not channel
+          // triples, so Tailwind cannot build `rgb(… / <alpha>)` from
+          // them and simply skips the utility — `bg-canvas-base/60`
+          // does NOT paint the same as `bg-canvas-base`, it paints
+          // NOTHING, and the element is transparent. Worse in a
+          // gradient: `from-canvas-elevated/90` leaves
+          // `--tw-gradient-stops` unset, so the whole background-image
+          // is invalid. This comment used to say the opposite, which is
+          // presumably why these kept coming back; verified against a
+          // real build of this config.
+          //
+          // Use the plain token for opaque chrome, or a real palette
+          // colour (`bg-black/[0.04]`) when you actually want alpha.
           base: 'var(--nx-bg-canvas)',
           elevated: 'var(--nx-bg-elevated)',
           overlay: 'var(--nx-bg-overlay)',
@@ -57,13 +66,17 @@ export default {
           border: 'var(--nx-border-glass)',
         },
         // Semantic accents
+        // Raw channels + <alpha-value> so `accent-lineage/15` actually emits a
+        // rule. As bare `var()`s these tokens silently dropped EVERY alpha
+        // suffix — 1,066 of them across 208 files — which is why accent tints,
+        // rings and gradients rendered as nothing and the app read as grey.
         accent: {
-          lineage: 'var(--nx-accent-lineage)',
-          business: 'var(--nx-accent-business)',
-          explore: 'var(--nx-accent-explore)',
-          technical: 'var(--nx-accent-technical)',
-          warning: 'var(--nx-accent-warning)',
-          muted: 'var(--nx-accent-muted)',
+          lineage: 'rgb(var(--nx-accent-lineage-rgb) / <alpha-value>)',
+          business: 'rgb(var(--nx-accent-business-rgb) / <alpha-value>)',
+          explore: 'rgb(var(--nx-accent-explore-rgb) / <alpha-value>)',
+          technical: 'rgb(var(--nx-accent-technical-rgb) / <alpha-value>)',
+          warning: 'rgb(var(--nx-accent-warning-rgb) / <alpha-value>)',
+          muted: 'rgb(var(--nx-accent-muted-rgb) / <alpha-value>)',
         },
         // Text colors
         ink: {

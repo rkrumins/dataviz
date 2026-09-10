@@ -2583,7 +2583,9 @@ describe('browsing what is inside — the peek and the keyboard', () => {
   it('once a walk exists the backdrop ASKS, and only the answer closes it', () => {
     const onClose = vi.fn()
     renderLens(['F', 'B'], table(), { onClose })   // two history entries = walked
-    fireEvent.click(document.querySelector('.absolute.inset-0.bg-black\\/50')!)
+    // The scrim is the shared <Backdrop> now — a fixed CSS-transitioned sibling
+    // of the lens wrapper, never a child inside <AnimatePresence>.
+    fireEvent.click(document.querySelector('.fixed.inset-0.bg-black\\/50')!)
     const ask = screen.getByRole('alertdialog')
     expect(ask).toBeTruthy()
     expect(onClose).not.toHaveBeenCalled()
@@ -2594,7 +2596,7 @@ describe('browsing what is inside — the peek and the keyboard', () => {
     expect(onClose).not.toHaveBeenCalled()
 
     // ...and the other answer is the one that leaves.
-    fireEvent.click(document.querySelector('.absolute.inset-0.bg-black\\/50')!)
+    fireEvent.click(document.querySelector('.fixed.inset-0.bg-black\\/50')!)
     fireEvent.click(within(screen.getByRole('alertdialog')).getByText('Close the lens'))
     expect(onClose).toHaveBeenCalled()
   })

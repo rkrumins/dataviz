@@ -19,6 +19,8 @@ import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { ArrowUpLeft, ArrowDownRight, Check, GitBranch, History, Link2, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { relativeTime } from '@/lib/relativeTime'
 
 export interface TraceHistoryPanelEntry {
   /** Index into the underlying history STACK (not the display order). */
@@ -48,16 +50,6 @@ const MODE_GLYPH = {
   both: { Icon: GitBranch, tone: 'text-violet-600 dark:text-violet-400 bg-violet-500/10', title: 'Full Lineage — both directions' },
 } as const
 
-function relativeTime(ts: number): string {
-  const seconds = Math.floor((Date.now() - ts) / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
-}
-
 export function TraceHistoryPanel({
   entries,
   onResume,
@@ -68,7 +60,7 @@ export function TraceHistoryPanel({
 }: TraceHistoryPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   /** Which row just yielded a link, and whether the clipboard took it. The
-   *  confirmation lives on the row itself: a toast for a two-word answer is
+   *  confirmation lives on the row itself: a notification for a two-word answer is
    *  more interruption than the gesture is worth. */
   const [copied, setCopied] = useState<{ index: number; ok: boolean } | null>(null)
   const copy = async (index: number) => {
@@ -121,10 +113,12 @@ export function TraceHistoryPanel({
       aria-label="Trace history"
       initial={{ opacity: 0, y: -4, scale: 0.98 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.15, ease: 'easeOut' }}
+      transition={{ duration: 0.1, ease: 'easeOut' }}
       style={{ position: 'fixed', right: anchor.right, top: anchor.top, zIndex: 1000 }}
       className={cn(
         'w-[300px] py-1.5 rounded-xl overflow-hidden',
+        // A plain token: an alpha suffix on a canvas colour emits no rule at
+        // all, so this panel was rendering with no fill over the canvas.
         'bg-canvas-elevated/98 backdrop-blur-2xl',
         'border border-glass-border shadow-glass-lg',
       )}
@@ -150,14 +144,19 @@ export function TraceHistoryPanel({
               return (
                 <div
                   key={`${e.index}-${e.timestamp}`}
+                  data-history-row
                   className="group/row flex items-stretch hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
                 >
+                  <HoverTip
+                    className="flex-1 min-w-0 flex"
+                    label={`Run this trace again — ${glyph.title.toLowerCase()}`}
+                    detail={e.label}
+                  >
                   <button
                     type="button"
                     role="menuitem"
                     data-history-resume
                     onClick={() => onResume(e.index)}
-                    title={`Resume — ${glyph.title}`}
                     className="flex-1 min-w-0 flex items-center gap-2.5 pl-3.5 pr-2 py-2 text-left focus-visible:outline-none focus-visible:bg-black/[0.04] dark:focus-visible:bg-white/[0.06]"
                   >
                     <span
@@ -171,10 +170,18 @@ export function TraceHistoryPanel({
                       {relativeTime(e.timestamp)}
                     </span>
                   </button>
+                  </HoverTip>
                   {/* HAND IT OVER WITHOUT OPENING IT. The trace worth sending
                       is often not the one on screen, and opening it first
                       just to copy a link is a walk nobody needed. */}
                   {onCopyLink && (
+                    <HoverTip
+                      className="flex flex-shrink-0"
+                      label={justCopied
+                        ? (copied?.ok ? 'Link copied' : 'Your browser blocked the clipboard')
+                        : 'Copy a link to this trace'}
+                      detail={justCopied ? undefined : 'Sends it without opening it first'}
+                    >
                     <button
                       type="button"
                       role="menuitem"
@@ -182,9 +189,6 @@ export function TraceHistoryPanel({
                       aria-label={justCopied
                         ? (copied?.ok ? 'Link copied' : 'Copy failed')
                         : `Copy a link to the ${e.label} trace`}
-                      title={justCopied
-                        ? (copied?.ok ? 'Link copied' : 'Your browser blocked the clipboard')
-                        : 'Copy a link to this trace'}
                       onClick={(ev) => { ev.stopPropagation(); void copy(e.index) }}
                       className={cn(
                         'flex items-center justify-center w-9 pr-1.5 flex-shrink-0 transition-all',
@@ -198,6 +202,7 @@ export function TraceHistoryPanel({
                         ? <Check className="w-3.5 h-3.5" strokeWidth={2.6} />
                         : <Link2 className="w-3.5 h-3.5" strokeWidth={2.2} />}
                     </button>
+                    </HoverTip>
                   )}
                 </div>
               )

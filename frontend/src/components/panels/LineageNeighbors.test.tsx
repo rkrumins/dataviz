@@ -276,7 +276,10 @@ describe('LineageNeighbors — counts', () => {
     const consumersCard = screen.getByText('Data Consumers').closest('button')!
     expect(within(sourcesCard).getByText('2')).toBeInTheDocument()
     expect(within(consumersCard).getByText('1')).toBeInTheDocument()
-    expect(screen.getByText(/3 connections/)).toBeInTheDocument()
+    // The header states its unit: these are connected entities (one per
+    // neighbor and kind of relationship), NOT the canvas's lines and NOT
+    // the underlying relationship total.
+    expect(screen.getByText(/3 connected entities/)).toBeInTheDocument()
   })
 
   it('excludes containment edges from the lineage counts', () => {
@@ -610,7 +613,7 @@ describe('on-demand source fetch', () => {
       render(<LineageNeighbors nodeId="focal-x" />)
       // The store alone has NO edges for this node — the count must come
       // from the source fetch, merged exactly like the Lens does it.
-      await waitFor(() => expect(screen.getByText('1 connection')).toBeInTheDocument())
+      await waitFor(() => expect(screen.getByText('1 connected entity')).toBeInTheDocument())
     } finally {
       mockProviderHolder.current = null
     }

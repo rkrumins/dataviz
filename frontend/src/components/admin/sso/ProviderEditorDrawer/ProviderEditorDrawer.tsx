@@ -24,7 +24,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { DocsLink } from '@/components/help/DocsLink'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { IdpProvider } from '@/services/ssoAdminService'
 import { AssurancePill } from '@/components/admin/AssurancePill'
 import { logoFor } from '../IdpLogos'
@@ -52,7 +52,7 @@ export function ProviderEditorDrawer({
     onDeleted: () => void
 }) {
     const ed = useProviderEditor(provider)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
     const titleId = useId()
     const panel = useRef<HTMLDivElement>(null)
     const [confirmDiscard, setConfirmDiscard] = useState(false)
@@ -76,7 +76,7 @@ export function ProviderEditorDrawer({
 
     async function submit() {
         if (await ed.save()) {
-            showToast('success', `Saved ${provider.displayName || provider.slug}`)
+            notify('success', `Saved ${provider.displayName || provider.slug}`)
             onSaved()
             onClose()
         }

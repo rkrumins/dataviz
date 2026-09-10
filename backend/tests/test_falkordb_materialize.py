@@ -1739,3 +1739,168 @@ def test_auto_mode_cube_ceiling_is_independent_of_write_budget():
         "max_materialized_edges": 50_000_000,
     }))
     assert result2["run_stats"]["regime"] == "cube"
+
+
+# ── scan ladder: per-query memory ceiling ────────────────────────────────
+#
+# FalkorDB buffers a query's ENTIRE result set inside its per-query memory
+# budget (QUERY_MEM_CAPACITY) and refuses the query with "Query's mem
+# consumption exceeded capacity" when it doesn't fit. That is deterministic
+# for a given ID-range width, so the pipeline must NARROW the range rather
+# than re-issue the same query — the production failure was a job retried
+# identically three times, each attempt re-running a full EXTRACT.
+
+
+class _MemoryCeiling:
+    """Wraps a fake's ro_query, refusing any ID range wider than ``fits``.
+
+    Mimics the engine: the refusal is a plain exception whose MESSAGE is the
+    signal (FalkorDB surfaces it as a generic ResponseError), and it depends
+    only on how many rows the range could return — never on the attempt
+    number, so an unchanged retry always fails again."""
+
+    def __init__(self, inner, fits, only_aggregated=False):
+        self._inner = inner
+        self._fits = fits
+        self._only_aggregated = only_aggregated
+        self.refusals = 0
+
+    async def __call__(self, cypher, params=None, **kw):
+        params = params or {}
+        lo, hi = params.get("lo"), params.get("hi")
+        targeted = (not self._only_aggregated) or ("r:AGGREGATED" in cypher)
+        if targeted and lo is not None and hi is not None and hi - lo > self._fits:
+            self.refusals += 1
+            raise Exception("Query's mem consumption exceeded capacity")
+        return await self._inner(cypher, params, **kw)
+
+
+def _seeded_provider_with_ceiling(fits, *, only_aggregated=False):
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    ceiling = _MemoryCeiling(fake.ro_query, fits, only_aggregated)
+    p._ro_query = ceiling
+    p._proj_ro_query = ceiling
+    return fake, p, ceiling
+
+
+def test_query_memory_refusal_narrows_the_range_and_the_run_completes(monkeypatch):
+    """The production failure, reproduced: a scan too wide for the server's
+    per-query ceiling must shrink and finish, not fail the job.
+
+    Before the fix this raised out of EXTRACT, was relabelled
+    ProviderUnavailable by the circuit breaker, and burned all three worker
+    retries on the identical query."""
+    monkeypatch.setenv("AGGREGATION_SCAN_SHRINK_FLOOR", "50000")
+    fake, p, ceiling = _seeded_provider_with_ceiling(fits=100_000)
+
+    result = _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    assert ceiling.refusals >= 1, "the ceiling must actually have been hit"
+    # Identical output to an unthrottled run — degrading changes cost, never
+    # the answer.
+    assert set(fake.agg.keys()) == _EXPECTED_PAIRS
+    for edge in fake.agg.values():
+        assert edge["weight"] == 2
+    # …and the degradation is REPORTED: a run that only survived by
+    # narrowing is the warning that the next size increment fails outright.
+    stats = result["run_stats"]
+    assert stats["scan_width_min"] == 100_000
+    assert stats["scan_shrinks"] >= 1
+
+
+def test_query_memory_refusal_on_the_reconcile_scan_recovers(monkeypatch):
+    """RECONCILE is the phase that actually blows the ceiling in production:
+    it projects 11 columns including aggKey (two concatenated URNs) and the
+    sourceEdgeTypes array, so its rows are an order of magnitude wider than
+    EXTRACT's two integers — at the same range width."""
+    monkeypatch.setenv("AGGREGATION_SCAN_SHRINK_FLOOR", "50000")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+    _run(_materialize(p))
+    before = {k: dict(v) for k, v in fake.agg.items()}
+
+    ceiling = _MemoryCeiling(fake.ro_query, 100_000, only_aggregated=True)
+    p._ro_query = ceiling
+    p._proj_ro_query = ceiling
+    result = _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    assert ceiling.refusals >= 1
+    # An unchanged re-run stays a no-op even when it had to degrade.
+    assert set(fake.agg.keys()) == set(before)
+    for key, edge in fake.agg.items():
+        assert edge["weight"] == before[key]["weight"]
+    assert result["run_stats"]["scan_width_min"] == 100_000
+
+
+def test_query_memory_refusal_at_floor_width_is_terminal(monkeypatch):
+    """At the narrowest width the ladder descends to, the payload — not the
+    row count — is the problem, and no retry can change that. It must fail
+    as a ValueError subclass so the circuit breaker ignores it (a too-large
+    query is not a sick provider) and the worker's terminal branch catches
+    it without spending the retry budget."""
+    monkeypatch.setenv("AGGREGATION_SCAN_SHRINK_FLOOR", "10000")
+    _fake, p, _ceiling = _seeded_provider_with_ceiling(fits=0)
+
+    with pytest.raises(mat.MaterializationQueryMemoryExceeded) as exc:
+        _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    # Breaker-ignored classification (circuit._DEFAULT_IGNORED_EXCEPTIONS).
+    assert isinstance(exc.value, ValueError)
+    msg = str(exc.value)
+    # run_stats is persisted on SUCCESS only, so on this path the message is
+    # the entire record the operator gets. It must name the scan, the width,
+    # the server's own words, and the fixes.
+    assert "extract:" in msg
+    assert "10000" in msg
+    assert "Query's mem consumption exceeded capacity" in msg
+    assert "AGGREGATION_SCAN_SHRINK_FLOOR" in msg
+    assert "QUERY_MEM_CAPACITY" in msg
+    assert "NOT retried" in msg
+
+
+def test_terminal_query_memory_message_is_classified_as_query_memory(monkeypatch):
+    """The terminal message must land in its OWN resolution bucket.
+
+    classify_failure tests earlier categories first, so any stray "OOM"
+    (case-sensitive), "timeout", "ontology" or "conflict" in this text would
+    silently route the operator to someone else's guidance."""
+    from backend.app.services.aggregation.service import classify_failure
+
+    monkeypatch.setenv("AGGREGATION_SCAN_SHRINK_FLOOR", "10000")
+    _fake, p, _ceiling = _seeded_provider_with_ceiling(fits=0)
+    with pytest.raises(mat.MaterializationQueryMemoryExceeded) as exc:
+        _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+    assert classify_failure(str(exc.value)) == "query_memory"
+
+
+def test_timeout_at_floor_width_still_propagates_unchanged(monkeypatch):
+    """Regression guard on the pre-existing arm: a floor-width TIMEOUT is a
+    provider outage, not a payload-size fact, and must keep propagating as a
+    TimeoutError so the worker's ordinary retry path handles it."""
+    monkeypatch.setenv("AGGREGATION_SCAN_SHRINK_FLOOR", "10000")
+    fake = _FakeFalkor()
+    levels = _seed_two_chain_graph(fake)
+    p = _make_provider(fake, levels)
+
+    async def always_timeout(cypher, params=None, **kw):
+        if (params or {}).get("lo") is not None:
+            raise asyncio.TimeoutError()
+        return await fake.ro_query(cypher, params, **kw)
+
+    p._ro_query = always_timeout
+    p._proj_ro_query = always_timeout
+
+    with pytest.raises(asyncio.TimeoutError):
+        _run(_materialize(p, tuning={"scan_range_width": 200_000}))
+
+
+def test_clean_run_reports_no_scan_pressure():
+    """An unstressed run's run_stats must be byte-identical to before."""
+    pipe = _make_pipeline()
+    stats = pipe._result(10)["run_stats"]
+    assert "scan_width_min" not in stats
+    assert "scan_shrinks" not in stats

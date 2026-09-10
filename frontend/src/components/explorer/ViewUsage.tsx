@@ -108,7 +108,7 @@ function personalNote(usage: ViewUsage): string | null {
  * Reading order is the point, not the decoration: "12 people" is the answer
  * and "in the last 30 days" is the caveat, so they are not the same size.
  */
-function UsageTip({ icon: Icon, accent, figure, caption, footnote, note }: {
+export function UsageTip({ icon: Icon, accent, figure, caption, footnote, note }: {
     icon: React.ComponentType<{ className?: string }>
     accent: string
     figure: string
@@ -147,10 +147,64 @@ function UsageTip({ icon: Icon, accent, figure, caption, footnote, note }: {
     )
 }
 
-const TIP_ACCENT = {
+export const TIP_ACCENT = {
     people: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
     opens: 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20',
+    /** The trend chip on the view page. Same family as `opens` — it plots the
+     *  same number — one step quieter, because it is the shape, not the total. */
+    trend: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20',
 } as const
+
+/**
+ * The two usage tips, EXPORTED — because there are two surfaces showing the
+ * same two figures, and they had already drifted.
+ *
+ * `UsageTip` was private to this file, so the view page's `ViewUsageBadge`
+ * could only pass `peoplePhrase()` — one line of grey prose — while the
+ * catalogue rendered the card. Same number, same window, two different
+ * answers depending on which page you were standing on. Sharing the phrase
+ * helpers was meant to prevent exactly that and did not go far enough: what
+ * has to be shared is the whole tip.
+ */
+export function PeopleUsageTip({ usage }: { usage: ViewUsage }) {
+    return (
+        <UsageTip
+            icon={Users}
+            accent={TIP_ACCENT.people}
+            figure={
+                usage.onlyAuthor
+                    ? 'Only its author'
+                    : usage.uniqueViewers === 0
+                        ? 'Nobody yet'
+                        : `${exact(usage.uniqueViewers)} ${usage.uniqueViewers === 1 ? 'person' : 'people'}`
+            }
+            caption={
+                usage.onlyAuthor
+                    ? `has opened this in the last ${usage.windowDays} days`
+                    : usage.uniqueViewers === 0
+                        ? `nobody has opened this in the last ${usage.windowDays} days`
+                        : `${usage.uniqueViewers === 1 ? 'has' : 'have'} opened this in the last ${usage.windowDays} days`
+            }
+            note={personalNote(usage)}
+        />
+    )
+}
+
+export function OpensUsageTip({ usage }: { usage: ViewUsage }) {
+    return (
+        <UsageTip
+            icon={Eye}
+            accent={TIP_ACCENT.opens}
+            figure={
+                usage.opens === 0
+                    ? 'Not opened'
+                    : `${exact(usage.opens)} ${usage.opens === 1 ? 'open' : 'opens'}`
+            }
+            caption={`in the last ${usage.windowDays} days`}
+            footnote={opensTail(usage) || null}
+        />
+    )
+}
 
 export function ViewUsageCounters({ usage, className }: {
     usage: ViewUsage | undefined
@@ -158,7 +212,6 @@ export function ViewUsageCounters({ usage, className }: {
 }) {
     if (!usage) return null
 
-    const note = personalNote(usage)
     return (
         <span className={cn('inline-flex items-center gap-2 text-[11px] font-medium text-ink-muted', className)}>
             {/* A tip PER ICON, not one for the pair. A row of small glyphs with
@@ -167,29 +220,7 @@ export function ViewUsageCounters({ usage, className }: {
                 nobody. `HoverTip` rather than `title`: the native one waits a
                 second, renders in OS chrome, and on a card that swaps in hover
                 controls it frequently never appears at all. */}
-            <HoverTip
-                label={
-                    <UsageTip
-                        icon={Users}
-                        accent={TIP_ACCENT.people}
-                        figure={
-                            usage.onlyAuthor
-                                ? 'Only its author'
-                                : usage.uniqueViewers === 0
-                                    ? 'Nobody yet'
-                                    : `${exact(usage.uniqueViewers)} ${usage.uniqueViewers === 1 ? 'person' : 'people'}`
-                        }
-                        caption={
-                            usage.onlyAuthor
-                                ? `has opened this in the last ${usage.windowDays} days`
-                                : usage.uniqueViewers === 0
-                                    ? `nobody has opened this in the last ${usage.windowDays} days`
-                                    : `${usage.uniqueViewers === 1 ? 'has' : 'have'} opened this in the last ${usage.windowDays} days`
-                        }
-                        note={note}
-                    />
-                }
-            >
+            <HoverTip label={<PeopleUsageTip usage={usage} />}>
                 <span className="inline-flex items-center gap-1">
                     {/* People first even here: it is the number that says
                         whether a view is load-bearing. */}
@@ -198,21 +229,7 @@ export function ViewUsageCounters({ usage, className }: {
                     <span className="sr-only">{peoplePhrase(usage)}</span>
                 </span>
             </HoverTip>
-            <HoverTip
-                label={
-                    <UsageTip
-                        icon={Eye}
-                        accent={TIP_ACCENT.opens}
-                        figure={
-                            usage.opens === 0
-                                ? 'Not opened'
-                                : `${exact(usage.opens)} ${usage.opens === 1 ? 'open' : 'opens'}`
-                        }
-                        caption={`in the last ${usage.windowDays} days`}
-                        footnote={opensTail(usage) || null}
-                    />
-                }
-            >
+            <HoverTip label={<OpensUsageTip usage={usage} />}>
                 <span className="inline-flex items-center gap-1">
                     <Eye className="h-3 w-3" aria-hidden />
                     {compact(usage.opens)}

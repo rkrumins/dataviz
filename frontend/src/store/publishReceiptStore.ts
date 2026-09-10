@@ -2,7 +2,7 @@
  * publishReceiptStore — a one-shot receipt for "your changes are now live".
  *
  * Publishing is the moment a draft's work becomes real for everyone else, and until now it was
- * acknowledged with a toast that vanished in three seconds — the same weight as "copied to
+ * acknowledged with a notification that vanished in three seconds — the same weight as "copied to
  * clipboard". Worse, the merge can happen on a *different route* (the Reviews inbox) from the canvas
  * that should reflect it, so the confirmation has to survive a navigation.
  *

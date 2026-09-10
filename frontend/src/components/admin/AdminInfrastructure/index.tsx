@@ -198,7 +198,7 @@ export function AdminInfrastructure() {
                     </div>
 
                     {/* Graph data providers (any type — FalkorDB, Neo4j, …) */}
-                    <GraphProvidersPanel providers={data.graphProviders} />
+                    <GraphProvidersPanel providers={data.graphProviders} services={data.services} projection={data.projection} />
 
                     {/* Workload KPIs — is the work getting done, and how fast */}
                     <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">

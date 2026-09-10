@@ -19,6 +19,7 @@ export type RefreshScope = 'auto' | 'read-caches' | 'rollups' | 'full' | 'clear'
  *  resolution guidance. Mirrors the backend ``classify_failure`` categories. */
 export type FailureCategory =
     | 'out_of_memory'
+    | 'query_memory'
     | 'provider_unavailable'
     | 'ontology'
     | 'timeout'
@@ -33,6 +34,16 @@ export type DriftStateValue =
     // Versioned graph: version control owns its rollups, so the sweep observes
     // and labels it but never acts. Mirrors ``reconcile.DRIFT_STATES``.
     | 'managed'
+    // Versioned, but the projector that maintains those rollups is NOT
+    // current — its watermark trails the published head, or it recorded an
+    // error. While it holds, main reads fall back to the version log, which
+    // carries no rolled-up connections at all, so aggregated lineage is
+    // missing from the canvas right now. RED tier, above ``drifting`` and
+    // deliberately not folded into it: drifting means the raw graph moved and
+    // a rebuild fixes it, this means the rollups are not being served and a
+    // rebuild is the WRONG remedy. The sweep never acts on it; it clears by
+    // itself once the projector catches up.
+    | 'projectionStalled'
 
 /** Why the sweep acted. Mirrors ``reconcile.REASONS``. */
 export type ReconcileReason =
@@ -93,8 +104,32 @@ export interface FreshnessRow {
      *  name the cause without opening the drawer. */
     lastFailureReason?: string | null
     lastFailureCategory?: FailureCategory | null
-    /** True when a live versioned graph exists — mastered here, not external. */
+    /** True when a live versioned graph exists — mastered here, not external.
+     *  Also true under ``projectionStalled``: a wedged source keeps its
+     *  "mastered here" badge at exactly the moment an operator most needs to
+     *  know who owns it. */
     platformMastered?: boolean | null
+
+    // ── Projection health: the evidence behind ``projectionStalled`` ──
+    //
+    // NULL MEANS UNKNOWN, NEVER HEALTHY. All four are null for a source that
+    // is not versioned, for a versioned graph not pinned to a real graph
+    // target (nothing is projected there by design), and when the projection
+    // store could not be read. Never render "up to date" from a null.
+    /** Is this source's projection caught up? ``false`` is the affirmative
+     *  wedge reading — the only value that may drive a warning. */
+    projectorCurrent?: boolean | null
+    /** How many published commits the read cache has not caught up to; 0 when
+     *  current. The "how far behind" number. */
+    projectionCommitsBehind?: number | null
+    /** The projector's own last recorded failure, verbatim. Operator detail —
+     *  belongs in an expander, not the headline. Can be set even while
+     *  ``projectionCommitsBehind`` is 0; that alone makes the source stalled. */
+    projectionLastError?: string | null
+    /** When this reading was taken. Read LIVE per request (cached seconds), so
+     *  it is "as of now" — distinct from ``lastCheckedAt``, which is the
+     *  sweep's fairness stamp. The two will differ and both are correct. */
+    projectionCheckedAt?: string | null
 }
 
 export interface FreshnessDoc extends FreshnessRow {
@@ -275,6 +310,10 @@ export interface FreshnessSummary {
     drifting: number
     /** Circuit breaker tripped — automation stopped; a person has to look. */
     suspended?: number
+    /** Versioned sources whose projector is not current. Its OWN tile — never
+     *  added to ``drifting``, which points at a rebuild that cannot help here.
+     *  Already included in ``needsAttention``: do not add the two together. */
+    projectionStalled?: number
 }
 
 /** Per-provider breakdown of the fleet ``summary`` — identical bucket
@@ -293,6 +332,10 @@ export interface ProviderFreshnessSummary {
     cacheStamped: number
     drifting: number
     suspended?: number
+    /** Same bucket semantics as ``FreshnessSummary.projectionStalled``,
+     *  grouped per provider — and likewise already inside this group's
+     *  ``needsAttention``. */
+    projectionStalled?: number
 }
 
 export interface FreshnessFleetResponse {

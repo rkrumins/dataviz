@@ -6,22 +6,34 @@
  *     navigates to a canvas-bearing route, not on /dashboard or /admin.
  *   - Child routes always mount — they handle their own loading/error states.
  *
- * When the provider is unavailable, the layout renders in degraded mode:
+ * When the schema cannot be read, the layout renders in degraded mode:
  *   - Schema loads from management DB cache (fast, no provider dependency)
  *   - A floating status pill is shown top-center in the canvas
  *   - Graph data queries will fail per-component with inline error messages
+ *
+ * The pill says "Schema unavailable", not "Provider Offline": the schema
+ * endpoints read the management database and never touch the graph
+ * provider, so a failure here says nothing about FalkorDB. A session that
+ * needs renewing (401/403) shows no pill at all — the session-lost and
+ * access-denied flows own that message.
  *
  * AppLayout handles auth, sidebar, topbar, and the view list (lightweight).
  * This component handles the heavier ontology fetch.
  */
 
-import { Outlet } from 'react-router-dom'
+import { Outlet, useMatch } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2, RefreshCw, CloudOff } from 'lucide-react'
-import { useGraphSchema } from '@/hooks/useGraphSchema'
+import { isSchemaAuthError, useGraphSchema } from '@/hooks/useGraphSchema'
+import { MOTION } from '@/lib/motion'
 
 export function CanvasLayout() {
   const { isLoading, isFetching, isError, error, refetch } = useGraphSchema()
+  // This hook reads the GLOBAL scope (the sidebar's active workspace). An
+  // open view fetches its own scope through ViewSchemaGate, so a failure
+  // here says nothing about the view on screen — showing it there put an
+  // amber "offline" pill over a canvas whose own schema was fine.
+  const viewOpen = useMatch('/views/:viewId') !== null
 
   return (
     <>
@@ -30,7 +42,7 @@ export function CanvasLayout() {
 
       {/* Degraded-mode pill — top-center, floating above the canvas */}
       <AnimatePresence>
-        {isError && (
+        {isError && !viewOpen && !isSchemaAuthError(error) && (
           <motion.div
             key="provider-degraded"
             role="status"
@@ -38,14 +50,14 @@ export function CanvasLayout() {
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
-            transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+            transition={MOTION.drawerSlide}
             className="absolute top-4 left-1/2 -translate-x-1/2 z-40"
           >
             <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-amber-50 dark:bg-amber-950/60 border border-amber-300/60 dark:border-amber-500/30 shadow-lg shadow-amber-500/10 backdrop-blur-sm">
               <CloudOff className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-semibold text-amber-800 dark:text-amber-300 whitespace-nowrap">
-                  Provider Offline
+                  Schema unavailable
                 </span>
                 <span className="text-sm text-amber-600/80 dark:text-amber-400/70 hidden sm:inline">
                   — {error instanceof Error ? error.message : 'showing cached data'}

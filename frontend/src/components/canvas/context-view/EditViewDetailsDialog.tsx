@@ -7,7 +7,7 @@
  * persists via viewApiService.updateView and hands the fields back through
  * onSaved so the canvas can refresh the schema store (header updates
  * instantly). A save failure keeps the dialog open with fields intact and
- * surfaces the server detail; a fetch failure toasts and closes.
+ * surfaces the server detail; a fetch failure notifies and closes.
  *
  * Visual conventions follow features/ontology/.../EditDetailsDialog (centred
  * modal, name input + description textarea) with ShareViewDialog's
@@ -20,7 +20,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, PenLine, Loader2, Check } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getView, updateView, type View } from '@/services/viewApiService'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 
 /** Provenance fields shown in the dialog's quiet footer. */
@@ -41,7 +41,7 @@ const FIELD_CLASS =
   'w-full px-3.5 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.03] border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40 focus:border-accent-lineage/40 transition-colors duration-150'
 
 export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditViewDetailsDialogProps) {
-  const { showToast } = useToast()
+  const { notify } = useAppNotifications()
 
   const [loading, setLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -73,7 +73,7 @@ export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditVi
       })
       .catch(err => {
         if (cancelled) return
-        showToast('error', err instanceof Error ? err.message : 'Failed to load view details')
+        notify('error', err instanceof Error ? err.message : 'Failed to load view details')
         onClose()
       })
     return () => { cancelled = true }
@@ -95,7 +95,7 @@ export function EditViewDetailsDialog({ open, viewId, onClose, onSaved }: EditVi
       onSaved(payload)
       onClose()
     } catch (err) {
-      showToast('error', err instanceof Error ? err.message : 'Failed to save view details')
+      notify('error', err instanceof Error ? err.message : 'Failed to save view details')
     } finally {
       setIsSaving(false)
     }

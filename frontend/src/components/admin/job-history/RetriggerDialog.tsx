@@ -13,7 +13,7 @@
  *                                AND its status is failed/cancelled.
  *
  * On confirm, the dialog awaits the parent's promise. Success → close.
- * Failure → propagate so the parent's toast can render; the dialog stays
+ * Failure → propagate so the parent's notification can render; the dialog stays
  * open so the user can retry without losing their overrides.
  */
 import { useEffect, useRef, useState } from 'react'
@@ -104,7 +104,7 @@ export function RetriggerDialog({
             }
             onClose()
         } catch {
-            // Parent owns the toast/error surface. Keep dialog open + form intact.
+            // Parent owns the notification/error surface. Keep dialog open + form intact.
         } finally {
             setLoading(null)
         }

@@ -51,7 +51,7 @@ export function IdentitySection({
             <Field
                 label="Display name"
                 required
-                hint="Shown on the connection card and, unless overridden, on the sign-in button."
+                hint="Shown on the connection card — and on the sign-in button, unless a Button label is set under Login page, in which case that label wins until it is cleared."
             >
                 <TextField
                     mono={false}

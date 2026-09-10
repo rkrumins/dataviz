@@ -19,7 +19,7 @@ import { SlidersHorizontal, Tags, Layers, X } from 'lucide-react'
 import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
-import { useToast } from '@/components/ui/toast'
+import { useAppNotifications } from '@/components/ui/notifications'
 import {
     useDisplayRules,
     useReferenceModelStore,
@@ -32,6 +32,7 @@ import type { Predicate } from '@/types/search'
 import { DisplayRuleEditor } from './DisplayRuleEditor'
 import { DisplayRuleList } from './DisplayRuleList'
 import { PropertyBrowser } from './PropertyBrowser'
+import { MOTION } from '@/lib/motion'
 
 
 export interface PropertyManagerDrawerProps {
@@ -70,7 +71,7 @@ export function PropertyManagerDrawer({
     const removeDisplayRule = useReferenceModelStore((s) => s.removeDisplayRule)
     const toggleDisplayRule = useReferenceModelStore((s) => s.toggleDisplayRule)
     const reorderDisplayRules = useReferenceModelStore((s) => s.reorderDisplayRules)
-    const { showToast } = useToast()
+    const { notify } = useAppNotifications()
 
     const handleSaveRule = (rule: DisplayRuleConfig) => {
         const isUpdate = rules.some((r) => r.id === rule.id)
@@ -81,9 +82,9 @@ export function PropertyManagerDrawer({
         }
         setEditor({ mode: 'closed' })
         // Premium feedback: confirm the rule applied. The engine recomputes
-        // the match set asynchronously; the toast reassures the user the
+        // the match set asynchronously; the notification reassures the user the
         // tag is now live on the canvas.
-        showToast('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
+        notify('success', `“${rule.name}” ${isUpdate ? 'updated' : 'applied'} — tagging matched entities`)
     }
 
     /** Reveal a rule's matched nodes on the canvas by publishing them
@@ -93,7 +94,7 @@ export function PropertyManagerDrawer({
     const handleRevealRule = (rule: DisplayRuleConfig) => {
         const urns = useDisplayRuleMatchStore.getState().matchUrnsByRule.get(rule.id)
         if (!urns || urns.size === 0) {
-            showToast('info', `“${rule.name}” has no matches on the canvas yet`)
+            notify('info', `“${rule.name}” has no matches on the canvas yet`)
             return
         }
         useSearchStore.getState().setResult({
@@ -101,7 +102,7 @@ export function PropertyManagerDrawer({
             matchUrns: urns,
             queryHash: `display-rule:${rule.id}`,
         })
-        showToast('info', `Spotlighting ${urns.size} match${urns.size === 1 ? '' : 'es'} for “${rule.name}”`)
+        notify('info', `Spotlighting ${urns.size} match${urns.size === 1 ? '' : 'es'} for “${rule.name}”`)
     }
 
     // Names of OTHER rules — feeds the editor's duplicate-name guard.
@@ -132,7 +133,7 @@ export function PropertyManagerDrawer({
                     initial={{ width: 0, opacity: 0 }}
                     animate={{ width: 'clamp(380px, 30vw, 520px)', opacity: 1 }}
                     exit={{ width: 0, opacity: 0 }}
-                    transition={{ type: 'spring', stiffness: 400, damping: 35 }}
+                    transition={MOTION.drawerSlide}
                     className={cn(
                         'relative h-full flex-shrink-0 overflow-hidden',
                         'bg-canvas-elevated/98 backdrop-blur-2xl',

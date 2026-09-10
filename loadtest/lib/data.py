@@ -68,6 +68,14 @@ class IdPool:
             return None
         return random.choice(candidates)
 
+    def pick_ws_urns(self) -> Optional[Tuple[str, List[str]]]:
+        """Pick a workspace and its WHOLE discovered URN sample — the canvas
+        view-open scenario's "assigned entities" for one open."""
+        candidates = [(w, urns) for w, urns in self.ws_to_urns.items() if urns]
+        if not candidates:
+            return None
+        return random.choice(candidates)
+
 
 def discover(client) -> IdPool:
     """Best-effort discovery of workspace and datasource IDs.
@@ -163,9 +171,13 @@ def _discover_uncached(client) -> IdPool:
     # randomise over.
     urn_workspaces = pool.workspace_ids[: SETTINGS.urn_pool_workspaces]
     for ws_id in urn_workspaces:
+        # The endpoint embeds its model (``query: NodeQuery = Body(...,
+        # embed=True)``), so the body is ``{"query": {...}}`` exactly as the
+        # frontend sends it; a bare ``{"limit": N}`` is a 422 and left every
+        # graph scenario with an empty pool.
         with client.post(
             f"/api/v1/{ws_id}/graph/nodes/query",
-            json={"limit": SETTINGS.urns_per_workspace},
+            json={"query": {"limit": SETTINGS.urns_per_workspace}},
             name="discover:nodes",
             catch_response=True,
         ) as resp:

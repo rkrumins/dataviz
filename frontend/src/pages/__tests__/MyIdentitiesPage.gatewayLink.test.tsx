@@ -18,7 +18,7 @@ import { MyIdentitiesPage } from '../MyIdentitiesPage'
 
 const {
     listProviders, startIdentityLink, loginWithBackchannel,
-    runAuthenticateTrigger, runBrowserExchange, refresh, showToast,
+    runAuthenticateTrigger, runBrowserExchange, refresh, notify,
     refreshPermissions,
 } = vi.hoisted(() => ({
     listProviders: vi.fn(),
@@ -27,7 +27,7 @@ const {
     runAuthenticateTrigger: vi.fn(),
     runBrowserExchange: vi.fn(),
     refresh: vi.fn(),
-    showToast: vi.fn(),
+    notify: vi.fn(),
     refreshPermissions: vi.fn(),
 }))
 
@@ -55,8 +55,8 @@ vi.mock('@/components/account/AccountShell', () => ({
         passwordSet: true, identities: [], refresh,
     }),
 }))
-vi.mock('@/components/ui/toast', () => ({
-    useToast: () => ({ showToast }),
+vi.mock('@/components/ui/notifications', () => ({
+    useAppNotifications: () => ({ notify }),
 }))
 vi.mock('@/store/auth', () => ({
     useAuthStore: { getState: () => ({ refreshPermissions }) },
@@ -113,7 +113,7 @@ describe('linking a gateway provider', () => {
         // No navigation happened.
         expect(window.location.href).toBe('http://localhost/me/identities')
         await waitFor(() => expect(refresh).toHaveBeenCalled())
-        expect(showToast)
+        expect(notify)
             .toHaveBeenCalledWith('success', 'Corporate Gateway linked')
         await waitFor(() => expect(refreshPermissions).toHaveBeenCalled())
     })
@@ -126,7 +126,7 @@ describe('linking a gateway provider', () => {
 
         expect(await screen.findByText(/did not work/i)).toBeInTheDocument()
         expect(window.location.href).toBe('http://localhost/me/identities')
-        expect(showToast).not.toHaveBeenCalled()
+        expect(notify).not.toHaveBeenCalled()
     })
 })
 

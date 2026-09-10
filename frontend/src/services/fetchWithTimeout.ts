@@ -49,6 +49,10 @@ const CSRF_COOKIE = 'nx_csrf'
 const ACCESS_EXPIRY_COOKIE = 'nx_access_exp'
 const CSRF_HEADER = 'X-CSRF-Token'
 const REFRESH_URL = '/api/v1/auth/refresh'
+/** Re-mints ``nx_csrf`` against the live session WITHOUT rotating it — the
+ *  server-side heal `GET /auth/me` runs on reload, exposed on its own so
+ *  the client can repair a lost cookie in place. See {@link healCsrfToken}. */
+const CSRF_HEAL_URL = '/api/v1/auth/csrf'
 const LOGIN_PATH = '/login'
 const SESSION_LOST_EVENT = 'auth:session-lost'
 /** Dispatched after the session cookies have been rotated, by either
@@ -161,18 +165,6 @@ let sessionLostAt: number | null = null
 
 /** How long one announcement suppresses the next. */
 const SESSION_LOST_WINDOW_MS = 10_000
-
-/**
- * True while a CSRF-triggered repair is running.
- *
- * A page that fires several writes at once would otherwise have each of
- * them independently discover the missing cookie and independently POST
- * /auth/refresh. ``tryRefresh`` already dedupes the network call, but the
- * *retries* would still stampede, and a failed repair would be retried
- * once per request instead of once. One repair per burst is enough: the
- * cookie it re-mints is shared by all of them.
- */
-let csrfRepairInFlight = false
 
 /**
  * Clear the session-lost latch. Called from the auth store's login /
@@ -404,41 +396,101 @@ function readScopedCookie(base: string): string | null {
 }
 
 /**
- * Re-mint ``nx_csrf`` if this session has lost it.
+ * What a CSRF heal established.
  *
- * Rotation is the only thing that writes that cookie, so once it is gone
- * — evicted by a sibling deployment's sign-out, cleared by hand, expired
- * — nothing restores it until the session next rotates. At a 60-minute
- * access TTL that is up to an hour, and a tab doing nothing but reads
- * never triggers a rotation at all: reloading the page issues only GETs,
- * so the cookie stays missing however many times the user refreshes.
+ *   * ``ok``         — the cookie was (re)minted; a write can proceed or replay.
+ *   * ``no-session`` — the server has no live session to heal against (or the
+ *                      call could not be made). The cookie is NOT a session
+ *                      problem to fix here; the caller escalates to a rotation
+ *                      or lets its own request surface the failure.
+ */
+type CsrfHealOutcome = 'ok' | 'no-session'
+
+/**
+ * One in-flight heal, joined by every concurrent caller — the
+ * ``refreshInFlight`` pattern, for the cheaper primitive.
+ */
+let csrfHealInFlight: Promise<CsrfHealOutcome> | null = null
+
+/**
+ * Repair ``nx_csrf`` in place, without rotating the session.
  *
- * Called before any write, and once at bootstrap, so the repair happens
- * when the session is known rather than when a write has already failed.
+ * ``nx_csrf`` can go missing — evicted by a sibling deployment's sign-out
+ * sweeping the shared parent domain, cleared by hand — or arrive as another
+ * deployment's value in a shared jar, while the session stays perfectly
+ * valid. The page cannot tell: the token is bound to the session's ``sid``
+ * under a server secret, and the ``sid`` lives in the HttpOnly access cookie
+ * it cannot read. So the repair cannot be "check it and re-mint locally"; it
+ * has to ask the server, which is the only party that can mint a correctly
+ * bound cookie.
  *
- * Gated on there being a session to rotate. ``readAccessExpiryMs()`` is
- * the client's only evidence of one — the access cookie is HttpOnly — and
- * without that check an anonymous POST to /auth/login or /auth/signup
- * would fire a pointless refresh before every attempt.
+ * ``GET /auth/csrf`` is that ask: the same heal a reload runs on ``/auth/me``,
+ * on its own route. It re-mints the cookie against the live access token and
+ * returns — NO token rotation. That distinction is the whole point. The old
+ * repair rotated the session (``POST /auth/refresh``) to restore one cookie,
+ * which is heavyweight, per-session rate-limited, gated behind the
+ * session-lost latch, and — worst — runs the session ceilings, so a repair
+ * could TRIP THE SSO / idle / absolute ceiling and sign the user out. When it
+ * merely failed transiently it left the 403 stranded until a manual reload:
+ * exactly the "I have to refresh the page" the heal removes.
+ *
+ * Concurrent callers JOIN one heal. Never throws — a network failure resolves
+ * ``no-session`` so the caller's own request reports it.
+ */
+async function healCsrfToken(): Promise<CsrfHealOutcome> {
+  if (csrfHealInFlight) return csrfHealInFlight
+  csrfHealInFlight = (async () => {
+    try {
+      const res = await fetch(CSRF_HEAL_URL, {
+        method: 'GET',
+        credentials: 'include',
+      })
+      return res.ok ? 'ok' : 'no-session'
+    } catch {
+      return 'no-session'
+    } finally {
+      queueMicrotask(() => {
+        csrfHealInFlight = null
+      })
+    }
+  })()
+  return csrfHealInFlight
+}
+
+/**
+ * Re-mint ``nx_csrf`` if this session has lost it, before a write goes out.
+ *
+ * Once the cookie is gone — evicted by a sibling deployment's sign-out,
+ * cleared by hand — nothing used to restore it until the session next
+ * rotated. At a 60-minute access TTL that is up to an hour, and a tab doing
+ * nothing but reads never triggers a rotation at all: reloading the page
+ * issues only GETs, so the cookie stayed missing however many times the user
+ * refreshed. This heals it in place instead — a cheap, non-rotating server
+ * call — so the repair happens when the session is known rather than after a
+ * write has already failed.
+ *
+ * Gated on there being a session at all. ``readAccessExpiryMs()`` is the
+ * client's only evidence of one — the access cookie is HttpOnly — and without
+ * that check an anonymous POST to /auth/login or /auth/signup would fire a
+ * pointless heal before every attempt.
+ *
+ * Concurrent callers JOIN one heal (see {@link healCsrfToken}), so a burst of
+ * writes shares one ``/auth/csrf`` and each proceeds only once the cookie has
+ * been re-minted. The old guard here was a boolean that made joiners SKIP —
+ * they went out headerless mid-repair, 403'd, and the same flag then
+ * suppressed their retry: the intermittent "CSRF token missing or invalid".
  */
 export async function ensureCsrfToken(): Promise<void> {
   if (
-    csrfRepairInFlight
-    || onLoginRoute()
+    onLoginRoute()
     || readScopedCookie(CSRF_COOKIE) !== null
     || readAccessExpiryMs() === null
   ) {
     return
   }
-  csrfRepairInFlight = true
-  try {
-    await tryRefresh()
-  } catch {
-    // Let the caller's own request report the failure rather than
-    // inventing one here.
-  } finally {
-    csrfRepairInFlight = false
-  }
+  // Never rejects; a heal that cannot run is reported by the caller's own
+  // request, not invented here.
+  await healCsrfToken()
 }
 
 /**
@@ -698,7 +750,10 @@ async function notifyAccessDenied(res: Response, requestPath: string): Promise<v
  * preserved.
  *
  * Factored out so both the original attempt and the post-refresh retry
- * re-read a possibly-rotated ``nx_csrf`` cookie.
+ * re-read a possibly-rotated ``nx_csrf`` cookie. Its placement INSIDE
+ * ``runOnce`` is load-bearing: every attempt — original, post-refresh,
+ * post-repair — snapshots the cookie at send time, keeping the
+ * header/cookie skew window as narrow as the runtime allows.
  */
 function buildHeaders(
   method: string,
@@ -841,7 +896,7 @@ export async function fetchWithTimeout(
   // NOT short-circuit the request — the calling service still gets the
   // Response and can shape its own error handling — we just announce
   // the denial centrally so the user sees a clear "you don't have X"
-  // message instead of a generic toast.
+  // message instead of a generic notification.
   //
   // Callers can opt out with ``silent403: true`` when the 403 is an
   // expected outcome for a user tier (a background probe firing an
@@ -865,25 +920,38 @@ export async function fetchWithTimeout(
         return res
       }
       // A CSRF failure is NOT an authorization failure, and it has a
-      // repair the authorization case does not: every rotation re-mints
-      // ``nx_csrf``, so a session that is still valid can fix itself by
-      // refreshing once.
+      // repair the authorization case does not: the ``nx_csrf`` cookie can
+      // go missing while the session stays perfectly valid — signing out
+      // of a sibling deployment evicts it across the parent domain they
+      // share — and a still-live session can restore it in place.
       //
-      // Without this the user is simply stuck. The cookie can go missing
-      // while the session stays live — signing out of a sibling
-      // deployment evicts it across the parent domain they share — and
-      // nothing else re-mints it, because a 403 does not trigger the
-      // refresh path the way a 401 does. Every write then fails forever,
-      // reported as a permission the user demonstrably has.
+      // Heal FIRST, rotate only if there is nothing to heal. The cookie
+      // being gone is not a session problem: ``GET /auth/csrf`` re-mints
+      // it against the live access token without a rotation, so a repair
+      // can never trip a session ceiling and sign the user out, is not
+      // rate-limited per session, and is not gated behind the
+      // session-lost latch — all the ways the old refresh-based repair
+      // could fail and strand the 403 until a manual page reload. Only a
+      // heal that reports no live session (``no-session``) escalates to a
+      // rotation, which re-mints the cookie as a side effect and covers
+      // the case where the access token had also lapsed.
       //
       // Guarded on ``skipAuthRefresh`` for the same reason as the 401
-      // path: it marks a call that already came from a refresh, and
-      // refreshing again there would loop.
+      // path: it marks a call that already came from a repair, and
+      // repairing again there would loop.
       if (body?.detail?.error === 'csrf_failed') {
-        if (!skipAuthRefresh && !csrfRepairInFlight) {
-          csrfRepairInFlight = true
+        if (!skipAuthRefresh) {
+          // One repair + one replay per failed request, structurally —
+          // no loop. A 403 landing while another heal is in flight JOINS
+          // it (``healCsrfToken`` dedupes); one landing after a heal
+          // finished still gets its own. The old extra guard here
+          // suppressed the retry exactly when a repair was running — the
+          // one moment a retry was guaranteed to help.
           try {
-            if ((await tryRefresh()) === 'ok') {
+            if (
+              (await healCsrfToken()) === 'ok'
+              || (await tryRefresh()) === 'ok'
+            ) {
               // Retry with a header rebuilt from the re-minted cookie —
               // ``runOnce`` reads it fresh, so nothing has to be threaded
               // through.
@@ -891,15 +959,13 @@ export async function fetchWithTimeout(
             }
           } catch {
             // Fall through to the report below.
-          } finally {
-            csrfRepairInFlight = false
           }
         }
         // Repair did not run, or did not help. Say what actually
         // happened rather than showing the access-denied modal for a
         // permission the user holds.
         console.warn(
-          '[auth] CSRF token missing or stale and a refresh did not '
+          '[auth] CSRF token missing or stale and a repair did not '
           + 'restore it. Writes will fail until the session is renewed.',
         )
         return res

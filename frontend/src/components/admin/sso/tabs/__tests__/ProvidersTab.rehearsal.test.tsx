@@ -13,6 +13,9 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProvidersTab } from '../ProvidersTab'
+import {
+    NotificationStack, useNotificationStore,
+} from '@/components/ui/notifications'
 import { ssoAdminService, type IdpProvider } from '@/services/ssoAdminService'
 import {
     runAuthenticateCall, runBrowserExchangeCall,
@@ -69,6 +72,7 @@ function forwardingRow(): IdpProvider {
 
 beforeEach(() => {
     vi.clearAllMocks()
+    useNotificationStore.setState({ notifications: [], history: [], _nextId: 1 })
     svc.listProviders.mockResolvedValue([forwardingRow()])
     svc.providerStatus.mockResolvedValue({ providers: [] })
     svc.startDryRun.mockResolvedValue({ loginUrl: 'https://app/login?dry=1' })
@@ -82,7 +86,7 @@ beforeEach(() => {
 describe('rehearsing a forwarding browser-mode row', () => {
     it('hands the trigger token into the translate call it makes', async () => {
         const user = userEvent.setup()
-        render(<ProvidersTab />)
+        render(<><ProvidersTab /><NotificationStack /></>)
         await user.click(
             await screen.findByRole('button', { name: 'rehearse corp' }),
         )
@@ -113,7 +117,7 @@ describe('rehearsing a forwarding browser-mode row', () => {
 
     it('walks away on Cancel without touching the IdP', async () => {
         const user = userEvent.setup()
-        render(<ProvidersTab />)
+        render(<><ProvidersTab /><NotificationStack /></>)
         await user.click(
             await screen.findByRole('button', { name: 'rehearse corp' }),
         )

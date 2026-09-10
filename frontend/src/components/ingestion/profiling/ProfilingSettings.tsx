@@ -32,6 +32,7 @@ import { PROFILING_KEY, useProfilingPolicy } from '@/hooks/useProfiling'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { Segmented } from './BoardFilters'
 import { INHERIT_DEFAULT, type ProfilingPolicy } from '@/types/profiling'
+import { MOTION } from '@/lib/motion'
 import {
     RetentionSummary, RetentionTimeline, StorageEstimate, type Tiers,
 } from './RetentionTimeline'
@@ -229,7 +230,7 @@ export function ProfilingSettings({
                 aria-label="Profiling policy"
                 initial={{ x: '100%' }}
                 animate={{ x: 0 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 40 }}
+                transition={MOTION.modalSpring}
                 className={cn(
                     'fixed right-0 top-0 z-50 h-full w-full max-w-lg',
                     'flex flex-col bg-canvas border-l border-glass-border shadow-2xl',
