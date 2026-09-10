@@ -192,13 +192,25 @@ def _wire(monkeypatch, *, nodes, providers, data_sources=(), workspaces=None,
         def all(self):
             return list(self._rows)
 
+        def first(self):
+            return self._rows[0] if self._rows else None
+
     class _Session:
         def __init__(self):
             self.calls = 0
 
         async def execute(self, query):
             self.calls += 1
-            return _Result(providers if self.calls == 1 else list(data_sources))
+            if self.calls == 1:
+                return _Result(providers)
+            # The existence check that decides whether the environment's own
+            # store is part of this deployment asks for sources with NO
+            # provider; everything else asks for the sources themselves.
+            text = str(query)
+            if "provider_id IS NULL" in text and "workspaces" not in text.lower():
+                return _Result([ds for ds, _ws in data_sources
+                                if getattr(ds, "provider_id", None) is None])
+            return _Result(list(data_sources))
 
         async def get(self, orm, key):
             return types.SimpleNamespace(tuning_json=tuning) if tuning else None
@@ -706,18 +718,49 @@ def test_inactive_and_non_falkordb_providers_are_left_alone(monkeypatch):
     assert [p.id for i in snap.instances for p in i.providers] == ["p1"]
 
 
-def test_the_environment_default_instance_appears_only_when_configured(monkeypatch):
-    monkeypatch.delenv("FALKORDB_HOST", raising=False)
-    monkeypatch.delenv("FALKORDB_MODE", raising=False)
-    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
-    assert len(_run(topology.get_topology_snapshot()).instances) == 1
-
+def test_the_environment_store_appears_only_where_something_uses_it(monkeypatch):
+    """FALKORDB_HOST being set is not the same as there being a default
+    graph store. It is the connection this application was bootstrapped
+    with; a deployment whose sources all route through provider rows does
+    not have one, and a card for it invents a store the operator has to
+    explain away — with a phantom node's memory in the fleet totals."""
     monkeypatch.setenv("FALKORDB_HOST", "10.0.0.1")
     monkeypatch.setenv("FALKORDB_PORT", "6379")
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
+
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()],
+          data_sources=[(_ds("ds1", provider="p1", graph="g1"), "Data")])
+    snap = _run(topology.get_topology_snapshot())
+    assert len(snap.instances) == 1 and not snap.instances[0].env_default
+
+    # A source that never got a provider row still runs somewhere, and its
+    # graphs are as real as any other: that store belongs on the page.
     topology._cache = None
+    _wire(monkeypatch, nodes=_cluster_nodes({"graphs": {MASTERS[0]: ["g_orphan"]}}),
+          providers=[_provider()],
+          data_sources=[(_ds("ds1", provider="p1", graph="g1"), "Data"),
+                        (_ds("ds2", provider=None, graph="g_orphan"), "Data")])
     snap = _run(topology.get_topology_snapshot())
     assert len(snap.instances) == 2
-    assert any(i.env_default for i in snap.instances)
+    env = next(i for i in snap.instances if i.env_default)
+    # …and attributed to it, not reported as an orphan nobody claims.
+    rows = {g.key: g for sh in env.shards for g in sh.graphs}
+    assert rows["g_orphan"].role == "source"
+    assert [d.id for d in rows["g_orphan"].data_sources] == ["ds2"]
+
+    # …and every view that asks "where does this source live" resolves it,
+    # rather than telling its owner no store is configured for a graph the
+    # page two clicks away is listing.
+    env_for_unrouted = topology.instance_for_provider(snap, "")
+    assert env_for_unrouted is not None and env_for_unrouted.env_default
+    placement = topology.placement_for_graph(snap, "", "g_orphan")
+    assert placement is not None and placement.present
+
+    # A deployment with no provider rows at all is nothing BUT that store.
+    topology._cache = None
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[])
+    snap = _run(topology.get_topology_snapshot())
+    assert len(snap.instances) == 1 and snap.instances[0].env_default
 
 
 def test_the_order_never_depends_on_utilisation(monkeypatch):
@@ -870,7 +913,7 @@ def test_restart_evidence_survives_a_sweep_that_fails_half_way(monkeypatch):
     def _boom(*a, **kw):
         raise RuntimeError("a node vanished mid-assembly")
 
-    monkeypatch.setattr(topology, "_assemble_instance", _boom)
+    monkeypatch.setattr(topology, "_assemble_nodes", _boom)
     topology._cache = None
     with pytest.raises(RuntimeError, match="mid-assembly"):
         _run(topology.get_topology_snapshot())
@@ -898,3 +941,85 @@ def test_one_sweep_serves_concurrent_viewers(monkeypatch):
     snaps = _run(scenario())
     assert calls["n"] == 1
     assert all(s.summary.nodes_total == 9 for s in snaps)
+
+
+# ── one physical store, however many rows point at it ────────────────────
+
+
+def test_two_providers_on_one_cluster_keep_both_their_graphs(monkeypatch):
+    """Two rows can list disjoint seeds of the same cluster. They fold onto
+    one card — and the graphs of BOTH must survive the fold, or the second
+    provider's sources read as orphans nobody claims on a store that is
+    holding them perfectly well."""
+    nodes = _cluster_nodes({"graphs": {MASTERS[0]: [], MASTERS[1]: [], MASTERS[2]: []}})
+    for master in MASTERS:
+        nodes[master]["graphs"] = ["g_from_p1", "g_from_p2"]
+    _wire(
+        monkeypatch, nodes=nodes,
+        providers=[_provider("p1", "Falkor A", seeds=("10.0.0.1:6379",)),
+                   _provider("p2", "Falkor B", seeds=("10.0.0.2:6379",), host="10.0.0.2")],
+        data_sources=[(_ds("ds1", provider="p1", graph="g_from_p1"), "Data"),
+                      (_ds("ds2", provider="p2", graph="g_from_p2"), "Data")],
+    )
+    snap = _run(topology.get_topology_snapshot())
+    assert len(snap.instances) == 1                      # one store, not two
+    instance = snap.instances[0]
+    assert {p.id for p in instance.providers} == {"p1", "p2"}
+
+    rows = {g.key: g for s in instance.shards for g in s.graphs}
+    assert rows["g_from_p1"].role == "source"
+    assert rows["g_from_p2"].role == "source"            # not "unregistered"
+    assert [d.id for d in rows["g_from_p2"].data_sources] == ["ds2"]
+    assert instance.totals.unregistered_graphs == 0
+    # Each row asked the nodes to measure its OWN graphs; the fold keeps
+    # both answers, or the second provider's sources are sized by estimate
+    # on a store that measured them.
+    assert rows["g_from_p1"].measured_bytes and rows["g_from_p2"].measured_bytes
+
+    # …and each provider's own view resolves to that one store.
+    for pid in ("p1", "p2"):
+        assert topology.instance_for_provider(snap, pid) is not None
+
+
+def test_one_node_named_two_ways_is_not_counted_twice(monkeypatch):
+    """A standalone store reached as a DNS name by one row and an address by
+    another is ONE server. Two cards would double its memory in the fleet
+    total and report twice as many nodes as the deployment has."""
+    same_run = "run-shared-node"
+    nodes = {
+        "falkordb:6379": {
+            "info": _master_info("falkordb:6379", run_id=same_run),
+            "graphs": ["g1"], "graph_config": {}, "ping": True,
+        },
+        "10.0.0.1:6379": {
+            "info": _master_info("10.0.0.1:6379", run_id=same_run),
+            "graphs": ["g1"], "graph_config": {}, "ping": True,
+        },
+    }
+    _wire(
+        monkeypatch, nodes=nodes,
+        providers=[_provider("p1", "By name", mode="standalone", host="falkordb"),
+                   _provider("p2", "By address", mode="standalone", host="10.0.0.1")],
+        data_sources=[(_ds("ds1", provider="p1", graph="g1"), "Data")],
+    )
+    snap = _run(topology.get_topology_snapshot())
+    assert len(snap.instances) == 1
+    assert {p.id for p in snap.instances[0].providers} == {"p1", "p2"}
+    assert snap.summary.nodes_total == 1
+    assert snap.summary.used_memory == 10 * GB          # not 20
+
+
+def test_no_default_store_is_invented_where_every_source_has_a_provider(monkeypatch):
+    """FALKORDB_HOST is the connection the app was bootstrapped with. Where
+    every source routes through a provider row, it is not a store anyone
+    uses — and a card for it invents a "default graph store" the operator
+    does not have, adds its memory to the fleet, and reports an outage on
+    something nobody reads when the address is stale."""
+    monkeypatch.setenv("FALKORDB_HOST", "10.9.9.9")
+    monkeypatch.setenv("FALKORDB_PORT", "6379")
+    monkeypatch.delenv("FALKORDB_MODE", raising=False)
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()],
+          data_sources=[(_ds("ds1", provider="p1", graph="g1"), "Data")])
+    snap = _run(topology.get_topology_snapshot())
+    assert [i.env_default for i in snap.instances] == [False]
+    assert len(snap.instances) == 1

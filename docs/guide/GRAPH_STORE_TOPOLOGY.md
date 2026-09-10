@@ -28,6 +28,31 @@ is built on them:
 usually a master is down and no replica has been promoted yet. Keys in those
 slots cannot be read or written until one is.
 
+### One card per store, named by the providers that use it
+
+The page groups by **store**, not by provider row, because memory, nodes,
+slots and replication are properties of the servers — not of a row in a table.
+Rows that turn out to point at the same store therefore share one card, titled
+with all of their names, and the card says so in a line under the heading.
+
+Deciding that is not a matter of comparing connection settings: two rows can
+list disjoint seeds of one cluster, or name one node by its service name and
+by its address. So the nodes are asked. Overlapping cluster node ids — or, off
+a cluster, the same Redis run id — mean one store, and the rows fold together.
+Without the fold every figure on that store is counted once per row, and the
+fleet strip reports twice the memory and twice the nodes the deployment has.
+
+What *is* per provider is the graph inventory: each row on a shard card names
+the data source that owns it, so on a shared store you can still see which of
+the providers a graph belongs to.
+
+A card titled **Store with no provider** is the store named by this
+application's own environment settings. It appears only when data sources that
+were never given a provider still run on it, or when there are no provider
+rows at all. Where every source routes through a provider, that connection is
+what the application was bootstrapped with rather than a store anyone reads,
+and the page does not show it — there is no "default graph store" to explain.
+
 ---
 
 ## Reading the page
@@ -36,7 +61,7 @@ slots cannot be read or written until one is.
 
 | Figure | What it means |
 | --- | --- |
-| Graph stores | Distinct stores. Providers pointing at the same cluster count once. |
+| Graph stores | Distinct stores, and how many provider rows point at them. Rows sharing a store count the store once. |
 | Master shards | Slot-range owners across all stores. |
 | Replicas | Copies standing by. Zero means a node failure loses that shard's availability until it comes back. |
 | Nodes answering | How many nodes replied to this reading. Anything below the total is listed in red near the top. |

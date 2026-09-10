@@ -30,7 +30,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from backend.app.providers.falkordb_connection import (
     FalkorDBConnConfig,
@@ -163,13 +163,20 @@ def _instance_id(key: Tuple) -> str:
     return hashlib.sha1("|".join(str(k) for k in key).encode()).hexdigest()[:12]
 
 
-def _pending_instances(rows: Sequence[Any]) -> List[_Pending]:
+def _pending_instances(rows: Sequence[Any], *, env_in_use: bool) -> List[_Pending]:
     """Every active FalkorDB provider row → the instances to sweep.
 
-    The environment's own default instance joins the list when it is
-    configured and no provider row already covers it: graphs that were
-    never routed to a provider still live somewhere, and a page that omits
-    that store is lying by omission.
+    The store named by the environment joins the list only when something
+    actually depends on it: a deployment with no FalkorDB provider rows at
+    all, or sources that never got one (``env_in_use``). Otherwise
+    ``FALKORDB_HOST`` is the connection this application was bootstrapped
+    with, not a store anybody reads — and a card for it invents a "default
+    graph store" the operator does not have, adds a phantom node's memory
+    to the fleet totals, and reports an outage on an address nothing uses
+    when it is left over from another environment.
+
+    Where it IS used, graphs that were never routed to a provider still
+    live somewhere, and a page that omits that store is lying by omission.
     """
     from backend.app.db.repositories import provider_repo
     from backend.app.providers.falkor_graph_registry import conn_config_from_row
@@ -200,46 +207,101 @@ def _pending_instances(rows: Sequence[Any]) -> List[_Pending]:
         env_cfg.mode in ("cluster", "sentinel")
         or bool(os.getenv("FALKORDB_HOST"))
     )
+    depended_on = env_in_use or not pending
     env_key = _identity(env_cfg)
-    if configured and env_key not in pending:
+    if configured and depended_on and env_key not in pending:
         pending[env_key] = _Pending(key=env_key, cfg=env_cfg, env_default=True)
     return list(pending.values())
 
 
-def _merge_by_node_ids(instances: List[GraphStoreInstance]) -> List[GraphStoreInstance]:
-    """Fold cluster instances that turned out to be the same cluster.
+def _server_identity(instance: GraphStoreInstance) -> Set[str]:
+    """What the SERVERS behind an instance call themselves.
 
-    Two provider rows can list disjoint seeds of one cluster — different
-    identities, same store. Discovery settles it: overlapping master node
-    ids mean one cluster, and the providers merge onto one card.
+    A cluster node id where there is one, and otherwise the Redis run id,
+    which is regenerated per server process and so is unique across a
+    deployment. Connection settings cannot answer this — one node reached
+    as a service name by one provider row and as an address by another is
+    two identities and one server — so the nodes are asked.
     """
-    out: List[GraphStoreInstance] = []
-    for instance in instances:
-        ids = {s.master.node_id for s in instance.shards if s.master.node_id}
+    out: Set[str] = set()
+    for shard in instance.shards:
+        node_id = shard.master.node_id
+        run_id = shard.master.server.run_id
+        if node_id:
+            out.add(f"node:{node_id}")
+        elif run_id:
+            out.add(f"run:{run_id}")
+    return out
+
+
+def _merge_by_node_ids(
+    instances: List[Tuple[int, GraphStoreInstance]],
+) -> List[Tuple[List[int], GraphStoreInstance]]:
+    """Fold instances that turned out to be the same store.
+
+    Two provider rows can list disjoint seeds of one cluster, or name one
+    standalone node by its service name and by its address — different
+    connection settings, same store. Discovery settles it: overlapping
+    server identities mean one store, and the rows merge onto one card.
+    Without the fold every figure on that store is counted once per row.
+    """
+    out: List[Tuple[List[int], GraphStoreInstance]] = []
+    for idx, instance in instances:
+        ids = _server_identity(instance)
         target = None
-        if ids and instance.mode == "cluster":
-            for existing in out:
-                if existing.mode != "cluster":
-                    continue
-                existing_ids = {s.master.node_id for s in existing.shards if s.master.node_id}
-                if existing_ids & ids:
-                    target = existing
-                    break
+        for existing_idxs, existing in out:
+            if not ids or existing.mode != instance.mode:
+                continue
+            if _server_identity(existing) & ids:
+                target, target_idxs = existing, existing_idxs
+                break
         if target is None:
-            out.append(instance)
+            out.append(([idx], instance))
             continue
+        # Both rows' reads stay in play: each asked the same nodes to measure
+        # ITS OWN graphs, so dropping one leaves the other row's sources
+        # sized by estimate on a store that measured them.
+        target_idxs.append(idx)
         known = {p.id for p in target.providers}
         target.providers.extend(p for p in instance.providers if p.id not in known)
         target.seeds = sorted(set(target.seeds) | set(instance.seeds))
-        target.env_default = target.env_default or instance.env_default
+        # A store with a provider row is that provider's, whatever else also
+        # points at it: keeping the flag here would put "env default" on a
+        # card the operator manages as a provider.
+        target.env_default = bool(target.env_default and instance.env_default)
     return out
 
 
 # ── The data-source join ─────────────────────────────────────────────────
 
 
+async def _env_store_in_use(session: Any) -> bool:
+    """Whether any live data source still routes through the environment's
+    store rather than a provider row.
+
+    One existence check, not a scan: it only decides whether that store is
+    part of this deployment at all.
+    """
+    from sqlalchemy import select
+
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    try:
+        row = (await session.execute(
+            select(WorkspaceDataSourceORM.id).where(
+                WorkspaceDataSourceORM.deleted_at.is_(None),
+                WorkspaceDataSourceORM.provider_id.is_(None),
+            ).limit(1)
+        )).first()
+    except Exception as exc:                          # noqa: BLE001 — a sweep is not a migration
+        logger.info("graph store: could not tell whether the environment store "
+                    "is in use (%s) — assuming it is.", _err(exc))
+        return True
+    return row is not None
+
+
 async def _expected_graphs(
-    session: Any, provider_ids: Sequence[str],
+    session: Any, provider_ids: Sequence[str], *, include_unrouted: bool = False,
 ) -> Dict[Tuple[str, str], List[Tuple[str, DataSourceRef]]]:
     """``(provider_id, graph_key)`` → the data sources that own that key.
 
@@ -248,22 +310,25 @@ async def _expected_graphs(
     on a different shard than the source graph. That surprise is exactly
     what the placement views exist to show, so both keys are registered.
     """
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
     from ..aggregation.capacity import graph_key_of
 
     out: Dict[Tuple[str, str], List[Tuple[str, DataSourceRef]]] = {}
-    if not provider_ids:
+    if not provider_ids and not include_unrouted:
         return out
+    # A source with no provider row runs on the environment's store, and its
+    # graphs are as real as any other: leaving it out of the query reported
+    # every one of them as an orphan nobody claims.
+    routed = WorkspaceDataSourceORM.provider_id.in_(list(provider_ids))
+    owned = or_(routed, WorkspaceDataSourceORM.provider_id.is_(None)) \
+        if include_unrouted else routed
     rows = (await session.execute(
         select(WorkspaceDataSourceORM, WorkspaceORM.name)
         .join(WorkspaceORM, WorkspaceORM.id == WorkspaceDataSourceORM.workspace_id,
               isouter=True)
-        .where(
-            WorkspaceDataSourceORM.deleted_at.is_(None),
-            WorkspaceDataSourceORM.provider_id.in_(list(provider_ids)),
-        )
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None), owned)
     )).all()
     for ds, workspace_name in rows:
         ref = DataSourceRef(
@@ -618,7 +683,7 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     from sqlalchemy import select
 
     from backend.app.db.models import ProviderORM
-    from ..aggregation.capacity import _stored_tuning, effective_limits
+    from ..aggregation.capacity import _stored_tuning, effective_limits, shard_row
 
     global _prev_nodes
 
@@ -627,9 +692,12 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
         rows = (await session.execute(
             select(ProviderORM).order_by(ProviderORM.created_at)
         )).scalars().all()
-        pending = _pending_instances(rows)
+        pending = _pending_instances(rows, env_in_use=await _env_store_in_use(session))
         provider_ids = [p.id for slot in pending for p in slot.providers]
-        expected = await _expected_graphs(session, provider_ids)
+        expected = await _expected_graphs(
+            session, provider_ids,
+            include_unrouted=any(slot.env_default for slot in pending),
+        )
         limits = effective_limits(await _stored_tuning(session))
 
     discovered = await asyncio.gather(*(
@@ -661,13 +729,22 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     previous = dict(_prev_nodes)
 
     bytes_per_edge = int(limits.bytes_per_edge.value or 512)
-    instances: List[GraphStoreInstance] = []
-    for idx, (slot, raw) in enumerate(paired):
-        instance = _assemble_instance(
-            idx, slot, raw, reads, expected, previous, bytes_per_edge, limits,
+    assembled: List[Tuple[int, GraphStoreInstance]] = [
+        (idx, _assemble_nodes(idx, slot, raw, reads, previous))
+        for idx, (slot, raw) in enumerate(paired)
+    ]
+    # Fold first: which graphs an instance is expected to hold depends on
+    # every provider row that points at it, and two rows on one store only
+    # become one row list here.
+    merged = _merge_by_node_ids(assembled)
+    for idxs, instance in merged:
+        _attach_graphs(
+            instance, idxs, reads, _expected_here(expected, instance), bytes_per_edge,
         )
-        instances.append(instance)
-    instances = _merge_by_node_ids(instances)
+        for shard in instance.shards:
+            shard.capacity = shard_row(reading_of(shard.master), limits)
+        instance.totals = _totals(instance)
+    instances = [instance for _idxs, instance in merged]
     instances.sort(key=lambda i: (
         (i.providers[0].name or "").lower() if i.providers else "~env", i.id,
     ))
@@ -700,23 +777,14 @@ async def build_snapshot() -> GraphStoreTopologyResponse:
     )
 
 
-def _assemble_instance(
+def _assemble_nodes(
     idx: int, slot: _Pending, raw: RawTopology,
     reads: Dict[Tuple[int, str], Dict[str, Any]],
-    expected: Dict[Tuple[str, str], List[Tuple[str, DataSourceRef]]],
     previous: Dict[str, Dict[str, Any]],
-    bytes_per_edge: int,
-    limits: Any,
 ) -> GraphStoreInstance:
-    from ..aggregation.capacity import shard_row
-
-    provider_ids = {p.id for p in slot.providers}
-    # Every graph key this instance's providers expect, so a registered
-    # graph that is NOT on its node still shows up (with `present` false)
-    # instead of vanishing from the page.
-    expected_here = {
-        key: owners for (pid, key), owners in expected.items() if pid in provider_ids
-    }
+    """The store's NODES. What lives on them is attached after the fold —
+    two provider rows on one store only become one row list there, and the
+    graphs an instance is expected to hold follow from that list."""
     shards: List[GraphStoreShard] = []
     for index, (raw_master, raw_replicas) in enumerate(raw.shards):
         master = _node_from_read(raw_master, reads[(idx, raw_master.endpoint)], previous)
@@ -746,11 +814,25 @@ def _assemble_instance(
         slots_missing=raw.slots_missing,
         shards=shards,
     )
-    _attach_graphs(instance, idx, reads, expected_here, bytes_per_edge)
-    for shard in instance.shards:
-        shard.capacity = shard_row(reading_of(shard.master), limits)
-    instance.totals = _totals(instance)
     return instance
+
+
+def _expected_here(
+    expected: Dict[Tuple[str, str], List[Tuple[str, DataSourceRef]]],
+    instance: GraphStoreInstance,
+) -> Dict[str, List[Tuple[str, DataSourceRef]]]:
+    """Every graph key THIS store's rows expect, so a registered graph that
+    is not on its node still shows up (with ``present`` false) instead of
+    vanishing — and so a graph belonging to the second row on a shared
+    store is not reported as an orphan nobody claims.
+
+    Sources that never got a provider row are keyed by the empty string and
+    belong to the environment's store, the only instance that has no rows.
+    """
+    ids = {p.id for p in instance.providers}
+    if instance.env_default:
+        ids.add("")
+    return {key: owners for (pid, key), owners in expected.items() if pid in ids}
 
 
 def _seeds_of(cfg: FalkorDBConnConfig) -> List[str]:
@@ -762,7 +844,7 @@ def _seeds_of(cfg: FalkorDBConnConfig) -> List[str]:
 
 
 def _attach_graphs(
-    instance: GraphStoreInstance, idx: int,
+    instance: GraphStoreInstance, idxs: Sequence[int],
     reads: Dict[Tuple[int, str], Dict[str, Any]],
     expected_here: Dict[str, List[Tuple[str, DataSourceRef]]],
     bytes_per_edge: int,
@@ -801,9 +883,15 @@ def _attach_graphs(
             by_shard.setdefault(shard.index, []).append(row)
 
     for shard in instance.shards:
-        read = reads.get((idx, shard.master.endpoint)) or {}
-        measured = read.get("measured") or {}
-        for key in read.get("graphs") or []:
+        listed: List[str] = []
+        measured: Dict[str, Any] = {}
+        for idx in idxs:
+            read = reads.get((idx, shard.master.endpoint)) or {}
+            for key in read.get("graphs") or []:
+                if key not in listed:
+                    listed.append(key)
+            measured.update(read.get("measured") or {})
+        for key in listed:
             _add(key, True, measured.get(key), on_shard=shard)
     for key in expected_here:
         _add(key, False, None)
@@ -967,8 +1055,16 @@ def conn_config_of(instance_id: str) -> Optional[FalkorDBConnConfig]:
 def instance_for_provider(
     snapshot: GraphStoreTopologyResponse, provider_id: str,
 ) -> Optional[GraphStoreInstance]:
+    wanted = str(provider_id or "")
+    if not wanted:
+        # A source with no provider row runs on the store the environment
+        # names — the one instance that has no rows. Without this the
+        # capacity and placement views tell its owner "no graph store is
+        # configured for this source's provider", about a graph the page
+        # two clicks away is listing.
+        return next((i for i in snapshot.instances if i.env_default), None)
     for instance in snapshot.instances:
-        if any(p.id == str(provider_id) for p in instance.providers):
+        if any(p.id == wanted for p in instance.providers):
             return instance
     return None
 

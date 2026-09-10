@@ -13,6 +13,17 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**One card per graph store, named by the providers that use it.** Grouping is
+settled by asking the nodes, not by comparing connection settings: two provider rows can list
+disjoint seeds of one cluster, or name one node by its service name and by its address, and
+overlapping cluster node ids — or, off a cluster, the same Redis run id — mean one store. They
+fold onto one card, which says how many rows point at it, and the fleet totals count the store
+once instead of once per row. The graphs stay attributed per provider through the fold, where
+the second row's sources previously read as orphans nobody claimed. And the store named by the
+environment is shown only where something still uses it — a source that never got a provider
+row, or a deployment with no provider rows at all — instead of presenting a "default graph
+store" that a provider-driven deployment does not have.
+
 **Admin → Graph store: every node of every graph store, and what lives on it.** On a
 nine-node cluster the app showed three. The Infrastructure probe counted masters from the
 environment's own topology and the capacity card read only the nodes that owned an aggregated

@@ -250,6 +250,33 @@ describe('Admin → Graph store', () => {
         expect(within(card).getByText(/Show all 40 matches/)).toBeInTheDocument()
     })
 
+    it('says plainly when several provider rows share one store', async () => {
+        // Memory and nodes belong to the store, not to a row. Two rows on
+        // one cluster read as "Falkor A is using 30 GB" unless the card says
+        // otherwise — and the fold that puts them on one card is exactly
+        // what makes that reading available.
+        const shared = snapshot()
+        shared.instances[0].providers = [
+            { id: 'p1', name: 'Falkor A', isActive: true },
+            { id: 'p2', name: 'Falkor B', isActive: true },
+        ]
+        getTopology.mockResolvedValue(shared)
+        wrap()
+        const note = await screen.findByTestId('shared-store-note')
+        expect(note.textContent).toMatch(/2 provider rows point at this one store/)
+        expect(screen.getByText(/Falkor A, Falkor B/)).toBeInTheDocument()
+    })
+
+    it('never calls a store a default nobody configured', async () => {
+        const orphan = snapshot()
+        orphan.instances[0].providers = []
+        orphan.instances[0].envDefault = true
+        getTopology.mockResolvedValue(orphan)
+        wrap()
+        expect(await screen.findByText('Store with no provider')).toBeInTheDocument()
+        expect(document.body.textContent ?? '').not.toContain('Default graph store')
+    })
+
     it('rings the shard a deep link points at', async () => {
         wrap('/admin/graph-store?shard=i1:1')
         const focused = await screen.findByTestId('shard-card-1')

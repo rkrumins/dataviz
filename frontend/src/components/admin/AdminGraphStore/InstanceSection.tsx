@@ -80,13 +80,20 @@ export function InstanceSection({ instance, view, reservePct, canAdjustLimits, f
             <header className="px-4 pt-3.5 pb-3 border-b border-glass-border">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <h3 className="text-[13px] font-semibold text-ink">
+                        {/* A store is named by the provider rows that point
+                            at it — several rows on one cluster share a card,
+                            and the fleet strip above totals them all. The
+                            environment's own connection is a store here only
+                            when sources with no provider row still run on it,
+                            so it is named for that rather than for being a
+                            "default" nobody configured. */}
                         {instance.providers.length > 0
                             ? instance.providers.map(p => p.name ?? p.id).join(', ')
-                            : 'Default graph store'}
+                            : 'Store with no provider'}
                     </h3>
                     {instance.envDefault && (
-                        <HoverTip label="From the environment" detail="This store is configured by environment variables rather than a provider row — it is what a workspace without its own provider uses.">
-                            <span className="rounded-full border border-glass-border px-1.5 py-0.5 text-[10px] text-ink-muted">env default</span>
+                        <HoverTip label="No provider row points here" detail="This store comes from the application's own environment settings. It appears because data sources that were never given a provider still run on it; once every source has a provider, it is not part of this deployment's graph stores.">
+                            <span className="rounded-full border border-glass-border px-1.5 py-0.5 text-[10px] text-ink-muted">no provider row</span>
                         </HoverTip>
                     )}
                     <span className="text-[11px] text-ink-muted">{instance.mode}</span>
@@ -112,6 +119,13 @@ export function InstanceSection({ instance, view, reservePct, canAdjustLimits, f
                     {' · '}{t.graphs.toLocaleString()} graph{t.graphs === 1 ? '' : 's'}
                     {t.unregisteredGraphs > 0 && ` (${t.unregisteredGraphs} unregistered)`}
                 </p>
+                {instance.providers.length > 1 && (
+                    <p className="mt-1 text-[11px] text-ink-muted" data-testid="shared-store-note">
+                        {instance.providers.length} provider rows point at this one store, so every
+                        figure here is the store's, not each row's. Memory and nodes are shared;
+                        the graphs below say which source owns each one.
+                    </p>
+                )}
                 <p className="mt-0.5 text-[10px] text-ink-muted">
                     Seeds: {instance.seeds.join(', ') || '—'}
                     {instance.seedUsed && ` · answered by ${instance.seedUsed}`}
