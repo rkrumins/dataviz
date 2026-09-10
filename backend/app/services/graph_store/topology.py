@@ -877,7 +877,7 @@ def _assemble_nodes(
         ],
         known_nodes=info_parse.as_int(raw.cluster_info.get("cluster_known_nodes")),
         cluster_state=raw.cluster_info.get("cluster_state"),
-        findings=_instance_findings(raw),
+        findings=_instance_findings(raw, _seeds_of(slot.cfg)),
     )
     return instance
 
@@ -909,9 +909,60 @@ def _seeds_last_seen(slot: "_Pending") -> List[Tuple[str, int]]:
     return out
 
 
-def _instance_findings(raw: RawTopology) -> List[ReplicationFinding]:
+def _seed_drift(raw: RawTopology, seeds: Sequence[str]) -> Optional[ReplicationFinding]:
+    """Whether the configured startup nodes still describe this cluster.
+
+    A provider's startup nodes are the masters as they were the day someone
+    wrote the connection down. Masters move — a failover promotes a replica,
+    and with it the address a cold client must dial to find anything at all.
+
+    Nothing is broken while they drift: reads follow the cluster (the client
+    honours MOVED and re-reads the slot map), and a sweep that has already
+    seen this cluster seeds from the nodes it found rather than from this
+    list. The list matters in exactly one moment — a process starting COLD,
+    which is every process after a deploy or an eviction. If none of these
+    addresses answers then, a healthy cluster reads as unreachable.
+
+    So: some drifted is worth saying, all of them drifted is worth acting on.
+    """
+    if not seeds or not raw.shards:
+        return None
+    masters = {m.endpoint for m, _replicas in raw.shards}
+    live = {m.endpoint for m, _replicas in raw.shards if m.dialable}
+    stale = [s for s in seeds if s not in masters]
+    if not stale:
+        return None
+    usable = [s for s in seeds if s in live]
+    if usable:
+        return ReplicationFinding(
+            code="seeds_not_masters", severity="warn",
+            text=(f"{len(stale)} of {len(seeds)} configured startup nodes are no "
+                  f"longer masters of this cluster ({', '.join(stale)}). Reads "
+                  f"are unaffected — they follow the cluster."),
+            fix=("Point the provider's startup nodes at the current masters: "
+                 + ", ".join(sorted(masters)) + ". A process starting cold has "
+                 "only that list to try."),
+        )
+    return ReplicationFinding(
+        code="seeds_all_stale", severity="critical",
+        text=(f"None of the {len(seeds)} configured startup nodes is a master "
+              f"of this cluster any more. This reading survived on the nodes a "
+              f"previous sweep found; a process starting cold has only the "
+              f"configured list, and would report this healthy cluster as "
+              f"unreachable."),
+        fix=("Update the provider's startup nodes to the current masters: "
+             + ", ".join(sorted(masters)) + "."),
+    )
+
+
+def _instance_findings(
+    raw: RawTopology, seeds: Sequence[str] = (),
+) -> List[ReplicationFinding]:
     """Problems with the store as a whole rather than with one shard."""
     out: List[ReplicationFinding] = []
+    drift = _seed_drift(raw, seeds)
+    if drift is not None:
+        out.append(drift)
     for endpoint, ids in sorted(raw.collisions.items()):
         out.append(ReplicationFinding(
             code="endpoint_collision",
@@ -1181,6 +1232,43 @@ async def _refresh_quietly(fresh: bool) -> None:
         await get_topology_snapshot(fresh=fresh)
     except Exception as exc:                          # noqa: BLE001 — already logged
         logger.debug("graph store: background refresh ended: %s", _err(exc))
+
+
+def cached_summary() -> Optional[Dict[str, Any]]:
+    """The shape of every graph store, from the reading already in hand.
+
+    Strictly zero I/O and never triggers a sweep: it is for ``/health/deps``,
+    where on-call looks during an incident and where dialling a store that is
+    the SUBJECT of the incident is the last thing anyone wants. None means no
+    sweep has completed in this process yet, which is itself the answer.
+
+    Per instance rather than fleet-wide totals, because "8 of 9 up" across
+    three clusters hides which one is hurt.
+    """
+    if _cache is None:
+        return None
+    cached_at, snapshot = _cache
+    out: Dict[str, Any] = {
+        "measured_at": snapshot.measured_at,
+        "age_s": round(time.monotonic() - cached_at, 1),
+        "stale": time.monotonic() - cached_at >= _ttl_s(),
+        "instances": {},
+    }
+    for inst in snapshot.instances:
+        name = (inst.providers[0].name if inst.providers else None) or inst.id
+        out["instances"][name] = {
+            "reachable": inst.reachable,
+            "nodes": f"{inst.totals.nodes_up}/{inst.totals.nodes_total}",
+            "shards": len(inst.shards),
+            "cluster_state": inst.cluster_state,
+            "slots_covered": inst.slots_covered,
+            # Named, not counted: "3 findings" sends someone to the page,
+            # and during an incident the page is one more thing to load.
+            "findings": [f.code for f in inst.findings]
+            + sorted({f.code for s in inst.shards for f in s.replication.findings}),
+            **({"error": inst.error} if inst.error else {}),
+        }
+    return out
 
 
 def last_error() -> Optional[str]:

@@ -1574,6 +1574,132 @@ def test_a_cold_pod_cannot_reach_a_cluster_whose_masters_are_all_down(monkeypatc
     assert inst.totals.nodes_total == 0
 
 
+# ── are we still pointed at the right masters? ───────────────────────────
+
+
+def test_seeds_that_still_name_the_masters_say_nothing(monkeypatch):
+    """No finding on a settled cluster — a page that warns about a healthy
+    thing teaches operators to ignore it."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    snap = _run(topology.get_topology_snapshot())
+    codes = {f.code for f in snap.instances[0].findings}
+    assert "seeds_not_masters" not in codes and "seeds_all_stale" not in codes
+
+
+def test_a_seed_that_is_no_longer_a_master_is_named(monkeypatch):
+    """A failover promoted a replica, so one configured startup node is now a
+    replica. Nothing is broken — reads follow the cluster — but the list a
+    cold process depends on has drifted, and only the page can say so."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[
+        _provider(seeds=(MASTERS[0], REPLICAS_OF[MASTERS[1]][0])),
+    ])
+    snap = _run(topology.get_topology_snapshot())
+    finding = next(f for f in snap.instances[0].findings
+                   if f.code == "seeds_not_masters")
+    assert REPLICAS_OF[MASTERS[1]][0] in finding.text
+    assert finding.severity == "warn"
+    # And it says what to point them at instead.
+    assert all(m in (finding.fix or "") for m in MASTERS)
+
+
+def test_a_startup_list_the_cluster_has_outgrown_entirely_is_critical(monkeypatch):
+    """Every configured seed is gone. This reading only exists because a
+    previous sweep remembered the nodes — a process starting cold has
+    nothing but this list, and would call a healthy cluster unreachable.
+
+    This is the one that has to be loud: it is invisible until a deploy, and
+    then it is total.
+
+    Both seeds are REPLICAS — the realistic shape after two failovers. They
+    answer, so the cluster is found and the drift is visible; seeds that do
+    not answer at all leave no shards to compare against, and the code
+    correctly says nothing then (see the test below).
+    """
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[
+        _provider(seeds=(REPLICAS_OF[MASTERS[0]][0], REPLICAS_OF[MASTERS[2]][1]),
+                  host=REPLICAS_OF[MASTERS[0]][0].split(":")[0]),
+    ])
+    snap = _run(topology.get_topology_snapshot())
+    finding = next(f for f in snap.instances[0].findings
+                   if f.code == "seeds_all_stale")
+    assert finding.severity == "critical"
+    assert "starting cold" in finding.text
+    assert all(m in (finding.fix or "") for m in MASTERS)
+
+
+def test_an_unreachable_store_does_not_also_complain_about_its_seeds(monkeypatch):
+    """With no shards discovered there is nothing to compare against, and a
+    second finding would only bury the one that matters."""
+    _wire(monkeypatch, nodes={}, providers=[_provider()])
+    snap = _run(topology.get_topology_snapshot())
+    inst = snap.instances[0]
+    assert not inst.reachable
+    assert not [f for f in inst.findings
+                if f.code in ("seeds_not_masters", "seeds_all_stale")]
+
+
+# ── what on-call sees ────────────────────────────────────────────────────
+
+
+def test_the_deps_probe_reads_the_snapshot_and_dials_nothing(monkeypatch):
+    """`/health/deps` is where on-call looks during an incident. Dialling a
+    store that IS the incident is the last thing wanted, so this must be a
+    pure read of the reading already in hand — no I/O, and above all no
+    sweep, which would make the probe as slow as the sickest node."""
+    state = _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    _run(topology.get_topology_snapshot())
+
+    # Anything reaching a node from here is a bug: make it impossible.
+    def _no_dialling(*_a, **_k):
+        raise AssertionError("the deps probe dialled a graph store node")
+
+    monkeypatch.setattr(discovery, "node_client", _no_dialling)
+
+    summary = topology.cached_summary()
+    assert summary is not None
+    inst = summary["instances"]["Falkor"]
+    assert inst["nodes"] == "9/9"
+    assert inst["shards"] == 3 and inst["reachable"]
+    assert inst["slots_covered"] == 16_384
+    assert summary["stale"] is False
+
+
+def test_the_probe_names_the_findings_rather_than_counting_them(monkeypatch):
+    """"3 findings" sends someone to the page, and during an incident the page
+    is one more thing to load. The codes are the answer."""
+    # Both configured seeds are replicas now — the realistic post-failover
+    # shape: they ANSWER, so the cluster is found, but neither is a master.
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[
+        _provider(seeds=(REPLICAS_OF[MASTERS[0]][0], REPLICAS_OF[MASTERS[1]][0]),
+                  host=REPLICAS_OF[MASTERS[0]][0].split(":")[0]),
+    ])
+    _run(topology.get_topology_snapshot())
+    inst = topology.cached_summary()["instances"]["Falkor"]
+    assert "seeds_all_stale" in inst["findings"], inst["findings"]
+
+
+def test_the_probe_says_so_before_the_first_sweep(monkeypatch):
+    """No reading yet is itself the answer, and it must not be mistaken for a
+    healthy empty fleet."""
+    _wire(monkeypatch, nodes=_cluster_nodes({}), providers=[_provider()])
+    assert topology.cached_summary() is None
+
+
+def test_the_probe_reports_each_store_separately(monkeypatch):
+    """Fleet totals hide which cluster is hurt — "17 of 18 up" says nothing
+    an on-call engineer can act on."""
+    nodes = _cluster_nodes({})
+    _wire(monkeypatch, nodes=nodes, providers=[
+        _provider("p1", "Alive"),
+        _provider("p2", "Gone", seeds=("10.9.9.9:6379",), host="10.9.9.9"),
+    ])
+    _run(topology.get_topology_snapshot())
+    instances = topology.cached_summary()["instances"]
+    assert instances["Alive"]["reachable"] and instances["Alive"]["nodes"] == "9/9"
+    assert not instances["Gone"]["reachable"]
+    assert instances["Gone"].get("error")
+
+
 def test_the_sweep_deadline_scales_with_the_fleet():
     """Nodes are read a wave at a time. A fixed fleet-wide deadline lets the
     first waves spend it and leaves the later ones nothing — and since the

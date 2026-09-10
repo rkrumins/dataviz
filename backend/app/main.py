@@ -2795,6 +2795,21 @@ async def dependency_health():
     except Exception as exc:
         result["providers"] = {"_error": str(exc)[:200]}
 
+    # Graph store shape, from the reading already in hand. Zero I/O and it
+    # never triggers a sweep: this is where on-call looks during an incident,
+    # and dialling a store that IS the incident is the last thing wanted. A
+    # breaker state says a provider is unhappy; this says which nodes of which
+    # cluster are answering, and what the sweep already found wrong.
+    try:
+        from backend.app.services.graph_store import topology as _gs_topology
+
+        summary = _gs_topology.cached_summary()
+        result["graph_store"] = summary if summary is not None else {
+            "status": "no reading yet in this process",
+        }
+    except Exception as exc:  # noqa: BLE001 — a report must not 500
+        result["graph_store"] = {"_error": str(exc)[:200]}
+
     # P3.1 — event-loop lag surface. p99 lag > 500ms implies the loop
     # is wedged; > 50ms implies coroutines are queueing.
     lag_stats = getattr(app.state, "event_loop_lag_stats", None)

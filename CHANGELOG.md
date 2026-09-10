@@ -433,6 +433,21 @@ does not swing the trend, short enough that "what changed" is still about now.
   fingerprinted by the counters today. Where the scan still runs it is cached, and the
   caller's own wall clock is now a deadline shared by all three queries rather than an
   allowance granted to each.
+- **The page now says whether the configured startup nodes still describe the cluster.** A
+  provider's startup nodes are the masters as they were the day someone wrote the connection
+  down, and masters move: a failover promotes a replica, and with it the address a cold client
+  must dial. Nothing breaks while they drift — reads follow the cluster, and a sweep that has
+  already seen it seeds from the nodes it found — so the drift was invisible. It matters in
+  exactly one moment: a process starting COLD, which is every process after a deploy or an
+  eviction. Some seeds drifted is a warning naming them and the masters to use instead; none
+  of them still a master is critical, because that reading is surviving purely on memory and
+  the next cold start would call a healthy cluster unreachable.
+- **`/health/deps` reports the graph store's shape.** On-call had provider breaker states and
+  nothing about which nodes of which cluster were answering. It now carries, per instance,
+  nodes up over total, shard count, cluster state, slot coverage and the findings **by name** —
+  "3 findings" sends someone to the page, and during an incident the page is one more thing to
+  load. Strictly a read of the reading already in hand: zero I/O, and it never triggers a
+  sweep, because dialling a store that IS the incident is the last thing wanted.
 - **The pre-compute estimate refused graphs for aggregating well.** It sums, over every raw
   lineage edge, the product of its endpoints' ancestor-chain lengths — cells PRODUCED. The graph
   stores cells DISTINCT: the write is a `MERGE` on `aggKey`, so many raw edges between the same
