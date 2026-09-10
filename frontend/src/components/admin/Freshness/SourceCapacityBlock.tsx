@@ -8,6 +8,7 @@ import { useState } from 'react'
 import { CheckCircle2, HelpCircle, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DocsLink } from '@/components/help/DocsLink'
+import { useGraphPlacement } from '../shared/useGraphStoreTopology'
 import { compactBytes, compactEdges, heldByRebuilds } from '../shared/aggregationKnobs'
 import { useRemeasureCapacity, useSourceCapacity } from '../shared/useAggregationCapacity'
 
@@ -24,6 +25,7 @@ export function SourceCapacityBlock({ dsId }: { dsId: string }) {
     const q = useSourceCapacity(dsId, true)
     const remeasure = useRemeasureCapacity()
     const [busy, setBusy] = useState(false)
+    const { data: placements } = useGraphPlacement(dsId)
     const doc = q.data
 
     const onRemeasure = async () => {
@@ -33,6 +35,14 @@ export function SourceCapacityBlock({ dsId }: { dsId: string }) {
             await q.refetch()
         } catch { /* the query's error state says so */ } finally { setBusy(false) }
     }
+
+    // Which node this source's ROLLUPS land on: in dedicated mode that is a
+    // different graph key, and it can hash to a different shard than the
+    // source graph — so the placement is read, never inferred from the graph
+    // name in front of you.
+    const placement = placements?.placements?.find(p => p.role === 'projection')
+        ?? placements?.placements?.[0]
+        ?? null
 
     return (
         <section className="rounded-xl border border-glass-border p-3" aria-labelledby={`capacity-${dsId}`}>
@@ -61,6 +71,17 @@ export function SourceCapacityBlock({ dsId }: { dsId: string }) {
             ) : (
                 <>
                     <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3">
+                        <Row label="Placement">
+                            {placement?.master
+                                ? <>
+                                    {placement.shardIndex != null && <>Shard {placement.shardIndex + 1} · </>}
+                                    <span className="font-mono">{placement.master.endpoint}</span>
+                                    {placement.replicas.length > 0
+                                        && ` · ${placement.replicas.length} replica${placement.replicas.length === 1 ? '' : 's'}`}
+                                    {placement.role === 'projection' && ' · rollups on their own graph'}
+                                </>
+                                : 'not placed on a shard yet'}
+                        </Row>
                         <Row label="Shard">
                             {doc.shard.measurable ? (
                                 <>
