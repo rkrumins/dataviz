@@ -106,7 +106,7 @@ _POOL_DEFAULTS: dict[PoolRole, dict[str, int]] = {
     # GRAPH_READ absorbs the per-source fan-out (bounded to 4-wide on the FE
     # now). Kept modest so it can't dominate the Postgres budget; graph reads
     # fast-fail (~1.5s) on a down provider so holds are short. Env override:
-    # DB_GRAPH_READ_POOL_SIZE / DB_GRAPH_READ_MAX_OVERFLOW.
+    # DB_GRAPH_READ_POOL_SIZE / DB_GRAPH_READ_POOL_MAX_OVERFLOW.
     PoolRole.GRAPH_READ:     {"pool_size": 10, "max_overflow": 10},
     PoolRole.ADMIN:          {"pool_size": 2,  "max_overflow": 0},
 }

@@ -10,6 +10,12 @@ configuration** — but read [Rollout](#4-rollout) before deploying: two of the 
 infrastructure files (ingress timeout, nginx image, backend image) that only take effect
 when those are re-applied or rebuilt.
 
+**Upgrading an existing deployment?** Start at
+[`UPGRADE_2026-09-10_graph-availability.md`](UPGRADE_2026-09-10_graph-availability.md) —
+the operator checklist covering every round below, including the overrides you may already
+have set that would silently keep the pre-fix values. This document is the reasoning; that
+one is the steps.
+
 ---
 
 ## 1. What was broken
@@ -127,6 +133,11 @@ Order of preference:
    without it.
 
 No database migration. No new required environment variables.
+
+Rounds three to five (sections 8-10) added more infrastructure-side changes — FalkorDB
+thread count and memory, the viz CPU limit, new client deadlines baked into the frontend
+bundle. The complete, current list of what an existing deployment has to touch, in order,
+is [`UPGRADE_2026-09-10_graph-availability.md`](UPGRADE_2026-09-10_graph-availability.md).
 
 ---
 

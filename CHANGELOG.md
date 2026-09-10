@@ -306,6 +306,17 @@ workspace existence over a database hiccup.
 is required for correctness, but without it readers pay the aggregation on the read path and
 `product_events` grows with no horizon.
 
+**Graph availability: check what you already set.** No migration and no new required
+variable — but almost every value the graph-availability fix changed is an environment
+knob, and an explicit override beats the new default silently. A deployment that pinned
+`FALKORDB_NODES_QUERY_TIMEOUT=5`, or copied the old `.env.example` line
+`HTTP_TIMEOUT_GRAPH_SECS=15`, runs the new image and keeps producing the outage the
+release removes. The FalkorDB thread count and the client-side deadlines are baked into
+the pod args and the frontend bundle, so they need a restart and a rebuild respectively.
+`docs/UPGRADE_2026-09-10_graph-availability.md` is the checklist: what arrives on its own,
+which overrides to delete, what needs an image, a manifest, or the one restart with
+downtime, and how to confirm on `/api/v1/health/deps` that it landed.
+
 ### Known limitations
 
 - A custom role granted **only** `system:analytics:read` gets no nav item: the catalogue spec
