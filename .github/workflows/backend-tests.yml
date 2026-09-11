@@ -50,6 +50,19 @@ jobs:
           -k "falkordb or preflight or warmup or circuit or redis or bus
           or provider or probes or manager or aggregation or insights"
 
+      # The step above selects by KEYWORD, which is a denylist by omission: a
+      # file whose name and test names miss every keyword is ungated, and
+      # nothing goes red to say so. Measured on the graph-store branch, 681 of
+      # its 1174 tests gated nothing while this job stayed green. Until
+      # `full-suite` can be promoted to required, the read path is gated by
+      # naming its files. `tests/test_ci_required_list.py` fails if an entry
+      # stops existing, or if this step stops reading the list.
+      - name: Run the graph store, view cache and capacity suites
+        working-directory: backend
+        run: |
+          python -m pytest -q -m "not integration" \
+            $(grep -vE '^\s*(#|$)' tests/ci-required-files.txt)
+
   full-suite:
     name: Full backend suite (informational)
     runs-on: ubuntu-latest
