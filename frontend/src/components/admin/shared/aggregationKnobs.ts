@@ -24,7 +24,7 @@ export type TuningKnobKey =
     | 'scanTimeoutS' | 'writeTimeoutS' | 'stallTimeoutSecs' | 'maxWallSecs'
     | 'flushMemPct' | 'maxCubeEdges' | 'estimateMarginPct'
     | 'replicaAckMin' | 'replicaAckTimeoutMs'
-    | 'writeBatchMax' | 'writeBatchTargetS' | 'writeMinGapMs'
+    | 'writeBatchMax' | 'writeBatchTargetS' | 'writeMinGapMs' | 'writePacingMinRatio'
 
 export type KnobGroup = 'capacity' | 'reading' | 'writing' | 'timeouts'
 
@@ -93,10 +93,10 @@ export const TUNING_KNOBS: TuningKnob[] = [
     },
     {
         key: 'maxCubeEdges',
-        label: 'Auto’s cube ceiling',
-        tip: 'The largest full-detail estimate Auto stores in full; above it Auto keeps the depth-diagonal and derives finer granularities on demand. Deliberately separate from the write budget: a cube the shard would refuse is never picked regardless, and raising the budget must not silently turn Auto into Always full detail. Keep it below any edge ceiling.',
-        help: 'Largest full-detail estimate Auto stores (10,000-50,000,000 edges)',
-        min: 10_000, max: 50_000_000, group: 'capacity', fallback: 8_000_000, fleetOnly: true,
+        label: 'Auto’s appetite ceiling',
+        tip: 'An OPTIONAL limit on how much full detail Auto will store, however much room there is. It is not what decides: Auto stores the full cube for as long as the write budget says the owning shard can hold it AND the projected write time says this job’s wall clock can finish it, at the rate the source measured on its last run. This knob only caps that — "never store more than N cells for this fleet". Left at its default it does not bind. Above whichever limit applies, Auto keeps the depth-diagonal and derives finer granularities on demand; Full detail never degrades, it refuses with the numbers.',
+        help: 'Optional cap on what Auto stores in full (10,000-50,000,000 edges)',
+        min: 10_000, max: 50_000_000, group: 'capacity', fallback: 50_000_000, fleetOnly: true,
     },
     {
         key: 'estimateMarginPct',
@@ -143,9 +143,16 @@ export const TUNING_KNOBS: TuningKnob[] = [
     {
         key: 'writePacingRatio',
         label: 'Write pacing ratio',
-        tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
-        help: 'Pause between writes (0-10)',
+        tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration — the CEILING on that pause, in force when the graph store node is working. When the node has room to spare (no snapshot or rewrite in flight, every replica attached and in sync, a quarter of its container memory free) the rebuild drops to the pacing floor below instead. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
+        help: 'Pause between writes when the node is working (0-10)',
         min: 0, max: 10, step: 0.1, float: true, group: 'writing', fallback: 1.0,
+    },
+    {
+        key: 'writePacingMinRatio',
+        label: 'Write pacing floor',
+        tip: 'The pause between write batches on a node with room to spare. The ratio above is the ceiling, not a fixed cost: a node with nothing forked, its replicas in sync and a quarter of its container free is not being protected by a rebuild that idles half the time — only slowed down, and a rebuild that never finishes protects nobody. The rebuild reads the node before every batch and picks between the two. Starving readers still override both, and the batch size — the stall a reader actually waits for — is the same either way.',
+        help: 'Pause on a node with room to spare (0-10)',
+        min: 0, max: 10, step: 0.05, float: true, group: 'writing', fallback: 0.25,
     },
     {
         key: 'writeBatchMax',

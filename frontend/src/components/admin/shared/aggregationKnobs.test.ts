@@ -20,7 +20,7 @@ const NUMERIC_TUNING_KEYS: (keyof AggregationTuning)[] = [
     'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS', 'stallTimeoutSecs', 'maxWallSecs',
     'flushMemPct', 'maxCubeEdges', 'estimateMarginPct',
     'replicaAckMin', 'replicaAckTimeoutMs',
-    'writeBatchMax', 'writeBatchTargetS', 'writeMinGapMs',
+    'writeBatchMax', 'writeBatchTargetS', 'writeMinGapMs', 'writePacingMinRatio',
 ]
 
 describe('the knob catalogue', () => {

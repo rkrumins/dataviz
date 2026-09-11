@@ -87,7 +87,7 @@ describe('DefaultsDialog', () => {
         expect(bpe.placeholder).toBe('512')
         expect(screen.getByText('Environment default: 512')).toBeInTheDocument()
         // Auto's cube ceiling and the estimate margin are fleet knobs now: editable, labelled by source.
-        const cube = screen.getByLabelText(/^Auto’s cube ceiling/) as HTMLInputElement
+        const cube = screen.getByLabelText(/^Auto’s appetite ceiling/) as HTMLInputElement
         expect(cube.value).toBe('2000000')
         expect(screen.getByText('Set here: 2,000,000 (environment default 8,000,000)')).toBeInTheDocument()
         const margin = screen.getByLabelText(/^Estimate margin/) as HTMLInputElement
@@ -95,14 +95,14 @@ describe('DefaultsDialog', () => {
         expect(margin.placeholder).toBe('25')
         // Only the recheck interval is still the deployment's.
         expect(screen.getByText(/re-measured every 1\.0M edges/)).toBeInTheDocument()
-        expect(screen.queryByText(/cube ceiling 8\.0M edges/)).not.toBeInTheDocument()
+        expect(screen.queryByText(/appetite ceiling 8\.0M edges/)).not.toBeInTheDocument()
     })
 
-    it('Reset on Auto’s cube ceiling sends an explicit null like any other knob', async () => {
+    it('Reset on Auto’s appetite ceiling sends an explicit null like any other knob', async () => {
         wrap(<DefaultsDialog open onClose={() => {}} />)
-        await screen.findByLabelText(/^Auto’s cube ceiling/)
+        await screen.findByLabelText(/^Auto’s appetite ceiling/)
 
-        await userEvent.click(screen.getByRole('button', { name: 'Reset Auto’s cube ceiling to the environment default' }))
+        await userEvent.click(screen.getByRole('button', { name: 'Reset Auto’s appetite ceiling to the environment default' }))
         await userEvent.click(screen.getByRole('button', { name: 'Save defaults' }))
 
         await waitFor(() => expect(putAggregationSettings).toHaveBeenCalledTimes(1))
