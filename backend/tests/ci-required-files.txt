@@ -47,6 +47,7 @@ tests/test_freshness_endpoints.py
 tests/test_freshness_source_doc.py
 tests/test_graph_cache.py
 tests/test_graph_store_api.py
+tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
 tests/test_index_ddl_once.py

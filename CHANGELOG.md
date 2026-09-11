@@ -26,6 +26,22 @@ budget counts the container too, and the deployment guide's sizing rule now coun
 replication buffers. The run record keeps every hold by reason, and the run settings panel
 says so.
 
+**The graph store stops forking on its own schedule, and a replica frees in
+the background.** Three of the four steps in the incident were settings the
+pipeline's governor cannot reach. The hourly `save 3600 1` forked every master
+every hour whatever else it was doing, for an RDB that is a floor rather than a
+recovery path — it is six-hourly now, which the documented reasons for keeping
+it (a missing appendonlydir, an engine upgrade) are entirely indifferent to.
+`auto-aof-rewrite-min-size` stops a small AOF being rewritten for nothing; the
+rewrite percentage stays at its default deliberately, because lowering it shortens
+replay only in proportion and buys that by forking more often. And
+`replica-lazy-flush` means a replica following a promotion or a full resync frees
+what it held in the background rather than on its main thread: doing that
+synchronously on 13 GB is minutes of answering nothing, which is how a replica
+that was merely catching up failed its health probe and was restarted, turning
+one node's trouble into two. A guard test parses the manifests, including all
+three duplicated shard blocks.
+
 **A graph that cannot be fingerprinted is no longer treated as one that
 changed.** `compute_graph_fingerprint` returns an empty string when the fast
 label/relation counters cannot answer for a graph and the fallback scan fails or

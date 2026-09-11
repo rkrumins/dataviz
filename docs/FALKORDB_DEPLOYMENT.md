@@ -246,6 +246,44 @@ lost the input. AOF `everysec` bounds the loss window to ~1 second;
 refusing to start. Keep RDB snapshots enabled alongside AOF — they
 remain the fast-restart and DR-export mechanism.
 
+## 5bb. Forks, and the settings a rebuild cannot hold its way out of
+
+A rebuild took a master and its replica down. Read §5aa for the write side;
+this section is the four settings that decided how expensive each step was.
+
+**A fork under write load costs the dataset twice.** `BGSAVE`, an AOF rewrite
+and a replica's full resync all fork, and every page the parent writes while the
+child lives is copied. A rebuild writing at full speed dirties most of them, so
+the node's memory approaches `2 × RSS` and meets the container limit. The
+pipeline now **holds its writes for the whole fork** (`AGGREGATION_HOLD_MAX_SECS`;
+see `AGGREGATION_PIPELINE.md`), which makes a fork survivable. It does not make
+one free, and it cannot hold through a fork the node takes on its own schedule.
+
+* **`--save 21600 1`, not `--save 3600 1`.** The RDB here is a *floor*, not the
+  recovery path: AOF is, and an RDB is read only when the appendonlydir is
+  missing or quarantined, or across an engine upgrade (§5c). Its value does not
+  decay in six hours — Cloud SQL is the source of truth for every graph (§6) —
+  while an hourly save forked the node every hour whatever else it was doing.
+* **`--auto-aof-rewrite-min-size 512mb`.** The default 64 MB rewrites a small
+  AOF repeatedly for nothing. The *percentage* is deliberately left at its
+  default: lowering it shortens restart time by bounding the incremental tail,
+  but only in proportion — on a 13 GB base even 80% leaves 10 GB to replay —
+  and it buys that by forking more often, which is the wrong direction. If
+  restart time is the binding constraint, shrink the dataset per shard, not the
+  rewrite threshold.
+* **`--replica-lazy-flush yes` and `--lazyfree-lazy-server-del yes`.** A replica
+  following a promotion or a full resync flushes what it held first.
+  Synchronously, on 13 GB, that is minutes of a main thread answering nothing —
+  which is how a replica that was merely catching up failed its health probe and
+  was restarted, turning one node's trouble into two. Freed in the background it
+  answers throughout.
+
+The liveness probe already accepts `LOADING`, so a node replaying its AOF is not
+killed for taking an hour; readiness stays strict, so it takes no traffic while
+it does. `backend/tests/test_graph_store_fork_settings.py` parses the manifests
+and fails if any of this drifts, including across the three duplicated shard
+blocks in the production-cluster overlay.
+
 ## 5c. Engine Version Upgrades: Reload From RDB, Not AOF
 
 > **Caution:** Never carry an AOF incremental across an engine-version bump. Replaying an

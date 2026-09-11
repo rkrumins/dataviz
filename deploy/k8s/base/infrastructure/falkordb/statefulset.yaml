@@ -52,11 +52,17 @@ spec:
               value: "THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY $(FALKORDB_QUERY_MEM_CAPACITY) CACHE_SIZE 50 EFFECTS_THRESHOLD 0"
             # The dataset itself needs maxmemory or growth OOM-kills the pod.
             # noeviction = writes fail loudly at the ceiling.
-            # save 3600 1 = hourly RDB floor alongside AOF: appendonly-yes with
-            # a missing/quarantined appendonlydir boots EMPTY without an RDB
-            # base, and engine upgrades must reload from RDB (docs §5c).
+            # save = RDB FLOOR alongside AOF, not the recovery path: appendonly-yes
+            # with a missing/quarantined appendonlydir boots EMPTY without an RDB
+            # base, and engine upgrades must reload from RDB (docs §5c). Six-hourly
+            # rather than hourly — the floor's value does not decay in six hours
+            # (Cloud SQL is the source of truth for every graph) and each save is a
+            # FORK, which is memory a rebuild has to be held out of.
+            # replica-lazy-flush: a replica following a promotion or a full resync
+            # flushes its old dataset first; synchronously that is minutes of a main
+            # thread answering nothing, and a failed health probe.
             - name: REDIS_ARGS
-              value: "--maxmemory 6gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --save 3600 1"
+              value: "--maxmemory 6gb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --aof-load-truncated yes --auto-aof-rewrite-min-size 512mb --save 21600 1 --replica-lazy-flush yes --lazyfree-lazy-server-del yes"
             # Probe auth: redis-cli reads REDISCLI_AUTH natively (never on the
             # command line / in `ps`). optional:true + the empty-guard in the
             # probe wrapper keep unauthenticated deployments byte-for-byte

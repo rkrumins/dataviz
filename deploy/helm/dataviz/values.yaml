@@ -162,7 +162,11 @@ stores:
     args: "THREAD_COUNT 8 OMP_THREAD_COUNT 1 TIMEOUT_DEFAULT 30000 TIMEOUT_MAX 180000 MAX_QUEUED_QUERIES 64 QUERY_MEM_CAPACITY 536870912 CACHE_SIZE 50 EFFECTS_THRESHOLD 0"
     # noeviction = writes fail loudly instead of the pod being OOM-killed
     # by data growth.
-    redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction"
+    # replica-lazy-flush: a replica following a promotion or a full resync
+    # flushes its old dataset first, and doing that synchronously is minutes of
+    # a main thread answering nothing on a large graph — long enough to fail a
+    # health probe and be restarted mid-catch-up.
+    redisArgs: "--maxmemory 6gb --maxmemory-policy noeviction --replica-lazy-flush yes --lazyfree-lazy-server-del yes"
     storage: 10Gi
     resources:
       requests: { cpu: "1", memory: 2Gi }

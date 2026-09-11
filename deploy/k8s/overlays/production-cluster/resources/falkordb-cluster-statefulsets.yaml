@@ -113,6 +113,29 @@ spec:
             # replicate as a compact change log instead of being RE-RUN on
             # each replica's main thread, which is what stopped replicas
             # answering their health probes during a large rebuild.
+            #
+            # FORKS (doc §5bb). BGSAVE, an AOF rewrite and a replica's full
+            # resync all fork, and every page the parent writes while the child
+            # lives is copied — so a fork under a rebuild's write load costs the
+            # dataset twice and meets the container limit. A rebuild now HOLDS
+            # its writes for the whole fork, which makes one survivable; it
+            # cannot hold through one the node takes on its own schedule, hence:
+            #   save 21600 1  — the RDB is a FLOOR, not the recovery path (AOF
+            #     is; an RDB is read only when the appendonlydir is missing or
+            #     quarantined, or across an engine upgrade, doc §5c). Its value
+            #     does not decay in six hours — Cloud SQL is the source of truth
+            #     for every graph — while `save 3600 1` forked this node hourly
+            #     whatever else it was doing.
+            #   auto-aof-rewrite-min-size 512mb — the 64 MB default rewrites a
+            #     small AOF repeatedly for nothing. The PERCENTAGE stays at its
+            #     default on purpose: lowering it shortens replay only in
+            #     proportion (on a 13 GB base even 80% leaves 10 GB) and buys
+            #     that by forking more often.
+            #   replica-lazy-flush / lazyfree-lazy-server-del — a replica
+            #     following a promotion or a full resync flushes what it held
+            #     FIRST, and synchronously on 13 GB that is minutes of a main
+            #     thread answering nothing: how a replica that was merely
+            #     catching up failed its probe and was restarted in turn.
             - name: REDIS_ARGS
               value: >-
                 --cluster-enabled yes
@@ -127,7 +150,10 @@ spec:
                 --appendonly yes
                 --appendfsync everysec
                 --aof-load-truncated yes
-                --save 3600 1
+                --auto-aof-rewrite-min-size 512mb
+                --save 21600 1
+                --replica-lazy-flush yes
+                --lazyfree-lazy-server-del yes
                 --repl-backlog-size 1gb
                 --repl-diskless-sync yes
                 --repl-timeout 300
@@ -263,7 +289,10 @@ spec:
                 --appendonly yes
                 --appendfsync everysec
                 --aof-load-truncated yes
-                --save 3600 1
+                --auto-aof-rewrite-min-size 512mb
+                --save 21600 1
+                --replica-lazy-flush yes
+                --lazyfree-lazy-server-del yes
                 --repl-backlog-size 1gb
                 --repl-diskless-sync yes
                 --repl-timeout 300
@@ -385,7 +414,10 @@ spec:
                 --appendonly yes
                 --appendfsync everysec
                 --aof-load-truncated yes
-                --save 3600 1
+                --auto-aof-rewrite-min-size 512mb
+                --save 21600 1
+                --replica-lazy-flush yes
+                --lazyfree-lazy-server-del yes
                 --repl-backlog-size 1gb
                 --repl-diskless-sync yes
                 --repl-timeout 300
