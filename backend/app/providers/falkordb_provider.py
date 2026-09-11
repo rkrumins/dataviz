@@ -6842,6 +6842,8 @@ class FalkorDBProvider(GraphDataProvider):
             AGGREGATED_EDGE_PAGE_SIZE,
             AGGREGATED_EDGE_RESULT_CAP,
             AGGREGATED_SOURCE_URN_BATCH_SIZE,
+            FALKORDB_AGGREGATED_READ_BUDGET_SECS,
+            FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS,
         )
 
         if len(source_urns) > 100_000:
@@ -6908,6 +6910,12 @@ class FalkorDBProvider(GraphDataProvider):
         batch_failed = False
         pressure = _ReadPressure()
         floor = max(1, min(AGGREGATED_EDGE_PAGE_FLOOR, AGGREGATED_EDGE_PAGE_SIZE))
+        # ONE wall clock for the whole read, batches included. Each rung of the
+        # ladder below draws from this rather than re-arming a fresh per-query
+        # budget, so the read cannot outlive the ASGI tier above it and the
+        # degraded answer stays reachable. Batches run concurrently under
+        # gather, so they share the deadline rather than dividing it.
+        read_deadline = time.monotonic() + FALKORDB_AGGREGATED_READ_BUDGET_SECS
         # One page size for the whole read: the store's refusal of a page is
         # a fact about ITS size, so every batch of this read narrows with it.
         page_limit = AGGREGATED_EDGE_PAGE_SIZE
@@ -6939,10 +6947,27 @@ class FalkorDBProvider(GraphDataProvider):
                     params["lastWeight"] = int(last[2]) if last[2] else 0
                     params["lastSourceUrn"] = last[0]
                     params["lastTargetUrn"] = last[1]
+                remaining = read_deadline - time.monotonic()
+                if remaining < FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS:
+                    # Out of wall clock. Returning the prefix already read is
+                    # the whole point of the ladder; starting an attempt that
+                    # the tier above will cancel just burns a query thread
+                    # after the client has gone.
+                    pressure.degrade("timeout")
+                    logger.warning(
+                        "AGGREGATED edge read on %s ran out of its %.1fs budget at %d rows "
+                        "per page — returning the %d rows read so far as a partial answer.",
+                        self._graph_name, FALKORDB_AGGREGATED_READ_BUDGET_SECS, limit, len(rows),
+                    )
+                    batch_failed = True
+                    return rows
+                attempt_timeout = (
+                    min(timeout, remaining) if timeout is not None else remaining
+                )
                 try:
                     result = await self._proj_ro_query(
                         _cypher_for(label, resume=last is not None, limit=limit),
-                        params=params, timeout=timeout, op="agg.cells",
+                        params=params, timeout=attempt_timeout, op="agg.cells",
                     )
                     page = result.result_set or []
                 except Exception as e:
@@ -6977,10 +7002,15 @@ class FalkorDBProvider(GraphDataProvider):
                         )
                         continue
                     if kind == "timeout" and not floor_retried:
-                        floor_retried = True
-                        pressure.floor_retries += 1
-                        await asyncio.sleep(_READ_FLOOR_RETRY_S)
-                        continue
+                        # Only worth taking if what is left of the budget can
+                        # hold the pause AND an attempt after it.
+                        if (read_deadline - time.monotonic()) > (
+                            _READ_FLOOR_RETRY_S + FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS
+                        ):
+                            floor_retried = True
+                            pressure.floor_retries += 1
+                            await asyncio.sleep(_READ_FLOOR_RETRY_S)
+                            continue
                     pressure.degrade(kind)
                     logger.warning(
                         "AGGREGATED edge read on %s %s at %d rows per page, the narrowest "
