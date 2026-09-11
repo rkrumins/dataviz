@@ -245,15 +245,29 @@ class _Standalone:
             connection_kwargs={"host": "falkor", "port": 6379},
         )
 
+    #: What the node's own config says about when it DROPS a replica. The
+    #: reading asks for both; a fake that wants to refuse them overrides.
+    NODE_CONFIG = {
+        "repl-backlog-size": "1073741824",
+        "client-output-buffer-limit": (
+            "normal 0 0 0 slave 2147483648 1073741824 300 pubsub 33554432 8388608 60"
+        ),
+    }
+
     async def info(self, *sections):
-        # The reading asks for memory AND server in one round trip: how full
-        # the node is, and whether it is the same process it was a minute ago.
-        assert sections == ("memory", "server"), sections
+        # The reading asks for memory, server, persistence AND replication in
+        # one round trip: how full the node is, whether it is the same process
+        # it was a minute ago, whether it is forked, and how its replicas keep up.
+        assert sections == ("memory", "server", "persistence", "replication"), sections
         if self._delay:
             await asyncio.sleep(self._delay)
         if self._raise:
             raise self._raise
         return self._info
+
+    async def config_get(self, name):
+        self.commands.append(("CONFIG", "GET", name))
+        return {name: self.NODE_CONFIG[name]}
 
     async def execute_command(self, *args, **kw):
         self.commands.append(args)
@@ -285,7 +299,10 @@ class _Cluster:
         if args == ("GRAPH.CONFIG", "GET", "QUERY_MEM_CAPACITY"):
             self.config_targets.append(target_nodes)
             return self._config
-        assert args == ("INFO", "memory", "server"), args
+        if args[:2] == ("CONFIG", "GET"):
+            self.config_targets.append(target_nodes)
+            return {args[2]: _Standalone.NODE_CONFIG[args[2]]}
+        assert args == ("INFO", "memory", "server", "persistence", "replication"), args
         self.targets.append(target_nodes)
         return self._info
 
@@ -308,7 +325,9 @@ def test_the_reading_carries_the_per_query_ceiling_beside_the_memory():
                        config={"10.0.0.7:6379": ["QUERY_MEM_CAPACITY", "1024"]})
     m = _run(sc.read_shard_memory(_db(cluster), mode="cluster", graph_key="g", timeout=1))
     assert m.query_mem_capacity == 1024
-    assert len(cluster.config_targets) == 1 and isinstance(cluster.config_targets[0], _Node)
+    # Every config round trip — the module ceiling and the node's own drop
+    # limits — goes to the owner, not to whichever node the client picks.
+    assert cluster.config_targets and all(isinstance(t, _Node) for t in cluster.config_targets)
 
 
 @pytest.mark.parametrize("config", [
@@ -471,7 +490,12 @@ def test_the_reading_carries_the_nodes_limits_from_one_wildcard_read():
     assert (m.query_mem_capacity, m.timeout_max_ms, m.timeout_default_ms, m.thread_count) == (
         536870912, 180000, 30000, 4,
     )
-    assert conn.commands == [("GRAPH.CONFIG", "GET", "*")]
+    # One wildcard read for the module's limits; the node's own drop limits
+    # (repl-backlog-size, client-output-buffer-limit) are the other two.
+    assert [c for c in conn.commands if c[0] == "GRAPH.CONFIG"] == [("GRAPH.CONFIG", "GET", "*")]
+    assert [c[2] for c in conn.commands if c[0] == "CONFIG"] == [
+        "repl-backlog-size", "client-output-buffer-limit",
+    ]
     stats = m.as_stats()
     assert (stats["timeout_max_ms"], stats["thread_count"]) == (180000, 4)
     assert "timeout_default_ms" not in stats
@@ -535,3 +559,271 @@ def test_container_memory_needed_is_the_deployment_guides_rule():
     # The overhead steps up to 1 GiB from 32 GiB; concurrency is never below 1.
     assert sc.container_memory_needed(32 * GB, 0, 1) == int(1.25 * 32 * GB) + int(1.3 * 1) + GB
     assert sc.container_memory_needed(2 * GB, 4, GB) == int(1.25 * 2 * GB) + 4 * int(1.3 * GB) + 256 * MB
+
+
+# ── the whole node: fork state, replicas, buffers, the container ─────────
+#
+# The reading used to say how full the node was. It now says everything the
+# write governor holds on: what the process actually holds (RSS), whether it
+# is forked or about to be, how its replicas are keeping up, and the two
+# limits its own config drops a replica at. And the budget gains a second
+# ceiling: the container the pod is killed at, which ``maxmemory`` never
+# guarded — under ``noeviction`` reaching ``maxmemory`` refuses a write, while
+# reaching the container limit through a fork's copy-on-write kills the node.
+
+_NODE = {
+    "used_memory": str(13 * GB), "used_memory_rss": str(15 * GB),
+    "used_memory_peak": str(15 * GB), "maxmemory": str(32 * GB),
+    "maxmemory_policy": "noeviction", "mem_fragmentation_ratio": "1.08",
+    "mem_total_replication_buffers": str(256 * 1024 ** 2),
+    "run_id": "r1", "uptime_in_seconds": "1200", "loading": "0",
+    "rdb_bgsave_in_progress": "0", "aof_rewrite_in_progress": "0",
+    "aof_rewrite_scheduled": "0",
+    "role": "master", "connected_slaves": "2", "master_repl_offset": "1000",
+    "slave0": {"ip": "10.0.0.4", "port": "6379", "state": "online", "offset": "1000", "lag": "0"},
+    "slave1": {"ip": "10.0.0.5", "port": "6379", "state": "online", "offset": "400", "lag": "1"},
+}
+
+
+def _node_info(**over):
+    info = dict(_NODE)
+    info.update(over)
+    return info
+
+
+def test_the_reading_carries_the_whole_node():
+    conn = _Standalone(_node_info())
+    m = _run(sc.read_shard_memory(_db(conn), mode="standalone", graph_key="g", timeout=1))
+    assert m.source == "measured" and m.used == 13 * GB
+    assert m.rss == 15 * GB and m.fragmentation_ratio == 1.08
+    assert m.fork_in_progress is None
+    assert m.connected_replicas == 2 and m.replicas_syncing == 0
+    assert m.replica_max_lag_bytes == 600                 # 1000 - 400
+    assert m.mem_repl_buffers == 256 * 1024 ** 2
+    assert m.repl_backlog_bytes == GB and m.replica_outbuf_hard_bytes == 2 * GB
+    stats = m.as_stats()
+    assert stats["rss"] == 15 * GB and stats["replica_outbuf_hard_bytes"] == 2 * GB
+    assert "fork_in_progress" not in stats
+
+
+def test_a_replica_mid_full_sync_reads_as_a_fork():
+    """The master forks to stream a full resync, and the child lives for the
+    whole transfer — the most dangerous fork of the three, because a rebuild
+    is what dropped the replica in the first place."""
+    info = _node_info(slave1={"ip": "10.0.0.5", "port": "6379", "state": "wait_bgsave",
+                              "offset": "0", "lag": "0"})
+    m = _run(sc.read_shard_memory(_db(_Standalone(info)), mode="standalone", graph_key="g", timeout=1))
+    assert m.replicas_syncing == 1
+    assert m.fork_in_progress == "replica_sync"
+    assert m.as_stats()["fork_in_progress"] == "replica_sync"
+
+
+@pytest.mark.parametrize("flag,name", [
+    ("rdb_bgsave_in_progress", "bgsave"),
+    ("aof_rewrite_in_progress", "aof_rewrite"),
+    ("aof_rewrite_scheduled", "aof_rewrite_scheduled"),
+])
+def test_a_fork_in_flight_or_scheduled_is_read(flag, name):
+    m = _run(sc.read_shard_memory(
+        _db(_Standalone(_node_info(**{flag: "1"}))), mode="standalone", graph_key="g", timeout=1,
+    ))
+    assert m.fork_in_progress == name
+
+
+def test_the_per_batch_reading_skips_the_config_round_trips():
+    """The drop limits do not change during a run; a per-batch reading passes
+    ``include_config=False`` and reuses what the run read at its start."""
+    conn = _Standalone(_node_info())
+    m = _run(sc.read_shard_memory(
+        _db(conn), mode="standalone", graph_key="g", timeout=1, include_config=False,
+    ))
+    assert m.source == "measured" and m.rss == 15 * GB
+    assert m.repl_backlog_bytes is None and m.replica_outbuf_hard_bytes is None
+    assert not any(c[:2] == ("CONFIG", "GET") for c in conn.commands)
+
+
+def test_a_node_that_refuses_config_still_measures():
+    """A managed instance, or an ACL without CONFIG: the reading is still
+    real, the drop limits are unknown, and the hold threshold falls back."""
+    class _NoConfig(_Standalone):
+        async def config_get(self, name):
+            raise RuntimeError("NOPERM this user has no permissions to run the 'config' command")
+
+    m = _run(sc.read_shard_memory(_db(_NoConfig(_node_info())), mode="standalone", graph_key="g", timeout=1))
+    assert m.source == "measured"
+    assert m.repl_backlog_bytes is None and m.replica_outbuf_hard_bytes is None
+    assert sc.replica_lag_hold_bytes(m) == sc.REPLICA_LAG_HOLD_BYTES_DEFAULT
+
+
+def test_the_cluster_reading_asks_the_owner_for_info_and_config():
+    cluster = _Cluster(_node_info())
+    m = _run(sc.read_shard_memory(_db(cluster), mode="cluster", graph_key="g", timeout=1))
+    assert m.source == "measured" and m.rss == 15 * GB
+    assert m.repl_backlog_bytes == GB
+    assert all(isinstance(t, _Node) for t in cluster.targets)
+    assert cluster.config_targets and all(isinstance(t, _Node) for t in cluster.config_targets)
+
+
+# ── the envelope ──────────────────────────────────────────────────────────
+
+
+def _node(**over):
+    base = dict(
+        endpoint="10.0.0.1:6379", used=13 * GB, maxmemory=32 * GB, policy="noeviction",
+        observed_at=0.0, source="measured", query_mem_capacity=GB, thread_count=6,
+        rss=15 * GB, connected_replicas=2, replicas_syncing=0, replica_max_lag_bytes=0,
+        repl_backlog_bytes=GB, replica_outbuf_hard_bytes=2 * GB,
+    )
+    base.update(over)
+    return sc.ShardMemory(**base)
+
+
+def test_an_unmeasured_node_never_holds():
+    """Ignorance is not a reason to wait: the store not answering is the
+    outage path's business."""
+    assert sc.hold_reason(_node(source="unavailable", bgsave_in_progress=True),
+                          expected_replicas=2) is None
+
+
+def test_a_loading_node_holds():
+    kind, detail = sc.hold_reason(_node(loading=True), expected_replicas=2)
+    assert kind == "loading" and "10.0.0.1:6379" in detail
+
+
+@pytest.mark.parametrize("over,word", [
+    ({"bgsave_in_progress": True}, "background save"),
+    ({"aof_rewrite_in_progress": True}, "AOF rewrite"),
+    ({"aof_rewrite_scheduled": True}, "about to start"),
+    ({"replicas_syncing": 1}, "full resync"),
+])
+def test_a_fork_is_a_hold_and_says_which(over, word):
+    kind, detail = sc.hold_reason(_node(**over), expected_replicas=2)
+    assert kind == "fork" and word in detail
+
+
+def test_a_replica_that_left_is_a_hold():
+    """The inversion at the centre of the incident: the old gate stopped
+    waiting the moment the replicas were gone. A replica that vanishes during
+    a rebuild almost always vanished BECAUSE of it, and writing on is what
+    turns its return into a full-sync fork under full write load."""
+    kind, detail = sc.hold_reason(_node(connected_replicas=1), expected_replicas=2)
+    assert kind == "replica_lost" and "1 of 2" in detail
+    kind, _ = sc.hold_reason(_node(connected_replicas=0), expected_replicas=2)
+    assert kind == "replica_lost"
+    # A run that started with none expects none; an unknown count is no verdict.
+    assert sc.hold_reason(_node(connected_replicas=0), expected_replicas=0) is None
+    assert sc.hold_reason(_node(connected_replicas=None), expected_replicas=2) is None
+
+
+def test_a_replica_that_owes_more_than_the_threshold_is_a_hold():
+    """Held at a quarter of the buffer the master DROPS a replica at, so the
+    drop — and the full-sync fork it forces — stays out of a rebuild's reach."""
+    hold = sc.replica_lag_hold_bytes(_node())
+    assert hold == 512 * 1024 ** 2                          # min(2 GiB / 4, 1 GiB / 2)
+    kind, detail = sc.hold_reason(_node(replica_max_lag_bytes=hold), expected_replicas=2)
+    assert kind == "replica_lag" and "behind" in detail
+    assert sc.hold_reason(_node(replica_max_lag_bytes=hold - 1), expected_replicas=2) is None
+
+
+def test_the_lag_threshold_comes_from_the_nodes_own_drop_limits(monkeypatch):
+    assert sc.replica_lag_hold_bytes(_node(replica_outbuf_hard_bytes=2 * GB, repl_backlog_bytes=None)) == 512 * 1024 ** 2
+    assert sc.replica_lag_hold_bytes(_node(replica_outbuf_hard_bytes=None, repl_backlog_bytes=GB)) == 512 * 1024 ** 2
+    assert sc.replica_lag_hold_bytes(_node(replica_outbuf_hard_bytes=256 * 1024 ** 2, repl_backlog_bytes=GB)) == 64 * 1024 ** 2
+    assert sc.replica_lag_hold_bytes(_node(replica_outbuf_hard_bytes=None, repl_backlog_bytes=None)) == sc.REPLICA_LAG_HOLD_BYTES_DEFAULT
+    monkeypatch.setenv("AGGREGATION_REPLICA_LAG_HOLD_BYTES", str(7 * 1024 ** 2))
+    assert sc.replica_lag_hold_bytes(_node()) == 7 * 1024 ** 2
+
+
+def test_the_node_is_held_for_memory_once_past_the_fork_line():
+    """RSS already past what the container could survive a fork at: nothing
+    more may land until something drains — a fork's child exiting, usually."""
+    node = _node(container_limit_bytes=40 * GB, rss=30 * GB)
+    headroom = sc.container_headroom_bytes(node, fork_factor=1.25)
+    # 40 − 1.25×30 − 6×1.3×1 − (1 + 2×2) − 1 = −11.3 GiB
+    assert headroom < 0
+    kind, detail = sc.hold_reason(node, expected_replicas=2, fork_factor=1.25)
+    assert kind == "memory" and "past what a fork could be survived at" in detail
+    # Order: a fork is the more specific reason, reported first.
+    kind, _ = sc.hold_reason(_node(container_limit_bytes=40 * GB, rss=30 * GB, bgsave_in_progress=True),
+                             expected_replicas=2, fork_factor=1.25)
+    assert kind == "fork"
+
+
+def test_the_sizing_rule_counts_replication_when_told():
+    """The deployment guide's rule for the cluster overlay, at THREAD_COUNT 6:
+    1.25 × 32 + 6 × 1.3 × 1 + 1 + 2 × 2 + 1 = 53.8 GiB. The three-argument form
+    is unchanged, so an unreplicated node and every older caller see the same."""
+    full = sc.container_memory_needed(
+        32 * GB, 6, GB, repl_backlog_bytes=GB, replicas=2, replica_outbuf_hard_bytes=2 * GB,
+    )
+    assert full == int(1.25 * 32 * GB) + 6 * int(1.3 * GB) + GB + 2 * (2 * GB) + GB
+    assert 53.7 < full / GB < 53.9
+    assert full - sc.container_memory_needed(32 * GB, 6, GB) == GB + 4 * GB
+
+
+def test_the_container_limit_comes_from_the_deployment_else_the_rule():
+    node = _node()
+    assert sc.container_limit_bytes(node, env_bytes=56 * GB) == 56 * GB
+    # No statement from the deployment: the rule at the node's own settings,
+    # the smallest limit a correctly sized container can have.
+    assert sc.container_limit_bytes(node, env_bytes=None) == sc.container_memory_needed(
+        32 * GB, 6, GB, repl_backlog_bytes=GB, replicas=2, replica_outbuf_hard_bytes=2 * GB,
+    )
+    # An unreporting thread count plans for the largest we ship.
+    assert sc.container_limit_bytes(_node(thread_count=None), env_bytes=None) == sc.container_memory_needed(
+        32 * GB, sc.THREAD_COUNT_ASSUMED, GB, repl_backlog_bytes=GB, replicas=2,
+        replica_outbuf_hard_bytes=2 * GB,
+    )
+    # Nothing to evaluate the rule with: no limit, and the budget keeps to maxmemory.
+    assert sc.container_limit_bytes(_node(query_mem_capacity=None), env_bytes=None) is None
+
+
+def test_a_container_sized_below_the_rule_governs_before_maxmemory_does():
+    """The incident's arithmetic on an under-sized container. maxmemory says
+    12.6 GiB of growth (32 − 6.4 reserve − 13 used); a 40 GiB container holding
+    15 GiB resident, forked at 1.25×, with 7.8 GiB of query memory and 5 GiB of
+    replication buffers beside it, has less — and it is the container, not
+    maxmemory, that the kernel enforces."""
+    node = _node(container_limit_bytes=40 * GB)
+    b = sc.compute_write_budget(
+        node, reserve_pct=20, bytes_per_edge=512, bpe_source="default",
+        explicit_ceiling=None, static_cap=25_000_000, fork_factor=1.25,
+    )
+    headroom = 40 * GB - int(1.25 * 15 * GB) - 6 * int(1.3 * GB) - (GB + 2 * 2 * GB) - GB
+    assert b.container_headroom == headroom
+    assert b.allowed_growth_by_container == int(headroom / 1.25)
+    assert b.governed_by == "container"
+    assert b.available_bytes == b.allowed_growth_by_container < 12.6 * GB
+    assert b.as_stats()["container_limit"] == 40 * GB
+
+    v = b.verdict(projected=30_000_000, growth_edges=b.available_bytes // 512 + 1)
+    assert not v.ok and v.blocked_by == "container"
+    text = sc.format_refusal(b, v, graph="g", composition="x")
+    assert text.startswith(sc.REFUSAL_MARKER)
+    assert "fork" in text and "container" in text and "replica full-sync" in text
+
+
+def test_a_correctly_sized_container_leaves_maxmemory_governing():
+    """The design point. A container sized by the rule has room for 1.25 ×
+    maxmemory, so while RSS stays inside maxmemory the container is never
+    the tighter ceiling — which is why the FORK HOLD, not this rule, is what
+    protects a right-sized node: a fork under full write load copies far
+    more than the quarter the rule allows for."""
+    node = _node(container_limit_bytes=56 * GB)
+    b = sc.compute_write_budget(
+        node, reserve_pct=20, bytes_per_edge=512, bpe_source="default",
+        explicit_ceiling=None, static_cap=25_000_000, fork_factor=1.25,
+    )
+    assert b.governed_by == "shard"
+    assert b.available_bytes == 32 * GB - 32 * GB * 20 // 100 - 13 * GB
+    assert b.allowed_growth_by_container > b.available_bytes
+
+
+def test_without_a_container_limit_the_budget_is_what_it_was():
+    node = _node(container_limit_bytes=None)
+    b = sc.compute_write_budget(
+        node, reserve_pct=20, bytes_per_edge=512, bpe_source="default",
+        explicit_ceiling=None, static_cap=25_000_000,
+    )
+    assert b.governed_by == "shard" and b.container_headroom is None
+    assert "container_limit" not in b.as_stats()

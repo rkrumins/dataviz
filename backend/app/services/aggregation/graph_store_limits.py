@@ -41,27 +41,18 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.providers.shard_capacity import (
-    ShardMemory, _owner, container_memory_needed, human_bytes, read_shard_memory,
+    THREAD_COUNT_ASSUMED, ShardMemory, _owner, container_memory_needed, human_bytes,
+    read_shard_memory,
     set_graph_config,
 )
 from .schemas import GraphStoreLimitsPatch, GraphStoreLimitsResponse
 
 logger = logging.getLogger(__name__)
 
-#: The planning figure when the node does not report its THREAD_COUNT.
-#:
-#: This sizes ``container_memory_needed``: how much container memory the node
-#: needs for ``threads`` concurrent queries each allowed QUERY_MEM_CAPACITY.
-#: The two directions are NOT symmetric. Guess too HIGH and the guard refuses
-#: a config that would in fact have fitted — conservative, and the operator
-#: sees the numbers. Guess too LOW and it approves a config that OOM-kills the
-#: node under exactly the concurrency it was raised to serve.
-#:
-#: So this is the LARGEST THREAD_COUNT across the shipped manifests, not a
-#: typical one. It was 4 while the manifests shipped 8, which under-booked
-#: every unreporting node by half. ``test_thread_count_assumption.py`` derives
-#: the shipped values and fails if this drops below them again.
-THREAD_COUNT_ASSUMED = 8
+#: ``THREAD_COUNT_ASSUMED`` — the planning figure when a node does not
+#: report its THREAD_COUNT — lives beside the sizing rule it feeds, in
+#: ``shard_capacity``, and is re-exported here for the guard test that
+#: derives the shipped values and fails if it drops below them.
 
 
 class GraphStoreLimitsError(ValueError):
@@ -111,7 +102,12 @@ def validate_limits(current: ShardMemory, patch: GraphStoreLimitsPatch) -> Valid
     concurrent = min(int(patch.concurrent_queries or threads), int(threads))
     maxmemory = int(current.maxmemory or 0)
     if resulting_cap and maxmemory > 0:
-        needed = container_memory_needed(maxmemory, concurrent, int(resulting_cap))
+        needed = container_memory_needed(
+            maxmemory, concurrent, int(resulting_cap),
+            repl_backlog_bytes=int(getattr(current, "repl_backlog_bytes", 0) or 0),
+            replicas=int(getattr(current, "connected_replicas", 0) or 0),
+            replica_outbuf_hard_bytes=int(getattr(current, "replica_outbuf_hard_bytes", 0) or 0),
+        )
 
     if patch.query_mem_capacity is not None:
         new_cap = int(patch.query_mem_capacity)
@@ -134,7 +130,7 @@ def validate_limits(current: ShardMemory, patch: GraphStoreLimitsPatch) -> Valid
             if maxmemory <= 0:
                 raise GraphStoreLimitsError(
                     f"{current.endpoint} reports no maxmemory, so the sizing formula "
-                    f"(1.25 × maxmemory + queries × 1.3 × ceiling + overhead) cannot be "
+                    f"(1.25 × maxmemory + queries × 1.3 × ceiling + replication buffers + overhead) cannot be "
                     f"applied. Set maxmemory on the node first."
                 )
             assert needed is not None

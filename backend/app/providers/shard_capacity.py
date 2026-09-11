@@ -69,6 +69,36 @@ ESTIMATE_MARGIN_PCT_LO, ESTIMATE_MARGIN_PCT_HI = 0, 100
 #: memory delta and the ratio is noise.
 CALIBRATION_MIN_GROWTH_EDGES = 100_000
 
+#: The copy-on-write allowance over RSS, in percent: what a fork may
+#: duplicate while it runs. The deployment guide's ``1.25 ×`` — valid ONLY
+#: because the pipeline holds its writes while a fork is in progress
+#: (:func:`hold_reason`): a rebuild writing at full speed through a fork
+#: dirties most of the dataset's pages, and the child then holds a second
+#: copy of nearly all of it, which is the arithmetic that OOM-kills a
+#: correctly sized container. With the writer paused, what gets copied is
+#: what OTHER clients touch, and a quarter is generous.
+FORK_COW_PCT_DEFAULT = 125
+FORK_COW_PCT_LO, FORK_COW_PCT_HI = 100, 200
+
+#: The planning figure when a node does not report its THREAD_COUNT.
+#:
+#: This sizes :func:`container_memory_needed`: how much container memory
+#: the node needs for ``threads`` concurrent queries each allowed
+#: QUERY_MEM_CAPACITY. The two directions are NOT symmetric. Guess too HIGH
+#: and a guard refuses a config that would in fact have fitted —
+#: conservative, and the operator sees the numbers. Guess too LOW and it
+#: approves a config that OOM-kills the node under exactly the concurrency
+#: it was raised to serve. So this is the LARGEST THREAD_COUNT across the
+#: shipped manifests, not a typical one; ``test_thread_count_assumption.py``
+#: derives the shipped values and fails if this drops below them.
+THREAD_COUNT_ASSUMED = 8
+
+#: How far behind a replica may fall before the pipeline holds, when the
+#: node's own drop limits cannot be read. A quarter of the shipped replica
+#: output-buffer hard limit (2 GiB) is 512 MiB; this is the floor under a
+#: node that reports neither limit.
+REPLICA_LAG_HOLD_BYTES_DEFAULT = 256 * 1024 ** 2
+
 
 def _clamp(value: Any, lo: int, hi: int, default: int) -> int:
     try:
@@ -101,6 +131,19 @@ def bytes_per_edge_default() -> int:
 def estimate_margin_pct_default() -> int:
     return _env_clamped("AGGREGATION_ESTIMATE_MARGIN_PCT", ESTIMATE_MARGIN_PCT_DEFAULT,
                         ESTIMATE_MARGIN_PCT_LO, ESTIMATE_MARGIN_PCT_HI)
+
+
+def fork_cow_factor() -> float:
+    """``AGGREGATION_FORK_COW_PCT`` as a multiplier over RSS (1.25 default)."""
+    return _env_clamped("AGGREGATION_FORK_COW_PCT", FORK_COW_PCT_DEFAULT,
+                        FORK_COW_PCT_LO, FORK_COW_PCT_HI) / 100.0
+
+
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ── The measurement ─────────────────────────────────────────────────────
@@ -144,6 +187,49 @@ class ShardMemory:
     uptime_s: Optional[int] = None
     run_id: Optional[str] = None
     loading: Optional[bool] = None
+    # ── The rest of the node's picture, read in the same round trip ──────
+    # What the process actually holds (``used_memory_rss``): the dataset,
+    # allocator fragmentation, and whatever a fork's copy-on-write has
+    # duplicated. It is RSS, not ``used_memory``, that the kernel compares
+    # with the container limit when it decides to kill the process — so it
+    # is RSS the container budget is measured from.
+    rss: Optional[int] = None
+    fragmentation_ratio: Optional[float] = None
+    # A fork in flight, or one about to start: BGSAVE, an AOF rewrite, or a
+    # replica full-sync (the master forks to stream it). Every write during
+    # a fork costs copy-on-write memory on top of RSS, and the child lives
+    # for as long as the snapshot takes to write or stream.
+    bgsave_in_progress: Optional[bool] = None
+    aof_rewrite_in_progress: Optional[bool] = None
+    aof_rewrite_scheduled: Optional[bool] = None
+    # Replication as the write node sees it: how many replicas are attached,
+    # how many of those are still receiving a full sync rather than applying
+    # the stream, and the most any of them still owes the stream.
+    connected_replicas: Optional[int] = None
+    replicas_syncing: Optional[int] = None
+    replica_max_lag_bytes: Optional[int] = None
+    # What replication itself holds on this node right now.
+    mem_repl_buffers: Optional[int] = None
+    # The two limits that decide when a replica is DROPPED — the backlog a
+    # reconnecting replica can catch up through, and the output buffer past
+    # which the master disconnects it. From the node's own config.
+    repl_backlog_bytes: Optional[int] = None
+    replica_outbuf_hard_bytes: Optional[int] = None
+    # The memory limit the pod is killed at — see :func:`container_limit_bytes`.
+    container_limit_bytes: Optional[int] = None
+
+    @property
+    def fork_in_progress(self) -> Optional[str]:
+        """Which fork, if any — the reason a write has to wait."""
+        if self.bgsave_in_progress:
+            return "bgsave"
+        if self.aof_rewrite_in_progress:
+            return "aof_rewrite"
+        if self.aof_rewrite_scheduled:
+            return "aof_rewrite_scheduled"
+        if (self.replicas_syncing or 0) > 0:
+            return "replica_sync"
+        return None
 
     @property
     def measurable(self) -> bool:
@@ -191,6 +277,17 @@ class ShardMemory:
                 {"effects_threshold_us": self.effects_threshold_us}
                 if self.effects_threshold_us is not None else {}
             ),
+            **{
+                name: getattr(self, name)
+                for name in (
+                    "rss", "fragmentation_ratio", "connected_replicas",
+                    "replicas_syncing", "replica_max_lag_bytes", "mem_repl_buffers",
+                    "repl_backlog_bytes", "replica_outbuf_hard_bytes",
+                    "container_limit_bytes",
+                )
+                if getattr(self, name) is not None
+            },
+            **({"fork_in_progress": self.fork_in_progress} if self.fork_in_progress else {}),
         }
 
 
@@ -372,14 +469,178 @@ GIB = 1024 ** 3
 MIB = 1024 ** 2
 
 
-def container_memory_needed(maxmemory: int, concurrent: int, query_mem_capacity: int) -> int:
-    """The deployment guide's sizing rule, in bytes: ``1.25 × maxmemory +
-    concurrent × 1.3 × QUERY_MEM_CAPACITY + overhead`` (256 MiB, 1 GiB from
-    32 GiB). ``concurrent`` is how many queries may hold the ceiling at once
-    — at most the node's ``THREAD_COUNT``, since the ceiling is charged per
-    thread. The 1.3 is the reply buffer, which the ceiling does not count."""
+def container_memory_needed(
+    maxmemory: int, concurrent: int, query_mem_capacity: int, *,
+    repl_backlog_bytes: int = 0, replicas: int = 0, replica_outbuf_hard_bytes: int = 0,
+) -> int:
+    """The deployment guide's sizing rule, in bytes::
+
+        1.25 × maxmemory                          dataset + fragmentation + fork COW
+        + concurrent × 1.3 × QUERY_MEM_CAPACITY   in-flight queries and their reply buffers
+        + repl-backlog-size                       allocated once replication is in use
+        + replicas × replica-output-buffer-hard   worst case before a replica is dropped
+        + overhead                                256 MiB, 1 GiB from 32 GiB
+
+    ``concurrent`` is how many queries may hold the ceiling at once — at
+    most the node's ``THREAD_COUNT``, since the ceiling is charged per
+    thread. The replication terms default to zero so an unreplicated node
+    (and every caller that never knew them) is unchanged; on a cluster they
+    are ~5 GiB the rule used to leave out — a container that fits the
+    formula and not the shard."""
     overhead = GIB if maxmemory >= 32 * GIB else 256 * MIB
-    return int(1.25 * maxmemory) + max(1, int(concurrent)) * int(1.3 * query_mem_capacity) + overhead
+    return (
+        int(1.25 * maxmemory)
+        + max(1, int(concurrent)) * int(1.3 * query_mem_capacity)
+        + max(0, int(repl_backlog_bytes or 0))
+        + max(0, int(replicas or 0)) * max(0, int(replica_outbuf_hard_bytes or 0))
+        + overhead
+    )
+
+
+def container_limit_bytes(shard: ShardMemory, *, env_bytes: Optional[int]) -> Optional[int]:
+    """The memory limit the node's pod is killed at.
+
+    The app cannot read a cgroup limit over the wire, so the deployment
+    states it (``FALKORDB_CONTAINER_MEMORY_BYTES``, checked against the
+    manifests by a test). Absent that, the sizing rule evaluated at the
+    node's own settings is the smallest limit a correctly sized container
+    can have — a conservative stand-in, never a generous one. None when the
+    node reports neither a ceiling nor a per-query cap to evaluate it with.
+    """
+    if env_bytes and env_bytes > 0:
+        return int(env_bytes)
+    maxmemory = int(shard.maxmemory or 0)
+    cap = int(shard.query_mem_capacity or 0)
+    if maxmemory <= 0 or cap <= 0:
+        return None
+    return container_memory_needed(
+        maxmemory, int(shard.thread_count or THREAD_COUNT_ASSUMED), cap,
+        repl_backlog_bytes=int(shard.repl_backlog_bytes or 0),
+        replicas=int(shard.connected_replicas or 0),
+        replica_outbuf_hard_bytes=int(shard.replica_outbuf_hard_bytes or 0),
+    )
+
+
+def query_reserve_bytes(shard: ShardMemory) -> int:
+    """What the node's in-flight queries may hold at once: every thread at
+    the per-query ceiling, plus the reply buffer the ceiling does not count."""
+    cap = int(shard.query_mem_capacity or 0)
+    if cap <= 0:
+        return 0
+    return int(shard.thread_count or THREAD_COUNT_ASSUMED) * int(1.3 * cap)
+
+
+def replication_reserve_bytes(shard: ShardMemory) -> int:
+    """What replication may hold before the master drops a replica: the
+    backlog plus every attached replica's output buffer at its hard limit.
+    Falls back to what replication holds NOW when the limits are unknown."""
+    backlog = int(shard.repl_backlog_bytes or 0)
+    outbuf = int(shard.replica_outbuf_hard_bytes or 0)
+    if backlog or outbuf:
+        return backlog + int(shard.connected_replicas or 0) * outbuf
+    return int(shard.mem_repl_buffers or 0)
+
+
+def container_headroom_bytes(
+    shard: ShardMemory, *, held: int = 0, fork_factor: Optional[float] = None,
+) -> Optional[int]:
+    """Bytes of fork-exposed room left inside the container: the limit less
+    ``fork_factor × RSS``, the query reserve, the replication reserve, the
+    server overhead and what other rebuilds hold. Negative means the node is
+    already past the line a fork could be survived at. None when the limit
+    or RSS is unknown."""
+    limit = shard.container_limit_bytes
+    if limit is None or shard.rss is None:
+        return None
+    f = fork_factor if fork_factor is not None else fork_cow_factor()
+    overhead = GIB if int(shard.maxmemory or 0) >= 32 * GIB else 256 * MIB
+    return int(
+        limit - f * shard.rss - query_reserve_bytes(shard)
+        - replication_reserve_bytes(shard) - overhead - max(0, int(held or 0))
+    )
+
+
+def replica_lag_hold_bytes(shard: ShardMemory) -> int:
+    """How far behind a replica may fall before the pipeline holds.
+
+    Derived from the node's own drop limits: a quarter of the replica
+    output-buffer hard limit (past which the master DISCONNECTS the replica)
+    and half the backlog (past which a disconnected replica needs a FULL
+    resync). Holding at a fraction of either keeps both events out of a
+    rebuild's reach — the master dropping its own replica is how one shard's
+    rebuild becomes a fork under full write load.
+    ``AGGREGATION_REPLICA_LAG_HOLD_BYTES`` overrides; the floor covers a
+    node that reports neither limit."""
+    forced = _as_int(os.getenv("AGGREGATION_REPLICA_LAG_HOLD_BYTES"))
+    if forced and forced > 0:
+        return forced
+    candidates = []
+    if shard.replica_outbuf_hard_bytes:
+        candidates.append(int(shard.replica_outbuf_hard_bytes) // 4)
+    if shard.repl_backlog_bytes:
+        candidates.append(int(shard.repl_backlog_bytes) // 2)
+    return max(1, min(candidates)) if candidates else REPLICA_LAG_HOLD_BYTES_DEFAULT
+
+
+def hold_reason(
+    shard: ShardMemory, *, expected_replicas: Optional[int],
+    fork_factor: Optional[float] = None, held: int = 0,
+) -> Optional[Tuple[str, str]]:
+    """Why a write batch must wait, as ``(kind, detail)`` — or None.
+
+    Pure: the envelope a rebuild may write inside, decided from one reading.
+    Every kind names something that is true of the NODE now and false a
+    little later, which is what makes a hold the right response rather
+    than a refusal:
+
+    * ``loading`` — the node is replaying its dataset.
+    * ``fork`` — BGSAVE, an AOF rewrite (running or scheduled), or a replica
+      full-sync. Writing through a fork is what turns the dataset's size
+      into twice the dataset's size.
+    * ``replica_lost`` — fewer replicas attached than the run started with.
+      A replica that vanishes during a rebuild almost always vanished
+      BECAUSE of it (dropped for an overflowing output buffer); writing on
+      is what makes its return a full-sync fork under load.
+    * ``replica_lag`` — a replica owes the stream more than a fraction of
+      the limit the master drops it at.
+    * ``memory`` — RSS is already past what the container could survive a
+      fork at; something has to drain before more lands.
+
+    An unmeasured reading never holds: the store not answering is the
+    outage path's business, and ignorance is not a reason to wait.
+    """
+    if shard.source != "measured":
+        return None
+    if shard.loading:
+        return "loading", f"{shard.endpoint} is loading its dataset"
+    fork = shard.fork_in_progress
+    if fork:
+        what = {
+            "bgsave": "a background save",
+            "aof_rewrite": "an AOF rewrite",
+            "aof_rewrite_scheduled": "an AOF rewrite about to start",
+            "replica_sync": f"{shard.replicas_syncing} replica(s) receiving a full resync",
+        }[fork]
+        return "fork", f"{what} on {shard.endpoint}"
+    attached = shard.connected_replicas
+    if expected_replicas and attached is not None and attached < expected_replicas:
+        return "replica_lost", (
+            f"{attached} of {expected_replicas} replica(s) attached to {shard.endpoint}"
+        )
+    lag = shard.replica_max_lag_bytes
+    if lag is not None and lag >= replica_lag_hold_bytes(shard):
+        return "replica_lag", (
+            f"a replica of {shard.endpoint} is {human_bytes(lag)} behind "
+            f"(hold threshold {human_bytes(replica_lag_hold_bytes(shard))})"
+        )
+    headroom = container_headroom_bytes(shard, held=held, fork_factor=fork_factor)
+    if headroom is not None and headroom < 0:
+        return "memory", (
+            f"{shard.endpoint} holds {human_bytes(shard.rss)} RSS against a "
+            f"{human_bytes(shard.container_limit_bytes)} container — "
+            f"{human_bytes(-headroom)} past what a fork could be survived at"
+        )
+    return None
 
 
 def _endpoint_of(conn: Any) -> str:
@@ -431,13 +692,86 @@ async def owner_endpoint(
         return "unknown"
 
 
+async def _config_get(conn: Any, node: Any, name: str) -> Dict[str, str]:
+    """One Redis-level ``CONFIG GET`` on ``node`` as ``{name: value}``."""
+    from backend.app.services.graph_store import info_parse
+
+    if node is not None:
+        raw = await conn.execute_command("CONFIG", "GET", name, target_nodes=node)
+    else:
+        raw = await conn.config_get(name)
+    if isinstance(raw, dict) and raw and all(isinstance(v, dict) for v in raw.values()):
+        raw = next(iter(raw.values()))          # {node: {name: value}} from a cluster call
+    return info_parse.parse_config_pairs(raw)
+
+
+async def _read_node_config(conn: Any, node: Any) -> Dict[str, Optional[int]]:
+    """The two Redis-level settings that decide when the write node DROPS a
+    replica. Never raises: a node that will not answer ``CONFIG`` (a managed
+    instance, an ACL without it) reads as unknown, and the hold threshold
+    falls back to its floor."""
+    from backend.app.services.graph_store import info_parse
+
+    out: Dict[str, Optional[int]] = {
+        "repl_backlog_bytes": None, "replica_outbuf_hard_bytes": None,
+    }
+    try:
+        pairs = await _config_get(conn, node, "repl-backlog-size")
+        out["repl_backlog_bytes"] = info_parse.parse_memory_bytes(pairs.get("repl-backlog-size"))
+        pairs = await _config_get(conn, node, "client-output-buffer-limit")
+        out["replica_outbuf_hard_bytes"] = info_parse.replica_output_buffer_hard_limit(pairs)
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.debug("node config unreadable: %s", exc)
+    return out
+
+
+def _node_picture(info: Dict[str, Any]) -> Dict[str, Any]:
+    """The fork, memory and replication fields of one parsed ``INFO``,
+    keyed by :class:`ShardMemory` field."""
+    from backend.app.services.graph_store import info_parse
+
+    repl = info_parse.replication_stats(info)
+    replicas = repl.get("replicas") or []
+    syncing = sum(1 for r in replicas if (r.get("state") or "online") != "online")
+    lags = [r["lagBytes"] for r in replicas if r.get("lagBytes") is not None]
+    buffers = _as_int(info.get("mem_total_replication_buffers"))
+    if buffers is None:
+        parts = [_as_int(info.get("mem_clients_slaves")), _as_int(info.get("mem_replication_backlog"))]
+        buffers = sum(p for p in parts if p is not None) if any(p is not None for p in parts) else None
+
+    def _flag(name: str) -> Optional[bool]:
+        n = _as_int(info.get(name))
+        return bool(n) if n is not None else None
+
+    attached = repl.get("connectedReplicas")
+    return {
+        "rss": _as_int(info.get("used_memory_rss")),
+        "fragmentation_ratio": _as_float(info.get("mem_fragmentation_ratio")),
+        "bgsave_in_progress": _flag("rdb_bgsave_in_progress"),
+        "aof_rewrite_in_progress": _flag("aof_rewrite_in_progress"),
+        "aof_rewrite_scheduled": _flag("aof_rewrite_scheduled"),
+        "connected_replicas": attached,
+        "replicas_syncing": syncing if replicas else (0 if attached == 0 else None),
+        "replica_max_lag_bytes": max(lags) if lags else (0 if replicas else None),
+        "mem_repl_buffers": buffers,
+    }
+
+
 async def read_shard_memory(
     db: Any, *, mode: Optional[str], graph_key: str, timeout: float,
+    include_config: bool = True,
 ) -> ShardMemory:
-    """``INFO memory`` from the shard that owns ``graph_key`` — through the
-    client the pipeline already holds (``db.connection``: the redis client
-    ``falkordb_over`` wrapped, already carrying auth, TLS and the address
-    remap). Never raises.
+    """``INFO memory server persistence replication`` from the shard that
+    owns ``graph_key`` — through the client the pipeline already holds
+    (``db.connection``: the redis client ``falkordb_over`` wrapped, already
+    carrying auth, TLS and the address remap). Never raises.
+
+    One round trip says how full the node is, whether it is the same
+    process it was a minute ago, whether it is forked or about to be, and
+    how its replicas are keeping up — everything the write governor holds
+    on. ``include_config`` adds the two ``CONFIG GET`` round trips for the
+    replica drop limits; a per-batch reading passes False and reuses the
+    values the run read at its start.
 
     * standalone / sentinel: one node; the sentinel client follows failover
       inside its pool.
@@ -462,11 +796,11 @@ async def read_shard_memory(
             # "memory" plus "server": the same round trip that says how full
             # the node is says whether it is the same process it was a
             # minute ago. INFO with two sections is one command.
+            sections = ("memory", "server", "persistence", "replication")
             if node is not None:
-                raw = await conn.execute_command(
-                    "INFO", "memory", "server", target_nodes=node)
+                raw = await conn.execute_command("INFO", *sections, target_nodes=node)
             else:
-                raw = await conn.info("memory", "server")
+                raw = await conn.info(*sections)
             # The node's own limits — the per-query ceiling the pressure
             # ladder narrows against, the time cap every timeout knob is
             # clamped to, the thread count the container formula needs —
@@ -474,6 +808,7 @@ async def read_shard_memory(
             # provider's clamp can name them. Their own guard: a failure
             # here costs nothing above.
             limits = await _read_server_limits(conn, node)
+            node_cfg = await _read_node_config(conn, node) if include_config else {}
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("shard memory for %r via %s unavailable: %s",
                     graph_key, endpoint, exc)
@@ -488,12 +823,13 @@ async def read_shard_memory(
         "run_id": info.get("run_id") or None,
         "loading": bool(_as_int(info.get("loading"))) if info.get("loading") is not None else None,
     }
+    picture = {**_node_picture(info), **node_cfg}
     if used is None:
         return ShardMemory(endpoint, None, maxmemory, policy, now, "unavailable",
-                           "no used_memory in INFO", **limits, **liveness)
+                           "no used_memory in INFO", **limits, **liveness, **picture)
     return ShardMemory(endpoint, used, maxmemory or 0,
                        str(policy) if policy is not None else None, now, "measured",
-                       None, **limits, **liveness)
+                       None, **limits, **liveness, **picture)
 
 
 async def read_query_mem_capacity(
@@ -548,6 +884,14 @@ class WriteBudget:
     # to write, not yet in ``used`` — already taken off ``available_bytes``.
     reserved_bytes: int = 0
     reserved_by_jobs: int = 0
+    # The container behind the shard, when it could be resolved: its limit,
+    # the fork-exposed room left inside it, and the growth that room allows.
+    # ``governed_by == "container"`` when that is the tighter of the two
+    # ceilings — the rule that stands between a rebuild and the OOM killer,
+    # where ``maxmemory`` only stands between it and a refused write.
+    container_limit: Optional[int] = None
+    container_headroom: Optional[int] = None
+    allowed_growth_by_container: Optional[int] = None
 
     def verdict(self, *, projected: int, growth_edges: int, margin_pct: int = 0) -> Verdict:
         """May ``growth_edges`` new edges land, as part of ``projected`` in
@@ -558,13 +902,13 @@ class WriteBudget:
             return Verdict(False, "ceiling", projected, growth,
                            growth * self.bytes_per_edge, self.available_bytes, None,
                            projected - self.explicit_ceiling)
-        if self.governed_by == "shard":
+        if self.governed_by in ("shard", "container"):
             needed = growth * self.bytes_per_edge
             available = self.available_bytes or 0
             allowance = available * (100 + max(0, margin_pct)) // 100
             if needed > allowance:
                 short = needed - available
-                return Verdict(False, "shard", projected, growth, needed, available,
+                return Verdict(False, self.governed_by, projected, growth, needed, available,
                                short, -(-short // self.bytes_per_edge))
             return Verdict(True, None, projected, growth, needed, available, 0, 0)
         # The static rule is a count on the TOTAL; the margin stretches it for
@@ -589,6 +933,12 @@ class WriteBudget:
             "static_cap": self.static_cap,
             "reserved_bytes": self.reserved_bytes,
             "reserved_by_jobs": self.reserved_by_jobs,
+            **({"container_limit": self.container_limit} if self.container_limit is not None else {}),
+            **({"container_headroom": self.container_headroom} if self.container_headroom is not None else {}),
+            **(
+                {"allowed_growth_by_container": self.allowed_growth_by_container}
+                if self.allowed_growth_by_container is not None else {}
+            ),
             "shard": self.shard.as_stats(),
         }
 
@@ -602,13 +952,22 @@ def compute_write_budget(
     static_cap: int,
     reserved_bytes: int = 0,
     reserved_count: int = 0,
+    fork_factor: Optional[float] = None,
 ) -> WriteBudget:
     """Pure. ``reserve_pct`` / ``bytes_per_edge`` are the RESOLVED operator
     values (``None`` → env default); ``explicit_ceiling`` is present only
     when tuning set it; ``static_cap`` is the fallback count rule.
     ``reserved_bytes`` is what ``reserved_count`` other rebuilds hold in
     the node's ledger — allowed to write, not yet in ``used`` — and comes
-    off the free memory exactly as used memory does."""
+    off the free memory exactly as used memory does.
+
+    Two ceilings when the reading carries a container limit. ``maxmemory``
+    less the reserve is where writes start being REFUSED; the container
+    less ``fork_factor × RSS``, the query and replication reserves and the
+    overhead is where the node is KILLED the next time it forks. Growth is
+    allowed up to the lower of the two, and growth itself is fork-exposed,
+    so the container's room is divided by the factor before it becomes an
+    allowance."""
     reserve = (shard_reserve_pct_default() if reserve_pct is None
                else _clamp(reserve_pct, RESERVE_PCT_LO, RESERVE_PCT_HI, RESERVE_PCT_DEFAULT))
     bpe = (bytes_per_edge_default() if bytes_per_edge is None
@@ -619,12 +978,22 @@ def compute_write_budget(
     if shard.measurable:
         maxmemory = int(shard.maxmemory or 0)
         reserve_bytes = maxmemory * reserve // 100
-        available = max(0, maxmemory - reserve_bytes - int(shard.used or 0) - held)
+        by_maxmemory = max(0, maxmemory - reserve_bytes - int(shard.used or 0) - held)
+        governed, available = "shard", by_maxmemory
+        headroom = container_headroom_bytes(shard, held=held, fork_factor=fork_factor)
+        by_container: Optional[int] = None
+        if headroom is not None:
+            f = fork_factor if fork_factor is not None else fork_cow_factor()
+            by_container = max(0, int(headroom / f))
+            if by_container < by_maxmemory:
+                governed, available = "container", by_container
         return WriteBudget(
-            shard=shard, governed_by="shard", bytes_per_edge=bpe, bpe_source=bpe_source,
+            shard=shard, governed_by=governed, bytes_per_edge=bpe, bpe_source=bpe_source,
             reserve_pct=reserve, reserve_bytes=reserve_bytes, available_bytes=available,
             allowed_growth_edges=available // bpe, explicit_ceiling=explicit_ceiling,
             static_cap=static_cap, reserved_bytes=held, reserved_by_jobs=holders,
+            container_limit=shard.container_limit_bytes, container_headroom=headroom,
+            allowed_growth_by_container=by_container,
         )
     return WriteBudget(
         shard=shard, governed_by="static", bytes_per_edge=bpe, bpe_source=bpe_source,
@@ -726,6 +1095,26 @@ def format_refusal(
             f"Fixes: {fixes_auto}; free or add memory on that shard, or move this graph "
             f"(a dedicated projection lands on its own shard); or lower shardReservePct / "
             f"correct bytesPerEdge in tuning if you know the headroom is real."
+        )
+    if verdict.blocked_by == "container":
+        f = fork_cow_factor()
+        return (
+            f"{what}: ~{verdict.growth_edges:,} of them new, needing "
+            f"{human_bytes(verdict.needed_bytes)} at {bpe}, but the container behind shard "
+            f"{shard.endpoint} has {human_bytes(verdict.available_bytes)} of fork-safe room "
+            f"left: it holds {human_bytes(shard.rss)} resident against a "
+            f"{human_bytes(budget.container_limit)} limit, a fork copies up to "
+            f"{int(round((f - 1) * 100))}% of that on top, and {human_bytes(query_reserve_bytes(shard))} "
+            f"of query memory plus {human_bytes(replication_reserve_bytes(shard))} of replication "
+            f"buffers sit beside it — short by {human_bytes(verdict.shortfall_bytes)}. "
+            f"Writing it would not fill maxmemory; it would put the node past the size the "
+            f"kernel can hold through its next background save, AOF rewrite or replica "
+            f"full-sync, and that ends the shard and its replicas for the length of an AOF "
+            f"replay. {tail}"
+            f"Fixes: {fixes_auto}; grow the container to the sizing rule in "
+            f"FALKORDB_DEPLOYMENT.md (the replication terms included) or move this graph "
+            f"(a dedicated projection lands on its own shard); or lower AGGREGATION_FORK_COW_PCT "
+            f"only on a node you know never forks under load."
         )
     # static: the shard could not govern, so today's count cap did.
     return (

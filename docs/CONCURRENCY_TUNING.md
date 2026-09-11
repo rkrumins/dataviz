@@ -355,26 +355,25 @@ required container memory =
   + overhead (≈1Gi)
 ```
 
-> **The in-app guard does not count replication.**
-> `container_memory_needed()` (`shard_capacity.py:375`) implements only
-> `1.25 × maxmemory + concurrent × 1.3 × QUERY_MEM_CAPACITY + overhead`. It has no input
-> for `repl-backlog-size` or the replica output buffers, so on a replicated cluster it
-> under-counts by roughly **5 GiB** (1 GiB backlog + 2 replicas × 2 GiB hard limit).
-> Infrastructure → Memory headroom will therefore approve a `THREAD_COUNT` the shard
-> manifest's own budget refuses. **On the cluster overlay, do the arithmetic with the
-> full formula above, not with what the dialog says.**
+> **The in-app guard counts replication.** `container_memory_needed()` takes the
+> backlog and the per-replica output-buffer hard limit, and the Infrastructure → Memory
+> headroom check passes what the node reports for both (read from its own `CONFIG`).
+> On a node that will not answer `CONFIG GET` — a managed instance, an ACL without it —
+> those terms read as zero and the guard is back to the single-instance rule; the
+> numbers in the dialog say which was used. It did not count them until 2026-09-11,
+> and approved 8 threads on a 56Gi shard that the manifest's own budget refused.
 
 Worked, for the cluster overlay today (32gb maxmemory, 1GiB ceiling, 56Gi limit, 2
-replicas per master):
+replicas per master, 1GiB backlog, 2GiB replica output buffer):
 
-| THREAD_COUNT | Query memory | App guard says | Full budget (with replication) | Fits in 56Gi? |
-|---|---|---|---|---|
-| 6 (current) | 7.8 | 48.8 | 53.8 | yes, 2.2 spare |
-| 7 | 9.1 | 50.1 | 55.1 | yes, 0.9 spare — tight |
-| 8 | 10.4 | 51.4 | 56.4 | **no** — and the guard says yes |
+| THREAD_COUNT | Query memory | Needed (the guard's figure) | Fits in 56Gi? |
+|---|---|---|---|
+| 6 (current) | 7.8 | 53.8 | yes, 2.2 spare |
+| 7 | 9.1 | 55.1 | yes, 0.9 spare — tight |
+| 8 | 10.4 | 56.4 | **no** |
 
 So on the current shape there is **one thread of headroom**, not four — and the last row
-is exactly the case where trusting the dialog OOM-kills the pod. To go further you must
+is the case the dialog used to approve. To go further you must
 first lower `QUERY_MEM_CAPACITY`, lower `maxmemory`, or move to a larger machine —
 **in that order of preference**, since the first two are reversible and the third is not.
 Raising `THREAD_COUNT` without the memory trades a caught query error for an OOM-killed
