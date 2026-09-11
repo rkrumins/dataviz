@@ -39,7 +39,10 @@ def test_the_ladder_table_matches_the_code(doc):
     documented = [
         (r"ASGI request tier \|[^|]*?(\d+)s aggregation", R.HTTP_TIMEOUT_AGGREGATION_SECS),
         (r"ASGI request tier \|[^|]*?(\d+)s graph", R.HTTP_TIMEOUT_GRAPH_SECS),
-        (r"Per-source admission gate \|[^|]*?\*\*(\d+)\*\*", hard),
+        # The admission and pool rows now carry TWO columns — the code default
+        # and the deployed value. Check the code default against the code; the
+        # deployed column is checked against the ConfigMap below.
+        (r"Per-source admission gate \|[^|]*?= (\d+) \|", hard),
         (r"`GRAPH_READ` DB session \|[^|]*?pool_size (\d+)", gr["pool_size"]),
         (r"`GRAPH_READ` DB session \|[^|]*?overflow (\d+)", gr["max_overflow"]),
         (r"Provider semaphore \|[^|]*?\*\*(\d+)\*\*", M._MAX_PROVIDER_CONCURRENCY),
@@ -61,6 +64,30 @@ def test_the_ladder_table_matches_the_code(doc):
     # The per-source reserve is stated in prose in §2, not in the table.
     assert re.search(rf"default `pool // 8` = {reserved}\)", doc), (
         f"§2 no longer states the per-source reserve as {reserved}"
+    )
+
+
+def test_the_deployed_column_matches_the_configmap(doc):
+    """The doc's whole point in §1 is that the DEPLOYED value differs from the
+    code default. That only helps if the deployed column tracks the ConfigMap."""
+    import re as _re
+    from pathlib import Path as _Path
+
+    cm = (_Path(__file__).resolve().parents[2]
+          / "deploy/k8s/base/configmaps/viz-config.yaml").read_text()
+    size = int(_re.search(r'DB_GRAPH_READ_POOL_SIZE: "(\d+)"', cm).group(1))
+    overflow = int(_re.search(r'DB_GRAPH_READ_POOL_MAX_OVERFLOW: "(\d+)"', cm).group(1))
+    deployed_pool = size + overflow
+    deployed_hard = max(4, deployed_pool - 4)
+
+    assert _re.search(rf"\*\*{size} \+ {overflow} = {deployed_pool}\*\*", doc), (
+        f"§1's deployed pool column no longer says {size} + {overflow} = {deployed_pool}"
+    )
+    assert _re.search(rf"\| \*\*{deployed_hard}\*\* \|", doc), (
+        f"§1's deployed admission column no longer says {deployed_hard}"
+    )
+    assert _re.search(rf"12 × {deployed_hard}\s+= {12 * deployed_hard} in flight", doc), (
+        f"the fleet arithmetic no longer uses the deployed ceiling {deployed_hard}"
     )
 
 
@@ -87,11 +114,20 @@ def test_the_fleet_arithmetic_is_self_consistent(doc):
     replicas = total // per_pod
     assert total == replicas * per_pod, "the worker arithmetic in §1 does not multiply out"
 
+    from pathlib import Path as _Path
+
     from backend.app.providers import manager as M
-    hard, _ = M._graph_inflight_limits()
+
+    # The fleet line uses the DEPLOYED ceiling, not the code default — that is
+    # the whole point of §1's two-column table.
+    cm = (_Path(__file__).resolve().parents[2]
+          / "deploy/k8s/base/configmaps/viz-config.yaml").read_text()
+    pool = (int(re.search(r'DB_GRAPH_READ_POOL_SIZE: "(\d+)"', cm).group(1))
+            + int(re.search(r'DB_GRAPH_READ_POOL_MAX_OVERFLOW: "(\d+)"', cm).group(1)))
+    hard = max(4, pool - 4)
     assert re.search(rf"{total} × {hard}\s+= {total * hard} in flight", doc), (
         "the admitted-requests line in §1 no longer matches "
-        f"{total} workers × {hard} admitted"
+        f"{total} workers × {hard} admitted (deployed pool {pool})"
     )
     assert re.search(rf"{total} ×\s+{M._MAX_PROVIDER_CONCURRENCY}\s+=\s+{total * M._MAX_PROVIDER_CONCURRENCY} per provider", doc), (
         "the concurrent-FalkorDB-calls line in §1 no longer matches "

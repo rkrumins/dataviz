@@ -24,14 +24,22 @@ Two companions, both still authoritative for what they cover:
 
 A graph request passes through six ceilings. Each is a separate queue.
 
-| # | Ceiling | Value | Scope |
-|---|---|---|---|
-| 1 | ASGI request tier | 45s aggregation / 60s graph+trace / 120s versioning | per request |
-| 2 | Per-source admission gate | `hard = GRAPH_READ pool − 4` = **16** | per **process**, per data source |
-| 3 | `GRAPH_READ` DB session | `pool_size 10 + overflow 10` = **20** | per **process** |
-| 4 | Provider semaphore | `PROVIDER_MAX_CONCURRENCY` = **8** (+16 waiters, 2s wait) | per **process**, per (provider, graph) |
-| 5 | FalkorDB query threads | `THREAD_COUNT` **6** per node | per node |
-| 6 | FalkorDB queue | `MAX_QUEUED_QUERIES` **150** per node | per node |
+| # | Ceiling | Code default | **As deployed** | Scope |
+|---|---|---|---|---|
+| 1 | ASGI request tier | 45s aggregation / 60s graph+trace / 120s versioning | same | per request |
+| 2 | Per-source admission gate | `hard = GRAPH_READ pool − 4` = 16 | **12** | per **process**, per data source |
+| 3 | `GRAPH_READ` DB session | `pool_size 10 + overflow 10` = 20 | **8 + 8 = 16** | per **process** |
+| 4 | Provider semaphore | `PROVIDER_MAX_CONCURRENCY` = **8** (+16 waiters, 2s wait) | same | per **process**, per (provider, graph) |
+| 5 | FalkorDB query threads | `THREAD_COUNT` **6** per node (cluster overlay) | same | per node |
+| 6 | FalkorDB queue | `MAX_QUEUED_QUERIES` **150** per node | same | per node |
+
+**Read that table's two value columns before anything else.** `viz-config.yaml` sets
+`DB_GRAPH_READ_POOL_SIZE: "8"` and `DB_GRAPH_READ_POOL_MAX_OVERFLOW: "8"`, so the pool is
+16 and the admission gate derives **12**, not the 16 a reader of the code alone would
+assume. This is the trap in §4.1 happening to this very document: the deployed value wins,
+silently, and no log line says so. Whenever you reason about capacity, reason about the
+*right-hand* column — and confirm it with `kubectl get configmap viz-config -o yaml`
+rather than from memory.
 
 **The rule: every outer deadline must outlast the one inside it.**
 
@@ -57,7 +65,7 @@ per gunicorn worker, not per pod and not per cluster**:
 
 ```
 3 viz-service replicas × GUNICORN_WORKERS 4          = 12 worker processes
-admitted graph requests   12 × 16                    = 192 in flight
+admitted graph requests   12 × 12                    = 144 in flight
 concurrent FalkorDB calls 12 ×  8                    =  96 per provider
 ```
 
@@ -233,3 +241,147 @@ bulk-load at ~74 MB/s (13 GB ≈ 3 min) against incremental replay at minutes pe
 5. **Watch `/health/deps` → `resilience`** for a release, not just the logs. The counters
    are there to make a change verifiable: timeouts rising with `breaker_opens` flat is
    the healthy shape.
+
+---
+
+## 5. Hypertuning: making it faster, in the order that works
+
+This section is the playbook for "we need more throughput". It is ordered, and the order
+matters — most performance work fails because someone pulls lever 6 while lever 1 is
+still the constraint.
+
+**The governing fact, from §1:** the application tier can present ~96 concurrent queries
+per provider against 18–54 FalkorDB threads. **The store is the constraint, and adding
+web capacity does not change that.** Every step below is either "make the store do less",
+"make the store do it faster", or "make the app ask for less". In that order.
+
+### Step 0 — Measure, or everything below is guesswork
+
+You cannot tune what you have not measured, and exactly one number decides how many users
+this supports: **mean query service time**.
+
+```bash
+# Per-node: how many queries ran, how long they took, how deep the queue got.
+redis-cli -h <shard> GRAPH.INFO
+redis-cli -h <shard> INFO commandstats      # calls + usec_per_call for GRAPH.QUERY / GRAPH.RO_QUERY
+redis-cli -h <shard> SLOWLOG GET 25         # the tail that eats threads
+```
+
+Then the app's own view, which costs nothing and is already wired:
+
+```bash
+curl -s localhost:8080/health/deps | jq '.resilience'
+```
+
+Record: `usec_per_call`, the p99 from SLOWLOG, `breaker.deadline_timeouts_not_counted`,
+`provider_manager.slots_shed_wait_timeout`, `provider_manager.graph_shed_over_share`.
+Those five tell you which of the six ceilings is actually binding.
+
+### Step 1 — Stop doing avoidable work (free, biggest wins)
+
+Nothing here costs capacity; it removes load.
+
+| Lever | Effect | How to confirm it worked |
+|---|---|---|
+| Remove stale overrides (§4.1) | Often the whole problem | Values in `/health/deps` match the new defaults |
+| Confirm the drift sweep is bounded | Was 3 full scans/source/60s on the read threads | `GRAPH.INFO` query count drops between sweeps |
+| Retire unused `:AGGREGATED` edge indexes | Every edge write updates every index | `CALL db.indexes()` shows only the ones in `index_policy.py` |
+| Let aggregation yield to reads | Jobs stretch pacing while users are starved | `resilience.read_pressure.signals_sent > 0` under load |
+| Bound AOF rewrite (`--auto-aof-rewrite-percentage 80 --auto-aof-rewrite-min-size 256mb`) | Restart minutes instead of an hour | `INFO persistence` → `aof_current_size` stops growing unboundedly |
+
+### Step 2 — Spread the load across nodes you already pay for
+
+The 9-pod layout exists so reads do not all land on three masters.
+
+* Confirm read routing is actually offloading: read-only queries should reach replicas.
+  If `GRAPH.INFO` shows masters busy and replicas idle, routing is not working and you
+  are running at **18** threads, not 54. That is a 3× difference for zero cost.
+* Check placement skew. One shard holding most of the data means one shard doing most of
+  the work regardless of how many nodes exist. Admin → Graph store shows per-shard memory.
+* `cluster-require-full-coverage no` keeps two shards serving when one is down — verify it
+  is still set.
+
+### Step 3 — Give the store more threads (costs memory, needs care)
+
+`THREAD_COUNT` is the read-concurrency ceiling. Raising it is the most direct lever and
+the easiest to get wrong.
+
+```
+required container memory =
+    1.25 × maxmemory
+  + THREAD_COUNT × 1.3 × QUERY_MEM_CAPACITY
+  + repl-backlog-size
+  + replicas × replica-output-buffer-hard-limit
+  + overhead (≈1Gi)
+```
+
+> **The in-app guard does not count replication.**
+> `container_memory_needed()` (`shard_capacity.py:375`) implements only
+> `1.25 × maxmemory + concurrent × 1.3 × QUERY_MEM_CAPACITY + overhead`. It has no input
+> for `repl-backlog-size` or the replica output buffers, so on a replicated cluster it
+> under-counts by roughly **5 GiB** (1 GiB backlog + 2 replicas × 2 GiB hard limit).
+> Infrastructure → Memory headroom will therefore approve a `THREAD_COUNT` the shard
+> manifest's own budget refuses. **On the cluster overlay, do the arithmetic with the
+> full formula above, not with what the dialog says.**
+
+Worked, for the cluster overlay today (32gb maxmemory, 1GiB ceiling, 56Gi limit, 2
+replicas per master):
+
+| THREAD_COUNT | Query memory | App guard says | Full budget (with replication) | Fits in 56Gi? |
+|---|---|---|---|---|
+| 6 (current) | 7.8 | 48.8 | 53.8 | yes, 2.2 spare |
+| 7 | 9.1 | 50.1 | 55.1 | yes, 0.9 spare — tight |
+| 8 | 10.4 | 51.4 | 56.4 | **no** — and the guard says yes |
+
+So on the current shape there is **one thread of headroom**, not four — and the last row
+is exactly the case where trusting the dialog OOM-kills the pod. To go further you must
+first lower `QUERY_MEM_CAPACITY`, lower `maxmemory`, or move to a larger machine —
+**in that order of preference**, since the first two are reversible and the third is not.
+Raising `THREAD_COUNT` without the memory trades a caught query error for an OOM-killed
+pod, under exactly the load the change was meant to serve.
+
+`THREAD_COUNT` must also stay ≤ the pod's CPU limit (currently 7), or the threads contend
+for cores they do not have and each query gets slower — throughput falls while the number
+on the dial goes up.
+
+### Step 4 — Make the app ask for less, and shed sooner
+
+Only once the store is as fast as it is going to get. Counter-intuitively, **lowering**
+app concurrency can raise throughput: presenting 96 concurrent queries to 54 threads means
+42 are queueing, and a queued query holds a `GRAPH_READ` session and a provider slot the
+whole time it waits.
+
+* `PROVIDER_MAX_CONCURRENCY` (8/worker → 96 fleet-wide). Bringing it nearer the store's
+  real thread count converts slow 504s into fast 429s, which the canvas retries in place.
+  **Do not change this without step 0** — shed too eagerly and normal canvas opens fail.
+* `VITE_HYDRATION_CONCURRENCY` (4) is the browser-side fan-out per view. Lower means
+  gentler bursts and a longer single-view load.
+* `AGGREGATED_EDGE_PAGE_SIZE` controls how much one read asks for at once. Smaller pages
+  hold a thread for less time each, at the cost of more round trips.
+
+### Step 5 — Add capacity (last, because it is the only one that costs money)
+
+* **More FalkorDB shards** is the only change that raises the ceiling in §1. It requires a
+  reshard, which is not online for graph keys — plan it.
+* **More viz-service replicas** raises the *presented* concurrency, not the served
+  concurrency. It helps only if step 0 showed the web tier as the constraint (event-loop
+  lag high, FalkorDB threads idle). Otherwise it deepens queues and makes latency worse.
+* **Bigger FalkorDB nodes** buy `THREAD_COUNT` headroom via step 3's formula.
+
+### What "done" looks like
+
+Under target load, sustained:
+
+* `breaker_opens` flat while `deadline_timeouts_not_counted` may rise — slow, not broken.
+* `graph_shed_over_share` near zero — no source starving its neighbours.
+* Aggregate p95 within the SLO in `loadtest/lib/slo.py` (< 500 ms), failure rate < 0.1%.
+* FalkorDB `SLOWLOG` not growing a tail of multi-second queries.
+* Memory stable well below `maxmemory` on every shard, with no eviction (there is none —
+  `noeviction` means writes fail instead).
+
+### The honest caveat
+
+Every number in this section is arithmetic over configuration. **None of it has been
+measured against a real cluster under real load.** The load-test harness in `loadtest/`
+exists to settle that — `canvas_open` in particular models the hot path — and until it has
+been run at target concurrency, treat §1's user-count table as a shape, not a promise.

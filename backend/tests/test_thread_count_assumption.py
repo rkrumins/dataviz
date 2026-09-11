@@ -89,3 +89,59 @@ def test_the_direction_of_safety_is_stated(shipped, assumed, safe):
     """Pins the asymmetry itself, so the next person to touch the number knows
     which way is dangerous without re-deriving it."""
     assert (assumed >= shipped) is safe
+
+
+# ── what the container-memory guard does NOT count ───────────────────────
+#
+# container_memory_needed() implements the single-instance rule:
+#   1.25 x maxmemory + concurrent x 1.3 x QUERY_MEM_CAPACITY + overhead
+#
+# It has no input for replication, so on a replicated cluster it under-counts
+# by the replication backlog plus the per-replica output buffers. The cluster
+# overlay's own sizing comment counts both. The gap is ~5 GiB there, which is
+# enough to flip a THREAD_COUNT decision — the guard approves 8 threads on a
+# 56Gi shard while the manifest's full budget refuses them.
+#
+# This is a KNOWN bound, documented in docs/CONCURRENCY_TUNING.md §5 step 3.
+# It is pinned here so the gap cannot widen unnoticed, and so that whoever
+# gives the guard a replication input finds this test waiting for them.
+
+
+def test_the_container_guard_does_not_account_for_replication():
+    from backend.app.providers.shard_capacity import container_memory_needed
+
+    GIB = 1024 ** 3
+    maxmemory, cap, threads = 32 * GIB, 1 * GIB, 8
+    guard = container_memory_needed(maxmemory, threads, cap)
+
+    # The cluster overlay's stated budget adds what the guard omits.
+    repl_backlog = 1 * GIB
+    replica_buffers = 2 * (2 * GIB)          # 2 replicas x 2 GiB hard limit
+    full_budget = guard + repl_backlog + replica_buffers
+
+    shard_limit = 56 * GIB
+    assert guard < shard_limit, (
+        "the guard is expected to approve 8 threads on a 56Gi shard — that is the "
+        "whole point of this test"
+    )
+    assert full_budget > shard_limit, (
+        "the full budget is expected to refuse them. If this now fits, the shard "
+        "sizing changed and docs/CONCURRENCY_TUNING.md §5 needs its table redone."
+    )
+    assert full_budget - guard == repl_backlog + replica_buffers
+
+
+def test_the_guard_is_still_the_single_instance_formula():
+    """If someone gives container_memory_needed a replication input, this test
+    fails and points them at the doc that currently tells operators to do the
+    arithmetic by hand."""
+    import inspect
+
+    from backend.app.providers import shard_capacity
+
+    params = set(inspect.signature(shard_capacity.container_memory_needed).parameters)
+    assert params == {"maxmemory", "concurrent", "query_mem_capacity"}, (
+        "container_memory_needed grew an argument. If it now counts replication, "
+        "remove the warning in docs/CONCURRENCY_TUNING.md §5 step 3 and delete "
+        "test_the_container_guard_does_not_account_for_replication above."
+    )

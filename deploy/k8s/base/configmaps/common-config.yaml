@@ -31,7 +31,18 @@ data:
   FALKORDB_SERVER_TIMEOUT_MAX_MS: "180000"
   # Optional: the FalkorDB container's limits.memory, so the "Adjust graph
   # store limits" dialog is prefilled with it (the app cannot read it).
-  # FALKORDB_CONTAINER_MEMORY_BYTES: "10737418240"
+  # The graph store container's memory LIMIT, which the application cannot
+  # read for itself. It prefills the container field in Infrastructure →
+  # Memory headroom, and that field is what the sizing guard checks a raised
+  # QUERY_MEM_CAPACITY against. Left unset, an operator has to type the limit
+  # by hand on every raise — and a mistyped limit makes the guard's answer
+  # wrong in the direction that OOM-kills the node.
+  #
+  # MUST equal the deployed limit: 14Gi in the base StatefulSet
+  # (deploy/k8s/base/infrastructure/falkordb/statefulset.yaml). The
+  # production-cluster overlay runs 56Gi shards and overrides this in its
+  # cluster-config patch. 14 * 1024^3 = 15032385536.
+  FALKORDB_CONTAINER_MEMORY_BYTES: "15032385536"
   REDIS_URL: "redis://redis:6379/0"
   # Dedicated cache Redis for the FalkorDB provider's ancestor chain
   # and URN-label caches. Must point at a Redis instance that is NOT
