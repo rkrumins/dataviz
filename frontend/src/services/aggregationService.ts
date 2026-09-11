@@ -14,6 +14,12 @@ export interface AggregationTuning {
   applyChunk?: number | null;          // 1,000 .. 200,000
   deleteChunk?: number | null;         // 100 .. 50,000
   writePacingRatio?: number | null;    // 0 .. 10
+  /** Steady load: the ceiling on rows per write batch (10 .. 2,000), what one
+   *  batch should take in seconds (0.1 .. 10 — the lock window a reader of the
+   *  graph waits for), and the floor under the pause between two (0 .. 10,000 ms). */
+  writeBatchMax?: number | null;
+  writeBatchTargetS?: number | null;
+  writeMinGapMs?: number | null;
   extractConcurrency?: number | null;  // 1 .. 4
   /** Share of the worker's memory limit at which the pipeline flushes early (fleet-wide). 30 .. 90 */
   flushMemPct?: number | null;
@@ -175,12 +181,14 @@ export interface LiveOverrides {
    *  confirm each write (0 releases a run held behind one that is behind). */
   replica_ack_min?: number;
   replica_ack_timeout_ms?: number;
+  write_batch_max?: number;
+  write_batch_target_s?: number;
   history?: LiveLimitChange[];
 }
 
 /** Live values a patch may clear — back to the job's settings. */
 export type LiveResetKey = 'writePacingRatio' | 'extractConcurrency' | 'scanWidth' | 'scanTimeoutS' | 'writeTimeoutS'
-  | 'replicaAckMin' | 'replicaAckTimeoutMs';
+  | 'replicaAckMin' | 'replicaAckTimeoutMs' | 'writeBatchMax' | 'writeBatchTargetS';
 
 /**
  * What can be changed on a pending or running job without cancelling it: the
@@ -205,6 +213,10 @@ export interface JobLimitsPatch {
   scanWidth?: number;
   replicaAckMin?: number;
   replicaAckTimeoutMs?: number;
+  /** A cap on rows per write batch (10 .. 2,000), never above the job's
+   *  setting, and what one batch should take (0.1 .. 10 s) — from the next batch. */
+  writeBatchMax?: number;
+  writeBatchTargetS?: number;
   /** Live values to clear — back to the job's settings. */
   reset?: LiveResetKey[];
 }
@@ -226,6 +238,9 @@ export interface EffectiveTuningSnapshot {
   extract_concurrency?: number;
   replica_ack_min?: number;
   replica_ack_timeout_ms?: number;
+  write_batch_max?: number;
+  write_batch_target_s?: number;
+  write_min_gap_ms?: number;
   materialize_leaf_pairs?: boolean;
   materialize_fine_pairs?: 'auto' | 'true' | 'false' | string;
   max_materialized_edges?: number | null;
@@ -296,13 +311,37 @@ export interface AdaptedRunState {
   store_holds?: Record<string, number>;
   store_hold_s?: Record<string, number>;
   store_hold_last?: { kind: string; held_s: number; detail: string };
+  /** How often the run eased off short of a hold, by reason (replica_lag, memory). */
+  eases?: Record<string, number>;
   pressure?: PressureEvent[];
   by_scan?: Record<string, { events: number; min_size: number; kind: string }>;
   /** What the previous run of this source taught it, applied at the start. */
   from_last_run?: Record<string, number | string>;
   /** What an operator changed on the running job, in force now. */
   live?: Partial<Record<'scan_timeout_s' | 'write_timeout_s' | 'write_pacing_ratio' | 'extract_concurrency' | 'scan_width'
-    | 'replica_ack_min' | 'replica_ack_timeout_ms', number>>;
+    | 'replica_ack_min' | 'replica_ack_timeout_ms' | 'write_batch_max' | 'write_batch_target_s', number>>;
+}
+
+/**
+ * How the run wrote — a record, not an adaptation, so it sits beside
+ * `adapted`: the last batch's shape, the totals, and the rolling duty cycle
+ * (share of the time spent writing or waiting on the store rather than
+ * pausing) and rate over the last twenty batches.
+ */
+export interface PaceRecord {
+  batch_rows?: number;
+  batch_s?: number;
+  ack_s?: number;
+  sleep_s?: number;
+  batch_max?: number;
+  target_s?: number;
+  ratio?: number;
+  batches?: number;
+  rows?: number;
+  busy_s?: number;
+  idle_s?: number;
+  duty_pct?: number;
+  rows_per_s?: number;
 }
 
 export interface AggregationRunStats {
@@ -327,6 +366,7 @@ export interface AggregationRunStats {
   query_mem_capacity?: number | null;
   effective_tuning?: EffectiveTuningSnapshot;
   adapted?: AdaptedRunState;
+  pace?: PaceRecord;
   advisories?: Array<{ kind: string; severity?: string; message: string }>;
   pairs_by_level?: Record<string, number>;
   [key: string]: unknown;
@@ -464,6 +504,9 @@ export interface EnvTuningDefaults {
   flushMemPct?: number | null;
   replicaAckMin?: number | null;
   replicaAckTimeoutMs?: number | null;
+  writeBatchMax?: number | null;
+  writeBatchTargetS?: number | null;
+  writeMinGapMs?: number | null;
   /** Information only: pairs the accumulator must hold before a memory-aware flush fires. */
   flushMinPairs?: number | null;
 }

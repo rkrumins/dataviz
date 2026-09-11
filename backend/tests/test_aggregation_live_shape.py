@@ -88,6 +88,9 @@ def test_live_concurrency_pacing_and_width_are_read_from_the_shared_dict(monkeyp
 
 def test_live_pacing_applies_to_the_next_write(monkeypatch):
     pipe = base._make_pipeline()
+    # The ratio alone: the floor under the pause (the minimum gap) is the
+    # steady-load scheduler's own test, and would otherwise hide a ratio of 0.
+    pipe._write_min_gap_ms = 0
     sleeps = []
 
     async def fake_sleep(s):

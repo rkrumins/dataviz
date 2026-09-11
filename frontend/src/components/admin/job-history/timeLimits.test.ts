@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import {
     backToSettingsPatch, waitForReplicasPatch, releaseReplicaWaitPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
-    limitsInForce, pacePatch, perQueryPatch, secondsLeft, serialReadsPatch, shapeInForce,
+    limitsInForce, pacePatch, perQueryPatch, secondsLeft, serialReadsPatch, shapeInForce, smallerBatchesPatch,
 } from './timeLimits'
 
 function job(over: Partial<AggregationJobResponse> = {}): AggregationJobResponse {
@@ -73,20 +73,20 @@ describe('the scan shape', () => {
     it('reads what is in force: live first, then the run record, then the defaults', () => {
         expect(shapeInForce(job())).toEqual({
             pacingRatio: 1, extractConcurrency: 1, scanWidth: 200_000, scanWidthNow: null,
-            replicaAckMin: 1,
-            live: { pacing: false, concurrency: false, scanWidth: false, replicaAck: false },
+            replicaAckMin: 1, batchMax: 500, batchTargetS: 1,
+            live: { pacing: false, concurrency: false, scanWidth: false, replicaAck: false, batchMax: false, batchTarget: false },
         })
         const j = job({
             runStats: {
-                effective_tuning: { write_pacing_ratio: 0.5, extract_concurrency: 4, scan_range_width: 100_000 },
+                effective_tuning: { write_pacing_ratio: 0.5, extract_concurrency: 4, scan_range_width: 100_000, write_batch_max: 300, write_batch_target_s: 0.5 },
                 adapted: { scan_width: 12_500 },
             },
-            liveOverrides: { extract_concurrency: 2, replica_ack_min: 2 },
+            liveOverrides: { extract_concurrency: 2, replica_ack_min: 2, write_batch_max: 150 },
         })
         expect(shapeInForce(j)).toEqual({
             pacingRatio: 0.5, extractConcurrency: 2, scanWidth: 100_000, scanWidthNow: 12_500,
-            replicaAckMin: 2,
-            live: { pacing: false, concurrency: true, scanWidth: false, replicaAck: true },
+            replicaAckMin: 2, batchMax: 150, batchTargetS: 0.5,
+            live: { pacing: false, concurrency: true, scanWidth: false, replicaAck: true, batchMax: true, batchTarget: false },
         })
     })
 
@@ -99,8 +99,12 @@ describe('the scan shape', () => {
         expect(halveScansPatch(job({ runStats: { adapted: { scan_width: 12_500 } } }))).toEqual({ scanWidth: 6_250 })
         expect(halveScansPatch(job({ liveOverrides: { scan_width: 1 } }))).toEqual({ scanWidth: 1 })
         expect(backToSettingsPatch()).toEqual({
-            reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin'],
+            reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin', 'writeBatchMax', 'writeBatchTargetS'],
         })
+        // Smaller batches: half the ceiling in force, never below 10 rows.
+        expect(smallerBatchesPatch(job())).toEqual({ writeBatchMax: 250 })
+        expect(smallerBatchesPatch(job({ liveOverrides: { write_batch_max: 30 } }))).toEqual({ writeBatchMax: 15 })
+        expect(smallerBatchesPatch(job({ liveOverrides: { write_batch_max: 10 } }))).toEqual({ writeBatchMax: 10 })
         // Replication backpressure: one more replica per write, or none at all.
         expect(waitForReplicasPatch(job())).toEqual({ replicaAckMin: 2 })
         expect(waitForReplicasPatch(job({ liveOverrides: { replica_ack_min: 5 } }))).toEqual({ replicaAckMin: 5 })

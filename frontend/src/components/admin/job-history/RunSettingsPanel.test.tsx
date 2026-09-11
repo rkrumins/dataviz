@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { AggregationJobResponse } from '@/services/aggregationService'
 import { RunSettingsPanel } from './RunSettingsPanel'
-import { adaptationSentences, presetForRun, runSettingsRows } from './runSettings'
+import { adaptationSentences, presetForRun, runSettingsRows, paceSentence, } from './runSettings'
 
 const EFFECTIVE = {
     scan_range_width: 200_000, max_pending_pairs: 50_000_000, apply_chunk: 20_000, delete_chunk: 10_000,
@@ -142,6 +142,17 @@ describe('adaptationSentences — replicas and a node that went away', () => {
         // Waited but nothing proved a restart: no claim that one happened.
         expect(adaptationSentences({ store_outage_holds: 1, store_outage_s: 30 }))
             .toEqual(['Held 1 time while the graph store node was unreachable (30s)'])
+    })
+})
+
+describe('paceSentence — how the run wrote', () => {
+    it('says the batches, the ceiling, the seconds per batch, the duty cycle and the rate over the whole run', () => {
+        expect(paceSentence({ batches: 1_240, rows: 310_000, batch_max: 250, busy_s: 744, idle_s: 756 }))
+            .toBe('Wrote 1,240 batches (310,000 rows), at most 250 rows each, 0.6 s per batch, 50% write duty, 207 rows/s')
+        expect(paceSentence({ batches: 3, rows: 600, batch_max: 500, busy_s: 4.5, idle_s: 0.3 }, { replica_lag: 2, memory: 1 }))
+            .toBe('Wrote 3 batches (600 rows), at most 500 rows each, 1.5 s per batch, 94% write duty, 125 rows/s; eased off 3 times (replicas half way to the drop limit, the container’s fork line in sight)')
+        expect(paceSentence({ batches: 0 })).toBeNull()
+        expect(paceSentence(null)).toBeNull()
     })
 })
 

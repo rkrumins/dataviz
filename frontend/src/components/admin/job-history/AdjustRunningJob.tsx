@@ -22,7 +22,7 @@ import { timeAgo } from './shared'
 import {
     backToSettingsPatch, describeChange, doubleWallPatch, extendStallPatch, formatWindow, halveScansPatch,
     limitsInForce, pacePatch, perQueryPatch, releaseReplicaWaitPatch, secondsLeft, serialReadsPatch,
-    shapeInForce, waitForReplicasPatch,
+    shapeInForce, waitForReplicasPatch, smallerBatchesPatch,
 } from './timeLimits'
 
 const BUTTON = 'px-2 py-1 rounded-md border border-glass-border text-[11px] font-semibold text-ink hover:border-indigo-500/40 hover:text-indigo-500 transition-colors disabled:opacity-40'
@@ -54,6 +54,7 @@ export function AdjustRunningJob({ job, onAdjust, busy }: {
     const history = (job.liveOverrides?.history ?? []).slice(-4).reverse()
     const stallLow = left.stall != null && left.stall < 1800
     const anyLive = shape.live.pacing || shape.live.concurrency || shape.live.scanWidth
+        || shape.live.batchMax || shape.live.batchTarget
 
     const perQuery = perQueryPatch(
         job,
@@ -133,6 +134,8 @@ export function AdjustRunningJob({ job, onAdjust, busy }: {
                                 {' · '}scans {shape.scanWidth.toLocaleString()} rows{shape.live.scanWidth && <Live />}
                                 {shape.scanWidthNow != null && shape.scanWidthNow < shape.scanWidth && ` (narrowed to ${shape.scanWidthNow.toLocaleString()} by the ladder)`}
                                 {' · '}{shape.replicaAckMin === 0 ? 'no replica wait' : `waits for ${shape.replicaAckMin} replica${shape.replicaAckMin === 1 ? '' : 's'}`}{shape.live.replicaAck && <Live />}
+                                {' · '}batches of at most {shape.batchMax.toLocaleString()} rows{shape.live.batchMax && <Live />}
+                                {' in ~'}{shape.batchTargetS}s{shape.live.batchTarget && <Live />}
                             </span>
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
@@ -141,6 +144,7 @@ export function AdjustRunningJob({ job, onAdjust, busy }: {
                             <button type="button" disabled={busy} className={BUTTON} onClick={send(pacePatch(job, 4))} title="Sleep four times as long after every write">Pace ×4</button>
                             <button type="button" disabled={busy || shape.extractConcurrency === 1} className={BUTTON} onClick={send(serialReadsPatch())} title="One read scan at a time from the next wave">Serial reads</button>
                             <button type="button" disabled={busy} className={BUTTON} onClick={send(halveScansPatch(job))} title="Cap the scan width at half of what it scans with now">Halve scans</button>
+                            <button type="button" disabled={busy || shape.batchMax <= 10} className={BUTTON} onClick={send(smallerBatchesPatch(job))} title="Halve the most rows one write batch may carry — a write batch is the lock window every reader of the graph waits for">Smaller batches</button>
                             <button type="button" disabled={busy || shape.replicaAckMin >= 5} className={BUTTON} onClick={send(waitForReplicasPatch(job))} title="Wait for one more replica of the graph store node to confirm each write before sending the next">Wait for replicas</button>
                             <button type="button" disabled={busy || shape.replicaAckMin === 0} className={BUTTON} onClick={send(releaseReplicaWaitPatch())} title="Stop waiting for replicas — releases a run held behind one that is behind">Stop waiting</button>
                             <button type="button" disabled={busy || !anyLive} className={BUTTON} onClick={send(backToSettingsPatch())} title="Clear every live change">Back to settings</button>
@@ -148,7 +152,7 @@ export function AdjustRunningJob({ job, onAdjust, busy }: {
                     </section>
 
                     <p className="text-[10px] text-ink-muted">
-                        Takes effect within about thirty seconds — per-query budgets, pacing, concurrency, scan width and the replica wait from the next query, write, wave or scan. A cap is a ceiling: the pressure ladder may still narrow further on its own. Waiting for replicas keeps the graph store’s copies from falling behind, which is what stops a node being restarted mid-rebuild. Scan floor, chunks and rollup storage change on the next Resume or Re-trigger.
+                        Takes effect within about thirty seconds — per-query budgets, pacing, concurrency, scan width, the replica wait and the batch ceiling from the next query, write, wave, scan or batch. A cap is a ceiling: the pressure ladder may still narrow further on its own, and the batch sizer re-grows only toward the new ceiling. Waiting for replicas keeps the graph store’s copies from falling behind, which is what stops a node being restarted mid-rebuild. Scan floor, chunks and rollup storage change on the next Resume or Re-trigger.
                     </p>
                     {history.length > 0 && (
                         <ul className="space-y-0.5" aria-label="Recent limit changes">

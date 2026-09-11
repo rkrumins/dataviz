@@ -80,6 +80,7 @@ is the ``latestUpdate`` guard that protects edges written during the run
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import logging
 import os
@@ -90,9 +91,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from backend.app.providers.process_memory import MemoryGauge
 from backend.app.providers.shard_capacity import (
     ShardMemory, WriteBudget, bytes_per_edge_default, calibrate_bytes_per_edge,
-    compute_write_budget, container_limit_bytes, estimate_margin_pct_default,
-    format_refusal, hold_reason, human_bytes, read_shard_memory,
-    shard_reserve_pct_default,
+    compute_write_budget, container_headroom_bytes, container_limit_bytes,
+    estimate_margin_pct_default, format_refusal, hold_reason, human_bytes,
+    read_shard_memory, replica_lag_hold_bytes, shard_reserve_pct_default,
 )
 from backend.common.providers.identity import (
     node_identity_expr as _shared_identity_expr,
@@ -245,6 +246,39 @@ def _pacing_ratio() -> float:
     for interactive readers. Higher = GENTLER (and slower): 1.0 → ≤ ~50%
     duty cycle, 0.5 → ≤ ~66%, 0.0 → no sleep at all."""
     return _env_float("AGGREGATION_WRITE_PACING_RATIO", 1.0, 0.0, 10.0)
+
+
+def _write_batch_max() -> int:
+    """The ceiling on rows per write batch — the largest MERGE the sizer may
+    grow to. A write query holds the graph's write lock from its first
+    mutation to its end, so one batch is also the longest stall a reader of
+    that graph sees; this and the target below decide how long that is.
+    Per job / Defaults as ``writeBatchMax``; a cap on a RUNNING job only
+    ever lowers it."""
+    return _env_int("AGGREGATION_WRITE_BATCH_MAX", 500, 10, 2_000)
+
+
+def _write_batch_target_s() -> float:
+    """What one write batch should take. The sizer halves the batch when one
+    runs longer than this and grows it — by 100 rows, after five batches in
+    a row under two fifths of it — toward the ceiling. Smaller and steadier
+    beats larger and faster: the same rows land in more, shorter lock
+    windows, and readers of the graph wait for a shorter one each time.
+    Per job / Defaults as ``writeBatchTargetS``; changeable on a RUNNING job."""
+    return _env_float("AGGREGATION_WRITE_BATCH_TARGET_S", 1.0, 0.1, 10.0)
+
+
+def _write_min_gap_ms() -> int:
+    """The floor under the pause between write batches. The pause is a share
+    of the batch's own duration (``AGGREGATION_WRITE_PACING_RATIO``), so
+    fast small batches would otherwise follow each other back to back —
+    steady load needs a gap even then. Per job / Defaults as ``writeMinGapMs``."""
+    return _env_int("AGGREGATION_WRITE_MIN_GAP_MS", 100, 0, 10_000)
+
+
+#: The share of the batch target under which a batch counts as "healthy"
+#: for re-growing the batch — the old 0.8 s of a 2.0 s target.
+_GROW_BELOW_SHARE = 0.4
 
 
 def _read_pressure_pacing_ratio() -> float:
@@ -481,6 +515,9 @@ def env_tuning_defaults() -> Dict[str, Any]:
         "replica_ack_min": _replica_ack_min(),
         "replica_ack_timeout_ms": _replica_ack_timeout_ms(),
         "flush_min_pairs": _flush_min_pairs(),
+        "write_batch_max": _write_batch_max(),
+        "write_batch_target_s": _write_batch_target_s(),
+        "write_min_gap_ms": _write_min_gap_ms(),
     }
 
 
@@ -523,6 +560,9 @@ def resolve_effective_tuning(
     _num("max_cube_edges", _max_cube_edges, 10_000, 50_000_000, int)
     _num("replica_ack_min", _replica_ack_min, 0, 5, int)
     _num("replica_ack_timeout_ms", _replica_ack_timeout_ms, 500, 60_000, int)
+    _num("write_batch_max", _write_batch_max, 10, 2_000, int)
+    _num("write_batch_target_s", _write_batch_target_s, 0.1, 10.0, float)
+    _num("write_min_gap_ms", _write_min_gap_ms, 0, 10_000, int)
     _num("estimate_margin_pct", estimate_margin_pct_default, 0, 100, int)
     values["scan_shrink_floor"] = min(values["scan_shrink_floor"], values["scan_range_width"])
 
@@ -708,6 +748,53 @@ def _next_scan_width(
     if fail_width is not None and doubled >= fail_width and streak < 64:
         return sticky
     return None if doubled >= ceiling else doubled
+
+
+class _PaceMeter:
+    """What the write side is doing, batch by batch: the last batch's
+    figures and a rolling window of the last twenty, from which the duty
+    cycle (share of the time the run is writing or waiting on the store,
+    rather than pausing) and the rate follow. Rows and seconds only — the
+    meter measures, the scheduler decides."""
+
+    __slots__ = ("batches", "rows", "busy_s", "idle_s", "last", "_window")
+
+    def __init__(self) -> None:
+        self.batches = 0
+        self.rows = 0
+        self.busy_s = 0.0
+        self.idle_s = 0.0
+        self.last: Dict[str, Any] = {}
+        self._window: "collections.deque" = collections.deque(maxlen=20)
+
+    def note(
+        self, *, rows: Optional[int], batch_s: float, ack_s: float, sleep_s: float,
+        batch_max: int, target_s: float, ratio: float,
+    ) -> None:
+        n = int(rows or 0)
+        self.batches += 1
+        self.rows += n
+        self.busy_s += batch_s + ack_s
+        self.idle_s += sleep_s
+        self._window.append((batch_s + ack_s, sleep_s, n))
+        self.last = {
+            "batch_rows": n, "batch_s": round(batch_s, 3), "ack_s": round(ack_s, 3),
+            "sleep_s": round(sleep_s, 3), "batch_max": int(batch_max),
+            "target_s": round(float(target_s), 2), "ratio": round(float(ratio), 2),
+        }
+
+    def snapshot(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            **self.last, "batches": self.batches, "rows": self.rows,
+            "busy_s": round(self.busy_s, 1), "idle_s": round(self.idle_s, 1),
+        }
+        busy = sum(w[0] for w in self._window)
+        idle = sum(w[1] for w in self._window)
+        rows = sum(w[2] for w in self._window)
+        if busy + idle > 0:
+            out["duty_pct"] = int(round(100.0 * busy / (busy + idle)))
+            out["rows_per_s"] = round(rows / (busy + idle), 1)
+        return out
 
 
 class _StickyCap:
@@ -962,6 +1049,21 @@ class AggregationPipeline:
         )
         self._yielding_to_reads = False      # last write batch was paced for readers
         self._read_pressure_yields = 0       # write batches paced at the read-pressure ratio
+        # Steady load: how large a write batch may grow, how long one should
+        # take (the lock window a reader of the graph waits for), and the
+        # floor under the pause between two. The meter records what the
+        # scheduler did with them; ``_eased`` is the graded response short
+        # of a hold — the node nearing a hold line halves the ceiling and
+        # doubles the pause until the reading is back.
+        self._write_batch_max = self._knob_int("write_batch_max", _write_batch_max, 10, 2_000)
+        self._write_batch_target_s = self._knob_float(
+            "write_batch_target_s", _write_batch_target_s, 0.1, 10.0)
+        self._write_min_gap_ms = self._knob_int("write_min_gap_ms", _write_min_gap_ms, 0, 10_000)
+        self._pace = _PaceMeter()
+        self._eased: Optional[str] = None
+        self._eases: Dict[str, int] = {}
+        self._holding: Optional[str] = None
+        self._hb_accepts_pace: Optional[bool] = None
         self._phase_started = time.monotonic()
         self._phase_timings: Dict[str, float] = {}
         # Shrink-on-pressure scan state (see _fetch_range): a per-query
@@ -1199,6 +1301,34 @@ class AggregationPipeline:
         except (TypeError, ValueError):
             return self._pacing_ratio
 
+    def _live_write_batch_max(self) -> int:
+        """The batch ceiling in force: a cap set on the RUNNING job, clamped
+        to [10, the knob] — a cap is a ceiling and never widens anything."""
+        live = self._live.get("write_batch_max")
+        if live is None:
+            return self._write_batch_max
+        try:
+            return max(10, min(self._write_batch_max, int(live)))
+        except (TypeError, ValueError):
+            return self._write_batch_max
+
+    def _live_write_batch_target_s(self) -> float:
+        live = self._live.get("write_batch_target_s")
+        if live is None:
+            return self._write_batch_target_s
+        try:
+            return max(0.1, min(10.0, float(live)))
+        except (TypeError, ValueError):
+            return self._write_batch_target_s
+
+    def _batch_ceiling(self) -> int:
+        """The most rows one write batch may carry right now: the ceiling in
+        force, halved while the run is eased."""
+        ceiling = self._live_write_batch_max()
+        if self._eased:
+            return max(10, ceiling // 2)
+        return ceiling
+
     def _live_scan_width(self) -> Optional[int]:
         """A cap on the scan width set on the running job, clamped to
         [scan floor, the width knob]; None when none is set. Applied on
@@ -1435,12 +1565,15 @@ class AggregationPipeline:
             shard = await self._governor_reading(fresh=attempt > 0)
             reason = self._write_hold_reason(shard)
             if reason is None:
+                self._holding = None
+                self._note_easing(shard)
                 break
             new_kind, detail = reason
             if started is None:
                 started = time.monotonic()
             if new_kind != kind:
                 kind = new_kind
+                self._holding = kind
                 self._store_holds[kind] = self._store_holds.get(kind, 0) + 1
                 logger.warning(
                     "aggregation pipeline on %s: holding the next write batch — %s. "
@@ -1487,6 +1620,66 @@ class AggregationPipeline:
             self.p._graph_name, kind, held,
         )
         return held
+
+    def _ease_reason(self, shard: ShardMemory) -> Optional[str]:
+        """The graded response short of a hold: the reading is half way to a
+        hold line. Replicas at least half as far behind as the master drops
+        them at (only while replication backpressure is on), or the
+        container's fork line within an eighth of the limit."""
+        if shard.source != "measured":
+            return None
+        lag = shard.replica_max_lag_bytes
+        if (
+            self._live_replica_ack_min() > 0 and lag is not None
+            and lag >= replica_lag_hold_bytes(shard) // 2
+        ):
+            return "replica_lag"
+        headroom = container_headroom_bytes(shard, planning=False)
+        limit = shard.container_limit_bytes
+        if headroom is not None and limit and headroom < limit // 8:
+            return "memory"
+        return None
+
+    def _note_easing(self, shard: ShardMemory) -> None:
+        """Halve the batch ceiling and double the pause while the node is
+        nearing a hold line; back to the settings once the reading is."""
+        reason = self._ease_reason(shard)
+        if reason == self._eased:
+            return
+        if reason is not None:
+            self._eases[reason] = self._eases.get(reason, 0) + 1
+            logger.info(
+                "aggregation pipeline on %s: easing off — %s on %s; half the batch "
+                "ceiling and twice the pause until the reading is back.",
+                self.p._graph_name,
+                "replicas half way to the drop limit" if reason == "replica_lag"
+                else "the container's fork line in sight",
+                shard.endpoint,
+            )
+        else:
+            logger.info(
+                "aggregation pipeline on %s: the node is back inside the easing "
+                "line — batches and pacing back to the settings.", self.p._graph_name,
+            )
+        self._eased = reason
+
+    def _pace_scalars(self) -> Dict[str, Any]:
+        """How the run is writing right now, flat, for the heartbeat: the
+        meter's figures, whether it is holding or eased and why, and what
+        the node's last reading said about its replicas and its room."""
+        out = self._pace.snapshot()
+        out["holding"] = self._holding or ""
+        out["eased"] = self._eased or ""
+        shard = self._gov_reading
+        if shard is not None and shard.source == "measured":
+            if shard.replica_max_lag_bytes is not None:
+                out["replica_lag_bytes"] = int(shard.replica_max_lag_bytes)
+            headroom = container_headroom_bytes(shard, planning=False)
+            if headroom is not None:
+                out["headroom_bytes"] = int(headroom)
+            if shard.fork_in_progress:
+                out["fork"] = shard.fork_in_progress
+        return out
 
     def _record_hold(self, kind: str, held: float, detail: str) -> None:
         """The run's record of a hold: how long by reason, the last one in
@@ -1994,9 +2187,13 @@ class AggregationPipeline:
                         or self._memory_flushes or self._memory_rollups
                         or self._replica_waits or self._replica_holds
                         or self._outage_holds or self._node_restarts
-                        or self._store_holds
+                        or self._store_holds or self._eases
                     ) else {}
                 ),
+                # How the run wrote: batches, rows, the last batch's shape,
+                # the rolling duty cycle and rate. A record, not an
+                # adaptation — present on every run that wrote anything.
+                **({"pace": self._pace.snapshot()} if self._pace.batches else {}),
                 # The per-query ceiling the ladder narrows against, when the
                 # shard could say — always present, None when unknown.
                 "query_mem_capacity": self._query_mem_capacity,
@@ -2035,6 +2232,8 @@ class AggregationPipeline:
         adapted = self._adapted_snapshot()
         if adapted:
             live_stats["adapted"] = adapted
+        if self._pace.batches:
+            live_stats["pace"] = self._pace.snapshot()
         from backend.app.services.aggregation.cancel import JobCancelled
         try:
             if self._cb_accepts_pct is False:
@@ -2060,23 +2259,44 @@ class AggregationPipeline:
             )
 
     async def _heartbeat(self) -> None:
+        """Feed the worker: the running write count, and — when the callback
+        takes it — how the run is writing right now (``pace=``), so the
+        live overlay says what batch size it is at, whether it is holding
+        and why, and how far the replicas are behind. Probed once, like the
+        progress callback: an older one-argument callback keeps working."""
         if self._intra_cb is None:
             return
         try:
-            await self._intra_cb(self._writes)
+            if self._hb_accepts_pace is False:
+                await self._intra_cb(self._writes)
+                return
+            try:
+                await self._intra_cb(self._writes, pace=self._pace_scalars())
+                self._hb_accepts_pace = True
+            except TypeError:
+                if self._hb_accepts_pace is True:
+                    raise  # a genuine TypeError from inside the callback
+                self._hb_accepts_pace = False
+                await self._intra_cb(self._writes)
         except Exception as exc:  # pragma: no cover - logging only
             logger.error(
                 "aggregation heartbeat callback failed (continuing): %s", exc,
             )
 
-    async def _paced_write(self, coro_factory: Callable[[], Awaitable[Any]]) -> Any:
-        """Run one write query under distributed admission control, then
-        sleep ``duration × pacing_ratio`` so this job never saturates the
-        provider's write path — stretched to ``duration ×
+    async def _paced_write(
+        self, coro_factory: Callable[[], Awaitable[Any]], *, rows: Optional[int] = None,
+    ) -> Any:
+        """One write batch, settled before the next: hold while the node is
+        outside the envelope, take a write slot, run the query, wait for
+        the replicas to acknowledge it, then pause — ``duration ×
+        pacing_ratio``, never less than the minimum gap — so this job never
+        saturates the provider's write path. Stretched to ``duration ×
         read_pressure_pacing_ratio`` while the web tier reports interactive
-        reads starving on this endpoint. Interactive reads come first: a
-        rebuild finishing later costs nobody a page; a canvas queued behind
-        a MERGE batch costs every user of that graph."""
+        reads starving on this endpoint, and doubled while the run is eased.
+        Interactive reads come first: a rebuild finishing later costs
+        nobody a page; a canvas queued behind a MERGE batch costs every
+        user of that graph. ``rows`` is what the batch carried, for the
+        meter."""
         # The governor first: nothing is sent while the node is outside the
         # envelope, and the wait holds no write slot — another rebuild on
         # the same node decides for itself from its own reading.
@@ -2093,7 +2313,8 @@ class AggregationPipeline:
         # part of THIS write's duration, so the AIMD sizer and the pacing
         # sleep both see a replica-bound shard for what it is: a slow write
         # path that wants smaller batches and more room between them.
-        elapsed += await self._replica_gate()
+        ack = await self._replica_gate()
+        elapsed += ack
 
         # The ratio in force is the LIVE one (an operator can set
         # write_pacing_ratio on a running job; 0 means no pacing) — but read
@@ -2119,9 +2340,21 @@ class AggregationPipeline:
                     "aggregation on %s: read pressure cleared, write pacing ratio back to %g",
                     getattr(self.p, "_graph_name", "?"), ratio,
                 )
-        pace = elapsed * ratio
+        # Eased — the node nearing a hold line — doubles the pause on top of
+        # whatever the readers asked for. The pause is a share of the batch's
+        # own duration (a duty cycle, so a slow node gets more room), never
+        # less than the minimum gap (so fast small batches never run back to
+        # back), never more than 30 s.
+        if self._eased:
+            ratio = max(ratio * 2.0, 2.0)
+        pace = min(max(elapsed * ratio, self._write_min_gap_ms / 1000.0), 30.0)
         if pace > 0:
-            await asyncio.sleep(min(pace, 30.0))
+            await asyncio.sleep(pace)
+        self._pace.note(
+            rows=rows, batch_s=max(0.0, elapsed - ack), ack_s=ack, sleep_s=pace,
+            batch_max=self._batch_ceiling(), target_s=self._live_write_batch_target_s(),
+            ratio=ratio,
+        )
         return elapsed, result
 
     # -- type resolution -----------------------------------------------------
@@ -2521,6 +2754,9 @@ class AggregationPipeline:
                 out["replica_holds"] = self._replica_holds
             if self._replica_max_lag_bytes:
                 out["replica_max_lag_bytes"] = self._replica_max_lag_bytes
+        if self._eases:
+            # How often the run eased off short of a hold, by reason.
+            out["eases"] = dict(self._eases)
         if self._store_holds:
             # Why the write side waited, how often and for how long — the
             # node's side of the story, by reason.
@@ -3949,9 +4185,11 @@ class AggregationPipeline:
         # honoring the bulk-create ceiling. Ramping up beats starting big —
         # an oversized first batch on a cold/loaded server stalls the whole
         # write path behind one slow query.
-        size = max(100, min(
+        ceiling = self._batch_ceiling()
+        size = max(min(100, ceiling), min(
             self.p._aggregation_sub_batch_size,
             self.p._bulk_create_batch_size,
+            ceiling,
         ))
         # Under write pressure the ladder's sticky cap wins, down to a
         # single row — below the AIMD floor of 100 / the provider's 50,
@@ -3987,7 +4225,7 @@ class AggregationPipeline:
             return self._paced_write(lambda: p._proj_query(
                 cypher, params={**base_params, payload_key: batch},
                 timeout=self._write_timeout(),
-            ))
+            ), rows=len(batch))
 
         try:
             elapsed, _ = await self._through_outage(lambda: _issue(rows), op=label)
@@ -4039,23 +4277,26 @@ class AggregationPipeline:
         await self._heartbeat()
 
     def _note_write_latency(self, elapsed: float) -> None:
-        """Feed the provider's AIMD sizer: sustained slow writes shrink
-        sub-batches (multiplicative), healthy ones re-grow (additive)."""
+        """Feed the provider's AIMD sizer against the batch target in force:
+        a batch that ran past the target halves the next (multiplicative);
+        five in a row under two fifths of it grow it by a step (additive),
+        never past the ceiling."""
         p = self.p
         current = p._aggregation_sub_batch_size
-        if elapsed > p._MERGE_SUB_BATCH_TARGET_HIGH_S:
+        target = self._live_write_batch_target_s()
+        ceiling = self._batch_ceiling()
+        if elapsed > target:
             p._aggregation_sub_batch_size = max(p._MERGE_SUB_BATCH_MIN, current // 2)
             p._aggregation_sub_batch_under_target_run = 0
-        elif elapsed < p._MERGE_SUB_BATCH_TARGET_LOW_S:
+        elif elapsed < _GROW_BELOW_SHARE * target:
             p._aggregation_sub_batch_under_target_run += 1
             if (
                 p._aggregation_sub_batch_under_target_run
                 >= p._MERGE_SUB_BATCH_GROW_AFTER
-                and current < p._MERGE_SUB_BATCH_SIZE
+                and current < ceiling
             ):
                 p._aggregation_sub_batch_size = min(
-                    p._MERGE_SUB_BATCH_SIZE,
-                    current + p._MERGE_SUB_BATCH_GROW_STEP,
+                    ceiling, current + p._MERGE_SUB_BATCH_GROW_STEP,
                 )
                 p._aggregation_sub_batch_under_target_run = 0
         else:

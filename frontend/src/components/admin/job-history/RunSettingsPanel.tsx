@@ -17,7 +17,7 @@ import { Activity, Sparkles, Wrench } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { AdaptedRunState, AggregationJobResponse, AggregationTuning } from '@/services/aggregationService'
 import {
-    SOURCE_LABEL, SOURCE_TONE, adaptationSentences, frozenTuningRows, presetForRun, runSettingsRows,
+    SOURCE_LABEL, SOURCE_TONE, adaptationSentences, frozenTuningRows, paceSentence, presetForRun, runSettingsRows,
 } from './runSettings'
 
 export function RunSettingsPanel({ job, storedGlobal, live }: {
@@ -40,6 +40,10 @@ export function RunSettingsPanel({ job, storedGlobal, live }: {
     const sentences = useMemo(
         () => adaptationSentences(adapted, { bytesPerEdgeObserved: job.runStats?.bytes_per_edge_observed }),
         [adapted, job.runStats?.bytes_per_edge_observed],
+    )
+    const pace = useMemo(
+        () => paceSentence(job.runStats?.pace, adapted?.eases),
+        [job.runStats?.pace, adapted?.eases],
     )
     const running = job.status === 'running'
 
@@ -81,6 +85,9 @@ export function RunSettingsPanel({ job, storedGlobal, live }: {
                                 </div>
                             ))}
                         </dl>
+                    )}
+                    {pace && (
+                        <p data-testid="run-pace" className="mt-2 text-[11px] text-ink-secondary leading-snug">{pace}</p>
                     )}
                 </div>
                 <div>

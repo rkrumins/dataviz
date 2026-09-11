@@ -44,7 +44,7 @@ export function buildDataSourceLookup(
 
     for (const ws of workspaces) {
         for (const ds of ws.dataSources ?? []) {
-            const catalogItem = catalogMap.get(ds.catalogItemId)
+            const catalogItem = ds.catalogItemId ? catalogMap.get(ds.catalogItemId) : undefined
             const providerId = catalogItem?.providerId ?? ws.providerId ?? ''
             const provider = providerMap.get(providerId)
 

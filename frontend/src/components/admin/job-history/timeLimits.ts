@@ -17,6 +17,8 @@ export const DEFAULT_PACING = 1
 export const DEFAULT_CONCURRENCY = 1
 export const DEFAULT_SCAN_WIDTH = 200_000
 export const DEFAULT_REPLICA_ACK = 1
+export const DEFAULT_BATCH_MAX = 500
+export const DEFAULT_BATCH_TARGET_S = 1
 export const MAX_PACING = 10
 
 export interface LimitsInForce {
@@ -87,8 +89,11 @@ export interface ShapeInForce {
     scanWidthNow: number | null
     /** Replicas of the write node that must confirm each batch; 0 = none. */
     replicaAckMin: number
+    /** The most rows one write batch may carry, and what one should take. */
+    batchMax: number
+    batchTargetS: number
     /** Which of these are live changes on this run. */
-    live: { pacing: boolean; concurrency: boolean; scanWidth: boolean; replicaAck: boolean }
+    live: { pacing: boolean; concurrency: boolean; scanWidth: boolean; replicaAck: boolean; batchMax: boolean; batchTarget: boolean }
 }
 
 /** The scan shape the job is running with: live changes first, then the run record, then the defaults. */
@@ -102,11 +107,15 @@ export function shapeInForce(job: AggregationJobResponse): ShapeInForce {
         scanWidth: live?.scan_width ?? eff?.scan_range_width ?? DEFAULT_SCAN_WIDTH,
         scanWidthNow: typeof now === 'number' ? now : null,
         replicaAckMin: live?.replica_ack_min ?? eff?.replica_ack_min ?? DEFAULT_REPLICA_ACK,
+        batchMax: live?.write_batch_max ?? eff?.write_batch_max ?? DEFAULT_BATCH_MAX,
+        batchTargetS: live?.write_batch_target_s ?? eff?.write_batch_target_s ?? DEFAULT_BATCH_TARGET_S,
         live: {
             pacing: live?.write_pacing_ratio != null,
             concurrency: live?.extract_concurrency != null,
             scanWidth: live?.scan_width != null,
             replicaAck: live?.replica_ack_min != null,
+            batchMax: live?.write_batch_max != null,
+            batchTarget: live?.write_batch_target_s != null,
         },
     }
 }
@@ -143,7 +152,13 @@ export function releaseReplicaWaitPatch(): JobLimitsPatch {
 
 /** Clear every live shape change — back to the job's settings. */
 export function backToSettingsPatch(): JobLimitsPatch {
-    return { reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin'] }
+    return { reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin', 'writeBatchMax', 'writeBatchTargetS'] }
+}
+
+/** Halve the most rows one write batch may carry — a shorter lock window for
+ *  everyone reading the graph, from the next batch. Never below 10. */
+export function smallerBatchesPatch(job: AggregationJobResponse): JobLimitsPatch {
+    return { writeBatchMax: Math.max(10, Math.floor(shapeInForce(job).batchMax / 2)) }
 }
 
 export function formatWindow(seconds: number): string {

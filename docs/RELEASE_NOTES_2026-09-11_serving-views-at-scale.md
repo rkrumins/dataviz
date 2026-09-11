@@ -251,6 +251,49 @@ bounded, and "③ Act" is a real stop rather than a pause that resumes itself. T
 what each switch will do *before* it does it, and the canvas banner says why a hold
 persists.
 
+### 3.5 A rebuild never writes through a fork, and its load is steady
+
+A rebuild took a master and its replica down, and every safety value it had was watching
+the wrong number. The write budget measured `used_memory` against `maxmemory`; what killed
+the node was the container limit, reached by RSS plus a fork's copy-on-write under full
+write load. The chain, in order: batches went out as fast as the master took them; a
+replica fell behind, overflowed its output buffer and was dropped; the gate read "no
+replicas attached" as the topology's problem and wrote on at full speed; the replica
+reconnected and asked for a full resync, so the master forked under that load; the
+rebuild dirtied nearly every page the child held a copy of, the container limit was
+reached and the master was killed; its replica flushed the whole dataset to follow the
+promotion and stopped answering its probe. An hour of AOF replay per node.
+
+Every step but the first was visible in one `INFO`. So the shard reading now carries the
+whole node — RSS, fragmentation, BGSAVE and AOF-rewrite state, attached replicas, how many
+are still receiving a full resync, how far the furthest is behind, what replication holds,
+the two limits the master drops a replica at, and the container limit the pod is killed at
+— and **before every write batch the pipeline reads it and holds** while the node is
+outside the envelope a rebuild may write inside: a fork in flight, fewer replicas than the
+run started with, a replica further behind than a quarter of its drop limit, or RSS past
+what the container could survive a fork at. Each is true of the node now and false a
+little later, so it is a hold, not a refusal; each is bounded per hold
+(`AGGREGATION_HOLD_MAX_SECS`, 30 min), after which the run stops for a person with its
+checkpoint intact. The write budget also counts the container now: a container sized
+below the deployment guide's rule (which now counts replication buffers — the ~5 GiB it
+used to leave out) governs before `maxmemory` does, and the refusal says so.
+
+Under the governor the load is **steady**. A write batch holds the graph's write lock
+from its first mutation to its end, so one batch is the longest stall every reader of that
+graph sees — and the sizer used to aim for 0.8–2.0 s of it, half the time. It now aims for
+`writeBatchTargetS` (1.0 s) under a ceiling of `writeBatchMax` (500 rows), both fleet-wide,
+per job and live on a running job ("Smaller batches" halves the ceiling), and a batch is
+*settled* before the next — the node read, the query returned, the replicas acknowledged —
+then paused for `duration × writePacingRatio`, never less than `writeMinGapMs` (100 ms) so
+fast small batches never run back to back. Short of a hold the run *eases*: replicas half
+way to the drop limit, or the container's fork line within an eighth of the limit, halve
+the ceiling and double the pause until the reading is back. The job's progress carries all
+of it live — batch rows, seconds per batch, the pause, the rolling duty cycle and rate,
+whether the run is holding or eased and why, the replicas' lag and the container's
+measured headroom — as a *Steady load* line on the running job, and the run record keeps
+the batch figures and every hold by reason. `docs/CONCURRENCY_TUNING.md` §6 is the load
+model behind it.
+
 ---
 
 ## 4. What changed — the operator's view
@@ -379,6 +422,19 @@ New knobs, all defaulting on:
 
 ---
 
+### 6.5 Rebuild holds and pacing
+
+| Value | Was | Now | Why |
+|---|---|---|---|
+| Write batch target (`AGGREGATION_WRITE_BATCH_TARGET_S`) | 0.8–2.0 s, fixed in code | **1.0 s**, a knob | The batch is the lock window readers wait for; the same rows in shorter batches cost them less. |
+| Write batch ceiling (`AGGREGATION_WRITE_BATCH_MAX`) | 500, fixed in code | **500**, a knob, lowerable live | "Smaller batches" on a running job does less per batch instead of waiting longer between them. |
+| `AGGREGATION_WRITE_MIN_GAP_MS` | — | **100** | The pause is a share of the batch's duration; fast small batches ran back to back. |
+| `AGGREGATION_HOLD_MAX_SECS` | — | **1800** | One hold's bound; a node not recovering on its own is not one to write into. |
+| `AGGREGATION_FORK_COW_PCT` | — | **125** | The fork allowance the container line and budget are drawn with — valid only because writes now hold through a fork. |
+| `AGGREGATION_REPLICA_LAG_HOLD_BYTES` | — | derived (¼ of the replica output-buffer hard limit, or ½ the backlog) | The master must never drop a replica because of a rebuild. |
+| Replica gate on "no replicas attached" | wrote on | **holds** when the run started with replicas | A replica that vanished mid-run vanished because of the run; its return is a fork. |
+| Container sizing rule | `1.25 × maxmemory + threads × 1.3 × cap + overhead` | **+ repl-backlog-size + replicas × replica output-buffer hard limit** | ~5 GiB the rule left out on a cluster. |
+
 ## 7. Rollout
 
 Ordered. Steps 1–2 change infrastructure and must land before the values that depend on
@@ -445,6 +501,9 @@ rollback of the image.
 | No last-known-good fallback at all | `GRAPH_CACHE_LKG_TTL_S=0` |
 | The previous settle behaviour | `FALKORDB_REPLICA_READ_SETTLE_S=30` |
 | A specific cached endpoint off | `GRAPH_CACHE_ENABLED_<ENDPOINT>=0` (e.g. `GRAPH_CACHE_ENABLED_CANVAS_BOOTSTRAP`) |
+| The previous batch shape (0.8–2.0 s batches, no minimum gap) | `AGGREGATION_WRITE_BATCH_TARGET_S=2.0`, `AGGREGATION_WRITE_MIN_GAP_MS=0` |
+| No replica reasons in the write governor (a fork and the memory line cannot be turned off) | `replicaAckMin` 0 on the job, or `AGGREGATION_REPLICA_ACK_MIN=0` |
+| A longer hold before a run stops for a person | `AGGREGATION_HOLD_MAX_SECS` up to 21600 |
 
 ---
 

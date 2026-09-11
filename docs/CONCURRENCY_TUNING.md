@@ -424,3 +424,83 @@ Every number in this section is arithmetic over configuration. **None of it has 
 measured against a real cluster under real load.** The load-test harness in `loadtest/`
 exists to settle that — `canvas_open` in particular models the hot path — and until it has
 been run at target concurrency, treat §1's user-count table as a shape, not a promise.
+
+## 6. Steady load: what one write batch costs, and the controls that keep it steady
+
+A rebuild took a master and its replica down. The write governor (see the
+replication section of `AGGREGATION_PIPELINE.md`) is what stops that happening
+again; this section is about the layer under it — how much one write batch
+costs the node, why "smaller and steadier" beats "larger and faster" for
+everyone using the graph, and which knob does what. Everything here is read
+from the code; the load-test harness has not yet measured it.
+
+### What one apply batch is
+
+One `GRAPH.QUERY`: `UNWIND $batch AS item MATCH (s {urn}) MATCH (t {urn}) MERGE
+(s)-[r:AGGREGATED {aggKey}]->(t) SET r.weight, r.sourceEdgeTypes, r.sourceLevel,
+r.targetLevel, r.sourceDepth, r.targetDepth, r.levelDigest, r.latestUpdate`,
+with `$batch` carrying between 50 and `writeBatchMax` rows. Per row the node
+does two index seeks (label + urn), one edge-index seek on `aggKey`, the merge,
+eight property writes, and an update of every edge index those properties sit
+in (`index_policy.declared_edge_indexes()`). The commit then appends the
+batch's change log to the AOF and to every replica's output buffer
+(`EFFECTS_THRESHOLD 0`, so a replica applies the log instead of re-running the
+query), and `used_memory` grows by roughly `bytesPerEdge` per new edge.
+
+### Why the batch size is what users feel
+
+FalkorDB takes the graph's **write lock** at a write query's first mutation and
+holds it until the query ends. While a batch runs, every read of that graph —
+every canvas open, every trace — waits for it. The old sizer targeted 0.8–2.0 s
+per batch and paced at a 50% duty cycle, so users of a graph being rebuilt saw
+one- to two-second stalls half the time. The rows are the same either way; the
+lock windows are not. Ten batches of 50 rows cost readers ten short waits; one
+batch of 500 costs them one long one — and the fixed cost of a batch (a parsed,
+plan-cached query, one round trip, one governor `INFO`, one `WAIT`) is
+milliseconds. **Smaller batches at the same duty cycle are close to free for
+the rebuild and much cheaper for readers.** That is the whole argument for
+`writeBatchTargetS`, and why it defaults to 1.0 s rather than 2.0.
+
+### The five controls, in the order they act
+
+| | Control | Knob | What it decides |
+| --- | --- | --- | --- |
+| 1 | **Hold** | `AGGREGATION_HOLD_MAX_SECS`, `replicaAckMin` (0 waves the replica reasons through) | Nothing is written while the node is forked, missing the replicas the run started with, running a replica too far behind, or past the memory line. Bounded per hold; the run then stops for a person with its checkpoint. |
+| 2 | **Ease** | derived from the same reading | Replicas half way to the drop limit, or the container's fork line within an eighth of the limit: half the batch ceiling, twice the pause, until the reading is back. The graded response that keeps 1 from being needed. |
+| 3 | **Size** | `writeBatchMax` (500), `writeBatchTargetS` (1.0 s) | AIMD against the target: a batch that ran longer halves the next; five in a row under two fifths of it grow it by 100, never past the ceiling. After any hold, the next batch is half. |
+| 4 | **Settle** | `replicaAckMin`, `replicaAckTimeoutMs` | The batch is done only when the query has returned AND the replicas have acknowledged it. The wait counts as the batch's own duration, so a replica-bound shard also shrinks batches and paces longer. |
+| 5 | **Pause** | `writePacingRatio` (1.0), `writeMinGapMs` (100), `AGGREGATION_READ_PRESSURE_PACING_RATIO` (4.0) | `duration × ratio`, never below the minimum gap, never above 30 s; stretched to the read-pressure ratio while the web tier reports readers starving, doubled while eased. |
+
+Across jobs: the per-endpoint write slots (`FALKORDB_ENDPOINT_WRITE_SLOTS`, 2)
+bound how many rebuilds write to one node at once, and the per-node reservation
+ledger keeps two rebuilds from both passing on the same headroom. A held run
+holds no slot.
+
+### What the job's progress shows
+
+Every heartbeat carries the pace: rows in the last batch, seconds it took, the
+acknowledgement wait, the pause after it, the ceiling and target in force, the
+rolling duty cycle and rows per second over the last twenty batches, whether
+the run is holding or eased and why, the replicas' lag and the container's
+measured headroom. Job History shows it as a *Steady load* line on a running
+job and keeps the batch record (`run_stats.pace`) and the easing count
+(`run_stats.adapted.eases`) on the finished run. "Smaller batches" on a running
+job halves `writeBatchMax` live; the sizer re-grows only toward the new ceiling.
+
+### Tuning it
+
+* **Users see stalls while a rebuild runs** → lower `writeBatchTargetS` first
+  (0.5 s), then `writeBatchMax`. Raising `writePacingRatio` lengthens the gaps
+  but not the stalls; the lock window is the batch, not the pause.
+* **The replicas keep falling behind** → the run already eases and then holds;
+  the durable fix is `EFFECTS_THRESHOLD 0` so they apply a change log instead
+  of re-running every batch, and a larger `client-output-buffer-limit replica`
+  if they are being dropped. Both are in `FALKORDB_DEPLOYMENT.md`.
+* **The rebuild is too slow and nobody is on the graph** → `writePacingRatio`
+  0.25 and `writeBatchTargetS` 2.0 (the Performance profile); `writeMinGapMs`
+  can go to 0. Never above `writeBatchMax` 2000: the `UNWIND` payload and the
+  effects log per batch scale with it, and the 3 s socket timeout the ceiling
+  was chosen against has not moved.
+* **A fork every few minutes** → the AOF is rewriting too often; see the
+  `auto-aof-rewrite-*` settings in `FALKORDB_DEPLOYMENT.md`. The run holds
+  through each one and says so; the cost is time, not safety.

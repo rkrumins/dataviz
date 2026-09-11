@@ -5,7 +5,7 @@
  * file so it can be imported by JobRow's stat cell and tested directly.
  */
 import type {
-    AdaptedRunState, AggregationTuning, EffectiveTuningSnapshot,
+    AdaptedRunState, AggregationTuning, EffectiveTuningSnapshot, PaceRecord,
 } from '@/services/aggregationService'
 import { CONFIG_PRESETS, presetIdFor } from '@/components/admin/shared/AggregationOverridesForm'
 import { formatDuration } from './shared'
@@ -152,6 +152,34 @@ function atTime(iso: string | undefined): string | null {
 /** Plain sentences for what the ladder changed, in the order it happens. */
 function mb(n: number): string {
     return n >= 1024 ? `${(n / 1024).toFixed(1)} GB` : `${Math.round(n)} MB`
+}
+
+/**
+ * How a finished (or running) run wrote, in one sentence: batches and rows,
+ * the ceiling in force, seconds per batch, the write duty cycle and the rate
+ * over the whole run — and how often it eased off short of a hold. Null when
+ * the run wrote nothing.
+ */
+export function paceSentence(pace: PaceRecord | null | undefined, eases?: Record<string, number> | null): string | null {
+    if (!pace || !pace.batches) return null
+    const parts: string[] = [`Wrote ${plural(pace.batches, 'batch', 'batches')}`]
+    if (typeof pace.rows === 'number' && pace.rows > 0) parts[0] += ` (${pace.rows.toLocaleString()} rows)`
+    if (typeof pace.batch_max === 'number') parts.push(`at most ${pace.batch_max.toLocaleString()} rows each`)
+    const busy = typeof pace.busy_s === 'number' ? pace.busy_s : 0
+    const idle = typeof pace.idle_s === 'number' ? pace.idle_s : 0
+    if (busy > 0 && pace.batches > 0) parts.push(`${Number((busy / pace.batches).toFixed(2))} s per batch`)
+    if (busy + idle > 0) {
+        parts.push(`${Math.round(100 * busy / (busy + idle))}% write duty`)
+        if (typeof pace.rows === 'number' && pace.rows > 0) parts.push(`${Math.round(pace.rows / (busy + idle)).toLocaleString()} rows/s`)
+    }
+    let out = parts.join(', ')
+    const easeText: Record<string, string> = { replica_lag: 'replicas half way to the drop limit', memory: 'the container’s fork line in sight' }
+    const eased = Object.entries(eases ?? {}).filter(([, n]) => n > 0)
+    if (eased.length) {
+        const total = eased.reduce((a, [, n]) => a + n, 0)
+        out += `; eased off ${plural(total, 'time', 'times')} (${eased.map(([k]) => easeText[k] ?? k).join(', ')})`
+    }
+    return out
 }
 
 export function adaptationSentences(

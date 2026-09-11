@@ -83,6 +83,33 @@ describe('JobRow run settings', () => {
     it('stays quiet on a running job that is running at its settings', () => {
         renderRow(job({ status: 'running', progress: 30, currentPhase: 'extracting', completedAt: undefined }))
         expect(screen.queryByTestId('narrowing-state')).not.toBeInTheDocument()
+        expect(screen.queryByTestId('steady-load')).not.toBeInTheDocument()   // nothing written yet
+    })
+
+    it('shows the steady-load line from the live stream: the batch shape, the duty cycle, the node', () => {
+        useJob.mockReturnValue({
+            connected: true, needsResync: false, terminal: false,
+            snapshot: {
+                pace_batches: 120, pace_batch_rows: 250, pace_batch_s: 0.62, pace_ack_s: 0.01, pace_sleep_s: 0.63,
+                pace_duty_pct: 49, pace_rows_per_s: 198.4, pace_replica_lag_bytes: 12 * 2 ** 20,
+                pace_headroom_bytes: 24 * 2 ** 30, pace_holding: '', pace_eased: '',
+            },
+        })
+        renderRow(job({ status: 'running', progress: 80, currentPhase: 'applying', completedAt: undefined }))
+        const block = screen.getByTestId('steady-load')
+        expect(block).toHaveTextContent('Steady load')
+        expect(block).toHaveTextContent('250-row batches · 620 ms each · 630 ms pause · 49% write duty · 198 rows/s · replicas 12 MB behind · 24.0 GB headroom')
+    })
+
+    it('says when the run is holding for the node, and why', () => {
+        useJob.mockReturnValue({
+            connected: true, needsResync: false, terminal: false,
+            snapshot: { pace_batches: 3, pace_batch_rows: 500, pace_holding: 'fork', pace_fork: 'aof_rewrite' },
+        })
+        renderRow(job({ status: 'running', progress: 80, currentPhase: 'applying', completedAt: undefined }))
+        const block = screen.getByTestId('steady-load')
+        expect(block).toHaveTextContent('Holding — an AOF rewrite is running on the graph store node')
+        expect(block).toHaveTextContent('carries on by itself when the node is back')
     })
 })
 

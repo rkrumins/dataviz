@@ -63,6 +63,25 @@ export interface JobLiveOverlay {
         adapted_live_write_pacing_ratio: number
         adapted_live_extract_concurrency: number
         adapted_live_scan_width: number
+        /** How the run is writing right now: the last batch, the rolling duty
+         *  cycle and rate, whether it is holding or eased and why, and what the
+         *  node's last reading said (see steadyLoad.ts). */
+        pace_batch_rows: number
+        pace_batch_s: number
+        pace_ack_s: number
+        pace_sleep_s: number
+        pace_batch_max: number
+        pace_target_s: number
+        pace_ratio: number
+        pace_batches: number
+        pace_rows: number
+        pace_duty_pct: number
+        pace_rows_per_s: number
+        pace_replica_lag_bytes: number
+        pace_headroom_bytes: number
+        pace_holding: string
+        pace_eased: string
+        pace_fork: string
     }>
 }
 
@@ -166,12 +185,19 @@ export function useJob(
                 'adapted_mem_limit_mb',
                 'adapted_live_scan_timeout_s', 'adapted_live_write_timeout_s', 'adapted_live_write_pacing_ratio',
                 'adapted_live_extract_concurrency', 'adapted_live_scan_width',
+                'pace_batch_rows', 'pace_batch_s', 'pace_ack_s', 'pace_sleep_s', 'pace_batch_max',
+                'pace_target_s', 'pace_ratio', 'pace_batches', 'pace_rows', 'pace_duty_pct',
+                'pace_rows_per_s', 'pace_replica_lag_bytes', 'pace_headroom_bytes',
             ] as const) {
                 const v = _coerceNumeric(payload[key])
                 if (v !== undefined) next[key] = v
             }
             const strategy = payload['adapted_reconcile_strategy']
             if (typeof strategy === 'string') next.adapted_reconcile_strategy = strategy
+            for (const key of ['pace_holding', 'pace_eased', 'pace_fork'] as const) {
+                const v = payload[key]
+                if (typeof v === 'string') next[key] = v
+            }
 
             setState((prev) => ({
                 connected: true,

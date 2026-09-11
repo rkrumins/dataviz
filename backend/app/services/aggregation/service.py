@@ -460,6 +460,8 @@ _LIVE_RESET_FIELDS = {
     "writeTimeoutS": "write_timeout_s",
     "replicaAckMin": "replica_ack_min",
     "replicaAckTimeoutMs": "replica_ack_timeout_ms",
+    "writeBatchMax": "write_batch_max",
+    "writeBatchTargetS": "write_batch_target_s",
 }
 
 
@@ -1506,6 +1508,7 @@ class AggregationService:
             "max_wall_secs", "scan_timeout_s", "write_timeout_s",
             "write_pacing_ratio", "extract_concurrency", "scan_width",
             "replica_ack_min", "replica_ack_timeout_ms",
+            "write_batch_max", "write_batch_target_s",
         ):
             value = getattr(patch, field)
             if value is not None:
@@ -1519,7 +1522,8 @@ class AggregationService:
         if not changes:
             raise ValueError(
                 "No limit changed: send at least one of timeoutSecs, maxWallSecs, scanTimeoutS, "
-                "writeTimeoutS, writePacingRatio, extractConcurrency, scanWidth, or a reset"
+                "writeTimeoutS, writePacingRatio, extractConcurrency, scanWidth, replicaAckMin, "
+                "replicaAckTimeoutMs, writeBatchMax, writeBatchTargetS, or a reset"
             )
         doc["history"] = history[-20:]
         job.live_overrides = json.dumps(doc)

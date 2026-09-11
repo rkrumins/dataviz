@@ -24,6 +24,7 @@ export type TuningKnobKey =
     | 'scanTimeoutS' | 'writeTimeoutS' | 'stallTimeoutSecs' | 'maxWallSecs'
     | 'flushMemPct' | 'maxCubeEdges' | 'estimateMarginPct'
     | 'replicaAckMin' | 'replicaAckTimeoutMs'
+    | 'writeBatchMax' | 'writeBatchTargetS' | 'writeMinGapMs'
 
 export type KnobGroup = 'capacity' | 'reading' | 'writing' | 'timeouts'
 
@@ -145,6 +146,27 @@ export const TUNING_KNOBS: TuningKnob[] = [
         tip: 'Idle time inserted between write chunks, as a ratio of the previous chunk’s duration. Higher values leave more headroom for live queries but make the job slower; 0 disables pacing entirely.',
         help: 'Pause between writes (0-10)',
         min: 0, max: 10, step: 0.1, float: true, group: 'writing', fallback: 1.0,
+    },
+    {
+        key: 'writeBatchMax',
+        label: 'Write batch ceiling',
+        tip: 'The most rows one write batch may carry. A write batch holds the graph’s write lock from its first change to its end, so it is also the longest a reader of that graph waits — the same rows in more, shorter batches cost readers less than fewer, longer ones. The sizer grows toward this ceiling while batches stay under the target and never past it. Lowerable on a running job (Smaller batches).',
+        help: 'Rows per write batch, at most (10-2,000)',
+        min: 10, max: 2_000, step: 10, group: 'writing', fallback: 500,
+    },
+    {
+        key: 'writeBatchTargetS',
+        label: 'Write batch target',
+        tip: 'What one write batch should take. A batch that runs longer halves the next; five in a row under two fifths of it grow it by 100 rows. Lower it when users see stalls while a rebuild runs — the stall is the batch, not the pause after it.',
+        help: 'Seconds per write batch (0.1-10)',
+        min: 0.1, max: 10, step: 0.1, float: true, group: 'writing', fallback: 1.0,
+    },
+    {
+        key: 'writeMinGapMs',
+        label: 'Minimum gap between batches',
+        tip: 'The pause after a batch is a share of the batch’s own duration, so fast small batches on a quick node would otherwise follow each other back to back. This is the floor under that pause: the load stays steady however fast the node is.',
+        help: 'Milliseconds between two write batches, at least (0-10,000)',
+        min: 0, max: 10_000, step: 50, group: 'writing', fallback: 100,
     },
     {
         key: 'replicaAckMin',

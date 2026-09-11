@@ -373,6 +373,9 @@ export const CONFIG_PRESETS: ConfigPreset[] = [
         tuning: {
             ...CAPACITY_FLOOR, scanRangeWidth: 25_000, writePacingRatio: 4.0, extractConcurrency: 1,
             scanShrinkFloor: 1, scanTimeoutS: 120,
+            // Smaller, shorter write batches: a write batch is the lock window
+            // every reader of the graph waits for.
+            writeBatchMax: 100, writeBatchTargetS: 0.5,
         },
     },
     {
@@ -412,6 +415,7 @@ const PRESET_MATCH_KEYS: (keyof AggregationTuning)[] = [
     'scanRangeWidth', 'maxPendingPairs', 'applyChunk', 'deleteChunk',
     'writePacingRatio', 'extractConcurrency', 'materializeLeafPairs',
     'scanShrinkFloor', 'scanTimeoutS', 'writeTimeoutS',
+    'writeBatchMax', 'writeBatchTargetS',
 ]
 
 /** The profile for a graph the store keeps refusing: what a retry after a

@@ -273,6 +273,14 @@ def _pipeline(admission) -> mat.AggregationPipeline:
     p._store_holds = {}
     p._store_hold_s = {}
     p._store_hold_last = None
+    # …and the steady-load scheduler: the ceiling, the target, the minimum
+    # gap (below every sleep these tests assert), the meter and the easing.
+    p._write_batch_max = 500
+    p._write_batch_target_s = 1.0
+    p._write_min_gap_ms = 100
+    p._pace = mat._PaceMeter()
+    p._eased = None
+    p._eases = {}
     return p
 
 

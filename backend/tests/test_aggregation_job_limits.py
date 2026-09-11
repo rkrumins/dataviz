@@ -213,6 +213,10 @@ def test_the_watchdog_tick_re_reads_the_limits_and_hands_the_live_dict_to_the_pi
         # Replication backpressure is live too: lowering the acknowledgement
         # bar to 0 is what releases a run held behind a lagging replica.
         "replica_ack_min", "replica_ack_timeout_ms",
+        # Steady load: the batch ceiling and the batch target are live too —
+        # "smaller batches" on a running job is the one control that does
+        # less per batch rather than waiting longer between them.
+        "write_batch_max", "write_batch_target_s",
     }
     src = inspect.getsource(AggregationWorker._materialize_with_checkpoints)
     assert 'live_limits=(limits or {}).get("live")' in src

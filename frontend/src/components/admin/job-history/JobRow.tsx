@@ -14,6 +14,7 @@ import {
     PHASES, PHASE_BANDS, PhaseStepper, phaseLabel,
 } from './shared'
 import { RunSettingsPanel } from './RunSettingsPanel'
+import { steadyLoadFromSnapshot, steadyLoadLine } from './steadyLoad'
 import { presetForRun } from './runSettings'
 import { AdjustRunningJob } from './AdjustRunningJob'
 // One vocabulary for the detector codes across Job History and the Freshness
@@ -209,6 +210,13 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
         snap.adapted_live_write_timeout_s, snap.adapted_live_write_pacing_ratio,
         snap.adapted_live_extract_concurrency, snap.adapted_live_scan_width])
     const adaptedNow: Partial<AdaptedRunState> | null = liveAdapted ?? jobFromList.runStats?.adapted ?? null
+    // What the rebuild is doing to the graph store right now — only ever from
+    // the live stream: the batch shape, the duty cycle, a hold and its reason.
+    const steady = useMemo(() => {
+        if (!isActive || liveOverlay.terminal) return null
+        const now = steadyLoadFromSnapshot(snap)
+        return now ? steadyLoadLine(now) : null
+    }, [isActive, liveOverlay.terminal, snap])
     const narrowing = jobFromList.status === 'running' && !!adaptedNow && (
         adaptedNow.scan_width != null || adaptedNow.extract_concurrency != null
         || adaptedNow.reconcile_strategy === 'keys_only' || adaptedNow.write_batch != null
@@ -614,6 +622,27 @@ export const JobRow = memo(function JobRow({ job: jobFromList, meta, expanded, o
                                                         runStats={job.runStats}
                                                         status={job.status}
                                                     />
+                                                )}
+                                                {isRunning && steady && (
+                                                    <div
+                                                        data-testid="steady-load"
+                                                        className={cn(
+                                                            'rounded-xl border px-4 py-3',
+                                                            steady.tone === 'steady'
+                                                                ? 'bg-black/[0.02] dark:bg-white/[0.02] border-glass-border'
+                                                                : 'bg-amber-500/[0.05] border-amber-500/15',
+                                                        )}
+                                                    >
+                                                        <div className="flex items-center gap-2 mb-1">
+                                                            <Gauge className={cn('w-3.5 h-3.5', steady.tone === 'steady' ? 'text-ink-muted' : 'text-amber-400')} aria-hidden="true" />
+                                                            <span className={cn('text-[10px] font-bold uppercase tracking-wider', steady.tone === 'steady' ? 'text-ink-muted' : 'text-amber-500/90')}>
+                                                                {steady.title}
+                                                            </span>
+                                                        </div>
+                                                        <p className={cn('text-[11px] leading-relaxed', steady.tone === 'steady' ? 'text-ink-secondary' : 'text-amber-500/90')}>
+                                                            {steady.detail}
+                                                        </p>
+                                                    </div>
                                                 )}
                                                 {narrowing && adaptedNow && (
                                                     <div

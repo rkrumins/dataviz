@@ -111,7 +111,21 @@ _ADAPTED_LIVE_KEYS = ("scan_width", "scan_width_min", "scan_shrinks",
 #: width cap on every read of the sticky width.
 _LIVE_PIPELINE_KEYS = ("scan_timeout_s", "write_timeout_s", "write_pacing_ratio",
                        "extract_concurrency", "scan_width",
-                       "replica_ack_min", "replica_ack_timeout_ms")
+                       "replica_ack_min", "replica_ack_timeout_ms",
+                       "write_batch_max", "write_batch_target_s")
+
+
+def _pace_scalars(pace: Any) -> dict:
+    """The write pace as flat ``pace_<key>`` scalars for ``live_state`` —
+    how the run is writing right now: rows per batch, seconds per batch,
+    the pause after it, the rolling duty cycle and rate, and whether it is
+    holding or eased, and why."""
+    if not isinstance(pace, dict):
+        return {}
+    return {
+        f"pace_{key}": value for key, value in pace.items()
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool)
+    }
 
 
 def _adapted_scalars(adapted: Any) -> dict:
@@ -1333,10 +1347,13 @@ class AggregationWorker:
         pacing = doc.get("write_pacing_ratio")
         if isinstance(pacing, (int, float)) and not isinstance(pacing, bool) and pacing >= 0:
             out["write_pacing_ratio"] = float(pacing)
-        for key in ("extract_concurrency", "scan_width"):
+        for key in ("extract_concurrency", "scan_width", "write_batch_max"):
             value = _tuning_int(doc, key)
             if value is not None:
                 out[key] = value
+        target = doc.get("write_batch_target_s")
+        if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0:
+            out["write_batch_target_s"] = float(target)
         return out
 
     @staticmethod
@@ -1884,6 +1901,7 @@ class AggregationWorker:
                     "writes": (stats or {}).get("writes"),
                     "deletes": (stats or {}).get("deletes"),
                     **_adapted_scalars((stats or {}).get("adapted")),
+                    **_pace_scalars((stats or {}).get("pace")),
                 },
                 live_state={
                     "status": "running",
@@ -1897,10 +1915,13 @@ class AggregationWorker:
                     "writes": (stats or {}).get("writes", 0) or 0,
                     "deletes": (stats or {}).get("deletes", 0) or 0,
                     **_adapted_scalars((stats or {}).get("adapted")),
+                    **_pace_scalars((stats or {}).get("pace")),
                 },
             )
 
-        async def intra_batch_heartbeat(running_aggregated: int) -> None:
+        async def intra_batch_heartbeat(
+            running_aggregated: int, *, pace: Optional[dict] = None,
+        ) -> None:
             """Per Cypher MERGE sub-batch heartbeat. **Redis-only** —
             no PG writes mid-batch. The previous PG-writing version
             put ~30× sustained write pressure on the JOBS pool during
@@ -1921,13 +1942,18 @@ class AggregationWorker:
             # nothing has been written yet; publishing ``created_edges: 0``
             # there would flicker a resumed job's count back to zero.
             counted = {"created_edges": running_aggregated} if running_aggregated > 0 else {}
+            # How the run is writing right now — batch size, the pause, the
+            # duty cycle, whether it is holding for the node and why — so
+            # the job's progress says what the operator would otherwise
+            # only learn from the logs.
+            pacing = _pace_scalars(pace)
             await emitter.publish(
                 job_id=job.id,
                 kind="aggregation",
                 scope=scope,
                 type="progress",
-                payload={"boundary": "intra_batch", **counted},
-                live_state={**counted, "last_heartbeat_at": _now()},
+                payload={"boundary": "intra_batch", **counted, **pacing},
+                live_state={**counted, "last_heartbeat_at": _now(), **pacing},
             )
 
         # Cooperative cancel hook handed to the provider. The pipeline

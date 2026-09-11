@@ -22,6 +22,7 @@ recovering on its own, and the run stops for a person with its checkpoint.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import types
 
 import pytest
@@ -342,3 +343,140 @@ def test_the_governor_holds_before_the_slot_and_the_gate_runs_after(sleeps):
     _run(pipe._paced_write(_write_noting))
     assert events == ["slot", ("write", 2)]
     assert pipe._replica_waits == 1              # the gate, after the write
+
+
+# ── steady load: each batch settled, then a pause, then the next ─────────
+
+
+def test_the_pause_after_a_batch_never_drops_below_the_minimum_gap(sleeps):
+    """The pause is a share of the batch's own duration, so a fast small
+    batch would otherwise be followed at once by the next: the floor is
+    what keeps the load steady when the node is quick."""
+    pipe = _pipeline(_Conn(_picture()))
+    pipe._write_min_gap_ms = 250
+    _run(pipe._paced_write(_write, rows=120))
+    assert sleeps[-1] == pytest.approx(0.25, abs=0.01)
+    pace = pipe._pace.snapshot()
+    assert pace["batches"] == 1 and pace["rows"] == 120 and pace["sleep_s"] == 0.25
+    assert pace["batch_max"] == 500 and pace["target_s"] == 1.0
+
+
+def test_the_batch_ceiling_is_a_knob_and_a_live_cap_only_ever_lowers_it(sleeps):
+    pipe = _pipeline(_Conn(_picture()))
+    pipe.p._aggregation_sub_batch_size = 500
+    pipe._write_batch_max = 300
+    assert pipe._sub_batch_size() == 300
+    pipe._live["write_batch_max"] = 120                 # "smaller batches" on the running job
+    assert pipe._sub_batch_size() == 120
+    pipe._live["write_batch_max"] = 900                 # a cap is a ceiling: never above the knob
+    assert pipe._sub_batch_size() == 300
+
+
+def test_the_sizer_halves_past_the_target_and_grows_under_two_fifths_of_it():
+    """The target is the lock window a reader of the graph waits for; the
+    sizer keeps every batch under it and only grows after five in a row
+    well under."""
+    pipe = _pipeline(_Conn(_picture()))
+    p = pipe.p
+    p._aggregation_sub_batch_size = 400
+    pipe._write_batch_target_s = 1.0
+    pipe._note_write_latency(1.2)
+    assert p._aggregation_sub_batch_size == 200
+    for _ in range(5):
+        pipe._note_write_latency(0.3)
+    assert p._aggregation_sub_batch_size == 300
+    pipe._live["write_batch_target_s"] = 0.25           # tighter, live, from the next batch
+    pipe._note_write_latency(0.3)
+    assert p._aggregation_sub_batch_size == 150
+    # Never past the ceiling in force.
+    pipe._live["write_batch_target_s"] = 10.0
+    pipe._write_batch_max = 160
+    for _ in range(5):
+        pipe._note_write_latency(0.1)
+    assert p._aggregation_sub_batch_size == 160
+
+
+def test_the_run_eases_off_before_it_has_to_hold(sleeps, monkeypatch):
+    """Replicas half way to the line the master drops them at: half the
+    batch ceiling and twice the pause, until the reading is back. Steady
+    load is what keeps the hold from ever being needed."""
+    monkeypatch.setattr(mat, "time", _Clock(step=0.5))
+    behind = _picture(slave1={"ip": "10.0.0.5", "port": "6379", "state": "online",
+                              "offset": str(1000 - 300 * 1024 ** 2), "lag": "1"})
+    conn = _Conn(behind, _picture())
+    pipe = _pipeline(conn)
+    pipe.p._aggregation_sub_batch_size = 500
+    _run(pipe._paced_write(_write, rows=500))
+    assert pipe._eased == "replica_lag" and pipe._eases == {"replica_lag": 1}
+    assert pipe._sub_batch_size() == 250
+    # Under this clock the write took 0.5 s and the acknowledgement another
+    # 0.5 s, and the wait counts as the batch's own time: 1.0 s × (1.0 × 2).
+    assert sleeps[-1] == pytest.approx(2.0)
+    _run(pipe._paced_write(_write, rows=250))            # the replicas caught up
+    assert pipe._eased is None and pipe._sub_batch_size() == 500
+    assert sleeps[-1] == pytest.approx(1.0)
+    assert pipe._adapted_snapshot()["eases"] == {"replica_lag": 1}
+    # The pace is a record, not an adaptation: it sits beside `adapted`.
+    stats = pipe._result(0)["run_stats"]
+    assert stats["pace"]["batches"] == 2 and stats["pace"]["rows"] == 750
+    assert "pace" not in stats["adapted"]
+
+
+def test_the_pace_record_reaches_the_heartbeat_and_says_when_the_run_is_holding(sleeps):
+    beats = []
+
+    async def _hb(writes, *, pace=None):
+        beats.append(pace)
+
+    pipe = _pipeline(_Conn(_picture(rdb_bgsave_in_progress="1"), _picture()))
+    pipe._intra_cb = _hb
+    pipe._last_hb_mono = 0.0
+    _run(pipe._paced_write(_write, rows=200))
+    assert any(b and b.get("holding") == "fork" and b.get("fork") == "bgsave" for b in beats)
+    _run(pipe._heartbeat())
+    last = beats[-1]
+    assert last["holding"] == "" and last["batches"] == 1 and last["batch_rows"] == 200
+    assert last["replica_lag_bytes"] == 600 and "duty_pct" in last
+    assert pipe._hb_accepts_pace is True
+
+
+def test_a_one_argument_heartbeat_callback_still_works():
+    seen = []
+
+    async def _hb(writes):
+        seen.append(writes)
+
+    pipe = _pipeline(_Conn(_picture()))
+    pipe._intra_cb = _hb
+    _run(pipe._heartbeat())
+    _run(pipe._heartbeat())
+    assert seen == [0, 0] and pipe._hb_accepts_pace is False
+
+
+def test_the_batch_knobs_resolve_like_every_other(monkeypatch):
+    monkeypatch.setenv("AGGREGATION_WRITE_BATCH_MAX", "200")
+    monkeypatch.setenv("AGGREGATION_WRITE_BATCH_TARGET_S", "0.5")
+    monkeypatch.setenv("AGGREGATION_WRITE_MIN_GAP_MS", "250")
+    values, sources = mat.resolve_effective_tuning(
+        {"write_batch_max": 5000, "write_batch_target_s": 0.25}, None,
+    )
+    assert (values["write_batch_max"], sources["write_batch_max"]) == (2000, "job")
+    assert values["write_batch_target_s"] == 0.25 and values["write_min_gap_ms"] == 250
+    env = mat.env_tuning_defaults()
+    assert (env["write_batch_max"], env["write_batch_target_s"], env["write_min_gap_ms"]) == (200, 0.5, 250)
+    pipe = base._make_pipeline()
+    assert (pipe._write_batch_max, pipe._write_batch_target_s, pipe._write_min_gap_ms) == (200, 0.5, 250)
+
+
+def test_the_worker_flattens_the_pace_for_the_live_overlay():
+    from backend.app.services.aggregation import worker as w
+
+    flat = w._pace_scalars({"batch_rows": 250, "holding": "fork", "duty_pct": 42, "nested": {}})
+    assert flat == {"pace_batch_rows": 250, "pace_holding": "fork", "pace_duty_pct": 42}
+    assert w._pace_scalars(None) == {}
+    # …and the checkpoint carries it beside the adapted scalars.
+    src = inspect.getsource(w.AggregationWorker._materialize_with_checkpoints)
+    assert src.count('**_pace_scalars((stats or {}).get("pace"))') == 2
+    assert "pace: Optional[dict] = None" in src and "_pace_scalars(pace)" in src
+    assert "write_batch_max" in w._LIVE_PIPELINE_KEYS
+    assert "write_batch_target_s" in w._LIVE_PIPELINE_KEYS

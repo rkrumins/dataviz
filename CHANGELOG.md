@@ -13,6 +13,32 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
+**A rebuild never writes through a fork, and holds for the replicas it started with.**
+Before every write batch the pipeline reads the node it writes to — RSS, BGSAVE and
+AOF-rewrite state, attached and resyncing replicas, the furthest replica's lag, what
+replication holds, and the container limit the pod is killed at — and holds, heartbeating,
+while the node is outside the envelope a rebuild may write inside: a fork in flight, fewer
+replicas than the run started with, a replica further behind than a quarter of the limit
+the master drops it at, or RSS past what the container could survive a fork at. Each hold
+is bounded (`AGGREGATION_HOLD_MAX_SECS`, 30 minutes); past it the run stops with its
+checkpoint intact and a message that names the node and what it was doing. The write
+budget counts the container too, and the deployment guide's sizing rule now counts
+replication buffers. The run record keeps every hold by reason, and the run settings panel
+says so.
+
+**Steady load: smaller, settled write batches, tunable and visible.** A write batch holds
+the graph's write lock from its first change to its end, so one batch is the longest stall
+every reader of that graph sees. The batch ceiling (`writeBatchMax`, 500 rows) and the batch
+target (`writeBatchTargetS`, 1.0 s — the sizer halves a batch that ran longer and grows one
+that stays well under) are knobs, fleet-wide, per job and live on a running job ("Smaller
+batches" halves the ceiling); a batch is settled — the node read, the query returned, the
+replicas acknowledged — before the next; the pause after it never drops below
+`writeMinGapMs` (100 ms); and short of a hold the run eases, halving the ceiling and doubling
+the pause while the node nears a hold line. A running job shows a *Steady load* line — batch
+rows, seconds per batch, the pause, the rolling duty cycle and rate, whether it is holding
+or eased and why, the replicas' lag and the node's measured headroom — and the run record
+keeps the batch figures. `docs/CONCURRENCY_TUNING.md` §6 is the load model behind it.
+
 **One card per graph store, named by the providers that use it.** Grouping is
 settled by asking the nodes, not by comparing connection settings: two provider rows can list
 disjoint seeds of one cluster, or name one node by its service name and by its address, and

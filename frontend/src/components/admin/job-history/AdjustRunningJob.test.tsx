@@ -37,6 +37,11 @@ describe('AdjustRunningJob', () => {
         expect(onAdjust).toHaveBeenLastCalledWith(expect.anything(), { extractConcurrency: 1 })
         await userEvent.click(screen.getByRole('button', { name: 'Halve scans' }))
         expect(onAdjust).toHaveBeenLastCalledWith(expect.anything(), { scanWidth: 25_000 })
+        // Smaller batches: the one control that does less per batch rather
+        // than waiting longer between them.
+        expect(screen.getByTestId('shape-in-force')).toHaveTextContent(/batches of at most 500 rows in ~1s/)
+        await userEvent.click(screen.getByRole('button', { name: 'Smaller batches' }))
+        expect(onAdjust).toHaveBeenLastCalledWith(expect.anything(), { writeBatchMax: 250 })
         // Nothing live yet, so there is nothing to go back from.
         expect(screen.getByRole('button', { name: 'Back to settings' })).toBeDisabled()
         // The time controls are still here.
@@ -59,7 +64,7 @@ describe('AdjustRunningJob', () => {
         expect(screen.getByRole('button', { name: 'Serial reads' })).toBeDisabled()
         await userEvent.click(screen.getByRole('button', { name: 'Back to settings' }))
         expect(onAdjust).toHaveBeenLastCalledWith(expect.anything(), {
-            reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin'],
+            reset: ['writePacingRatio', 'extractConcurrency', 'scanWidth', 'replicaAckMin', 'writeBatchMax', 'writeBatchTargetS'],
         })
         expect(screen.getByText(/ops@example.com set the write pacing 1× → 2×/)).toBeInTheDocument()
     })

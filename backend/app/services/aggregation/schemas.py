@@ -127,6 +127,23 @@ class AggregationTuning(BaseModel):
         None, alias="writePacingRatio", ge=0.0, le=10.0,
         description="Sleep after each write for duration x ratio.",
     )
+    write_batch_max: Optional[int] = Field(
+        None, alias="writeBatchMax", ge=10, le=2_000,
+        description="Ceiling on rows per write batch (default 500). A write "
+                    "batch holds the graph's write lock, so this is also the "
+                    "longest stall a reader of the graph sees.",
+    )
+    write_batch_target_s: Optional[float] = Field(
+        None, alias="writeBatchTargetS", ge=0.1, le=10.0,
+        description="What one write batch should take, seconds (default 1.0): "
+                    "the sizer halves a batch that ran longer and grows one "
+                    "that stays well under.",
+    )
+    write_min_gap_ms: Optional[int] = Field(
+        None, alias="writeMinGapMs", ge=0, le=10_000,
+        description="Floor under the pause between write batches, ms (default "
+                    "100), so fast small batches never run back to back.",
+    )
     extract_concurrency: Optional[int] = Field(
         None, alias="extractConcurrency", ge=1, le=4,
         description="Concurrent read-only range scans during extract/reconcile.",
@@ -459,6 +476,14 @@ class JobLimitsPatch(BaseModel):
         None, alias="writePacingRatio", ge=0.0, le=10.0,
         description="Sleep-after-write ratio in force from the next write; 0 = no pacing.",
     )
+    write_batch_max: Optional[int] = Field(
+        None, alias="writeBatchMax", ge=10, le=2_000,
+        description="A cap on rows per write batch from the next batch; never above the job's setting.",
+    )
+    write_batch_target_s: Optional[float] = Field(
+        None, alias="writeBatchTargetS", ge=0.1, le=10.0,
+        description="What one write batch should take, seconds, from the next batch.",
+    )
     extract_concurrency: Optional[int] = Field(
         None, alias="extractConcurrency", ge=1, le=4,
         description="A cap on read concurrency from the next wave.",
@@ -478,7 +503,7 @@ class JobLimitsPatch(BaseModel):
     )
     reset: Optional[List[Literal[
         "writePacingRatio", "extractConcurrency", "scanWidth", "scanTimeoutS", "writeTimeoutS",
-        "replicaAckMin", "replicaAckTimeoutMs",
+        "replicaAckMin", "replicaAckTimeoutMs", "writeBatchMax", "writeBatchTargetS",
     ]]] = Field(
         None,
         description="Live values to clear — back to the job's settings from the next query.",
@@ -1215,6 +1240,9 @@ class EnvTuningDefaults(BaseModel):
     max_cube_edges: Optional[int] = Field(None, alias="maxCubeEdges")
     replica_ack_min: Optional[int] = Field(None, alias="replicaAckMin")
     replica_ack_timeout_ms: Optional[int] = Field(None, alias="replicaAckTimeoutMs")
+    write_batch_max: Optional[int] = Field(None, alias="writeBatchMax")
+    write_batch_target_s: Optional[float] = Field(None, alias="writeBatchTargetS")
+    write_min_gap_ms: Optional[int] = Field(None, alias="writeMinGapMs")
     budget_recheck_edges: Optional[int] = Field(None, alias="budgetRecheckEdges")
     # Information only (env-only): how many backoff retries a narrowest
     # scan gets before an outage is declared, the width at which RECONCILE

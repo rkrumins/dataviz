@@ -346,12 +346,29 @@ the **first checkpoint**, before any graph work. Resume rules:
   every other rebuild's write budget so two rebuilds cannot both pass on
   the same headroom). Fails **open** to the per-process limits if Redis
   is down.
-* **Pacing**: every write sub-batch is AIMD-sized (shrinks on latency
-  creep) and followed by `duration × AGGREGATION_WRITE_PACING_RATIO`
-  sleep (default 1.0 → ≤ ~50% write duty cycle), on top of the existing
-  per-process write semaphore and latency-quiesce circuit. The ratio is a
-  sleep multiplier, so RAISING it slows the job down and LOWERING it
-  speeds it up — 0.5 → ≤ ~66%, 0.25 → ≤ ~80%, 0 → no sleep at all.
+* **Pacing — one batch settled, then a pause, then the next**: a write
+  batch is sized by an AIMD sizer against `AGGREGATION_WRITE_BATCH_TARGET_S`
+  (default 1.0 s: a batch that ran longer halves the next; five in a row
+  under two fifths of it grow it by 100 rows) up to
+  `AGGREGATION_WRITE_BATCH_MAX` (default 500 rows). The target is the
+  number that matters for users: a write query holds the graph's write
+  lock from its first mutation to its end, so one batch is the longest
+  stall a reader of that graph sees, and the same rows in more, shorter
+  batches cost readers less than fewer, longer ones. Each batch is
+  *settled* before the next: the write governor has read the node and
+  found it inside the envelope, the query has returned, the replicas have
+  acknowledged it (`replicaAckMin`), and then the run pauses for
+  `duration × AGGREGATION_WRITE_PACING_RATIO` (default 1.0 → ≤ ~50% write
+  duty cycle), never less than `AGGREGATION_WRITE_MIN_GAP_MS` (100 ms, so
+  fast small batches never run back to back), never more than 30 s. The
+  ratio is a sleep multiplier, so RAISING it slows the job down and
+  LOWERING it speeds it up — 0.5 → ≤ ~66%, 0.25 → ≤ ~80%, 0 → only the
+  minimum gap. Short of a hold the run *eases*: replicas half way to the
+  limit the master drops them at, or the container's fork line within an
+  eighth of the limit, halve the batch ceiling and double the pause until
+  the reading is back. The run's progress carries all of it live (batch
+  rows, seconds per batch, the pause, the rolling duty cycle and rate,
+  whether it is holding or eased and why) and the run record keeps it.
 * **Interactive reads first**
   (`backend/app/services/aggregation/read_pressure.py`): the writers'
   only feedback used to be their OWN write latency, so a job issuing
@@ -519,6 +536,9 @@ pipeline).
 | `AGGREGATION_APPLY_CHUNK` | 20000 | Keys resolved+written per apply chunk |
 | `AGGREGATION_DELETE_CHUNK` | 10000 | Stale edges deleted per query |
 | `AGGREGATION_WRITE_PACING_RATIO` | 1.0 | Sleep-after-write ratio — HIGHER is gentler and slower (1.0 → ≤ ~50% duty cycle); 0 disables pacing. Changeable live on a running job (Pace ×2 / ×4), from the next write |
+| `AGGREGATION_WRITE_BATCH_MAX` | 500 | Ceiling on rows per write batch (10-2000). A write batch holds the graph's write lock, so this bounds the longest stall a reader of the graph sees. Per-job / Defaults as `writeBatchMax`; lowerable live on a running job (Smaller batches) |
+| `AGGREGATION_WRITE_BATCH_TARGET_S` | 1.0 | What one write batch should take, seconds (0.1-10): the sizer halves a batch that ran longer and grows one that stays under two fifths of it, up to the ceiling. Per-job / Defaults as `writeBatchTargetS`; changeable live |
+| `AGGREGATION_WRITE_MIN_GAP_MS` | 100 | Floor under the pause between two write batches, ms (0-10000) — the pause is a share of the batch's own duration, and fast small batches would otherwise run back to back. Per-job / Defaults as `writeMinGapMs` |
 | `AGGREGATION_READ_PRESSURE_PACING_RATIO` | 4.0 | Sleep-after-write ratio used while the web tier reports interactive reads starving on the endpoint (≤ ~20% duty cycle). The LARGER of this and the live pacing ratio wins, so a job told not to pace itself still yields while users are being starved. Env-only |
 | `AGGREGATION_READ_PRESSURE_TTL_S` | 30 | How long one starved-read signal keeps the writers yielding (5–600; every new signal refreshes it) |
 | `AGGREGATION_READ_PRESSURE_POLL_SECS` | 2 | How long a worker reuses its last read-pressure verdict before asking Redis again |
